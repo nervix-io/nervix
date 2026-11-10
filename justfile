@@ -531,6 +531,21 @@ check-tls-configuration-source source:
 fmt-tls-configuration-source source:
     cargo fmt --manifest-path {{ quote(source / "rustls/Cargo.toml") }} --package rustls
 
+# Verify licensing policy, request ownership and observations through their production owners.
+test-licensing-owners *args: build-deps
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    cargo test --package nervix-server --lib -- licensing:: {{ quote(args) }}
+
+# Verify durable transaction refusal projection and the preceding BEGIN through their owners.
+test-command-transaction-owners *args: build-deps
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    cargo test --package nervix-server --lib application::command_execution::tests:: -- {{ quote(args) }}
+    cargo test --package nervix-server --lib application::transaction::tests::process_command_rejects_domain_and_user_creation_inside_a_transaction -- --exact {{ quote(args) }}
+
 # Free-policy and quota checks use the native session client.
 test-licensing-free *args: build-deps build-plexus-format build-test-cli build-deadlock-report
     #!/usr/bin/env bash
@@ -602,6 +617,20 @@ test-inferencer-rebinding *args: build-deps
     set -euo pipefail
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
     cargo test --package nervix-scenarios --test scenarios -- --input {{ quote(justfile_directory() / "tests/features/runtime/inferencer_state_rebinding*.feature") }} {{ quote(args) }}
+
+# Follow inferencer state through planned handoffs, owner loss and a graceful cluster stop.
+test-inferencer-handoff *args: build-deps
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    cargo test --package nervix-scenarios --test scenarios -- --input {{ quote(justfile_directory() / "tests/features/cluster/inferencer_state_handoff*.feature") }} {{ quote(args) }}
+
+# Acknowledge every record a stateful inferencer admits in a batch, before and after an owner loss.
+test-inferencer-acknowledgement *args: build-deps
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    cargo test --package nervix-scenarios --test scenarios -- --input {{ quote(justfile_directory() / "tests/features/cluster/inferencer_state_acknowledgement*.feature") }} {{ quote(args) }}
 
 # Inspect materialized relay pages through the native client and in-process cluster.
 test-state-inspection *args: build-deps build-test-cli
@@ -4570,6 +4599,11 @@ toolchains-install:
 # unit and documentation tests. The walk itself is a separate gate, `plexus-completion-walk`.
 test-plexus *args:
     cargo test --package nervix-plexus --package nervix-plexus-format --all-targets -- {{ args }}
+
+# Keep the lexer and generated identifier domain in agreement through their production owners.
+test-plexus-keywords:
+    cargo test --package nervix-plexus --lib lexer::tests::the_generators_spell_a_name_like_every_keyword -- --exact
+    cargo test --package nervix-arbitrary --lib tests::a_name_spells_every_keyword -- --exact
 
 # Verify the backup and restore completion clauses and their public suggestion ordering.
 test-plexus-backup-completion:

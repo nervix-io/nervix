@@ -10,19 +10,12 @@ use std::{collections::BTreeMap, num::NonZeroUsize};
 use chrono::{DateTime, Utc};
 use error_stack::{Report, ResultExt as _};
 use meticulous::OptionExt as _;
-pub use nervix_licensing_vocabulary::Quota;
+pub use nervix_licensing_vocabulary::{ActivationKind, Quota};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
 
 use crate::{document::encode_json, documents::DecisionStatus};
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ActivationKind {
-    Persistent,
-    Ephemeral,
-}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]

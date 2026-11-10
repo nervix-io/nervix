@@ -105,14 +105,17 @@ jq -c -s 'sort_by(.last_index, .branch_name)[]' "${tmp_dir}/windows-by-branch.nd
 jq -c '. + {profile_branch: .branch_name, profile_version: (if .sequence < 40 then 1 else 2 end)}' \
     "${input}" >"${tmp_dir}/enriched.ndjson"
 jq -c '. + {branch_count: .branch_index}' "${input}" >"${tmp_dir}/counted.ndjson"
+# The stateful inferencer counts the rows each branch's state reflects, one output per row.
+jq -c '{branch_name, score: [.branch_index]}' "${input}" >"${tmp_dir}/inferred.ndjson"
 unique_count="$(wc -l <"${tmp_dir}/unique.ndjson")"
 boundaries none "${unique_count}" 10 120 120 "${tmp_dir}/none.json"
-for mode in dedup window enrich counter; do
+for mode in dedup window enrich counter inferencer; do
     case "${mode}" in
         dedup) output="${tmp_dir}/unique.ndjson" ;;
         window) output="${tmp_dir}/windows.ndjson" ;;
         enrich) output="${tmp_dir}/enriched.ndjson" ;;
         counter) output="${tmp_dir}/counted.ndjson" ;;
+        inferencer) output="${tmp_dir}/inferred.ndjson" ;;
     esac
     expect_pass "exact ${mode} output without a fault" "${state}" "${mode}" --input "${input}" \
         --output "${output}" --boundaries "${tmp_dir}/none.json" --result "${tmp_dir}/${mode}.json"
@@ -333,6 +336,71 @@ status=0
 "${state}" counter --input "${input}" --output "${tmp_dir}/counted.ndjson" \
     --boundaries "${tmp_dir}/missing.json" --result "${tmp_dir}/counter.json" >/dev/null 2>&1 || status=$?
 [[ "${status}" -eq 2 ]] || fail "missing boundaries returned ${status}, expected usage error 2"
+
+# Inferencer verdicts. Before the fault at sequence 56 each branch counted its first 28 rows, 26 of
+# them before the milestone and 30 admitted before recovery; 30 more follow recovery.
+jq '.pre_fault_outputs.chaos_inferred_output = 56' "${tmp_dir}/crash.json" >"${tmp_dir}/inferred-crash.json"
+inferencer_verdict() {
+    local output="$1"
+    local bounds="$2"
+    shift 2
+    "${state}" inferencer --input "${1:-${input}}" --output "${output}" --boundaries "${bounds}" \
+        --result "${tmp_dir}/inferencer.json"
+}
+expect_pass 'inferencer counts that continue through a fault' \
+    inferencer_verdict "${tmp_dir}/inferred.ndjson" "${tmp_dir}/inferred-crash.json"
+jq -e '.restored_counts == {alpha: [], beta: []} and .durability.milestone_records == {alpha: 26, beta: 26}' \
+    "${tmp_dir}/inferencer.json" >/dev/null || fail 'the inferencer verdict reported a restoration it did not see'
+# The checkpoint at the milestone restores 26 per branch, and the two volatile rows of each branch
+# that the source redelivers count again from there.
+jq -c '{branch_name, score: [(if .sequence >= 56 then .branch_index - 2 else .branch_index end)]}' "${input}" \
+    >"${tmp_dir}/inferred-restored.ndjson"
+expect_pass 'inferencer continued from the milestone checkpoint' \
+    inferencer_verdict "${tmp_dir}/inferred-restored.ndjson" "${tmp_dir}/inferred-crash.json"
+jq -e '.restored_counts == {alpha: [26], beta: [26]} and .count_excess == {alpha: -2, beta: -2}' \
+    "${tmp_dir}/inferencer.json" >/dev/null || fail 'the inferencer verdict did not cite the restored counts'
+jq -c '{branch_name, score: [(if .sequence >= 56 then .branch_index - 28 else .branch_index end)]}' "${input}" \
+    >"${tmp_dir}/inferred-reset.ndjson"
+expect_failure 'inferencer state reset after the fault' 'state durable at the milestone was lost' \
+    "${tmp_dir}/inferencer.json" inferencer_verdict "${tmp_dir}/inferred-reset.ndjson" "${tmp_dir}/inferred-crash.json"
+jq -c '{branch_name, score: [(if .sequence >= 56 then .branch_index + 6 else .branch_index end)]}' "${input}" \
+    >"${tmp_dir}/inferred-above.ndjson"
+expect_failure 'inferencer restored more rows than were admitted' 'exceeded the records admitted before recovery' \
+    "${tmp_dir}/inferencer.json" inferencer_verdict "${tmp_dir}/inferred-above.ndjson" "${tmp_dir}/inferred-crash.json"
+jq -c 'if .branch_name == "alpha" and .score[0] >= 48 then .score[0] += 1 else . end' \
+    "${tmp_dir}/inferred-restored.ndjson" >"${tmp_dir}/inferred-skipped.ndjson"
+expect_failure 'inferencer counts after recovery skipped' 'did not advance by one per record' \
+    "${tmp_dir}/inferencer.json" inferencer_verdict "${tmp_dir}/inferred-skipped.ndjson" "${tmp_dir}/inferred-crash.json"
+# One output delivered twice in a row is a replay; before the fault it is a violation.
+jq -c -s '.[] | ., select(.branch_name == "alpha" and .score == [10])' "${tmp_dir}/inferred-restored.ndjson" \
+    >"${tmp_dir}/inferred-replay-before.ndjson"
+jq '.pre_fault_outputs.chaos_inferred_output = 57' "${tmp_dir}/crash.json" >"${tmp_dir}/inferred-crash-57.json"
+expect_failure 'inferencer replayed an output before the fault' 'emitted twice while no fault' \
+    "${tmp_dir}/inferencer.json" inferencer_verdict "${tmp_dir}/inferred-replay-before.ndjson" \
+    "${tmp_dir}/inferred-crash-57.json"
+jq -c -s '.[] | ., select(.branch_name == "alpha" and .score == [40])' "${tmp_dir}/inferred-restored.ndjson" \
+    >"${tmp_dir}/inferred-replay-after.ndjson"
+expect_pass 'inferencer replayed an output after the fault' \
+    inferencer_verdict "${tmp_dir}/inferred-replay-after.ndjson" "${tmp_dir}/inferred-crash.json"
+jq -e '.replay_duplicates == {outputs: 1, after_fault: 1}' "${tmp_dir}/inferencer.json" >/dev/null \
+    || fail 'the inferencer verdict did not count the replay after the fault separately'
+expect_failure 'inferencer replayed an output without a fault' 'emitted twice while no fault' \
+    "${tmp_dir}/inferencer.json" inferencer_verdict "${tmp_dir}/inferred-replay-after.ndjson" "${tmp_dir}/none.json"
+jq -c -s '.[:-1][]' "${tmp_dir}/inferred.ndjson" >"${tmp_dir}/inferred-lost.ndjson"
+expect_failure 'inferencer lost its last count without a fault' 'differed from its record count while no fault' \
+    "${tmp_dir}/inferencer.json" inferencer_verdict "${tmp_dir}/inferred-lost.ndjson" "${tmp_dir}/none.json"
+jq '.pre_fault_outputs.chaos_inferred_output = 40' "${tmp_dir}/crash.json" >"${tmp_dir}/inferred-crash-40.json"
+expect_failure 'inferencer left milestone rows uncounted before the fault' 'had no count before the fault' \
+    "${tmp_dir}/inferencer.json" inferencer_verdict "${tmp_dir}/inferred-restored.ndjson" \
+    "${tmp_dir}/inferred-crash-40.json"
+jq -c 'if .branch_name == "beta" and .score == [12] then .score = [12, 0] else . end' \
+    "${tmp_dir}/inferred-restored.ndjson" >"${tmp_dir}/inferred-malformed.ndjson"
+expect_failure 'inferencer output that is not one count' 'not one whole, positive count' \
+    "${tmp_dir}/inferencer.json" inferencer_verdict "${tmp_dir}/inferred-malformed.ndjson" "${tmp_dir}/inferred-crash.json"
+jq -c -s '.[:60][]' "${tmp_dir}/inferred-restored.ndjson" >"${tmp_dir}/inferred-short.ndjson"
+expect_failure 'inferencer run without a count after recovery' 'durability is unverified' \
+    "${tmp_dir}/inferencer.json" inferencer_verdict "${tmp_dir}/inferred-short.ndjson" "${tmp_dir}/inferred-crash.json" \
+    "${tmp_dir}/input-short.ndjson"
 
 # Clock verdicts over three observers, one tick every 250 ms of physical time from a mapping at
 # rate 4 and period 1 s. Rounds fault nervix-1, nervix-2 and nervix-3 in turn; removing nervix-2
@@ -598,6 +666,35 @@ stateful_entity_placement "${tmp_dir}/partition-description.txt" \
     | jq -e '.owner == "-" and (.units | map(.unit)) == [0,1,2,3]
         and .units[0].owner == "node-1" and .units[1].owner == "node-2"' >/dev/null \
     || fail 'partition placement lost a unit or conflated its owners'
+# An entity without a DESCRIBE statement is placed from the schedule section of SHOW CLUSTER STATUS
+# alone, by its exact kind and name.
+cat >"${tmp_dir}/scheduled-status.txt" <<'EOF'
+raft.id: node-1
+[schedule]
+- domain=chaos_baseline kind=relay name=chaos_inferred owner=node-1 replicas=node-2
+- domain=chaos_baseline kind=inferencer name=chaos_running owner=node-2 replicas=node-3 transition_from=node-1 state_recovery=complete
+- domain=chaos_baseline kind=inferencer name=chaos_running_shadow owner=node-1 replicas=-
+[warnings]
+- domain=chaos_baseline kind=inferencer name=chaos_running owner=node-9 replicas=-
+EOF
+stateful_scheduled_placement "${tmp_dir}/scheduled-status.txt" 'INFERENCER chaos_running' \
+    | jq -e '.owner == "node-2" and .replicas == "node-3" and .units == []' >/dev/null \
+    || fail 'the scheduled single-unit placement was not read from the schedule section alone'
+cat >"${tmp_dir}/scheduled-partitions.txt" <<'EOF'
+[schedule]
+- domain=chaos_baseline kind=inferencer name=chaos_running unit=partition:0 owner=node-1 replicas=node-3
+- domain=chaos_baseline kind=inferencer name=chaos_running unit=partition:1 owner=node-2 replicas=node-3
+- domain=chaos_baseline kind=inferencer name=chaos_running unit=partition:2 owner=node-1 replicas=node-2
+- domain=chaos_baseline kind=inferencer name=chaos_running unit=partition:3 owner=node-2 replicas=node-1
+EOF
+stateful_scheduled_placement "${tmp_dir}/scheduled-partitions.txt" 'INFERENCER chaos_running' \
+    | jq -e '.owner == "-" and (.units | map(.unit)) == [0,1,2,3]
+        and .units[0].owner == "node-1" and .units[1].owner == "node-2"' >/dev/null \
+    || fail 'the scheduled partition placement lost a unit or conflated its owners'
+printf 'raft.id: node-1\n[schedule]\n- none\n' >"${tmp_dir}/scheduled-absent.txt"
+stateful_scheduled_placement "${tmp_dir}/scheduled-absent.txt" 'INFERENCER chaos_running' \
+    | jq -e '.owner == "-" and .units == []' >/dev/null \
+    || fail 'an unscheduled entity was given an owner'
 stateful_partitions=4
 CHAOS_REPLICA_COUNT=1
 jq -n '{outcome: "page", continuation: null, units: [range(0;4) | . as $unit | {wasm: {

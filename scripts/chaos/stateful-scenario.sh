@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # Sourced by run-baseline.sh after the external cluster, the baseline graph and the stateful graph
 # are ready. Drives two interleaved concrete branches through a deduplicator, a window processor, a
-# junction reading materialized relay state and a checkpointed WASM processor, holds the stateful
-# source at an observed durability milestone, composes one fault with that state, and judges every
-# processor's output against the external ledger of what the source accepted.
+# junction reading materialized relay state, a checkpointed WASM processor and a stateful
+# inferencer, holds the stateful source at an observed durability milestone, composes one fault with
+# that state, and judges every processor's output against the external ledger of what the source
+# accepted.
 
 # shellcheck source=recovery-scenario.sh
 source "${script_dir}/recovery-scenario.sh"
@@ -21,10 +22,15 @@ stateful_owned_entities=(
     'EMITTER chaos_unique_emitter' 'WINDOW PROCESSOR chaos_window' 'RELAY chaos_windows'
     'EMITTER chaos_window_emitter' 'RELAY chaos_profiles' 'JUNCTION chaos_enrich'
     'RELAY chaos_enriched' 'EMITTER chaos_enriched_emitter' 'WASM PROCESSOR chaos_counter'
-    'RELAY chaos_counted' 'EMITTER chaos_counted_emitter'
+    'RELAY chaos_counted' 'EMITTER chaos_counted_emitter' 'RELAY chaos_inferred'
+    'EMITTER chaos_inferred_emitter'
 )
+# Stateful entities whose kind has no DESCRIBE statement. They move with the others, and their
+# placement is read from the schedule section of SHOW CLUSTER STATUS instead.
+stateful_scheduled_entities=('INFERENCER chaos_running')
 stateful_ingestors=('INGESTOR chaos_state_ingestor' 'INGESTOR chaos_profile_ingestor')
-stateful_output_topics=(chaos_unique_output chaos_window_output chaos_enriched_output chaos_counted_output)
+stateful_output_topics=(chaos_unique_output chaos_window_output chaos_enriched_output chaos_counted_output
+    chaos_inferred_output)
 
 # The stateful fixture, its phases and the profile versions the runner publishes. The load holds
 # after the milestone's records, when every branch holds two rows in an open 12-row window, and
@@ -84,10 +90,37 @@ stateful_entity_placement() {
           end'
 }
 
+# Prints the same JSON object for ENTITY, a `KIND name` pair, from the schedule section of the
+# SHOW CLUSTER STATUS answer in FILE. Each of the entity's lines names one unit; a partition unit
+# adds `unit=partition:N` after the name.
+stateful_scheduled_placement() {
+    local status_file="$1"
+    local entity="$2"
+    jq -Rn --rawfile status "${status_file}" --arg kind "${entity% *}" --arg name "${entity##* }" '
+        ($status | split("\n")) as $lines
+        | ($lines | index("[schedule]")) as $start
+        | (if $start == null then [] else $lines[($start + 1):] end) as $after
+        | ([$after | to_entries[] | select(.value | startswith("[")) | .key] | first // ($after | length)) as $length
+        | ($kind | ascii_downcase | gsub(" "; "_")) as $status_kind
+        | [$after[:$length][]
+           | capture("^- domain=chaos_baseline kind=(?<kind>[^ ]+) name=(?<name>[^ ]+)(?: unit=partition:(?<index>[0-9]+))? owner=(?<owner>[^ ]+) replicas=(?<replicas>[^ ]+)")?
+           | select(.kind == $status_kind and .name == $name)] as $lines_of_entity
+        | ($lines_of_entity | map(select(.index != null)
+            | {unit: (.index | tonumber), owner, replicas})) as $units
+        | if ($units | length) > 0 then
+            {units: $units,
+             owner: ($units | map(.owner) | unique | if length == 1 then .[0] else "-" end),
+             replicas: ($units | map(.replicas) | unique | join(";"))}
+          else
+            {units: [], owner: ($lines_of_entity | map(.owner) | first // "-"),
+             replicas: ($lines_of_entity | map(.replicas) | first // "-")}
+          end'
+}
+
 stateful_placement() {
     local host="$1"
     local output_dir="$2"
-    local pairs=()
+    local pairs=(cluster-status 'SHOW CLUSTER STATUS;')
     local entity
     for entity in "${stateful_owned_entities[@]}" "${stateful_ingestors[@]}"; do
         pairs+=("describe-${entity// /_}" "DESCRIBE ${entity};")
@@ -99,6 +132,11 @@ stateful_placement() {
         local label="describe-${entity// /_}"
         batch_read_succeeded "${output_dir}" "${label}" || { rm -f "${placements_file}"; return 1; }
         stateful_entity_placement "${output_dir}/${label}.txt" \
+            | jq --arg entity "${entity}" '{key: $entity, value: .}' >>"${placements_file}" || return 1
+    done
+    batch_read_succeeded "${output_dir}" cluster-status || { rm -f "${placements_file}"; return 1; }
+    for entity in "${stateful_scheduled_entities[@]}"; do
+        stateful_scheduled_placement "${output_dir}/cluster-status.txt" "${entity}" \
             | jq --arg entity "${entity}" '{key: $entity, value: .}' >>"${placements_file}" || return 1
     done
     jq -s 'from_entries' "${placements_file}" >"${output_dir}.json"
@@ -355,7 +393,7 @@ stateful_milestone() {
           evidence: ["milestone/state-group.txt", "milestone/profile-group.txt", "milestone/outputs.json",
                      "milestone/outputs-after-hold.json", "milestone/wasm-checkpoints.txt",
                      "milestone/profiles.txt"],
-          not_observable: "deduplicator, window and materialized relay publications are not exposed publicly; the milestone holds the drained state for the configured publication intervals"}' \
+          not_observable: "deduplicator, window, inferencer and materialized relay publications are not exposed publicly; the milestone holds the drained state for the configured publication intervals"}' \
         >"${case_dir}/milestone.json"
 }
 
@@ -495,12 +533,13 @@ stateful_verify() {
           profiles:{loaded:$loaded,milestone:$milestone_version,volatile:$volatile_version}}' \
         >"${case_dir}/boundaries.json"
     local mode topic
-    for mode in dedup window enrich counter; do
+    for mode in dedup window enrich counter inferencer; do
         case "${mode}" in
             dedup) topic=chaos_unique_output ;;
             window) topic=chaos_window_output ;;
             enrich) topic=chaos_enriched_output ;;
             counter) topic=chaos_counted_output ;;
+            inferencer) topic=chaos_inferred_output ;;
         esac
         local status=0
         "${script_dir}/verify-state-evidence.sh" "${mode}" \
@@ -545,7 +584,7 @@ run_stateful() {
             fi
         done
         local selection
-        selection="$(printf '%s, ' "${stateful_owned_entities[@]}")"
+        selection="$(printf '%s, ' "${stateful_owned_entities[@]}" "${stateful_scheduled_entities[@]}")"
         domain_cli_command "RELOCATE ${selection%, } ONTO NODE ${state_owner} IGNORE PREFERENCES;" \
             >"${case_dir}/relocate-state.txt" 2>&1
         selection="$(printf '%s, ' "${stateful_ingestors[@]}")"
@@ -659,10 +698,12 @@ run_stateful() {
         --slurpfile window "${case_dir}/verdict-window.json" \
         --slurpfile enrich "${case_dir}/verdict-enrich.json" \
         --slurpfile counter "${case_dir}/verdict-counter.json" \
+        --slurpfile inferencer "${case_dir}/verdict-inferencer.json" \
         '{fault: $fault, topology_nodes: $nodes, fault_seconds: (if $fault == "none" then null else $fault_seconds end),
           deployment: {replica_count: $replicas, state_snapshot_interval: $snapshot_interval,
                        state_owner: $state_owner, ingestion_node: $ingest_node},
           wasm_fixture: $manifest[0].fixtures.wasm,
+          onnx_fixture: $manifest[0].fixtures.onnx,
           branches: ["alpha", "beta"],
           boundaries: {milestone_records: $milestone_records, fault_records: $fault_records,
                        committed_at_fault: ($fault_committed | tonumber? // null),
@@ -673,7 +714,8 @@ run_stateful() {
           verdicts: {deduplicator: ($dedup[0] | {verdict, checks, replay_duplicates, volatile_reemissions, durability, failures}),
                      window: ($window[0] | {verdict, checks, volatile_losses, replay_duplicates, durability, failures}),
                      materialized_relay: ($enrich[0] | {verdict, checks, versions_after_recovery, replay_duplicates, durability, failures}),
-                     wasm_processor: ($counter[0] | {verdict, checks, replay_excess_after_recovery, replay_duplicates, durability, failures})},
+                     wasm_processor: ($counter[0] | {verdict, checks, replay_excess_after_recovery, replay_duplicates, durability, failures}),
+                     inferencer: ($inferencer[0] | {verdict, checks, restored_counts, final_counts, count_excess, replay_duplicates, durability, failures})},
           evidence_class: (if $fault == "none" then "healthy baseline" else "process and network faults on one host; host power loss and storage corruption are not established" end),
           qualification_limit: $milestone[0].not_observable}' \
         >"${artifact_dir}/results/stateful-progress.json"

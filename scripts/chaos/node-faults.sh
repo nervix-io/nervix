@@ -260,8 +260,13 @@ node_fault_pause_inject() {
     local container_id container_name
     container_id="$(owned_service_container "${host}")" || return 1
     inspect_target "${container_id}" "${case_dir}/selected.json"
+    # The pause verifier judges the paused node against the cluster policy every node installed
+    # before the fault.
+    capture_cluster_parameters "${case_dir}/pause-cluster-parameters" "${node_names[@]}" \
+        || node_fault_fail product 'the nodes did not publish one installed cluster policy before the pause'
     "${script_dir}/verify-pause-evidence.sh" before "${run_id}" "${project_name}" \
-        "${host}" "${image_id}" "${case_dir}/selected.json" "${case_dir}/selected.json"
+        "${host}" "${image_id}" "${case_dir}/selected.json" "${case_dir}/selected.json" \
+        "${case_dir}/pause-cluster-parameters.json"
     container_name="$(jq -r '.[0].Name | ltrimstr("/")' "${case_dir}/selected.json")"
     node_fault_dry_run "${case_dir}/pumba-dry-run.txt" "${container_id}" node 'pausing container' \
         pause --duration 1ms --limit 1 "${container_name}"
@@ -278,7 +283,8 @@ node_fault_pause_inject() {
     inspect_target "${container_id}" "${case_dir}/paused.json"
     if jq -e '.[0].State.Paused' "${case_dir}/paused.json" >/dev/null; then
         "${script_dir}/verify-pause-evidence.sh" paused "${run_id}" "${project_name}" \
-            "${host}" "${image_id}" "${case_dir}/selected.json" "${case_dir}/paused.json"
+            "${host}" "${image_id}" "${case_dir}/selected.json" "${case_dir}/paused.json" \
+            "${case_dir}/pause-cluster-parameters.json"
     else
         # A pause of a second or two can end before its inspection; its recorded pause and unpause
         # events prove it when it resumes.
@@ -310,7 +316,8 @@ node_fault_pause_resume() {
         || node_fault_fail controller 'the live Docker event recording does not cover the pause'
     "${script_dir}/verify-pause-evidence.sh" resumed "${run_id}" "${project_name}" \
         "${host}" "${image_id}" "${case_dir}/selected.json" "${case_dir}/resumed.json" \
-        "${case_dir}/pause-events.ndjson" "${min_ms}" "${max_ms}" "${case_dir}/pause-duration.json" \
+        "${case_dir}/pause-cluster-parameters.json" "${case_dir}/pause-events.ndjson" "${min_ms}" \
+        "${max_ms}" "${case_dir}/pause-duration.json" \
         || node_fault_fail injection 'the actual Docker pause interval missed the declared fault window'
     failure_category=product
 }

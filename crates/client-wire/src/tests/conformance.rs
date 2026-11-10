@@ -721,6 +721,14 @@ fn corpus_frames() -> Vec<(&'static str, Bytes)> {
             ),
         ),
         (
+            "server_notice_licensing.nxsm",
+            notice(
+                NoticeLevel::Warning,
+                NoticeKind::Licensing,
+                "refresh_overdue: licensing time crossed the signed overdue deadline",
+            ),
+        ),
+        (
             "server_notice_membership.nxsm",
             notice(
                 NoticeLevel::Info,

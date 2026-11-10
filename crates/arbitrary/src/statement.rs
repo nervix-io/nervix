@@ -170,6 +170,8 @@ pub enum StatementVariant {
     DescribeTransaction,
     DescribeCluster,
     DescribeLicense,
+    ActivateLicense,
+    RefreshLicense,
     AlterBranch,
     DescribeBranch,
     AlterCluster,
@@ -245,6 +247,8 @@ impl StatementVariant {
             Statement::DescribeTransaction(_) => Self::DescribeTransaction,
             Statement::DescribeCluster(_) => Self::DescribeCluster,
             Statement::DescribeLicense(_) => Self::DescribeLicense,
+            Statement::ActivateLicense(_) => Self::ActivateLicense,
+            Statement::RefreshLicense(_) => Self::RefreshLicense,
         }
     }
 }
@@ -796,6 +800,19 @@ impl Arbitrary<'_> {
             }
             StatementVariant::DescribeCluster => Statement::DescribeCluster(DescribeCluster),
             StatementVariant::DescribeLicense => Statement::DescribeLicense(DescribeLicense),
+            StatementVariant::ActivateLicense => {
+                Statement::ActivateLicense(nervix_models::ActivateLicense {
+                    kind: if self.entropy().flag() {
+                        nervix_models::ActivationKind::Persistent
+                    } else {
+                        nervix_models::ActivationKind::Ephemeral
+                    },
+                    license_key: self.non_empty_string(),
+                })
+            }
+            StatementVariant::RefreshLicense => {
+                Statement::RefreshLicense(nervix_models::RefreshLicense)
+            }
         }
     }
 

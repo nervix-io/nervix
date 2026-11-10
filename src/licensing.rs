@@ -11,6 +11,8 @@
 )]
 
 mod admission_metrics;
+mod requests;
+pub(crate) use requests::{Connectivity, RequestEvent, RequestOutcome};
 pub(crate) mod metrics;
 pub mod policy;
 
@@ -31,6 +33,7 @@ struct PolicyPublication {
     policy: ArcSwap<LicensingPolicy>,
     fault: ConfiguredFaultInjection,
     admissions: AdmissionMetrics,
+    requests: requests::RequestObservations,
 }
 
 #[derive(Clone)]
@@ -82,8 +85,33 @@ impl PolicyHandle {
                 policy: ArcSwap::from_pointee(value),
                 fault,
                 admissions: AdmissionMetrics::register(metrics),
+                requests: requests::RequestObservations::default(),
             }),
         }
+    }
+
+    pub(crate) fn record_request(
+        &self,
+        operation: nervix_licensing_protocol::requests::Operation,
+        event: RequestEvent,
+        at: nervix_models::Timestamp,
+    ) {
+        self.inner.requests.record(operation, event, at);
+    }
+    pub(crate) fn request_count(
+        &self,
+        operation: nervix_licensing_protocol::requests::Operation,
+        outcome: RequestOutcome,
+    ) -> u64 {
+        self.inner.requests.count(operation, outcome)
+    }
+    pub(crate) fn connectivity_changes(
+        &self,
+    ) -> nervix_primitives::sync::watch::Receiver<Connectivity> {
+        self.inner.requests.connectivity.subscribe()
+    }
+    pub(crate) fn connectivity(&self) -> Connectivity {
+        *self.inner.requests.connectivity.borrow()
     }
 
     pub fn current(&self) -> PolicyView {
@@ -97,6 +125,19 @@ impl PolicyHandle {
     }
     pub fn processing_stop(&self) -> Option<StopReason> {
         self.current().processing_stop()
+    }
+
+    pub(crate) fn admit_snapshot(
+        &self,
+        snapshot: LicensingSnapshot,
+        name: QuotaName,
+        usage: u64,
+        requested: u64,
+        replacement: bool,
+    ) -> error_stack::Result<QuotaConstraint, LicensingRefusal> {
+        for_node(snapshot, &self.inner.fault)
+            .admit(name, usage, requested, replacement)
+            .inspect_err(|report| self.record_refusal(report))
     }
 
     pub fn admit(
