@@ -142,7 +142,7 @@ pub(super) fn ProcessorInheritanceEditor(
 #[cfg(test)]
 mod tests {
     use meticulous::ResultExt as _;
-    use nervix_models::FieldName;
+    use nervix_models::{FieldName, ModelKind};
 
     use super::*;
     use crate::create_dialog::{
@@ -153,7 +153,11 @@ mod tests {
     fn inherited_field_labels_follow_the_selected_route_mode_and_order() {
         Owner::new().with(|| {
             let signals = CreateSignals::new();
-            signals.open(CreateKind::Junction, None, "global-create-button");
+            signals.open(
+                CreateKind::Model(ModelKind::Junction),
+                None,
+                "global-create-button",
+            );
             signals.junction.update(|draft| {
                 draft.routes[0].inherit = InheritDraft::Fields(vec![
                     InheritedFieldDraft {

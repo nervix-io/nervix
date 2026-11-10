@@ -49,6 +49,7 @@ mod client_draft;
 mod client_editor;
 mod codec_draft;
 mod codec_editor;
+mod creation_family;
 mod emitter_choices;
 mod emitter_construction_editor;
 mod emitter_destination_draft;
@@ -142,6 +143,7 @@ use client_draft::{ClientDraft, ClientDraftError, ClientTransport};
 use client_editor::ClientEditor;
 use codec_draft::{CodecDraft, CodecDraftError, CodecFormatDraft, CodecFormatKind};
 use codec_editor::CodecEditor;
+pub(crate) use creation_family::CreateKind;
 use emitter_draft::{EmitterDraft, EmitterDraftError};
 use emitter_editor::EmitterEditor;
 use endpoint_draft::{EndpointDraft, EndpointDraftError};
@@ -166,154 +168,6 @@ use udf_draft::{UdfDraft, UdfDraftError};
 use udf_editor::UdfEditor;
 use vhost_draft::{VhostDraft, VhostDraftError};
 use vhost_editor::VhostEditor;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub(crate) enum CreateKind {
-    Domain,
-    Placement,
-    User,
-    Resource,
-    Schema,
-    WireJsonSchema,
-    WireCborSchema,
-    WireAvroSchema,
-    Branch,
-    Relay,
-    Subscription,
-    Codec,
-    SignalingProtocol,
-    Client,
-    Vhost,
-    Endpoint,
-    HashMap,
-    Udf,
-    Ingestor,
-    Emitter,
-    Junction,
-    Deduplicator,
-    Reorderer,
-    WindowProcessor,
-    Correlator,
-    Reingestor,
-    Generator,
-    Inferencer,
-    WasmProcessor,
-}
-
-impl CreateKind {
-    fn label(self) -> &'static str {
-        match self {
-            Self::Domain => "domain",
-            Self::Placement => "placement",
-            Self::User => "user",
-            Self::Resource => "resource",
-            Self::Schema => "schema",
-            Self::WireJsonSchema => "wire JSON schema",
-            Self::WireCborSchema => "wire CBOR schema",
-            Self::WireAvroSchema => "wire AVRO schema",
-            Self::Branch => "branch",
-            Self::Relay => "relay",
-            Self::Subscription => "subscription",
-            Self::Codec => "codec",
-            Self::SignalingProtocol => "signaling protocol",
-            Self::Client => "client",
-            Self::Vhost => "VHOST",
-            Self::Endpoint => "endpoint",
-            Self::HashMap => "hash map",
-            Self::Udf => "Roto UDF",
-            Self::Ingestor => "ingestor",
-            Self::Emitter => "emitter",
-            Self::Junction => "junction",
-            Self::Deduplicator => "deduplicator",
-            Self::Reorderer => "reorderer",
-            Self::WindowProcessor => "window processor",
-            Self::Correlator => "correlator",
-            Self::Reingestor => "reingestor",
-            Self::Generator => "generator",
-            Self::Inferencer => "inferencer",
-            Self::WasmProcessor => "WASM processor",
-        }
-    }
-
-    fn domain_scoped(self) -> bool {
-        !matches!(self, Self::Domain | Self::User)
-    }
-
-    /// Whether the created statement takes `IF NOT EXISTS`. A session subscription is not a stored
-    /// entity, so its statement has no such modifier.
-    fn takes_if_not_exists(self) -> bool {
-        self != Self::Subscription
-    }
-
-    fn wire_format(self) -> Option<WireFormat> {
-        match self {
-            Self::WireJsonSchema => Some(WireFormat::Json),
-            Self::WireCborSchema => Some(WireFormat::Cbor),
-            Self::WireAvroSchema => Some(WireFormat::Avro),
-            Self::Domain
-            | Self::Placement
-            | Self::User
-            | Self::Resource
-            | Self::Schema
-            | Self::Branch
-            | Self::Relay
-            | Self::Subscription
-            | Self::Codec
-            | Self::SignalingProtocol
-            | Self::Client
-            | Self::Vhost
-            | Self::Endpoint => None,
-            Self::HashMap
-            | Self::Udf
-            | Self::Ingestor
-            | Self::Emitter
-            | Self::Junction
-            | Self::Deduplicator
-            | Self::Reorderer
-            | Self::WindowProcessor
-            | Self::Correlator
-            | Self::Reingestor
-            | Self::Generator
-            | Self::Inferencer
-            | Self::WasmProcessor => None,
-        }
-    }
-
-    /// The processor family the shared processor form creates for this kind.
-    fn processor_family(self) -> Option<ProcessorFamily> {
-        match self {
-            Self::Junction => Some(ProcessorFamily::Junction),
-            Self::Deduplicator => Some(ProcessorFamily::Deduplicator),
-            Self::Reorderer => Some(ProcessorFamily::Reorderer),
-            Self::WindowProcessor => Some(ProcessorFamily::Window),
-            Self::Correlator => Some(ProcessorFamily::Correlator),
-            Self::Reingestor => Some(ProcessorFamily::Reingestor),
-            Self::Generator => Some(ProcessorFamily::Generator),
-            Self::Inferencer => Some(ProcessorFamily::Inferencer),
-            Self::WasmProcessor => Some(ProcessorFamily::Wasm),
-            Self::Domain
-            | Self::Placement
-            | Self::User
-            | Self::Resource
-            | Self::Schema
-            | Self::WireJsonSchema
-            | Self::WireCborSchema
-            | Self::WireAvroSchema
-            | Self::Branch
-            | Self::Relay
-            | Self::Subscription
-            | Self::Codec
-            | Self::SignalingProtocol
-            | Self::Client
-            | Self::Vhost
-            | Self::Endpoint
-            | Self::HashMap
-            | Self::Udf
-            | Self::Ingestor
-            | Self::Emitter => None,
-        }
-    }
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum ChoiceControl {
@@ -408,22 +262,24 @@ impl ChoiceControl {
     fn form(self) -> CreateKind {
         match self {
             Self::DomainPace => CreateKind::Domain,
-            Self::PlacementPolicy => CreateKind::Placement,
-            Self::BranchSchema => CreateKind::Branch,
-            Self::RelaySchema | Self::RelayBranch => CreateKind::Relay,
+            Self::PlacementPolicy => CreateKind::Model(ModelKind::Placement),
+            Self::BranchSchema => CreateKind::Model(ModelKind::Branch),
+            Self::RelaySchema | Self::RelayBranch => CreateKind::Model(ModelKind::Relay),
             Self::SubscriptionRelay | Self::SubscriptionField => CreateKind::Subscription,
             Self::CodecSchema
             | Self::CodecWireSchema
             | Self::CodecResource
-            | Self::CodecVersion => CreateKind::Codec,
-            Self::SignalingResource | Self::SignalingVersion => CreateKind::SignalingProtocol,
-            Self::ClientResource | Self::ClientVersion | Self::ClientSignaling => {
-                CreateKind::Client
+            | Self::CodecVersion => CreateKind::Model(ModelKind::Codec),
+            Self::SignalingResource | Self::SignalingVersion => {
+                CreateKind::Model(ModelKind::SignalingProtocol)
             }
-            Self::VhostResource | Self::VhostVersion => CreateKind::Vhost,
-            Self::EndpointVhost | Self::EndpointSignaling => CreateKind::Endpoint,
+            Self::ClientResource | Self::ClientVersion | Self::ClientSignaling => {
+                CreateKind::Model(ModelKind::Client)
+            }
+            Self::VhostResource | Self::VhostVersion => CreateKind::Model(ModelKind::Vhost),
+            Self::EndpointVhost | Self::EndpointSignaling => CreateKind::Model(ModelKind::Endpoint),
             Self::HashResource | Self::HashVersion | Self::HashCodec | Self::HashKey => {
-                CreateKind::HashMap
+                CreateKind::Model(ModelKind::Lookup)
             }
             Self::IngestSourceRef
             | Self::IngestCodec
@@ -434,7 +290,7 @@ impl ChoiceControl {
             | Self::IngestOutputField
             | Self::IngestBranchField
             | Self::IngestErrorRelay
-            | Self::IngestErrorField => CreateKind::Ingestor,
+            | Self::IngestErrorField => CreateKind::Model(ModelKind::Ingestor),
             Self::EmitterReference
             | Self::EmitterCatalog
             | Self::EmitterInputRelay
@@ -444,7 +300,7 @@ impl ChoiceControl {
             | Self::EmitterStateRelay
             | Self::EmitterStateField
             | Self::EmitterErrorRelay
-            | Self::EmitterErrorField => CreateKind::Emitter,
+            | Self::EmitterErrorField => CreateKind::Model(ModelKind::Emitter),
             Self::ProcessorInputRelay
             | Self::ProcessorBranch
             | Self::ProcessorStateRelay
@@ -470,7 +326,7 @@ impl ChoiceControl {
             | Self::ProcessorResourceVersion
             | Self::InferencerInputField
             | Self::ProcessorBranchKeyField
-            | Self::WasmGuestField => CreateKind::Junction,
+            | Self::WasmGuestField => CreateKind::Model(ModelKind::Junction),
         }
     }
 
@@ -478,7 +334,7 @@ impl ChoiceControl {
         if self.form() == kind {
             return true;
         }
-        self.form() == CreateKind::Junction && kind.processor_family().is_some()
+        self.form() == CreateKind::Model(ModelKind::Junction) && kind.processor_family().is_some()
     }
 }
 
@@ -1385,56 +1241,74 @@ impl CreateSignals {
         }
         if self.captured_domain.get_untracked() != domain {
             match kind {
-                CreateKind::Branch => self
+                CreateKind::Model(ModelKind::Branch) => self
                     .structured
                     .update(|drafts| drafts.branch.invalidate_references()),
-                CreateKind::Relay => self.relay.update(RelayDraft::invalidate_references),
+                CreateKind::Model(ModelKind::Relay) => {
+                    self.relay.update(RelayDraft::invalidate_references)
+                }
                 CreateKind::Subscription => self
                     .subscription
                     .update(SubscriptionDraft::invalidate_references),
-                CreateKind::Codec => self.codec.update(CodecDraft::invalidate_references),
-                CreateKind::SignalingProtocol => {
+                CreateKind::Model(ModelKind::Codec) => {
+                    self.codec.update(CodecDraft::invalidate_references)
+                }
+                CreateKind::Model(ModelKind::SignalingProtocol) => {
                     self.signaling.update(SignalingDraft::invalidate_references)
                 }
-                CreateKind::Client => self.client.update(ClientDraft::invalidate_references),
-                CreateKind::Vhost => self.vhost.update(VhostDraft::invalidate_references),
-                CreateKind::Endpoint => self.endpoint.update(EndpointDraft::invalidate_references),
-                CreateKind::HashMap => self.hash_map.update(HashMapDraft::invalidate_references),
-                CreateKind::Ingestor => self.ingestor.update(IngestorDraft::invalidate_references),
-                CreateKind::Emitter => self.emitter.update(EmitterDraft::invalidate_references),
-                CreateKind::Junction => self.junction.update(ProcessorDraft::invalidate_references),
-                CreateKind::Deduplicator => self
+                CreateKind::Model(ModelKind::Client) => {
+                    self.client.update(ClientDraft::invalidate_references)
+                }
+                CreateKind::Model(ModelKind::Vhost) => {
+                    self.vhost.update(VhostDraft::invalidate_references)
+                }
+                CreateKind::Model(ModelKind::Endpoint) => {
+                    self.endpoint.update(EndpointDraft::invalidate_references)
+                }
+                CreateKind::Model(ModelKind::Lookup) => {
+                    self.hash_map.update(HashMapDraft::invalidate_references)
+                }
+                CreateKind::Model(ModelKind::Ingestor) => {
+                    self.ingestor.update(IngestorDraft::invalidate_references)
+                }
+                CreateKind::Model(ModelKind::Emitter) => {
+                    self.emitter.update(EmitterDraft::invalidate_references)
+                }
+                CreateKind::Model(ModelKind::Junction) => {
+                    self.junction.update(ProcessorDraft::invalidate_references)
+                }
+                CreateKind::Model(ModelKind::Deduplicator) => self
                     .deduplicator
                     .update(ProcessorDraft::invalidate_references),
-                CreateKind::Reorderer => {
+                CreateKind::Model(ModelKind::Reorderer) => {
                     self.reorderer.update(ProcessorDraft::invalidate_references)
                 }
-                CreateKind::WindowProcessor => {
+                CreateKind::Model(ModelKind::WindowProcessor) => {
                     self.window.update(ProcessorDraft::invalidate_references)
                 }
-                CreateKind::Correlator => self
+                CreateKind::Model(ModelKind::Correlator) => self
                     .correlator
                     .update(ProcessorDraft::invalidate_references),
-                CreateKind::Reingestor => self
+                CreateKind::Model(ModelKind::Reingestor) => self
                     .reingestor
                     .update(ProcessorDraft::invalidate_references),
-                CreateKind::Generator => {
+                CreateKind::Model(ModelKind::Generator) => {
                     self.generator.update(ProcessorDraft::invalidate_references)
                 }
-                CreateKind::Inferencer => self
+                CreateKind::Model(ModelKind::Inferencer) => self
                     .inferencer
                     .update(ProcessorDraft::invalidate_references),
-                CreateKind::WasmProcessor => {
+                CreateKind::Model(ModelKind::WasmProcessor) => {
                     self.wasm.update(ProcessorDraft::invalidate_references)
                 }
-                CreateKind::Udf | CreateKind::Placement => {}
+                CreateKind::Model(ModelKind::Udf) | CreateKind::Model(ModelKind::Placement) => {}
                 CreateKind::Domain
                 | CreateKind::User
                 | CreateKind::Resource
-                | CreateKind::Schema
-                | CreateKind::WireJsonSchema
-                | CreateKind::WireCborSchema
-                | CreateKind::WireAvroSchema => {}
+                | CreateKind::Model(ModelKind::Schema)
+                | CreateKind::Model(ModelKind::WireJsonSchema)
+                | CreateKind::Model(ModelKind::WireCborSchema)
+                | CreateKind::Model(ModelKind::WireAvroSchema) => {}
             }
         }
         self.captured_scopes.update(|scopes| {
@@ -1939,12 +1813,12 @@ impl CreateSignals {
         let captured_domain = self.captured_domain.get_untracked();
         match kind {
             CreateKind::Domain => self.domain.get_untracked().submission(),
-            CreateKind::Placement => {
+            CreateKind::Model(ModelKind::Placement) => {
                 let scope = captured_domain
                     .ok_or_else(|| Report::new(CreateDraftError::ScopedDomainRequired))?;
                 let draft = self.placement.get_untracked();
                 CreateSubmission::domain_model(
-                    CreateKind::Placement,
+                    CreateKind::Model(ModelKind::Placement),
                     Model::Placement(draft.build().map_err(draft_error)?),
                     draft.if_not_exists,
                     scope,
@@ -1952,20 +1826,20 @@ impl CreateSignals {
             }
             CreateKind::User => self.user.get_untracked().submission(),
             CreateKind::Resource => self.resource.get_untracked().submission(captured_domain),
-            CreateKind::Schema
-            | CreateKind::WireJsonSchema
-            | CreateKind::WireCborSchema
-            | CreateKind::WireAvroSchema
-            | CreateKind::Branch => {
+            CreateKind::Model(ModelKind::Schema)
+            | CreateKind::Model(ModelKind::WireJsonSchema)
+            | CreateKind::Model(ModelKind::WireCborSchema)
+            | CreateKind::Model(ModelKind::WireAvroSchema)
+            | CreateKind::Model(ModelKind::Branch) => {
                 let scope = captured_domain
                     .ok_or_else(|| Report::new(CreateDraftError::ScopedDomainRequired))?;
                 let drafts = self.structured.get_untracked();
                 let (model, if_not_exists) = match kind {
-                    CreateKind::Schema => (
+                    CreateKind::Model(ModelKind::Schema) => (
                         Model::Schema(drafts.schema.build().map_err(draft_error)?),
                         drafts.schema.if_not_exists,
                     ),
-                    CreateKind::Branch => (
+                    CreateKind::Model(ModelKind::Branch) => (
                         Model::Branch(drafts.branch.build().map_err(draft_error)?),
                         drafts.branch.if_not_exists,
                     ),
@@ -1982,7 +1856,7 @@ impl CreateSignals {
                 };
                 CreateSubmission::domain_model(kind, model, if_not_exists, scope)
             }
-            CreateKind::Relay => {
+            CreateKind::Model(ModelKind::Relay) => {
                 let scope = captured_domain
                     .ok_or_else(|| Report::new(CreateDraftError::ScopedDomainRequired))?;
                 let draft = self.relay.get_untracked();
@@ -1994,7 +1868,7 @@ impl CreateSignals {
                     scope,
                 )
             }
-            CreateKind::Codec => {
+            CreateKind::Model(ModelKind::Codec) => {
                 let scope = captured_domain
                     .ok_or_else(|| Report::new(CreateDraftError::ScopedDomainRequired))?;
                 let draft = self.codec.get_untracked();
@@ -2006,7 +1880,7 @@ impl CreateSignals {
                     scope,
                 )
             }
-            CreateKind::SignalingProtocol => {
+            CreateKind::Model(ModelKind::SignalingProtocol) => {
                 let scope = captured_domain
                     .ok_or_else(|| Report::new(CreateDraftError::ScopedDomainRequired))?;
                 let draft = self.signaling.get_untracked();
@@ -2018,7 +1892,7 @@ impl CreateSignals {
                     scope,
                 )
             }
-            CreateKind::Client => {
+            CreateKind::Model(ModelKind::Client) => {
                 let scope = captured_domain
                     .ok_or_else(|| Report::new(CreateDraftError::ScopedDomainRequired))?;
                 let draft = self.client.get_untracked();
@@ -2031,7 +1905,7 @@ impl CreateSignals {
                     scope,
                 )
             }
-            CreateKind::Vhost => {
+            CreateKind::Model(ModelKind::Vhost) => {
                 let scope = captured_domain
                     .ok_or_else(|| Report::new(CreateDraftError::ScopedDomainRequired))?;
                 let draft = self.vhost.get_untracked();
@@ -2043,7 +1917,7 @@ impl CreateSignals {
                     scope,
                 )
             }
-            CreateKind::Endpoint => {
+            CreateKind::Model(ModelKind::Endpoint) => {
                 let scope = captured_domain
                     .ok_or_else(|| Report::new(CreateDraftError::ScopedDomainRequired))?;
                 let draft = self.endpoint.get_untracked();
@@ -2055,7 +1929,7 @@ impl CreateSignals {
                     scope,
                 )
             }
-            CreateKind::HashMap => {
+            CreateKind::Model(ModelKind::Lookup) => {
                 let scope = captured_domain
                     .ok_or_else(|| Report::new(CreateDraftError::ScopedDomainRequired))?;
                 let draft = self.hash_map.get_untracked();
@@ -2067,14 +1941,14 @@ impl CreateSignals {
                     scope,
                 )
             }
-            CreateKind::Udf => {
+            CreateKind::Model(ModelKind::Udf) => {
                 let scope = captured_domain
                     .ok_or_else(|| Report::new(CreateDraftError::ScopedDomainRequired))?;
                 let draft = self.udf.get_untracked();
                 let udf = draft.build().map_err(draft_error)?;
                 CreateSubmission::domain_model(kind, Model::Udf(udf), draft.if_not_exists, scope)
             }
-            CreateKind::Ingestor => {
+            CreateKind::Model(ModelKind::Ingestor) => {
                 let scope = captured_domain
                     .ok_or_else(|| Report::new(CreateDraftError::ScopedDomainRequired))?;
                 let draft = self.ingestor.get_untracked();
@@ -2086,7 +1960,7 @@ impl CreateSignals {
                     scope,
                 )
             }
-            CreateKind::Emitter => {
+            CreateKind::Model(ModelKind::Emitter) => {
                 let scope = captured_domain
                     .ok_or_else(|| Report::new(CreateDraftError::ScopedDomainRequired))?;
                 let draft = self.emitter.get_untracked();
@@ -2098,31 +1972,31 @@ impl CreateSignals {
                     scope,
                 )
             }
-            CreateKind::Junction => {
+            CreateKind::Model(ModelKind::Junction) => {
                 self.processor_submission(kind, ProcessorFamily::Junction, captured_domain)
             }
-            CreateKind::Deduplicator => {
+            CreateKind::Model(ModelKind::Deduplicator) => {
                 self.processor_submission(kind, ProcessorFamily::Deduplicator, captured_domain)
             }
-            CreateKind::Reorderer => {
+            CreateKind::Model(ModelKind::Reorderer) => {
                 self.processor_submission(kind, ProcessorFamily::Reorderer, captured_domain)
             }
-            CreateKind::WindowProcessor => {
+            CreateKind::Model(ModelKind::WindowProcessor) => {
                 self.processor_submission(kind, ProcessorFamily::Window, captured_domain)
             }
-            CreateKind::Correlator => {
+            CreateKind::Model(ModelKind::Correlator) => {
                 self.processor_submission(kind, ProcessorFamily::Correlator, captured_domain)
             }
-            CreateKind::Reingestor => {
+            CreateKind::Model(ModelKind::Reingestor) => {
                 self.processor_submission(kind, ProcessorFamily::Reingestor, captured_domain)
             }
-            CreateKind::Generator => {
+            CreateKind::Model(ModelKind::Generator) => {
                 self.processor_submission(kind, ProcessorFamily::Generator, captured_domain)
             }
-            CreateKind::Inferencer => {
+            CreateKind::Model(ModelKind::Inferencer) => {
                 self.processor_submission(kind, ProcessorFamily::Inferencer, captured_domain)
             }
-            CreateKind::WasmProcessor => {
+            CreateKind::Model(ModelKind::WasmProcessor) => {
                 self.processor_submission(kind, ProcessorFamily::Wasm, captured_domain)
             }
             CreateKind::Subscription => {
@@ -2178,95 +2052,23 @@ pub(crate) fn CreateMenu(
                 <span>"Create"</span>
             </button>
             <div class="popup-menu create-menu" class:open=move || menu_open.get() role="menu">
-                <button type="button" role="menuitem" data-create-kind="domain" on:click=move |_| choose.run(CreateKind::Domain)>
-                    <span>"Domain"</span><em>"Clock and lifecycle"</em>
-                </button>
-                <button type="button" role="menuitem" data-create-kind="placement" on:click=move |_| choose.run(CreateKind::Placement)>
-                    <span>"Placement"</span><em>"Domain-wide policy"</em>
-                </button>
-                <button type="button" role="menuitem" data-create-kind="user" on:click=move |_| choose.run(CreateKind::User)>
-                    <span>"User"</span><em>"Login credential"</em>
-                </button>
-                <button type="button" role="menuitem" data-create-kind="resource" on:click=move |_| choose.run(CreateKind::Resource)>
-                    <span>"Resource"</span><em>"Catalog and upload"</em>
-                </button>
-                <button type="button" role="menuitem" data-create-kind="schema" on:click=move |_| choose.run(CreateKind::Schema)>
-                    <span>"Schema"</span><em>"Internal record fields"</em>
-                </button>
-                <button type="button" role="menuitem" data-create-kind="wire-json-schema" on:click=move |_| choose.run(CreateKind::WireJsonSchema)>
-                    <span>"Wire JSON schema"</span><em>"JSON payload fields"</em>
-                </button>
-                <button type="button" role="menuitem" data-create-kind="wire-cbor-schema" on:click=move |_| choose.run(CreateKind::WireCborSchema)>
-                    <span>"Wire CBOR schema"</span><em>"CBOR payload fields"</em>
-                </button>
-                <button type="button" role="menuitem" data-create-kind="wire-avro-schema" on:click=move |_| choose.run(CreateKind::WireAvroSchema)>
-                    <span>"Wire AVRO schema"</span><em>"AVRO payload fields"</em>
-                </button>
-                <button type="button" role="menuitem" data-create-kind="branch" on:click=move |_| choose.run(CreateKind::Branch)>
-                    <span>"Branch"</span><em>"Key schema and lifetime"</em>
-                </button>
-                <button type="button" role="menuitem" data-create-kind="relay" on:click=move |_| choose.run(CreateKind::Relay)>
-                    <span>"Relay"</span><em>"Schema, branching and capacity"</em>
-                </button>
-                <button type="button" role="menuitem" data-create-kind="subscription" on:click=move |_| choose.run(CreateKind::Subscription)>
-                    <span>"Subscription"</span><em>"Read-only relay tab"</em>
-                </button>
-                <button type="button" role="menuitem" data-create-kind="codec" on:click=move |_| choose.run(CreateKind::Codec)>
-                    <span>"Codec"</span><em>"Wire format and schema mapping"</em>
-                </button>
-                <button type="button" role="menuitem" data-create-kind="signaling-protocol" on:click=move |_| choose.run(CreateKind::SignalingProtocol)>
-                    <span>"Signaling protocol"</span><em>"Ordered connection handshake"</em>
-                </button>
-                <button type="button" role="menuitem" data-create-kind="client" on:click=move |_| choose.run(CreateKind::Client)>
-                    <span>"Client"</span><em>"External transport configuration"</em>
-                </button>
-                <button type="button" role="menuitem" data-create-kind="vhost" on:click=move |_| choose.run(CreateKind::Vhost)>
-                    <span>"VHOST"</span><em>"Hostnames and optional TLS"</em>
-                </button>
-                <button type="button" role="menuitem" data-create-kind="endpoint" on:click=move |_| choose.run(CreateKind::Endpoint)>
-                    <span>"Endpoint"</span><em>"HTTP or WebSocket path"</em>
-                </button>
-                <button type="button" role="menuitem" data-create-kind="hash-map" on:click=move |_| choose.run(CreateKind::HashMap)>
-                    <span>"Hash map"</span><em>"Resource-backed lookup"</em>
-                </button>
-                <button type="button" role="menuitem" data-create-kind="udf" on:click=move |_| choose.run(CreateKind::Udf)>
-                    <span>"Roto UDF"</span><em>"Typed function and source tests"</em>
-                </button>
-                <button type="button" role="menuitem" data-create-kind="ingestor" on:click=move |_| choose.run(CreateKind::Ingestor)>
-                    <span>"Ingestor"</span><em>"External source and ordered routes"</em>
-                </button>
-                <button type="button" role="menuitem" data-create-kind="emitter" on:click=move |_| choose.run(CreateKind::Emitter)>
-                    <span>"Emitter"</span><em>"External publication and client output"</em>
-                </button>
-                <button type="button" role="menuitem" data-create-kind="junction" on:click=move |_| choose.run(CreateKind::Junction)>
-                    <span>"Junction"</span><em>"Transform and fan out relay records"</em>
-                </button>
-                <button type="button" role="menuitem" data-create-kind="deduplicator" on:click=move |_| choose.run(CreateKind::Deduplicator)>
-                    <span>"Deduplicator"</span><em>"Suppress repeated keys in each branch"</em>
-                </button>
-                <button type="button" role="menuitem" data-create-kind="reorderer" on:click=move |_| choose.run(CreateKind::Reorderer)>
-                    <span>"Reorderer"</span><em>"Release each branch in key order"</em>
-                </button>
-                <button type="button" role="menuitem" data-create-kind="window-processor" on:click=move |_| choose.run(CreateKind::WindowProcessor)>
-                    <span>"Window processor"</span><em>"Aggregate each branch over WIDTH and STEP"</em>
-                </button>
-                <button type="button" role="menuitem" data-create-kind="correlator" on:click=move |_| choose.run(CreateKind::Correlator)>
-                    <span>"Correlator"</span><em>"Match left and right records in each branch"</em>
-                </button>
-                <button type="button" role="menuitem" data-create-kind="reingestor" on:click=move |_| choose.run(CreateKind::Reingestor)>
-                    <span>"Reingestor"</span><em>"Transform records across branch boundaries"</em>
-                </button>
-                <button type="button" role="menuitem" data-create-kind="generator" on:click=move |_| choose.run(CreateKind::Generator)>
-                    <span>"Generator"</span><em>"Generate from materialized state on a cadence"</em>
-                </button>
-                <button type="button" role="menuitem" data-create-kind="inferencer" on:click=move |_| choose.run(CreateKind::Inferencer)>
-                    <span>"Inferencer"</span><em>"Score each branch with an ONNX model"</em>
-                </button>
-                <button type="button" role="menuitem" data-create-kind="wasm-processor" on:click=move |_| choose.run(CreateKind::WasmProcessor)>
-                    <span>"WASM processor"</span><em>"Run a guest with fuel and memory limits"</em>
-                </button>
+                {CreateKind::MENU
+                    .into_iter()
+                    .map(|kind| view! { <CreateMenuItem kind=kind choose=choose /> })
+                    .collect_view()}
             </div>
         </div>
+    }
+}
+
+/// One Create menu item, which opens its family's form.
+#[component]
+fn CreateMenuItem(kind: CreateKind, choose: Callback<CreateKind>) -> impl IntoView {
+    let entry = kind.menu_entry();
+    view! {
+        <button type="button" role="menuitem" data-create-kind=kind.key() on:click=move |_| choose.run(kind)>
+            <span>{entry.name}</span><em>{entry.summary}</em>
+        </button>
     }
 }
 
@@ -2341,9 +2143,9 @@ fn page_cursor(load: RwSignal<ChoiceLoad>) -> Option<String> {
 fn open_form_controls(signals: CreateSignals, kind: CreateKind) -> Vec<ChoiceControl> {
     match kind {
         CreateKind::Domain => vec![ChoiceControl::DomainPace],
-        CreateKind::Placement => vec![ChoiceControl::PlacementPolicy],
-        CreateKind::Branch => vec![ChoiceControl::BranchSchema],
-        CreateKind::Relay => {
+        CreateKind::Model(ModelKind::Placement) => vec![ChoiceControl::PlacementPolicy],
+        CreateKind::Model(ModelKind::Branch) => vec![ChoiceControl::BranchSchema],
+        CreateKind::Model(ModelKind::Relay) => {
             let mut controls = vec![ChoiceControl::RelaySchema];
             if signals.relay.get_untracked().branching.is_branched() {
                 controls.push(ChoiceControl::RelayBranch);
@@ -2354,7 +2156,7 @@ fn open_form_controls(signals: CreateSignals, kind: CreateKind) -> Vec<ChoiceCon
             ChoiceControl::SubscriptionRelay,
             ChoiceControl::SubscriptionField,
         ],
-        CreateKind::Codec => {
+        CreateKind::Model(ModelKind::Codec) => {
             let mut controls = vec![ChoiceControl::CodecSchema];
             match signals.codec.get_untracked().format {
                 Some(CodecFormatDraft::Wire { .. }) => {
@@ -2368,7 +2170,7 @@ fn open_form_controls(signals: CreateSignals, kind: CreateKind) -> Vec<ChoiceCon
             }
             controls
         }
-        CreateKind::SignalingProtocol => {
+        CreateKind::Model(ModelKind::SignalingProtocol) => {
             if matches!(
                 signals.signaling.get_untracked().format,
                 Some(SignalingFormatDraft::Protobuf { .. })
@@ -2381,7 +2183,7 @@ fn open_form_controls(signals: CreateSignals, kind: CreateKind) -> Vec<ChoiceCon
                 Vec::new()
             }
         }
-        CreateKind::Client => {
+        CreateKind::Model(ModelKind::Client) => {
             let draft = signals.client.get_untracked();
             let mut controls = Vec::new();
             if draft.mount_enabled {
@@ -2393,14 +2195,14 @@ fn open_form_controls(signals: CreateSignals, kind: CreateKind) -> Vec<ChoiceCon
             }
             controls
         }
-        CreateKind::Vhost => {
+        CreateKind::Model(ModelKind::Vhost) => {
             if signals.vhost.get_untracked().tls_enabled {
                 vec![ChoiceControl::VhostResource, ChoiceControl::VhostVersion]
             } else {
                 Vec::new()
             }
         }
-        CreateKind::Endpoint => {
+        CreateKind::Model(ModelKind::Endpoint) => {
             let mut controls = vec![ChoiceControl::EndpointVhost];
             if signals.endpoint.get_untracked().endpoint_type()
                 == Some(nervix_models::EndpointType::Websockets)
@@ -2409,13 +2211,13 @@ fn open_form_controls(signals: CreateSignals, kind: CreateKind) -> Vec<ChoiceCon
             }
             controls
         }
-        CreateKind::HashMap => vec![
+        CreateKind::Model(ModelKind::Lookup) => vec![
             ChoiceControl::HashResource,
             ChoiceControl::HashVersion,
             ChoiceControl::HashCodec,
             ChoiceControl::HashKey,
         ],
-        CreateKind::Ingestor => {
+        CreateKind::Model(ModelKind::Ingestor) => {
             let draft = signals.ingestor.get_untracked();
             let mut controls = vec![ChoiceControl::IngestCodec, ChoiceControl::IngestRouteRelay];
             if draft.source.kind.is_some() {
@@ -2443,23 +2245,23 @@ fn open_form_controls(signals: CreateSignals, kind: CreateKind) -> Vec<ChoiceCon
             }
             controls
         }
-        CreateKind::Emitter => signals.emitter_open_controls(),
-        CreateKind::Junction
-        | CreateKind::Deduplicator
-        | CreateKind::Reorderer
-        | CreateKind::WindowProcessor
-        | CreateKind::Correlator
-        | CreateKind::Reingestor
-        | CreateKind::Generator
-        | CreateKind::Inferencer
-        | CreateKind::WasmProcessor => signals.processor_open_controls(),
-        CreateKind::Udf => Vec::new(),
+        CreateKind::Model(ModelKind::Emitter) => signals.emitter_open_controls(),
+        CreateKind::Model(ModelKind::Junction)
+        | CreateKind::Model(ModelKind::Deduplicator)
+        | CreateKind::Model(ModelKind::Reorderer)
+        | CreateKind::Model(ModelKind::WindowProcessor)
+        | CreateKind::Model(ModelKind::Correlator)
+        | CreateKind::Model(ModelKind::Reingestor)
+        | CreateKind::Model(ModelKind::Generator)
+        | CreateKind::Model(ModelKind::Inferencer)
+        | CreateKind::Model(ModelKind::WasmProcessor) => signals.processor_open_controls(),
+        CreateKind::Model(ModelKind::Udf) => Vec::new(),
         CreateKind::User
         | CreateKind::Resource
-        | CreateKind::Schema
-        | CreateKind::WireJsonSchema
-        | CreateKind::WireCborSchema
-        | CreateKind::WireAvroSchema => Vec::new(),
+        | CreateKind::Model(ModelKind::Schema)
+        | CreateKind::Model(ModelKind::WireJsonSchema)
+        | CreateKind::Model(ModelKind::WireCborSchema)
+        | CreateKind::Model(ModelKind::WireAvroSchema) => Vec::new(),
     }
 }
 
@@ -2671,7 +2473,7 @@ fn CreateKindFields(
             </Show>
         </Show>
 
-        <Show when=move || signals.open.get() == Some(CreateKind::Placement) fallback=|| ()>
+        <Show when=move || signals.open.get() == Some(CreateKind::Model(ModelKind::Placement)) fallback=|| ()>
             <label class="create-field">
                 <span>"Placement name"</span>
                 <input node_ref=name_input class="create-name" type="text" autocomplete="off"
@@ -2726,79 +2528,79 @@ fn CreateKindFields(
             </label>
         </Show>
 
-        <Show when=move || signals.open.get() == Some(CreateKind::Schema) fallback=|| ()>
+        <Show when=move || signals.open.get() == Some(CreateKind::Model(ModelKind::Schema)) fallback=|| ()>
             <SchemaEditor signals=signals name_input=name_input />
         </Show>
-        <Show when=move || signals.open.get() == Some(CreateKind::WireJsonSchema) fallback=|| ()>
+        <Show when=move || signals.open.get() == Some(CreateKind::Model(ModelKind::WireJsonSchema)) fallback=|| ()>
             <WireSchemaEditor signals=signals name_input=name_input format=WireFormat::Json />
         </Show>
-        <Show when=move || signals.open.get() == Some(CreateKind::WireCborSchema) fallback=|| ()>
+        <Show when=move || signals.open.get() == Some(CreateKind::Model(ModelKind::WireCborSchema)) fallback=|| ()>
             <WireSchemaEditor signals=signals name_input=name_input format=WireFormat::Cbor />
         </Show>
-        <Show when=move || signals.open.get() == Some(CreateKind::WireAvroSchema) fallback=|| ()>
+        <Show when=move || signals.open.get() == Some(CreateKind::Model(ModelKind::WireAvroSchema)) fallback=|| ()>
             <WireSchemaEditor signals=signals name_input=name_input format=WireFormat::Avro />
         </Show>
-        <Show when=move || signals.open.get() == Some(CreateKind::Branch) fallback=|| ()>
+        <Show when=move || signals.open.get() == Some(CreateKind::Model(ModelKind::Branch)) fallback=|| ()>
             <BranchEditor signals=signals name_input=name_input request_tx=request_tx session_generation=session_generation />
         </Show>
-        <Show when=move || signals.open.get() == Some(CreateKind::Relay) fallback=|| ()>
+        <Show when=move || signals.open.get() == Some(CreateKind::Model(ModelKind::Relay)) fallback=|| ()>
             <RelayEditor signals=signals name_input=name_input request_tx=request_tx session_generation=session_generation />
         </Show>
         <Show when=move || signals.open.get() == Some(CreateKind::Subscription) fallback=|| ()>
             <SubscriptionEditor signals=signals name_input=name_input request_tx=request_tx session_generation=session_generation />
         </Show>
-        <Show when=move || signals.open.get() == Some(CreateKind::Codec) fallback=|| ()>
+        <Show when=move || signals.open.get() == Some(CreateKind::Model(ModelKind::Codec)) fallback=|| ()>
             <CodecEditor signals=signals name_input=name_input request_tx=request_tx session_generation=session_generation />
         </Show>
-        <Show when=move || signals.open.get() == Some(CreateKind::SignalingProtocol) fallback=|| ()>
+        <Show when=move || signals.open.get() == Some(CreateKind::Model(ModelKind::SignalingProtocol)) fallback=|| ()>
             <SignalingEditor signals=signals name_input=name_input request_tx=request_tx session_generation=session_generation />
         </Show>
-        <Show when=move || signals.open.get() == Some(CreateKind::Client) fallback=|| ()>
+        <Show when=move || signals.open.get() == Some(CreateKind::Model(ModelKind::Client)) fallback=|| ()>
             <ClientEditor signals=signals name_input=name_input request_tx=request_tx session_generation=session_generation />
         </Show>
-        <Show when=move || signals.open.get() == Some(CreateKind::Vhost) fallback=|| ()>
+        <Show when=move || signals.open.get() == Some(CreateKind::Model(ModelKind::Vhost)) fallback=|| ()>
             <VhostEditor signals=signals name_input=name_input request_tx=request_tx session_generation=session_generation />
         </Show>
-        <Show when=move || signals.open.get() == Some(CreateKind::Endpoint) fallback=|| ()>
+        <Show when=move || signals.open.get() == Some(CreateKind::Model(ModelKind::Endpoint)) fallback=|| ()>
             <EndpointEditor signals=signals name_input=name_input request_tx=request_tx session_generation=session_generation />
         </Show>
-        <Show when=move || signals.open.get() == Some(CreateKind::HashMap) fallback=|| ()>
+        <Show when=move || signals.open.get() == Some(CreateKind::Model(ModelKind::Lookup)) fallback=|| ()>
             <HashMapEditor signals=signals name_input=name_input request_tx=request_tx session_generation=session_generation />
         </Show>
-        <Show when=move || signals.open.get() == Some(CreateKind::Udf) fallback=|| ()>
+        <Show when=move || signals.open.get() == Some(CreateKind::Model(ModelKind::Udf)) fallback=|| ()>
             <UdfEditor signals=signals name_input=name_input />
         </Show>
-        <Show when=move || signals.open.get() == Some(CreateKind::Ingestor) fallback=|| ()>
+        <Show when=move || signals.open.get() == Some(CreateKind::Model(ModelKind::Ingestor)) fallback=|| ()>
             <IngestorEditor signals=signals name_input=name_input request_tx=request_tx session_generation=session_generation />
         </Show>
-        <Show when=move || signals.open.get() == Some(CreateKind::Emitter) fallback=|| ()>
+        <Show when=move || signals.open.get() == Some(CreateKind::Model(ModelKind::Emitter)) fallback=|| ()>
             <EmitterEditor signals=signals name_input=name_input request_tx=request_tx session_generation=session_generation />
         </Show>
-        <Show when=move || signals.open.get() == Some(CreateKind::Junction) fallback=|| ()>
+        <Show when=move || signals.open.get() == Some(CreateKind::Model(ModelKind::Junction)) fallback=|| ()>
             <ProcessorEditor family=ProcessorFamily::Junction signals=signals name_input=name_input request_tx=request_tx session_generation=session_generation />
         </Show>
-        <Show when=move || signals.open.get() == Some(CreateKind::Deduplicator) fallback=|| ()>
+        <Show when=move || signals.open.get() == Some(CreateKind::Model(ModelKind::Deduplicator)) fallback=|| ()>
             <ProcessorEditor family=ProcessorFamily::Deduplicator signals=signals name_input=name_input request_tx=request_tx session_generation=session_generation />
         </Show>
-        <Show when=move || signals.open.get() == Some(CreateKind::Reorderer) fallback=|| ()>
+        <Show when=move || signals.open.get() == Some(CreateKind::Model(ModelKind::Reorderer)) fallback=|| ()>
             <ProcessorEditor family=ProcessorFamily::Reorderer signals=signals name_input=name_input request_tx=request_tx session_generation=session_generation />
         </Show>
-        <Show when=move || signals.open.get() == Some(CreateKind::WindowProcessor) fallback=|| ()>
+        <Show when=move || signals.open.get() == Some(CreateKind::Model(ModelKind::WindowProcessor)) fallback=|| ()>
             <ProcessorEditor family=ProcessorFamily::Window signals=signals name_input=name_input request_tx=request_tx session_generation=session_generation />
         </Show>
-        <Show when=move || signals.open.get() == Some(CreateKind::Correlator) fallback=|| ()>
+        <Show when=move || signals.open.get() == Some(CreateKind::Model(ModelKind::Correlator)) fallback=|| ()>
             <ProcessorEditor family=ProcessorFamily::Correlator signals=signals name_input=name_input request_tx=request_tx session_generation=session_generation />
         </Show>
-        <Show when=move || signals.open.get() == Some(CreateKind::Reingestor) fallback=|| ()>
+        <Show when=move || signals.open.get() == Some(CreateKind::Model(ModelKind::Reingestor)) fallback=|| ()>
             <ProcessorEditor family=ProcessorFamily::Reingestor signals=signals name_input=name_input request_tx=request_tx session_generation=session_generation />
         </Show>
-        <Show when=move || signals.open.get() == Some(CreateKind::Generator) fallback=|| ()>
+        <Show when=move || signals.open.get() == Some(CreateKind::Model(ModelKind::Generator)) fallback=|| ()>
             <ProcessorEditor family=ProcessorFamily::Generator signals=signals name_input=name_input request_tx=request_tx session_generation=session_generation />
         </Show>
-        <Show when=move || signals.open.get() == Some(CreateKind::Inferencer) fallback=|| ()>
+        <Show when=move || signals.open.get() == Some(CreateKind::Model(ModelKind::Inferencer)) fallback=|| ()>
             <ProcessorEditor family=ProcessorFamily::Inferencer signals=signals name_input=name_input request_tx=request_tx session_generation=session_generation />
         </Show>
-        <Show when=move || signals.open.get() == Some(CreateKind::WasmProcessor) fallback=|| ()>
+        <Show when=move || signals.open.get() == Some(CreateKind::Model(ModelKind::WasmProcessor)) fallback=|| ()>
             <ProcessorEditor family=ProcessorFamily::Wasm signals=signals name_input=name_input request_tx=request_tx session_generation=session_generation />
         </Show>
     }
@@ -2816,33 +2618,33 @@ fn IfNotExistsField(signals: CreateSignals) -> impl IntoView {
                     type="checkbox"
                     prop:checked=move || match signals.open.get() {
                         Some(CreateKind::Domain) => signals.domain.get().if_not_exists,
-                        Some(CreateKind::Placement) => signals.placement.get().if_not_exists,
+                        Some(CreateKind::Model(ModelKind::Placement)) => signals.placement.get().if_not_exists,
                         Some(CreateKind::User) => signals.user.get().if_not_exists,
                         Some(CreateKind::Resource) => signals.resource.get().if_not_exists,
-                        Some(CreateKind::Schema) => signals.structured.get().schema.if_not_exists,
-                        Some(CreateKind::WireJsonSchema) => signals.structured.get().wire_json.if_not_exists,
-                        Some(CreateKind::WireCborSchema) => signals.structured.get().wire_cbor.if_not_exists,
-                        Some(CreateKind::WireAvroSchema) => signals.structured.get().wire_avro.if_not_exists,
-                        Some(CreateKind::Branch) => signals.structured.get().branch.if_not_exists,
-                        Some(CreateKind::Relay) => signals.relay.get().if_not_exists,
-                        Some(CreateKind::Codec) => signals.codec.get().if_not_exists,
-                        Some(CreateKind::SignalingProtocol) => signals.signaling.get().if_not_exists,
-                        Some(CreateKind::Client) => signals.client.get().if_not_exists,
-                        Some(CreateKind::Vhost) => signals.vhost.get().if_not_exists,
-                        Some(CreateKind::Endpoint) => signals.endpoint.get().if_not_exists,
-                        Some(CreateKind::HashMap) => signals.hash_map.get().if_not_exists,
-                        Some(CreateKind::Udf) => signals.udf.get().if_not_exists,
-                        Some(CreateKind::Ingestor) => signals.ingestor.get().if_not_exists,
-                        Some(CreateKind::Emitter) => signals.emitter.get().if_not_exists,
-                        Some(CreateKind::Junction) => signals.junction.get().if_not_exists,
-                        Some(CreateKind::Deduplicator) => signals.deduplicator.get().if_not_exists,
-                        Some(CreateKind::Reorderer) => signals.reorderer.get().if_not_exists,
-                        Some(CreateKind::WindowProcessor) => signals.window.get().if_not_exists,
-                        Some(CreateKind::Correlator) => signals.correlator.get().if_not_exists,
-                        Some(CreateKind::Reingestor) => signals.reingestor.get().if_not_exists,
-                        Some(CreateKind::Generator) => signals.generator.get().if_not_exists,
-                        Some(CreateKind::Inferencer) => signals.inferencer.get().if_not_exists,
-                        Some(CreateKind::WasmProcessor) => signals.wasm.get().if_not_exists,
+                        Some(CreateKind::Model(ModelKind::Schema)) => signals.structured.get().schema.if_not_exists,
+                        Some(CreateKind::Model(ModelKind::WireJsonSchema)) => signals.structured.get().wire_json.if_not_exists,
+                        Some(CreateKind::Model(ModelKind::WireCborSchema)) => signals.structured.get().wire_cbor.if_not_exists,
+                        Some(CreateKind::Model(ModelKind::WireAvroSchema)) => signals.structured.get().wire_avro.if_not_exists,
+                        Some(CreateKind::Model(ModelKind::Branch)) => signals.structured.get().branch.if_not_exists,
+                        Some(CreateKind::Model(ModelKind::Relay)) => signals.relay.get().if_not_exists,
+                        Some(CreateKind::Model(ModelKind::Codec)) => signals.codec.get().if_not_exists,
+                        Some(CreateKind::Model(ModelKind::SignalingProtocol)) => signals.signaling.get().if_not_exists,
+                        Some(CreateKind::Model(ModelKind::Client)) => signals.client.get().if_not_exists,
+                        Some(CreateKind::Model(ModelKind::Vhost)) => signals.vhost.get().if_not_exists,
+                        Some(CreateKind::Model(ModelKind::Endpoint)) => signals.endpoint.get().if_not_exists,
+                        Some(CreateKind::Model(ModelKind::Lookup)) => signals.hash_map.get().if_not_exists,
+                        Some(CreateKind::Model(ModelKind::Udf)) => signals.udf.get().if_not_exists,
+                        Some(CreateKind::Model(ModelKind::Ingestor)) => signals.ingestor.get().if_not_exists,
+                        Some(CreateKind::Model(ModelKind::Emitter)) => signals.emitter.get().if_not_exists,
+                        Some(CreateKind::Model(ModelKind::Junction)) => signals.junction.get().if_not_exists,
+                        Some(CreateKind::Model(ModelKind::Deduplicator)) => signals.deduplicator.get().if_not_exists,
+                        Some(CreateKind::Model(ModelKind::Reorderer)) => signals.reorderer.get().if_not_exists,
+                        Some(CreateKind::Model(ModelKind::WindowProcessor)) => signals.window.get().if_not_exists,
+                        Some(CreateKind::Model(ModelKind::Correlator)) => signals.correlator.get().if_not_exists,
+                        Some(CreateKind::Model(ModelKind::Reingestor)) => signals.reingestor.get().if_not_exists,
+                        Some(CreateKind::Model(ModelKind::Generator)) => signals.generator.get().if_not_exists,
+                        Some(CreateKind::Model(ModelKind::Inferencer)) => signals.inferencer.get().if_not_exists,
+                        Some(CreateKind::Model(ModelKind::WasmProcessor)) => signals.wasm.get().if_not_exists,
                         Some(CreateKind::Subscription) | None => false,
                     }
                     disabled=move || signals.progress.get().is_pending()
@@ -2850,33 +2652,33 @@ fn IfNotExistsField(signals: CreateSignals) -> impl IntoView {
                         let checked = event_target_checked(&event);
                         match signals.open.get_untracked() {
                             Some(CreateKind::Domain) => signals.domain.update(|draft| draft.if_not_exists = checked),
-                            Some(CreateKind::Placement) => signals.placement.update(|draft| draft.if_not_exists = checked),
+                            Some(CreateKind::Model(ModelKind::Placement)) => signals.placement.update(|draft| draft.if_not_exists = checked),
                             Some(CreateKind::User) => signals.user.update(|draft| draft.if_not_exists = checked),
                             Some(CreateKind::Resource) => signals.resource.update(|draft| draft.if_not_exists = checked),
-                            Some(CreateKind::Schema) => signals.structured.update(|draft| draft.schema.if_not_exists = checked),
-                            Some(CreateKind::WireJsonSchema) => signals.structured.update(|draft| draft.wire_json.if_not_exists = checked),
-                            Some(CreateKind::WireCborSchema) => signals.structured.update(|draft| draft.wire_cbor.if_not_exists = checked),
-                            Some(CreateKind::WireAvroSchema) => signals.structured.update(|draft| draft.wire_avro.if_not_exists = checked),
-                            Some(CreateKind::Branch) => signals.structured.update(|draft| draft.branch.if_not_exists = checked),
-                            Some(CreateKind::Relay) => signals.relay.update(|draft| draft.if_not_exists = checked),
-                            Some(CreateKind::Codec) => signals.codec.update(|draft| draft.if_not_exists = checked),
-                            Some(CreateKind::SignalingProtocol) => signals.signaling.update(|draft| draft.if_not_exists = checked),
-                            Some(CreateKind::Client) => signals.client.update(|draft| draft.if_not_exists = checked),
-                            Some(CreateKind::Vhost) => signals.vhost.update(|draft| draft.if_not_exists = checked),
-                            Some(CreateKind::Endpoint) => signals.endpoint.update(|draft| draft.if_not_exists = checked),
-                            Some(CreateKind::HashMap) => signals.hash_map.update(|draft| draft.if_not_exists = checked),
-                            Some(CreateKind::Udf) => signals.udf.update(|draft| draft.if_not_exists = checked),
-                            Some(CreateKind::Ingestor) => signals.ingestor.update(|draft| draft.if_not_exists = checked),
-                            Some(CreateKind::Emitter) => signals.emitter.update(|draft| draft.if_not_exists = checked),
-                            Some(CreateKind::Junction) => signals.junction.update(|draft| draft.if_not_exists = checked),
-                            Some(CreateKind::Deduplicator) => signals.deduplicator.update(|draft| draft.if_not_exists = checked),
-                            Some(CreateKind::Reorderer) => signals.reorderer.update(|draft| draft.if_not_exists = checked),
-                            Some(CreateKind::WindowProcessor) => signals.window.update(|draft| draft.if_not_exists = checked),
-                            Some(CreateKind::Correlator) => signals.correlator.update(|draft| draft.if_not_exists = checked),
-                            Some(CreateKind::Reingestor) => signals.reingestor.update(|draft| draft.if_not_exists = checked),
-                            Some(CreateKind::Generator) => signals.generator.update(|draft| draft.if_not_exists = checked),
-                            Some(CreateKind::Inferencer) => signals.inferencer.update(|draft| draft.if_not_exists = checked),
-                            Some(CreateKind::WasmProcessor) => signals.wasm.update(|draft| draft.if_not_exists = checked),
+                            Some(CreateKind::Model(ModelKind::Schema)) => signals.structured.update(|draft| draft.schema.if_not_exists = checked),
+                            Some(CreateKind::Model(ModelKind::WireJsonSchema)) => signals.structured.update(|draft| draft.wire_json.if_not_exists = checked),
+                            Some(CreateKind::Model(ModelKind::WireCborSchema)) => signals.structured.update(|draft| draft.wire_cbor.if_not_exists = checked),
+                            Some(CreateKind::Model(ModelKind::WireAvroSchema)) => signals.structured.update(|draft| draft.wire_avro.if_not_exists = checked),
+                            Some(CreateKind::Model(ModelKind::Branch)) => signals.structured.update(|draft| draft.branch.if_not_exists = checked),
+                            Some(CreateKind::Model(ModelKind::Relay)) => signals.relay.update(|draft| draft.if_not_exists = checked),
+                            Some(CreateKind::Model(ModelKind::Codec)) => signals.codec.update(|draft| draft.if_not_exists = checked),
+                            Some(CreateKind::Model(ModelKind::SignalingProtocol)) => signals.signaling.update(|draft| draft.if_not_exists = checked),
+                            Some(CreateKind::Model(ModelKind::Client)) => signals.client.update(|draft| draft.if_not_exists = checked),
+                            Some(CreateKind::Model(ModelKind::Vhost)) => signals.vhost.update(|draft| draft.if_not_exists = checked),
+                            Some(CreateKind::Model(ModelKind::Endpoint)) => signals.endpoint.update(|draft| draft.if_not_exists = checked),
+                            Some(CreateKind::Model(ModelKind::Lookup)) => signals.hash_map.update(|draft| draft.if_not_exists = checked),
+                            Some(CreateKind::Model(ModelKind::Udf)) => signals.udf.update(|draft| draft.if_not_exists = checked),
+                            Some(CreateKind::Model(ModelKind::Ingestor)) => signals.ingestor.update(|draft| draft.if_not_exists = checked),
+                            Some(CreateKind::Model(ModelKind::Emitter)) => signals.emitter.update(|draft| draft.if_not_exists = checked),
+                            Some(CreateKind::Model(ModelKind::Junction)) => signals.junction.update(|draft| draft.if_not_exists = checked),
+                            Some(CreateKind::Model(ModelKind::Deduplicator)) => signals.deduplicator.update(|draft| draft.if_not_exists = checked),
+                            Some(CreateKind::Model(ModelKind::Reorderer)) => signals.reorderer.update(|draft| draft.if_not_exists = checked),
+                            Some(CreateKind::Model(ModelKind::WindowProcessor)) => signals.window.update(|draft| draft.if_not_exists = checked),
+                            Some(CreateKind::Model(ModelKind::Correlator)) => signals.correlator.update(|draft| draft.if_not_exists = checked),
+                            Some(CreateKind::Model(ModelKind::Reingestor)) => signals.reingestor.update(|draft| draft.if_not_exists = checked),
+                            Some(CreateKind::Model(ModelKind::Generator)) => signals.generator.update(|draft| draft.if_not_exists = checked),
+                            Some(CreateKind::Model(ModelKind::Inferencer)) => signals.inferencer.update(|draft| draft.if_not_exists = checked),
+                            Some(CreateKind::Model(ModelKind::WasmProcessor)) => signals.wasm.update(|draft| draft.if_not_exists = checked),
                             Some(CreateKind::Subscription) | None => {}
                         }
                         signals.edit();

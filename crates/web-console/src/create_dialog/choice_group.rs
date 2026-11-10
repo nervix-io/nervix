@@ -133,7 +133,7 @@ pub(super) fn selected_choice(
     control: ChoiceControl,
     value: &ChoiceValue,
 ) -> bool {
-    if control.form() == super::CreateKind::Emitter {
+    if control.form() == super::CreateKind::Model(ModelKind::Emitter) {
         return signals.emitter_selected(control, value);
     }
     match (control, value) {
@@ -370,7 +370,7 @@ pub(super) fn selected_choice(
 /// Applies `value` to the draft `control` edits. A value of another kind than the control asks
 /// for changes nothing.
 pub(super) fn select_choice(signals: CreateSignals, control: ChoiceControl, value: ChoiceValue) {
-    if control.form() == super::CreateKind::Emitter {
+    if control.form() == super::CreateKind::Model(ModelKind::Emitter) {
         signals.select_emitter_choice(control, value);
         return;
     }
