@@ -129,9 +129,7 @@ use crate::common::{
         ATTACHED_LINE, ClientProbe, OPENED_LINE, ProbeExercise, ProbeRuntime, ProbeTarget,
         SUBSCRIBED_LINE, corpus_report,
     },
-    client_suites::{
-        ClientSuite, SuiteAction, SuiteHost, SuiteTarget, fixture_certificate_authority,
-    },
+    client_suites::{ClientSuite, SuiteAction, SuiteHost, SuiteTarget},
     client_wire_tls_cost::TransportCostServers,
     cluster::{
         AcknowledgedHttpPublisher, BrokerMessage, BrokerObserver, BrokerRecordTime, Cluster,
@@ -140,9 +138,9 @@ use crate::common::{
         TEST_AUTH_PASSWORD, TEST_AUTH_USERNAME, TestClusterConfig, TestSession, TypedBrokerHeader,
         WebsocketExchangeAction, assert_kafka_consumer_group_next_offset_through,
         bind_rabbitmq_queue, client_connect_options, client_domain, command_connect_options,
-        delete_rabbitmq_queue, ensure_rabbitmq_exchange, ensure_rabbitmq_queue, ensure_sqs_queue,
-        observe_kafka_through, observe_sqs, observe_sqs_fifo_without_content_deduplication,
-        publish_kafka_record_through, publish_sqs,
+        delete_rabbitmq_queue, dev_tls_ca_path, ensure_rabbitmq_exchange, ensure_rabbitmq_queue,
+        ensure_sqs_queue, observe_kafka_through, observe_sqs,
+        observe_sqs_fifo_without_content_deduplication, publish_kafka_record_through, publish_sqs,
     },
     cluster_teardown::CLUSTER_TEARDOWN_BUDGET,
     command_probe::{CommandPause, CommandProbe, CommandProbes, ProbeReply},
@@ -211,6 +209,7 @@ use crate::common::{
 };
 
 mod backup;
+mod branch_repartition;
 mod cli_outcomes;
 mod cli_repl;
 mod clickhouse_connections;
@@ -490,6 +489,7 @@ struct ScenarioWorld {
     endpoint_websocket: Option<endpoint_intake::EndpointWebsocket>,
     endpoint_requests: endpoint_intake::requests::EndpointRequests,
     websocket_peer: Option<websocket_lifecycle::WebsocketPeer>,
+    websocket_handoff_peer: Option<websocket_lifecycle::HandoffPeer>,
     transaction_clients: BTreeMap<String, Client>,
     /// The paced simulation drivers a scenario ran, and the files their runs share.
     paced_simulation: paced_simulation::PacedSimulation,
@@ -5220,7 +5220,7 @@ async fn when_client_suite_runs_its_cluster_tests(world: &mut ScenarioWorld, hos
         username: TEST_AUTH_USERNAME.to_string(),
         password: TEST_AUTH_PASSWORD.to_string(),
         domain: world.domain.clone(),
-        ca_certificate: fixture_certificate_authority(),
+        ca_certificate: dev_tls_ca_path().expect("the suite's fixture authority is prepared"),
         backups: backups.path().to_path_buf(),
     };
     append_cucumber_log_line(&format!(
@@ -5254,6 +5254,20 @@ async fn then_client_suite_passes_every_registered_cluster_test(
                 SuiteAction::ClearSubscriptionOpeningRefusals => {
                     for node_id in world.cluster().node_ids() {
                         world.fault_injection.clear_subscription_opening_refusal_on(
+                            &crate::common::cluster::node_name(&node_id),
+                        );
+                    }
+                }
+                SuiteAction::RefuseNextClockAttachment => {
+                    for node_id in world.cluster().node_ids() {
+                        world.fault_injection.refuse_next_clock_attachment_on(
+                            crate::common::cluster::node_name(&node_id),
+                        );
+                    }
+                }
+                SuiteAction::ClearClockAttachmentRefusals => {
+                    for node_id in world.cluster().node_ids() {
+                        world.fault_injection.clear_clock_attachment_refusal_on(
                             &crate::common::cluster::node_name(&node_id),
                         );
                     }
@@ -37797,6 +37811,17 @@ async fn run_scenarios(parallelism: TestParallelism) -> SuiteOutcome {
                 world.syslog_listener_fault = None;
                 world.syslog_silent_client = None;
                 world.producers = client_producers::ScenarioProducers::default();
+                let websocket_handoff_cleanup =
+                    if let Some(peer) = world.websocket_handoff_peer.take() {
+                        Some(peer.stop().await)
+                    } else {
+                        None
+                    };
+                if let Some(Err(error)) = &websocket_handoff_cleanup {
+                    append_cucumber_log_line(&format!(
+                        "scenario teardown failed: responsive WebSocket handoff peer: {error}"
+                    ));
+                }
                 stop_receivers(world).await;
                 close_browser(world).await;
                 world.active_session = None;
@@ -37888,6 +37913,11 @@ async fn run_scenarios(parallelism: TestParallelism) -> SuiteOutcome {
                     &format!("body={body} {cluster_cleanup}"),
                 );
                 world.scenario_admission = None;
+                if let Some(cleanup) = websocket_handoff_cleanup {
+                    cleanup.assured(
+                        "the responsive WebSocket handoff peer is checked after all other cleanup",
+                    );
+                }
                 if let Some(cleanup) = rabbitmq_cleanup {
                     cleanup.assured(
                         "the scenario-owned RabbitMQ broker is removed after all other cleanup",

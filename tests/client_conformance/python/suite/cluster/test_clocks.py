@@ -10,6 +10,7 @@ from collections.abc import Iterator
 import pytest
 
 import nervix_client as nx
+from actions import Harness
 from support import Cluster, Relay, completed, deadline
 
 ORIGIN_2030 = 1_893_456_000_000_000_000
@@ -146,6 +147,45 @@ def test_a_detached_clock_is_no_longer_followed(cluster: Cluster, paced: str) ->
         assert detached.disposition == nx.Disposition.COMPLETED
         assert session.domain_clock(paced) is None
         # ANCHOR_END: detach
+
+
+def test_a_refused_clock_restoration_reports_its_cause_and_recovers(
+    cluster: Cluster, relay: Relay, clock_attachment_refusal: Harness
+) -> None:
+    with cluster.connect(relay.uri) as following:
+        cancel = deadline()
+        completed(following, "ATTACH DOMAIN CLOCK;")
+        initial = following.domain_clock(cluster.domain)
+        assert initial is not None
+        assert initial.state == nx.ClockState.UNPACED
+        relay.cut()
+        clock_attachment_refusal.refuse_next_clock_attachment()
+        relay.restore()
+        # ANCHOR: clock_restoration_failed
+        interrupted = following.next_clock_event(cancel=cancel)
+        assert interrupted.kind == nx.ClockEventKind.INTERRUPTED
+        assert interrupted.domain == cluster.domain
+        refused = following.next_clock_event(cancel=cancel)
+        assert refused.kind == nx.ClockEventKind.RESTORATION_FAILED
+        assert refused.domain == cluster.domain
+        failure = refused.restoration_failure
+        assert failure is not None
+        assert failure.cause == nx.RestorationCause.IN_TRANSACTION
+        assert failure.message
+        assert failure.retry_after_nanos > 0
+        # A refused attempt keeps the attachment desired; the library retries it.
+        while True:
+            restored = following.next_clock_event(cancel=cancel)
+            assert restored.domain == cluster.domain
+            if restored.kind == nx.ClockEventKind.STATE:
+                break
+            assert restored.kind == nx.ClockEventKind.RESTORATION_FAILED
+            retry = restored.restoration_failure
+            assert retry is not None and retry.cause == nx.RestorationCause.IN_TRANSACTION
+        assert restored.state == nx.ClockState.UNPACED
+        assert restored.generation == initial.generation
+        # ANCHOR_END: clock_restoration_failed
+        completed(following, "DETACH DOMAIN CLOCK;")
 
 
 def test_a_clock_wait_ends_at_its_deadline_and_by_cancellation(session: nx.Session) -> None:

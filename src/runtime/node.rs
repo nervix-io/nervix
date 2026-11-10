@@ -183,6 +183,10 @@ pub(in crate::runtime) struct RuntimeInner {
         DashMap<RuntimeStatePlacement, PreparedRuntimeStateSnapshot, RandomState>,
     pub(in crate::runtime) relay_branch_presences:
         DashMap<RuntimeStatePlacement, RelayBranchPresence, RandomState>,
+    /// The holdings every unit of a branch-keyed entity this node owns publishes while its
+    /// branch's partition count changes. Each unit's owner registers its publication when it starts
+    /// and withdraws it when it ends; claimants and observers read it. No record path reaches it.
+    pub(in crate::runtime) partition_holdings: super::partition_holdings::PartitionHoldingsRegistry,
     pub(in crate::runtime) replicated_deduplicator_states:
         DashMap<RuntimeStatePlacement, Arc<ReplicatedDeduplicatorState>, RandomState>,
     pub(in crate::runtime) replicated_kafka_offset_states:

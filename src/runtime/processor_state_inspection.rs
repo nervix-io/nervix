@@ -419,7 +419,18 @@ pub(super) struct SelectedStateBranches {
 
 pub(super) struct SelectedStateBranch {
     pub(super) key: Option<BranchKey>,
-    pub(super) task: Arc<ProcessorBranchTask>,
+    /// The key's live slot in the unit's registry. Releasing a key replaces its registry entry
+    /// rather than changing the slot, so a slot selected live stays live.
+    slot: Arc<ProcessorBranchSlot>,
+}
+
+impl SelectedStateBranch {
+    /// The branch task the selection reads.
+    pub(super) fn task(&self) -> &ProcessorBranchTask {
+        self.slot.live().assured(
+            "a selection keeps only live slots, and a registry slot never changes in place",
+        )
+    }
 }
 
 impl SelectedStateBranches {
@@ -429,19 +440,26 @@ impl SelectedStateBranches {
     ///
     /// A read of one concrete branch compares fingerprints over the unit's live branches: the
     /// fingerprint is the only identity the request carries, and the visit is the one a read of all
-    /// branches makes, bounded by the processor's live branch count.
+    /// branches makes, bounded by the processor's branch count.
+    ///
+    /// A key this unit released during a partition transition is not read here: its state moves
+    /// to the unit that claims it, which reports the key once it installs that state, and this unit
+    /// keeps its copy only until that unit asks it to forget the key.
     #[cfg_attr(
         nervix_lint,
         nervix::dispatch(reason = "the branch registry's iterator walks its own index map of \
-                                   live instances, once per inspection and bounded by the \
-                                   unit's live branches, and acquires nothing")
+                                   live and released instances, once per inspection and bounded \
+                                   by the unit's branches, and acquires nothing")
     )]
     pub(super) fn select(
-        instances: &BranchInstanceRegistry<Option<BranchKey>, ProcessorBranchTask>,
+        instances: &ProcessorBranches,
         selection: StateInspectionBranchSelection,
     ) -> Self {
         let mut branches = Vec::new();
-        for (key, task) in instances.instances() {
+        for (key, slot) in instances.instances() {
+            if slot.live().is_none() {
+                continue;
+            }
             let selected = match selection {
                 StateInspectionBranchSelection::All => true,
                 StateInspectionBranchSelection::Unbranched => key.is_none(),
@@ -453,7 +471,7 @@ impl SelectedStateBranches {
             if selected {
                 branches.push(SelectedStateBranch {
                     key: key.clone(),
-                    task: task.clone(),
+                    slot: slot.clone(),
                 });
             }
         }
@@ -466,7 +484,7 @@ impl SelectedStateBranches {
     /// refused rather than reporting an incomplete state as complete.
     pub(super) fn answer(
         response: oneshot::Sender<error_stack::Result<Self, BranchStateReadError>>,
-        instances: &BranchInstanceRegistry<Option<BranchKey>, ProcessorBranchTask>,
+        instances: &ProcessorBranches,
         selection: StateInspectionBranchSelection,
         restore_pending: bool,
     ) {
@@ -654,7 +672,7 @@ impl Runtime {
                 max_rows: rows_left,
                 max_bytes: bytes_left,
             };
-            let copy = read_branch_state(&branch.task, read)
+            let copy = read_branch_state(branch.task(), read)
                 .await
                 .change_context(ProcessorStatePageError::Branch)?;
             let fingerprint = branch.key.as_ref().map(BranchKey::fingerprint);

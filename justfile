@@ -1861,6 +1861,14 @@ test-mysql *args:
 test-websockets *args:
     cargo test --package nervix-connector-websockets --lib -- {{ args }}
 
+# Exercise outbound connection behavior through the public graph without preparing unrelated
+# host-language and paced-simulation drivers.
+test-websockets-runtime *args: build-deps build-plexus-format build-test-cli build-deadlock-report
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    cargo test --package nervix-scenarios --test scenarios -- --input 'tests/features/runtime/websocket_connection*.feature' {{ quote(args) }}
+
 # Diagnose one WebSockets owner check with its replayable schedule. `test-shuttle` remains the
 # inventory, completion and nondeterminism gate for qualification.
 test-websockets-shuttle check:

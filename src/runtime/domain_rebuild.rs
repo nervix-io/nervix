@@ -20,7 +20,10 @@
 use error_stack::ResultExt as _;
 use nervix_connector_websockets::CompiledSignalingProtocol;
 
-use super::{emitter_supervision::EmitterInput, *};
+use super::{
+    emitter_supervision::EmitterInput, partition_claims::UnitPartitionTransition,
+    relay_repartition::relay_transitions, *,
+};
 use crate::emitter_execution_plan::EmitterInputUnits;
 
 /// One locally placed emitter unit a rebuild starts, with the relay consumers it reads.
@@ -258,6 +261,7 @@ impl Runtime {
         self.publish_routed_endpoints(domain, &execution);
         execution.routing.activate(self, domain);
         execution.routing.publish();
+        self.observe_partition_epochs(domain, &execution.revision);
         self.inner
             .domain_routings
             .insert(domain.clone(), execution.routing.shared());
@@ -562,8 +566,13 @@ impl Runtime {
                             partitioning: relay.branch_presences.partitioning(),
                             state,
                             retention: planned.retention,
-                            receiver: relay
-                                .runtime_consumer_fan_in_for_unit(AckMode::Detached, unit),
+                            receiver: if node.is_holding_unit(unit) {
+                                relay.dormant_unit_fan_in(AckMode::Detached, unit)
+                            } else {
+                                relay.runtime_consumer_fan_in_for_unit(AckMode::Detached, unit)
+                            },
+                            transition: UnitPartitionTransition::of(node, unit),
+                            parked_capacity: relay.owner_capacity(),
                         });
                     }
                 }
@@ -690,10 +699,13 @@ impl Runtime {
                         })
                         .change_context(build()));
                     };
-                    inputs.push((
-                        input_relay.clone(),
-                        relay.runtime_consumer_fan_in_for_unit(node_spec.spec.mode, unit),
-                    ));
+                    // A unit holding only keys the previous count placed in it takes no input.
+                    let input = if node.is_holding_unit(unit) {
+                        relay.dormant_unit_fan_in(node_spec.spec.mode, unit)
+                    } else {
+                        relay.runtime_consumer_fan_in_for_unit(node_spec.spec.mode, unit)
+                    };
+                    inputs.push((input_relay.clone(), input));
                 }
                 processor_input_specs.push((NodeUnitRef::new(node.identity.clone(), unit), inputs));
             }
@@ -763,6 +775,11 @@ impl Runtime {
                 let services = relay_services.get(&relay).cloned().verified(
                     "these maps were built from the same scheduled relay nodes this loop walks",
                 );
+                // A unit holding only keys the previous count placed in it has no owner: no
+                // producer places a key in it.
+                if !services.declares_unit(unit) {
+                    continue;
+                }
                 let retention = activation_plan
                     .relays
                     .get(&relay)
@@ -947,6 +964,7 @@ impl Runtime {
                         relay_state_epoch: self.relay_state_epoch(domain),
                         materialized_stream_specs,
                         materialized_stream_owner_nodes,
+                        relay_transitions: relay_transitions(&revision),
                         codecs,
                         signaling_protocols,
                         processor_plans,
@@ -1120,6 +1138,7 @@ impl Runtime {
             Some(state) => state.start_version,
             None => 0,
         };
+        let transitions = relay_transitions(&revision);
         Ok(DomainExecution {
             mqtt_ingestor_clients: HashMap::default(),
             revision,
@@ -1141,6 +1160,7 @@ impl Runtime {
                     relay_state_epoch: self.relay_state_epoch(domain),
                     materialized_stream_specs,
                     materialized_stream_owner_nodes,
+                    relay_transitions: transitions,
                     codecs,
                     signaling_protocols,
                     processor_plans: HashMap::default(),

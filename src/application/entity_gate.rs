@@ -733,10 +733,11 @@ impl SessionServiceImpl {
             .filter(|entity| entity.kind == ModelKind::Ingestor)
             .collect::<Vec<_>>();
         let intake_targets = EntityGateTargets::Entities(ingestors.clone());
-        if purpose != EntityGatePurpose::ModelAlteration
-            || relays.is_empty()
-            || ingestors.is_empty()
-        {
+        let alters_entities = matches!(
+            purpose,
+            EntityGatePurpose::ModelAlteration | EntityGatePurpose::PartitionChange
+        );
+        if !alters_entities || relays.is_empty() || ingestors.is_empty() {
             return self
                 .engage_cluster_entity_gate_scope(scope, deadline, impact)
                 .await;
@@ -896,6 +897,7 @@ impl SessionServiceImpl {
         }
         let reason = match purpose {
             EntityGatePurpose::ModelAlteration => "leader-orchestrated entity alteration",
+            EntityGatePurpose::PartitionChange => "leader-orchestrated partition count change",
             EntityGatePurpose::OwnershipHandoff => "leader-orchestrated ownership handoff",
             EntityGatePurpose::WasmStateReset(_) => "leader-orchestrated WASM guest-state reset",
         };

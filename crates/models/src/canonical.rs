@@ -907,6 +907,9 @@ impl Statement {
             Self::DescribeLookup(describe) => {
                 Ok(format!("DESCRIBE HASH MAP {};", describe.name.as_str()))
             }
+            Self::DescribeBranch(describe) => {
+                Ok(format!("DESCRIBE BRANCH {};", describe.branch.as_str()))
+            }
             Self::DescribeEndpoint(describe) => {
                 Ok(format!("DESCRIBE ENDPOINT {};", describe.name.as_str()))
             }

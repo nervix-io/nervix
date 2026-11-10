@@ -844,7 +844,7 @@ execution or numeric normalization. Restore refuses a different model/schema fin
 branch key or incarnation before installing state. `WITHOUT STATE` on either side omits restored
 tensors, so new branches use `INITIAL`; both `RESUME` and a normal `START` preserve installed tensors.
 
-The `<unit>` path portion is `single`, `partition/<number>`, or `instance/<number>`. The record descriptor carries the same typed unit; sections of separate units of one entity have distinct paths and restore destinations.
+The `<unit>` path portion is `single`, `partition/<number>`, or `instance/<number>`. The record descriptor carries the same typed unit; sections of separate units of one entity have distinct paths and restore destinations. A restore places the deduplicator, window, WASM, inferencer, branch lifecycle and materialized relay state of an entity its branch's partitions divide in the partition the restored count places each key in, whichever partition archived it, so an archive cut while a branch changed its partition count restores every key into its partition and the restored branch begins its first partition epoch. Every other section restores into its archived unit.
 
 Materialized group coordinates are zero-based decimal numbers padded to ten digits. A descriptor
 with zero rows has zero groups. A record comes before the sections it owns: a resource version

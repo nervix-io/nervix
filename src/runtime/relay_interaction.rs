@@ -114,6 +114,11 @@ pub(super) trait RelayInteractionCommand: Send {
     }
 }
 
+/// How many commands an owner task's command channel queues. A sender waits for room, and every
+/// command either awaits its answer or reports work its sender already finished, so one queued
+/// command keeps the task busy without letting senders run ahead of it.
+pub(super) const RELAY_INTERACTION_COMMAND_CAPACITY: usize = 1;
+
 #[derive(Debug)]
 pub(super) enum NoRelayInteractionCommand {}
 

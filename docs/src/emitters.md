@@ -237,6 +237,11 @@ Draining or losing a node moves only the instances it ran. The other instances k
 buffers and open destinations. A replaced instance starts from its partitions' undelivered records
 as any restarted emitter does.
 
+[Changing the partition count](relay.md#changing-the-partition-count) of the branch the inputs share
+gates and drains the emitter together with the branch's relays, so every record placed by the
+previous count is published first. Then a `PER PARTITION` emitter runs one instance per partition of
+the new count, and instance `i` of `INSTANCES n` serves the new partitions `p` with `p mod n = i`.
+
 Whether an entity can run several instances is declared by the entity, and the
 [capability reference](connector-capabilities.md) lists it. `CLIENT CONSUMER`, `ICEBERG TABLE` and
 `MQTT TOPIC` emitters run one instance and refuse the clause with their reason, such as

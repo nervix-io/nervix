@@ -46,6 +46,7 @@ mod kafka_start;
 mod node_drain;
 mod observation;
 mod operation;
+mod partition_transition;
 mod peer_resolver;
 mod peer_target;
 mod pool;
@@ -75,6 +76,12 @@ pub use observation::{
     StreamResetReason, TransferDirection, TransportCounters, TransportSnapshot,
 };
 pub use operation::{RemoteOperationFailure, RemoteOperationSubject};
+pub use partition_transition::{
+    PartitionCatalogKey, PartitionCatalogShard, PartitionClaimOutcome, PartitionClaimStep,
+    PartitionClaimSubject, PartitionTransitionAnswer, PartitionTransitionRequest,
+    PartitionTransitionResponse, ReleasedBranch, ReleasedCheckpoint, ReleasedKey, ReleasedRow,
+    UnitPartitionHoldings,
+};
 pub use peer_resolver::PeerResolver;
 pub use peer_target::PeerTarget;
 pub use pool::PoolClass;
@@ -775,6 +782,11 @@ pub struct DomainDrainStatusResponse {
 #[derive(Debug, Clone, Copy, Archive, Serialize, Deserialize, PartialEq, Eq)]
 pub enum EntityGatePurpose {
     ModelAlteration,
+    /// A change of a branch's partition count. It gates and holds its entities as a model
+    /// alteration does, while every processor unit hands its branches to its next supervisor in
+    /// place, so the shares and messages a unit keeps parked travel with them, as in an ownership
+    /// handoff.
+    PartitionChange,
     OwnershipHandoff,
     WasmStateReset(WasmStateResetScope),
 }
@@ -783,9 +795,16 @@ impl EntityGatePurpose {
     pub const fn operation_name(self) -> &'static str {
         match self {
             Self::ModelAlteration => "model alteration",
+            Self::PartitionChange => "partition count change",
             Self::OwnershipHandoff => "ownership handoff",
             Self::WasmStateReset(_) => "WASM state reset",
         }
+    }
+
+    /// Whether the units this gate holds keep what they park, a share a window retains or a
+    /// message waiting on materialized state, so a drain does not wait for it.
+    pub const fn keeps_parked_work(self) -> bool {
+        matches!(self, Self::OwnershipHandoff | Self::PartitionChange)
     }
 }
 

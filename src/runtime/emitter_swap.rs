@@ -14,7 +14,7 @@
 
 use error_stack::ResultExt as _;
 
-use super::{emitter_supervision::EmitterInput, *};
+use super::{emitter_supervision::EmitterInput, relay_repartition::InstalledRegistrations, *};
 use crate::emitter_execution_plan::EmitterInputUnits;
 
 impl Runtime {
@@ -26,6 +26,7 @@ impl Runtime {
         domain: &DomainName,
         entity: &NodeRef,
         revision: &Arc<ExecutionRevision>,
+        registrations: &InstalledRegistrations<'_>,
         replace_all: bool,
         local_node_id: Option<&ClusterNodeName>,
     ) -> error_stack::Result<(), RuntimeError> {
@@ -110,6 +111,11 @@ impl Runtime {
                         let Some(services) = execution.relay_services.get(&input.relay) else {
                             continue;
                         };
+                        // A relay this swap repartitioned replaced the services the old consumers
+                        // counted in.
+                        if !registrations.counts(&input.relay, entity, None) {
+                            continue;
+                        }
                         match old_emitter.input_units(unit, input) {
                             EmitterInputUnits::WholeRelay => {
                                 services.remove_local_runtime_consumer(old_emitter.mode);

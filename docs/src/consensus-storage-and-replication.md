@@ -518,8 +518,8 @@ status, keeping the start version, start mode, clock, schedule and incremental s
 
 The current emitter Models carry explicit key expressions, source-partition routing and
 expression-only SQS FIFO groups. The dedicated database owns exactly four current keyspaces:
-`raft_payload_identity_licensing_capability_tls_inference_reset_instances_logs`, `raft_payload_identity_licensing_capability_tls_inference_reset_instances_meta`, `raft_payload_identity_licensing_capability_tls_inference_reset_instances_state`, and
-`raft_payload_identity_licensing_capability_tls_inference_reset_instances_snapshots`. Opening it validates the complete keyspace namespace before reading
+`raft_payload_identity_licensing_capability_tls_inference_reset_epoch_instances_logs`, `raft_payload_identity_licensing_capability_tls_inference_reset_epoch_instances_meta`, `raft_payload_identity_licensing_capability_tls_inference_reset_epoch_instances_state`, and
+`raft_payload_identity_licensing_capability_tls_inference_reset_epoch_instances_snapshots`. Opening it validates the complete keyspace namespace before reading
 any records. The committed cluster-parameter record stores ordered typed TLS cipher suites and
 key-exchange groups; recovery validates their complete pair before returning that record.
 This namespace identifies the current Model shape, including the separate JSON
@@ -531,9 +531,11 @@ count an SQS QUEUE ingestor's `ACK PARALLEL MAX` declares, the session and quali
 MQTT TOPIC ingestor writes beside its delivery mode, the quality of service an MQTT TOPIC emitter
 writes beside its publishing mode, its retained-publication flag and MQTT 5 property mappings, a
 `REDIS PUBSUB` ingestor's `CHANNEL` or `PATTERN` subscription, an emitter's `INSTANCES`
-declaration, whether a polled HTTP request's header holds a literal or names a client secret, the endpoint kind
-whose signaling data exists only on its WebSockets variant, and the branch partition count every
-resolved branch declaration of the committed schedule carries. It identifies
+declaration,
+whether a polled HTTP request's header holds a literal or names a client secret, the endpoint kind
+whose signaling data exists only on its WebSockets variant, the branch partition count every
+resolved branch declaration of the committed schedule carries, and the partition epoch the
+committed schedule records for every branch whose count changed. It identifies
 the current statement shape as well, which the statements a transaction keeps are stored in:
 `ALTER BRANCH` among those statements, an `ALTER INGESTOR` or `ALTER EMITTER` operation that
 changes one part of its entity's body, an envelope clause or the properties, or one part of a
@@ -541,7 +543,7 @@ construction where it stands, including the typed `payload` expression scope and
 `RESET WASM PROCESSOR ... STATE` that names its processor and scope and takes its domain from
 the transaction, as the step effect and commit plan step keep it too. The database also stores
 incarnation-bound node capability claims under record-family tag `C`. Its state metadata
-requires the current `ClusterState` encoding, 24, including the cluster identity reference,
+requires the current `ClusterState` encoding, 25, including the cluster identity reference,
 committed cluster parameters, the durable restore installation gate and the unit-keyed committed
 schedule in which a relay of a partitioned branch is scheduled as one unit per partition.
 The current shape also requires inferencer state bindings and their initial expressions,

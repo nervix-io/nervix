@@ -241,6 +241,8 @@ checks = [
   "runtime::materialized_state::publication_tests::shuttle_checks::shuttle_materialized_required_wait_registers_before_reading_publications",
   "runtime::materialized_state::tests::shuttle_checks::shuttle_materialized_capture_names_exactly_its_branch_generation",
   "runtime::materialized_state::tests::shuttle_checks::shuttle_replica_synchronization_preserves_the_restored_materialized_revision",
+  "runtime::partition_claims::shuttle_tests::shuttle_a_claimed_key_runs_its_input_once_in_arrival_order_after_its_state_installs",
+  "runtime::partition_holdings::shuttle_tests::shuttle_a_successor_unit_owner_keeps_its_holdings_when_its_predecessor_withdraws",
   "runtime::processor_state_inspection::shuttle_tests::shuttle_a_branch_inspection_answers_whole_batches_in_arrival_order_or_is_refused_after_the_end",
   "runtime::relay_boundary::branch_presence_shuttle_tests::shuttle_a_replaced_owner_never_publishes_over_its_successor",
   "runtime::relay_boundary::branch_presence_shuttle_tests::shuttle_an_observer_sees_every_owner_step_whole_and_never_an_older_one",
