@@ -263,7 +263,8 @@ A server notice prints as `[events] <kind> <level>: <message>`, labelled by the 
 sent with it: `membership` when the connected node sees a node join, leave or restart as a new
 incarnation, `leadership` for that node's Raft transitions and the membership operations it
 proposes, `cluster parameters` when it installs a committed parameter revision, `runtime` for a
-runtime failure of any node and `control plane` for a control-plane failure of the connected node.
+runtime failure of any node, `control plane` for a control-plane failure of the connected node,
+and `licensing` for a licensing lifecycle observation or policy warning.
 The level is `INFO`, `WARN` or `ERROR`.
 
 The carried kind selects this label; the message is display text. A configuration mutation or a

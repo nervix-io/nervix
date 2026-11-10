@@ -28,6 +28,7 @@ fn notices_round_trip_at_every_level_and_kind() {
             NoticeKind::ClusterParameters,
             NoticeKind::Runtime,
             NoticeKind::ControlPlane,
+            NoticeKind::Licensing,
         ] {
             let notice = ServerNotice {
                 level,

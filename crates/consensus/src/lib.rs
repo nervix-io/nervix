@@ -102,7 +102,10 @@ mod cluster_parameters;
 mod command_execution;
 mod licensing;
 pub use licensing::{
-    ClusterLicensingState, LicensingMode, LicensingRecord, LicensingSnapshot, StoredTrustDocument,
+    ActivationBinding, ActivationState, ClusterLicensingState, LICENSING_SERVICE,
+    LicenseDecisionError, LicenseVerification, LicensingEnvironment, LicensingMode,
+    LicensingRecord, LicensingSnapshot, ReceivedLicenseDecision, StoredDecision,
+    StoredTrustDocument, VerifiedLicenseDecision,
 };
 mod node_capabilities;
 #[cfg(any(test, feature = "testing"))]
@@ -425,6 +428,20 @@ pub enum ConsensusCommand {
     InstallClusterIdentity {
         identity: Box<ClusterIdentityRecord>,
     },
+    ActivateLicense {
+        binding: Box<ActivationBinding>,
+        decision: Box<ReceivedLicenseDecision>,
+    },
+    ApplyLicenseDecision {
+        decision: Box<ReceivedLicenseDecision>,
+        expected_revision: u64,
+    },
+    InstallTrustDocuments {
+        documents: Vec<StoredTrustDocument>,
+    },
+    AdvanceLicensingTime {
+        observed_at: nervix_models::Timestamp,
+    },
     SeedClusterParameters {
         values: ClusterParameterValues,
     },
@@ -661,6 +678,11 @@ pub enum ConsensusResponse {
     Error,
 )]
 pub enum ConsensusConflict {
+    #[error("licensing decision was refused")]
+    LicenseDecision {
+        #[source]
+        reason: LicenseDecisionError,
+    },
     #[error("licensing refused this state change")]
     LicensingQuota {
         #[source]
@@ -756,6 +778,10 @@ impl std::fmt::Display for ConsensusCommand {
                 write!(f, "announce-node-capabilities:{}", record.identity)
             }
             Self::InstallClusterIdentity { .. } => f.write_str("install-cluster-identity"),
+            Self::ActivateLicense { .. } => f.write_str("activate-license"),
+            Self::ApplyLicenseDecision { .. } => f.write_str("apply-license-decision"),
+            Self::InstallTrustDocuments { .. } => f.write_str("install-trust-documents"),
+            Self::AdvanceLicensingTime { .. } => f.write_str("advance-licensing-time"),
             Self::SeedClusterParameters { .. } => f.write_str("seed-cluster-parameters"),
             Self::AlterClusterParameters { reference, .. } => {
                 write!(f, "alter-cluster-parameters:{reference}")
@@ -987,6 +1013,7 @@ pub struct ConsensusSettings {
     pub interconnect_advertise_addr: NodeEndpoint,
     pub interconnect: Transport,
     pub executor: nervix_execution::Executor,
+    pub licensing: LicensingEnvironment,
     pub raft_timings: RaftTimings,
     pub raft_retention: RaftRetentionSettings,
 }
@@ -998,6 +1025,7 @@ pub struct ConsensusSettings {
 /// whose interconnect endpoint is still unavailable is never a membership admission candidate.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GossipNode {
+    pub licensing: Option<nervix_models::LicensingConnectivityPublication>,
     pub parameters: Option<nervix_models::ClusterParameterPublication>,
     pub node_id: ClusterNodeName,
     pub incarnation: ClusterNodeIncarnation,
@@ -1523,6 +1551,8 @@ impl ReportedAdmissionRefusals {
 struct StateMachineData {
     cluster_identity: Option<Arc<ClusterIdentityRecord>>,
     licensing: Option<Arc<LicensingRecord>>,
+    licensing_environment: Arc<LicensingEnvironment>,
+    licensing_verification: Option<LicenseVerification>,
     parameters: Option<ClusterParameterRecord>,
     password_work: Option<nervix_models::PasswordCost>,
     last_applied_log_id: Option<LogIdOf>,
@@ -2538,9 +2568,10 @@ impl Consensus {
         let db = Self::open_database(path.as_ref().to_path_buf(), &settings.executor)
             .await
             .map_err(|error| Report::new(error).change_context(ConsensusError::Storage))?;
-        let store = FjallStore::from_database(db, settings.executor.clone())
-            .await
-            .map_err(|error| Report::new(error).change_context(ConsensusError::Storage))?;
+        let store =
+            FjallStore::from_database(db, settings.executor.clone(), settings.licensing.clone())
+                .await
+                .map_err(|error| Report::new(error).change_context(ConsensusError::Storage))?;
         Self::from_store(store, settings, ()).await
     }
 
@@ -2557,6 +2588,7 @@ impl Consensus {
             db,
             settings.executor.clone(),
             test_probe.storage_fault(),
+            settings.licensing.clone(),
         )
         .await
         .map_err(|error| Report::new(error).change_context(ConsensusError::Storage))?;
@@ -5856,6 +5888,12 @@ fn apply_consensus_command_at(
         ConsensusCommand::InstallClusterIdentity { identity } => {
             return cluster_identity::install(state, identity);
         }
+        ConsensusCommand::ActivateLicense { .. }
+        | ConsensusCommand::ApplyLicenseDecision { .. }
+        | ConsensusCommand::InstallTrustDocuments { .. }
+        | ConsensusCommand::AdvanceLicensingTime { .. } => {
+            return licensing::apply(state, command);
+        }
         ConsensusCommand::SeedClusterParameters { values } => {
             return cluster_parameters::seed(state, *values);
         }
@@ -7816,6 +7854,7 @@ mod tests {
     /// every test node shares.
     fn undiscovered_node(name: &str, incarnation: u64) -> GossipNode {
         GossipNode {
+            licensing: None,
             parameters: None,
             node_id: ClusterNodeName::parse(name).assured("the test node name is valid"),
             incarnation: ClusterNodeIncarnation::new(incarnation),
@@ -8518,9 +8557,12 @@ mod tests {
     async fn membership_completion_leaves_an_already_uniform_core_log_unchanged()
     -> Result<(), Box<dyn std::error::Error>> {
         let node = ClusterNodeName::parse("node-1")?;
-        let store =
-            FjallStore::from_database(temp_database(), nervix_execution::Executor::default())
-                .await?;
+        let store = FjallStore::from_database(
+            temp_database(),
+            nervix_execution::Executor::default(),
+            crate::LicensingEnvironment::default(),
+        )
+        .await?;
         let config = nervix_primitives::sync::StdArc::new(super::Config::default().validate()?);
         let raft = super::NervixRaft::new(
             node.clone(),
@@ -8608,9 +8650,12 @@ mod tests {
     async fn membership_completion_uses_the_core_after_a_joint_observation()
     -> Result<(), Box<dyn std::error::Error>> {
         let node = ClusterNodeName::parse("node-1")?;
-        let mut store =
-            FjallStore::from_database(temp_database(), nervix_execution::Executor::default())
-                .await?;
+        let mut store = FjallStore::from_database(
+            temp_database(),
+            nervix_execution::Executor::default(),
+            crate::LicensingEnvironment::default(),
+        )
+        .await?;
         let voters = BTreeSet::from([node.clone()]);
         // Both recorded quorum sets use the fixture voter, so the real Core can apply the
         // joint-to-uniform transition without a remote peer.
@@ -11578,10 +11623,13 @@ mod tests {
 
     #[nervix_primitives::test]
     async fn log_reader_returns_the_requested_range_in_index_order() {
-        let mut store =
-            FjallStore::from_database(temp_database(), nervix_execution::Executor::default())
-                .await
-                .expect("store should open");
+        let mut store = FjallStore::from_database(
+            temp_database(),
+            nervix_execution::Executor::default(),
+            crate::LicensingEnvironment::default(),
+        )
+        .await
+        .expect("store should open");
         let vote = VoteOf::new(4, ClusterNodeName::parse("node-1").expect("valid name"));
         RaftLogStorage::<TypeConfig>::save_vote(&mut store, &vote)
             .await
@@ -11628,10 +11676,13 @@ mod tests {
 
     #[nervix_primitives::test]
     async fn log_reader_observes_writes_the_storage_owner_makes() {
-        let mut store =
-            FjallStore::from_database(temp_database(), nervix_execution::Executor::default())
-                .await
-                .expect("store should open");
+        let mut store = FjallStore::from_database(
+            temp_database(),
+            nervix_execution::Executor::default(),
+            crate::LicensingEnvironment::default(),
+        )
+        .await
+        .expect("store should open");
         let mut reader = RaftLogStorage::<TypeConfig>::get_log_reader(&mut store).await;
         assert!(
             reader
@@ -11688,8 +11739,12 @@ mod durability_tests {
     -> Result<(), Box<dyn std::error::Error>> {
         let directory = tempfile::tempdir()?;
         let database = Database::builder(directory.path()).open()?;
-        let mut store =
-            FjallStore::from_database(database, nervix_execution::Executor::default()).await?;
+        let mut store = FjallStore::from_database(
+            database,
+            nervix_execution::Executor::default(),
+            crate::LicensingEnvironment::default(),
+        )
+        .await?;
         let mut notifications = store.inner.resource_tx.subscribe();
         let domain = DomainName::try_from("durability")?;
         let identifier = ResourceName::parse("artifact")?;

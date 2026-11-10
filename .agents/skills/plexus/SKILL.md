@@ -123,9 +123,11 @@ For backend validation claims, follow that chapter's P-256 signing and backend-s
 selecting an approved algorithm does not establish a validated deployment.
 For cluster continuity and public identity inspection, read
 [Node Settings → Permanent Cluster Identity](../../../docs/src/node-settings.md#permanent-cluster-identity).
-For `DESCRIBE LICENSE`, effective policy and quota usage, read
+For activation, refresh, `DESCRIBE LICENSE`, effective policy, credential handling and quota usage, read
 [Node Settings → Cluster Licensing](../../../docs/src/node-settings.md#cluster-licensing) and
 [Licensing Metrics](../../../docs/src/metrics-and-observability.md#licensing-metrics).
+Keep licensing commands cluster-scoped and obtain credentials and trust provisioning externally;
+Plexus supplies no service-address or trust-anchor override.
 For source UUID inspection and restore behavior, read
 [Backup And Restore](../../../docs/src/backup-and-restore.md#what-a-restore-recreates).
 For authentication refusals and retry behavior, follow

@@ -1,7 +1,7 @@
-//! Shared licensing activation and quota values.
+//! Shared licensing activation, quota and refusal vocabulary.
 //!
 //! Layer: vocabulary.
-//! - **Owns.** Activation kinds, the bounded and unlimited quota value and its arithmetic.
+//! - **Owns.** Activation kinds, quota arithmetic, decision rejections and service refusal codes.
 //! - **Depends on.** Serialization and primitive value types.
 //! - **Must not know.** Policies, cryptography, Models, consensus or network I/O.
 
@@ -135,6 +135,7 @@ impl QuotaConstraint {
                     Ok(self)
                 } else {
                     Err(Report::new(LicensingRefusal {
+                        state: AdmissionState::OverLimit,
                         condition: self.name,
                         limit: value,
                         current_usage,
@@ -162,9 +163,10 @@ impl QuotaConstraint {
 )]
 #[error(
     "licensing quota '{condition}' refused usage: limit {limit}, current {current_usage}, \
-     requested {requested} (over_limit)"
+     requested {requested} ({state})"
 )]
 pub struct LicensingRefusal {
+    pub state: AdmissionState,
     pub condition: QuotaName,
     pub limit: u64,
     pub current_usage: u64,
@@ -173,7 +175,7 @@ pub struct LicensingRefusal {
 
 impl LicensingRefusal {
     pub const fn state_label(self) -> &'static str {
-        "over_limit"
+        self.state.as_str()
     }
 }
 
@@ -221,6 +223,7 @@ mod tests {
         assert_eq!(
             *refused.current_context(),
             LicensingRefusal {
+                state: AdmissionState::OverLimit,
                 condition: QuotaName::ClusterDomains,
                 limit: 0,
                 current_usage: 0,
@@ -236,5 +239,35 @@ mod tests {
                 .admit(u64::MAX, 1, false)
                 .is_err()
         );
+    }
+}
+
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    Archive,
+    RkyvSerialize,
+    RkyvDeserialize,
+)]
+pub enum AdmissionState {
+    OverLimit,
+    Lapsed,
+}
+impl AdmissionState {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::OverLimit => "over_limit",
+            Self::Lapsed => "lapsed",
+        }
+    }
+}
+impl std::fmt::Display for AdmissionState {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
     }
 }

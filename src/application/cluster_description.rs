@@ -304,6 +304,7 @@ mod tests {
 
     fn node(node: &str, incarnation: u64, record: Option<NodePrerequisites>) -> GossipNode {
         GossipNode {
+            licensing: None,
             parameters: None,
             node_id: name(node),
             incarnation: ClusterNodeIncarnation::new(incarnation),

@@ -177,6 +177,7 @@ mod interconnect_relay;
 mod join_supervision;
 mod leader_redirect;
 mod license_description;
+pub mod licensing;
 mod licensing_admission;
 mod membership_reconciliation;
 mod model_mutation;
@@ -288,6 +289,9 @@ pub struct Application {
     #[builder(default)]
     #[doc(hidden)]
     pub fault_injection: ConfiguredFaultInjection,
+    #[builder(default)]
+    #[doc(hidden)]
+    pub licensing_test_support: licensing::ConfiguredLicensingTestSupport,
     /// Bound by the shutdown timeout the settings hold, so the two can never disagree.
     #[builder(
         default = ShutdownCoordinator::new(settings.shutdown.shutdown_timeout()),
@@ -651,6 +655,14 @@ impl Application {
         startup.interconnect = Some(interconnect.clone());
 
         let consensus_settings = ConsensusSettings {
+            licensing: self.licensing_test_support.environment(
+                startup
+                    .runtime
+                    .executor()
+                    .limits()
+                    .management_event_bytes
+                    .as_u64(),
+            ),
             cluster_name: cluster_id.clone(),
             node_id: node_id.clone(),
             interconnect_advertise_addr: interconnect_advertise_addr.clone(),
@@ -968,6 +980,8 @@ impl Application {
                 https_certificates: certificates,
                 runtime: runtime.clone(),
                 licensing,
+                licensing_requests: licensing::LicensingRequests::default(),
+                licensing_test_support: self.licensing_test_support.clone(),
                 runtime_admission: runtime_admission.clone(),
                 initialization: Arc::new(node_initialization::NodeInitialization::default()),
                 admission_shutdown: shutdown_coordinator.admission_token(),
@@ -2786,6 +2800,7 @@ impl Application {
         }));
 
                 service.inner.initialization.complete();
+                background_tasks.push(nervix_primitives::task::spawn(licensing::run(service.clone(), shutdown.clone())));
                 Ok::<(), Report<AppError>>(())
             }) => result,
         };

@@ -95,12 +95,14 @@ const KEY_INSTALLING: &[u8] = b"installing";
 const KEY_VOTE: &[u8] = b"vote";
 const KEY_COMMITTED: &[u8] = b"committed";
 const KEY_LAST_PURGED: &[u8] = b"last_purged";
-const KEYSPACE_LOGS: &str = "raft_payload_identity_licensing_capability_tls_inference_reset_logs";
-const KEYSPACE_META: &str = "raft_payload_identity_licensing_capability_tls_inference_reset_meta";
+const KEYSPACE_LOGS: &str =
+    "raft_payload_identity_license_activation_capability_tls_inference_reset_logs";
+const KEYSPACE_META: &str =
+    "raft_payload_identity_license_activation_capability_tls_inference_reset_meta";
 const KEYSPACE_STATE_MACHINE: &str =
-    "raft_payload_identity_licensing_capability_tls_inference_reset_state";
+    "raft_payload_identity_license_activation_capability_tls_inference_reset_state";
 const KEYSPACE_SNAPSHOT: &str =
-    "raft_payload_identity_licensing_capability_tls_inference_reset_snapshots";
+    "raft_payload_identity_license_activation_capability_tls_inference_reset_snapshots";
 const KEY_CLUSTER_IDENTITY: &[u8] = b"K";
 const KEY_LICENSING: &[u8] = b"L";
 /// Working memory reserved for ordinary metadata and log storage relative to its operation unit.
@@ -234,7 +236,7 @@ const KEYSPACE_NAMES: [&str; 4] = [
 #[derive(Debug, Clone, Archive, Serialize, Deserialize)]
 #[repr(u8)]
 enum StateEncoding {
-    ClusterState = 23,
+    ClusterState = 24,
 }
 
 #[derive(Debug)]
@@ -364,7 +366,11 @@ fn load_cluster_licensing(
 }
 
 impl StateMachineData {
-    fn load(sm: &Keyspace, metadata: StateMetadata) -> io::Result<Self> {
+    fn load(
+        sm: &Keyspace,
+        metadata: StateMetadata,
+        licensing_environment: Arc<crate::LicensingEnvironment>,
+    ) -> io::Result<Self> {
         let StateMetadata {
             encoding: StateEncoding::ClusterState,
             cluster_identity: expected_identity,
@@ -376,9 +382,17 @@ impl StateMachineData {
             command_retry_fence,
         } = metadata;
         let (identity, licensing) = load_cluster_licensing(sm, expected_identity)?;
+        let licensing_verification = match (&identity, &licensing) {
+            (Some(identity), Some(record)) => {
+                record.verify(&identity.public(), &licensing_environment)
+            }
+            _ => None,
+        };
         let state = Self {
             cluster_identity: identity.map(Arc::new),
             licensing: licensing.map(Arc::new),
+            licensing_environment,
+            licensing_verification,
             last_applied_log_id,
             last_membership,
             runtime_revision,
@@ -716,6 +730,7 @@ impl AppliedRange {
 pub(super) struct StoreState {
     db: Database,
     pub(super) executor: Executor,
+    pub(super) licensing_environment: Arc<crate::LicensingEnvironment>,
     admission: WorkingSetAdmission,
     pub(super) faults: StorageFault,
     failed: AtomicBool,
@@ -1260,7 +1275,7 @@ impl StoreInner {
             inner.commit("snapshot_installed", batch)?;
             let metadata = StateMetadata::read(&inner.sm)?
                 .ok_or_else(|| io::Error::other(StorageFailure::InvalidState))?;
-            StateMachineData::load(&inner.sm, metadata)
+            StateMachineData::load(&inner.sm, metadata, inner.licensing_environment.clone())
         })
         .await
     }
@@ -1445,8 +1460,12 @@ pub(super) struct FjallStore {
 }
 
 impl FjallStore {
-    pub(super) async fn from_database(db: Database, executor: Executor) -> io::Result<Self> {
-        Self::from_database_with_fault(db, executor, StorageFault::default()).await
+    pub(super) async fn from_database(
+        db: Database,
+        executor: Executor,
+        licensing: crate::LicensingEnvironment,
+    ) -> io::Result<Self> {
+        Self::from_database_with_fault(db, executor, StorageFault::default(), licensing).await
     }
 
     #[cfg(feature = "testing")]
@@ -1454,15 +1473,18 @@ impl FjallStore {
         db: Database,
         executor: Executor,
         fault: StorageFault,
+        licensing: crate::LicensingEnvironment,
     ) -> io::Result<Self> {
-        Self::from_database_with_fault(db, executor, fault).await
+        Self::from_database_with_fault(db, executor, fault, licensing).await
     }
 
     async fn from_database_with_fault(
         db: Database,
         executor: Executor,
         fault: StorageFault,
+        licensing: crate::LicensingEnvironment,
     ) -> io::Result<Self> {
+        let licensing_environment = Arc::new(licensing);
         let admission = WorkingSetAdmission::new(&executor)?;
         let WorkingSet { reservation, turn } =
             admission.admit(&executor, StorageCharge::Commands).await?;
@@ -1537,6 +1559,7 @@ impl FjallStore {
                                 shared: Arc::new(StoreState {
                                     db,
                                     executor: store_executor,
+                                    licensing_environment,
                                     admission,
                                     faults: fault,
                                     failed: AtomicBool::new(false),
@@ -1590,7 +1613,7 @@ impl FjallStore {
                 .run(StorageCharge::Bulk, |inner, _| {
                     let metadata = StateMetadata::read(&inner.sm)?
                         .ok_or_else(|| io::Error::other(StorageFailure::InvalidState))?;
-                    StateMachineData::load(&inner.sm, metadata)
+                    StateMachineData::load(&inner.sm, metadata, inner.licensing_environment.clone())
                 })
                 .await;
         };
@@ -2207,3 +2230,42 @@ mod properties;
 mod raft_properties;
 #[cfg(test)]
 mod tests;
+
+#[cfg(feature = "testing")]
+impl crate::ConsensusTestProbe {
+    /// Edit a current licensing record only while the scenario owns a stopped database.
+    /// The harness calls this from its bounded off-runner inspection owner.
+    pub fn rewrite_stopped_licensing_record(
+        path: &std::path::Path,
+        edit: impl FnOnce(&mut crate::LicensingRecord),
+    ) -> io::Result<()> {
+        let database = Database::builder(path).open().map_err(io::Error::other)?;
+        if !database
+            .list_keyspace_names()
+            .iter()
+            .any(|name| name.as_ref() == KEYSPACE_STATE_MACHINE)
+        {
+            return Err(io::Error::other(
+                "current consensus state keyspace is absent",
+            ));
+        }
+        let state = database
+            .keyspace(KEYSPACE_STATE_MACHINE, KeyspaceCreateOptions::default)
+            .map_err(io::Error::other)?;
+        let mut record = read_key::<crate::LicensingRecord>(&state, KEY_LICENSING)?
+            .ok_or_else(|| io::Error::other("current licensing singleton is absent"))?;
+        edit(&mut record);
+        let encoded = DurableBatch::encode(
+            &record,
+            nervix_execution::OperationLimits::default()
+                .command_bytes
+                .as_u64(),
+        )?;
+        state
+            .insert(KEY_LICENSING, encoded)
+            .map_err(io::Error::other)?;
+        database
+            .persist(fjall::PersistMode::SyncAll)
+            .map_err(io::Error::other)
+    }
+}

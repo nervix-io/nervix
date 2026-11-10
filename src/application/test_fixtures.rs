@@ -298,6 +298,8 @@ fn test_session_service(
     SessionServiceImpl {
         inner: Arc::new(SessionServiceInner {
             licensing,
+            licensing_requests: super::licensing::LicensingRequests::default(),
+            licensing_test_support: super::licensing::ConfiguredLicensingTestSupport::default(),
             cluster: cluster.clone(),
             consensus: consensus.proposer(),
             consensus_administrator: consensus.administrator(),
@@ -663,6 +665,7 @@ pub(in crate::application) async fn build_test_service_inner(
     let interconnect = test_interconnect("test", &expected_leader).await;
     let executor = nervix_execution::Executor::default();
     let settings = ConsensusSettings {
+        licensing: nervix_consensus::LicensingEnvironment::default(),
         cluster_name: "test".to_string(),
         node_id: expected_leader.clone(),
         interconnect_advertise_addr: interconnect.local_addr().into(),

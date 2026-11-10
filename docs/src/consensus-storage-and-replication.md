@@ -518,8 +518,8 @@ status, keeping the start version, start mode, clock, schedule and incremental s
 
 The current emitter Models carry explicit key expressions, source-partition routing and
 expression-only SQS FIFO groups. The dedicated database owns exactly four current keyspaces:
-`raft_payload_identity_licensing_capability_tls_inference_reset_logs`, `raft_payload_identity_licensing_capability_tls_inference_reset_meta`, `raft_payload_identity_licensing_capability_tls_inference_reset_state`, and
-`raft_payload_identity_licensing_capability_tls_inference_reset_snapshots`. Opening it validates the complete keyspace namespace before reading
+`raft_payload_identity_license_activation_capability_tls_inference_reset_logs`, `raft_payload_identity_license_activation_capability_tls_inference_reset_meta`, `raft_payload_identity_license_activation_capability_tls_inference_reset_state`, and
+`raft_payload_identity_license_activation_capability_tls_inference_reset_snapshots`. Opening it validates the complete keyspace namespace before reading
 any records. The committed cluster-parameter record stores ordered typed TLS cipher suites and
 key-exchange groups; recovery validates their complete pair before returning that record.
 This namespace identifies the current Model shape, including the separate JSON
@@ -758,7 +758,7 @@ state, and restore retains the target cluster's identity. Rebuilding from an arc
 recovering a licensed installation requires an administrative transfer to the rebuilt cluster.
 [Backup And Restore](backup-and-restore.md#what-a-restore-recreates) owns that archive contract.
 
-## Free Licensing Record
+## Licensing Record
 
 The first identity installation also creates one `LicensingRecord` at state key `L`, in the same
 applied command and durable batch. Its licensing time is the installed identity's creation time,
@@ -770,6 +770,23 @@ initialization or present together afterwards. Load refuses a missing partner or
 it never creates replacement licensing state. The record has explicit load, keyed-record-count
 and incremental-write ownership, and snapshots include it. Snapshot installation follows the same
 record validation as ordinary open.
+
+An activated record retains its independent binding and original compact JWS, decision and conditions
+revisions, signed issue time, received time and request UUID. It also retains original signed trust
+documents. The immutable store environment fixes the service, build anchors and admitted document
+capacity before open. Apply verifies each proposal under those inputs; open and snapshot install
+rebuild a derived verification view. A semantic signature, chain or binding failure keeps the record
+and exposes an unverifiable view, while structural decode and identity failures refuse open.
+Revocation committed after a decision preserves its verified signature and marks its signing key
+revoked. Derived parsed decisions and verification flags are never persisted.
+
+`ActivateLicense` installs only from Free mode and sets the identity's ever-activated fact. Refresh
+proposals retain the independent binding and compare their expected revision with the committed
+revision. An exact verified replay is a no-op even with another expected revision; a lower decision
+or a higher decision from a stale expected revision conflicts. Rejection changes no committed state.
+Trust installation verifies and appends complete document identities, refusing conflicting bytes.
+Time advances retain the maximum committed observation. No apply or recovery path reads a clock or
+opens a connection. The leader's independent timer and request owner propose those facts.
 
 An observer captures public identity, licensing record, applied revision and `UsageSnapshot` from
 one committed state. Node usage is the number of committed voters and learners, and domain usage

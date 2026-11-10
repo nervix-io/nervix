@@ -10,7 +10,7 @@
     nervix::layer(decisions, reason = "owns pure licensing decisions")
 )]
 
-use meticulous::OptionExt as _;
+use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_consensus::LicensingSnapshot;
 use nervix_licensing_protocol::conditions::{Capability, FREE_POLICY, UsageConditions};
 use nervix_licensing_vocabulary::{LicensingRefusal, Quota, QuotaConstraint, QuotaName};
@@ -28,29 +28,115 @@ pub enum StopReason {}
 pub struct LicensingPolicy {
     pub snapshot: LicensingSnapshot,
     pub conditions: UsageConditions,
+    pub state: PolicyState,
 }
 
 /// Revision and usage must travel with identity/record: separate observations could mix cuts.
 pub fn evaluate_policy(snapshot: LicensingSnapshot) -> LicensingPolicy {
-    LicensingPolicy {
+    let mut policy = LicensingPolicy {
         snapshot,
         conditions: FREE_POLICY.usage(),
+        state: PolicyState::Free,
+    };
+    if let Some(initialized) = &policy.snapshot.initialized {
+        if let nervix_consensus::LicensingMode::Activated(_) = &initialized.record.mode {
+            match &initialized.verification {
+                Some(Ok(verified)) => {
+                    let decision = &verified.decision;
+                    let now = initialized.record.licensing_time.into_datetime();
+                    policy.conditions = if now >= decision.timing.term_ends_at
+                        || decision.status
+                            != nervix_licensing_protocol::documents::DecisionStatus::Active
+                    {
+                        FREE_POLICY.usage()
+                    } else {
+                        decision.conditions.usage.clone()
+                    };
+                    policy.state = if decision
+                        .timing
+                        .valid_until
+                        .is_some_and(|until| now >= until)
+                    {
+                        PolicyState::Lapsed
+                    } else if now >= decision.timing.overdue_at {
+                        PolicyState::LicensedOverdue
+                    } else if now >= decision.timing.refresh_after {
+                        PolicyState::LicensedDue
+                    } else {
+                        PolicyState::LicensedFresh
+                    };
+                }
+                Some(Err(_)) | None => policy.state = PolicyState::Degraded,
+            }
+        }
     }
+    policy
 }
 
-pub fn next_deadline(_policy: &LicensingPolicy) -> Option<Timestamp> {
-    None
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PolicyState {
+    Free,
+    LicensedFresh,
+    LicensedDue,
+    LicensedOverdue,
+    Lapsed,
+    Degraded,
+}
+
+pub fn next_deadline(policy: &LicensingPolicy) -> Option<Timestamp> {
+    let initialized = policy.snapshot.initialized.as_ref()?;
+    let time = initialized.record.licensing_time;
+    let binding_expiry = match &initialized.record.mode {
+        nervix_consensus::LicensingMode::Activated(activation) => {
+            activation.binding.ephemeral_expires_at
+        }
+        nervix_consensus::LicensingMode::Free => None,
+    };
+    let signed = match &initialized.verification {
+        Some(Ok(verified)) => {
+            let timing = &verified.decision.timing;
+            [
+                Some(timing.refresh_after),
+                Some(timing.overdue_at),
+                timing.valid_until,
+                Some(timing.term_ends_at),
+            ]
+            .map(|at| {
+                at.map(|at| {
+                    Timestamp::try_from(at)
+                        .assured("verification admitted the timestamp coordinate")
+                })
+            })
+        }
+        _ => [None; 4],
+    };
+    signed
+        .into_iter()
+        .flatten()
+        .chain(binding_expiry)
+        .filter(|at| *at > time)
+        .min()
 }
 
 impl LicensingPolicy {
     pub fn state_name(&self) -> &'static str {
-        match self
-            .snapshot
-            .initialized
-            .as_ref()
-            .map(|value| value.record.mode)
-        {
-            None | Some(nervix_consensus::LicensingMode::Free) => "free",
+        match self.state {
+            PolicyState::Free => "free",
+            PolicyState::LicensedFresh => "licensed_fresh",
+            PolicyState::LicensedDue => "licensed_due",
+            PolicyState::LicensedOverdue => "licensed_overdue",
+            PolicyState::Lapsed => "lapsed",
+            PolicyState::Degraded => "degraded",
+        }
+    }
+
+    pub fn display_state(&self) -> &'static str {
+        match self.state {
+            PolicyState::LicensedFresh => "licensed fresh",
+            PolicyState::LicensedDue => "licensed due",
+            PolicyState::LicensedOverdue => "licensed overdue",
+            PolicyState::Lapsed => "lapsed freeze",
+            _ => self.state_name(),
         }
     }
 
@@ -74,6 +160,15 @@ impl LicensingPolicy {
         requested: u64,
         replacement: bool,
     ) -> error_stack::Result<QuotaConstraint, LicensingRefusal> {
+        if self.state == PolicyState::Lapsed && !replacement && requested > 0 {
+            return Err(error_stack::Report::new(LicensingRefusal {
+                state: nervix_licensing_vocabulary::AdmissionState::Lapsed,
+                condition: name,
+                limit: current_usage,
+                current_usage,
+                requested,
+            }));
+        }
         QuotaConstraint {
             name,
             quota: self.quota(name),
@@ -88,7 +183,6 @@ impl LicensingPolicy {
 
 #[cfg(test)]
 mod tests {
-    use meticulous::ResultExt as _;
 
     use super::*;
 

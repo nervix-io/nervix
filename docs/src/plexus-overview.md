@@ -923,6 +923,9 @@ A relocation `<selection>` is a kind-qualified list, `<kind> <name>[, ...]`, or 
 For a wire schema, `<kind>` is the exact multi-word kind: `WIRE JSON SCHEMA`, `WIRE CBOR SCHEMA`,
 or `WIRE AVRO SCHEMA`. The same exact kind is required by `DROP`.
 
+`ACTIVATE LICENSE PERSISTENT WITH KEY '<credential>';` and
+`ACTIVATE LICENSE EPHEMERAL WITH KEY '<credential>';` activate a cluster on its leader without
+a selected domain. `REFRESH LICENSE;` requests a current signed decision.
 `DESCRIBE LICENSE` reports the cluster's effective licensing policy and committed quota usage.
 It takes no name and works on every node without a selected domain. The embedded free policy
 ships with unlimited node and domain quotas. See

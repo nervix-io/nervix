@@ -17,6 +17,19 @@ fn index(name: QuotaName) -> usize {
 }
 
 impl FaultInjection {
+    pub(crate) fn licensing_clock_changes(
+        &self,
+    ) -> Option<nervix_primitives::sync::watch::Receiver<std::time::Duration>> {
+        Some(self.inner.licensing_clock_offset.subscribe())
+    }
+
+    pub fn set_licensing_clock_offset(&self, offset: std::time::Duration) {
+        self.inner.licensing_clock_offset.send_replace(offset);
+    }
+    pub(crate) fn licensing_clock_offset(&self) -> std::time::Duration {
+        *self.inner.licensing_clock_offset.borrow()
+    }
+
     pub fn set_licensing_quota(&self, name: QuotaName, limit: u64) {
         self.inner
             .licensing_quotas

@@ -1114,6 +1114,7 @@ reports, so a client routes notices by kind and never by their text:
 | `ClusterParameters` | A committed cluster-parameter revision the serving node installed | `Info` |
 | `Runtime` | A failure the runtime of the serving node, or of another node, recovered from | `Error` |
 | `ControlPlane` | A control-plane failure the serving node recovered from | `Error` |
+| `Licensing` | A licensing lifecycle observation or a refresh/policy warning | `Info`, `Warning` |
 
 A membership notice reports only a change of the live set. Model changes, subscriptions opening or
 closing and domain starts change what members publish through gossip, not which members are live,

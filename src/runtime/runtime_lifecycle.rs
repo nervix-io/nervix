@@ -386,7 +386,6 @@ impl Runtime {
 
     /// The fault controls a coordinator consults with control-plane identities this runtime does
     /// not know, such as the durable execution that owns a domain's mutation.
-    #[cfg(feature = "testing")]
     pub(crate) fn fault_injection(&self) -> &ConfiguredFaultInjection {
         &self.inner.fault_injection
     }

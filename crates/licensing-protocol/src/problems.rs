@@ -1,7 +1,7 @@
 //! The closed protocol refusal catalog and RFC 9457 projection.
 //!
 //! Layer: engines and infrastructure.
-//! - **Owns.** Stable refusal codes and their status, retryability and problem-detail projection.
+//! - **Owns.** Typed service refusals and the shared catalog's RFC 9457 projection.
 //! - **Depends on.** Maintained serde/URL encodings and typed request identities.
 //! - **Must not know.** HTTP servers, storage, retry scheduling, Models or clocks.
 

@@ -397,6 +397,7 @@ mod tests {
 
     fn gossip_node(name: &str, incarnation: u64, terminating: bool) -> GossipNode {
         GossipNode {
+            licensing: None,
             parameters: None,
             node_id: ClusterNodeName::parse(name).assured("the test node name is valid"),
             incarnation: ClusterNodeIncarnation::new(incarnation),
