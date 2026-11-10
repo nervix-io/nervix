@@ -2545,11 +2545,13 @@ cut, the kind, the schema, the unit owner and the target incarnation, then asks 
 tasks for bounded copies, as [Data-Plane
 Concurrency](data-plane-concurrency.md#processor-state-inspection-requests) describes, and gathers
 the returned rows into Arrow columns on the bounded Bulk executor. Deduplicator and window reads
-capture published generations instead of asking branch tasks. Sealed window metadata and columns
+capture published generations instead of asking branch tasks. Inferencer pages retain the current
+native tensor generation through projection and build only selected tensor rows as Arrow lists.
+Sealed window metadata and columns
 are decoded under bounded admission, with cancellation and storage charges retained through
 encoding. A zero-row request returns only counts for the processor's `DESCRIBE` summary.
 
-A deduplicator or window inspection during repartitioning additionally requests the complete
+A deduplicator, window or inferencer inspection during repartitioning additionally requests the complete
 selected branch-fingerprint catalog and a set of copies to exclude. Count-only census requests
 use an empty exclusion set. The returned catalog precedes exclusion, while counts, rows and
 continuation positions describe only the selected authoritative copies. The coordinator compares
@@ -2562,9 +2564,12 @@ The stream frames an eight-byte little-endian descriptor length, a bounded typed
 one native Arrow snapshot section per returned section. The descriptor carries the read origin, the
 complete counts, the returned offset and last branch, the returned rows as runs of one section and
 one branch with the branch's typed key fields, and each section's complete field list, held row
-count and body identity: exact byte length and SHA-256 digest. A descriptor names at most three
-sections, fixed by processor kind: reorderer `pending`; correlator `left` and `right`; deduplicator
-`keys`; or window `rows`, `header` and `accumulators`. Window metadata runs count toward section
+count and body identity: exact byte length and SHA-256 digest. A descriptor names the sections of
+its committed processor layout: reorderer `pending`; correlator `left` and `right`; deduplicator
+`keys`; window `rows`, `header` and `accumulators`; or inferencer `header` and one typed tensor-index
+section per declared state entry. Tensor indices address the declared order directly and are
+checked before body access. The existing section, descriptor and reply-byte bounds govern every
+kind. Window and inferencer metadata runs count toward section
 bodies and bytes, while only retained-row runs advance the row offset or consume its limit. The receiver bounds all buffering, verifies every digest before decoding,
 checks each section's payload fields against its own committed schema, decodes each section with
 exactly the declared field list, and checks the run rows, the returned offset and the row counts

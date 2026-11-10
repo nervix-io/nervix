@@ -748,7 +748,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/plexus/src/__fuzz__/canonical_round_trip_tests__bolero_statement_roundtrip_canonical_plexus/corpus"
-domain_version = 67
+domain_version = 68
 features = []
 id = "plexus-statement"
 invariant = "Canonical Plexus of every generated current statement form, session-only forms included, reparses through the client and server grammars to the complete statement."
@@ -778,7 +778,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/plexus/src/__fuzz__/canonical_round_trip_tests__bolero_statement_text_is_canonical_or_rejected/corpus"
-domain_version = 66
+domain_version = 67
 features = []
 id = "plexus-statement-text"
 invariant = "Edited canonical text is either rejected with located diagnostics or read as statements whose canonical Plexus reparses to them."
@@ -793,7 +793,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/plexus-format/src/__fuzz__/format_round_trip_tests__bolero_formatted_documents_keep_their_statements/corpus"
-domain_version = 66
+domain_version = 67
 features = []
 id = "plexus-format-document"
 invariant = "Formatting a generated document with gaps, comments and either line ending keeps its statements and comments and is idempotent."
@@ -808,7 +808,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/plexus-format/src/__fuzz__/format_round_trip_tests__bolero_formatter_text_is_formatted_or_rejected/corpus"
-domain_version = 65
+domain_version = 66
 features = []
 id = "plexus-format-text"
 invariant = "Edited documents are either refused as unparseable or formatted without changing their statements, idempotently."
@@ -2593,7 +2593,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/consensus/src/storage/__fuzz__/storage__properties__bolero_consensus_state_records_recover_every_stored_value/corpus"
-domain_version = 63
+domain_version = 64
 features = []
 id = "consensus-state-records"
 invariant = "A generated replicated state holding records of every family, including unit-keyed schedules with their branch partition epochs, stored by the consensus state writer into a real keyspace, and a second revision stored as the changes from it each recover with complete equality of every record, index and metadata field."
@@ -2608,7 +2608,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/consensus/src/storage/__fuzz__/storage__properties__bolero_corrupt_consensus_state_records_fail_typed_or_recover_canonically/corpus"
-domain_version = 63
+domain_version = 64
 features = []
 id = "consensus-state-corruption"
 invariant = "Flipped, truncated, extended, rekeyed, copied, unknown and missing consensus state records free every decoding allocation and either fail recovery with the typed invalid-state failure or recover a state stored under its own canonical keys whose readers' invariants hold and which recovers again unchanged."
@@ -2623,7 +2623,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/consensus/src/storage/__fuzz__/storage__raft_properties__bolero_consensus_raft_records_round_trip_through_the_storage_codec/corpus"
-domain_version = 62
+domain_version = 63
 features = []
 id = "consensus-raft-records"
 invariant = "Votes, log positions, log entries of every consensus command, current state metadata, snapshot manifests and sections restore with complete equality through the storage codec, and every log and section key names exactly the position or section it was built for."
@@ -2638,7 +2638,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/consensus/src/storage/__fuzz__/storage__raft_properties__bolero_malformed_consensus_raft_records_fail_typed/corpus"
-domain_version = 48
+domain_version = 49
 features = []
 id = "consensus-raft-records-malformed"
 invariant = "Arbitrary bytes read as any Raft record, log key or section key free every decoding allocation and fail with the typed storage failure or name a value that stores back to the same record."
@@ -4680,7 +4680,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "src/__fuzz__/state_inspection_cursor__tests__bolero_state_inspection_cursor_round_trips/corpus"
-domain_version = 7
+domain_version = 8
 features = ["testing"]
 id = "state-inspection-cursor"
 invariant = "Canonical opaque continuations preserve every domain, inspected stateful node, schema, captured-generation fingerprint, selector and unit/branch/offset position through the production bounded encoding and decoding pair."
@@ -4710,10 +4710,10 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/interconnect/src/__fuzz__/state_inspection__tests__bolero_processor_inspection_page_messages_round_trip/corpus"
-domain_version = 3
+domain_version = 4
 features = []
 id = "interconnect-processor-state-inspection"
-invariant = "Every field of the bounded processor owner-page request and typed descriptor or refusal survives the production admitted rkyv codec bit for bit, including the inspected kind and name, selectors, partition exclusions and complete catalogs, positions, source identity, complete counts, row runs with typed branch keys, section fields and body identities."
+invariant = "Every field of the bounded processor owner-page request and typed descriptor or refusal survives the production admitted rkyv codec bit for bit, including inference kinds and tensor-index sections, the inspected name, selectors, partition exclusions and complete catalogs, positions, source identity, complete counts, row runs with typed branch keys, section fields and body identities."
 manifest = "Cargo.toml"
 max_input_bytes = 1024
 package = "nervix-interconnect"
@@ -4950,10 +4950,10 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/client-wire/src/state_inspection/__fuzz__/state_inspection__tests__published__bolero_published_processor_sections_round_trip/corpus"
-domain_version = 1
+domain_version = 2
 features = []
 id = "client-published-processor-sections"
-invariant = "Every typed deduplicator key and window header or accumulator section, including nullable lifetime/sequence/deadline facts, redacted keys, exact U64 counts and timestamp extremes, survives the production session codec with its complete schema and cells unchanged."
+invariant = "Every typed deduplicator key, window header or accumulator, and inference header or tensor section, including exact F32 bits, shapes, whole-value redaction, nullable lifetime/sequence/deadline facts, redacted keys, exact U64 counts and timestamp extremes, survives the production session codec with its complete schema and cells unchanged."
 manifest = "Cargo.toml"
 max_input_bytes = 512
 package = "nervix-client-wire"

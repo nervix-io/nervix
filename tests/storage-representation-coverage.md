@@ -9,6 +9,13 @@ licensing refusals, and statement/archive/canonical domains include `DESCRIBE LI
 `client-state-inspection` and the shared host inspection property preserve cluster-license scope
 without manufacturing a domain or graph-node identity.
 
+Statement and consensus record domains include `SHOW INFERENCER ... STATE` with the shared branch,
+page and format clauses. `interconnect-processor-state-inspection` preserves its owner request,
+partition catalog and indexed tensor sections. `client-published-processor-sections` preserves the
+complete header and tensor schemas, exact F32 bits, shapes and whole-value redaction through the
+session codec. These observations remain in memory; the current consensus namespace and encoding
+identify the statement layout before decoding.
+
 Names drawn from `nervix-arbitrary` include current Plexus keyword spellings where their name
 kind and domain admit them. The [property register](../docs/src/property-testing-and-fuzzing.md)
 records each generated domain's revision and input bounds.
@@ -61,7 +68,7 @@ datetimes or bytes. JSON, CBOR and AVRO retain their own wire type enums; CBOR c
 native representation types, and an AVRO array nests its item type, arrays included, to a
 bounded depth. The Model/archive, registry and consensus properties preserve those complete
 values, including inferencer state bindings and their initial expressions.
-The `NERVIX EMIT INST` registry signature and `raft_infrastructure_capabilities_identity_licensing_tls_inference_reset_epoch_engine_host_instances_` consensus namespace
+The `NERVIX EMIT INST` registry signature and `raft_inferencer_inspection_` consensus namespace
 identify the current Model layout before decoding.
 
 `ALTER INGESTOR` and `ALTER EMITTER` statement generators draw, for every entity, each change its
@@ -70,7 +77,7 @@ Kafka's and Pulsar's `SET START AT`, a declared quiesce mode and `SET CLIENT` wh
 or writes through a client. They mix them with the shared operations, the in-place construction
 changes of a route or an emitter, and an emitter's envelope clauses and properties. The
 Model/archive, consensus and canonical Plexus properties preserve the complete operations in order,
-and the `raft_infrastructure_capabilities_identity_licensing_tls_inference_reset_epoch_engine_host_instances_` consensus namespace identifies the statement layout the
+and the `raft_inferencer_inspection_` consensus namespace identifies the statement layout the
 transactions it keeps are stored in before decoding.
 
 `RESET WASM PROCESSOR ... STATE` statement generators draw a processor and an unbranched,

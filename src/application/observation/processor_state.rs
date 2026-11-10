@@ -55,6 +55,7 @@ use crate::{
     state_inspection_cursor::StateInspectionCursor,
 };
 
+mod inferencer;
 mod partition;
 
 /// One section of a processor's state before the owner appends its own columns: which section it
@@ -72,6 +73,7 @@ struct ProcessorLayout {
     node: ScheduledNode,
     sections: Vec<SectionLayout>,
     moving_partitions: Option<nervix_models::BranchPartitions>,
+    _metadata: Option<nervix_execution::Reservation>,
 }
 
 /// A section's complete fields, as the owner names and types the columns it appends.
@@ -151,7 +153,9 @@ fn section_fields(
                 ));
             }
         }
-        ProcessorStateSection::Header | ProcessorStateSection::Accumulators => {}
+        ProcessorStateSection::Header
+        | ProcessorStateSection::Accumulators
+        | ProcessorStateSection::Tensor(_) => {}
         ProcessorStateSection::Left | ProcessorStateSection::Right => {
             appended.push((
                 "received_at".to_string(),
@@ -238,6 +242,7 @@ fn processor_layout(
             Ok(ProcessorLayout {
                 node: reorderer.node.clone(),
                 moving_partitions: None,
+                _metadata: None,
                 sections: vec![SectionLayout {
                     section: ProcessorStateSection::Pending,
                     payload,
@@ -254,6 +259,7 @@ fn processor_layout(
             Ok(ProcessorLayout {
                 node: correlator.node.clone(),
                 moving_partitions: None,
+                _metadata: None,
                 sections: vec![
                     SectionLayout {
                         section: ProcessorStateSection::Left,
@@ -283,6 +289,7 @@ fn processor_layout(
             Ok(ProcessorLayout {
                 node: deduplicator.node.clone(),
                 moving_partitions: None,
+                _metadata: None,
                 sections: vec![SectionLayout {
                     section: ProcessorStateSection::Keys,
                     payload: Vec::new(),
@@ -363,6 +370,7 @@ fn window_layout(
     Ok(ProcessorLayout {
         node: window.node.clone(),
         moving_partitions: None,
+        _metadata: None,
         sections,
     })
 }
@@ -370,6 +378,9 @@ fn window_layout(
 /// The node reference a `SHOW <kind> <name> STATE` names.
 fn inspected_node(processor: &StateInspectedProcessor) -> NodeRef {
     match processor {
+        StateInspectedProcessor::Inferencer(name) => {
+            NodeRef::new(ModelKind::Inferencer, name.clone())
+        }
         StateInspectedProcessor::Reorderer(name) => {
             NodeRef::new(ModelKind::Reorderer, name.clone())
         }
@@ -606,6 +617,15 @@ impl SessionServiceImpl {
         processor: &NodeRef,
     ) -> Result<ProcessorLayout, StateInspectionRejection> {
         match processor.kind {
+            ModelKind::Inferencer => {
+                inferencer::prepare(
+                    self.inner.runtime.inspection_executor(),
+                    schedule,
+                    domain,
+                    processor,
+                )
+                .await
+            }
             ModelKind::Deduplicator | ModelKind::WindowProcessor => {
                 let executor = self.inner.runtime.inspection_executor();
                 let charge = executor
@@ -1415,11 +1435,7 @@ fn encode_page(
     let mut last_branch = None;
     let mut full = false;
     'runs: for run in &runs {
-        // Each processor kind fixes its sections; windows have the maximum of three.
-        let Some(index) = sections
-            .iter()
-            .position(|section| section.section == run.section)
-        else {
+        let Some(index) = run.section.index_in(&sections, |section| section.section) else {
             return Err(StateInspectionRejection::NotReady);
         };
         let key = &run.branch;
@@ -1494,7 +1510,7 @@ fn encode_page(
         }
         let returned = u64::try_from(frames.len()).assured("bounded row counts fit u64");
         encoded.push(StateInspectionSection {
-            name: section.section.as_ref().to_string(),
+            name: section.section.name(),
             schema,
             frames,
             omitted_rows: section

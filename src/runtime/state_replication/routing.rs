@@ -332,6 +332,33 @@ impl StateReplicationRouting {
             .collect()
     }
 
+    /// Inspect current inference handles from one immutable routing cut. The visitor admits
+    /// retained handles before cloning them and can stop at cancellation or admission refusal.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(
+            reason = "the observer owns admitted capture and cancellation over an immutable \
+                      routing cut"
+        )
+    )]
+    pub(in crate::runtime) fn visit_inferencers<E>(
+        &self,
+        mut visit: impl FnMut(Option<&Arc<ReplicatedInferencerState>>) -> error_stack::Result<(), E>,
+    ) -> error_stack::Result<(), E> {
+        let routing = self.current.load();
+        for route in routing.routes.values() {
+            let current = route.current_state();
+            let state = match current.as_deref() {
+                Some(ReplicatedState::Inferencer(state)) => Some(state),
+                _ => None,
+            };
+            // Invoke the observer for every route, including another kind or an ended one,
+            // so its cancellation checks bound a scan with no matching inference state too.
+            visit(state)?;
+        }
+        Ok(())
+    }
+
     pub(in crate::runtime) fn assigned_request(
         &self,
         placement: &RuntimeStatePlacement,

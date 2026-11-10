@@ -1430,6 +1430,13 @@ retained-row limit or continuation offset. See [Runtime Nodes](./processors.md#i
 for section meanings and
 [Materialized State Inspection Envelope](./client-session-protocol.md#materialized-state-inspection-envelope).
 
+Inferencer inspections use that same contract. Clients preserve `header` metadata and each
+`tensor_1` onwards section, including the exact port names, `VEC<U64>` shape and `VEC<F32>`
+values. Float bits and whole-cell redaction survive without numeric conversion. Headers do not
+advance the tensor-row continuation. Section names are distinct from arbitrary model port names;
+their order is the written `STATE` order. See
+[Inspect Carried Inference State](./processors.md#inspect-carried-inference-state).
+
 The native Python, Ruby and JVM bindings expose this envelope through
 `Outcome.state_inspection` (Python property and Ruby method) and `Outcome.stateInspection()`
 (JVM). Their inspection, unit and section views retain the shared host `Inspection`; each frame

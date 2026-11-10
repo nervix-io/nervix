@@ -37,11 +37,11 @@ use crate::{
     CreateReingestor, CreateReorderer, CreateSchema, CreateUdf, CreateWasmProcessor,
     CreateWindowProcessor, DeduplicatorName, DomainClockPeriod, DomainClockSkew, DomainClockState,
     DomainName, DomainTimeRate, EmitterName, EndpointName, FieldName, GeneratorName,
-    IngestQuiesceMode, IngestorName, JsonType, JunctionName, LookupName, ModelName, NodeRef,
-    PlacementName, ProcessorOutput, ProcessorOutputs, RebindResource, ReingestorName, RelayName,
-    ReordererName, RequestedResourceVersion, ResetWasmState, ResourceName, Restore, SchemaName,
-    SignalingProtocolName, SubscriptionName, Timestamp, TransactionInspectionRequest, UdfName,
-    Unit, UserName, VhostName, WasmProcessorName, WindowProcessorName, WireSchemaName,
+    InferencerName, IngestQuiesceMode, IngestorName, JsonType, JunctionName, LookupName, ModelName,
+    NodeRef, PlacementName, ProcessorOutput, ProcessorOutputs, RebindResource, ReingestorName,
+    RelayName, ReordererName, RequestedResourceVersion, ResetWasmState, ResourceName, Restore,
+    SchemaName, SignalingProtocolName, SubscriptionName, Timestamp, TransactionInspectionRequest,
+    UdfName, Unit, UserName, VhostName, WasmProcessorName, WindowProcessorName, WireSchemaName,
 };
 
 #[derive(
@@ -468,6 +468,7 @@ pub struct ShowProcessorState {
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
 pub enum StateInspectedProcessor {
+    Inferencer(InferencerName),
     Reorderer(ReordererName),
     Correlator(CorrelatorName),
     Deduplicator(DeduplicatorName),

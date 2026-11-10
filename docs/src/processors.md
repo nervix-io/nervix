@@ -637,6 +637,37 @@ execution uses the bounded extension workers; mapped input and public output con
 respect the configured relay operation limit. The state is retained once per active branch;
 use the branch's `MAX INSTANCES` to bound the number of live copies.
 
+### Inspect Carried Inference State
+
+```plexus
+SHOW INFERENCER running STATE
+  FOR BRANCH VALUES { tenant = 'alpha' } LIMIT 100 FORMAT JSON;
+```
+
+`SHOW INFERENCER <name> STATE` reads the immutable tensor generation published by each selected
+branch. It uses the [shared state inspection envelope](relay.md#inspect-materialized-state),
+owner routing, ordered selection and paging clauses, declared read bounds and typed refusals.
+An inferencer without `STATE` returns `not_materialized`. A stateful inferencer with no live
+branches returns zero counts and no sections.
+
+Each branch has a `header` row with its fingerprint, incarnation, publication revision, persisted
+revision, tensor bytes, confirmed and assigned replica counts, and persistence stage. Stages are
+`PUBLISHED`, `PERSISTED` and, when at least one replica is assigned and all confirm the captured revision,
+`REPLICA_CONFIRMED`. Progress describes that captured generation; it does not hold up a read.
+
+Sections `tensor_1` onwards follow the `STATE` declaration order. Each row carries `input` and
+`output` port names, its `shape` as `VEC<U64>` and its `values` as `VEC<F32>`. Float bits are
+preserved. If any input or branch-key field is sensitive, the entire `values` cell is redacted;
+port names, shape and lifecycle metadata remain visible. There is no implicit leakage exception.
+
+Complete row counts, `LIMIT` and continuation offsets count tensor rows. Header rows consume
+the reply's section and byte bounds separately. A continuation names the complete selected
+publication cut, owner incarnations, committed revision and selector. Changed tensors, branch
+membership, ownership or configuration make it stale. Start a new read after
+`stale_continuation`; do not combine rows from different cuts. During repartitioning, the
+installed claimant or its holder supplies each key exactly once. Reads leave inference,
+publication cadence, branch activity, checkpoints and acknowledgements unchanged.
+
 ## WASM processor
 
 WASM routes are also set-only and execute only when the guest returns actual output data:

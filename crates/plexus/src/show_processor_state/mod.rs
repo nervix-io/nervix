@@ -19,7 +19,7 @@ use crate::{
     lexer::{Identifier, Token},
     parser_support::{
         LexedInput, ParseError, ParseFromSourceError, correlator_ref, deduplicator_ref,
-        into_parse_error, kw, kw_phrase2, lex_input, reorderer_ref, suggest_from,
+        inferencer_ref, into_parse_error, kw, kw_phrase2, lex_input, reorderer_ref, suggest_from,
         window_processor_ref,
     },
     state_inspection_clauses::state_inspection_clauses,
@@ -28,6 +28,9 @@ use crate::{
 pub fn show_processor_state_parser<'src>()
 -> impl Parser<'src, &'src [Token], ShowProcessorState, extra::Err<ParseError<'src>>> + Clone {
     let processor = choice((
+        kw(Identifier::Inferencer)
+            .ignore_then(inferencer_ref())
+            .map(StateInspectedProcessor::Inferencer),
         kw(Identifier::Reorderer)
             .ignore_then(reorderer_ref())
             .map(StateInspectedProcessor::Reorderer),
@@ -95,6 +98,7 @@ mod tests {
     #[test]
     fn processor_kinds_name_their_state_with_every_clause() {
         for (head, kind) in [
+            ("SHOW INFERENCER held STATE", "inferencer"),
             ("SHOW REORDERER held STATE", "reorderer"),
             ("SHOW CORRELATOR held STATE", "correlator"),
             ("SHOW DEDUPLICATOR held STATE", "deduplicator"),
@@ -114,6 +118,9 @@ mod tests {
                     panic!("a processor state inspection: {statement:?}");
                 };
                 match (&show.processor, kind) {
+                    (StateInspectedProcessor::Inferencer(name), "inferencer") => {
+                        assert_eq!(name.as_str(), "held");
+                    }
                     (StateInspectedProcessor::Reorderer(name), "reorderer") => {
                         assert_eq!(name.as_str(), "held");
                     }
@@ -152,6 +159,10 @@ mod tests {
     #[test]
     fn malformed_processor_state_reads_are_refused() {
         for statement in [
+            "SHOW INFERENCER STATE;",
+            "SHOW INFERENCER held;",
+            "SHOW INFERENCER held STATE LIMIT 0;",
+            "SHOW INFERENCER held STATE FORMAT JSON LIMIT 1;",
             "SHOW REORDERER STATE;",
             "SHOW REORDERER held;",
             "SHOW REORDERER held MATERIALIZED STATE;",
@@ -177,6 +188,7 @@ mod tests {
         let input = "SHOW ";
         let suggestions = suggest_statement(input, input.len());
         for expected in [
+            "INFERENCER",
             "REORDERER",
             "CORRELATOR",
             "RELAY",
@@ -198,6 +210,7 @@ mod tests {
                 .contains(&"ref:correlator".to_string())
         );
         for (input, expected) in [
+            ("SHOW INFERENCER ", "ref:inferencer"),
             ("SHOW DEDUPLICATOR ", "ref:deduplicator"),
             ("SHOW WINDOW PROCESSOR ", "ref:window_processor"),
         ] {

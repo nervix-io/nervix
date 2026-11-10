@@ -2620,8 +2620,14 @@ reply bytes and sections, while complete row counts, `LIMIT` and continuation of
 to retained inputs. Metadata can therefore be present when no input is retained. The
 [processor inspection sections](./processors.md#inspect-retained-window-state) define their fields.
 
-The shared host runtime keeps this envelope in `Inspection`. Python, Ruby and JVM applications
-read its typed metadata and lossless JSON through their native binding, using the host guides'
+The shared host runtime keeps this envelope in `Inspection`, including for `SHOW INFERENCER ... STATE`: `header` frames contain branch lifecycle and
+checkpoint progress, and `tensor_1` onwards contain the declared ports, `VEC<U64>` shape and
+bit-exact `VEC<F32>` values. Any sensitive input or key makes the complete values cell redacted.
+Tensor rows consume the row limit; header metadata consumes bytes and sections only. Section
+names and schemas follow [inference inspection](processors.md#inspect-carried-inference-state).
+All clients preserve these sections through the existing generic inspection surface.
+
+Python, Ruby and JVM applications read its typed metadata and lossless JSON through their native binding, using the host guides'
 `Inspect Materialized State` sections. Metadata views retain the inspection independently; each
 frame view retains its exact verified bytes and schema. Host buffer lifetimes do not depend on
 the outcome or session, and no binding parses the display message to recover inspection data.

@@ -1803,6 +1803,12 @@ model rejection. A route construction error occurs after the model's successful 
 does not undo that invocation. A later flush dispatches its buffered outputs without running the
 model again.
 
+Inference inspection uses the shared typed state-inspection refusals. A stateless inferencer is
+`NOT_MATERIALIZED`; missing installed state or an unavailable owner is refused rather than replaced
+with zeros. Native tensor access retains `StatefulInferenceError::StateTensor { index }` beneath the
+page's typed column error. Invalid positions and changed publication cuts refuse continuation;
+row, byte, descriptor and executor admission bounds keep their existing typed outcomes.
+
 ### Client Inspection Admission
 
 Client inspection during incoming preflight may refuse full command-memory or filesystem queue

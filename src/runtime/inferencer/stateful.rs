@@ -49,6 +49,8 @@ use crate::{registry::InferencerStatePlan, runtime_schema::RuntimeRecordBatch};
 pub(in crate::runtime) enum StatefulInferenceError {
     #[error("failed to prepare INITIAL tensors")]
     Initial,
+    #[error("published state tensor {index} is unavailable or has an invalid type")]
+    StateTensor { index: usize },
     #[error("the stateful inference working set exceeds the configured relay operation limit")]
     WorkingSet,
     #[error(
@@ -106,6 +108,21 @@ impl std::fmt::Debug for NativeGeneration {
     }
 }
 impl NativeGeneration {
+    /// Borrow one immutable tensor for a bounded observation without materializing other entries.
+    pub(in crate::runtime) fn tensor(
+        &self,
+        index: usize,
+    ) -> error_stack::Result<(&[i64], &[f32]), StatefulInferenceError> {
+        let tensor = self
+            .tensors
+            .get(index)
+            .ok_or_else(|| Report::new(StatefulInferenceError::StateTensor { index }))?;
+        let (shape, values) = tensor
+            .try_extract_tensor::<f32>()
+            .change_context(StatefulInferenceError::StateTensor { index })?;
+        Ok((shape, values))
+    }
+
     pub(in crate::runtime) fn snapshot(
         &self,
         cancellation: &Cancellation,

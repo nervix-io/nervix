@@ -1,7 +1,7 @@
 //! Current inspection envelope round trips, exact cells and retained backing storage.
 
 #[path = "published_tests.rs"]
-mod published;
+pub(crate) mod published;
 
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::{

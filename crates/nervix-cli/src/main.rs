@@ -1909,10 +1909,16 @@ mod tests {
         assert!(is_json_inspection_command(
             "SHOW CORRELATOR settle STATE FORMAT JSON;"
         ));
+        assert!(is_json_inspection_command(
+            "SHOW INFERENCER running STATE LIMIT 1 FORMAT JSON;"
+        ));
         assert!(!is_json_inspection_command(
             "SHOW RELAY events MATERIALIZED STATE FORMAT TEXT;"
         ));
         assert!(!is_json_inspection_command("SHOW CORRELATOR settle STATE;"));
+        assert!(!is_json_inspection_command(
+            "SHOW INFERENCER running STATE;"
+        ));
         assert!(!is_json_inspection_command("DESCRIBE TRANSACTION;"));
         assert!(!is_json_inspection_command(
             "DESCRIBE TRANSACTION FORMAT JSON; SHOW TRANSACTIONS;"
