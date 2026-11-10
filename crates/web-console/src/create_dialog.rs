@@ -50,6 +50,12 @@ mod client_editor;
 mod codec_draft;
 mod codec_editor;
 mod creation_family;
+#[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
+mod creation_matrix_tests;
 mod emitter_choices;
 mod emitter_construction_editor;
 mod emitter_destination_draft;
@@ -77,6 +83,7 @@ mod ingestor_route_editor;
 mod ingestor_source_draft;
 mod inserted_reference;
 mod placement_draft;
+mod placement_editor;
 mod processor_assignment_editor;
 mod processor_binding_draft;
 mod processor_binding_editor;
@@ -153,7 +160,8 @@ use hash_map_editor::HashMapEditor;
 use ingestor_draft::{IngestorDraft, IngestorDraftError, TimestampDraft};
 use ingestor_editor::IngestorEditor;
 use ingestor_route_draft::{InheritDraft, MessageErrorDraft, RouteBranchDraft};
-use placement_draft::{PlacementDraft, PlacementDraftError};
+use placement_draft::{PlacementCoverage, PlacementDraft, PlacementDraftError};
+use placement_editor::PlacementEditor;
 use processor_draft::{ProcessorDraft, ProcessorDraftError, ProcessorFamily};
 use processor_editor::ProcessorEditor;
 use relay_draft::{RelayDraft, RelayDraftError};
@@ -173,6 +181,10 @@ use vhost_editor::VhostEditor;
 pub(crate) enum ChoiceControl {
     DomainPace,
     PlacementPolicy,
+    /// Adds a runtime node to the end of a corridor placement's `FROM` members.
+    PlacementFromMember,
+    /// Adds a runtime node to the end of a corridor placement's `TO` members.
+    PlacementToMember,
     BranchSchema,
     RelaySchema,
     RelayBranch,
@@ -262,7 +274,9 @@ impl ChoiceControl {
     fn form(self) -> CreateKind {
         match self {
             Self::DomainPace => CreateKind::Domain,
-            Self::PlacementPolicy => CreateKind::Model(ModelKind::Placement),
+            Self::PlacementPolicy | Self::PlacementFromMember | Self::PlacementToMember => {
+                CreateKind::Model(ModelKind::Placement)
+            }
             Self::BranchSchema => CreateKind::Model(ModelKind::Branch),
             Self::RelaySchema | Self::RelayBranch => CreateKind::Model(ModelKind::Relay),
             Self::SubscriptionRelay | Self::SubscriptionField => CreateKind::Subscription,
@@ -381,6 +395,8 @@ impl ChoiceControlSignals {
 struct ChoiceControls {
     domain_pace: ChoiceControlSignals,
     placement_policy: ChoiceControlSignals,
+    placement_from_member: ChoiceControlSignals,
+    placement_to_member: ChoiceControlSignals,
     branch_schema: ChoiceControlSignals,
     relay_schema: ChoiceControlSignals,
     relay_branch: ChoiceControlSignals,
@@ -456,6 +472,8 @@ impl ChoiceControls {
         Self {
             domain_pace: ChoiceControlSignals::new(),
             placement_policy: ChoiceControlSignals::new(),
+            placement_from_member: ChoiceControlSignals::new(),
+            placement_to_member: ChoiceControlSignals::new(),
             branch_schema: ChoiceControlSignals::new(),
             relay_schema: ChoiceControlSignals::new(),
             relay_branch: ChoiceControlSignals::new(),
@@ -531,6 +549,8 @@ impl ChoiceControls {
         match control {
             ChoiceControl::DomainPace => self.domain_pace,
             ChoiceControl::PlacementPolicy => self.placement_policy,
+            ChoiceControl::PlacementFromMember => self.placement_from_member,
+            ChoiceControl::PlacementToMember => self.placement_to_member,
             ChoiceControl::BranchSchema => self.branch_schema,
             ChoiceControl::RelaySchema => self.relay_schema,
             ChoiceControl::RelayBranch => self.relay_branch,
@@ -1178,6 +1198,23 @@ impl CreateSignals {
         self.advance_revision();
     }
 
+    /// Opens a new corridor placement draft whose first `FROM` member is `member`, in `domain`, as
+    /// a runtime node's graph action does. The action names where the corridor starts, so it
+    /// replaces a retained placement draft rather than editing it.
+    pub(crate) fn open_placement_from(
+        self,
+        domain: DomainName,
+        member: ModelName,
+        return_focus: &'static str,
+    ) {
+        let kind = CreateKind::Model(ModelKind::Placement);
+        self.placement.set(PlacementDraft::starting_from(member));
+        self.captured_scopes.update(|scopes| {
+            scopes.insert(kind, Some(domain.clone()));
+        });
+        self.open(kind, Some(domain), return_focus);
+    }
+
     /// Opens a new subscription draft that reads `relay` in `domain`, as the graph's relay action
     /// does. The action names what the operator wants to read, so it replaces a retained
     /// subscription draft rather than editing it, under a newly generated name.
@@ -1301,7 +1338,10 @@ impl CreateSignals {
                 CreateKind::Model(ModelKind::WasmProcessor) => {
                     self.wasm.update(ProcessorDraft::invalidate_references)
                 }
-                CreateKind::Model(ModelKind::Udf) | CreateKind::Model(ModelKind::Placement) => {}
+                CreateKind::Model(ModelKind::Placement) => {
+                    self.placement.update(PlacementDraft::invalidate_references)
+                }
+                CreateKind::Model(ModelKind::Udf) => {}
                 CreateKind::Domain
                 | CreateKind::User
                 | CreateKind::Resource
@@ -1455,8 +1495,14 @@ impl CreateSignals {
             ChoiceControl::PlacementPolicy => Ok(ChoiceQuery {
                 target: ChoiceTarget::PlacementPolicy,
                 dependencies: Vec::new(),
-                page_size: 3,
+                // Every policy fits one page, so the form offers all of them without paging.
+                page_size: 100,
             }),
+            ChoiceControl::PlacementFromMember | ChoiceControl::PlacementToMember => self
+                .domain_question(
+                    ChoiceTarget::PlacementMember,
+                    "Select a domain before choosing placement members",
+                ),
             ChoiceControl::BranchSchema | ChoiceControl::RelaySchema => self.domain_question(
                 ChoiceTarget::Schema,
                 "Select a domain before choosing a schema",
@@ -2143,7 +2189,16 @@ fn page_cursor(load: RwSignal<ChoiceLoad>) -> Option<String> {
 fn open_form_controls(signals: CreateSignals, kind: CreateKind) -> Vec<ChoiceControl> {
     match kind {
         CreateKind::Domain => vec![ChoiceControl::DomainPace],
-        CreateKind::Model(ModelKind::Placement) => vec![ChoiceControl::PlacementPolicy],
+        CreateKind::Model(ModelKind::Placement) => {
+            match signals.placement.get_untracked().coverage {
+                PlacementCoverage::DomainWide => vec![ChoiceControl::PlacementPolicy],
+                PlacementCoverage::Corridor => vec![
+                    ChoiceControl::PlacementPolicy,
+                    ChoiceControl::PlacementFromMember,
+                    ChoiceControl::PlacementToMember,
+                ],
+            }
+        }
         CreateKind::Model(ModelKind::Branch) => vec![ChoiceControl::BranchSchema],
         CreateKind::Model(ModelKind::Relay) => {
             let mut controls = vec![ChoiceControl::RelaySchema];
@@ -2474,31 +2529,7 @@ fn CreateKindFields(
         </Show>
 
         <Show when=move || signals.open.get() == Some(CreateKind::Model(ModelKind::Placement)) fallback=|| ()>
-            <label class="create-field">
-                <span>"Placement name"</span>
-                <input node_ref=name_input class="create-name" type="text" autocomplete="off"
-                    prop:value=move || signals.placement.get().name
-                    disabled=move || signals.progress.get().is_pending()
-                    on:input=move |event| { signals.placement.update(|draft| draft.name = event_target_value(&event)); signals.edit(); }
-                />
-            </label>
-            <div class="create-field"><span>"Coverage"</span><strong class="create-placement-coverage">"Entire domain"</strong></div>
-            <ChoiceGroup
-                class_name="create-placement-options"
-                label="Placement"
-                control=ChoiceControl::PlacementPolicy
-                signals=signals
-                request_tx=request_tx
-                session_generation=session_generation
-            />
-            <label class="create-field">
-                <span>"Rank (optional)"</span>
-                <input class="create-placement-rank" type="text" inputmode="numeric"
-                    prop:value=move || signals.placement.get().rank
-                    disabled=move || signals.progress.get().is_pending()
-                    on:input=move |event| { signals.placement.update(|draft| draft.rank = event_target_value(&event)); signals.edit(); }
-                />
-            </label>
+            <PlacementEditor signals=signals name_input=name_input request_tx=request_tx session_generation=session_generation />
         </Show>
 
         <Show when=move || signals.open.get() == Some(CreateKind::User) fallback=|| ()>

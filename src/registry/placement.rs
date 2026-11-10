@@ -12,7 +12,11 @@
     nervix::layer(decisions, reason = "owns the decisions boundary declared above")
 )]
 
-use std::{cmp::Ordering, collections::VecDeque, num::NonZeroU64};
+use std::{
+    cmp::Ordering,
+    collections::{BTreeMap, VecDeque},
+    num::NonZeroU64,
+};
 
 use ahash::{HashMap, HashMapExt, HashSet};
 use error_stack::Report;
@@ -688,17 +692,17 @@ fn resolve_placement_member(
     let mut cluster_wide_ingestor = false;
     let mut ineligible_kinds = Vec::new();
     for (key, model) in models.iter().filter(|(key, _)| key.identifier == *member) {
-        match model {
-            Model::Ingestor(_) if model.executes_on_every_cluster_node() => {
+        match PlacementMemberEligibility::of(model) {
+            PlacementMemberEligibility::EveryClusterNode => {
                 cluster_wide_ingestor = true;
             }
-            _ if is_user_placement_member_model(model) => {
+            PlacementMemberEligibility::Eligible => {
                 eligible.push(ResolvedPlacementMember {
                     runtime: key.clone(),
                     pin: key.clone(),
                 });
             }
-            _ => ineligible_kinds.push(key.kind),
+            PlacementMemberEligibility::NotRuntime => ineligible_kinds.push(key.kind),
         }
     }
     eligible.sort_by(|left, right| left.runtime.cmp(&right.runtime));
@@ -744,30 +748,85 @@ fn resolve_placement_member(
     }))
 }
 
-fn is_user_placement_member_model(model: &Model) -> bool {
-    matches!(
-        model,
-        Model::Generator(_)
-            | Model::Inferencer(_)
-            | Model::Ingestor(_)
-            | Model::Reingestor(_)
-            | Model::Relay(_)
-            | Model::Lookup(_)
-            | Model::Junction(_)
-            | Model::Deduplicator(_)
-            | Model::Correlator(_)
-            | Model::Reorderer(_)
-            | Model::WindowProcessor(_)
-            | Model::WasmProcessor(_)
-            | Model::Emitter(_)
-    )
+/// Whether a placement rule may name a Model as a `FROM` or `TO` member. Validation, the REPL's
+/// member completion and the console's member choices all ask this one rule, so none of them
+/// offers or accepts a member another refuses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PlacementMemberEligibility {
+    /// A schedulable runtime node, whose units a rule can keep together or apart.
+    Eligible,
+    /// A server-listener ingestor, which executes on every cluster node, so no rule places it.
+    EveryClusterNode,
+    /// An entity that is not a schedulable runtime node.
+    NotRuntime,
+}
+
+impl PlacementMemberEligibility {
+    /// The eligibility of `model`, whatever version its resource bindings carry, so a stored
+    /// graph, a candidate graph and a session's transaction prefix are judged alike. Every kind
+    /// is decided here explicitly, so a new kind cannot become a member by default.
+    fn of<Version>(model: &Model<Version>) -> Self {
+        if let Model::Ingestor(ingestor) = model
+            && ingestor.input.executes_on_every_cluster_node()
+        {
+            return Self::EveryClusterNode;
+        }
+        match model.kind() {
+            ModelKind::Generator
+            | ModelKind::Inferencer
+            | ModelKind::WasmProcessor
+            | ModelKind::Ingestor
+            | ModelKind::Reingestor
+            | ModelKind::Relay
+            | ModelKind::Lookup
+            | ModelKind::Junction
+            | ModelKind::Deduplicator
+            | ModelKind::Correlator
+            | ModelKind::Reorderer
+            | ModelKind::WindowProcessor
+            | ModelKind::Emitter => Self::Eligible,
+            ModelKind::Schema
+            | ModelKind::WireJsonSchema
+            | ModelKind::WireCborSchema
+            | ModelKind::WireAvroSchema
+            | ModelKind::Codec
+            | ModelKind::Client
+            | ModelKind::Vhost
+            | ModelKind::Branch
+            | ModelKind::Endpoint
+            | ModelKind::SignalingProtocol
+            | ModelKind::Placement
+            | ModelKind::Udf => Self::NotRuntime,
+        }
+    }
+}
+
+/// The runtime nodes a placement rule may name, ordered by name. A member is named without its
+/// kind, so an eligible name another eligible Model shares is ambiguous and is not offered; the
+/// rule's validation refuses it in the same way.
+pub(crate) fn placement_members<'a, Version: 'a>(
+    models: impl IntoIterator<Item = &'a Model<Version>>,
+) -> Vec<NodeRef> {
+    let mut by_name = BTreeMap::<ModelName, Vec<NodeRef>>::new();
+    for model in models {
+        if PlacementMemberEligibility::of(model) == PlacementMemberEligibility::Eligible {
+            by_name
+                .entry(model.name())
+                .or_default()
+                .push(model.node_ref());
+        }
+    }
+    let mut members = Vec::with_capacity(by_name.len());
+    for candidates in by_name.into_values() {
+        if let [member] = candidates.as_slice() {
+            members.push(member.clone());
+        }
+    }
+    members
 }
 
 fn is_placement_runtime_model(model: &Model) -> bool {
-    match model {
-        Model::Ingestor(_) if model.executes_on_every_cluster_node() => false,
-        _ => is_user_placement_member_model(model),
-    }
+    PlacementMemberEligibility::of(model) == PlacementMemberEligibility::Eligible
 }
 
 fn placement_materialized_relays(model: &Model) -> Vec<&RelayName> {
@@ -1293,6 +1352,70 @@ mod tests {
         let _ = fs::remove_dir_all(relay_path);
         let _ = fs::remove_dir_all(endpoint_path);
         let _ = fs::remove_dir_all(syslog_path);
+    }
+
+    #[test]
+    fn placement_members_list_exactly_the_unambiguous_eligible_runtime_nodes() {
+        let mut models = full_graph_batch();
+        let mut listener = models
+            .iter()
+            .find_map(|model| match model {
+                Model::Ingestor(ingestor) if ingestor.name == named("ing") => {
+                    Some(ingestor.clone())
+                }
+                _ => None,
+            })
+            .expect("full graph must contain ing");
+        listener.name = named("listener");
+        let nervix_models::IngestorInput::Transport(transport) = &mut listener.input else {
+            panic!("the full graph's ingestor reads a transport");
+        };
+        transport.source = IngestorEntity::Http(HttpIngestor::Endpoint(HttpEndpointIngestor {
+            endpoint: named("ingest_http"),
+            mode: nervix_models::EndpointIngestMode::NoAck,
+            quiesce: nervix_models::IngestQuiesceMode::EndpointBuffer {
+                max_size: "1MiB".to_string(),
+            },
+        }));
+        let listener = Model::Ingestor(listener);
+        assert_eq!(
+            PlacementMemberEligibility::of(&listener),
+            PlacementMemberEligibility::EveryClusterNode
+        );
+        models.extend([
+            vhost("public", &["events.example.com"]),
+            endpoint(
+                "ingest_http",
+                "public",
+                "/ingest",
+                nervix_models::EndpointType::Http,
+            ),
+            listener,
+            // A relay named like the junction makes that name ambiguous on both sides.
+            relay("p99_proc", "event_schema"),
+        ]);
+
+        let members = placement_members(&models);
+
+        assert_eq!(
+            members,
+            vec![
+                NodeRef::new(ModelKind::Emitter, named::<ModelName>("emit")),
+                NodeRef::new(ModelKind::Ingestor, named::<ModelName>("ing")),
+                NodeRef::new(ModelKind::Relay, named::<ModelName>("notifications")),
+                NodeRef::new(ModelKind::Relay, named::<ModelName>("p99")),
+            ],
+            "the branch sharing a relay's name is no runtime node, so that relay stays listed"
+        );
+        for model in &models {
+            if let Model::Schema(_) | Model::Codec(_) | Model::Vhost(_) | Model::Endpoint(_) = model
+            {
+                assert_eq!(
+                    PlacementMemberEligibility::of(model),
+                    PlacementMemberEligibility::NotRuntime
+                );
+            }
+        }
     }
 
     #[test]

@@ -136,7 +136,7 @@ impl CreateKind {
             Self::Resource => ("Resource", "Catalog and upload"),
             Self::Subscription => ("Subscription", "Read-only relay tab"),
             Self::Model(kind) => match kind {
-                ModelKind::Placement => ("Placement", "Domain-wide policy"),
+                ModelKind::Placement => ("Placement", "Domain-wide or corridor policy"),
                 ModelKind::Schema => ("Schema", "Internal record fields"),
                 ModelKind::WireJsonSchema => ("Wire JSON schema", "JSON payload fields"),
                 ModelKind::WireCborSchema => ("Wire CBOR schema", "CBOR payload fields"),

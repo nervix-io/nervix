@@ -458,6 +458,7 @@ class InventoryTests(unittest.TestCase):
             "console-endpoint-drafts",
             "console-emitter-drafts",
             "console-processor-drafts",
+            "console-placement-drafts",
             "runtime-window-sketch-panes",
             "kafka-partition-offsets",
             "kafka-destination-partitions",
@@ -578,7 +579,7 @@ class InventoryTests(unittest.TestCase):
             "inferencer-native-snapshot-projection": 1,
             "console-emitter-drafts": 5,
             "console-processor-drafts": 6,
-            "client-requests": 12,
+            "client-requests": 13,
         }.items():
             with self.subTest(target=target):
                 self.assertEqual(versions[target], version)

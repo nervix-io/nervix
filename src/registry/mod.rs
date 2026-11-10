@@ -103,6 +103,7 @@ pub(crate) use message_error_plan::{
 pub(crate) use mutation::{PlannedMutations, RegistryMutation};
 pub(crate) use placement::{
     PlacementEndpointPairPlan, PlacementPlan, PlacementRequireGroupPlan, PlacementRulePlan,
+    placement_members,
 };
 pub(crate) use processor_plan::{
     BranchedNodeSpecs, BranchedProcessorNodeSpec, BranchedProcessorOperationSpec,

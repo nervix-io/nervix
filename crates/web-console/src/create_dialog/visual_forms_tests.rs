@@ -1842,3 +1842,169 @@ fn deduplicator_and_reorderer_forms_edit_ordered_keys_after_their_node_branch() 
         }
     });
 }
+
+#[test]
+fn a_corridor_placement_asks_for_members_and_renders_their_ordered_rows() {
+    use super::placement_draft::{CorridorSide, MemberChange, MemberMove, PlacementCoverage};
+
+    super::super::initialize_test_executor();
+    Owner::new().with(|| {
+        let scope = DomainName::parse("orders").assured("valid domain");
+        let placement = CreateKind::Model(ModelKind::Placement);
+        let signals = CreateSignals::new();
+        signals.open(placement, Some(scope.clone()), "global-create-button");
+        assert_eq!(
+            open_form_controls(signals, placement),
+            vec![ChoiceControl::PlacementPolicy],
+            "a domain-wide rule asks for no members"
+        );
+        assert_eq!(
+            signals
+                .choice_query(ChoiceControl::PlacementPolicy)
+                .assured("policies need no dependency")
+                .page_size,
+            100,
+            "every policy fits the first page"
+        );
+
+        signals
+            .placement
+            .update(|draft| draft.coverage = PlacementCoverage::Corridor);
+        assert_eq!(
+            open_form_controls(signals, placement),
+            vec![
+                ChoiceControl::PlacementPolicy,
+                ChoiceControl::PlacementFromMember,
+                ChoiceControl::PlacementToMember,
+            ]
+        );
+        for control in [
+            ChoiceControl::PlacementFromMember,
+            ChoiceControl::PlacementToMember,
+        ] {
+            let query = signals
+                .choice_query(control)
+                .assured("a captured domain asks for members");
+            assert_eq!(query.target, ChoiceTarget::PlacementMember);
+            assert_eq!(query.dependencies.len(), 1);
+            assert_eq!(
+                query.dependencies[0].value,
+                ChoiceValue::Domain(scope.clone())
+            );
+        }
+
+        let input = ChoiceValue::Model(node(ModelKind::Relay, "input"));
+        let normalize = ChoiceValue::Model(node(ModelKind::Junction, "normalize"));
+        let publish = ChoiceValue::Model(node(ModelKind::Emitter, "publish"));
+        select_choice(signals, ChoiceControl::PlacementFromMember, input.clone());
+        select_choice(
+            signals,
+            ChoiceControl::PlacementFromMember,
+            normalize.clone(),
+        );
+        select_choice(signals, ChoiceControl::PlacementToMember, publish.clone());
+        assert!(selected_choice(
+            signals,
+            ChoiceControl::PlacementFromMember,
+            &input
+        ));
+        assert!(selected_choice(
+            signals,
+            ChoiceControl::PlacementToMember,
+            &publish
+        ));
+        assert!(
+            !selected_choice(signals, ChoiceControl::PlacementToMember, &input),
+            "each side keeps its own members"
+        );
+
+        let dialog = CreateDialog(
+            CreateDialogProps::builder()
+                .signals(signals)
+                .active_domain(RwSignal::new(Some(scope.clone())))
+                .connection_state(RwSignal::new(super::super::ConsoleConnectionState::Waiting))
+                .session_generation(RwSignal::new(1))
+                .request_tx(RwSignal::new(None))
+                .submit(super::ignore_test_submission)
+                .build(),
+        );
+        any_spawner::Executor::poll_local();
+        let html = dialog.to_html();
+        for control in [
+            "create-placement-coverage",
+            "create-placement-from",
+            "create-placement-to",
+            "create-placement-from-members",
+            "create-placement-to-members",
+            "Move input down",
+            "Move normalize up",
+            "Remove publish",
+        ] {
+            assert!(html.contains(control), "{control} must render");
+        }
+
+        signals.placement.update(|draft| {
+            draft.name = "corridor".to_string();
+            draft.change_member(
+                CorridorSide::From,
+                1,
+                MemberChange::Move(MemberMove::Earlier),
+            );
+        });
+        let built = signals
+            .placement
+            .get_untracked()
+            .build()
+            .assured("a complete corridor builds");
+        assert_eq!(
+            built
+                .to_canonical_plexus()
+                .assured("a placement renders canonical Plexus"),
+            "CREATE PLACEMENT corridor FROM normalize, input TO publish NEUTRAL;",
+            "the moved member leads the FROM side"
+        );
+
+        signals.change_scope(Some(DomainName::parse("refunds").assured("valid domain")));
+        assert!(signals.placement.get_untracked().has_changed_members());
+        assert!(!selected_choice(
+            signals,
+            ChoiceControl::PlacementFromMember,
+            &input
+        ));
+        select_choice(signals, ChoiceControl::PlacementFromMember, input.clone());
+        assert!(selected_choice(
+            signals,
+            ChoiceControl::PlacementFromMember,
+            &input
+        ));
+    });
+}
+
+#[test]
+fn the_graph_place_action_replaces_the_draft_with_a_corridor_in_its_domain() {
+    use super::placement_draft::{CorridorSide, PlacementCoverage};
+
+    super::super::initialize_test_executor();
+    Owner::new().with(|| {
+        let scope = DomainName::parse("orders").assured("valid domain");
+        let signals = CreateSignals::new();
+        signals
+            .placement
+            .update(|draft| draft.name = "retained".to_string());
+        signals.open_placement_from(
+            scope.clone(),
+            ModelName::parse("normalize").assured("valid name"),
+            "graph-search",
+        );
+        let draft = signals.placement.get_untracked();
+        assert_eq!(draft.coverage, PlacementCoverage::Corridor);
+        assert_eq!(draft.name, "", "the action starts a new draft");
+        assert!(draft.selects_member(CorridorSide::From, &node(ModelKind::Junction, "normalize")));
+        assert!(draft.members(CorridorSide::To).is_empty());
+        assert_eq!(
+            signals.open.get_untracked(),
+            Some(CreateKind::Model(ModelKind::Placement))
+        );
+        assert_eq!(signals.captured_domain.get_untracked(), Some(scope));
+    });
+}

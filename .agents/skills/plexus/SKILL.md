@@ -149,9 +149,10 @@ The web console's visual Create forms also cover internal schemas, declared JSON
 schemas, branches, relays, codecs, signaling protocols, clients, VHOSTs, endpoints, hash maps,
 Roto UDFs, ingestors and emitters for every connector and entity pair, junctions, deduplicators,
 reorderers, window processors, correlators, reingestors, generators, inferencers, WASM processors,
-and session subscriptions; use the same web-console chapter for their typed fields, resource
-versions, tensor shapes, guest limits, program editors, reference lookup, and transaction
-behavior.
+domain-wide and corridor placement rules, and session subscriptions; use the same web-console
+chapter for their typed fields, resource versions, tensor shapes, guest limits, program editors,
+reference lookup, placement members, contextual create actions, and transaction behavior, and its
+Creation Coverage section for which form creates each statement.
 
 For materialized relay inspection, read [Relay → Inspect Materialized State](../../../docs/src/relay.md#inspect-materialized-state)
 for selector, LIMIT/AFTER and FORMAT clause order, typed rows, sensitivity and stale continuations.
