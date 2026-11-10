@@ -49,7 +49,7 @@ use nervix_models::{
     ClientAttachmentId, ClientEndpointContract, ClientOutcomeUncertainty, ClientProcessingFailure,
     ClientProducerAdmission, ClientProducerDescription, ClientProducerEndReason,
     ClientProducerGrant, ClientProducerLimits, ClientProducerPolicy, ClientProducerRefusal,
-    ClientSubmissionOutcome, ClientSubmissionRefusal, SchemaField,
+    ClientSubmissionOutcome, ClientSubmissionRefusal, SchemaField, UserName,
 };
 use nervix_primitives::sync::atomic::AtomicU64;
 
@@ -166,6 +166,7 @@ impl Drop for ClientProducerReservation {
 
 /// What a producer asks the node executing a client ingestor for.
 pub(crate) struct ClientProducerOpenRequest {
+    pub(crate) user: UserName,
     pub(crate) domain: DomainName,
     pub(crate) ingestor: IngestorName,
     pub(crate) expected_fields: Vec<SchemaField>,
@@ -425,6 +426,7 @@ enum EndpointCommand {
 }
 
 struct AttachCommand {
+    user: UserName,
     max_batch_rows: NonZeroU32,
     expected_fields: Vec<SchemaField>,
     limits: ClientProducerLimits,
@@ -454,6 +456,7 @@ struct AttachedProducer {
 
 /// One batch the endpoint hands its admission worker.
 struct AdmissionJob {
+    user: UserName,
     max_batch_rows: NonZeroU32,
     attachment: ClientAttachmentId,
     submission: ClientSubmissionId,
@@ -490,6 +493,8 @@ struct QueuedSubmission {
 
 /// One attached producer, as its endpoint task holds it.
 struct Attachment {
+    /// Shared with admission jobs that may outlive this attachment.
+    user: UserName,
     generation: u64,
     contract: ClientEndpointContract,
     grant: ClientProducerGrant,
@@ -549,6 +554,7 @@ impl Attachment {
         let bytes: u64 = batch.body.len().arch_into();
         self.outstanding.insert(batch.submission, bytes);
         AdmissionJob {
+            user: self.user.clone(),
             attachment,
             submission: batch.submission,
             body: batch.body,
@@ -677,6 +683,7 @@ impl Runtime {
         request: ClientProducerOpenRequest,
     ) -> Result<OpenedClientProducer, ClientProducerRefusal> {
         let ClientProducerOpenRequest {
+            user,
             domain,
             ingestor,
             expected_fields,
@@ -710,6 +717,7 @@ impl Runtime {
         };
         let (reply, attached) = oneshot::channel();
         let command = EndpointCommand::Attach(AttachCommand {
+            user,
             max_batch_rows: NonZeroU32::new(
                 u32::try_from(parameters.client_batch_rows())
                     .assured("the committed row count fits its wire representation"),
@@ -1073,6 +1081,7 @@ impl Endpoint {
 
     fn attach(&mut self, attach: AttachCommand) {
         let AttachCommand {
+            user,
             max_batch_rows,
             expected_fields,
             limits,
@@ -1081,6 +1090,7 @@ impl Endpoint {
             reply,
         } = attach;
         let attached = self.attached_producer(
+            user,
             expected_fields,
             limits,
             max_batch_bytes,
@@ -1100,6 +1110,7 @@ impl Endpoint {
 
     fn attached_producer(
         &mut self,
+        user: UserName,
         expected_fields: Vec<SchemaField>,
         limits: ClientProducerLimits,
         max_batch_bytes: NonZeroU64,
@@ -1136,6 +1147,7 @@ impl Endpoint {
         self.attachments.insert(
             id,
             Attachment {
+                user,
                 generation: execution.generation,
                 contract: execution.contract,
                 grant,
@@ -1915,6 +1927,7 @@ impl ClientIntake {
         let dispatched = self
             .runtime
             .dispatch_client_batch(ClientBatchDispatch {
+                user: &job.user,
                 handles: &self.handles,
                 domain: &self.domain,
                 ingestor: &self.ingestor,

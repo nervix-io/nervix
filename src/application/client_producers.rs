@@ -30,7 +30,7 @@ use bytes::Bytes;
 use nervix_interconnect::{HandlerRegistrationError, Transport};
 use nervix_models::{
     ClientProducerDescription, ClientProducerLimits, ClientProducerRefusal, ClusterNodeName,
-    DomainName, IngestorName, SchemaField,
+    DomainName, IngestorName, SchemaField, UserName,
 };
 
 use self::link::{ForwardedProducer, ProducerLinks};
@@ -41,6 +41,8 @@ use crate::runtime::{
 
 /// What a session asks for when it opens a producer.
 pub(in crate::application) struct ProducerOpen {
+    /// The identity authenticated by the session that opens this producer.
+    pub(in crate::application) user: UserName,
     pub(in crate::application) domain: DomainName,
     pub(in crate::application) ingestor: IngestorName,
     pub(in crate::application) expected_fields: Vec<SchemaField>,
@@ -139,6 +141,7 @@ impl ClientProducerRouter {
             return self.links.open(owner, open).await;
         }
         let ProducerOpen {
+            user,
             domain,
             ingestor,
             expected_fields,
@@ -146,6 +149,7 @@ impl ClientProducerRouter {
             max_batch_bytes,
         } = open;
         let request = ClientProducerOpenRequest {
+            user,
             domain,
             ingestor,
             expected_fields,

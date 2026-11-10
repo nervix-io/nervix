@@ -1724,6 +1724,11 @@ domain's `START` generation, the endpoint contract digest, the ingestor's window
 retry backoff, the granted credit with the largest batch one submission may carry, and whether
 admission is open.
 
+The ordered open captures the session's authenticated user name and carries it to the ingestor
+owner. Every row of that producer's batches reads the same identity as `metadata.user`, including
+through a forwarded attachment. The user is supplied by session authentication; an application
+cannot choose it in the producer open or substitute an Arrow payload field for it.
+
 The request identity of the open names the producer: every later request and frame about it carries
 that identity as its `ProducerId`, so a client needs no second identity space. The producer accepts
 batches from the moment its reply is queued. It belongs to the session: `USE` does not retarget it,
@@ -2328,6 +2333,12 @@ runtime and thread ownership, call cancellation, retained views, failure project
 exchange, packaging and qualification. Application APIs belong in the [C and C++](client-library-c.md),
 [Python](client-library-python.md), [Ruby](client-library-ruby.md) and
 [JVM](client-library-jvm.md) guides.
+
+Each host suite follows a clock across a session loss and a declared testing-build attach refusal.
+It reads `INTERRUPTED`, then the `RESTORATION_FAILED` cause, message and positive retry wait,
+and the restored `STATE`. These are the existing clock outcomes projected through each binding;
+the [suite action exchange](integration-test-lifecycle.md#client-suites) supplies the fault and
+clears unused refusals during teardown.
 
 The C ABI's public contract is `crates/client-ffi/include/nervix_client.h`.
 [Manual B-1 through B-16](client-implementation-manual.md#using-the-c-abi) apply to its callers:

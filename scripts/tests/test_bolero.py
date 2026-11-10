@@ -582,6 +582,8 @@ class InventoryTests(unittest.TestCase):
             "console-emitter-drafts": 5,
             "console-processor-drafts": 6,
             "client-requests": 12,
+            "client-producer-link-frames": 10,
+            "client-producer-link-frames-malformed": 10,
         }.items():
             with self.subTest(target=target):
                 self.assertEqual(versions[target], version)
