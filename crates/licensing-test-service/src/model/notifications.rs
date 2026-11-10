@@ -34,6 +34,19 @@ use uuid::Uuid;
 use super::{MAX_ENTRIES, Model, problem};
 use crate::{ServerState, SharedModel, limits};
 
+// Healthy streams emit this fixture heartbeat; the idle-reconnect scenarios use a three-second
+// deadline to distinguish keepalive traffic from the deliberately blocked mode.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the scenario peer emits a comment every second so healthy streams stay inside \
+                  the three-second idle-reconnect verification envelope; absent from product \
+                  graphs"
+    )
+)]
+const KEEP_ALIVE_INTERVAL: Duration = Duration::from_secs(1);
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum StreamMode {
     #[default]
@@ -296,7 +309,7 @@ impl Session {
             nervix_primitives::select! {
                 _ = self.stop.cancelled() => return None,
                 changed = self.admission.updates.changed() => if changed.is_err() { return None; },
-                _ = sleep(Duration::from_secs(1)), if mode != StreamMode::Blocked => {
+                _ = sleep(KEEP_ALIVE_INTERVAL), if mode != StreamMode::Blocked => {
                     return Some(Event::default().comment("keep-alive"));
                 },
             }
