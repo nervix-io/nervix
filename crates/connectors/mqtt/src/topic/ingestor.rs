@@ -338,6 +338,73 @@ struct UnstartedConnection {
     admission: NonZeroU32,
 }
 
+impl UnstartedConnection {
+    /// Drives connection setup through CONNACK and returns whether the broker resumed its session.
+    async fn connect(&mut self) -> MqttTopicIngestorResult<bool> {
+        loop {
+            nervix_primitives::task::consume_budget().await;
+            match self.eventloop.poll().await {
+                Ok(Event::Incoming(Incoming::ConnAck(connack))) => {
+                    return Ok(connack.session_present);
+                }
+                Ok(Event::Incoming(_) | Event::Outgoing(_) | Event::Auth(_)) => {}
+                Err(error) => {
+                    return Err(MqttConnectionError::report(error)
+                        .change_context(MqttTopicIngestorError::Connect));
+                }
+            }
+        }
+    }
+
+    /// Sends the one filter and drives its answer through the broker's QoS grant.
+    async fn subscribe(
+        &mut self,
+        filter: SubscribeFilter,
+        qos: QoS,
+    ) -> MqttTopicIngestorResult<()> {
+        self.client
+            .subscribe_many([filter])
+            .await
+            .map_err(|error| {
+                Report::new(MqttTopicIngestorError::Subscribe).attach_printable(error.to_string())
+            })?;
+        loop {
+            nervix_primitives::task::consume_budget().await;
+            match self.eventloop.poll().await {
+                Ok(Event::Incoming(Incoming::SubAck(suback))) => {
+                    // One SUBSCRIBE requests exactly this one filter.
+                    let [SubscribeReasonCode::Success(granted)] = suback.return_codes.as_slice()
+                    else {
+                        return Err(Report::new(MqttTopicIngestorError::SubscriptionRefused)
+                            .attach_printable(format!("{suback:?}")));
+                    };
+                    if *granted < qos {
+                        let requested = match qos {
+                            QoS::AtMostOnce => MqttQos::Qos0,
+                            QoS::AtLeastOnce => MqttQos::Qos1,
+                            QoS::ExactlyOnce => MqttQos::Qos2,
+                        };
+                        let granted = match granted {
+                            QoS::AtMostOnce => MqttQos::Qos0,
+                            QoS::AtLeastOnce => MqttQos::Qos1,
+                            QoS::ExactlyOnce => MqttQos::Qos2,
+                        };
+                        let refusal =
+                            MqttTopicIngestorError::SubscriptionDowngraded { requested, granted };
+                        return Err(Report::new(refusal));
+                    }
+                    return Ok(());
+                }
+                Ok(Event::Incoming(_) | Event::Outgoing(_) | Event::Auth(_)) => {}
+                Err(error) => {
+                    return Err(MqttConnectionError::report(error)
+                        .change_context(MqttTopicIngestorError::Connect));
+                }
+            }
+        }
+    }
+}
+
 /// The publishes an ingestor instance reads from its broker connection: the read-ahead its
 /// connection's driver hands them over through, and a fake connection in the checks of how a read
 /// meets the host's cancellation.
@@ -694,62 +761,15 @@ impl MqttTopicIngestorPlan {
         Ok(connection)
     }
 
-    /// Drives the event loop until the broker confirms the subscription.
-    ///
-    /// A broker that resumes a persistent session already holds the subscription and cannot
-    /// allocate a new SUBSCRIBE packet identifier, so its CONNACK is the readiness boundary and
-    /// queued QoS messages follow immediately.
+    /// A resumed broker session already holds its subscription; a fresh session needs SUBACK.
     async fn establish_subscription(
         &self,
         connection: &mut UnstartedConnection,
     ) -> MqttTopicIngestorResult<()> {
-        loop {
-            nervix_primitives::task::consume_budget().await;
-            match connection.eventloop.poll().await {
-                Ok(Event::Incoming(Incoming::ConnAck(connack))) => {
-                    if connack.session_present {
-                        return Ok(());
-                    }
-                    connection
-                        .client
-                        .subscribe_many([self.subscription()])
-                        .await
-                        .map_err(|error| {
-                            Report::new(MqttTopicIngestorError::Subscribe)
-                                .attach_printable(error.to_string())
-                        })?;
-                }
-                Ok(Event::Incoming(Incoming::SubAck(suback))) => {
-                    // One SUBSCRIBE requests exactly this one filter.
-                    let [SubscribeReasonCode::Success(granted)] = suback.return_codes.as_slice()
-                    else {
-                        return Err(Report::new(MqttTopicIngestorError::SubscriptionRefused)
-                            .attach_printable(format!("{suback:?}")));
-                    };
-                    if *granted < self.qos {
-                        let requested = match self.qos {
-                            QoS::AtMostOnce => MqttQos::Qos0,
-                            QoS::AtLeastOnce => MqttQos::Qos1,
-                            QoS::ExactlyOnce => MqttQos::Qos2,
-                        };
-                        let granted = match granted {
-                            QoS::AtMostOnce => MqttQos::Qos0,
-                            QoS::AtLeastOnce => MqttQos::Qos1,
-                            QoS::ExactlyOnce => MqttQos::Qos2,
-                        };
-                        let refusal =
-                            MqttTopicIngestorError::SubscriptionDowngraded { requested, granted };
-                        return Err(Report::new(refusal));
-                    }
-                    return Ok(());
-                }
-                Ok(Event::Incoming(_) | Event::Outgoing(_) | Event::Auth(_)) => {}
-                Err(error) => {
-                    return Err(MqttConnectionError::report(error)
-                        .change_context(MqttTopicIngestorError::Connect));
-                }
-            }
+        if connection.connect().await? {
+            return Ok(());
         }
+        connection.subscribe(self.subscription(), self.qos).await
     }
 }
 
@@ -840,6 +860,31 @@ pub struct MqttTopicIngestor {
 }
 
 impl MqttTopicIngestor {
+    /// Hands a subscribed connection to the driver that owns its established session.
+    fn install_connection(&mut self, connection: UnstartedConnection) {
+        let UnstartedConnection {
+            client,
+            eventloop,
+            admission,
+        } = connection;
+        // The CONNACK has replaced the client's own keep-alive with the broker's, if it
+        // announced one, and a keep-alive of zero is none.
+        let keep_alive = eventloop.options.keep_alive();
+        let keep_alive = if keep_alive.is_zero() {
+            None
+        } else {
+            Some(keep_alive)
+        };
+        self.connection = MqttIngestorConnection::Running(Box::new(MqttConnection::start(
+            client,
+            eventloop,
+            self.plan.acknowledgement,
+            keep_alive,
+            admission,
+            self.plan.read_ahead_dropped.clone(),
+        )));
+    }
+
     /// Drops the connection, which ends its driver and the broker connection, and with it every
     /// rejected publish, whose packet identifiers belong to the session that ends here. A persistent
     /// session delivers them again on resume.
@@ -997,27 +1042,7 @@ impl IngestorConnector for MqttTopicIngestor {
                     return Err(error.change_context(IngestorError::Resume { connector: MQTT }));
                 }
             };
-            let UnstartedConnection {
-                client,
-                eventloop,
-                admission,
-            } = connection;
-            // The CONNACK has replaced the client's own keep-alive with the broker's, if it
-            // announced one, and a keep-alive of zero is none.
-            let keep_alive = eventloop.options.keep_alive();
-            let keep_alive = if keep_alive.is_zero() {
-                None
-            } else {
-                Some(keep_alive)
-            };
-            self.connection = MqttIngestorConnection::Running(Box::new(MqttConnection::start(
-                client,
-                eventloop,
-                self.plan.acknowledgement,
-                keep_alive,
-                admission,
-                self.plan.read_ahead_dropped.clone(),
-            )));
+            self.install_connection(connection);
         }
         Ok(IngestorResume::Ready)
     }
