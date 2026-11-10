@@ -3600,6 +3600,15 @@ with the idle deadline, Nervix waits neither to write the frame nor for the peer
 Close never delays the reconnect. A connection whose TCP has already ended or failed is released
 without a Close.
 
+A signaling handshake that fails ends its connection the same way, and the ingestor reports the
+failure with its cause. A read that fails while signaling earns the status of the read failure
+above. A frame a `FAIL JAQ` guard rejects earns status `1008` (policy violation), and the
+protocol's `TIMEOUT` earns `1001` (going away), as the idle deadline does. A failure of the
+client's own programs earns `1011` (internal error): a `SEND JAQ` program that does not produce
+exactly one value, an output the protocol's format cannot encode, or a `CAPTURE` program that
+fails or produces no object. A handshake whose TCP has already ended, or whose own write failed, is released without a
+Close.
+
 For `ws` and `wss`, each initial connection and resume resolves the URL host through the node's
 asynchronous resolver. It tries the returned addresses in order within the configured
 `connect_timeout_ms` budget for DNS, TCP, TLS and the opening upgrade. The upgrade still uses the configured URL for the HTTP Host
@@ -3682,7 +3691,8 @@ rather than a connection failure. On timeout, the error names the matchers the
 current step was still waiting on.
 Invalid signaling programs fail validation with the protocol, clause, step, and compiler cause.
 Handshake send, capture, encoding, and transport failures retain their causes in the ingestor
-diagnostic. A failed handshake delivers no frame to the relay.
+diagnostic. A failed handshake delivers no frame to the relay. A `WEBSOCKETS CLIENT` connection
+whose handshake fails ends with a Close frame naming why, with the statuses listed above.
 
 ### Data Arriving During The Handshake
 

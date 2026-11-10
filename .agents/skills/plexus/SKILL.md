@@ -165,9 +165,10 @@ The web console's visual Create forms also cover internal schemas, declared JSON
 schemas, branches, relays, codecs, signaling protocols, clients, VHOSTs, endpoints, hash maps,
 Roto UDFs, ingestors and emitters for every connector and entity pair, junctions, deduplicators,
 reorderers, window processors, correlators, reingestors, generators, inferencers, WASM processors,
-and session subscriptions; use the same web-console chapter for their typed fields, resource
-versions, tensor shapes, guest limits, program editors, reference lookup, and transaction
-behavior.
+domain-wide and corridor placement rules, and session subscriptions; use the same web-console
+chapter for their typed fields, resource versions, tensor shapes, guest limits, program editors,
+reference lookup, placement members, contextual create actions, and transaction behavior, and its
+Creation Coverage section for which form creates each statement.
 
 For materialized relay inspection, read [Relay → Inspect Materialized State](../../../docs/src/relay.md#inspect-materialized-state)
 for selector, LIMIT/AFTER and FORMAT clause order, typed rows, sensitivity and stale continuations.
@@ -565,9 +566,10 @@ literal HTTP polling headers, at model creation and when a later cap is lowered.
   window route `SET`, `input` only inside their arguments, and `COUNT`, `SUM`, `FIRST`, `LAST`,
   `MIN`, and `MAX` are aggregates there, never list functions. Compute window output from aggregates
   and constants, and prefer the dedicated aggregates (`AVG`, `COUNT_IF`, `ARG_MIN`, `ARG_MAX`, the
-  `*_POP` and `*_SAMP` statistics, `CORR`) over hand-built formulas. Before using `COLLECT_VEC`,
-  check its required argument and bounded-retention rules in that reference; use the documented
-  list functions to consume its result. For `APPROX_COUNT_DISTINCT`,
+  `*_POP` and `*_SAMP` statistics, `CORR`) over hand-built formulas. Before using `COLLECT_VEC` or
+  `COLLECT_ARRAY`, check the reference's required-argument, retention and count-width rules;
+  follow the Generators quickstart for sampled sequences and visible cadence gaps. Use the
+  documented list functions to consume the result. For `APPROX_COUNT_DISTINCT`,
   `APPROX_QUANTILE`, and `APPROX_TOP_K`, read `Approximate Sketches`: the window needs
   `MAX STATE SIZE` after duration `WIDTH` and `STEP`, a branched window a branch with
   `MAX INSTANCES <n> EVICT LRU`, and the precision or capacity sets both accuracy and memory.

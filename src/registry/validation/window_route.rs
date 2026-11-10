@@ -15,7 +15,9 @@
 use ahash::HashSet;
 use arrow_schema::DataType;
 use error_stack::{Report, ResultExt as _};
-use nervix_models::{CreateSchema, CreateWindowProcessor, ProcessorOutput, WindowStateLimit};
+use nervix_models::{
+    CreateSchema, CreateWindowProcessor, ProcessorOutput, WindowBound, WindowStateLimit,
+};
 use nervix_vm::{
     CompileOptions,
     program::{FieldRef, Program, SpannedNode, WindowAggregateFunction},
@@ -53,6 +55,7 @@ pub(in crate::registry) fn validate_window_route_types(
         context,
         output,
         aggregate,
+        &processor.width,
         output_schema,
         input_schema,
         branch_schema,
@@ -95,6 +98,7 @@ pub(in crate::registry) fn compile_window_route(
     context: ModelValidationContext<'_, '_>,
     output: &ProcessorOutput,
     aggregate: &WindowAggregateProgram,
+    width: &WindowBound,
     output_schema: &CreateSchema,
     input_schema: &CreateSchema,
     branch_schema: Option<&CreateSchema>,
@@ -104,6 +108,21 @@ pub(in crate::registry) fn compile_window_route(
         identifier,
         models,
     } = context;
+    if width.fixed_message_width().is_none() {
+        for demand in aggregate.demands() {
+            if demand
+                .functions
+                .contains(&WindowAggregateFunction::CollectArray)
+            {
+                return Err(Report::new(RegistryError::WindowFixedCollectionWidth {
+                    domain: domain.clone(),
+                    processor: identifier.clone(),
+                    route: output.relay.clone(),
+                    width: width.clone(),
+                }));
+            }
+        }
+    }
     let mut readable = Vec::new();
     if let Some(branch_schema) = branch_schema {
         readable.push(readonly_binding_for_internal_schema(
@@ -137,7 +156,13 @@ pub(in crate::registry) fn compile_window_route(
             output: &output_arrow_schema,
             output_sensitivity: &output_sensitivity,
         },
-        &udf_compile_options(models, CompileOptions::default()),
+        &udf_compile_options(
+            models,
+            CompileOptions {
+                window_message_width: width.fixed_message_width(),
+                ..CompileOptions::default()
+            },
+        ),
     )
     .change_context(RegistryError::WindowRouteCompile {
         domain: domain.clone(),
