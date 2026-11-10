@@ -1392,7 +1392,8 @@ into the FlatBuffers builder; no JSON object, map of fields, or intermediate row
 Plexus type has exactly one cell type, `DATETIME` travels as signed nanoseconds, floats keep their
 exact bits, and `BYTES` travels as raw octets. A sensitive field is written as `RedactedCell` in
 every row, whether or not it held a value, so the frame reveals neither the value nor its nullness.
-A null in a nullable field is `NullCell`; a list element is never null or redacted.
+A null in a nullable field is `NullCell`; a list element is never null or redacted. A null fixed
+array has no visible elements: physical child nulls masked by its Arrow validity are not encoded.
 
 A frame holds rows of one concrete branch. Its branch key is written once per frame, with sensitive
 key fields redacted, and is absent exactly when the relay is unbranched. The encoder groups the

@@ -479,9 +479,25 @@ subsections after the boundary table follow this order.
 
 A window route compilation failure retains its compiler report beneath
 `RegistryError::WindowRouteCompile`, which names the domain, processor and output relay.
-`WindowRouteCompileError::CollectionArgumentNullable` names `COLLECT_VEC` and directs an optional
+`WindowRouteCompileError::CollectionArgumentNullable` names the collection function and directs an optional
 argument to `coalesce`. `RegistryError::WindowCollectionMissingBound` names the same route and
 function when neither a message width nor a state limit bounds retained collection.
+The fixed form's bound refusal names its authored `WIDTH` and directs duration or combined
+windows to `COLLECT_VEC`; an intrinsically unrepresentable fixed dimension keeps its typed
+compiler cause. A retained-count disagreement fails before gathering through the window's
+existing emission-failure owner.
+
+State inspection and WASM reset resolve `BRANCH KEY { field = literal, ... }` through the shared
+`StateBranchSelection` vocabulary before reading or resetting state. Its typed
+`StateBranchSelectionError` names the branch key when its fields do not match the declaration.
+A literal-type refusal also names the affected field and its exact required type. Neither
+diagnostic includes a key's value.
+
+The WASM reset coordinator keeps a remote owner's `RemoteOperationFailure` as a report cause
+beneath its action context. An unpublished preparation failure has `Prepare` context, an abort
+failure has `Abort`, and a preparation or activation after publication has `CommittedNotUsable`.
+This preserves the owner's refusal in the rendered chain without reporting an unpublished
+generation as committed. Successful replies build no failure context.
 
 ### Boundaries
 

@@ -22,23 +22,29 @@ use super::*;
 pub(super) enum WindowProcessorError {
     #[error("window aggregate requires a non-empty window")]
     EmptyWindow,
-    #[error("COLLECT_VEC cannot address {rows} retained rows with list offsets")]
+    #[error("{} failed to collect retained window values", .function.plexus_name())]
+    Collection { function: WindowAggregateFunction },
+    #[error("fixed window collection requires {expected} retained rows, found {rows}")]
+    CollectionLength { expected: i32, rows: i32 },
+    #[error("window collection cannot address {rows} retained rows with list offsets")]
     CollectionRows { rows: usize },
-    #[error("COLLECT_VEC exceeds variable offsets at argument depth {depth}")]
+    #[error("window collection exceeds variable offsets at argument depth {depth}")]
     CollectionOffsets { depth: usize },
-    #[error("COLLECT_VEC working memory size overflows")]
+    #[error("window collection working memory size overflows")]
     CollectionSizeOverflow,
-    #[error("COLLECT_VEC working memory was not admitted")]
+    #[error("window collection working memory was not admitted")]
     CollectionAdmission,
-    #[error("COLLECT_VEC data execution failed")]
+    #[error("window collection data execution failed")]
     CollectionExecution,
-    #[error("COLLECT_VEC cannot produce the compiled {data_type:?} output type")]
+    #[error("window collection cannot produce the compiled {data_type:?} output type")]
     CollectionOutputType { data_type: ArrowDataType },
-    #[error("failed to build the COLLECT_VEC output column")]
+    #[error("failed to build the window collection output column")]
     BuildCollection,
-    #[error("COLLECT_VEC output has {bytes} decoded bytes, exceeding the relay limit {limit}")]
+    #[error(
+        "window collection output has {bytes} decoded bytes, exceeding the relay limit {limit}"
+    )]
     CollectionOutputLimit { bytes: u64, limit: u64 },
-    #[error("COLLECT_VEC output cannot be carried as a relay batch")]
+    #[error("window collection output cannot be carried as a relay batch")]
     CollectionOutput,
     #[error("window processor '{}' failed to snapshot branch state", .processor.as_str())]
     Snapshot { processor: ModelName },
@@ -1028,7 +1034,7 @@ pub(super) async fn evaluate_window_aggregate(
             .get(demand)
             .verified("a route's demands follow the demands of every route written before it");
         let result = match compiled.invocation.function {
-            WindowAggregateFunction::CollectVec => {
+            WindowAggregateFunction::CollectArray | WindowAggregateFunction::CollectVec => {
                 collects = true;
                 window_accumulator::collection::CollectedSequence::evaluate(
                     executor,
@@ -1036,7 +1042,10 @@ pub(super) async fn evaluate_window_aggregate(
                     &compiled.output_type,
                     &state.entries,
                 )
-                .await?
+                .await
+                .change_context(WindowProcessorError::Collection {
+                    function: compiled.invocation.function,
+                })?
             }
             _ => accumulator.evaluate(
                 demand,
@@ -2721,7 +2730,7 @@ mod tests {
                 &output,
                 &output_only,
                 None,
-                nervix_vm::VmSettings::default(),
+                nervix_vm::CompileOptions::default(),
             )),
             "window aggregate input relay 'latencies' has no runtime schema"
         );
@@ -2736,7 +2745,7 @@ mod tests {
             &output,
             &unrelated_output,
             None,
-            nervix_vm::VmSettings::default(),
+            nervix_vm::CompileOptions::default(),
         ) else {
             panic!("an assignment to an undeclared field must not compile");
         };
@@ -2757,7 +2766,7 @@ mod tests {
             &output,
             &scalar_output,
             None,
-            nervix_vm::VmSettings::default(),
+            nervix_vm::CompileOptions::default(),
         ) else {
             panic!("an array cannot be assigned to a scalar field");
         };

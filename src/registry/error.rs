@@ -536,6 +536,13 @@ pub(crate) enum RegistryError {
         route: RelayName,
         function: WindowAggregateFunction,
     },
+    #[error("window processor '{processor}' in domain '{domain}' route '{route}': {} requires WIDTH n MESSAGES with no duration; found WIDTH {}; use {} for a duration or combined bound", WindowAggregateFunction::CollectArray.plexus_name(), .width.to_describe_string(), WindowAggregateFunction::CollectVec.plexus_name())]
+    WindowFixedCollectionWidth {
+        domain: DomainName,
+        processor: ModelName,
+        route: RelayName,
+        width: nervix_models::WindowBound,
+    },
     #[error(
         "window processor '{processor}' in domain '{domain}' route '{route}' uses a sketch and \
          requires MAX STATE SIZE"

@@ -1,11 +1,11 @@
-//! Full COLLECT_VEC emission, including Arrow gathering, VM projection and IPC qualification.
+//! Full retained collection emission, including Arrow gathering, VM projection and IPC qualification.
 //!
 //! Layer: harness.
 //! - **Owns.** Criterion cases for complete collection emissions at two retained-row counts.
 //! - **Depends on.** The production collection fixture, Criterion and the primitive runtime.
 //! - **Must not know.** Model lowering, placement, transport or acknowledgement lifecycles.
 
-use std::num::NonZeroUsize;
+use std::num::{NonZeroU16, NonZeroUsize};
 
 use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
 use meticulous::{OptionExt as _, ResultExt as _};
@@ -25,6 +25,13 @@ fn collection_emission(criterion: &mut Criterion) {
         ));
         group.bench_function(BenchmarkId::from_parameter(count), |bench| {
             bench.iter(|| black_box(runtime.block_on(fixture.emit())))
+        });
+        let array_rows =
+            NonZeroU16::new(u16::try_from(count).assured("the fixed cases retain 64 or 4096 rows"))
+                .verified("the fixed collection retains rows");
+        let fixed = WindowCollectionBenchmark::fixed_array(array_rows);
+        group.bench_function(BenchmarkId::new("fixed_array", count), |bench| {
+            bench.iter(|| black_box(runtime.block_on(fixed.emit())))
         });
     }
     group.finish();

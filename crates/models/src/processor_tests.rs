@@ -1,5 +1,28 @@
 use nonzero_ext::nonzero;
 
+#[test]
+fn fixed_message_width_is_present_only_for_a_positive_count_only_bound() {
+    use crate::WindowBound;
+    assert_eq!(
+        WindowBound::of_messages(3).fixed_message_width(),
+        std::num::NonZeroU64::new(3)
+    );
+    assert!(WindowBound::of_messages(0).fixed_message_width().is_none());
+    assert!(
+        WindowBound::of_duration("1s".to_string())
+            .fixed_message_width()
+            .is_none()
+    );
+    assert!(
+        WindowBound {
+            messages: Some(3),
+            duration: Some("1s".to_string())
+        }
+        .fixed_message_width()
+        .is_none()
+    );
+}
+
 use crate::{
     AckMode, AlterDeduplicator, AlterDeduplicatorError, AlterDeduplicatorOperation, AlterJunction,
     AlterJunctionError, AlterProcessorError, AlterProcessorOperation, AlterReingestor,

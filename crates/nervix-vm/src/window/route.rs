@@ -195,6 +195,7 @@ impl WindowAggregateFunction {
             | Self::Avg
             | Self::BoolAnd
             | Self::BoolOr
+            | Self::CollectArray
             | Self::CollectVec
             | Self::Corr
             | Self::Count
@@ -493,10 +494,10 @@ impl CompiledArguments {
         let mut demands = Vec::with_capacity(program.demands().len());
         for demand in program.demands() {
             let first = argument_column(&types, demand.id, 0)?;
-            if demand
-                .functions
-                .contains(&WindowAggregateFunction::CollectVec)
-            {
+            for function in demand.functions.iter() {
+                if !function.collects_values() {
+                    continue;
+                }
                 let inferred = types
                     .get(&first.field)
                     .verified("argument_column just found this field in the inferred arguments");
@@ -504,7 +505,7 @@ impl CompiledArguments {
                     return Err(Report::new(
                         WindowRouteCompileError::CollectionArgumentNullable {
                             demand: demand.id,
-                            function: WindowAggregateFunction::CollectVec,
+                            function: *function,
                         },
                     ));
                 }
@@ -605,6 +606,15 @@ mod tests {
         input: &StdArc<Schema>,
         output: &StdArc<Schema>,
     ) -> Result<CompiledWindowRoute, Report<WindowRouteCompileError>> {
+        compile_with_width(assignments, input, output, None)
+    }
+
+    fn compile_with_width(
+        assignments: &str,
+        input: &StdArc<Schema>,
+        output: &StdArc<Schema>,
+        window_message_width: Option<std::num::NonZeroU64>,
+    ) -> Result<CompiledWindowRoute, Report<WindowRouteCompileError>> {
         let construction = nervix_plexus::parse_route_construction(&format!("SET {assignments}"))
             .expect("every route construction in these tests is valid Plexus");
         let program = lower_window_assignments(&construction)
@@ -618,8 +628,138 @@ mod tests {
                 output,
                 output_sensitivity: &SchemaSensitivity::default(),
             },
-            &CompileOptions::default(),
+            &CompileOptions {
+                window_message_width,
+                ..CompileOptions::default()
+            },
         )
+    }
+
+    #[test]
+    fn fixed_collection_type_comes_from_the_window_and_shares_the_sequence() {
+        use meticulous::ResultExt as _;
+        let input = schema(&[("value", DataType::Int64, false)]);
+        let fixed =
+            DataType::FixedSizeList(StdArc::new(Field::new("item", DataType::Int64, false)), 3);
+        let output = schema(&[
+            ("collected", fixed.clone(), false),
+            ("first_value", DataType::Int64, false),
+            ("last_value", DataType::Int64, false),
+        ]);
+        let compiled = compile_with_width(
+            "collected = COLLECT_ARRAY(input.value), first_value = FIRST(input.value), last_value \
+             = LAST(input.value)",
+            &input,
+            &output,
+            std::num::NonZeroU64::new(3),
+        )
+        .assured("the declared width and required element match the output");
+        assert_eq!(compiled.demands.len(), 1);
+        assert_eq!(
+            compiled.demands[0]
+                .functions
+                .iter()
+                .map(|function| function.plexus_name())
+                .collect::<Vec<_>>(),
+            ["COLLECT_ARRAY", "FIRST", "LAST"]
+        );
+        let invocation = compiled
+            .invocations
+            .iter()
+            .find(|invocation| {
+                invocation.invocation.function == WindowAggregateFunction::CollectArray
+            })
+            .assured("the assignment injects a fixed collection");
+        assert_eq!(invocation.output_type, fixed);
+    }
+
+    #[test]
+    fn fixed_collection_does_not_infer_a_width_from_the_assigned_field() {
+        let input = schema(&[("value", DataType::Int64, false)]);
+        let output = schema(&[(
+            "collected",
+            DataType::FixedSizeList(StdArc::new(Field::new("item", DataType::Int64, false)), 2),
+            false,
+        )]);
+        let missing = compile("collected = COLLECT_ARRAY(input.value)", &input, &output)
+            .expect_err("an output target supplies no count width");
+        assert_eq!(
+            missing
+                .downcast_ref::<crate::error::CompileError>()
+                .assured("the compiler context is retained")
+                .code,
+            crate::error::CompileErrorCode::UnsupportedFunctionContext
+        );
+        let different = compile_with_width(
+            "collected = COLLECT_ARRAY(input.value)",
+            &input,
+            &output,
+            std::num::NonZeroU64::new(3),
+        )
+        .expect_err("the declared width is three, while the field is two");
+        assert_eq!(
+            different
+                .downcast_ref::<crate::error::CompileError>()
+                .assured("the exact-type refusal keeps its compiler context")
+                .code,
+            crate::error::CompileErrorCode::TypeMismatch
+        );
+    }
+
+    #[test]
+    fn fixed_collection_requires_a_required_argument() {
+        let input = schema(&[("value", DataType::Int64, true)]);
+        let output = schema(&[(
+            "collected",
+            DataType::FixedSizeList(StdArc::new(Field::new("item", DataType::Int64, false)), 3),
+            false,
+        )]);
+        let error = compile_with_width(
+            "collected = COLLECT_ARRAY(input.value)",
+            &input,
+            &output,
+            std::num::NonZeroU64::new(3),
+        )
+        .expect_err("fixed-list elements cannot be nullable");
+        assert!(matches!(
+            error.current_context(),
+            WindowRouteCompileError::CollectionArgumentNullable {
+                function: WindowAggregateFunction::CollectArray,
+                demand: 0
+            }
+        ));
+        let compiled = compile_with_width(
+            "collected = COLLECT_ARRAY(coalesce(input.value, 0))",
+            &input,
+            &output,
+            std::num::NonZeroU64::new(3),
+        );
+        assert!(
+            compiled.is_ok(),
+            "an explicit default makes the argument required: {compiled:?}"
+        );
+    }
+
+    #[test]
+    fn fixed_collection_adds_an_outer_axis_to_the_argument_type() {
+        use meticulous::ResultExt as _;
+        for argument in [
+            DataType::FixedSizeList(StdArc::new(Field::new("item", DataType::Float32, false)), 2),
+            DataType::List(StdArc::new(Field::new("item", DataType::Float32, false))),
+        ] {
+            let input = schema(&[("value", argument.clone(), false)]);
+            let fixed =
+                DataType::FixedSizeList(StdArc::new(Field::new("item", argument, false)), 3);
+            let output = schema(&[("collected", fixed.clone(), false)]);
+            let compiled = compile_with_width(
+                "collected = COLLECT_ARRAY(input.value)",
+                &input,
+                &output,
+                std::num::NonZeroU64::new(3),
+            )
+            .assured("the count width wraps the complete argument type");
+            assert_eq!(compiled.invocations[0].output_type, fixed);
+        }
     }
 
     fn failure(result: Result<CompiledWindowRoute, Report<WindowRouteCompileError>>) -> String {

@@ -1036,6 +1036,16 @@ The reference owns each family's contract. These notes describe its implementati
   - Construction and `concat` use Arrow `interleave`. `slice` builds indices for one `take`.
   - `ListElements` in the catalog decides, when the call is compiled, which functions reject
     nested elements, so no batch reaches a kernel with an element type it cannot read.
+  - `list_reshape` resolves positive literal dimensions at lowering and validates their product
+    against the fixed input shape at compilation. Execution rebuilds the list levels around the
+    same innermost child buffer; fixed `list_flatten` also reuses its child buffer. Rebuilt levels
+    expand the input container's null mask, including for sliced inputs.
+  - `list_flatten` removes one level. With a variable level it composes offsets and shares the
+    child values where their validity permits; hidden null children of a null fixed container are
+    omitted when constructing a vector with required elements.
+  - `list_transpose` gathers the second-level child once, then exchanges the two outer fixed
+    levels. Deeper levels remain whole. `first`, `last`, and `nth` select nested list values through
+    the same Arrow `take` as scalar elements.
   - Explicit list arithmetic validates exact numeric leaf types and fixed inner shapes in
     `semantics/list_arithmetic.rs`. Its runtime owner applies the existing checked numeric kernels
     to a whole fixed child run; ragged pairs and per-row scalar operands use a segmented pass.
@@ -1168,8 +1178,15 @@ and diagnostics.
 Registry validation compiles the same route with the same compiler when the processor is applied.
 It also rejects arguments containing `BYTES`, checks the sketch budget, and requires a message
 `WIDTH` or `MAX STATE SIZE` for `COLLECT_VEC`. Collection refuses a nullable argument with a typed
-route error and a `coalesce` instruction. Its injected result is a required `VEC` whose non-null
-item has the argument's exact type, including a nested array or vector.
+route error and a `coalesce` instruction. `COLLECT_VEC` injects a required `VEC` whose non-null
+item has the argument's exact type, including a nested array or vector. For `COLLECT_ARRAY`, the
+vocabulary projects a positive message width only from a count-only bound. Validation refuses
+other bounds with the processor, route, function and authored bound; compilation receives that
+same width during validation, installation and restored argument-schema construction. The
+compiler wraps the argument type in a required fixed-size list of that width, independently of
+the assigned field. Widths and necessarily present nested fixed-list field lengths exceeding
+Arrow's signed 32-bit representation are refused before allocation. Per-node relay byte limits
+remain emission admission, since capabilities do not select graph acceptance.
 
 Cold state inspection projects the same argument program through
 `CompiledWindowRoute::argument_inspection_fields` with the input schema's sensitivity and the
@@ -1216,6 +1233,11 @@ for each row.
 Gathering checks cancellation between runs and preserves nested types and floating-point bits.
 Accepted retained work waits for a worker place under the branch task's existing lifetime.
 
+The fixed form checks the retained count against its compiled width before capturing or charging
+the gather. Both forms gather the same child column; only the final Arrow container differs.
+The vector adds two offsets, while the fixed array has no outer offset buffer. Neither form adds
+an accumulator, retained column, snapshot field or publication protocol.
+
 Before a collection route publishes, its final output is checked against the relay decoded limit
 and qualified by the bounded IPC encoder against the encoded limit. That qualification has a cost
 separate from destination encoding; `window_collection` benchmarks the complete route emission,
@@ -1240,7 +1262,7 @@ window's relay emission or couple branch execution to a subscribing client's set
 | `moments` | `AVG`, variances, standard deviations | Two-pass centered count, mean, and M2 with one Chan merge per run, in a two-stack window | Refold typed surviving runs |
 | `co_moments` | Covariances, `CORR` | Two-pass centered co-moments with one Chan merge per run; `CORR` clamped to `[-1, 1]` | Refold typed surviving runs |
 | `extremes`, `sequence`, `arg_extremes` | `MIN`/`MAX`, `FIRST`/`LAST`, `ARG_MIN`/`ARG_MAX` | Monotonic candidate deque ordered by value, arrival, or key; ties keep the earliest row | Drop front candidates older than the first survivor |
-| `sequence` | `COLLECT_VEC` | Gather every retained argument in ingestion-low-watermark/admission order, sharing the argument and endpoint structure with `FIRST`/`LAST` | Read only the surviving rows; no extra retained state |
+| `sequence` | `COLLECT_VEC`, `COLLECT_ARRAY` | Gather every retained argument in ingestion-low-watermark/admission order, sharing the argument and endpoint structure with `FIRST`/`LAST` | Read only the surviving rows; no extra retained state |
 | `linear_histogram` | `PERCENTILE_LINEAR_HISTOGRAM` | Fixed-range buckets, answered with a bucket midpoint | Immediately, or after the configured delay on the domain clock |
 | `hll` | `APPROX_COUNT_DISTINCT` | HyperLogLog over the first 8 bytes of a BLAKE3 hash of a type-tagged key, with linear counting at small cardinalities | Rebuilt from survivors |
 | `quantile_sketch` | `APPROX_QUANTILE` | t-digest capped at its capacity, merging the least-cost adjacent centroids; exact while it holds every value | Rebuilt from survivors |

@@ -10,7 +10,7 @@
     nervix::layer(harness, reason = "collection emission benchmark fixture")
 )]
 
-use std::num::NonZeroUsize;
+use std::num::{NonZeroU16, NonZeroU32, NonZeroU64, NonZeroUsize};
 
 use ahash::HashMap;
 use arrow_array::{ArrayRef, Int64Array, RecordBatch};
@@ -18,7 +18,7 @@ use meticulous::ResultExt as _;
 use nervix_execution::Executor;
 use nervix_models::{CreateSchema, ParseAsType, RelayName, SchemaField, Timestamp};
 use nervix_primitives::sync::{Arc, StdArc};
-use nervix_vm::window::lower_window_assignments;
+use nervix_vm::{program::WindowAggregateFunction, window::lower_window_assignments};
 
 use super::{WindowAccumulatorPlan, WindowArgumentColumns};
 use crate::{
@@ -40,22 +40,69 @@ pub struct WindowCollectionBenchmark {
     state: WindowProcessorState,
 }
 
+enum CollectionCase {
+    Vector(NonZeroUsize),
+    Array(NonZeroU16),
+}
+
+impl CollectionCase {
+    fn rows(&self) -> NonZeroUsize {
+        match self {
+            Self::Vector(rows) => *rows,
+            Self::Array(rows) => NonZeroUsize::from(*rows),
+        }
+    }
+
+    fn output_type(&self) -> ParseAsType {
+        match self {
+            Self::Vector(_) => ParseAsType::Vec {
+                element: Box::new(ParseAsType::I64),
+            },
+            Self::Array(rows) => ParseAsType::Array {
+                element: Box::new(ParseAsType::I64),
+                len: NonZeroU32::from(*rows),
+            },
+        }
+    }
+
+    fn function(&self) -> WindowAggregateFunction {
+        match self {
+            Self::Vector(_) => WindowAggregateFunction::CollectVec,
+            Self::Array(_) => WindowAggregateFunction::CollectArray,
+        }
+    }
+
+    fn message_width(&self) -> Option<NonZeroU64> {
+        match self {
+            Self::Vector(_) => None,
+            Self::Array(rows) => Some(NonZeroU64::from(*rows)),
+        }
+    }
+}
+
 impl WindowCollectionBenchmark {
     /// Build outside the measured loop; only emission, including output IPC qualification, is timed.
     pub fn new(rows: NonZeroUsize) -> Self {
+        Self::build(CollectionCase::Vector(rows))
+    }
+
+    /// Measure fixed collection with a bounded width that fits Arrow and the fixture's memory.
+    pub fn fixed_array(rows: NonZeroU16) -> Self {
+        Self::build(CollectionCase::Array(rows))
+    }
+
+    fn build(case: CollectionCase) -> Self {
+        let rows = case.rows();
         let input = schema("reading", "value", ParseAsType::I64);
-        let output_schema = schema(
-            "history",
-            "values",
-            ParseAsType::Vec {
-                element: Box::new(ParseAsType::I64),
-            },
-        );
+        let output_schema = schema("history", "values", case.output_type());
         let from = RelayName::try_from("readings").assured("the relay name is valid");
         let to = RelayName::try_from("histories").assured("the relay name is valid");
-        let construction =
-            nervix_plexus::parse_route_construction("SET values = COLLECT_VEC(input.value)")
-                .assured("the benchmark route is valid Plexus");
+        let set = format!(
+            "SET values = {}(input.value)",
+            case.function().plexus_name()
+        );
+        let construction = nervix_plexus::parse_route_construction(&set)
+            .assured("the benchmark route is valid Plexus");
         let aggregate = lower_window_assignments(&construction)
             .assured("the collection route lowers")
             .inner;
@@ -69,7 +116,10 @@ impl WindowCollectionBenchmark {
             &to,
             &schemas,
             None,
-            nervix_vm::VmSettings::default(),
+            nervix_vm::CompileOptions {
+                window_message_width: case.message_width(),
+                ..nervix_vm::CompileOptions::default()
+            },
         )
         .assured("the benchmark route compiles");
         let plan = WindowAccumulatorPlan::new([&compiled.route], None, None);

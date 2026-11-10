@@ -227,7 +227,7 @@ pub(super) fn compile_window_aggregate_for_test(
         &output_relay,
         &relay_schemas,
         None,
-        nervix_vm::VmSettings::default(),
+        nervix_vm::CompileOptions::default(),
     )
     .expect("window aggregate should compile")
 }
@@ -594,6 +594,16 @@ impl TestWindow {
         input: &[OptionalTestField],
         output: &[OptionalTestField],
     ) -> Self {
+        Self::with_message_width(set, input, output, None)
+    }
+
+    /// Compile with the count-only width supplied by the production window plan.
+    pub(super) fn with_message_width(
+        set: &str,
+        input: &[OptionalTestField],
+        output: &[OptionalTestField],
+        window_message_width: Option<std::num::NonZeroU64>,
+    ) -> Self {
         let input_schema = test_optional_schema(input);
         let output_schema = test_optional_schema(output);
         let input_relay = named::<RelayName>("events");
@@ -608,7 +618,10 @@ impl TestWindow {
             &output_relay,
             &relay_schemas,
             None,
-            nervix_vm::VmSettings::default(),
+            nervix_vm::CompileOptions {
+                window_message_width,
+                ..nervix_vm::CompileOptions::default()
+            },
         )
         .expect("the test window route should compile");
         let sketch_layout = compiled

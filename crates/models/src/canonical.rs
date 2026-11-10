@@ -3735,7 +3735,7 @@ impl crate::StateBranchSelection {
                     let value = expression_to_plexus(&Expression::Literal(field.value.clone()))?;
                     rendered.push(format!("{} = {value}", field.name.as_str()));
                 }
-                format!("BRANCH VALUES {{ {} }}", rendered.join(", "))
+                format!("BRANCH KEY {{ {} }}", rendered.join(", "))
             }
         })
     }

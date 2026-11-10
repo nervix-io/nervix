@@ -55,19 +55,19 @@ pub enum ResolvedStateBranchSelection {
 pub enum StateBranchSelectionError {
     #[error("state selection does not match the entity's branch declaration")]
     InvalidScope,
-    #[error("state branch fields do not match the declared branch schema")]
+    #[error("state branch key fields do not match the declared branch schema")]
     InvalidFields,
-    #[error("state branch field '{field}' requires an exact {expected} literal")]
+    #[error("state branch key field '{field}' requires an exact {expected} literal")]
     InvalidFieldType {
         field: FieldName,
         expected: ParseAsType,
     },
-    #[error("state branch field '{field}' has a non-finite floating-point value")]
+    #[error("state branch key field '{field}' has a non-finite floating-point value")]
     NonFiniteFloat { field: FieldName },
 }
 
 impl StateBranchSelection {
-    /// Resolve a command's written branch values before any state read or reset effect.
+    /// Resolve a command's written branch key before any state read or reset effect.
     /// The selected fingerprint follows the same canonical JSON key encoding as runtime branch
     /// keys, while the field values themselves stay out of impact reports.
     pub fn resolve(
