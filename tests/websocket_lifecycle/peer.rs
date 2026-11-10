@@ -3,8 +3,9 @@
 //! Layer: test harness.
 //! - **Owns.** Listening connections, bounded events, opening cancellation, public connection
 //!   confirmation, payload release, graceful-close observations, a first message above the
-//!   client's limit, how an unread connection ended, measured reconnect instants, scripted
-//!   subprotocol answers and measured client ping arrivals.
+//!   client's limit, a first signaling handshake refused or left unanswered, how an unread
+//!   connection ended, measured reconnect instants, scripted subprotocol answers and measured
+//!   client ping arrivals.
 //! - **Depends on.** Execution primitives, I/O errors and the WebSocket protocol.
 //! - **Must not know.** Scenario state, connector internals or runtime ownership handles.
 
@@ -173,6 +174,16 @@ impl UnreadEnding {
             }
         }
     }
+}
+
+/// How a failed-handshake peer fails the client's first signaling handshake.
+#[derive(Clone, Copy)]
+pub(crate) enum FirstHandshake {
+    /// Answers with `{"error":"subscription refused"}`, which the protocol's `FAIL JAQ '.error'`
+    /// guard rejects.
+    Refused,
+    /// Never answers, so the protocol's `TIMEOUT` ends the handshake.
+    Stalled,
 }
 
 /// What a subprotocol peer answers to the `sec-websocket-protocol` offer of every opening upgrade.
@@ -555,6 +566,76 @@ impl WebsocketPeer {
                 .send(Message::Text("{\"user_id\":43}".into()))
                 .await
                 .map_err(io::Error::other)?;
+            while let Some(message) = replacement.next().await {
+                nervix_primitives::task::consume_budget().await;
+                match message.map_err(io::Error::other)? {
+                    Message::Close(_) => {
+                        reply_to_close(&mut replacement).await?;
+                        break;
+                    }
+                    _ => replacement.flush().await.map_err(io::Error::other)?,
+                }
+            }
+            Ok(())
+        });
+        Self {
+            events,
+            payload: None,
+            task: AbortOnDropHandle::new(task),
+        }
+    }
+
+    /// Accepts one connection and fails the client's signaling handshake over it as `first`
+    /// scripts, then never reads that connection. It reports how the client ended it as soon as
+    /// TCP ends, while it accepts the replacement the client opens, so the two reports arrive in
+    /// the order they happened. Over the replacement it answers the handshake with
+    /// `{"ready":true}`, sends one payload and answers until the client closes it.
+    pub(super) fn failed_handshake(listener: TcpListener, first: FirstHandshake) -> Self {
+        // Both connections and the failed one's ending, so a report never waits on the observer.
+        let (events_tx, events) = mpsc::channel(3);
+        let task = nervix_primitives::task::spawn(async move {
+            let (stream, _) = listener.accept().await?;
+            let mut failed = tokio_tungstenite::accept_async(stream)
+                .await
+                .map_err(io::Error::other)?;
+            events_tx
+                .send(PeerEvent::Connected(Instant::now()))
+                .await
+                .map_err(io::Error::other)?;
+            match first {
+                FirstHandshake::Refused => failed
+                    .send(Message::Text("{\"error\":\"subscription refused\"}".into()))
+                    .await
+                    .map_err(io::Error::other)?,
+                FirstHandshake::Stalled => {}
+            }
+            let failed_ending = async {
+                let ending = UnreadEnding::read(failed).await?;
+                events_tx
+                    .send(PeerEvent::UnreadConnectionEnded(ending))
+                    .await
+                    .map_err(io::Error::other)
+            };
+            let replacement = async {
+                let (stream, _) = listener.accept().await?;
+                let replacement = tokio_tungstenite::accept_async(stream)
+                    .await
+                    .map_err(io::Error::other)?;
+                events_tx
+                    .send(PeerEvent::Connected(Instant::now()))
+                    .await
+                    .map_err(io::Error::other)?;
+                io::Result::Ok(replacement)
+            };
+            let (failed_ending, replacement) = tokio::join!(failed_ending, replacement);
+            failed_ending?;
+            let mut replacement = replacement?;
+            for answer in ["{\"ready\":true}", "{\"user_id\":43}"] {
+                replacement
+                    .send(Message::Text(answer.into()))
+                    .await
+                    .map_err(io::Error::other)?;
+            }
             while let Some(message) = replacement.next().await {
                 nervix_primitives::task::consume_budget().await;
                 match message.map_err(io::Error::other)? {
