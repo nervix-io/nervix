@@ -321,6 +321,11 @@ impl MaterializedRelayStateRead {
         self.state.current_lsm.current()
     }
 
+    /// The newest revision of this state persisted on this node.
+    pub(super) fn persisted_lsm(&self) -> u64 {
+        self.state.last_persisted_lsm.load(Ordering::SeqCst)
+    }
+
     pub(super) fn primary_node(&self) -> Option<ClusterNodeName> {
         self.state.assignment.roles().primary_node.clone()
     }

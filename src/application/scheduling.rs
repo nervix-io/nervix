@@ -19,7 +19,7 @@
 
 use std::{collections::BTreeSet, fmt, num::NonZeroU64, time::Duration};
 
-use ahash::{HashMap, HashSet};
+use ahash::{HashMap, HashMapExt, HashSet};
 use error_stack::{Report, ResultExt as _};
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_connector_kafka::TopicPartitionInspector;
@@ -622,6 +622,7 @@ impl SessionServiceImpl {
                 cluster_nodes,
                 usize::try_from(self.cluster_parameters().replica_count())
                     .assured("the committed count fits a supported target"),
+                inputs.schedule(),
                 self.inner.runtime.scheduler_mode(),
                 planning.capabilities(),
             );
@@ -631,6 +632,7 @@ impl SessionServiceImpl {
                 cluster_nodes,
                 usize::try_from(self.cluster_parameters().replica_count())
                     .assured("the committed count fits a supported target"),
+                inputs.schedule(),
                 planning.capabilities(),
             );
             Self::merge_existing_schedule_data(&mut schedule, inputs.schedule(), preservable_nodes);
@@ -876,6 +878,7 @@ impl SessionServiceImpl {
                     &replacement_nodes,
                     usize::try_from(self.cluster_parameters().replica_count())
                         .assured("the committed count fits a supported target"),
+                    inputs.schedule(),
                     self.inner.runtime.scheduler_mode(),
                     planning.capabilities(),
                 );
@@ -885,6 +888,7 @@ impl SessionServiceImpl {
                     &replacement_nodes,
                     usize::try_from(self.cluster_parameters().replica_count())
                         .assured("the committed count fits a supported target"),
+                    inputs.schedule(),
                     planning.capabilities(),
                 );
                 let Some(current_domain) = inputs.schedule() else {
@@ -2586,6 +2590,38 @@ impl SessionServiceImpl {
                 },
             );
         }
+    }
+}
+
+/// Keeps the Kafka partition watchers of the schedule current while this node leads, re-reading the
+/// committed schedule whenever it changes and at the leader's watch interval, and stops every
+/// watcher it started when `shutdown` ends the loop.
+pub(in crate::application) async fn run_kafka_partition_watchers(
+    service: SessionServiceImpl,
+    shutdown: CancellationToken,
+) {
+    let mut schedule_rx = service.inner.consensus.subscribe_schedule();
+    let mut tasks: HashMap<KafkaPartitionWatcherKey, KafkaPartitionWatcherTask> = HashMap::new();
+
+    loop {
+        nervix_primitives::task::consume_budget().await;
+        let schedule = service.inner.consensus.current_schedule().await;
+        service
+            .reconcile_kafka_partition_watchers(&schedule, &mut tasks)
+            .await;
+        nervix_primitives::select! {
+            _ = shutdown.cancelled() => break,
+            changed = schedule_rx.changed() => {
+                if changed.is_err() {
+                    break;
+                }
+            }
+            _ = sleep(LEADER_KAFKA_PARTITION_WATCH_INTERVAL) => {}
+        }
+    }
+
+    for (_, watcher) in tasks {
+        watcher.task.stop().await;
     }
 }
 

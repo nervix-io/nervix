@@ -32,13 +32,16 @@ impl Runtime {
         &self,
         domain: &DomainName,
         processor: &ModelName,
+        unit: nervix_models::Unit,
         branch: &Option<BranchKey>,
     ) -> error_stack::Result<(), StateIdentityError> {
-        let placement = self.state_placement(
+        // A partitioned window processor keeps each branch under the unit that owns it.
+        let placement = self.state_placement_for_unit(
             domain,
             RuntimeStateKind::WindowProcessor,
             ModelKind::WindowProcessor,
             processor,
+            unit,
             branch.clone(),
         )?;
         self.inner.state_replication_routing.retire(&placement);

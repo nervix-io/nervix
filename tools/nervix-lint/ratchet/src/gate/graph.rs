@@ -295,7 +295,7 @@ pub fn sites(tree: &str, lockfile: &str) -> Result<Vec<Site>> {
             path: "Cargo.lock".into(),
             line: *line,
             detail: format!(
-                "non_aws_lc_crypto (graph): {} -> {}",
+                "non_aws_lc_crypto: {} -> {}",
                 edge.dependent.render(),
                 edge.dependency.render()
             ),
@@ -346,15 +346,15 @@ mod tests {
         assert_eq!(before.len(), 3);
         assert_eq!(
             before[0].render(),
-            "Cargo.lock:1: non_aws_lc_crypto (graph): nervix-server 1 -> argon2 1"
+            "Cargo.lock:1: non_aws_lc_crypto: nervix-server 1 -> argon2 1"
         );
         assert_eq!(
             before[1].render(),
-            "Cargo.lock:4: non_aws_lc_crypto (graph): argon2 1 -> blake2 1"
+            "Cargo.lock:4: non_aws_lc_crypto: argon2 1 -> blake2 1"
         );
         assert_eq!(
             before[2].render(),
-            "Cargo.lock:7: non_aws_lc_crypto (graph): nervix-models 1 -> sha2 1"
+            "Cargo.lock:7: non_aws_lc_crypto: nervix-models 1 -> sha2 1"
         );
         let extra = two_trees(
             "1argon2 v1\n2blake2 v1\n1nervix-models v1\n2sha2 v1\n2argon2 v1 (*)\n1parquet \

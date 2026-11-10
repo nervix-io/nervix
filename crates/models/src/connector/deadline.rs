@@ -35,7 +35,7 @@ pub struct ClientDeadline(Duration);
 
 impl ClientDeadline {
     /// The longest deadline a wait can be scheduled with: half the nanoseconds a `u64` holds, about
-    /// 146 years.
+    /// 292 years.
     pub const LONGEST: Duration = Duration::from_nanos(u64::MAX / 2);
 
     /// The timeout `milliseconds` states, written as ASCII digits alone: no sign, fraction, unit or
