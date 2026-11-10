@@ -37,6 +37,7 @@ pub(in crate::application) async fn run(service: SessionServiceImpl, shutdown: C
     let mut retry_at = Instant::now();
     let mut announced = None;
     let mut published = None;
+    let mut refreshed_revocations = None;
     loop {
         nervix_primitives::task::consume_budget().await;
         let current = service
@@ -49,6 +50,7 @@ pub(in crate::application) async fn run(service: SessionServiceImpl, shutdown: C
             while requests.join_next().await.is_some() {}
             tenure = current;
             retry_at = Instant::now();
+            refreshed_revocations = None;
         }
         let publication = (tenure.clone(), service.inner.licensing.connectivity());
         if published.as_ref() != Some(&publication) {
@@ -63,7 +65,14 @@ pub(in crate::application) async fn run(service: SessionServiceImpl, shutdown: C
             published = Some(publication);
         }
         let delay = if tenure.is_some() {
-            reconcile(&service, &mut requests, retry_at, &mut announced).await
+            reconcile(
+                &service,
+                &mut requests,
+                retry_at,
+                &mut announced,
+                &mut refreshed_revocations,
+            )
+            .await
         } else {
             None
         };
@@ -121,15 +130,20 @@ async fn reconcile(
     requests: &mut RefreshAttempts,
     retry_at: Instant,
     announced: &mut Option<PolicyState>,
+    refreshed_revocations: &mut Option<Vec<u64>>,
 ) -> Option<Duration> {
     let policy = crate::licensing::policy::evaluate_policy(
         service.inner.consensus.observer().licensing_snapshot(),
     );
     let initialized = policy.snapshot.initialized.as_ref()?;
-    if !matches!(
+    let pending = initialized.rotation.is_some()
+        || matches!(&initialized.record.mode,
+        nervix_consensus::LicensingMode::Released(release) if release.awaiting());
+    if matches!(
         initialized.record.mode,
-        nervix_consensus::LicensingMode::Activated(_)
-    ) {
+        nervix_consensus::LicensingMode::Free { .. }
+    ) && !pending
+    {
         return None;
     }
     let now = clock::observe(service.inner.runtime.fault_injection());
@@ -148,12 +162,43 @@ async fn reconcile(
         }
     }
     let due = match &initialized.verification {
-        Some(Ok(verified)) => now.into_datetime() >= verified.decision.timing.refresh_after,
+        Some(Ok(verified)) => {
+            verified.signing_key_revoked
+                || now.into_datetime() >= verified.decision.timing.refresh_after
+        }
         Some(Err(_)) | None => true,
     };
-    if due && requests.is_empty() && Instant::now() >= retry_at {
+    let revocations = initialized
+        .record
+        .trust
+        .iter()
+        .filter(|document| {
+            document.typ == nervix_licensing_protocol::document::DocumentType::Revocation
+        })
+        .map(|document| document.serial)
+        .collect::<Vec<_>>();
+    let newly_revoked = matches!(&initialized.verification, Some(Ok(verified)) if verified.signing_key_revoked)
+        && refreshed_revocations.as_ref() != Some(&revocations);
+    if (pending
+        || due
+            && matches!(
+                initialized.record.mode,
+                nervix_consensus::LicensingMode::Activated(_)
+            ))
+        && requests.is_empty()
+        && (newly_revoked || Instant::now() >= retry_at)
+    {
+        if newly_revoked {
+            *refreshed_revocations = Some(revocations);
+        }
         let requester = service.clone();
-        requests.spawn(async move { requester.refresh_license_in_background().await });
+        requests.spawn(async move {
+            if pending {
+                requester.resume_licensing_operations().await
+            } else {
+                requester.refresh_license_in_background().await
+            }
+        });
     }
     if *announced != Some(policy.state) {
         publish_warning(service, policy.state, initialized.record.licensing_time);

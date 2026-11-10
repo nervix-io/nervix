@@ -5,6 +5,7 @@
 //! - **Depends on.** Maintained HTTP/TLS clients, the signing capability and protocol encoders.
 //! - **Must not know.** Private key bytes, policy grants or graph execution.
 
+mod retained;
 use std::time::Duration;
 
 use error_stack::{Report, ResultExt as _};
@@ -21,6 +22,7 @@ use nervix_licensing_protocol::{
 };
 use nervix_models::Timestamp;
 use nervix_primitives::time::{sleep, timeout};
+pub(super) use retained::{release, rotation};
 use serde::de::DeserializeOwned;
 use thiserror::Error;
 use uuid::Uuid;
@@ -47,6 +49,8 @@ pub(super) enum LicensingRequestError {
     Signing,
     #[error("licensing work could not acquire its execution reservation")]
     Admission,
+    #[error("licensing request could not be committed before submission")]
+    Consensus,
     #[error("licensing trust anchors have not been provisioned in this build")]
     Unprovisioned,
     #[error("the license key does not have the declared public identifier and secret format")]
@@ -55,6 +59,8 @@ pub(super) enum LicensingRequestError {
     Leadership,
     #[error("licensing request ended during node shutdown")]
     Shutdown,
+    #[error("the pending release yielded to a foreground licensing command")]
+    Foreground,
 }
 
 pub(super) enum Operation {
@@ -65,6 +71,18 @@ pub(super) enum Operation {
     Refresh {
         activation_id: Uuid,
         state: RefreshState,
+    },
+    RotateKey {
+        activation_id: Uuid,
+        state: CommittedState,
+        rotation: nervix_consensus::ClusterKeyRotation,
+    },
+    Release {
+        activation_id: Uuid,
+        state: CommittedState,
+        identity: nervix_consensus::ClusterIdentity,
+        grants_until: Timestamp,
+        prepared: Option<nervix_consensus::PreparedLicensingRequest>,
     },
 }
 
@@ -86,6 +104,8 @@ impl Operation {
         match self {
             Self::Create { .. } => nervix_licensing_protocol::requests::Operation::Create,
             Self::Refresh { .. } => nervix_licensing_protocol::requests::Operation::Refresh,
+            Self::RotateKey { .. } => nervix_licensing_protocol::requests::Operation::RotateKey,
+            Self::Release { .. } => nervix_licensing_protocol::requests::Operation::Release,
         }
     }
 }
@@ -217,12 +237,14 @@ impl<'a> LicensingClient<'a> {
             return Err(Report::new(LicensingRequestError::Leadership));
         }
         let mut topology = self.service.inner.consensus.observer().subscribe_topology();
+        let yields_to_foreground = matches!(operation, Operation::Release { .. });
         let mut work = std::pin::pin!(self.perform_request(cluster, operation, request_id));
         loop {
             nervix_primitives::task::consume_budget().await;
             nervix_primitives::select! {
                 result = &mut work => return result,
                 _ = self.service.inner.drain_support_shutdown.cancelled() => return Err(Report::new(LicensingRequestError::Shutdown)),
+                _ = self.service.inner.licensing_requests.refresh_requested(), if yields_to_foreground => return Err(Report::new(LicensingRequestError::Foreground)),
                 changed = topology.changed() => {
                     if !changed || self.service.inner.consensus.current_leader_tenure().as_ref() != Some(&tenure) {
                         return Err(Report::new(LicensingRequestError::Leadership));
@@ -238,17 +260,25 @@ impl<'a> LicensingClient<'a> {
         operation: Operation,
         request_id: Uuid,
     ) -> Result<DecisionResponse, Report<LicensingRequestError>> {
-        let mut signed: Option<SignedRequest> = None;
+        let mut signed = operation.prepared().map(|request| SignedRequest {
+            body: Zeroizing::new(request.body().to_owned()),
+            expires_at: request.expires_at,
+        });
         let mut backoff = self.budget.min(self.backoff_max);
         loop {
             nervix_primitives::task::consume_budget().await;
             let now = clock::observe(self.service.inner.runtime.fault_injection());
             let attempt = async {
-                if !matches!(signed.as_ref(), Some(request) if now < request.expires_at) {
+                if signed.is_none()
+                    || (!operation.retains_request()
+                        && !matches!(signed.as_ref(), Some(request) if now < request.expires_at))
+                {
                     let challenge = self.challenge(cluster).await?;
                     let expires_at = Timestamp::try_from(challenge.expires_at)
                         .change_context(LicensingRequestError::Response)?;
-                    let request = self.request(cluster, &operation, request_id, challenge, now);
+                    let request = self
+                        .request(cluster, &operation, request_id, challenge, now)
+                        .await?;
                     let executor = self.service.inner.runtime.executor();
                     let reservation = executor
                         .try_reserve(
@@ -256,15 +286,8 @@ impl<'a> LicensingClient<'a> {
                             executor.limits().management_event_bytes.as_u64(),
                         )
                         .change_context(LicensingRequestError::Admission)?;
-                    let signer = self
-                        .service
-                        .inner
-                        .consensus
-                        .cluster_signer()
-                        .await
-                        .change_context(LicensingRequestError::Signing)?
-                        .verified("initialized licensing requests hold an identity");
-                    signed = Some(SignedRequest {
+                    let signer = operation.signer(self, request_id).await?;
+                    let prepared = SignedRequest {
                         body: Zeroizing::new(
                             signer
                                 .sign(request, self.environment.limits(), reservation)
@@ -272,12 +295,20 @@ impl<'a> LicensingClient<'a> {
                                 .change_context(LicensingRequestError::Signing)?,
                         ),
                         expires_at,
-                    });
+                    };
+                    operation.retain(self, request_id, &prepared).await?;
+                    signed = Some(prepared);
                 }
                 let route = match &operation {
                     Operation::Create { .. } => "/v1/activations".to_owned(),
                     Operation::Refresh { activation_id, .. } => {
                         format!("/v1/activations/{activation_id}/refresh")
+                    }
+                    Operation::RotateKey { activation_id, .. } => {
+                        format!("/v1/activations/{activation_id}/key")
+                    }
+                    Operation::Release { activation_id, .. } => {
+                        format!("/v1/activations/{activation_id}/release")
                     }
                 };
                 timeout(self.budget, async {
@@ -319,7 +350,16 @@ impl<'a> LicensingClient<'a> {
             match attempt {
                 Ok(response) => return Ok(response),
                 Err(error) => {
-                    let (retry, outcome) = failed_attempt(error.current_context());
+                    let (mut retry, outcome) = failed_attempt(error.current_context());
+                    if matches!(
+                        error.current_context(),
+                        LicensingRequestError::Refused {
+                            kind: ProblemKind::ChallengeInvalid
+                        }
+                    ) {
+                        signed = None;
+                        retry = true;
+                    }
                     if let Some(outcome) = outcome {
                         self.service.inner.licensing.record_request(
                             operation.name(),
@@ -347,45 +387,72 @@ impl<'a> LicensingClient<'a> {
         }
     }
 
-    fn request(
+    async fn request(
         &self,
         cluster: &ClusterLicensingState,
         operation: &Operation,
         request_id: Uuid,
         challenge: ChallengeResponse,
         now: Timestamp,
-    ) -> Request {
+    ) -> Result<Request, Report<LicensingRequestError>> {
+        let identity = operation.identity(cluster);
         let common = RequestCommon {
             protocol: 1,
             request_id,
             challenge: challenge.challenge,
             sent_at: now.into_datetime(),
             aud: self.environment.service().clone(),
-            cluster_uid: cluster.identity.cluster_uid,
-            display_name: cluster.identity.cluster_uid.to_string(),
+            cluster_uid: identity.cluster_uid,
+            display_name: identity.cluster_uid.to_string(),
             client: ClientDescription {
                 product: ClientProduct::NervixServer,
                 version: env!("CARGO_PKG_VERSION").to_owned(),
             },
-            key_generation: cluster.identity.key_generation.get(),
+            key_generation: identity.key_generation.get(),
             trust_held: held(cluster),
         };
         match operation {
-            Operation::Create { kind, license_key } => Request::Create {
+            Operation::Create { kind, license_key } => Ok(Request::Create {
                 common,
                 kind: *kind,
                 license_key: license_key.clone(),
                 cluster_key: cluster.identity.public_jwk.clone(),
-            },
+            }),
             Operation::Refresh {
                 activation_id,
                 state,
-            } => Request::Refresh {
+            } => Ok(Request::Refresh {
                 common,
                 activation_id: *activation_id,
                 state: state.clone(),
                 transitions: Vec::new(),
-            },
+            }),
+            Operation::Release {
+                activation_id,
+                state,
+                grants_until,
+                ..
+            } => Ok(Request::Release {
+                common,
+                activation_id: *activation_id,
+                state: state.clone(),
+                grants_until: grants_until.into_datetime(),
+                reason: "operator_release".to_owned(),
+            }),
+            Operation::RotateKey {
+                activation_id,
+                state,
+                rotation,
+            } => {
+                let proof = operation.rotation_proof(self, &common).await?;
+                Ok(Request::RotateKey {
+                    common,
+                    activation_id: *activation_id,
+                    state: state.clone(),
+                    new_key: rotation.next_identity.public_jwk.clone(),
+                    proof,
+                })
+            }
         }
     }
 }
@@ -425,12 +492,15 @@ fn failed_attempt(error: &LicensingRequestError) -> (bool, Option<crate::licensi
         LicensingRequestError::Response | LicensingRequestError::Bounds => {
             (false, Some(RequestEvent::RejectedByCluster))
         }
-        LicensingRequestError::Admission | LicensingRequestError::Signing => (true, None),
+        LicensingRequestError::Admission
+        | LicensingRequestError::Signing
+        | LicensingRequestError::Consensus => (true, None),
         LicensingRequestError::Client
         | LicensingRequestError::Unprovisioned
         | LicensingRequestError::LicenseKey
         | LicensingRequestError::Leadership
         | LicensingRequestError::Shutdown => (false, None),
+        LicensingRequestError::Foreground => (false, None),
     }
 }
 

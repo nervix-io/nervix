@@ -201,6 +201,24 @@ fn families(
                 nanos / 1_000_000_000.0,
             );
         }
+        if let nervix_consensus::LicensingMode::Released(release) = &initialized.record.mode {
+            sample(
+                &mut revision,
+                &[],
+                release.activation.decision.revision.approx_into(),
+            );
+            if let Some(next) = release
+                .transitions
+                .values()
+                .iter()
+                .map(|transition| transition.deadline)
+                .filter(|at| *at > initialized.record.licensing_time.into_datetime())
+                .min()
+            {
+                let seconds: f64 = next.timestamp().approx_into();
+                sample(&mut deadlines, &[("deadline", "next_grant")], seconds);
+            }
+        }
     }
     output.push(revision);
     output.push(deadlines);
@@ -233,7 +251,26 @@ fn families(
         output.push(connected);
     }
     let mut transitions = family(6, MetricType::GAUGE);
-    sample(&mut transitions, &[], 0.0);
+    let active_transitions = policy
+        .snapshot
+        .initialized
+        .as_ref()
+        .map_or(0, |initialized| {
+            let values = match &initialized.record.mode {
+                nervix_consensus::LicensingMode::Released(release) => release.transitions.values(),
+                _ => match &initialized.verification {
+                    Some(Ok(verified)) => verified.decision.transitions.as_slice(),
+                    _ => &[],
+                },
+            };
+            values
+                .iter()
+                .filter(|transition| {
+                    transition.deadline > initialized.record.licensing_time.into_datetime()
+                })
+                .count()
+        });
+    sample(&mut transitions, &[], active_transitions.approx_into());
     output.push(transitions);
     let mut over = family(7, MetricType::GAUGE);
     for name in QuotaName::ALL {

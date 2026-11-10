@@ -3964,6 +3964,13 @@ or HTTP 503 without changing failure pacing. Wrong passwords remain authenticati
 
 ### Licensing Admission Refusals
 
+Cluster-key rotation reports typed `RotationInProgress`, `StaleRotation`, `NoPendingRotation` or
+`GenerationExhausted` conflicts. Only its matching operation can complete or abandon a pending key.
+Release reports `NotActivated`, a mismatched independent `Binding`, or `Expired` when an ephemeral
+binding has reached its expiry. A stale admitted command cannot release a later activation.
+These conflicts change no identity, decision or grant. Service refusals retain their protocol
+problem kind; signature, trust and binding refusals retain the shared verifier's typed cause.
+
 `LicensingRefusal` retains the quota name, effective limit, current usage, requested amount and
 refusal state. Quota arithmetic creates its report at the refusal; policy handles preserve it,
 and the admission owner adds its domain or membership context with `change_context`. It keeps

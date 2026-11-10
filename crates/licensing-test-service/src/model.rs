@@ -22,8 +22,23 @@ use uuid::Uuid;
 
 use crate::{ServiceError, limits};
 
+#[derive(Debug, thiserror::Error)]
+#[error("licensing peer refused the request: {code}", code = .kind.code().as_str())]
+struct PeerRefusal {
+    kind: ProblemKind,
+}
+
+impl PeerRefusal {
+    fn report(kind: ProblemKind) -> error_stack::Report<Self> {
+        error_stack::Report::new(Self { kind })
+    }
+}
+
+mod operations;
 #[cfg(test)]
 mod tests;
+mod trust;
+use operations::Route;
 
 #[cfg_attr(
     nervix_lint,
@@ -74,6 +89,8 @@ struct HeldActivation {
     public_key: nervix_licensing_protocol::keys::PublicKey,
     decision: Decision,
     prior_decision: Option<Decision>,
+    retired: Option<operations::RetiredBinding>,
+    capacity_until: Option<DateTime<Utc>>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -100,6 +117,7 @@ pub struct Model {
     now: DateTime<Utc>,
     working: DocumentSigner,
     roots: [DocumentSigner; 3],
+    root_epoch: u64,
     documents: TrustDocuments,
     plan: Conditions,
     conditions_revision: u64,
@@ -109,6 +127,7 @@ pub struct Model {
     faults: VecDeque<Fault>,
     refusal: Option<ProblemKind>,
     license_key: Secret,
+    transition_usage: Option<nervix_licensing_protocol::impact::UsageSnapshot>,
 }
 
 pub(crate) fn id() -> Uuid {
@@ -166,6 +185,7 @@ impl Model {
             now,
             working,
             roots,
+            root_epoch: 0,
             documents,
             plan: default_plan(),
             conditions_revision: 1,
@@ -175,6 +195,7 @@ impl Model {
             faults: VecDeque::new(),
             refusal: None,
             license_key: Secret::new("NVXK-TESTABCD-fixture-secret".to_owned()),
+            transition_usage: None,
         })
     }
 
@@ -224,17 +245,12 @@ impl Model {
             Ok(value) => value,
             Err(_) => return (problem(ProblemKind::InvalidRequest, None), None),
         };
-        let refresh = refresh_id(path);
-        let signer = match refresh {
-            None => RequestSigner::CarriedClusterKey,
-            Some(id) => match self.activations.get(&id) {
-                Some(activation) => RequestSigner::Bound(&activation.public_key),
-                None => return (problem(ProblemKind::ActivationUnknown, None), None),
-            },
+        let Some(route) = Route::parse(path) else {
+            return (problem(ProblemKind::InvalidRequest, None), None);
         };
-        let request = match Request::verify(compact, signer, limits()) {
+        let request = match self.verify_request(compact, route) {
             Ok(request) => request,
-            Err(_) => return (problem(ProblemKind::SignatureInvalid, None), None),
+            Err(error) => return (problem(error.current_context().kind.clone(), None), None),
         };
         if self.requests.len() >= MAX_ENTRIES {
             return (
@@ -289,15 +305,20 @@ impl Model {
                 None,
             );
         }
-        let result = self.process(&request, refresh, fault.as_ref());
+        let result = self.process(&request, route, fault.as_ref());
         let (status, body) = match result {
             Ok(answer) => (
-                if refresh.is_some() { 200 } else { 201 },
+                if route == Route::Create { 201 } else { 200 },
                 serde_json::to_vec(&answer).assured("typed fixture answer serializes"),
             ),
-            Err(kind) => return (problem(kind, Some(identity.request)), None),
+            Err(error) => {
+                return (
+                    problem(error.current_context().kind.clone(), Some(identity.request)),
+                    None,
+                );
+            }
         };
-        if matches!(fault, Some(Fault::Adopt)) && refresh.is_none() {
+        if matches!(fault, Some(Fault::Adopt)) && route == Route::Create {
             // The fixture caps this inventory at MAX_ENTRIES, independently of the scenario.
             let activation_id = self
                 .activations
@@ -368,9 +389,9 @@ impl Model {
     fn process(
         &mut self,
         request: &Request,
-        route: Option<Uuid>,
+        route: Route,
         fault: Option<&Fault>,
-    ) -> Result<DecisionResponse, ProblemKind> {
+    ) -> error_stack::Result<DecisionResponse, PeerRefusal> {
         let common = request.common();
         let activation_id = match request {
             Request::Create {
@@ -378,11 +399,30 @@ impl Model {
                 kind,
                 cluster_key,
                 ..
-            } if route.is_none() => self.create(common, license_key, kind, cluster_key)?,
-            Request::Refresh { activation_id, .. } if route == Some(*activation_id) => {
-                self.refresh(common, activation_id, fault)?
+            } if route == Route::Create => self
+                .create(common, license_key, kind, cluster_key)
+                .map_err(PeerRefusal::report)?,
+            Request::Refresh { activation_id, .. } if route == Route::Refresh(*activation_id) => {
+                self.refresh(common, activation_id, fault)
+                    .map_err(PeerRefusal::report)?
             }
-            _ => return Err(ProblemKind::InvalidRequest),
+            Request::RotateKey {
+                activation_id,
+                state,
+                new_key,
+                proof,
+                ..
+            } if route == Route::RotateKey(*activation_id) => {
+                self.rotate_key(common, *activation_id, state, new_key, proof)?
+            }
+            Request::Release {
+                activation_id,
+                grants_until,
+                ..
+            } if route == Route::Release(*activation_id) => self
+                .release(common, *activation_id, *grants_until)
+                .map_err(PeerRefusal::report)?,
+            _ => return Err(PeerRefusal::report(ProblemKind::InvalidRequest)),
         };
         Ok(self.signed_response(activation_id, fault))
     }
@@ -398,11 +438,10 @@ impl Model {
             return Err(ProblemKind::LicenseKeyInvalid);
         }
         // This scenario inventory has a fixed MAX_ENTRIES bound; it is never a product lookup.
-        if let Some(activation) = self
-            .activations
-            .values()
-            .find(|activation| activation.binding.cluster_uid == common.cluster_uid)
-        {
+        if let Some(activation) = self.activations.values().find(|activation| {
+            activation.binding.cluster_uid == common.cluster_uid
+                && activation.decision.status == DecisionStatus::Active
+        }) {
             return Err(ProblemKind::AlreadyActivated {
                 activation_id: activation.binding.activation_id,
             });
@@ -431,7 +470,7 @@ impl Model {
         let count = u64::try_from(
             self.activations
                 .values()
-                .filter(|held| held.binding.kind == *kind)
+                .filter(|held| held.binding.kind == *kind && held.holds_capacity(self.now))
                 .count(),
         )
         .assured("fixture activation bound fits u64");
@@ -465,6 +504,8 @@ impl Model {
                 public_key: cluster_key.clone(),
                 decision,
                 prior_decision: None,
+                retired: None,
+                capacity_until: None,
             },
         );
         Ok(activation_id)
@@ -492,7 +533,39 @@ impl Model {
             .decision_revision
             .checked_add(1)
             .assured("fixture revisions are bounded");
-        let decision = self.decision(binding, common.request_id, revision);
+        let mut decision = self.decision(binding, common.request_id, revision);
+        if let Some(usage) = self.transition_usage {
+            use nervix_licensing_protocol::impact::*;
+            decision.transitions = held.decision.transitions.clone();
+            decision.transitions.extend(
+                assess_impact(
+                    EffectiveUsage {
+                        conditions: &held.decision.conditions.usage,
+                        transitions: &held.decision.transitions,
+                    },
+                    ImpactTarget::Usage(&decision.conditions.usage),
+                    usage,
+                    TransitionPolicy::from_operating(&held.decision.conditions.operating)
+                        .assured("validated fixture grace"),
+                    ImpactContext {
+                        from_conditions_revision: held.decision.conditions.conditions_revision,
+                        to_conditions_revision: decision.conditions.conditions_revision,
+                        started_at: self.now,
+                        trigger: TransitionTrigger::Decision {
+                            decision_id: decision.decision_id,
+                        },
+                        reason: TransitionReason::PlanChanged,
+                    },
+                    limits().bytes,
+                )
+                .assured("bounded transition assessment"),
+            );
+        }
+        if held.decision.status != DecisionStatus::Active {
+            decision.status = held.decision.status;
+            decision.conditions = held.decision.conditions.clone();
+            decision.transitions = held.decision.transitions.clone();
+        }
         if !matches!(fault, Some(Fault::Tamper(Tamper::PriorDecision))) {
             let held = self
                 .activations
@@ -720,12 +793,6 @@ fn empty_conditions() -> Conditions {
             sets: BTreeMap::new(),
         },
     }
-}
-
-fn refresh_id(path: &str) -> Option<Uuid> {
-    let path = path.strip_prefix("/v1/activations/")?;
-    let id = path.strip_suffix("/refresh")?;
-    Uuid::parse_str(id).ok()
 }
 
 fn default_plan() -> Conditions {

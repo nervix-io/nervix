@@ -27,6 +27,19 @@ use super::{
 };
 use crate::ClusterIdentity;
 
+fn transition_revisions(decision: &Decision) -> BTreeSet<u64> {
+    decision
+        .transitions
+        .iter()
+        .flat_map(|transition| {
+            [
+                transition.from_conditions_revision,
+                transition.to_conditions_revision,
+            ]
+        })
+        .collect()
+}
+
 #[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
@@ -48,10 +61,31 @@ pub struct StoredDecision {
     pub bytes: String,
     pub revision: u64,
     pub conditions_revision: u64,
+    pub transition_conditions_revisions: Vec<u64>,
+    pub operation: StoredDecisionOperation,
     pub issued_at: Timestamp,
     pub received_at: Timestamp,
     #[rkyv(with = crate::cluster_identity::archive::UuidBytes)]
     pub request_id: Uuid,
+}
+
+/// The accepted command's semantic context is required to verify preserved rotation deadlines
+/// again after recovery. It is constructed at acceptance, never supplied as a verification flag.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    Archive,
+    RkyvSerialize,
+    RkyvDeserialize,
+)]
+pub enum StoredDecisionOperation {
+    Apply,
+    ClusterKeyRotation,
 }
 
 #[derive(
@@ -108,6 +142,10 @@ pub enum LicenseDecisionError {
     NotActivated,
     #[error("the licensing decision proposal is stale")]
     StaleDecision,
+    #[error("the prepared licensing request does not verify")]
+    Request,
+    #[error("an expired ephemeral activation cannot be released")]
+    Expired,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -181,11 +219,19 @@ impl ReceivedLicenseDecision {
     fn stored(
         &self,
         decision: &Decision,
+        operation: DecisionOperation<'_>,
     ) -> error_stack::Result<StoredDecision, LicenseDecisionError> {
         Ok(StoredDecision {
             bytes: self.bytes.clone(),
             revision: decision.decision_revision,
             conditions_revision: decision.conditions.conditions_revision,
+            transition_conditions_revisions: transition_revisions(decision).into_iter().collect(),
+            operation: match operation {
+                DecisionOperation::Apply => StoredDecisionOperation::Apply,
+                DecisionOperation::CompleteClusterKeyRotation { .. } => {
+                    StoredDecisionOperation::ClusterKeyRotation
+                }
+            },
             issued_at: Timestamp::try_from(decision.issued_at)
                 .change_context(LicenseDecisionError::Timestamp)?,
             received_at: self.received_at,
@@ -265,8 +311,10 @@ impl LicensingRecord {
         identity: &ClusterIdentity,
         environment: &LicensingEnvironment,
     ) -> Option<LicenseVerification> {
-        let LicensingMode::Activated(activation) = &self.mode else {
-            return None;
+        let (activation, identity) = match &self.mode {
+            LicensingMode::Free { .. } => return None,
+            LicensingMode::Activated(activation) => (activation.as_ref(), identity),
+            LicensingMode::Released(release) => (&release.activation, &release.identity),
         };
         Some(
             self.verify_stored(activation, identity, environment)
@@ -285,7 +333,20 @@ impl LicensingRecord {
         if StoredTrustDocument::retained(&trust)? != self.trust {
             return Err(Report::new(LicenseDecisionError::Metadata));
         }
-        let binding = activation.binding.protocol_binding(identity);
+        let mut binding = activation.binding.protocol_binding(identity);
+        let operation = match activation.decision.operation {
+            StoredDecisionOperation::Apply => DecisionOperation::Apply,
+            StoredDecisionOperation::ClusterKeyRotation => {
+                binding.generation = binding
+                    .generation
+                    .checked_sub(1)
+                    .filter(|generation| *generation > 0)
+                    .ok_or_else(|| Report::new(LicenseDecisionError::Metadata))?;
+                DecisionOperation::CompleteClusterKeyRotation {
+                    pending_key: &identity.kid,
+                }
+            }
+        };
         let validated = trust
             .validate_decision(
                 &activation.decision.bytes,
@@ -293,10 +354,15 @@ impl LicensingRecord {
                 DecisionContext {
                     service: environment.service(),
                     binding: &binding,
-                    operation: DecisionOperation::Apply,
+                    operation,
                     request_id: activation.decision.request_id,
                     committed: None,
-                    known_conditions_revisions: &BTreeSet::new(),
+                    known_conditions_revisions: &activation
+                        .decision
+                        .transition_conditions_revisions
+                        .iter()
+                        .copied()
+                        .collect(),
                 },
                 environment.limits(),
             )
@@ -307,6 +373,10 @@ impl LicensingRecord {
         let stored = &activation.decision;
         if decision.decision_revision != stored.revision
             || decision.conditions.conditions_revision != stored.conditions_revision
+            || transition_revisions(decision)
+                .into_iter()
+                .collect::<Vec<_>>()
+                != stored.transition_conditions_revisions
             || decision.issued_at != stored.issued_at.into_datetime()
         {
             return Err(Report::new(LicenseDecisionError::Metadata));
@@ -329,8 +399,27 @@ impl LicensingRecord {
         expected_revision: Option<u64>,
         environment: &LicensingEnvironment,
     ) -> error_stack::Result<Self, LicenseDecisionError> {
+        self.accept_operation(
+            identity,
+            binding,
+            received,
+            expected_revision,
+            DecisionOperation::Apply,
+            environment,
+        )
+    }
+
+    pub(super) fn accept_operation(
+        &self,
+        identity: &ClusterIdentity,
+        binding: &ActivationBinding,
+        received: &ReceivedLicenseDecision,
+        expected_revision: Option<u64>,
+        operation: DecisionOperation<'_>,
+        environment: &LicensingEnvironment,
+    ) -> error_stack::Result<Self, LicenseDecisionError> {
         let previous = match &self.mode {
-            LicensingMode::Free => {
+            LicensingMode::Free { .. } | LicensingMode::Released(_) => {
                 if expected_revision.is_some() {
                     return Err(Report::new(LicenseDecisionError::NotActivated));
                 }
@@ -352,11 +441,22 @@ impl LicensingRecord {
         if StoredTrustDocument::retained(&trust)? != documents {
             return Err(Report::new(LicenseDecisionError::Metadata));
         }
-        let committed = match self.verify(identity, environment) {
-            Some(Ok(verified)) => Some(verified),
-            Some(Err(_)) | None => None,
+        let committed = match (previous, self.verify(identity, environment)) {
+            (Some(_), Some(Ok(verified))) => Some(verified),
+            _ => None,
         };
         let protocol_binding = binding.protocol_binding(identity);
+        let mut known_revisions = BTreeSet::new();
+        if let Some(previous) = previous {
+            known_revisions.insert(previous.decision.conditions_revision);
+            known_revisions.extend(
+                previous
+                    .decision
+                    .transition_conditions_revisions
+                    .iter()
+                    .copied(),
+            );
+        }
         let verified = trust
             .verify_decision(
                 &received.bytes,
@@ -379,10 +479,10 @@ impl LicensingRecord {
             .validate(DecisionContext {
                 service: environment.service(),
                 binding: &protocol_binding,
-                operation: DecisionOperation::Apply,
+                operation,
                 request_id: received.request_id,
                 committed: committed.as_ref().map(|view| view.decision.as_ref()),
-                known_conditions_revisions: &BTreeSet::new(),
+                known_conditions_revisions: &known_revisions,
             })
             .map_err(LicenseDecisionError::from_rejection)?;
         let decision = verified.decision();
@@ -405,7 +505,7 @@ impl LicensingRecord {
                 return Err(Report::new(LicenseDecisionError::StaleDecision));
             }
         }
-        let decision = received.stored(decision)?;
+        let decision = received.stored(decision, operation)?;
         let time = self
             .licensing_time
             .max(decision.received_at)

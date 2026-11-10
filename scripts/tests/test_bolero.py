@@ -551,31 +551,31 @@ class InventoryTests(unittest.TestCase):
         }
         for target, version in {
             "benchmark-metrics-report": 1,
-            "ingestor-describe-envelope": 12,
-            "plexus-model": 62,
-            "plexus-archive-model": 65,
-            "plexus-statement": 69,
-            "plexus-statement-text": 68,
-            "plexus-format-document": 68,
-            "plexus-format-text": 67,
-            "models-archived-models": 68,
-            "registry-archived-models": 57,
-            "consensus-state-records": 65,
-            "consensus-state-corruption": 65,
-            "consensus-raft-records": 64,
-            "registry-stored-models": 50,
-            "registry-stored-models-corruption": 50,
-            "cluster-identity-record-rkyv": 2,
-            "node-capability-records": 5,
-            "node-settings-command-line": 11,
+            "ingestor-describe-envelope": 13,
+            "plexus-model": 63,
+            "plexus-archive-model": 66,
+            "plexus-statement": 70,
+            "plexus-statement-text": 69,
+            "plexus-format-document": 69,
+            "plexus-format-text": 68,
+            "models-archived-models": 69,
+            "registry-archived-models": 58,
+            "consensus-state-records": 66,
+            "consensus-state-corruption": 66,
+            "consensus-raft-records": 65,
+            "registry-stored-models": 51,
+            "registry-stored-models-corruption": 51,
+            "cluster-identity-record-rkyv": 3,
+            "node-capability-records": 6,
+            "node-settings-command-line": 12,
             "inferencer-tensor-columns": 1,
             "inferencer-state-snapshots": 1,
-            "backup-inferencer-values": 3,
-            "backup-inferencer-malformed": 3,
-            "backup-record-manifest": 19,
-            "backup-complete-archives": 19,
-            "backup-malformed-records": 19,
-            "backup-corrupt-archives": 20,
+            "backup-inferencer-values": 4,
+            "backup-inferencer-malformed": 4,
+            "backup-record-manifest": 20,
+            "backup-complete-archives": 20,
+            "backup-malformed-records": 20,
+            "backup-corrupt-archives": 21,
             "backup-capture-wire": 3,
             "backup-capture-wire-malformed": 3,
             "backup-section-mapping": 4,
@@ -586,18 +586,18 @@ class InventoryTests(unittest.TestCase):
 
             "inferencer-state-snapshots-malformed": 1,
             "inferencer-native-snapshot-projection": 1,
-            "console-emitter-drafts": 7,
-            "console-processor-drafts": 7,
-            "client-requests": 13,
-            "client-producer-link-frames": 11,
-            "client-producer-link-frames-malformed": 11,
+            "console-emitter-drafts": 8,
+            "console-processor-drafts": 8,
+            "client-requests": 14,
+            "client-producer-link-frames": 12,
+            "client-producer-link-frames-malformed": 12,
         }.items():
             with self.subTest(target=target):
                 self.assertEqual(versions[target], version)
 
     def test_state_inspection_representations_are_bounded_pairs(self) -> None:
         targets = {target.id: target for target in bolero.load_inventory().targets}
-        for name, version in (("client-state-inspection", 7), ("state-inspection-cursor", 8)):
+        for name, version in (("client-state-inspection", 8), ("state-inspection-cursor", 9)):
             with self.subTest(target=name):
                 self.assertEqual(targets[name].domain_version, version)
                 self.assertEqual(targets[name].max_input_bytes, 512)

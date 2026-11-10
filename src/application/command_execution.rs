@@ -351,7 +351,10 @@ impl PersistentCommandRequest {
                     };
                     if matches!(
                         statement,
-                        Statement::ActivateLicense(_) | Statement::RefreshLicense(_)
+                        Statement::ActivateLicense(_)
+                            | Statement::RefreshLicense(_)
+                            | Statement::ReleaseLicense(_)
+                            | Statement::RotateLicenseClusterKey(_)
                     ) {
                         return Err(Report::new(
                             PersistentCommandRequestError::UnqueueableStatement {
@@ -667,6 +670,18 @@ impl SessionServiceImpl {
             .await;
 
         let effect = match &request.body {
+            PersistentCommandRequestBody::Statement {
+                statement: Statement::RotateLicenseClusterKey(_),
+                ..
+            } => self
+                .prepare_cluster_key_rotation()
+                .map_err(|error| Box::new(command_error(format!("{error:#}"))))?,
+            PersistentCommandRequestBody::Statement {
+                statement: Statement::ReleaseLicense(_),
+                ..
+            } => self
+                .prepare_license_release()
+                .map_err(|error| Box::new(command_error(format!("{error:#}"))))?,
             PersistentCommandRequestBody::Statement {
                 statement: Statement::ActivateLicense(activate),
                 ..
@@ -987,6 +1002,13 @@ impl SessionServiceImpl {
                     .await;
                 }
             },
+            CommandExecutionEffect::RotateLicenseClusterKey { identity, .. } => {
+                self.rotate_license_cluster_key(&execution.reference, *identity)
+                    .await
+            }
+            CommandExecutionEffect::ReleaseLicense { binding, .. } => {
+                self.release_license(&execution.reference, *binding).await
+            }
             CommandExecutionEffect::ActivateLicense { binding, decision } => {
                 self.apply_license_activation(&execution.reference, *binding, *decision)
                     .await

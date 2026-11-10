@@ -524,7 +524,8 @@ Emitter statements exchanged through the control plane use explicit `KEY` expres
 `payload` expression scope, typed materialized relay inspection, ingestor read interactions,
 corridor/domain-wide placement coverage, pace-only domain configuration, exact partition/instance
 relocation selections, ingestor acknowledgement and connector lifecycle observations, and the current
-transaction operation and commit-step alternatives. Peers must
+transaction operation and commit-step alternatives, durable licensing rotation/release effects and
+consensus commands with their exact request and independent binding records. Peers must
 match it exactly.
 
 Execution-unit identities use an eight-byte rank with four-byte archive alignment. Single and

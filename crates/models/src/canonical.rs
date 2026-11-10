@@ -1005,6 +1005,8 @@ impl Statement {
                 ))
             }
             Self::RefreshLicense(_) => Ok("REFRESH LICENSE;".to_string()),
+            Self::ReleaseLicense(_) => Ok("RELEASE LICENSE;".to_string()),
+            Self::RotateLicenseClusterKey(_) => Ok("ROTATE LICENSE CLUSTER KEY;".to_string()),
             Self::DescribeLicense(_) => Ok("DESCRIBE LICENSE;".to_string()),
             Self::ShowTransactions(_) => Ok("SHOW TRANSACTIONS;".to_string()),
             Self::DescribeTransaction(describe) => Ok(describe.to_canonical_plexus()),

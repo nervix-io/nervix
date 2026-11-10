@@ -7679,6 +7679,7 @@ dependencies = [
  "indexmap 2.14.2",
  "meticulous",
  "nervix-arbitrary",
+ "nervix-bounded-write",
  "nervix-crypto",
  "nervix-dns",
  "nervix-execution",

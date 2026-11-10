@@ -51,6 +51,8 @@ pub enum Statement {
     AlterCluster(crate::AlterCluster),
     ActivateLicense(ActivateLicense),
     RefreshLicense(RefreshLicense),
+    ReleaseLicense(ReleaseLicense),
+    RotateLicenseClusterKey(RotateLicenseClusterKey),
     CreateDomain(CreateStatement<CreateDomain>),
     CreateUser(CreateStatement<CreateUser>),
     CreateResource(CreateStatement<CreateResource>),
@@ -152,6 +154,8 @@ impl Statement {
             Self::AlterCluster(_)
             | Self::ActivateLicense(_)
             | Self::RefreshLicense(_)
+            | Self::ReleaseLicense(_)
+            | Self::RotateLicenseClusterKey(_)
             | Self::CreateDomain(_)
             | Self::CreateUser(_)
             | Self::CreateResource(_)
@@ -2989,6 +2993,16 @@ impl std::fmt::Debug for ActivateLicense {
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
 pub struct RefreshLicense;
+
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
+pub struct ReleaseLicense;
+
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
+pub struct RotateLicenseClusterKey;
 
 impl Drop for ActivateLicense {
     fn drop(&mut self) {

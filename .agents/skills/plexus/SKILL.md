@@ -137,7 +137,8 @@ For backend validation claims, follow that chapter's P-256 signing and backend-s
 selecting an approved algorithm does not establish a validated deployment.
 For cluster continuity and public identity inspection, read
 [Node Settings → Permanent Cluster Identity](../../../docs/src/node-settings.md#permanent-cluster-identity).
-For activation, refresh, `DESCRIBE LICENSE`, effective policy, credential handling and quota usage, read
+For activation, refresh, `ROTATE LICENSE CLUSTER KEY`, `RELEASE LICENSE`, `DESCRIBE LICENSE`,
+effective policy, credential handling and quota usage, read
 [Node Settings → Cluster Licensing](../../../docs/src/node-settings.md#cluster-licensing) and
 [Licensing Metrics](../../../docs/src/metrics-and-observability.md#licensing-metrics).
 Keep licensing commands cluster-scoped and obtain credentials and trust provisioning externally;

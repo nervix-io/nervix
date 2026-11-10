@@ -298,11 +298,20 @@ async fn current_license(world: &ScenarioWorld) -> std::collections::BTreeMap<St
         .await
         .assured("public license inspection completes");
     assert!(outcome.succeeded(), "{}", outcome.message);
-    let mut fields = license_fields(&outcome.message);
-    let state = outcome
-        .state
-        .as_ref()
-        .verified("inspection includes typed rows");
+    inspected_license_fields(
+        &outcome.message,
+        outcome
+            .state
+            .as_ref()
+            .verified("inspection includes typed rows"),
+    )
+}
+
+fn inspected_license_fields(
+    message: &str,
+    state: &nervix_client_wire::StateInspection,
+) -> std::collections::BTreeMap<String, String> {
+    let mut fields = license_fields(message);
     let nervix_client_wire::StateInspectionResult::Page(page) = &state.result else {
         panic!("license inspection returned a page");
     };
@@ -311,12 +320,20 @@ async fn current_license(world: &ScenarioWorld) -> std::collections::BTreeMap<St
             for frame in &section.frames {
                 for row in frame.batch().rows() {
                     for (index, field) in section.schema.fields.iter().enumerate() {
-                        if let Some(nervix_client_wire::CellView::Datetime(value)) = row.get(index)
-                        {
-                            fields.insert(
-                                field.name.as_str().replace('_', " "),
-                                value.into_datetime().to_rfc3339(),
-                            );
+                        let value = match row.get(index) {
+                            Some(nervix_client_wire::CellView::Datetime(value)) => {
+                                Some(value.into_datetime().to_rfc3339())
+                            }
+                            Some(nervix_client_wire::CellView::U64(value)) => {
+                                Some(value.to_string())
+                            }
+                            Some(nervix_client_wire::CellView::String(value)) => {
+                                Some(value.to_owned())
+                            }
+                            _ => None,
+                        };
+                        if let Some(value) = value {
+                            fields.insert(field.name.as_str().replace('_', " "), value);
                         }
                     }
                 }
@@ -332,6 +349,13 @@ fn license_fields(message: &str) -> std::collections::BTreeMap<String, String> {
         .filter_map(|line| line.split_once(": "))
         .map(|(name, value)| (name.to_owned(), value.to_owned()))
         .collect()
+}
+
+#[then(expr = "every node has the license decision saved as placeholder {string}")]
+async fn every_node_license_matches(world: &mut ScenarioWorld, name: String) {
+    for node in world.cluster().node_ids() {
+        node_license_matches(world, node, name.clone()).await;
+    }
 }
 
 #[then(expr = "node {string} reports the licensing service refusal {string}")]
@@ -666,6 +690,7 @@ async fn pass_deadline(world: &mut ScenarioWorld, name: String) {
         "valid_until" => "valid until",
         "refresh_after" => "refresh after",
         "ephemeral" => "ephemeral expires at",
+        "grants_until" => "grants until",
         _ => panic!("undeclared licensing deadline"),
     };
     let deadline =
@@ -786,6 +811,7 @@ async fn refuse_service(world: &mut ScenarioWorld, name: String) {
 }
 
 #[given("the first activation response is lost after processing")]
+#[given("the next licensing operation response is lost after processing")]
 async fn lose_activation_response(world: &mut ScenarioWorld) {
     world
         .licensing_service
@@ -793,6 +819,283 @@ async fn lose_activation_response(world: &mut ScenarioWorld) {
         .verified("fixture started")
         .configure(|model| model.script(nervix_licensing_test_service::Fault::LoseResponse))
         .await;
+}
+
+#[given("the next licensing rotation is refused")]
+async fn refuse_rotation(world: &mut ScenarioWorld) {
+    world
+        .licensing_service
+        .as_ref()
+        .verified("fixture started")
+        .configure(|model| {
+            model.script(nervix_licensing_test_service::Fault::Refuse(
+                nervix_licensing_protocol::problems::ProblemKind::ProofInvalid,
+            ));
+        })
+        .await;
+}
+
+#[then(
+    expr = "the rotation preserves identity and every signed deadline from placeholder {string}"
+)]
+async fn preserved_rotation(world: &mut ScenarioWorld, name: String) {
+    let saved = saved_license(world, &name);
+    let current = current_license(world).await;
+    for field in [
+        "cluster uid",
+        "activation",
+        "ephemeral expires at",
+        "refresh after",
+        "overdue at",
+        "valid until",
+    ] {
+        assert_eq!(
+            current.get(field),
+            saved.get(field),
+            "rotation moved {field}"
+        );
+    }
+    assert_ne!(
+        current.get("cluster key"),
+        saved.get("cluster key"),
+        "rotation must replace its public key"
+    );
+    let generation = |values: &std::collections::BTreeMap<String, String>| {
+        values
+            .get("cluster key generation")
+            .verified("typed generation")
+            .parse::<u64>()
+            .assured("generation is u64")
+    };
+    assert_eq!(generation(&current), generation(&saved) + 1);
+}
+
+#[then("the licensing service replayed one rotation request identity")]
+async fn rotation_replay(world: &mut ScenarioWorld) {
+    let requests = world
+        .licensing_service
+        .as_ref()
+        .verified("fixture started")
+        .requests()
+        .await;
+    let rotations = requests
+        .iter()
+        .filter(|request| {
+            matches!(
+                request,
+                nervix_licensing_protocol::requests::Request::RotateKey { .. }
+            )
+        })
+        .collect::<Vec<_>>();
+    assert!(rotations.len() >= 2);
+    for request in &rotations {
+        assert_eq!(request, &rotations[0]);
+    }
+}
+
+#[when("the licensing service revokes its working key")]
+async fn revoke_working_key(world: &mut ScenarioWorld) {
+    let refreshes = world
+        .licensing_service
+        .as_ref()
+        .verified("fixture started")
+        .requests()
+        .await
+        .into_iter()
+        .filter_map(|request| match request {
+            nervix_licensing_protocol::requests::Request::Refresh { common, .. } => {
+                Some(common.request_id)
+            }
+            _ => None,
+        })
+        .collect::<std::collections::BTreeSet<_>>();
+    world.placeholders.insert(
+        "refreshes_before_revocation".to_owned(),
+        refreshes.len().to_string(),
+    );
+    world
+        .licensing_service
+        .as_ref()
+        .verified("fixture started")
+        .configure(|model| model.revoke_working_key().assured("real signed revocation"))
+        .await;
+}
+
+#[then("the revocation triggers a background refresh before its ordinary deadline")]
+async fn revocation_triggers_refresh(world: &mut ScenarioWorld) {
+    let before = world
+        .placeholders
+        .get("refreshes_before_revocation")
+        .verified("pre-revocation requests were saved")
+        .parse::<usize>()
+        .assured("saved count");
+    timeout(STATUS_WAIT_BUDGET, async {
+        loop {
+            let requests = world
+                .licensing_service
+                .as_ref()
+                .verified("fixture started")
+                .requests()
+                .await;
+            let refreshes = requests
+                .into_iter()
+                .filter_map(|request| match request {
+                    nervix_licensing_protocol::requests::Request::Refresh { common, .. } => {
+                        Some(common.request_id)
+                    }
+                    _ => None,
+                })
+                .collect::<std::collections::BTreeSet<_>>();
+            if refreshes.len() >= before + 2 {
+                break;
+            }
+            sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .assured("revocation adds a background refresh beside the explicit request");
+    let current = current_license(world).await;
+    assert!(
+        public_license_timestamp(current.get("licensing time").verified("committed time"))
+            < public_license_timestamp(
+                current
+                    .get("refresh after")
+                    .verified("ordinary refresh deadline")
+            )
+    );
+}
+
+#[when("the licensing service installs a replacement working key")]
+async fn replace_working_key(world: &mut ScenarioWorld) {
+    world
+        .licensing_service
+        .as_ref()
+        .verified("fixture started")
+        .configure(|model| {
+            model
+                .replace_working_key()
+                .assured("real signed authorization")
+        })
+        .await;
+}
+
+#[when(expr = "the licensing service advances its root epoch with succession {string}")]
+async fn succeed_roots(world: &mut ScenarioWorld, supplied: String) {
+    let supplied = match supplied.as_str() {
+        "provided" => true,
+        "missing" => false,
+        _ => panic!("declared succession choice"),
+    };
+    world
+        .licensing_service
+        .as_ref()
+        .verified("fixture started")
+        .configure(|model| {
+            model
+                .succeed_roots(supplied)
+                .assured("real root and working key change")
+        })
+        .await;
+}
+
+#[when("the licensing administrator transfers the activation")]
+async fn transfer_activation(world: &mut ScenarioWorld) {
+    world
+        .licensing_service
+        .as_ref()
+        .verified("fixture started")
+        .configure(|model| model.transfer_activations())
+        .await;
+}
+
+#[given("the licensing service allows one persistent activation")]
+async fn one_persistent_slot(world: &mut ScenarioWorld) {
+    use nervix_licensing_protocol::conditions::*;
+    world
+        .licensing_service
+        .as_ref()
+        .verified("fixture started")
+        .configure(|model| {
+            let mut plan = model.conditions();
+            plan.operating.quotas.insert(
+                PERSISTENT_ACTIVATIONS.to_owned(),
+                ConditionValue::Known(Quota::Bounded { value: 1 }),
+            );
+            model.plan(plan);
+        })
+        .await;
+}
+
+#[when("the transferred installation is rebuilt and activates anew")]
+async fn rebuilt_activation(world: &mut ScenarioWorld) {
+    let mut config = world.cluster_config.clone();
+    config.node_name_prefix = "rebuilt".to_owned();
+    let mut rebuilt = super::common::cluster::Cluster::start_with_config(
+        world.cluster().node_ids().len(),
+        nervix_server::FaultInjection::default(),
+        config,
+        world.scenario_identity(),
+    )
+    .await
+    .assured("clean independent cluster starts");
+    let result = async {
+        let leader = rebuilt.wait_for_leader_among_running().await?;
+        let uri = rebuilt.grpc_uri(&leader)?;
+        let client = Client::connect_with_options(&uri, None, super::client_connect_options(&uri)?)
+            .await
+            .map_err(std::io::Error::other)?;
+        client
+            .execute("ACTIVATE LICENSE PERSISTENT WITH KEY 'NVXK-TESTABCD-fixture-secret';")
+            .await
+            .map_err(std::io::Error::other)
+    }
+    .await;
+    rebuilt
+        .shutdown()
+        .await
+        .assured("rebuilt fixture is joined before asserting");
+    let outcome = result.assured("new activation completes");
+    assert!(outcome.succeeded(), "{}", outcome.message);
+}
+
+#[then("the licensing service holds one active activation after transfer")]
+async fn one_active_after_transfer(world: &mut ScenarioWorld) {
+    let (all, active) = world
+        .licensing_service
+        .as_ref()
+        .verified("fixture started")
+        .configure(|model| (model.activation_count(), model.active_activation_count()))
+        .await;
+    assert_eq!(all, 2);
+    assert_eq!(active, 1);
+}
+
+#[when("the licensing service reduces the domain quota with a transition")]
+async fn reduce_domain_quota(world: &mut ScenarioWorld) {
+    world
+        .licensing_service
+        .as_ref()
+        .verified("fixture started")
+        .configure(|model| model.reduce_domain_quota_with_grace())
+        .await;
+}
+
+#[then("the released cluster retains a grant until its signed deadline")]
+async fn release_has_grant(world: &mut ScenarioWorld) {
+    let current = current_license(world).await;
+    assert_eq!(current.get("mode").map(String::as_str), Some("released"));
+    assert!(
+        current.contains_key("grants until"),
+        "release must retain the transition deadline: {current:?}"
+    );
+    let requests = world
+        .licensing_service
+        .as_ref()
+        .verified("fixture started")
+        .requests()
+        .await;
+    assert!(requests.iter().any(|request| matches!(request, nervix_licensing_protocol::requests::Request::Release { grants_until, .. }
+        if chrono::DateTime::parse_from_rfc3339(current.get("grants until").verified("typed grant deadline")).map(|time| time.with_timezone(&chrono::Utc) == *grants_until).unwrap_or(false))));
 }
 
 #[given("the licensing service has already processed the activation when it answers")]
@@ -861,16 +1164,20 @@ async fn node_license_matches(world: &mut ScenarioWorld, node: String, name: Str
                 .execute("DESCRIBE LICENSE;")
                 .await
                 .assured("inspection completes");
-            if ["decision", "activation", "verification"]
-                .iter()
-                .all(|name| {
-                    expected.get(*name).is_some_and(|value| {
-                        outcome
-                            .message
-                            .lines()
-                            .any(|line| line == format!("{name}: {value}"))
-                    })
-                })
+            let current = inspected_license_fields(
+                &outcome.message,
+                outcome.state.as_ref().verified("typed inspection"),
+            );
+            if [
+                "decision",
+                "activation",
+                "verification",
+                "cluster uid",
+                "cluster key",
+                "cluster key generation",
+            ]
+            .iter()
+            .all(|field| current.get(*field) == expected.get(*field))
             {
                 break;
             }
@@ -1056,4 +1363,37 @@ async fn binding_expiry_reached(world: &mut ScenarioWorld, name: String) {
     .assured(
         "the independent timer commits the original expiry despite unverifiable decision bytes",
     );
+}
+
+#[then(expr = "node {string} eventually has cluster key generation {int}")]
+async fn key_generation(world: &mut ScenarioWorld, node: String, generation: u64) {
+    let uri = world
+        .cluster()
+        .grpc_uri(&expand_placeholders(world, &node))
+        .assured("node endpoint");
+    let client = Client::connect_with_options(
+        &uri,
+        None,
+        super::client_connect_options(&uri).assured("TLS options"),
+    )
+    .await
+    .assured("native session connects");
+    timeout(STATUS_WAIT_BUDGET, async {
+        loop {
+            let outcome = client
+                .execute("DESCRIBE LICENSE;")
+                .await
+                .assured("public inspection completes");
+            let fields = inspected_license_fields(
+                &outcome.message,
+                outcome.state.as_ref().verified("typed inspection"),
+            );
+            if fields.get("cluster key generation") == Some(&generation.to_string()) {
+                break;
+            }
+            sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .assured("the typed generation reaches this node");
 }
