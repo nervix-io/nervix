@@ -293,8 +293,9 @@ pub use names::{
     WireSchemaName,
 };
 pub use node_capabilities::{
-    ConsensusCapabilities, DnsAddressFamilies, DnsCapabilities, InterconnectCapabilities,
-    InvalidPeerCapacity, MaxPeers, NodeCapabilities, NodeCapabilityRecord, PeerReceiveBounds,
+    ConnectorHostCapabilities, ConsensusCapabilities, DnsAddressFamilies, DnsCapabilities,
+    EngineCapabilities, InterconnectCapabilities, InvalidPeerCapacity, MaxPeers, NodeCapabilities,
+    NodeCapabilityRecord, PeerReceiveBounds,
 };
 pub use node_endpoint::{
     NodeEndpoint, NodeEndpointParseError, NodeServiceUrl, NodeServiceUrlParseError,

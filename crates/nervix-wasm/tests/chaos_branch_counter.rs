@@ -469,6 +469,7 @@ fn write_the_branch_counter_module() {
 #[nervix_primitives::test]
 async fn the_branch_counter_counts_its_branch_rows_and_restores_the_count() {
     let runtime = WasmRuntime::new(WasmRuntimeConfig {
+        engine: nervix_wasm::WasmEngineSettings::default(),
         optimize: false,
         epoch_tick_interval: Duration::from_millis(5),
         epoch_deadline_ticks: 2_000,
@@ -572,6 +573,7 @@ async fn the_branch_counter_counts_its_branch_rows_and_restores_the_count() {
 #[nervix_primitives::test]
 async fn the_branch_counter_refuses_saved_state_of_another_shape() {
     let runtime = WasmRuntime::new(WasmRuntimeConfig {
+        engine: nervix_wasm::WasmEngineSettings::default(),
         optimize: false,
         epoch_tick_interval: Duration::from_millis(5),
         epoch_deadline_ticks: 2_000,

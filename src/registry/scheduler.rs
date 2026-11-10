@@ -823,6 +823,10 @@ pub(crate) fn uniform_capabilities(
             .node_capability_record()
             .capabilities
             .consensus,
+        engines: nervix_arbitrary::Arbitrary::new(&[], nervix_arbitrary::Domain::Vocabulary)
+            .node_engine_capabilities(),
+        connector_host: nervix_arbitrary::Arbitrary::new(&[], nervix_arbitrary::Domain::Vocabulary)
+            .node_connector_host_capabilities(),
         cpu_count: Some(std::num::NonZeroU64::MIN),
         memory_bytes: Some(std::num::NonZeroU64::MIN),
         receive: nervix_interconnect::PeerReceiveSettings::default().bounds(),

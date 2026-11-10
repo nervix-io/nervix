@@ -547,6 +547,13 @@ test-partition-placement feature="tests/features/cluster/partition_placement.fea
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
     cargo test --package nervix-scenarios --test scenarios -- --input {{ quote(feature) }} {{ quote(args) }}
 
+# Exercise local engine admission and CLI settings through public node and REPL interfaces.
+test-engine-settings *args: build-deps build-plexus-format build-test-cli build-deadlock-report
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    cargo test --package nervix-scenarios --test scenarios -- --input tests/features/cluster/engine_settings.feature {{ quote(args) }}
+
 # Exercise emitter destination keys and partitions without unrelated client-tool preparation.
 test-emitter-destinations *args: build-deps
     #!/usr/bin/env bash

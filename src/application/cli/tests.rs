@@ -20,11 +20,13 @@ use crate::application::{
 };
 
 /// The headings of the settings areas, in the order help lists them.
-const SETTINGS_HEADINGS: [&str; 14] = [
+const SETTINGS_HEADINGS: [&str; 16] = [
     "Databases",
     "Consensus capacities",
     "DNS",
     "Interconnect",
+    "Connector host",
+    "Expression engine",
     "Consensus",
     "Membership",
     "Scheduling",
@@ -38,7 +40,19 @@ const SETTINGS_HEADINGS: [&str; 14] = [
 ];
 
 /// Every setting the settings groups declare, by the name its definition gives it.
-const SETTING_NAMES: [&str; 113] = [
+const SETTING_NAMES: [&str; 125] = [
+    "connector-retry-multiplier",
+    "connector-retry-jitter-percent",
+    "kafka-domain-assignment-retry",
+    "kafka-partition-watch-interval",
+    "syslog-intake-queue-capacity",
+    "syslog-read-chunk-bytes",
+    "wasm-stack-bytes",
+    "wasm-memory-reservation-bytes",
+    "vm-inline-row-limit",
+    "vm-regex-search-cache-bytes",
+    "vm-dynamic-pattern-cache-capacity",
+    "vm-pattern-sets-per-batch",
     "database-cache-bytes",
     "database-journal-bytes",
     "database-workers",

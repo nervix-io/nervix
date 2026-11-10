@@ -235,6 +235,8 @@ impl Preflight<'_> {
                     .value(),
                 executor.limits(),
             ),
+            engines: self.settings.runtime.engine_capabilities(),
+            connector_host: self.settings.runtime.connector_host.capabilities(),
             cpu_count,
             memory_bytes,
             receive: peer_receive.bounds(),

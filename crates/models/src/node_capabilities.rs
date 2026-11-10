@@ -1,7 +1,7 @@
 //! The resolved capacity claim of one concrete node run.
 //!
 //! Layer: vocabulary.
-//! - **Owns.** CPU and memory capacity, peer receive bounds and the incarnation-bound claim.
+//! - **Owns.** CPU and memory capacity, transport, DNS, database, consensus, engine and connector host limits, peer receive bounds and the incarnation-bound claim.
 //! - **Depends on.** Node identities and serialization primitives.
 //! - **Must not know.** Detection, consensus, transport or placement policy.
 
@@ -16,6 +16,51 @@ use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
 
 use crate::ClusterNodeIdentity;
+
+/// The engine limits one node has resolved for its compiled programs and guests.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    Archive,
+    RkyvSerialize,
+    RkyvDeserialize,
+)]
+pub struct EngineCapabilities {
+    pub vm_inline_row_limit: u64,
+    pub vm_regex_search_cache_bytes: NonZeroU64,
+    pub vm_dynamic_pattern_cache_capacity: NonZeroU64,
+    pub vm_pattern_sets_per_batch: NonZeroU64,
+    pub wasm_stack_bytes: NonZeroU64,
+    pub wasm_memory_reservation_bytes: u64,
+    pub wasm_parallel_compilation: bool,
+}
+
+/// Local host cadence and intake limits, independent of external client configuration.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    Archive,
+    RkyvSerialize,
+    RkyvDeserialize,
+)]
+pub struct ConnectorHostCapabilities {
+    pub retry_multiplier: std::num::NonZeroU32,
+    pub retry_jitter_percent: u8,
+    pub kafka_domain_assignment_retry: std::time::Duration,
+    pub kafka_partition_watch_interval: std::time::Duration,
+    pub syslog_intake_queue_capacity: NonZeroU64,
+    pub syslog_read_chunk_bytes: NonZeroU64,
+}
 
 /// Positive limits the receiver enforces. They bound work; they never change cluster acceptance.
 #[derive(
@@ -177,6 +222,8 @@ pub struct ConsensusCapabilities {
     RkyvDeserialize,
 )]
 pub struct NodeCapabilities {
+    pub engines: EngineCapabilities,
+    pub connector_host: ConnectorHostCapabilities,
     pub cpu_count: Option<NonZeroU64>,
     pub memory_bytes: Option<NonZeroU64>,
     pub receive: PeerReceiveBounds,

@@ -570,7 +570,7 @@ impl TestServer {
         let channel = within_deadline(connector.connect(&server))
             .await
             .assured("the client reaches the test server");
-        let events = SessionEvents::new();
+        let events = SessionEvents::new(crate::ClientCapabilities::default());
         let exchange =
             within_deadline(Exchange::open(channel, &connector, events.emitters.clone()))
                 .await

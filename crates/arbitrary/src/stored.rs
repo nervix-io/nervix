@@ -54,6 +54,59 @@ const UUID_RANDOM_A: u64 = 0x0fff;
 const UUID_RANDOM_B: u64 = 0x3fff_ffff_ffff_ffff;
 
 impl Arbitrary<'_> {
+    /// Current engine capabilities, with addressable positive counts and explicit local derivations.
+    pub fn node_engine_capabilities(&mut self) -> nervix_models::EngineCapabilities {
+        let inline = self.entropy.boundary_biased(0..=u64::MAX);
+        let reservation = self.entropy.boundary_biased(0..=u64::MAX);
+        let mut positive = || {
+            std::num::NonZeroU64::new(self.entropy.boundary_biased(1..=u64::MAX))
+                .assured("generated capacities are positive")
+        };
+        nervix_models::EngineCapabilities {
+            vm_inline_row_limit: inline,
+            vm_regex_search_cache_bytes: positive(),
+            vm_dynamic_pattern_cache_capacity: positive(),
+            vm_pattern_sets_per_batch: positive(),
+            wasm_stack_bytes: positive(),
+            wasm_memory_reservation_bytes: reservation,
+            wasm_parallel_compilation: false,
+        }
+    }
+
+    /// Current local connector capabilities; broker-dependent choices remain outside the record.
+    pub fn node_connector_host_capabilities(&mut self) -> nervix_models::ConnectorHostCapabilities {
+        let multiplier = std::num::NonZeroU32::new(
+            u32::try_from(self.entropy.boundary_biased(1..=u64::from(u32::MAX)))
+                .assured("the generated multiplier fits u32"),
+        )
+        .assured("the multiplier is positive");
+        let jitter =
+            u8::try_from(self.entropy.boundary_biased(0..=100)).assured("a percentage fits u8");
+        let mut duration = || {
+            let seconds = self.entropy.boundary_biased(0..=u64::from(u32::MAX));
+            let nanos = self.entropy.boundary_biased(0..=999_999_999);
+            let nanos = if seconds == 0 { nanos.max(1) } else { nanos };
+            std::time::Duration::new(
+                seconds,
+                u32::try_from(nanos).assured("subsecond nanoseconds fit u32"),
+            )
+        };
+        let assignment = duration();
+        let watch = duration();
+        let mut positive = || {
+            std::num::NonZeroU64::new(self.entropy.boundary_biased(1..=65_536))
+                .assured("bounded intake capacities fit native channel and address limits")
+        };
+        nervix_models::ConnectorHostCapabilities {
+            retry_multiplier: multiplier,
+            retry_jitter_percent: jitter,
+            kafka_domain_assignment_retry: assignment,
+            kafka_partition_watch_interval: watch,
+            syslog_intake_queue_capacity: positive(),
+            syslog_read_chunk_bytes: positive(),
+        }
+    }
+
     /// A current incarnation-bound capacity claim, including unknown host measurements.
     pub fn node_capability_record(&mut self) -> nervix_models::NodeCapabilityRecord {
         use std::num::NonZeroU64;
@@ -228,6 +281,8 @@ impl Arbitrary<'_> {
                 node_database: database,
                 consensus_database,
                 consensus,
+                engines: self.node_engine_capabilities(),
+                connector_host: self.node_connector_host_capabilities(),
                 cpu_count: cpu,
                 memory_bytes: memory,
                 receive,

@@ -91,6 +91,16 @@ mod tests {
                         .node_capability_record()
                         .capabilities
                         .consensus,
+                        engines: nervix_arbitrary::Arbitrary::new(
+                            &[],
+                            nervix_arbitrary::Domain::Vocabulary,
+                        )
+                        .node_engine_capabilities(),
+                        connector_host: nervix_arbitrary::Arbitrary::new(
+                            &[],
+                            nervix_arbitrary::Domain::Vocabulary,
+                        )
+                        .node_connector_host_capabilities(),
                         cpu_count: NonZeroU64::new(2),
                         memory_bytes: NonZeroU64::new(8 << 30),
                         receive: crate::PeerReceiveSettings::default().bounds(),

@@ -97,6 +97,13 @@ async fn receive_bound_refusal_creates_no_attempt_and_a_revised_claim_is_adopted
                 .node_capability_record()
                 .capabilities
                 .consensus,
+            engines: nervix_arbitrary::Arbitrary::new(&[], nervix_arbitrary::Domain::Vocabulary)
+                .node_engine_capabilities(),
+            connector_host: nervix_arbitrary::Arbitrary::new(
+                &[],
+                nervix_arbitrary::Domain::Vocabulary,
+            )
+            .node_connector_host_capabilities(),
             cpu_count: None,
             memory_bytes: None,
             receive: receive.bounds(),

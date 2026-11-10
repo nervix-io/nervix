@@ -17,9 +17,10 @@
 
 use std::{convert::Infallible, path::PathBuf, time::Duration};
 
+use arch_into::ArchInto as _;
 use error_stack::Report;
 use fjall::Database;
-use meticulous::ResultExt as _;
+use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_dns::DnsResolver;
 use nervix_execution::Executor;
 use nervix_models::{NodeCapabilities, Setting, SettingDefinition};
@@ -54,6 +55,9 @@ impl SettingDefinition for RestoreStagingMaxBytes {
 /// The settings one runtime is constructed with.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RuntimeSettings {
+    pub connector_host: super::ConnectorHostSettings,
+    pub vm: nervix_vm::VmSettings,
+    pub wasm_engine: nervix_wasm::WasmEngineSettings,
     pub inspection: super::StateInspectionSettings,
     pub state_snapshot_interval: Setting<StateSnapshotInterval>,
     pub restore_staging_max_bytes: Setting<RestoreStagingMaxBytes>,
@@ -66,11 +70,31 @@ impl RuntimeSettings {
         restore_staging_max_bytes: Option<ByteUnit>,
     ) -> Result<Self, Report<nervix_models::ClusterParameterError>> {
         Ok(Self {
+            connector_host: super::ConnectorHostSettings::default(),
+            vm: nervix_vm::VmSettings::default(),
+            wasm_engine: nervix_wasm::WasmEngineSettings::default(),
             inspection: super::StateInspectionSettings::default(),
             state_snapshot_interval: Setting::resolve(state_snapshot_interval, &())?,
             restore_staging_max_bytes: Setting::new(restore_staging_max_bytes, &())
                 .assured("the local restore capability accepts every optional byte bound"),
         })
+    }
+
+    /// The immutable engine values this node announces after resolving its local settings.
+    pub fn engine_capabilities(&self) -> nervix_models::EngineCapabilities {
+        let positive = |value: usize| {
+            std::num::NonZeroU64::new(value.arch_into())
+                .assured("the engine settings validate positive native capacities")
+        };
+        nervix_models::EngineCapabilities {
+            vm_inline_row_limit: self.vm.inline_row_limit().arch_into(),
+            vm_regex_search_cache_bytes: positive(self.vm.regex_search_cache_bytes()),
+            vm_dynamic_pattern_cache_capacity: positive(self.vm.dynamic_pattern_cache_capacity()),
+            vm_pattern_sets_per_batch: positive(self.vm.pattern_sets_per_batch().get()),
+            wasm_stack_bytes: positive(self.wasm_engine.stack_bytes()),
+            wasm_memory_reservation_bytes: self.wasm_engine.memory_reservation_bytes(),
+            wasm_parallel_compilation: self.wasm_engine.parallel_compilation(),
+        }
     }
 
     pub fn state_snapshot_interval(&self) -> Duration {

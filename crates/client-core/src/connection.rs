@@ -7,7 +7,7 @@
 //! - **Depends on.** tonic's transport, the cryptography boundary and the native DNS resolver.
 //! - **Must not know.** What the calls on a channel carry.
 
-use std::{str::FromStr as _, time::Duration};
+use std::{num::NonZeroUsize, str::FromStr as _, time::Duration};
 
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use error_stack::{Report, ResultExt as _};
@@ -18,12 +18,12 @@ use nervix_dns::{DnsConfiguration, DnsResolver};
 use nervix_recovery::Discarded as _;
 use tonic::{
     Request,
-    metadata::{AsciiMetadataValue, errors::InvalidMetadataValue},
+    metadata::AsciiMetadataValue,
     transport::{Certificate, Channel, ClientTlsConfig},
 };
 use url::Url;
 
-use crate::error::ClientError;
+use crate::{ClientCapabilities, error::ClientError};
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum EndpointValidationError {
@@ -66,10 +66,18 @@ pub struct ConnectOptions {
     pub retry_timeout: Duration,
     /// Overall BACKUP command wait, including redirects and reconnects, before archive download.
     pub backup_wait_timeout: Duration,
+    pub retry_backoff: Duration,
+    pub retry_max_backoff: Duration,
+    pub subscription_record_capacity: NonZeroUsize,
+    pub subscription_retained_frames: NonZeroUsize,
+    pub subscriptions_retained_in_full: NonZeroUsize,
+    pub upload_frame_capacity: NonZeroUsize,
+    pub restore_frame_capacity: NonZeroUsize,
 }
 
 impl Default for ConnectOptions {
     fn default() -> Self {
+        let capabilities = ClientCapabilities::default();
         Self {
             dns: ConnectDns::Configuration(DnsConfiguration::system()),
             tls_requirement: None,
@@ -77,10 +85,17 @@ impl Default for ConnectOptions {
             username: None,
             password: None,
             seed_servers: Vec::new(),
-            connect_timeout: Duration::from_secs(10),
-            request_timeout: Duration::from_secs(120),
-            retry_timeout: Duration::from_secs(120),
-            backup_wait_timeout: Duration::from_secs(10 * 60),
+            connect_timeout: capabilities.connect_timeout(),
+            request_timeout: capabilities.request_timeout(),
+            retry_timeout: capabilities.retry_timeout(),
+            backup_wait_timeout: capabilities.backup_wait_timeout(),
+            retry_backoff: capabilities.retry_backoff(),
+            retry_max_backoff: capabilities.retry_max_backoff(),
+            subscription_record_capacity: capabilities.subscription_record_capacity(),
+            subscription_retained_frames: capabilities.subscription_retained_frames(),
+            subscriptions_retained_in_full: capabilities.subscriptions_retained_in_full(),
+            upload_frame_capacity: capabilities.upload_frame_capacity(),
+            restore_frame_capacity: capabilities.restore_frame_capacity(),
         }
     }
 }
@@ -119,20 +134,43 @@ impl ConnectOptions {
 /// Opens channels with one client's TLS policy and presents its credentials on every call.
 #[derive(Clone)]
 pub(crate) struct GrpcConnector {
-    options: ConnectOptions,
+    options: ConnectionParameters,
+    capabilities: ClientCapabilities,
     dns: Option<DnsResolver>,
     /// The `authorization` metadata, built once from the credentials when the client has them.
     authorization: Option<AsciiMetadataValue>,
 }
 
+#[derive(Clone)]
+struct ConnectionParameters {
+    dns: ConnectDns,
+    tls_requirement: Option<TlsRequirement>,
+    ca_certificate_pem: Option<Vec<u8>>,
+    seed_servers: Vec<Url>,
+}
+
 impl GrpcConnector {
-    pub(crate) fn new(options: ConnectOptions) -> Result<Self, InvalidMetadataValue> {
-        let authorization = match options.basic_authorization() {
-            Some(authorization) => Some(AsciiMetadataValue::from_str(&authorization)?),
-            None => None,
-        };
+    pub(crate) fn capabilities(&self) -> ClientCapabilities {
+        self.capabilities
+    }
+
+    pub(crate) fn new(options: ConnectOptions) -> error_stack::Result<Self, ClientError> {
+        let capabilities = ClientCapabilities::from_options(&options)?;
+        let authorization =
+            match options.basic_authorization() {
+                Some(authorization) => Some(AsciiMetadataValue::from_str(&authorization).map_err(
+                    |source| Report::new(ClientError::BuildAuthenticationMetadata(source)),
+                )?),
+                None => None,
+            };
         Ok(Self {
-            options,
+            options: ConnectionParameters {
+                dns: options.dns,
+                tls_requirement: options.tls_requirement,
+                ca_certificate_pem: options.ca_certificate_pem,
+                seed_servers: options.seed_servers,
+            },
+            capabilities,
             dns: None,
             authorization,
         })
@@ -158,7 +196,7 @@ impl GrpcConnector {
         let is_https = server.scheme() == "https";
         let mut endpoint = Channel::from_shared(server.as_str().to_string())
             .map_err(|error| Report::new(ClientError::InvalidServerUri(error)))?;
-        endpoint = endpoint.connect_timeout(self.options.connect_timeout);
+        endpoint = endpoint.connect_timeout(self.capabilities.connect_timeout());
         if is_https {
             nervix_crypto::tls::install_default_provider();
             let mut tls =
@@ -212,19 +250,19 @@ impl GrpcConnector {
     }
 
     pub(crate) fn request_timeout(&self) -> Duration {
-        self.options.request_timeout
+        self.capabilities.request_timeout()
     }
 
     pub(crate) fn connect_timeout(&self) -> Duration {
-        self.options.connect_timeout
+        self.capabilities.connect_timeout()
     }
 
     pub(crate) fn retry_timeout(&self) -> Duration {
-        self.options.retry_timeout
+        self.capabilities.retry_timeout()
     }
 
     pub(crate) fn backup_wait_timeout(&self) -> Duration {
-        self.options.backup_wait_timeout
+        self.capabilities.backup_wait_timeout()
     }
 
     pub(crate) fn seed_servers(&self) -> &[Url] {
