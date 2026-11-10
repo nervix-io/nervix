@@ -697,16 +697,28 @@ stateful_scheduled_placement "${tmp_dir}/scheduled-absent.txt" 'INFERENCER chaos
     || fail 'an unscheduled entity was given an owner'
 stateful_partitions=4
 CHAOS_REPLICA_COUNT=1
-jq -n '{units: [range(0;4) | . as $unit | {checkpoint_counts: {total: (if . == 0 or . == 2 then 1 else 0 end), failed: 0},
-    checkpoints: (if . == 0 or . == 2 then [{stage: "ReplicaConfirmed", committed_revision: 7, latest_revision: 7, required_replicas: 1, confirmed_replicas: 1}] else [] end)}]}' \
-    >"${tmp_dir}/checkpoints-current.json"
+jq -n '{outcome: "page", continuation: null, units: [range(0;4) | . as $unit | {wasm: {
+    checkpoints: {total: (if . == 0 or . == 2 then 1 else 0 end), failed: 0},
+    branches: (if . == 0 or . == 2 then [{branch: ($unit | tostring), recovery: null,
+        checkpoint: {stage: "replica_confirmed", committed_revision: 7, latest_revision: 7, required_replicas: 1, confirmed_replicas: 1}}] else [] end)}}]}' \
+    >"${tmp_dir}/checkpoints-confirmed.json"
+cp "${tmp_dir}/checkpoints-confirmed.json" "${tmp_dir}/checkpoints-current.json"
 domain_cli_command() { cat "${tmp_dir}/checkpoints-current.json"; }
 stateful_checkpoints_committed nervix-1 "${tmp_dir}/checkpoint-evidence.json" \
     || fail 'the partition milestone refused two confirmed active units'
-jq '.units[2].checkpoints[0].confirmed_replicas = 0' "${tmp_dir}/checkpoints-current.json" \
-    >"${tmp_dir}/checkpoints-incomplete.json"
-mv "${tmp_dir}/checkpoints-incomplete.json" "${tmp_dir}/checkpoints-current.json"
+jq '.units[2].wasm.branches[0].checkpoint.confirmed_replicas = 0' "${tmp_dir}/checkpoints-confirmed.json" \
+    >"${tmp_dir}/checkpoints-current.json"
 if stateful_checkpoints_committed nervix-1 "${tmp_dir}/checkpoint-evidence.json"; then
     fail 'the milestone accepted an unconfirmed sibling checkpoint'
+fi
+jq '.continuation = "unread-entries"' "${tmp_dir}/checkpoints-confirmed.json" \
+    >"${tmp_dir}/checkpoints-current.json"
+if stateful_checkpoints_committed nervix-1 "${tmp_dir}/checkpoint-evidence.json"; then
+    fail 'the milestone accepted a page that left branch entries unread'
+fi
+jq '{entity: .entity, outcome: "rejected", rejection: "owner_unavailable"}' "${tmp_dir}/checkpoints-confirmed.json" \
+    >"${tmp_dir}/checkpoints-current.json"
+if stateful_checkpoints_committed nervix-1 "${tmp_dir}/checkpoint-evidence.json"; then
+    fail 'the milestone accepted a refused state read'
 fi
 printf 'stateful and domain-time self-test passed\n'
