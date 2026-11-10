@@ -2774,7 +2774,7 @@ fn deduplicator_node(identifier: &ModelName, fingerprint: SchemaFingerprint) -> 
 }
 
 /// The fingerprint of a schema a test never changes.
-fn unchanged_schema_fingerprint() -> SchemaFingerprint {
+pub(super) fn unchanged_schema_fingerprint() -> SchemaFingerprint {
     SchemaFingerprint::from_digest([7; 32])
 }
 

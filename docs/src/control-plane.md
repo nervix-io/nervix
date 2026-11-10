@@ -717,6 +717,15 @@ activation finish. Preparation retains its original deadline, distinct from the 
 protects activation. Repeated engagement requests use the same coordination identity and scope;
 a bounded reply timeout does not create another flush or restart the lease.
 
+Capture reads what each frozen branch publishes, not the last periodic snapshot. The freeze asks
+every branch of a moved processor to publish its live state, so a deduplicator's keys, a window's
+rows and a stateful inferencer's tensors reach the destination with every input the source
+admitted before the hold, even when no periodic snapshot covers them yet. A WASM branch carries
+its committed guest checkpoint. A branch with nothing published, as in a stopped domain, carries
+the newest checkpoint on the source's storage. The destination stages the transferred checkpoints
+durably before the schedule changes, installs them when it activates the new revision, and each
+branch restores from them when it starts again.
+
 Nervix writes the new schedule only after that drain succeeds. A drain writes and activates one hard
 group or independent node at a time. Placement consolidation gates all of its moved groups together
 and publishes its model and assignments in one schedule update. Only moved runtime nodes restart;

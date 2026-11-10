@@ -279,6 +279,10 @@ pub struct ClientConsumerEmitter {
 impl EmitterDeclaration for ClientConsumerEmitter {
     const CAPABILITIES: EmitterEntityCapabilities = EmitterEntityCapabilities {
         events: crate::DeclaredEvents::NONE,
+        // Application sessions consume the rows through the emitter's one consumer stream.
+        instancing: crate::EmitterInstancingCapability::Single {
+            reason: crate::SingleEmitterReason::OneConsumerStream,
+        },
         headers: None,
         reference: EmitterReferenceKind::Schema,
         body: EmitterBodyForm::Native,

@@ -39,6 +39,7 @@ mod duration_text;
 mod emitter;
 mod emitter_batch;
 mod emitter_envelope;
+mod emitter_instances;
 mod execution_unit;
 mod expression;
 mod http_request;
@@ -266,6 +267,9 @@ pub use emitter_batch::{
 pub use emitter_envelope::{
     EmitterEnvelope, EmitterEnvelopeAlteration, EnvelopeClause, EnvelopeClauseValue,
     EnvelopeDeclarationError, EnvelopeProperty,
+};
+pub use emitter_instances::{
+    EmitterInstances, EmitterInstancingCapability, SingleEmitterReason, SingleInstanceRefusal,
 };
 pub use execution_unit::{Unit, UnitIndexError, UnitKind};
 pub use expression::{

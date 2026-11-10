@@ -123,7 +123,7 @@ fn bolero_arrow_bodies_restore_every_column_value_and_null() {
             runtime.block_on(async {
                 let batch = case.runtime_batch();
                 let body = batch
-                    .encode_arrow_ipc(&executor)
+                    .encode_arrow_ipc(&executor, nervix_execution::QueueAdmission::RefuseWhenFull)
                     .await
                     .assured("a bounded batch encodes");
                 let exact = case
@@ -277,7 +277,7 @@ async fn check_damaged_outcome(
         }
     };
     let body = decoded
-        .encode_arrow_ipc(executor)
+        .encode_arrow_ipc(executor, nervix_execution::QueueAdmission::RefuseWhenFull)
         .await
         .assured("a decoded batch encodes again");
     let again = RuntimeRecordBatch::decode_arrow_ipc(executor, body)

@@ -44,6 +44,7 @@ use nervix_models::{
 use rstest::rstest;
 use strum::IntoEnumIterator as _;
 
+mod emitter_instancing;
 mod instancing;
 mod surface;
 

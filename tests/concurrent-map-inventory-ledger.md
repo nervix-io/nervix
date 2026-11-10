@@ -353,6 +353,12 @@ it adds no map or lock and does not change relay-frame or ACK protocol maps.
 one identity-checked removal at retirement, and observer lookups for health. Host readiness
 callbacks touch only their retained scalar atomic, never the map or a recurring record path.
 
+`emitter_statuses`, `emitter_readiness`, `emitter_confirmation_waits`, `emitter_buffers` and
+`pool_waits` are keyed by `DomainNodeUnitRef`, so each instance of an emitter registers its own
+entry when its task starts and removes it with its task: one entry per running instance instead of
+one per emitter, with the same lifecycle and observer frequencies and no recurring access. Draining
+an emitter reads the entries of its local instances.
+
 
 The connector crates and the connector contract crate own no concurrent map, cache or lock over a
 map in product code. Their plan- and task-local maps have one owner. RabbitMQ's one-slot

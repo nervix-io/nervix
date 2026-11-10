@@ -253,6 +253,7 @@ checks = [
   "runtime::relay_boundary::shuttle_tests::shuttle_a_detached_consumer_joins_during_attached_backpressure",
   "runtime::relay_boundary::shuttle_tests::shuttle_a_partition_handoff_fences_its_delivery_and_materialized_reads_while_its_sibling_flows",
   "runtime::relay_boundary::shuttle_tests::shuttle_a_routed_batch_racing_a_joining_consumer_reserves_a_share_for_every_delivery",
+  "runtime::relay_boundary::shuttle_tests::shuttle_emitter_instances_receive_only_their_partitions_while_a_sibling_moves",
   "runtime::relay_boundary::shuttle_tests::shuttle_owner_fanout_fails_its_ack_while_an_attached_consumer_moves",
   "runtime::relay_channel::shuttle_tests::shuttle_canceled_dispatch_returns_its_permit_to_the_gate_fence",
   "runtime::relay_channel::shuttle_tests::shuttle_capacity_growth_admits_waiting_publishers_without_a_take",
