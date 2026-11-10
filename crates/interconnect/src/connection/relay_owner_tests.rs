@@ -33,6 +33,32 @@ struct ReservedAttempt {
     grant: RelayGrant,
 }
 
+#[test]
+fn a_continued_channel_on_a_fresh_receiver_is_definitely_unopened() {
+    let fixture = PeerFixture::new(2);
+    assert_eq!(
+        fixture.owner.grant_position(&PeerFixture::attempt(1, 2)),
+        RelayGrantPosition::Unopened,
+        "a restarted receiver cannot wait for earlier positions its process never held"
+    );
+    assert_eq!(
+        fixture.owner.grant_position(&PeerFixture::attempt(2, 0)),
+        RelayGrantPosition::Next,
+        "the sender can open a new channel at zero"
+    );
+    fixture.deliver(2, 0, 1);
+    assert_eq!(
+        fixture.owner.grant_position(&PeerFixture::attempt(2, 2)),
+        RelayGrantPosition::OutOfOrder,
+        "a retained channel still refuses a skipped position"
+    );
+    assert_eq!(
+        fixture.owner.grant_position(&PeerFixture::attempt(2, 1)),
+        RelayGrantPosition::Next,
+        "the retained channel takes only its next position"
+    );
+}
+
 impl PeerFixture {
     /// A peer that holds `capacity` attempts and twice as many channel watermarks.
     fn new(capacity: usize) -> Self {
@@ -951,6 +977,11 @@ fn shuttle_the_next_grant_racing_the_outcome_return_before_it_takes_the_next_pos
 
     check_interleavings(|| {
         let fixture = StdArc::new(PeerFixture::new(1));
+        assert_eq!(
+            fixture.owner.grant_position(&PeerFixture::attempt(1, 1)),
+            RelayGrantPosition::Unopened,
+            "a new receiver asks for a channel opening before any continuation"
+        );
         let first = fixture.register(1, 1);
         let delivering = fixture.admit_with_outcome_in_flight(&first, 1);
         let returning = fixture.owner.clone();

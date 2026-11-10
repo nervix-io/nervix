@@ -527,80 +527,120 @@ impl RemoteDispatcher {
         deadline: Instant,
         capacity_refusals: GrantCapacityRefusals,
     ) -> error_stack::Result<(), RemoteDispatchError> {
-        if branch_channel.cancellation().is_cancelled() {
-            return Err(Report::new(RemoteDispatchError::BranchEvicted {
-                target: node_id.clone(),
-                sequence: payload.delivery.sequence,
-            }));
-        }
-        let delivery = payload.delivery;
-        let mut cancellation_guard = self
-            .interconnect
-            .relay_cancellation_guard(node_id.clone(), delivery);
-        let (registration, admission) = self.register_pending_relay_admission()?;
-        payload.admission = Some(registration.clone());
-        let dispatch = self.dispatch_relay_payload(node_id, payload, deadline, capacity_refusals);
-        tokio::pin!(dispatch);
-        let dispatch_result = nervix_primitives::select! {
-            biased;
-            result = &mut dispatch => result,
-            () = branch_channel.cancellation().cancelled() => {
-                Err(Report::new(RemoteDispatchError::BranchEvicted {
+        loop {
+            if branch_channel.cancellation().is_cancelled() {
+                return Err(Report::new(RemoteDispatchError::BranchEvicted {
                     target: node_id.clone(),
-                    sequence: delivery.sequence,
-                }))
-            },
-        };
-        if let Err(error) = dispatch_result {
-            self.clear_pending_relay_admission(&registration);
-            if matches!(
-                error.current_context(),
-                RemoteDispatchError::ReceiveBounds { .. }
-            ) {
-                cancellation_guard.disarm();
-                return Err(error);
+                    sequence: payload.delivery.sequence,
+                }));
             }
-            let resolution = self
-                .resolve_failed_relay_admission(node_id, delivery, error, &mut cancellation_guard)
-                .await;
-            return match resolution {
-                FailedRelayAdmissionResolution::Admitted => Ok(()),
-                FailedRelayAdmissionResolution::Failed(error) => Err(error),
-                FailedRelayAdmissionResolution::Indeterminate(error) => {
-                    branch_channel.reopen_delivery_channel();
-                    Err(error)
+            let delivery = payload.delivery;
+            let mut cancellation_guard = self
+                .interconnect
+                .relay_cancellation_guard(node_id.clone(), delivery);
+            let (registration, admission) = self.register_pending_relay_admission()?;
+            payload.admission = Some(registration.clone());
+            let dispatch_result = {
+                let dispatch =
+                    self.dispatch_relay_payload(node_id, payload, deadline, capacity_refusals);
+                tokio::pin!(dispatch);
+                nervix_primitives::select! {
+                    biased;
+                    result = &mut dispatch => result,
+                    () = branch_channel.cancellation().cancelled() => {
+                        Err(Report::new(RemoteDispatchError::BranchEvicted {
+                            target: node_id.clone(),
+                            sequence: delivery.sequence,
+                        }))
+                    },
                 }
             };
-        }
-        let admission =
-            Self::await_relay_admission(node_id, admission, Self::DISPATCH_TIMEOUT, deadline);
-        tokio::pin!(admission);
-        let result = nervix_primitives::select! {
-            biased;
-            result = &mut admission => result,
-            () = branch_channel.cancellation().cancelled() => {
-                Err(Report::new(RemoteDispatchError::BranchEvicted {
-                    target: node_id.clone(),
-                    sequence: delivery.sequence,
-                }))
-            },
-        };
-        if let Err(error) = result {
-            self.clear_pending_relay_admission(&registration);
-            let resolution = self
-                .resolve_failed_relay_admission(node_id, delivery, error, &mut cancellation_guard)
-                .await;
-            return match resolution {
-                FailedRelayAdmissionResolution::Admitted => Ok(()),
-                FailedRelayAdmissionResolution::Failed(error) => Err(error),
-                FailedRelayAdmissionResolution::Indeterminate(error) => {
-                    branch_channel.reopen_delivery_channel();
-                    Err(error)
+            if let Err(error) = dispatch_result {
+                self.clear_pending_relay_admission(&registration);
+                if matches!(
+                    error.current_context(),
+                    RemoteDispatchError::ReceiveBounds { .. }
+                ) {
+                    cancellation_guard.disarm();
+                    return Err(error);
                 }
+                if matches!(
+                    error.current_context(),
+                    RemoteDispatchError::GrantRefused {
+                        refusal: RelayGrantRefusal::ChannelUnopened,
+                        ..
+                    }
+                ) {
+                    cancellation_guard.disarm();
+                    if payload.delivery.sequence == 0 {
+                        return Err(error);
+                    }
+                    if Instant::now() >= deadline {
+                        return Err(error.change_context(
+                            RemoteDispatchError::AdmissionTotalTimeout {
+                                target: node_id.clone(),
+                                timeout: REMOTE_RELAY_TOTAL_TIMEOUT,
+                            },
+                        ));
+                    }
+                    // No body was granted. Retain this payload and its ACKs under the held channel
+                    // gate, and open a fresh channel at zero without extending the deadline.
+                    branch_channel.reopen_delivery_channel();
+                    payload.delivery = branch_channel.next_delivery();
+                    continue;
+                }
+                let resolution = self
+                    .resolve_failed_relay_admission(
+                        node_id,
+                        delivery,
+                        error,
+                        &mut cancellation_guard,
+                    )
+                    .await;
+                return match resolution {
+                    FailedRelayAdmissionResolution::Admitted => Ok(()),
+                    FailedRelayAdmissionResolution::Failed(error) => Err(error),
+                    FailedRelayAdmissionResolution::Indeterminate(error) => {
+                        branch_channel.reopen_delivery_channel();
+                        Err(error)
+                    }
+                };
+            }
+            let admission =
+                Self::await_relay_admission(node_id, admission, Self::DISPATCH_TIMEOUT, deadline);
+            tokio::pin!(admission);
+            let result = nervix_primitives::select! {
+                biased;
+                result = &mut admission => result,
+                () = branch_channel.cancellation().cancelled() => {
+                    Err(Report::new(RemoteDispatchError::BranchEvicted {
+                        target: node_id.clone(),
+                        sequence: delivery.sequence,
+                    }))
+                },
             };
+            if let Err(error) = result {
+                self.clear_pending_relay_admission(&registration);
+                let resolution = self
+                    .resolve_failed_relay_admission(
+                        node_id,
+                        delivery,
+                        error,
+                        &mut cancellation_guard,
+                    )
+                    .await;
+                return match resolution {
+                    FailedRelayAdmissionResolution::Admitted => Ok(()),
+                    FailedRelayAdmissionResolution::Failed(error) => Err(error),
+                    FailedRelayAdmissionResolution::Indeterminate(error) => {
+                        branch_channel.reopen_delivery_channel();
+                        Err(error)
+                    }
+                };
+            }
+            cancellation_guard.disarm();
+            return Ok(());
         }
-        cancellation_guard.disarm();
-        Ok(())
     }
 
     async fn resolve_failed_relay_admission(
@@ -901,6 +941,14 @@ impl RemoteDispatcher {
                     return Err(error.change_context(RemoteDispatchError::ReceiveBounds {
                         target: node_id.clone(),
                         bounds,
+                    }));
+                }
+                TransportError::RelayGrantRefused(RelayGrantRefusal::ChannelUnopened)
+                    if unresolved_attempt =>
+                {
+                    // A later refusal cannot prove what an earlier interrupted attempt did.
+                    return Err(error.change_context(RemoteDispatchError::Send {
+                        target: node_id.clone(),
                     }));
                 }
                 TransportError::RelayGrantRefused(refusal) => RelaySendFailure::Refused(*refusal),

@@ -1,9 +1,11 @@
 //! Layer: test harness outside the product layer order.
-//! Owns: typed materialized and inferencer branch state transfer across a partition, repair and transport-owner
-//!   replacement. Inferencer bytes are opaque; native frame properties qualify their representation.
+//! Owns: typed materialized, collected-window and inferencer branch state transfer across a
+//!   partition, repair and transport-owner replacement. Native frame properties qualify their
+//!   representation; the window fixture additionally compares complete nested Arrow lists.
 //! May depend on: the production interconnect, shared simulation driver and Arrow fixtures.
 //! Must not know: server graphs, materialized snapshot decoding or disk durability.
 
+use arrow_array::{Array as _, ArrayRef, FixedSizeListArray, Int64Array, StringArray};
 use error_stack::Report;
 use futures_util::stream;
 use nervix_interconnect::{
@@ -57,6 +59,7 @@ enum CheckpointFixture {
     Materialized,
     MaterializedPage,
     Inferencer,
+    Window,
 }
 impl CheckpointFixture {
     fn placement(self, tenant: &str) -> StatePlacementEnvelope {
@@ -68,6 +71,12 @@ impl CheckpointFixture {
             };
             placement.kind = ModelKind::Inferencer;
             placement.identifier = ModelName::parse("running").assured("valid inferencer name");
+        } else if let Self::Window = self {
+            placement.state = RuntimeState::WindowProcessor {
+                schema: SchemaFingerprint::from_digest([7; 32]),
+            };
+            placement.kind = ModelKind::WindowProcessor;
+            placement.identifier = ModelName::parse("collected").assured("valid window name");
         }
         placement
     }
@@ -80,6 +89,85 @@ impl CheckpointFixture {
                 payload[..size_of::<u64>()].copy_from_slice(&revision.to_le_bytes());
                 payload
             }
+            Self::Window => {
+                let batch = Self::window_batch(tenant, revision);
+                let mut payload = Vec::new();
+                let mut writer = StreamWriter::try_new(&mut payload, &batch.schema())
+                    .assured("the fixture has a complete Arrow schema");
+                writer.write(&batch).assured("the fixture lists encode");
+                writer.finish().assured("the fixture stream finishes");
+                payload
+            }
+        }
+    }
+
+    /// The complete scalar and list-argument sequences, distinct at each branch and generation.
+    /// Padding ensures the transport fault interrupts a multi-chunk stream.
+    fn window_batch(tenant: &str, revision: u64) -> RecordBatch {
+        let values = match (tenant, revision) {
+            ("acme", 1) => [10_i64, 20, 30],
+            ("acme", 2) => [110, 120, 130],
+            ("beta", 1) => [1000, 2000, 3000],
+            ("beta", 2) => [1100, 2100, 3100],
+            _ => unreachable!("the fixture has two branches and two generations"),
+        };
+        let pairs = values.map(|value| {
+            [
+                value,
+                value
+                    .checked_add(1)
+                    .assured("fixture values are at most 3100"),
+            ]
+        });
+        let scalar_values: ArrayRef = StdArc::new(Int64Array::from(values.to_vec()));
+        let scalar = FixedSizeListArray::try_new(
+            StdArc::new(Field::new("item", DataType::Int64, false)),
+            3,
+            scalar_values,
+            None,
+        )
+        .assured("the scalar sequence has exactly three values");
+        let pair_values: ArrayRef = StdArc::new(Int64Array::from(
+            pairs.into_iter().flatten().collect::<Vec<_>>(),
+        ));
+        let pairs = FixedSizeListArray::try_new(
+            StdArc::new(Field::new("item", DataType::Int64, false)),
+            2,
+            pair_values,
+            None,
+        )
+        .assured("each retained argument has exactly two elements");
+        let pair_type = pairs.data_type().clone();
+        let pair_values: ArrayRef = StdArc::new(pairs);
+        let nested = FixedSizeListArray::try_new(
+            StdArc::new(Field::new("item", pair_type, false)),
+            3,
+            pair_values,
+            None,
+        )
+        .assured("the nested sequence has exactly three retained arguments");
+        let schema = StdArc::new(Schema::new(vec![
+            Field::new("values", scalar.data_type().clone(), false),
+            Field::new("pairs", nested.data_type().clone(), false),
+            Field::new("padding", DataType::Utf8, false),
+        ]));
+        let scalar: ArrayRef = StdArc::new(scalar);
+        let nested: ArrayRef = StdArc::new(nested);
+        let padding: ArrayRef = StdArc::new(StringArray::from(vec!["x".repeat(3 * 1024 * 1024)]));
+        RecordBatch::try_new(schema, vec![scalar, nested, padding])
+            .assured("all sequence columns describe one complete window")
+    }
+
+    fn assert_window_payload(self, payload: &[u8], tenant: &str, revision: u64) {
+        if let Self::Window = self {
+            let mut reader = StreamReader::try_new(Cursor::new(payload), None)
+                .assured("a transferred window keeps its Arrow framing");
+            let batch = reader
+                .next()
+                .assured("the window has one batch")
+                .assured("all scalar and nested columns decode");
+            assert_eq!(batch, Self::window_batch(tenant, revision));
+            assert!(reader.next().is_none(), "no window rows are duplicated");
         }
     }
 }
@@ -419,6 +507,7 @@ fn exchange_fixture(run: ScenarioRun, fixture: CheckpointFixture) -> Result<(), 
                                 "the typed state payload transfers unchanged"
                             );
                             assert_eq!(*blake3::hash(&payload).as_bytes(), snapshot.digest);
+                            fixture.assert_window_payload(&payload, tenant, revision);
                             if let CheckpointFixture::Materialized
                             | CheckpointFixture::MaterializedPage = fixture
                             {
@@ -496,5 +585,19 @@ fn inferencer_branch_state_transfers_reconnect_to_the_replacement_owner() {
     }
     .check(checkpoint_config, |run| {
         exchange_fixture(run, CheckpointFixture::Inferencer)
+    });
+}
+
+#[test]
+fn collected_window_sequences_survive_partition_and_owner_replacement() {
+    Scenario {
+        name: "collected window state owner replacement",
+        fault_plan: "interrupt a multi-chunk collected-window generation under partition, repair \
+                     and replace its transport owner, then compare complete scalar and nested \
+                     list columns for both branches at both generations",
+        seeds: &[61],
+    }
+    .check(checkpoint_config, |run| {
+        exchange_fixture(run, CheckpointFixture::Window)
     });
 }

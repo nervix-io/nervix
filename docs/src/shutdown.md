@@ -1186,6 +1186,13 @@ relay is: its periodic and stopping checkpoints seal in bounded pieces to a quot
 its segments are synchronized before the header that selects them, so a restored window larger
 than the bulk memory budget survives a graceful restart with the rows it admitted afterwards.
 
+`COLLECT_VEC` and `COLLECT_ARRAY` use those retained input and argument columns, including
+list-valued arguments. Their sequence order survives with the window's rows through stop/start,
+restart, planned handoff and restore; promotion continues from the checkpoint the replica holds.
+`WITHOUT STATE` restores no retained rows, so a collecting window starts empty. The public recovery
+scenarios compare complete scalar and multidimensional lists in two interleaved branches; a
+partitioned restore checks each unit's lists independently.
+
 Durability is not uniform across those rows, and the difference is operationally visible:
 
 - Consensus acknowledges a vote, an appended batch, or an applied range only after synchronizing

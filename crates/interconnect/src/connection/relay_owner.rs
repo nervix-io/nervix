@@ -138,6 +138,8 @@ pub(super) enum RelayGrantPosition {
     Busy,
     /// The attempt is not the channel's next position.
     OutOfOrder,
+    /// The peer has never opened this channel and cannot take its nonzero continuation.
+    Unopened,
 }
 
 enum RelayPeerRun {
@@ -316,6 +318,11 @@ impl RelayPeerOwner {
         }
         if state.can_follow(attempt) {
             RelayGrantPosition::Next
+        } else if attempt.sequence != 0
+            && state.watermarks.get(&attempt.channel).is_none()
+            && !state.forgotten(&attempt.channel)
+        {
+            RelayGrantPosition::Unopened
         } else {
             RelayGrantPosition::OutOfOrder
         }

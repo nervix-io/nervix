@@ -663,6 +663,11 @@ impl TransportState {
                     .refuse_relay_grant(respond, RelayGrantRefusal::ChannelBusy)
                     .await;
             }
+            RelayGrantPosition::Unopened => {
+                return self
+                    .refuse_relay_grant(respond, RelayGrantRefusal::ChannelUnopened)
+                    .await;
+            }
             RelayGrantPosition::OutOfOrder => {
                 return self
                     .refuse_relay_grant(respond, RelayGrantRefusal::OutOfOrder)

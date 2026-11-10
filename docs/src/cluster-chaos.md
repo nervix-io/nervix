@@ -1797,6 +1797,12 @@ and output topic:
 - **The detached window processor `chaos_window`.** It aggregates 12 rows of a branch. It reports
   the smallest and largest index, the sum of the sequences, and the sum of 4 raised to each index
   modulo 24. The base-4 digits of that last sum tell which rows the window held, and how often.
+  Its `sequences` field is `COLLECT_ARRAY(input.sequence)`: twelve sequence numbers in retained
+  order. The verifier requires exactly the accepted-input values and multiplicities selected by
+  the decoded membership, with first occurrences in source order. Missing, changed, reordered
+  first occurrences and other-branch elements fail even when the count and sum match. Permitted
+  volatile inputs may replay after their retained prefix; their repeated appearances need not be
+  adjacent, and the existing volatile-interval checks still constrain their multiplicity.
 - **The junction `chaos_enrich`.** It reads the branch's row of the materialized relay
   `chaos_profiles`, which a second ingestor fills from `chaos_profile_input`. Its `DEFAULT` names no
   branch.
@@ -1906,7 +1912,9 @@ Every verdict also requires:
 - the records' own content and branch
 - the first occurrence of every key of each branch
 - every record in the enriched and counted outputs
-- windows of 12 rows of one branch, with the sums they report
+- windows of 12 rows of one branch, with the sums they report and the complete collected sequence
+  matching their smallest index, largest index and decoded membership, with first occurrences in
+  source order
 - guest counts that equal the branch index before the fault and advance by one per record after
   recovery
 - inferencer outputs that are each one whole count of an accepted branch, that count 1, 2, 3 and

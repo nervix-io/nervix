@@ -559,6 +559,166 @@ invocation = "stress-restore-scenarios"
 scenario = "Partitioned deduplicator keys and windows resume on their scheduled unit owners"
 selections = ["deloxide-stress-restore"]
 
+[[workload]]
+coverage = "Production window branch lifecycle, retained Arrow input/argument publications, checkpoint ownership and restore gates; transport waits remain untracked."
+examples = 1
+feature = "tests/features/cluster/window_collection_recovery.feature"
+id = "scenario.window-collection-stop-start"
+invariant = "Exact scalar and multidimensional sequences retain their branch, elements and order through stop-start; WITHOUT STATE initializes empty windows."
+invocation = "scenarios"
+scenario = "STOP and START retain both collecting windows"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: Production window branch lifecycle, retained Arrow input/argument publications, checkpoint ownership and restore gates; transport waits remain untracked."
+examples = 1
+feature = "tests/features/cluster/window_collection_recovery.feature"
+id = "stress.window-collection-stop-start"
+invariant = "Exact scalar and multidimensional sequences retain their branch, elements and order through stop-start; WITHOUT STATE initializes empty windows."
+invocation = "stress-restore-scenarios"
+scenario = "STOP and START retain both collecting windows"
+selections = ["deloxide-stress-restore"]
+
+[[workload]]
+coverage = "Production window branch lifecycle, retained Arrow input/argument publications, checkpoint ownership and restore gates; transport waits remain untracked."
+examples = 1
+feature = "tests/features/cluster/window_collection_recovery.feature"
+id = "scenario.window-collection-cluster-restart"
+invariant = "Exact scalar and multidimensional sequences retain their branch, elements and order through cluster-restart; WITHOUT STATE initializes empty windows."
+invocation = "scenarios"
+scenario = "Restarting the cluster retains scalar and list argument columns"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: Production window branch lifecycle, retained Arrow input/argument publications, checkpoint ownership and restore gates; transport waits remain untracked."
+examples = 1
+feature = "tests/features/cluster/window_collection_recovery.feature"
+id = "stress.window-collection-cluster-restart"
+invariant = "Exact scalar and multidimensional sequences retain their branch, elements and order through cluster-restart; WITHOUT STATE initializes empty windows."
+invocation = "stress-restore-scenarios"
+scenario = "Restarting the cluster retains scalar and list argument columns"
+selections = ["deloxide-stress-restore"]
+
+[[workload]]
+coverage = "Production window branch lifecycle, retained Arrow input/argument publications, checkpoint ownership and restore gates; transport waits remain untracked."
+examples = 1
+feature = "tests/features/cluster/window_collection_recovery.feature"
+id = "scenario.window-collection-owner-restart"
+invariant = "Exact scalar and multidimensional sequences retain their branch, elements and order through owner-restart; WITHOUT STATE initializes empty windows."
+invocation = "scenarios"
+scenario = "Restarting the window owner retains both branch sequences"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: Production window branch lifecycle, retained Arrow input/argument publications, checkpoint ownership and restore gates; transport waits remain untracked."
+examples = 1
+feature = "tests/features/cluster/window_collection_recovery.feature"
+id = "stress.window-collection-owner-restart"
+invariant = "Exact scalar and multidimensional sequences retain their branch, elements and order through owner-restart; WITHOUT STATE initializes empty windows."
+invocation = "stress-restore-scenarios"
+scenario = "Restarting the window owner retains both branch sequences"
+selections = ["deloxide-stress-restore"]
+
+[[workload]]
+coverage = "Production window branch lifecycle, retained Arrow input/argument publications, checkpoint ownership and restore gates; transport waits remain untracked."
+examples = 1
+feature = "tests/features/cluster/window_collection_recovery.feature"
+id = "scenario.window-collection-handoff"
+invariant = "Exact scalar and multidimensional sequences retain their branch, elements and order through handoff; WITHOUT STATE initializes empty windows."
+invocation = "scenarios"
+scenario = "A planned handoff retains incomplete multidimensional collections"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: Production window branch lifecycle, retained Arrow input/argument publications, checkpoint ownership and restore gates; transport waits remain untracked."
+examples = 1
+feature = "tests/features/cluster/window_collection_recovery.feature"
+id = "stress.window-collection-handoff"
+invariant = "Exact scalar and multidimensional sequences retain their branch, elements and order through handoff; WITHOUT STATE initializes empty windows."
+invocation = "stress-restore-scenarios"
+scenario = "A planned handoff retains incomplete multidimensional collections"
+selections = ["deloxide-stress-restore"]
+
+[[workload]]
+coverage = "Production window branch lifecycle, retained Arrow input/argument publications, checkpoint ownership and restore gates; transport waits remain untracked."
+examples = 1
+feature = "tests/features/cluster/window_collection_recovery.feature"
+id = "scenario.window-collection-promotion"
+invariant = "Exact scalar and multidimensional sequences retain their branch, elements and order through promotion; WITHOUT STATE initializes empty windows."
+invocation = "scenarios"
+scenario = "A promoted replica continues both exact collected sequences"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: Production window branch lifecycle, retained Arrow input/argument publications, checkpoint ownership and restore gates; transport waits remain untracked."
+examples = 1
+feature = "tests/features/cluster/window_collection_recovery.feature"
+id = "stress.window-collection-promotion"
+invariant = "Exact scalar and multidimensional sequences retain their branch, elements and order through promotion; WITHOUT STATE initializes empty windows."
+invocation = "stress-restore-scenarios"
+scenario = "A promoted replica continues both exact collected sequences"
+selections = ["deloxide-stress-restore"]
+
+[[workload]]
+coverage = "Production window branch lifecycle, retained Arrow input/argument publications, checkpoint ownership and restore gates; transport waits remain untracked."
+examples = 1
+feature = "tests/features/cluster/window_collection_recovery.feature"
+id = "scenario.window-collection-resume"
+invariant = "Exact scalar and multidimensional sequences retain their branch, elements and order through resume; WITHOUT STATE initializes empty windows."
+invocation = "scenarios"
+scenario = "RESUME restores scalar and list argument columns"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: Production window branch lifecycle, retained Arrow input/argument publications, checkpoint ownership and restore gates; transport waits remain untracked."
+examples = 1
+feature = "tests/features/cluster/window_collection_recovery.feature"
+id = "stress.window-collection-resume"
+invariant = "Exact scalar and multidimensional sequences retain their branch, elements and order through resume; WITHOUT STATE initializes empty windows."
+invocation = "stress-restore-scenarios"
+scenario = "RESUME restores scalar and list argument columns"
+selections = ["deloxide-stress-restore"]
+
+[[workload]]
+coverage = "Production window branch lifecycle, retained Arrow input/argument publications, checkpoint ownership and restore gates; transport waits remain untracked."
+examples = 1
+feature = "tests/features/cluster/window_collection_recovery.feature"
+id = "scenario.window-collection-start"
+invariant = "Exact scalar and multidimensional sequences retain their branch, elements and order through start; WITHOUT STATE initializes empty windows."
+invocation = "scenarios"
+scenario = "A plain START continues restored collecting windows"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: Production window branch lifecycle, retained Arrow input/argument publications, checkpoint ownership and restore gates; transport waits remain untracked."
+examples = 1
+feature = "tests/features/cluster/window_collection_recovery.feature"
+id = "stress.window-collection-start"
+invariant = "Exact scalar and multidimensional sequences retain their branch, elements and order through start; WITHOUT STATE initializes empty windows."
+invocation = "stress-restore-scenarios"
+scenario = "A plain START continues restored collecting windows"
+selections = ["deloxide-stress-restore"]
+
+[[workload]]
+coverage = "Production window branch lifecycle, retained Arrow input/argument publications, checkpoint ownership and restore gates; transport waits remain untracked."
+examples = 1
+feature = "tests/features/cluster/window_collection_recovery.feature"
+id = "scenario.window-collection-without-state"
+invariant = "Exact scalar and multidimensional sequences retain their branch, elements and order through without-state; WITHOUT STATE initializes empty windows."
+invocation = "scenarios"
+scenario = "WITHOUT STATE starts both collecting windows empty"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: Production window branch lifecycle, retained Arrow input/argument publications, checkpoint ownership and restore gates; transport waits remain untracked."
+examples = 1
+feature = "tests/features/cluster/window_collection_recovery.feature"
+id = "stress.window-collection-without-state"
+invariant = "Exact scalar and multidimensional sequences retain their branch, elements and order through without-state; WITHOUT STATE initializes empty windows."
+invocation = "stress-restore-scenarios"
+scenario = "WITHOUT STATE starts both collecting windows empty"
+selections = ["deloxide-stress-restore"]
+
 [lane]
 # All diagnostic test and driver executables build before any workload starts, under their own
 # real-time budget. The measured cold stressed scenario build took 1988s on a loaded host; 80
@@ -721,6 +881,7 @@ tags = [
   "@iceberg_batch_bounds",
   "@zeromq_emitter_open_deadline",
   "@metrics_checkpoint_handoff",
+  "@window_collection_recovery",
   "@forced_recovery_schedule",
   "@websocket_source_lifecycle",
   "@websocket_declaration_lifecycle",

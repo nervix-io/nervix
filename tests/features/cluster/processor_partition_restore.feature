@@ -8,8 +8,8 @@ Feature: Partitioned processor state in backup archives
       CREATE SCHEMA payment ( tenant STRING, transaction_id STRING, amount I64 );
       CREATE WIRE JSON SCHEMA payment_wire MODE STRICT ( tenant string, transaction_id string, amount integer );
       CREATE WIRE JSON CODEC payment_codec FROM WIRE SCHEMA payment_wire TO SCHEMA payment;
-      CREATE SCHEMA metric ( tenant STRING, latency I64 );
-      CREATE WIRE JSON SCHEMA metric_wire MODE STRICT ( tenant string, latency integer );
+      CREATE SCHEMA metric ( tenant STRING, latency I64, pair ARRAY<I64, 2> );
+      CREATE WIRE JSON SCHEMA metric_wire MODE STRICT ( tenant string, latency integer, pair array );
       CREATE WIRE JSON CODEC metric_codec FROM WIRE SCHEMA metric_wire TO SCHEMA metric;
       CREATE SCHEMA metric_summary (
         tenant STRING,
@@ -19,7 +19,9 @@ Feature: Partitioned processor state in backup archives
         last_latency I64 OPTIONAL,
         smallest I64 OPTIONAL,
         largest I64 OPTIONAL,
-        latency_p0 F64 OPTIONAL
+        latency_p0 F64 OPTIONAL,
+        collected ARRAY<I64, 2>,
+        pairs ARRAY<I64, 2, 2>
       );
       CREATE SCHEMA tenant_key ( tenant STRING );
       CREATE BRANCH by_tenant SCHEMA tenant_key TTL 30m PARTITIONS 2;
@@ -53,7 +55,8 @@ Feature: Partitioned processor state in backup archives
           SET tenant = FIRST(input.tenant), samples = COUNT(input.latency), total = SUM(input.latency),
               first_latency = FIRST(input.latency), last_latency = LAST(input.latency),
               smallest = MIN(input.latency), largest = MAX(input.latency),
-              latency_p0 = PERCENTILE_LINEAR_HISTOGRAM(input.latency, 0, 10, 0, 100, '10m')
+              latency_p0 = PERCENTILE_LINEAR_HISTOGRAM(input.latency, 0, 10, 0, 100, '10m'),
+              collected = COLLECT_ARRAY(input.latency), pairs = COLLECT_ARRAY(input.pair)
           ON MESSAGE ERROR LOG;
       START;
       """
@@ -94,24 +97,24 @@ Feature: Partitioned processor state in backup archives
       """
     And http payload is posted to host "backup-branch-state-{{test_id}}.example.com" path "/metrics"
       """
-      {"tenant":"eta","latency":10}
+      {"tenant":"eta","latency":10,"pair":[10,11]}
       """
     And http payload is posted to host "backup-branch-state-{{test_id}}.example.com" path "/metrics"
       """
-      {"tenant":"acme","latency":20}
+      {"tenant":"acme","latency":20,"pair":[20,21]}
       """
     And http payload is posted to host "backup-branch-state-{{test_id}}.example.com" path "/metrics"
       """
-      {"tenant":"eta","latency":70}
+      {"tenant":"eta","latency":70,"pair":[70,71]}
       """
     And http payload is posted to host "backup-branch-state-{{test_id}}.example.com" path "/metrics"
       """
-      {"tenant":"acme","latency":80}
+      {"tenant":"acme","latency":80,"pair":[80,81]}
       """
     Then within "30s" the relay subscription receives exactly one payload for each fragment set
       """
-      key={"tenant":"eta"} | "samples":2 | "total":80 | "first_latency":10 | "last_latency":70 | "latency_p0":15.0
-      key={"tenant":"acme"} | "samples":2 | "total":100 | "first_latency":20 | "last_latency":80 | "latency_p0":25.0
+      key={"tenant":"eta"} | "samples":2 | "total":80 | "first_latency":10 | "last_latency":70 | "latency_p0":15.0 | "collected":[10,70] | "pairs":[[10,11],[70,71]]
+      key={"tenant":"acme"} | "samples":2 | "total":100 | "first_latency":20 | "last_latency":80 | "latency_p0":25.0 | "collected":[20,80] | "pairs":[[20,21],[80,81]]
       """
     When these Plexus commands are executed through the client on the leader node
       """
@@ -141,7 +144,7 @@ Feature: Partitioned processor state in backup archives
     And the last cluster status lists 2 partitions of window_processor "latency_window" on <owners> distinct owners
     And within "60s" node "restored-1" accepts http payload for host "backup-branch-state-{{test_id}}.example.com" path "/metrics"
       """
-      {"tenant":"probe","latency":1}
+      {"tenant":"probe","latency":1,"pair":[1,2]}
       """
     When the CLI backs up "domain {{domain}}" from node "{{leader}}" into "branch-state-resumed.nvxb" reporting JSON
     Then the CLI backup succeeded with a JSON report naming domain "{{domain}}"
@@ -152,16 +155,16 @@ Feature: Partitioned processor state in backup archives
       """
     And http payload is posted to node "restored-1" with host "backup-branch-state-{{test_id}}.example.com" path "/metrics"
       """
-      {"tenant":"eta","latency":30}
+      {"tenant":"eta","latency":30,"pair":[30,31]}
       """
     And http payload is posted to node "restored-1" with host "backup-branch-state-{{test_id}}.example.com" path "/metrics"
       """
-      {"tenant":"acme","latency":40}
+      {"tenant":"acme","latency":40,"pair":[40,41]}
       """
     Then within "30s" the relay subscription receives exactly one payload for each fragment set
       """
-      key={"tenant":"eta"} | "samples":2 | "total":100 | "first_latency":70 | "last_latency":30 | "smallest":30 | "largest":70 | "latency_p0":15.0
-      key={"tenant":"acme"} | "samples":2 | "total":120 | "first_latency":80 | "last_latency":40 | "smallest":40 | "largest":80 | "latency_p0":25.0
+      key={"tenant":"eta"} | "samples":2 | "total":100 | "first_latency":70 | "last_latency":30 | "smallest":30 | "largest":70 | "latency_p0":15.0 | "collected":[70,30] | "pairs":[[70,71],[30,31]]
+      key={"tenant":"acme"} | "samples":2 | "total":120 | "first_latency":80 | "last_latency":40 | "smallest":40 | "largest":80 | "latency_p0":25.0 | "collected":[80,40] | "pairs":[[80,81],[40,41]]
       """
     When these Plexus commands are executed on the leader node
       """

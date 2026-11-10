@@ -367,6 +367,14 @@ test-scenarios *args: tests-deps test-client-python-api-run
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
     cargo test --package nervix-scenarios --test scenarios -- {{ quote(args) }}
 
+# Exercise exact window collections through restart, promotion, handoff and restore.
+test-window-collection-recovery *args: build-deps build-plexus-format build-test-cli build-deadlock-report
+    ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)" cargo test --package nervix-scenarios --test scenarios -- --input {{ quote(justfile_directory() / "tests/features/cluster/window_collection_recovery{,}.feature") }} {{ quote(args) }}
+
+# Measure the same focused recovery paths without building unrelated host bindings.
+coverage-window-collection-recovery output *args: build-deps build-plexus-format build-test-cli build-deadlock-report
+    ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)" cargo llvm-cov --package nervix-scenarios --test scenarios --no-default-ignore-filename-regex --lcov --output-path {{ quote(output) }} -- --input {{ quote(justfile_directory() / "tests/features/cluster/window_collection_recovery{,}.feature") }} {{ quote(args) }}
+
 # Exercise fixed window collection and its sampled-sequence tensor consumer.
 test-window-collection-arrays *args: build-deps build-plexus-format build-test-cli build-deadlock-report
     #!/usr/bin/env bash
@@ -5123,7 +5131,7 @@ coverage-chaos-stateful-verifiers:
     if [[ "${descriptor_limit}" == unlimited ]] || ((descriptor_limit > 65536)); then
         ulimit -n 65536
     fi
-    kcov --clean --include-path={{ quote(invocation_directory() / "scripts/chaos/verify-clock-evidence.sh") }},{{ quote(invocation_directory() / "scripts/chaos/tests/stateful-self-test.sh") }} {{ quote(cargo_target_dir / "chaos-stateful-verifier-coverage") }} scripts/chaos/tests/stateful-self-test.sh
+    kcov --clean --include-path={{ quote(invocation_directory() / "scripts/chaos/verify-clock-evidence.sh") }},{{ quote(invocation_directory() / "scripts/chaos/verify-state-evidence.sh") }},{{ quote(invocation_directory() / "scripts/chaos/tests/stateful-self-test.sh") }} {{ quote(cargo_target_dir / "chaos-stateful-verifier-coverage") }} scripts/chaos/tests/stateful-self-test.sh
 
 # Requires kcov; retains shell Cobertura coverage for the probe and its regression controls.
 coverage-chaos-rate-probe:
@@ -5174,7 +5182,7 @@ build-server:
 build-chaos-local-image tag="nervix:backup-local" base="nervix:chaos-current":
     #!/usr/bin/env bash
     set -euo pipefail
-    cargo build --package nervix-server --bin nervix-server --package nervix-cli --bin nervix-cli
+    cargo build {{ release_flag }} --package nervix-server --bin nervix-server --package nervix-cli --bin nervix-cli
     revision="$(git rev-parse HEAD)"
     checkout_status="$(git status --porcelain --untracked-files=no)"
     if [[ -n "${checkout_status}" ]]; then
@@ -5182,8 +5190,8 @@ build-chaos-local-image tag="nervix:backup-local" base="nervix:chaos-current":
     fi
     stage="$(mktemp -d {{ quote(cargo_target_dir + "/backup-chaos-image.XXXXXX") }})"
     trap 'rm -rf "${stage}"' EXIT
-    install -m 755 {{ quote(cargo_target_dir + "/debug/nervix-server") }} "${stage}/nervix-server"
-    install -m 755 {{ quote(cargo_target_dir + "/debug/nervix-cli") }} "${stage}/nervix-cli"
+    install -m 755 {{ quote(cargo_target_dir + "/" + build_mode + "/nervix-server") }} "${stage}/nervix-server"
+    install -m 755 {{ quote(cargo_target_dir + "/" + build_mode + "/nervix-cli") }} "${stage}/nervix-cli"
     llvm-strip-23 "${stage}/nervix-server" "${stage}/nervix-cli"
     cat >"${stage}/Dockerfile" <<'EOF'
     ARG BASE

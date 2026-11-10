@@ -10,7 +10,7 @@
 )]
 
 use nervix_backup::DescribedRuntimeState;
-use nervix_interconnect::{RuntimeState, StatePlacementEnvelope};
+use nervix_interconnect::{RuntimeState, RuntimeStateKind, StatePlacementEnvelope};
 use nervix_models::ModelKind;
 
 use super::*;
@@ -147,20 +147,48 @@ async fn snapshot_receive_admission(world: &mut ScenarioWorld, file: String, nod
 }
 
 /// The archive supplies the production lifecycle identity without reconstructing a schema digest.
-/// Tensor bytes themselves are then observed through authenticated checkpoint requests.
+/// Complete checkpoint bytes are then observed through authenticated checkpoint requests.
 #[given(
     expr = "inferencer {string} has complete checkpoints for both branches on replica {string} of \
             owner {string}"
 )]
 async fn inferencer_replica_checkpoints(
     world: &mut ScenarioWorld,
-    inferencer: String,
+    entity: String,
     replica: String,
     owner: String,
 ) {
+    branch_replica_checkpoints(world, ModelKind::Inferencer, entity, replica, owner).await;
+}
+
+#[given(
+    expr = "window processor {string} has complete checkpoints for both branches on replica \
+            {string} of owner {string}"
+)]
+async fn window_replica_checkpoints(
+    world: &mut ScenarioWorld,
+    entity: String,
+    replica: String,
+    owner: String,
+) {
+    branch_replica_checkpoints(world, ModelKind::WindowProcessor, entity, replica, owner).await;
+}
+
+async fn branch_replica_checkpoints(
+    world: &mut ScenarioWorld,
+    owner_kind: ModelKind,
+    entity: String,
+    replica: String,
+    owner: String,
+) {
+    let state_kind = match owner_kind {
+        ModelKind::Inferencer => RuntimeStateKind::Inferencer,
+        ModelKind::WindowProcessor => RuntimeStateKind::WindowProcessor,
+        _ => unreachable!("the step names one supported branch checkpoint owner"),
+    };
     let replica = expand_placeholders(world, &replica);
     let owner = expand_placeholders(world, &owner);
-    let file = archive_path(world, "inferencer-lifecycle.nvxb");
+    let file = archive_path(world, "branch-checkpoints.nvxb");
     let command = format!("BACKUP DOMAIN {} TO '{}';", world.domain, file.display());
     world
         .cluster()
@@ -178,14 +206,13 @@ async fn inferencer_replica_checkpoints(
         .iter()
         .find_map(|state| match state {
             DescribedRuntimeState::BranchLifecycle { lifecycle, .. }
-                if lifecycle.owner_kind == ModelKind::Inferencer
-                    && lifecycle.entity.as_str() == inferencer =>
+                if lifecycle.owner_kind == owner_kind && lifecycle.entity.as_str() == entity =>
             {
                 Some(lifecycle.clone())
             }
             _ => None,
         })
-        .expect("the inference branch lifecycle is archived");
+        .expect("the populated branch lifecycle is archived");
     assert_eq!(
         lifecycle.branches.len(),
         2,
@@ -196,14 +223,14 @@ async fn inferencer_replica_checkpoints(
         state: RuntimeState::BranchLru {
             schema: lifecycle.schema,
         },
-        kind: ModelKind::Inferencer,
+        kind: owner_kind,
         identifier: lifecycle.entity,
         unit: lifecycle.unit,
         branch_key: None,
     };
     world
         .cluster()
-        .wait_for_inferencer_replica_checkpoints(&owner, &replica, placement)
+        .wait_for_branch_replica_checkpoints(&owner, &replica, placement, state_kind)
         .await
         .expect("both complete replica checkpoints cover the current branch publications");
 }

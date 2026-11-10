@@ -23,9 +23,11 @@ dedup requires every first occurrence of a key in its branch to be emitted, a la
 pass only when its key was first seen in the volatile interval, and identical replays only after a
 fault.
 
-window decodes each 12-row window's membership and requires its rows to belong to its branch with
-the sums it reports, every row outside the volatile interval to be aggregated exactly once, and
-each row admitted before the milestone to survive the fault.
+window decodes each 12-row window's membership and requires its twelve collected values to match
+that membership, with first occurrences in source order. Replayed volatile inputs may follow a
+retained prefix. Its rows must belong to its branch with the sums it reports, every row outside
+the volatile interval must be aggregated exactly once, and each row admitted before the milestone
+must survive the fault.
 
 enrich requires every record to be emitted with its own branch's materialized profile, never the
 default, and with at least the version durable at the milestone once the milestone has passed.
@@ -210,17 +212,29 @@ window() {
              | select($count > 0)
              | {index: ($window.first_index + (($position - ($window.first_index % 24) + 24) % 24)),
                 count: $count}];
+          def first_occurrences:
+            reduce .[] as $value ([]; if index($value) == null then . + [$value] else . end);
           [$output | to_entries[] | .key as $offset | .value as $window
            | members($window) as $members
            | ($members | map(.count) | add // 0) as $decoded
            | [$members[] | $at[$window.branch_name + "/" + (.index | tostring)] as $record
               | . + {record: $record}] as $resolved
+           | [($resolved | sort_by(.index))[] | .record.sequence as $sequence
+              | range(0; .count) | $sequence] as $expected_sequence
            | {offset: $offset, branch_name: $window.branch_name, records: $window.records,
               first_index: $window.first_index, last_index: $window.last_index,
               decodable: (($window.last_index - $window.first_index) < 24 and $decoded == $window.records
                           and (($members | map(.index) | min) == $window.first_index)
                           and (($members | map(.index) | max) == $window.last_index)),
               own_branch: (all($resolved[]; .record != null and .record.branch_name == $window.branch_name)),
+              # First appearances stay ordered. A volatile prefix can then be replayed
+              # after its retained copy; the existing multiplicity checks bound those replays.
+              sequence_matches: (if ($window.sequences | type) == "array" then
+                ($window.sequences | length) == 12
+                and ($window.sequences | sort) == $expected_sequence
+                and ($window.sequences | first_occurrences) == ($expected_sequence | unique)
+                else false end),
+              sequences: $window.sequences,
               sum_matches: ((if all($resolved[]; .record != null)
                              then ($resolved | map(.count * .record.sequence) | add) else null end) == $window.sequence_sum),
               members: ($resolved | map({index, count, sequence: .record.sequence}))}] as $windows
@@ -228,6 +242,7 @@ window() {
         | [$windows[] | select(.decodable | not)] as $undecodable
         | [$windows[] | select(.decodable and ((.own_branch | not) or (.sum_matches | not)))] as $wrong
         | [$windows[] | select(.records != 12)] as $wrong_size
+        | [$windows[] | select(.sequence_matches | not)] as $wrong_sequence
         | [$windows[] | select(.offset < $pre)
            | select((.members | length) != 12 or any(.members[]; .count != 1)
                     or ((.first_index - 1) % 12) != 0 or .last_index != .first_index + 11)] as $inexact_before_fault
@@ -256,6 +271,7 @@ window() {
             (if ($undecodable | length) > 0 then "windows whose membership cannot be decoded" else empty end),
             (if ($wrong | length) > 0 then "windows with rows of another branch or a wrong sum" else empty end),
             (if ($wrong_size | length) > 0 then "windows that did not aggregate exactly 12 rows" else empty end),
+            (if ($wrong_sequence | length) > 0 then "windows whose collected sequence disagrees with ordered membership" else empty end),
             (if ($inexact_before_fault | length) > 0 then "windows before the fault that were not 12 consecutive rows" else empty end),
             (if ($violating_losses | map(select(.class == "milestone")) | length) > 0
              then "rows admitted before the milestone were lost from the restored window" else empty end),
@@ -275,7 +291,8 @@ window() {
             input_records: ($input | length),
             windows: ($windows | length),
             checks: {undecodable: ($undecodable | length), wrong_branch_or_sum: ($wrong | length),
-                     wrong_size: ($wrong_size | length), inexact_before_fault: ($inexact_before_fault | length),
+                     wrong_size: ($wrong_size | length), wrong_sequence: ($wrong_sequence | length),
+                     inexact_before_fault: ($inexact_before_fault | length),
                      lost_outside_volatile_interval: ($violating_losses | length),
                      repeated_outside_volatile_interval: ($violating_repeats | length)},
             volatile_losses: ([$lost[] | select(.class == "volatile")] | length),
@@ -286,6 +303,7 @@ window() {
                restored_after_fault: ($restored_rows | length)} end),
             undecodable: $undecodable,
             wrong: $wrong,
+            wrong_sequence: $wrong_sequence,
             inexact_before_fault: $inexact_before_fault,
             lost: $lost,
             repeated: $repeated,

@@ -64,7 +64,8 @@ CREATE SCHEMA chaos_window_summary (
   first_index I64,
   last_index I64,
   membership I64,
-  sequence_sum I64
+  sequence_sum I64,
+  sequences ARRAY<I64, 12>
 );
 
 CREATE WIRE JSON SCHEMA chaos_window_wire MODE STRICT (
@@ -73,7 +74,8 @@ CREATE WIRE JSON SCHEMA chaos_window_wire MODE STRICT (
   first_index INTEGER,
   last_index INTEGER,
   membership INTEGER,
-  sequence_sum INTEGER
+  sequence_sum INTEGER,
+  sequences ARRAY
 );
 
 CREATE WIRE JSON CODEC chaos_window_json
@@ -94,7 +96,8 @@ CREATE WINDOW PROCESSOR chaos_window
         first_index = min(input.branch_index),
         last_index = max(input.branch_index),
         membership = sum(shift_left(1, 2 * (input.branch_index % 24))),
-        sequence_sum = sum(input.sequence)
+        sequence_sum = sum(input.sequence),
+        sequences = collect_array(input.sequence)
     ON MESSAGE ERROR LOG;
 
 CREATE KAFKA TOPIC EMITTER chaos_window_emitter

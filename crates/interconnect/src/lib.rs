@@ -402,10 +402,12 @@ pub enum RelayGrantRefusal {
     ForeignRegistrar,
     /// The grant names content other than what its delivery identity was first granted with.
     ContentConflict,
-    /// The grant's channel incarnation is unknown or its sequence is out of order.
+    /// The grant's sequence is out of order in a channel the receiver retains.
     OutOfOrder,
     /// The grant's admission registration is already active for another delivery.
     AdmissionActive,
+    /// The receiver has never opened this channel, so its nonzero continuation was not admitted.
+    ChannelUnopened,
 }
 
 impl RelayGrantRefusal {
@@ -430,6 +432,7 @@ impl RelayGrantRefusal {
             Self::ContentConflict => 8,
             Self::OutOfOrder => 9,
             Self::AdmissionActive => 10,
+            Self::ChannelUnopened => 11,
         }
     }
 }

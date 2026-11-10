@@ -1146,6 +1146,13 @@ outcome is no longer known there. A channel opened just before one that was forg
 refused the same way; its sender handles that as any retired delivery and reopens the channel under
 a fresh incarnation. The floor and every retained watermark end with the peer's bound process epoch.
 
+A receiver that has never opened a channel refuses a nonzero continuation as `channel_unopened`,
+before reserving a body. After a quick owner restart, the runtime keeps that definitely unadmitted
+payload and its ACKs under its existing channel gate, opens a fresh channel at sequence zero and
+retries within the original admission deadline. A prior interrupted send makes its outcome
+uncertain and forbids this retry; a retained channel still requires its exact next position, and a
+forgotten channel still returns `Retired`.
+
 Lost terminal replies remain reconcilable while their watermark is retained. A sixty-second sweep
 reclaims attempts, outbound correlations and channel watermarks after ten minutes without progress
 or reconciliation; live admission reports renew retained records. The sweep forgets a watermark the
@@ -1182,9 +1189,11 @@ read or decode is drained unkept and refused for memory like any other, so a ful
 at once instead of holding the request, and its admission stream, until room returns. Every other
 refusal is permanent for the grant that asked: its sender epoch, body length or admission
 registration is wrong, its content conflicts with what its delivery identity was first granted with,
-its sequence is out of order, or its admission registration is already active. The refusal crosses
+its channel was never opened, its sequence is out of order, or its admission registration is
+already active. The refusal crosses
 the wire as a typed `RelayGrantRefusal`, never as an HTTP status or text, and the sender decides
-from its class alone. A permanent refusal fails the delivery at once.
+from its class alone. A permanent refusal fails that grant at once; only a definitely unadmitted
+`channel_unopened` continuation can open a fresh channel as described above.
 
 A capacity refusal holds a routed or owner-ingress delivery back. The receiver answered, so the
 refusal does not count toward the five-second stall bound: the sender asks for a grant again after
