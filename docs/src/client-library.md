@@ -719,6 +719,5 @@ The other libraries read the same envelope through their own typed inspection ob
 each guide shows with a tested example: [Python](client-library-python.md#inspect-materialized-state),
 [Ruby](client-library-ruby.md#inspect-materialized-state),
 [JVM](client-library-jvm.md#inspect-materialized-state) and
-[C and C++](client-library-c.md#read-materialized-state). They read a WASM page's guest-state
-facts from its lossless JSON. [Typed Inspection](client-host-bindings.md#typed-inspection) owns
-how they retain it.
+[C and C++](client-library-c.md#read-materialized-state).
+[Typed Inspection](client-host-bindings.md#typed-inspection) owns how they retain it.
