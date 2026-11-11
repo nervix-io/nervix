@@ -38,6 +38,10 @@ Feature: Pipelined raft replication and bounded log retention
     And transaction "{{transaction_id}}" eventually has state "OPEN"
     When client "resumed" executes these Plexus commands
       """
+      DESCRIBE TRANSACTION;
+      """
+    And client "resumed" executes these Plexus commands
+      """
       COMMIT;
       """
     Then transaction "{{transaction_id}}" eventually has state "COMMITTED"

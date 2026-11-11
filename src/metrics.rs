@@ -62,6 +62,8 @@ use strum::{AsRefStr, EnumIter, IntoEnumIterator};
 use tikv_jemalloc_ctl::{epoch, epoch_mib, stats};
 
 mod command_execution;
+mod inferencer;
+pub(crate) use inferencer::{InferencerBranchBytes, InferencerStateMetrics};
 mod connector;
 mod control_plane;
 mod interconnection;
@@ -1668,6 +1670,7 @@ impl RuntimeMetrics {
 /// Every series one node records into, plus the Prometheus registry they are exported through.
 #[derive(Debug)]
 struct MetricSeries {
+    inferencer: Arc<inferencer::InferencerStateMetricSeries>,
     connector: ConnectorInteractionMetrics,
     counters: DashMap<MetricKey, Arc<CounterSeries>>,
     histograms: DashMap<MetricKey, Arc<HistogramSeries>>,
@@ -1783,8 +1786,10 @@ impl Default for RuntimeMetrics {
     fn default() -> Self {
         let prometheus = PrometheusMetrics::new();
         let connector = ConnectorInteractionMetrics::register(&prometheus.registry);
+        let inferencer = inferencer::InferencerStateMetricSeries::register(&prometheus.registry);
         Self {
             series: Arc::new(MetricSeries {
+                inferencer,
                 connector,
                 counters: DashMap::new(),
                 histograms: DashMap::new(),
