@@ -33,6 +33,7 @@ use crate::{
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct NodeSettings {
     /// Explicit first-bootstrap seeds, retained separately from resolved local defaults.
+    pub listeners: super::listener_settings::ListenerSettings,
     pub parameter_seeds: nervix_models::ClusterParameterSeedValues,
     pub operational: nervix_models::NodeOperationalCapabilities,
     pub raft: RaftTimings,

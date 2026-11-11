@@ -16,10 +16,17 @@
     )
 )]
 
-use std::{collections::BTreeSet, io, net::SocketAddr};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    io,
+    net::SocketAddr,
+};
 
 use meticulous::ResultExt as _;
-use nervix_primitives::net::{TcpListener, TcpStream};
+use nervix_primitives::{
+    net::{TcpListener, TcpStream},
+    time::Instant,
+};
 
 use super::FaultInjection;
 
@@ -28,7 +35,7 @@ use super::FaultInjection;
 #[derive(Debug, Default)]
 pub(super) struct ListenerAcceptFailures {
     armed: BTreeSet<SocketAddr>,
-    failed: BTreeSet<SocketAddr>,
+    failed: BTreeMap<SocketAddr, Instant>,
 }
 
 impl ListenerAcceptFailures {
@@ -38,7 +45,7 @@ impl ListenerAcceptFailures {
         if !self.armed.remove(&address) {
             return false;
         }
-        self.failed.insert(address);
+        self.failed.insert(address, Instant::now());
         true
     }
 }
@@ -55,12 +62,12 @@ impl FaultInjection {
     }
 
     /// Resolves once the failure armed for the listener bound to `address` happened.
-    pub async fn listener_accept_failure(&self, address: SocketAddr) {
+    pub async fn listener_accept_failure(&self, address: SocketAddr) -> Instant {
         let mut changes = self.inner.listener_accept_failures.subscribe();
         loop {
             nervix_primitives::task::consume_budget().await;
-            if changes.borrow_and_update().failed.contains(&address) {
-                return;
+            if let Some(fired_at) = changes.borrow_and_update().failed.get(&address).copied() {
+                return fired_at;
             }
             changes
                 .changed()

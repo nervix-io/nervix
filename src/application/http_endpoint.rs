@@ -16,7 +16,7 @@
 use std::{convert::Infallible, net::SocketAddr, time::Duration};
 
 use futures_util::SinkExt;
-use http_body_util::{BodyExt, Either, Empty, Full};
+use http_body_util::{Either, Empty, Full};
 use hyper::{
     Method, Request as HyperRequest, Response as HyperResponse, StatusCode,
     body::{Bytes, Incoming as HyperIncoming},
@@ -24,7 +24,6 @@ use hyper::{
         CONNECTION, HOST, RETRY_AFTER, SEC_WEBSOCKET_ACCEPT, SEC_WEBSOCKET_KEY,
         SEC_WEBSOCKET_VERSION, UPGRADE,
     },
-    server::conn::http1,
     service::service_fn,
     upgrade,
 };
@@ -215,6 +214,7 @@ impl EndpointWebsocketConnection {
         on_upgrade: upgrade::OnUpgrade,
         host: String,
         shutdown: CancellationToken,
+        settings: super::listener_settings::ListenerSettings,
     ) {
         let upgraded = nervix_primitives::select! {
             _ = shutdown.cancelled() => return,
@@ -233,7 +233,18 @@ impl EndpointWebsocketConnection {
             }
         };
         let io = TokioIo::new(upgraded);
-        let mut websocket = WebSocketStream::from_raw_socket(io, Role::Server, None).await;
+        let config = tokio_tungstenite::tungstenite::protocol::WebSocketConfig {
+            max_message_size: Some(
+                usize::try_from(settings.websocket_message_bytes().as_u64())
+                    .assured("WebSocket size-setting validation checks usize representation"),
+            ),
+            max_frame_size: Some(
+                usize::try_from(settings.websocket_frame_bytes().as_u64())
+                    .assured("WebSocket size-setting validation checks usize representation"),
+            ),
+            ..Default::default()
+        };
+        let mut websocket = WebSocketStream::from_raw_socket(io, Role::Server, Some(config)).await;
 
         let connector = EndpointSignalingDataEmitter {
             runtime: &runtime,
@@ -385,11 +396,20 @@ async fn handle_http_request(
     shutdown: CancellationToken,
     remote_addr: SocketAddr,
     request: HyperRequest<HyperIncoming>,
+    accounting: super::listener_input::InputAccounting,
 ) -> Result<HyperResponse<EndpointResponseBody>, Infallible> {
     if shutdown.is_cancelled() || !initialization.is_ready() {
         return Ok(endpoint_rejection_response(None).map(Either::Left));
     }
-    dispatch_http_request(runtime, request_tasks, shutdown, remote_addr, request).await
+    dispatch_http_request(
+        runtime,
+        request_tasks,
+        shutdown,
+        remote_addr,
+        request,
+        accounting,
+    )
+    .await
 }
 
 async fn dispatch_http_request(
@@ -398,6 +418,7 @@ async fn dispatch_http_request(
     shutdown: CancellationToken,
     remote_addr: SocketAddr,
     mut request: HyperRequest<HyperIncoming>,
+    accounting: super::listener_input::InputAccounting,
 ) -> Result<HyperResponse<EndpointResponseBody>, Infallible> {
     let mut host = String::new();
     if let Some(value) = request.headers().get(HOST)
@@ -460,7 +481,13 @@ async fn dispatch_http_request(
             );
 
         let on_upgrade = upgrade::on(&mut request);
-        request_tasks.spawn(connection.serve(runtime, on_upgrade, host, shutdown));
+        request_tasks.spawn(connection.serve(
+            runtime,
+            on_upgrade,
+            host,
+            shutdown,
+            accounting.settings(),
+        ));
 
         return Ok(response.map(Either::Left));
     }
@@ -472,11 +499,23 @@ async fn dispatch_http_request(
         if let Some(refusal) = route.refusal() {
             return Ok(endpoint_dispatch_response(refusal));
         }
-        let body = match request.body_mut().collect().await {
-            Ok(collected) => collected.to_bytes(),
+        let body = match super::listener_input::collect(
+            request.body_mut(),
+            runtime.executor(),
+            &accounting,
+        )
+        .await
+        {
+            Ok(body) => body,
             Err(error) => {
-                warn!(error = %error, host, path, "failed to read http request body");
-                return Ok(response_with_status(StatusCode::BAD_REQUEST).map(Either::Left));
+                let refusal = *error.current_context();
+                warn!(error = %format_args!("{error:#}"), host, path, "HTTP input refused");
+                accounting.mark_refused();
+                let mut response = text_response(refusal.status(), refusal.to_string());
+                response
+                    .headers_mut()
+                    .insert(CONNECTION, hyper::header::HeaderValue::from_static("close"));
+                return Ok(response.map(Either::Right));
             }
         };
         if shutdown.is_cancelled() {
@@ -516,12 +555,17 @@ async fn serve_endpoint_connection<S>(
     initialization: Arc<NodeInitialization>,
     request_tasks: ServiceTasks,
     shutdown: CancellationToken,
+    settings: super::listener_settings::ListenerSettings,
 ) -> Result<(), hyper::Error>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
     let request_shutdown = shutdown.clone();
-    let connection = http1::Builder::new()
+    let accounting = super::listener_input::InputAccounting::new(settings);
+    let stream = super::listener_input::AccountedIo::new(stream, accounting.clone());
+    // The service owns its handle while serving; this owner keeps one through final teardown.
+    let service_accounting = accounting.clone();
+    let mut connection = super::listener_io::http_builder(settings)
         .serve_connection(
             TokioIo::new(stream),
             service_fn(move |request| {
@@ -532,18 +576,29 @@ where
                     request_shutdown.clone(),
                     remote_addr,
                     request,
+                    service_accounting.clone(),
                 )
             }),
         )
         .with_upgrades();
-    let mut connection = std::pin::pin!(connection);
-    nervix_primitives::select! {
+    let result = nervix_primitives::select! {
         result = &mut connection => result,
         () = shutdown.cancelled() => {
-            connection.as_mut().graceful_shutdown();
-            connection.await
+            std::pin::Pin::new(&mut connection).graceful_shutdown();
+            (&mut connection).await
         }
+    };
+    if result.is_ok()
+        && accounting.was_refused()
+        && let Some(parts) = connection.into_parts()
+    {
+        let stream = parts.io.into_inner().into_inner();
+        // Reuse the declared read-buffer capacity after Hyper's own buffer is released.
+        drop(parts.read_buf);
+        drop(parts.service);
+        accounting.finish_refusal(stream, &shutdown).await;
     }
+    result
 }
 
 pub(in crate::application) async fn serve_http(
@@ -553,6 +608,7 @@ pub(in crate::application) async fn serve_http(
     mut listener: PublicListener,
     shutdown: CancellationToken,
 ) {
+    let settings = listener.settings();
     let mut connection_tasks = JoinSet::new();
 
     loop {
@@ -561,6 +617,7 @@ pub(in crate::application) async fn serve_http(
             _ = shutdown.cancelled() => {
                 break;
             }
+            _ = connection_tasks.join_next(), if !connection_tasks.is_empty() => continue,
             accepted = listener.accept() => accepted,
         };
         let runtime = runtime.clone();
@@ -575,6 +632,7 @@ pub(in crate::application) async fn serve_http(
                 initialization,
                 request_tasks,
                 request_shutdown,
+                settings,
             )
             .await
             {
@@ -593,6 +651,7 @@ pub(in crate::application) async fn serve_https(
     mut listener: PublicListener,
     shutdown: CancellationToken,
 ) {
+    let settings = listener.settings();
     let mut connection_tasks = JoinSet::new();
 
     loop {
@@ -601,6 +660,7 @@ pub(in crate::application) async fn serve_https(
             _ = shutdown.cancelled() => {
                 break;
             }
+            _ = connection_tasks.join_next(), if !connection_tasks.is_empty() => continue,
             accepted = listener.accept() => accepted,
         };
         let runtime = runtime.clone();
@@ -616,10 +676,10 @@ pub(in crate::application) async fn serve_https(
             let acceptor = TlsAcceptor::from(tls_config);
             let accepted = nervix_primitives::select! {
                 () = request_shutdown.cancelled() => return,
-                accepted = acceptor.accept(stream) => accepted,
+                accepted = nervix_primitives::time::timeout(settings.tls_timeout(), acceptor.accept(stream)) => accepted,
             };
             match accepted {
-                Ok(tls_stream) => {
+                Ok(Ok(tls_stream)) => {
                     if let Err(error) = serve_endpoint_connection(
                         tls_stream,
                         remote_addr,
@@ -627,15 +687,17 @@ pub(in crate::application) async fn serve_https(
                         initialization,
                         request_tasks,
                         request_shutdown,
+                        settings,
                     )
                     .await
                     {
                         warn!(error = %error, "https connection failed");
                     }
                 }
-                Err(error) => {
+                Ok(Err(error)) => {
                     warn!(error = %error, "tls accept failed");
                 }
+                Err(error) => warn!(%error, "HTTPS handshake timeout"),
             }
         });
     }

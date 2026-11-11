@@ -202,6 +202,8 @@ pub struct SettingsArgs {
     pub execution: ExecutionArgs,
     #[command(flatten)]
     pub operational: OperationalArgs,
+    #[command(flatten)]
+    pub listeners: super::listeners::ListenerArgs,
 }
 
 impl TryFrom<SettingsArgs> for NodeSettings {
@@ -289,6 +291,10 @@ impl TryFrom<SettingsArgs> for NodeSettings {
                 .operational
                 .settings()
                 .change_context(AppError::InvalidOperationalCapabilities)?,
+            listeners: args
+                .listeners
+                .settings()
+                .change_context(AppError::InvalidListenerSettings)?,
             raft,
             raft_retention: args
                 .consensus
@@ -352,6 +358,7 @@ impl From<&NodeSettings> for SettingsArgs {
             shutdown: ShutdownArgs::from_settings(&settings.shutdown),
             resources: ResourceArgs::from_settings(&settings.resources),
             capacity: CapacityArgs::from_settings(&settings.capacity, &settings.peer_receive),
+            listeners: super::listeners::ListenerArgs::from_settings(&settings.listeners),
             execution: ExecutionArgs::from_overrides(
                 &settings.execution,
                 &settings.client_endpoints,
@@ -383,6 +390,7 @@ impl SettingsArgs {
         self.capacity.render(&mut command_line);
         self.execution.render(&mut command_line);
         self.operational.render(&mut command_line);
+        self.listeners.render(&mut command_line);
         command_line.arguments
     }
 }

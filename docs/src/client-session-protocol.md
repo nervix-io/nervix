@@ -1206,9 +1206,9 @@ session on any other node, and a console session whose node stops leading, is en
 
 ### Deadlines And Cancellation
 
-The server imposes no deadline on a request's wait and no idle timeout on a session, and neither
-transport sends keepalives; a connection is judged dead by its transport or by the client's own
-deadline. A client deadline bounds only the client's wait. It never cancels admitted work, and
+The session exchange places no deadline on an individual command's wait. Its transport follows
+[Listener Admission And Expiry](#listener-admission-and-expiry), including idle expiry and native
+gRPC keepalive. A client deadline bounds only the client's wait. It never cancels admitted work, and
 [Command Completion](./command-completion.md#disconnects-deadlines-and-recovery) owns what the work
 does meanwhile. A client that gives up on an uncertain command keeps its execution reference and can
 recover the outcome later, within the retry validity.
@@ -1222,9 +1222,10 @@ The Rust client bounds each connection attempt by `connect_timeout` (10 seconds 
 request by `request_timeout` (120 seconds), and each public call, including all of its retries and
 redirects, by `retry_timeout` (120 seconds). A `BACKUP` takes `backup_wait_timeout` in place of
 both: its replies and every redirect and reconnect it makes share that one deadline, so a backup
-keeps reconnecting through an outage longer than `retry_timeout`. Without keepalives, a request
-that outlives `request_timeout` is the client's only sign that its session may be dead, so it ends
-every request still waiting on that session, and the next request opens a new one. While an
+keeps reconnecting through an outage longer than `retry_timeout`. A request that outlives
+`request_timeout` causes the client to end every request still waiting on that session, and the
+next request opens a new one. This also bounds a stalled application wait when transport keepalive
+still succeeds. While an
 election converges it retries with a delay that starts at 100 milliseconds and doubles up to one
 second. When a call's deadline passes before a command's outcome is known, and the command may have
 been admitted, the call fails as uncertain and names the execution reference. When a nonterminal
@@ -2546,8 +2547,8 @@ It does not provide:
 - **A durable session.** A session, its request identities, its selected domain, its subscriptions,
   its domain clock attachments, its producers, and its transaction binding end with the connection. Only execution
   records, transactions, and upload records outlive it.
-- **Liveness detection.** Neither transport sends keepalives, and the server has no idle timeout. A
-  client that needs to detect a half-open connection bounds its own waits.
+- **Application responsiveness.** Transport keepalive and idle expiry detect an unresponsive peer;
+  they do not prove that an application request can finish. A client bounds its own waits.
 - **A durable archive.** A backup's archive lives in the staging area of the node that assembled it
   and is lost when that node stops, or once its reference's retry validity ends; the recorded
   outcome outlives it. Only the first complete download receives it.
@@ -2719,3 +2720,12 @@ strings and reset scopes as `{"kind": ..., "branch": ...}`. See
 [Inspect Materialized State](./relay.md#inspect-materialized-state) and
 [WASM State And Recovery](./wasm-state.md#observability) for token fencing and query semantics. This operator page protocol does not change subscription batches or the
 internal dependency/generator full-snapshot protocol.
+
+## Listener Admission And Expiry
+
+The serving node declares its [Listener Bounds](node-settings.md#listener-bounds) in its committed
+capability record. Public connection admission, TLS and idle deadlines precede or contain a session;
+gRPC also bounds handler response time and concurrent streams and uses HTTP/2 and kernel TCP keepalive.
+A streaming response already established is not given a whole-session request deadline. A peer
+that stops acknowledging server pings is closed, releasing session-owned resources. These transport
+bounds introduce no session wire message and do not change command admission or recovery identity.

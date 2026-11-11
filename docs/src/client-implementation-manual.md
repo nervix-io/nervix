@@ -208,8 +208,10 @@ archive; see [Restore Streams](#restore-streams).
   a `LeaderRedirect` whenever its node does not lead. It then reconnects to the named leader's
   `web_console_uri` with the path `/console/ws`, or backs off and retries when the redirect names no
   endpoint.
-- **T-8.** A client MUST NOT rely on keepalives or an idle timeout, since neither side sends
-  keepalives, and MUST bound every wait with a deadline of its own.
+- **T-8.** A client MUST bound every application wait with a deadline of its own. The node's
+  [listener bounds](node-settings.md#listener-bounds), HTTP/2 keepalive and idle expiry detect
+  transport liveness; they do not establish an application request deadline. A close caused by
+  those bounds remains a transport failure under the existing recovery rules.
 - **T-9.** A client MUST treat an upload, restore or download call that ends with `UNAVAILABLE`
   before its reply or its last frame as a call that failed in transport. A node that stops ends
   every such call it has not answered that way, and the call's outcome is then uncertain as U-5,

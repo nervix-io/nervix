@@ -185,6 +185,13 @@ impl<'bytes> GeneratedSettings<'bytes> {
     fn execution(&mut self) -> nervix_execution::ExecutionOverrides {
         let workers = self.execution_workers();
         nervix_execution::ExecutionOverrides {
+            intake_memory_bytes: if self.entropy.flag() {
+                Some(ByteUnit::Byte(
+                    self.entropy.between(1..=u64::from(u32::MAX)),
+                ))
+            } else {
+                None
+            },
             management_memory_bytes: if self.entropy.flag() {
                 Some(ByteUnit::Byte(
                     self.entropy.between(1..=u64::from(u32::MAX)),
@@ -555,6 +562,45 @@ impl<'bytes> GeneratedSettings<'bytes> {
         .assured("generated engine capacities fit bounded counts and milliseconds")
     }
 
+    #[cfg(test)]
+    fn listeners(&mut self) -> crate::application::listener_settings::ListenerSettings {
+        use crate::application::listener_settings::{ListenerOverrides, ListenerSettings};
+        ListenerSettings::resolve(ListenerOverrides {
+            max_connections: Some(
+                u32::try_from(self.entropy.between(1..=1024)).verified("bounded listener count"),
+            ),
+            header_bytes: Some(ByteUnit::Byte(self.entropy.between(8192..=67108864))),
+            buffer_bytes: Some(ByteUnit::Byte(self.entropy.between(8192..=67108864))),
+            header_timeout: Some(Duration::from_secs(self.entropy.between(1..=120))),
+            tls_timeout: Some(Duration::from_secs(self.entropy.between(1..=120))),
+            idle_timeout: Some(Duration::from_secs(self.entropy.between(1..=120))),
+            accept_retry_delay: Some(Duration::from_secs(self.entropy.between(1..=120))),
+            http_keepalive: Some(self.entropy.flag()),
+            http_body_bytes: Some(ByteUnit::Byte(self.entropy.between(8192..=67108864))),
+            http_body_copy_bytes: Some(ByteUnit::Byte(self.entropy.between(8192..=67108864))),
+            http_body_timeout: Some(Duration::from_secs(self.entropy.between(1..=120))),
+            http_refusal_drain_timeout: Some(Duration::from_secs(self.entropy.between(1..=120))),
+            websocket_message_bytes: Some(ByteUnit::Byte(self.entropy.between(8192..=67108864))),
+            websocket_frame_bytes: Some(ByteUnit::Byte(self.entropy.between(8192..=67108864))),
+            grpc_header_bytes: Some(ByteUnit::Byte(self.entropy.between(8192..=67108864))),
+            grpc_concurrency: Some(
+                u32::try_from(self.entropy.between(1..=1024)).verified("bounded listener count"),
+            ),
+            grpc_request_timeout: Some(Duration::from_secs(self.entropy.between(1..=120))),
+            grpc_max_streams: Some(
+                u32::try_from(self.entropy.between(1..=1024)).verified("bounded listener count"),
+            ),
+            grpc_keepalive_interval: Some(Duration::from_secs(self.entropy.between(1..=120))),
+            grpc_keepalive_timeout: Some(Duration::from_secs(self.entropy.between(1..=120))),
+            tcp_keepalive_time: Some(Duration::from_secs(self.entropy.between(1..=120))),
+            tcp_keepalive_interval: Some(Duration::from_secs(self.entropy.between(1..=120))),
+            tcp_keepalive_retries: Some(
+                u32::try_from(self.entropy.between(1..=127)).verified("bounded listener count"),
+            ),
+        })
+        .assured("generated bounded listener inputs satisfy their scalar contracts")
+    }
+
     fn node_settings(&mut self) -> NodeSettings {
         let execution = self.execution();
         let runtime_threads = crate::application::RuntimeThreadOverrides {
@@ -705,6 +751,7 @@ impl<'bytes> GeneratedSettings<'bytes> {
             node_database: self.database(),
             consensus_database: self.database(),
             operational: self.entropy.node_operational_capabilities(),
+            listeners: self.listeners(),
             parameter_seeds: nervix_models::ClusterParameterSeedValues {
                 tls_cipher_suites: Some(tls_cipher_suites),
                 tls_key_exchange_groups: Some(tls_key_exchange_groups),

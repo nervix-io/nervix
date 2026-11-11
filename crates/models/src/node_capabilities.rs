@@ -1,7 +1,7 @@
 //! The resolved capacity claim of one concrete node run.
 //!
 //! Layer: vocabulary.
-//! - **Owns.** CPU and memory capacity, transport, DNS, database, consensus, engine, connector host and operational limits, peer receive bounds and the incarnation-bound claim.
+//! - **Owns.** CPU and memory capacity, transport, DNS, database, consensus, engine, connector host, operational and listener limits, peer receive bounds and the incarnation-bound claim.
 //! - **Depends on.** Node identities and serialization primitives.
 //! - **Must not know.** Detection, consensus, transport or placement policy.
 
@@ -232,6 +232,7 @@ pub struct NodeCapabilities {
     pub node_database: crate::DatabaseCapabilities,
     pub consensus_database: crate::DatabaseCapabilities,
     pub consensus: ConsensusCapabilities,
+    pub listeners: crate::ListenerBounds,
 }
 
 impl NodeCapabilities {

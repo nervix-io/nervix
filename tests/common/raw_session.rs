@@ -267,8 +267,17 @@ pub(crate) async fn open_session_as(
     domain: &str,
     authorization: &str,
 ) -> io::Result<Result<TestSession, Box<Status>>> {
-    let limits = SessionLimits::DEFAULT;
     let channel = session_channel(server).await?;
+    open_session_on_channel(channel, domain, authorization).await
+}
+
+/// Opens the same public exchange through a transport fixture supplied by a scenario.
+pub(crate) async fn open_session_on_channel(
+    channel: Channel,
+    domain: &str,
+    authorization: &str,
+) -> io::Result<Result<TestSession, Box<Status>>> {
+    let limits = SessionLimits::DEFAULT;
     // The harness sends whatever a scenario asks it to, including messages above the frame limit
     // the server must refuse, so only what it receives is held to that limit.
     let mut client =

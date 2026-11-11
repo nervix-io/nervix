@@ -410,11 +410,13 @@ fn capability_line(record: &NodeCapabilityRecord) -> String {
         .collect::<Vec<_>>()
         .join(" ");
     format!(
-        "  capabilities: committed {} cpu-count={cpu} memory-bytes={memory} {} {} {} {operational}",
+        "  capabilities: committed {} cpu-count={cpu} memory-bytes={memory} {} {} {} \
+         listeners={:?} {operational}",
         record.identity,
         bounds_line(capabilities.receive),
         engine_capability_line(capabilities.engines),
         connector_host_capability_line(capabilities.connector_host),
+        capabilities.listeners,
     )
 }
 
@@ -617,6 +619,8 @@ mod tests {
                         nervix_arbitrary::Domain::Vocabulary,
                     )
                     .node_connector_host_capabilities(),
+                    listeners: crate::application::listener_settings::ListenerSettings::default()
+                        .bounds(),
                     cpu_count: None,
                     memory_bytes: NonZeroU64::new(8 << 30),
                     receive,

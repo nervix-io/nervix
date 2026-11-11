@@ -624,3 +624,13 @@ binds ordinary costs and public/model/fault results to their actual revision and
 Run records, audit registers and measurements belong on the owning task. Architecture documentation
 states durable guarantees and limits, without turning one passing snapshot into a permanent claim
 about later source.
+
+## Native TCP Keepalive Configuration
+
+`net::configure_tcp_keepalive` borrows an already selected native `TcpStream` and configures its
+kernel idle time, probe interval and retry count. It creates no socket or wrapper and uses socket2
+only inside the primitive boundary. Its positive and listener-type rejection API examples and
+native socket conformance check exercise that contract. Simulated sockets have no kernel options,
+so Turmoil does not expose the operation; no mode substitutes a no-op. The Hyper timer adapter's
+permission for the real Instant type exists only to satisfy that external trait signature; selected
+clock reads, sleeps and resets still determine every listener deadline.
