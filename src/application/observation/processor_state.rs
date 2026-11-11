@@ -27,8 +27,8 @@ use nervix_interconnect::{
 use nervix_models::{
     BranchKeyFingerprint, ClusterNodeIdentity, ClusterSchedule, CreateCorrelator,
     CreateDeduplicator, CreateRelay, CreateReorderer, CreateSchema, CreateWindowProcessor,
-    DomainName, DomainNodeRef, DomainSchedule, Expression, FieldScope, InspectionFormat, ModelKind,
-    NodeRef, ParseAsType, ProcessorStateSection, ResolvedBranching, ResolvedStateBranchSelection,
+    DomainName, DomainNodeRef, DomainSchedule, Expression, FieldScope, ModelKind, NodeRef,
+    ParseAsType, ProcessorStateSection, ResolvedBranching, ResolvedStateBranchSelection,
     ScheduledNode, SchemaField, ShowProcessorState, StateInspectedProcessor,
     StateInspectionBranchSelection, StateInspectionCounts, StateInspectionOrigin,
     StateInspectionPosition, StateInspectionRejection, StateInspectionStage, Unit,
@@ -36,14 +36,11 @@ use nervix_models::{
 use nervix_primitives::time::timeout;
 
 use super::inspection_pages::{
-    add_counts, distinct_field, inspection_owner, inspection_refusal, resume_position,
+    add_counts, distinct_field, inspection_owner, inspection_refusal, rendered_inspection,
+    resume_position,
 };
 use crate::{
-    application::{
-        command_result::CommandResult,
-        model_mutation::{command_error, command_ok},
-        session_service::SessionServiceImpl,
-    },
+    application::{command_result::CommandResult, session_service::SessionServiceImpl},
     client_row::{ArrowRowBatch, write_runtime_value},
     runtime::{
         BranchKey, ProcessorStatePageBounds, ProcessorStatePageError, ProcessorStateSelection,
@@ -663,25 +660,7 @@ impl SessionServiceImpl {
                 Err(_) => StateInspectionResult::Rejected(StateInspectionRejection::Deadline),
             },
         };
-        let message = match show.format {
-            InspectionFormat::Json => state.to_json(),
-            InspectionFormat::Text => match state.display_text() {
-                Ok(text) => text,
-                Err(error) => return command_error(format!("{error:#}")),
-            },
-        };
-        let mut result = if matches!(state.result, StateInspectionResult::Rejected(_)) {
-            command_error(message)
-        } else {
-            command_ok(message)
-        };
-        result.state = Some(Box::new(
-            crate::application::command_result::RenderedStateInspection {
-                inspection: state,
-                format: show.format,
-            },
-        ));
-        result
+        rendered_inspection(state, show.format)
     }
 
     async fn processor_inspection_plan(
@@ -855,6 +834,7 @@ impl SessionServiceImpl {
                     origin: descriptor.origin.clone(),
                     counts: descriptor.counts,
                     sections: Vec::new(),
+                    wasm: None,
                 });
                 progress.passed_without_rows(**unit, skip, unit_more);
                 continue;
@@ -870,6 +850,7 @@ impl SessionServiceImpl {
                 origin: encoded.origin,
                 counts: encoded.counts,
                 sections: encoded.sections,
+                wasm: None,
             });
         }
         let more = progress.more;
@@ -907,6 +888,7 @@ impl SessionServiceImpl {
             unit_count: u64::try_from(units.len()).assured("a bounded unit count fits u64"),
             units: output,
             continuation,
+            wasm_binding: None,
         })
     }
 

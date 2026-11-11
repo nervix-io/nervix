@@ -63,6 +63,12 @@ serialized copy to each remote consuming cluster node, where all runtime consume
 subscription share that delivery. Only a relay's optional materialized records have
 scheduler-selected state replicas; the relay's hot-path runtime is never replicated.
 
+Subscription delivery observes relay fan-out, independently of the materialized state task that
+consumes its own queued batches. Receiving a row through a subscription does not establish that
+an inspection can already read that row or that a prior inspection continuation has become stale.
+A reader requiring a particular materialized publication observes that row through the owner-side
+inspection before relying on its changed cut.
+
 Nervix is not a durable event log for every in-flight row. If hot-path message or ACK state is lost, external systems and ingestors react according to their delivery mode, offsets, and retry policy.
 
 Branch grouping is native runtime isolation based on explicit `CREATE BRANCH` declarations. A

@@ -159,10 +159,11 @@ Pace and placement policy are typed choices supplied by the session server. They
 paged independently, and neither depends on another selection. Loading and no matches have separate
 neutral messages. A missing prerequisite, such as a captured
 domain or a selected relay for its field list, shows a neutral hint naming what to choose. A stale
-choice page shows a neutral message and **Retry**, which requests a fresh first page. Lookup,
-session-channel, and unreadable-reply failures remain alerts. These states apply to every form's
-server-backed choices. An edit, dialog close, or replacement session makes an
-older reply ineligible to change the form.
+choice page shows a neutral message and **Retry**, which requests a fresh first page. Lookup and
+session-channel failures remain alerts on the control. A reply the console cannot read ends the
+session instead, which the REPL reports, and the control asks again once the console reconnects.
+These states apply to every form's server-backed choices. An edit, dialog close, or replacement
+session makes an older reply ineligible to change the form.
 
 A placement form creates a named [placement rule](placement.md) in its captured domain. Its
 coverage is **Entire domain**, which writes `DOMAIN WIDE`, or **Corridor**, which writes `FROM` and
@@ -189,10 +190,12 @@ cleartext value is never added to terminal history.
 Submitting uses the same durable command path as the REPL. The form therefore keeps the command's
 execution reference through redirects and reconnects, uses the attached transaction's expected
 position, and reports **Editing**, **Submitting**, **Queued until reconnect**, **Queued in
-transaction**, **Completed**, or **Failed** from the correlated outcome. A queued transaction
-operation is not presented as externally complete. A successful standalone resource create opens
-the existing resource version dialog, where upload identity and completion continue to be owned by
-the upload workflow.
+transaction**, **Completed**, or **Failed** from the correlated outcome. While the command is
+submitting or queued until reconnect, the form's fields and typed choices, their searches included,
+are disabled along with **Create**, so the draft cannot change or be sent again and the form reports
+that command's own outcome. A queued transaction operation is not presented as externally complete.
+A successful standalone resource create opens the existing resource version dialog, where upload
+identity and completion continue to be owned by the upload workflow.
 
 The **Create** menu also opens forms for internal schemas, JSON/CBOR/AVRO wire schemas, and named
 branches. Schema fields are added in declaration order and can be moved or removed. An internal
@@ -491,6 +494,8 @@ The sections above give each form's optional clauses. A transaction can stage a 
 these forms: each create is queued at its position in the attached transaction, later forms offer
 what earlier ones staged, the transaction inspector supplies the commit basis, and the attached
 transaction and its queued creates survive the console following a new leader.
+[Visual Creation And Shared Completion](./visual-creation.md) explains how drafts, choices,
+completion and submission are built and qualified.
 
 ## The Execution Graph
 

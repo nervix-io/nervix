@@ -1892,7 +1892,6 @@ mod tests {
             transaction: None,
             transaction_admission: None,
             inspection: None,
-            wasm_state: None,
             state: None,
             resource: None,
             backup: None,

@@ -652,6 +652,24 @@ execution uses the bounded extension workers; mapped input and public output con
 respect the configured relay operation limit. The state is retained once per active branch;
 use the branch's `MAX INSTANCES` to bound the number of live copies.
 
+### Inspect inference configuration and state
+
+`DESCRIBE INFERENCER <name>;` reports the pinned resource version and file, execution mode,
+`INPUTS`, `STATE` and `OUTPUT SCHEMA` declarations, branch policy and output routes. The static
+state bytes per branch count the declared native `F32` tensor elements; snapshot framing and
+ONNX session memory are outside that count. A stateless inferencer reports zero.
+
+For a running stateful inferencer, the summary reports each execution unit's owner and replicas,
+the branches in its published state and their bytes, and publication, persistence and replica
+progress. These are observations of immutable publications, not a synchronized state cut. Revisions
+are branch-local: a unit's revision at each stage is the highest branch revision observed at that
+stage, not a checkpoint covering every branch. Missing observations are shown as unavailable;
+revision zero remains a valid observed baseline. The summary reads no tensor values or branch-key
+values. Any node can serve the command by asking the scheduled unit owners for their typed facts.
+
+The [inferencer state metrics](metrics-and-observability.md#inferencer-state) measure active state
+bytes, snapshot failures and branch initialization on each execution owner.
+
 ## WASM processor
 
 WASM routes are also set-only and execute only when the guest returns actual output data:
@@ -699,17 +717,36 @@ An `ATTACHED` WASM processor, the default, acknowledges an input only after the 
 checkpoint that covers it is on the stable storage of the branch's owner and of every replica the
 schedule assigns the processor; relay fan-out acknowledges the input of a `DETACHED` one upstream.
 A checkpoint that cannot get there negatively acknowledges what it covers and recreates the branch's
-guest from its last completed checkpoint. `DESCRIBE WASM PROCESSOR` reads the committed binding,
-default state generation, latest coordinated reset and retained rejected-state recoveries together
-with the owner's current checkpoint stages and revisions. Each reported branch uses a fixed-size
-opaque fingerprint rather than a branch value. Required and confirmed replica counts are shown for
-checkpoints captured on the current owner; a restored checkpoint whose earlier boundary is unknown
-reports those counts as unknown. Counts cover every active branch, while detailed branch and
-recovery entries are bounded. `DESCRIBE WASM PROCESSOR <name> FORMAT JSON` serializes the same
-typed state inspection used by the text output; the command also returns it as a typed client
-outcome in either format. See
+guest from its last completed checkpoint. `DESCRIBE WASM PROCESSOR` summarizes the committed
+binding and, per execution unit, the default state generation, the latest coordinated reset with its
+readiness, the recorded rejected-state recoveries by outcome and the counts of the owner's current
+checkpoint stages.
+
+### Read guest-state facts from Plexus
+
+`SHOW WASM PROCESSOR <processor> STATE` reads the facts behind that summary through the typed state
+inspection envelope, branch by branch, with the clauses every `SHOW ... STATE` statement shares:
+
+```plexus
+SHOW WASM PROCESSOR normalize_events STATE;
+SHOW WASM PROCESSOR normalize_events STATE FOR BRANCH KEY { tenant = 'acme' } FORMAT JSON;
+SHOW WASM PROCESSOR normalize_events STATE FOR ALL BRANCHES LIMIT 100 FORMAT JSON;
+SHOW WASM PROCESSOR normalize_events STATE LIMIT 100 AFTER '<continuation>' FORMAT JSON;
+```
+
+Every unit reports its owner and replicas, its default generation, its latest reset with the reset's
+request reference, scope, phase, reason, generation and readiness, and complete counts of its
+selected entries, checkpoint stages and recovery outcomes. Each selected branch with a checkpoint in
+its current lifetime or a recorded recovery has one entry, in branch order, named by a fixed-size
+opaque fingerprint rather than a branch value: its checkpoint's generation, committed and latest
+revision, stage and required and confirmed replica counts, and its recovery's refused generation,
+rejection, request and outcome. Required and confirmed replica counts are shown for checkpoints
+captured on the current owner; a restored checkpoint whose earlier boundary is unknown reports those
+counts as unknown. `LIMIT` bounds the entries of one reply, and a reply that stops early carries a
+continuation that `AFTER` resumes under the same committed schedule. `FORMAT JSON` renders the same
+typed envelope the command returns to clients in either format. See
 [Checkpoints And Acknowledgements](wasm-processor-guests.md#checkpoints-and-acknowledgements) and
-[WASM State And Recovery](wasm-state.md).
+[WASM State And Recovery](wasm-state.md#observability).
 
 ### Reset guest state from Plexus
 

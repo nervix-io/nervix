@@ -375,6 +375,24 @@ An outage moves no signed deadline, and restart resets none. Freeze keeps existi
 and refuses new domain and member usage. Existing domain lifecycle commands and backups remain
 available. A later verified decision can clear the lapse.
 
+The licensed leader holds one authenticated outbound event stream. Each connection obtains a
+fresh challenge and single-use signed stream ticket; credentials stay out of the URL. The initial
+`sync` compares notification, decision, conditions and trust revisions. A gap or a new `decision`
+or `trust` hint schedules a coalesced refresh through the ordinary verification and Raft path;
+duplicate and stale notification identifiers do not schedule another refresh. Hints grant no
+permission. Reconnects retain `Last-Event-ID` within the current activation and leader tenure;
+a new leader reconciles from its committed revisions. Leadership loss, shutdown or a changed
+activation/key binding ends the exact stream before its replacement starts.
+
+Stream setup shares the request timeout, resolver and TLS policy above. The idle timeout applies
+to incoming bytes, including keep-alive comments. Parsing uses the maintained SSE parser with a
+management-event-sized input envelope per parser lifetime; exhausting it renews the connection
+with its cursor and reconciliation, so incomplete input cannot accumulate without a bound.
+Reconnects use the declared exponential backoff with full jitter. Polling at `refresh_after` and
+committed deadline crossings run independently of stream setup, reads and reconnect sleeps.
+A blocked or unavailable stream therefore changes notification latency, never signed permission
+or the polling schedule. Stream state and its cursor are process-local and never persisted.
+
 Every node answers `DESCRIBE LICENSE` without selecting a domain or redirecting to the leader.
 It reports the mode, policy, public identity, committed time, processing state and quotas. An
 activation adds its binding, public credential identifier, decision and conditions revisions,

@@ -199,6 +199,8 @@ class InventoryTests(unittest.TestCase):
             "interconnect-state-inspection",
             "interconnect-processor-state-inspection",
             "state-inspection-cursor",
+            "interconnect-wasm-state-inspection",
+            "wasm-state-inspection-cursor",
             "client-requests",
             "client-replies",
             "client-events",
@@ -411,8 +413,11 @@ class InventoryTests(unittest.TestCase):
             "rate-limit-utc-generations",
             "vm-decimal-rounding-floats",
             "vm-decimal-rounding-integers",
+            "vm-list-conversions",
+            "vm-list-conversion-lengths",
             "vm-list-shapes",
             "vm-list-arithmetic",
+            "vm-list-statistics",
             "approx-into-rounding",
             "approx-into-exact",
             "simd-json-escapes",
@@ -472,6 +477,7 @@ class InventoryTests(unittest.TestCase):
             "kafka-record-metadata",
             "pulsar-message-metadata",
             "ingestor-describe-envelope",
+            "inferencer-describe-envelope",
             "dns-operation-budget",
         })
         self.assertEqual({target.package for target in inventory.targets}, {
@@ -554,22 +560,24 @@ class InventoryTests(unittest.TestCase):
         for target, version in {
             "benchmark-metrics-report": 1,
             "ingestor-describe-envelope": 12,
-            "plexus-model": 62,
-            "plexus-archive-model": 65,
-            "plexus-statement": 69,
-            "plexus-statement-text": 68,
-            "plexus-format-document": 68,
-            "plexus-format-text": 67,
-            "models-archived-models": 68,
+            "plexus-model": 63,
+            "plexus-archive-model": 66,
+            "plexus-statement": 72,
+            "plexus-statement-text": 71,
+            "plexus-format-document": 71,
+            "plexus-format-text": 70,
+            "models-archived-models": 70,
             "registry-archived-models": 57,
-            "consensus-state-records": 66,
-            "consensus-state-corruption": 66,
-            "consensus-raft-records": 65,
+            "consensus-state-records": 68,
+            "consensus-state-corruption": 68,
+            "consensus-raft-records": 67,
             "registry-stored-models": 50,
             "registry-stored-models-corruption": 50,
             "cluster-identity-record-rkyv": 2,
             "node-records": 3,
             "node-settings-command-line": 12,
+            "inferencer-describe-envelope": 1,
+            "consensus-raft-records-malformed": 53,
             "inferencer-tensor-columns": 1,
             "inferencer-state-snapshots": 1,
             "backup-inferencer-values": 3,
@@ -588,8 +596,8 @@ class InventoryTests(unittest.TestCase):
 
             "inferencer-state-snapshots-malformed": 1,
             "inferencer-native-snapshot-projection": 1,
-            "console-emitter-drafts": 7,
-            "console-processor-drafts": 7,
+            "console-emitter-drafts": 8,
+            "console-processor-drafts": 8,
             "client-requests": 14,
             "client-producer-link-frames": 11,
             "client-producer-link-frames-malformed": 11,
@@ -599,7 +607,12 @@ class InventoryTests(unittest.TestCase):
 
     def test_state_inspection_representations_are_bounded_pairs(self) -> None:
         targets = {target.id: target for target in bolero.load_inventory().targets}
-        for name, version in (("client-state-inspection", 7), ("state-inspection-cursor", 8)):
+        for name, version in (
+            ("client-state-inspection", 7),
+            ("state-inspection-cursor", 8),
+            ("interconnect-wasm-state-inspection", 3),
+            ("wasm-state-inspection-cursor", 3),
+        ):
             with self.subTest(target=name):
                 self.assertEqual(targets[name].domain_version, version)
                 self.assertEqual(targets[name].max_input_bytes, 512)

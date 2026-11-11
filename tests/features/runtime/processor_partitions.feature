@@ -346,7 +346,7 @@ Feature: Partitioned processors and generators
       state reset reason: TRANSACTION
       state reset readiness: READY
       """
-    And within "10s" DESCRIBE WASM PROCESSOR "counting_guest" on the leader node contains
+    And within "10s" SHOW WASM PROCESSOR "counting_guest" STATE on the leader node contains
       """
       stage=REPLICA_CONFIRMED required_replicas=<replica_count> confirmed_replicas=<replica_count>
       """
@@ -381,7 +381,7 @@ Feature: Partitioned processors and generators
       state reset reason: TRANSACTION
       state reset readiness: READY
       """
-    And within "10s" DESCRIBE WASM PROCESSOR "counting_guest" on the leader node contains
+    And within "10s" SHOW WASM PROCESSOR "counting_guest" STATE on the leader node contains
       """
       stage=REPLICA_CONFIRMED required_replicas=<replica_count> confirmed_replicas=<replica_count>
       """

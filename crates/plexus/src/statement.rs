@@ -47,6 +47,7 @@ pub fn statement_parser<'src>()
         crate::describe_stream::describe_stream_parser().map(Statement::DescribeRelay),
         crate::describe_window_processor::describe_window_processor_parser()
             .map(Statement::DescribeWindowProcessor),
+        crate::describe_inferencer::describe_inferencer_parser().map(Statement::DescribeInferencer),
         crate::lookup_query::lookup_query_parser().map(Statement::LookupQuery),
         crate::generator::create_generator_parser()
             .map(|create| Statement::Create(create.map_body(Model::Generator).map_body(Box::new))),
@@ -148,6 +149,8 @@ pub fn statement_parser<'src>()
             .map(Statement::ShowRelayMaterializedState),
         crate::show_processor_state::show_processor_state_parser()
             .map(Statement::ShowProcessorState),
+        crate::show_processor_state::show_wasm_processor_state_parser()
+            .map(Statement::ShowWasmProcessorState),
         crate::udf::describe_udf_parser().map(Statement::DescribeUdf),
         crate::udf::show_udfs_parser().map(Statement::ShowUdfs),
         crate::ingestor::show_ingestors_parser().map(Statement::ShowIngestors),
@@ -195,7 +198,9 @@ pub fn suggest_statement(input: &str, cursor: usize) -> Vec<String> {
             .verified("has_errors returned false above, so this parse produced output");
         if matches!(
             statement,
-            Statement::ShowRelayMaterializedState(_) | Statement::ShowProcessorState(_)
+            Statement::ShowRelayMaterializedState(_)
+                | Statement::ShowProcessorState(_)
+                | Statement::ShowWasmProcessorState(_)
         ) && source.ends_with(char::is_whitespace)
             && !matches!(tokens.last(), Some(Token::Semicolon))
         {
@@ -249,8 +254,6 @@ fn open_statement_tail(statement: &Statement, tokens: &[Token], normalized: &str
         vec!["VERSION".to_string()]
     } else if let Statement::DescribeTransaction(describe) = &statement {
         crate::describe_transaction::describe_transaction_tail(describe, tokens)
-    } else if matches!(&statement, Statement::DescribeWasmProcessor(_)) {
-        crate::describe_wasm_processor::describe_wasm_processor_tail(tokens)
     } else if let Statement::RebindResource(rebind) = &statement {
         if matches!(
             rebind.selection,

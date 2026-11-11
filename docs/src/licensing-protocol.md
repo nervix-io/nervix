@@ -216,3 +216,15 @@ crate's and the boundary's tests, both builds' vectors included, on either build
 These checks do not claim a FIPS-qualified deployment. The shared engine has no product endpoint
 or concurrent state machine, so Cucumber and concurrency-model execution belong to its later
 integration owners.
+
+## Notification Payloads
+
+`notifications` owns the current typed `sync`, `decision` and `trust` payloads and their JSON
+mapping. Every payload carries its notification revision. Sync also carries decision, conditions
+and maximum trust-document serial; decision carries its decision revision and reason; trust
+carries its trust serial. The SSE event name selects its exact payload, and the transport checks
+that the numeric event identifier equals that payload's notification revision. Missing, unknown
+or incorrectly typed fields are refused. HTTP/SSE framing belongs to maintained transport code.
+These values are invalidation hints only: no field carries a permission or bypasses signed-decision
+verification. The existing `licensing-protocol-json-roundtrip` property covers all three complete
+current values, Unicode reasons and canonical JSON, with its documented domain version.

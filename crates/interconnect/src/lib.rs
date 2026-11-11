@@ -43,6 +43,7 @@ pub use relay_slicing::RelaySliceCursor;
 mod connection;
 mod entropy;
 mod identity;
+mod inferencer_description;
 mod kafka_start;
 mod node_drain;
 mod observation;
@@ -67,6 +68,7 @@ pub use connection::{
 };
 pub use entropy::TransportEntropy;
 pub use identity::{JoinTerms, TlsConfigBundle, TransportIdentity};
+pub use inferencer_description::DescribeInferencerRequest;
 pub use kafka_start::{KafkaStartAction, KafkaStartRequest, KafkaStartResponse};
 pub use node_drain::{
     StoppingNodeDrainAction, StoppingNodeDrainRequest, StoppingNodeDrainResponse,
@@ -1586,3 +1588,6 @@ pub use state_inspection::{
     ProcessorStateSectionTransfer, ReadMaterializedStatePage, ReadProcessorStatePage,
     StatePageBody,
 };
+
+mod wasm_state_inspection;
+pub use wasm_state_inspection::{ReadWasmStatePage, ReadWasmStatePageResponse, WasmStatePage};

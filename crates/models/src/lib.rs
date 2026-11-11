@@ -44,6 +44,7 @@ mod execution_unit;
 mod expression;
 mod http_request;
 mod inferencer_model_fingerprint;
+mod inferencer_state_summary;
 mod ingestor_input;
 mod json_path;
 mod message_error;
@@ -72,6 +73,7 @@ mod schedule;
 mod schema;
 mod schema_fingerprint;
 mod settings;
+mod show_wasm_state;
 mod state_branch_selection;
 mod state_inspection;
 mod state_inspection_settings;
@@ -282,6 +284,7 @@ pub use http_request::{
     HttpMethod, HttpOrigin, HttpRequestFieldError, HttpTarget,
 };
 pub use inferencer_model_fingerprint::InferencerModelFingerprint;
+pub use inferencer_state_summary::{InferencerReplicaProgress, InferencerStateSummary};
 pub use ingestor_input::{IngestorInput, TransportIngestorInput};
 pub use json_path::{JsonPath, JsonPathError, JsonPathStep};
 pub use message_error::{
@@ -331,12 +334,13 @@ pub use processor::{
     AlterReingestorError, AlterReorderer, AlterReordererError, AlterReordererOperation,
     CorrelationTimeoutAction, CorrelationTimeoutPolicy, CorrelatorMatchPolicy, CreateCorrelator,
     CreateDeduplicator, CreateInferencer, CreateJunction, CreateReingestor, CreateReorderer,
-    CreateWasmProcessor, CreateWindowProcessor, FlushPolicy, InferencerExecutionMode,
-    InferencerStateBinding, InferencerStateInitial, InferencerTensorDeclaration,
-    InferencerTensorDimension, InferencerTensorElementType, InferencerTensorMapping,
-    InferencerTensorRepresentation, InferencerTensorSchema, InferencerTensorSchemaError,
-    InputCollectPolicy, ProcessorInputWhere, ProcessorInputs, ProcessorOutput, ProcessorOutputs,
-    WasmProcessorLimits, WasmRejectedStatePolicy, WindowBound, WindowStateLimit,
+    CreateWasmProcessor, CreateWindowProcessor, DescribeInferencer, DescribeWasmProcessor,
+    FlushPolicy, InferencerExecutionMode, InferencerStateBinding, InferencerStateInitial,
+    InferencerTensorDeclaration, InferencerTensorDimension, InferencerTensorElementType,
+    InferencerTensorMapping, InferencerTensorRepresentation, InferencerTensorSchema,
+    InferencerTensorSchemaError, InputCollectPolicy, ProcessorInputWhere, ProcessorInputs,
+    ProcessorOutput, ProcessorOutputs, WasmProcessorLimits, WasmRejectedStatePolicy, WindowBound,
+    WindowStateLimit,
 };
 pub use quiesce::{
     ActivationAction, ActivationImpact, ActualExecutionStepImpact, ActualQuiescence,
@@ -394,6 +398,7 @@ pub use schema::{
 };
 pub use schema_fingerprint::SchemaFingerprint;
 pub use settings::{ClusterParameters, Prerequisites, Setting, SettingClass, SettingDefinition};
+pub use show_wasm_state::ShowWasmProcessorState;
 pub use state_branch_selection::{
     ResolvedStateBranchSelection, StateBranchField, StateBranchSelection, StateBranchSelectionError,
 };
@@ -419,11 +424,11 @@ pub use statement::{
     DescribeDeduplicator, DescribeDomain, DescribeEmitter, DescribeEndpoint, DescribeIngestor,
     DescribeJunction, DescribeLicense, DescribeLookup, DescribePlacement, DescribeReingestor,
     DescribeRelay, DescribeReorderer, DescribeResource, DescribeTransaction, DescribeUdf,
-    DescribeWasmProcessor, DescribeWindowProcessor, DomainConfig, DomainPace, DomainStartPoint,
-    DomainState, DomainStatus, DomainTick, DrainNode, DropModel, DropNode, EndpointKind,
-    EndpointType, ErrorPolicies, GeneralErrorPolicy, IngestTimestampSource, InspectionFormat,
-    LookupQuery, MaterializedRelayState, MessageErrorPolicy, Model, ModelKind, PartitionSeed,
-    RefreshLicense, RelayBranching, Relocation, RelocationMember, RelocationPreferenceOverride,
+    DescribeWindowProcessor, DomainConfig, DomainPace, DomainStartPoint, DomainState, DomainStatus,
+    DomainTick, DrainNode, DropModel, DropNode, EndpointKind, EndpointType, ErrorPolicies,
+    GeneralErrorPolicy, IngestTimestampSource, InspectionFormat, LookupQuery,
+    MaterializedRelayState, MessageErrorPolicy, Model, ModelKind, PartitionSeed, RefreshLicense,
+    RelayBranching, Relocation, RelocationMember, RelocationPreferenceOverride,
     RelocationPreferenceStrategy, RelocationSelection, RelocationUnitSelection, ResolvedBranching,
     ResolvedCodecWireFormat, RetryPolicy, ShowClusterStatus, ShowCreate, ShowEmitters,
     ShowIngestors, ShowPlacements, ShowProcessorState, ShowRelayMaterializedState,
@@ -441,9 +446,10 @@ pub use wasm_state_generation::{
     WasmStateReset, WasmStateResetPhase, WasmStateResetReason, WasmStateResetScope,
 };
 pub use wasm_state_inspection::{
-    WasmCheckpointCounts, WasmCheckpointInspection, WasmCheckpointStage, WasmRecoveryInspection,
-    WasmStateInspection, WasmStateResetInspection, WasmStateResetReadiness,
-    WasmUnitStateInspection,
+    WasmBranchStateInspection, WasmCheckpointCounts, WasmCheckpointInspection, WasmCheckpointStage,
+    WasmCheckpointState, WasmRecoveryCounts, WasmRecoveryInspection, WasmStateBinding,
+    WasmStateEntryKey, WasmStateInspectionError, WasmStateResetInspection, WasmStateResetReadiness,
+    WasmUnitStateInspection, WasmUnitStatePage, WasmUnitStateSelection,
 };
 pub use window_model_digest::WindowModelDigest;
 

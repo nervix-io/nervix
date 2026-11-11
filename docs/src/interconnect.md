@@ -513,8 +513,8 @@ reference, both in Models and in queued transaction statements. It also covers a
 `RESET WASM PROCESSOR ... STATE`, which names its processor and scope and takes its domain from its
 transaction.
 It also covers fixed-width 64-bit counts in Models, transaction commands and records,
-and WASM inspection results. These fields use the vocabulary's `CountAsU64` adapter and checked
-native decoding; an unrepresentable count fails decoding. Window processor state has current
+and the unit pages of the WASM state page operation. These fields use the vocabulary's `CountAsU64`
+adapter and checked native decoding; an unrepresentable count fails decoding. Window processor state has current
 runtime-state kind tag `8`, and its bulk snapshot codec validates the `NVXWIN64` frame signature
 before decoding histogram delayed-removal bucket indices in the same count representation.
 
@@ -532,7 +532,8 @@ Emitter statements exchanged through the control plane use explicit `KEY` expres
 `payload` expression scope, typed materialized relay inspection, ingestor read interactions,
 corridor/domain-wide placement coverage, pace-only domain configuration, exact partition/instance
 relocation selections, ingestor acknowledgement and connector lifecycle observations, and the current
-transaction operation and commit-step alternatives. Peers must
+transaction operation and commit-step alternatives, and the engine and connector host capabilities
+in each node's incarnation-bound claim. Peers must
 match it exactly.
 
 Execution-unit identities use an eight-byte rank with four-byte archive alignment. Single and
@@ -2476,6 +2477,21 @@ back the selected handoff. The current wire fingerprint identifies this required
 peers must use the same current contract. Its fingerprint also includes the required committed
 cluster-parameter publication.
 
+## Inferencer Unit Observation
+
+An inferencer describe request names the domain, inferencer, execution unit and expected pinned
+model fingerprint. Its receiver verifies the current model binding and that it executes that
+unit. The reply carries typed branch and byte counts, publication and persistence revisions, and
+the owner's confirmed progress for its current replicas. The control plane composes these unit
+facts with the stored tensor declarations and placement before rendering the description.
+
+Collection visits immutable state publications on the bounded executor, checks cancellation
+between entries and reads only counts and revision metadata. It never encodes a tensor or a branch
+key. Revision zero is a known baseline; absence means no progress was observed. The per-unit
+revision at each stage is the highest observed branch-local revision, not a common checkpoint.
+This request uses the ordinary bounded control-request transport and deadline. It neither requests
+publication nor changes replication progress or gossip.
+
 ## Cluster Parameter Observations
 
 The existing authenticated gossip exchange publishes a coherent `cluster_parameters` value: the
@@ -2582,3 +2598,27 @@ against the descriptor before any row reaches a Row frame. A typed refusal carri
 coordinator writes Row frames at the session reporting boundary, as for materialized pages.
 The inspection deadline controls stream admission and setup through
 `request_stream_with_timeout`, and the request type's `DEADLINE` projects from the configured request budget, like the materialized page operation. The caller's explicit remaining inspection deadline remains authoritative.
+
+## WASM State Page Operation
+
+`read_wasm_state_page` is a process-targeted unary request in the Commands class. It names the
+domain, the WASM processor, one execution unit, the committed control revision the coordinator
+planned the read at, the resolved branch selector, the key of the last entry an earlier page
+returned, an entry limit and the exact owner process. The owner waits until it has applied that
+control revision and refuses a newer one as a stale continuation, so any change committed between
+two pages, a reset included, ends the read rather than mixing two schedules. It then checks that it executes the unit and
+that the target names its own incarnation, and reads the unit's committed lifetimes, reset and
+recoveries beside the checkpoints its runtime samples for the unit's branches. Selection, counting
+and the entry limit apply on the owner, so only the selected page crosses the interconnect.
+
+The reply is a typed rkyv value. A page carries the read origin (the owner's identity, a SHA-256
+fingerprint of the unit's selected facts, its newest lifetime and committed revision) and the
+unit's page: complete counts over the selection, at most the requested entries in entry order, and
+whether entries remain after the last one. A refusal carries the envelope's typed reason. The owner
+caps the entries at what one Commands payload holds: every archived entry fits 512 bytes, and room
+for two entries is left for the unit's own facts. A coordinator refuses a page that returned no
+entry while entries remained and it allowed some, instead of issuing a continuation that cannot
+advance. The request runs under the caller's remaining inspection deadline through
+`request_with_timeout`, and its `DEADLINE` projects from the configured request budget, like the
+other state inspection page operations. Branches cross the interconnect only as fingerprints, and
+no guest state bytes travel with the facts.

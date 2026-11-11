@@ -1973,6 +1973,14 @@ impl Application {
             .change_context(AppError::RegisterInterconnectRequestHandler)?;
 
         let describe_snapshot_service = service.clone();
+        let describe_inferencer_service = service.clone();
+        interconnect
+            .register_handler::<nervix_interconnect::DescribeInferencerRequest, _, _>(move |_context, request| {
+                let service = describe_inferencer_service.clone();
+                async move { service.handle_describe_inferencer_request(request).await }
+            })
+            .change_context(AppError::RegisterInterconnectRequestHandler)?;
+
         interconnect
             .register_handler::<DescribeStateSnapshot, _, _>(move |_context, request| {
                 let service = describe_snapshot_service.clone();
@@ -2168,6 +2176,16 @@ impl Application {
                     }
                 }
             })
+            .change_context(AppError::RegisterInterconnectRequestHandler)?;
+
+        let wasm_state_page_service = service.clone();
+        interconnect
+            .register_handler::<nervix_interconnect::ReadWasmStatePage, _, _>(
+                move |_context, request| {
+                    let service = wasm_state_page_service.clone();
+                    async move { service.handle_read_wasm_state_page(request).await }
+                },
+            )
             .change_context(AppError::RegisterInterconnectRequestHandler)?;
 
         let describe_metrics_service = service.clone();

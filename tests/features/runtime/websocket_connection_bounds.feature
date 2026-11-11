@@ -176,11 +176,13 @@ Feature: Outbound WebSocket connection bounds
       """
 
     Examples:
-      | behavior | handshake | status | cluster_size |
-      | refuses  | refused   | 1008   | 1            |
-      | refuses  | refused   | 1008   | 3            |
-      | stalls   | stalled   | 1001   | 1            |
-      | stalls   | stalled   | 1001   | 3            |
+      | behavior | handshake   | status | cluster_size |
+      | refuses  | refused     | 1008   | 1            |
+      | refuses  | refused     | 1008   | 3            |
+      | stalls   | stalled     | 1001   | 1            |
+      | stalls   | stalled     | 1001   | 3            |
+      | closes   | peer_closed | 1008   | 1            |
+      | closes   | peer_closed | 1008   | 3            |
 
   Scenario Outline: A WebSocket ping interval paces client pings once signaling completes on <cluster_size> nodes
     Given a WebSocket ping peer holds signaling open for 1500ms

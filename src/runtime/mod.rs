@@ -268,6 +268,7 @@ mod http_request_fields;
 mod inferencer;
 pub(crate) use inferencer::probe_onnx_runtime;
 mod inferencer_archive;
+mod inferencer_observation;
 mod inferencer_output;
 mod inferencer_state;
 pub(crate) use inferencer_archive::CapturedInferencer;

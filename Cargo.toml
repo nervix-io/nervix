@@ -119,6 +119,7 @@ ciborium-ll = { workspace = true }
 clap = { workspace = true, features = ["derive", "env"] }
 clap_complete = { workspace = true }
 error-stack = { workspace = true }
+eventsource-stream = { workspace = true }
 fastrand = { workspace = true }
 fjall = { workspace = true }
 flatbuffers = { workspace = true }
@@ -140,6 +141,7 @@ indexmap = { workspace = true }
 libc = { workspace = true }
 memmap2 = { workspace = true }
 meticulous = { workspace = true }
+mime = { workspace = true }
 multer = { workspace = true }
 nervix-approx-into = { workspace = true }
 nervix-backup = { workspace = true }
@@ -513,6 +515,8 @@ data-encoding = "2.11"
 # in nervix-primitives was qualified against: a later release may change what it tracks or reports.
 deloxide = { version = "=1.1.0", default-features = false }
 error-stack = "0.5"
+# The maintained fork strips the full UTF-8 BOM; upstream 0.2.3 slices inside that character.
+eventsource-stream = { git = "https://github.com/nervix-io/eventsource-stream.git", rev = "b318ee5447771317391e72669d876725a1d8a6cf" }
 faster-hex = "0.10"
 fastrand = "2.4.1"
 fearless_simd = { version = "1.0", features = ["force_support_fallback"] }
@@ -526,6 +530,7 @@ gloo-net = "0.7"
 governor = "0.10.4"
 h2 = "0.4"
 hdrhistogram = "7.5.4"
+headers = "0.4.1"
 # Hickory's Tokio runtime only. DNS over TLS, HTTPS and QUIC stay disabled, so name resolution adds
 # no second TLS provider beside AWS-LC, and the resolver reads the host's configuration through the
 # `resolv-conf` grammar that nervix-dns applies itself.
@@ -588,6 +593,7 @@ memchr = "2.8"
 # with E0046 rather than only the builds that call `todo()`.
 memmap2 = "0.9.11"
 meticulous = "0.2.0-pre.2"
+mime = "0.3.17"
 # MongoDB 3.6 exposes an explicit AWS-LC backend; its TLS defaults select another provider.
 mongodb = { version = "3.6.0", default-features = false, features = [
   "compat-3-0-0",

@@ -11,6 +11,15 @@ parameter is refused where it is written.
 `just test-unit-binary <executable> <filters>` replays a compiled unit-test executable without
 rebuilding it; its evidence applies only to the source inputs that produced that executable.
 
+The materialized-state inspection feature observes exact typed owner rows before saving its
+first cut and before checking that a later publication invalidates its saved continuation.
+Subscription receipt remains independent delivery evidence. Readiness probes preserve the saved
+token and its unit origins; a separate assertion confirms the owner cut changed before the one
+resume attempt expects `stale_continuation`. Both one- and three-node examples keep their
+30-second observation bounds and exact paging, counts and redaction assertions. The native
+publication regression holds the materialized consumer unpolled while the real relay fan-out
+delivers a subscription row, then runs the real state task and checks both inspection identities.
+
 `just test-partition-state-inspection --concurrency 1 --retry 0` selects the eight one- and
 three-node deduplicator/window cases for growing and shrinking a running branch. The native server
 assets, formatter, CLI and report tool are prepared through the usual recipes. Domain-scoped
@@ -187,6 +196,12 @@ their bounded queue, and releases the workers after the configured idle bound. I
 on drop even when a step fails. The responsive peer accepts one connection and releases the next
 payload only after a client ping. Its stop result is retained until node teardown and port release
 finish, then asserted, so a connection failure remains visible and does not prevent cleanup.
+
+The failed-signaling peer can initiate a Close with a status and reason. It records the client's
+exact reply and the replacement connection as separate events; the scenario requires the reply
+first, then the replacement's payload. The peer's isolated harness controls exercise both a client
+that flushes the exact reply and one that releases its connection without answering, so a missing
+Close cannot satisfy the public oracle.
 
 ## Delayed Consensus Heartbeat Answers
 

@@ -172,9 +172,9 @@ Feature: Recovery from a rejected WASM guest snapshot
       """
       {"tenant":"alpha","message":"alpha-after-limit"}
       """
-    Then within "30s" DESCRIBE WASM PROCESSOR "recovering_guest" on the leader node contains
+    Then within "30s" SHOW WASM PROCESSOR "recovering_guest" STATE on the leader node contains
       """
-      rejected state recovery: branch, application state rejected, recovered
+      application state rejected, recovered
       """
     When http payload is posted to host "wasm-recovery-{{test_id}}.example.com" path "/events"
       """
@@ -271,9 +271,9 @@ Feature: Recovery from a rejected WASM guest snapshot
       """
       wasm processor 'recovering_guest' rejected-state recovery failed
       """
-    And within "30s" DESCRIBE WASM PROCESSOR "recovering_guest" on the leader node contains
+    And within "30s" SHOW WASM PROCESSOR "recovering_guest" STATE on the leader node contains
       """
-      rejected state recovery: branch, application state rejected, failed
+      application state rejected, failed
       """
     When fresh WASM reset guest initialization succeeds again on every node
     And the cluster is restarted
@@ -298,9 +298,9 @@ Feature: Recovery from a rejected WASM guest snapshot
       """
       "tenant":"alpha"
       """
-    And within "20s" DESCRIBE WASM PROCESSOR "recovering_guest" on the leader node contains
+    And within "20s" SHOW WASM PROCESSOR "recovering_guest" STATE on the leader node contains
       """
-      rejected state recovery: branch, application state rejected, failed
+      application state rejected, failed
       """
 
     Examples:

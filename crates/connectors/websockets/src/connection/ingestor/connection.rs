@@ -233,8 +233,11 @@ impl From<&WebsocketSignalingError> for ConnectionEnding {
             | WebsocketSignalingError::Capture { .. } => Self::Close(CloseCode::Error),
             // This client's own write failed, so the transport takes no Close either.
             WebsocketSignalingError::Send(_) => Self::Release,
-            // TCP ended, or the peer's own Close began the closing handshake.
-            WebsocketSignalingError::Closed => Self::Release,
+            // A peer Close already queued a reply, which resume flushes before releasing it.
+            // An ended stream has nothing left to answer.
+            WebsocketSignalingError::PeerClosed { .. }
+            | WebsocketSignalingError::PeerClosedWithoutStatus
+            | WebsocketSignalingError::Ended => Self::Release,
         }
     }
 }

@@ -87,6 +87,7 @@ pub(in crate::application) fn requires_leader(statement: &Statement) -> bool {
             | Statement::DescribeUdf(_)
             | Statement::DescribeWasmProcessor(_)
             | Statement::DescribeWindowProcessor(_)
+            | Statement::DescribeInferencer(_)
             | Statement::DescribePlacement(_)
             | Statement::DescribeRelocation(_)
             | Statement::LookupQuery(_)
@@ -97,6 +98,7 @@ pub(in crate::application) fn requires_leader(statement: &Statement) -> bool {
             | Statement::ShowPlacements(_)
             | Statement::ShowRelayMaterializedState(_)
             | Statement::ShowProcessorState(_)
+            | Statement::ShowWasmProcessorState(_)
     )
 }
 

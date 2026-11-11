@@ -2,8 +2,9 @@
 //!
 //! Layer: primitives.
 //!
-//! - **Owns.** Bitmap counting, exact integer folds, floating-point run statistics, finite-value
-//!   classification, and fixed-range bucket indexes over plain typed slices.
+//! - **Owns.** Bitmap counting, exact integer folds, floating-point run statistics with the
+//!   estimators their variances divide by and the rank their exact quantiles interpolate at,
+//!   finite-value classification, and fixed-range bucket indexes over plain typed slices.
 //! - **Depends on.** Portable SIMD selection and primitive numeric types.
 //! - **Must not know.** Arrow, window plans, branches, or aggregate output types.
 
@@ -492,6 +493,74 @@ pub fn moments<T: Copy>(
     }
 }
 
+/// Whether a dispersion statistic describes the contributing values themselves or estimates the
+/// population they were sampled from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum Estimator {
+    /// Divides by the number of contributing values, and is defined from one value.
+    Population,
+    /// Divides by one less than the number of contributing values, and needs two.
+    Sample,
+}
+
+impl Estimator {
+    /// The divisor for `count` contributing values, or `None` when the statistic is undefined.
+    pub fn divisor(self, count: u64) -> Option<f64> {
+        let divisor = match self {
+            Self::Population => count,
+            Self::Sample => count.checked_sub(1)?,
+        };
+        if divisor == 0 {
+            return None;
+        }
+        Some(divisor.approx_into())
+    }
+}
+
+impl RunMoments {
+    /// The variance of the run under `estimator`, or `None` when too few values contributed for it
+    /// to be defined.
+    pub fn variance(&self, estimator: Estimator) -> Option<f64> {
+        let divisor = estimator.divisor(self.count)?;
+        Some(self.squares / divisor)
+    }
+}
+
+/// Where an exact quantile of `count` ordered values lies: at rank `percentage / 100 * (count -
+/// 1)`, interpolated linearly between the values at the whole ranks below and above it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct QuantileRank {
+    rank: f64,
+}
+
+impl QuantileRank {
+    /// The rank of `percentage` among `count` ordered values, or `None` when there are none.
+    pub fn new(percentage: f64, count: u64) -> Option<Self> {
+        let maximum_rank = count.checked_sub(1)?;
+        Some(Self {
+            rank: (percentage / 100.0) * maximum_rank.approx_into::<f64>(),
+        })
+    }
+
+    /// The whole rank of the value at or below the quantile.
+    pub fn lower(self) -> f64 {
+        self.rank.floor()
+    }
+
+    /// The whole rank of the value at or above the quantile, the lower rank itself when the rank
+    /// is whole.
+    pub fn upper(self) -> f64 {
+        self.rank.ceil()
+    }
+
+    /// The quantile between the values at the lower and upper ranks, each weighted by how near the
+    /// rank lies to it.
+    pub fn interpolate(self, lower: f64, upper: f64) -> f64 {
+        let fraction = self.rank.fract();
+        lower * (1.0 - fraction) + upper * fraction
+    }
+}
+
 /// The centered means, second moments, and cross moment of two typed runs.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct RunCoMoments {
@@ -626,6 +695,27 @@ mod tests {
         validity: RunValidity<'_>,
     ) -> (u64, i128) {
         dispatch!(level, simd => sum_i64_lanes(simd, values, validity))
+    }
+
+    #[test]
+    fn estimators_and_quantile_ranks_divide_and_interpolate_by_one_rule() {
+        assert_eq!(Estimator::Population.divisor(0), None);
+        assert_eq!(Estimator::Population.divisor(1), Some(1.0));
+        assert_eq!(Estimator::Sample.divisor(1), None);
+        assert_eq!(Estimator::Sample.divisor(3), Some(2.0));
+        let run = moments(&[1.0_f64, 3.0], RunValidity::new(None, 0), |value| value);
+        assert_eq!(run.variance(Estimator::Population), Some(1.0));
+        assert_eq!(run.variance(Estimator::Sample), Some(2.0));
+
+        assert_eq!(QuantileRank::new(50.0, 0), None);
+        let between = QuantileRank::new(62.5, 4).verified("four values have a rank");
+        assert_eq!((between.lower(), between.upper()), (1.0, 2.0));
+        assert_eq!(between.interpolate(20.0, 30.0), 28.75);
+        let whole = QuantileRank::new(50.0, 5).verified("five values have a rank");
+        assert_eq!((whole.lower(), whole.upper()), (2.0, 2.0));
+        assert_eq!(whole.interpolate(7.0, 7.0), 7.0);
+        let last = QuantileRank::new(100.0, 3).verified("three values have a rank");
+        assert_eq!((last.lower(), last.upper()), (2.0, 2.0));
     }
 
     #[test]

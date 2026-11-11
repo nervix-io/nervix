@@ -568,6 +568,21 @@ test-licensing-free *args: build-deps build-plexus-format build-test-cli build-d
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
     cargo test --package nervix-scenarios --test scenarios -- --input "$(pwd)/tests/features/licensing/*.feature" {{ quote(args) }}
 
+# Verify a maintained SSE parser source tree with its dependency-owner regressions.
+test-licensing-parser-source source *args:
+    cargo test --manifest-path {{ quote(source / "Cargo.toml") }} --lib {{ quote(args) }}
+
+# Verify a production licensing owner directly through an isolated source harness.
+test-licensing-owner-source source *args:
+    cargo test --manifest-path {{ quote(source / "Cargo.toml") }} --lib {{ quote(args) }}
+
+# Verify licensed leader streams, cursor reconciliation and independent polling through HTTPS.
+test-licensing-notifications *args: build-deps build-plexus-format build-test-cli build-deadlock-report
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    cargo test --package nervix-scenarios --test scenarios -- --input "$(pwd)/tests/features/licensing/notifications*.feature" {{ quote(args) }}
+
 # Cluster identity, replication and restore checks use the native session client.
 test-cluster-identity *args: build-deps build-plexus-format build-test-cli build-deadlock-report
     #!/usr/bin/env bash
@@ -626,6 +641,16 @@ test-inferencer-backup *args: build-deps build-test-cli
     export NERVIX_TEST_CLI_PATH={{ quote(cargo_target_dir + "/debug/nervix-cli") }}
     cargo test --package nervix-scenarios --test scenarios -- --input {{ quote(justfile_directory() / "tests/features/cluster/inferencer_backup*.feature") }} {{ quote(args) }}
 
+# Inspect inference configuration and state summaries through the public session.
+check-inferencer-describe:
+    cargo check --package nervix-server --features testing --lib
+
+test-inferencer-describe *args: build-deps
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    cargo test --package nervix-scenarios --test scenarios -- --input {{ quote(justfile_directory() / "tests/features/runtime/inferencer_describe*.feature") }} {{ quote(args) }}
+
 # Verify inference resource replacement without traversing unrelated features or build artifacts.
 test-inferencer-rebinding *args: build-deps
     #!/usr/bin/env bash
@@ -654,7 +679,8 @@ test-state-inspection *args: build-deps build-test-cli
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
     cargo test --package nervix-scenarios --test scenarios -- --input {{ quote(justfile_directory() / "tests/features/runtime/materialized_state_inspection*.feature") }} {{ quote(args) }}
 
-# Replay one affected materialized-state feature without unrelated binding/tool preparation.
+# Replay one affected state-inspection feature, materialized relay or WASM processor state, without
+# unrelated binding/tool preparation.
 test-state-inspection-feature feature *args: build-deps build-test-cli
     #!/usr/bin/env bash
     set -euo pipefail
@@ -1162,6 +1188,28 @@ test-wire-schema-lists *args: build-web-console wasm-processor-guests download-o
     cargo test --package nervix-scenarios --test scenarios -- \
         --input tests/features/runtime/wire_schema_lists.feature "$@"
 
+# Convert lists with AS and TRY_CAST through the in-process cluster: element and container
+# conversions, failed rows, conditional arms, an inferencer input and the refused conversions.
+[positional-arguments]
+test-list-conversions *args: build-deps
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    cargo test --package nervix-scenarios --test scenarios -- \
+        --input tests/features/runtime/list_conversions.feature "$@"
+
+# Create domains, users and resources through the web console's popup forms on in-process one- and
+# three-node clusters, with rejected, queued, recovered and pending submissions, and with only the
+# in-process server's prerequisites. The input is an absolute glob, so Cucumber reads the feature
+# file instead of walking the checkout; a literal path is no glob and selects nothing.
+[positional-arguments]
+test-visual-create *args: build-web-console wasm-processor-guests download-onnxruntime
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    cargo test --package nervix-scenarios --test scenarios -- \
+        --input "$PWD/tests/features/web-console/visual_create{,}.feature" "$@"
+
 # Create window processors and correlators through the web console's visual forms on in-process
 # one- and three-node clusters, with only the in-process server's prerequisites.
 [positional-arguments]
@@ -1342,6 +1390,10 @@ check-package-lib package *args:
 # Run the unit tests of one workspace package whose tests need no server test dependencies.
 test-package-lib package *args:
     cargo test --package {{ package }} --lib -- {{ args }}
+
+# Run the command-line client's unit tests, which live in its binary target.
+test-cli-unit *args:
+    cargo test --package nervix-cli --bin nervix-cli -- {{ args }}
 
 # Package-scoped local evidence, using the canonical runners and complete registered owner records.
 # Normal CI keeps the full model inventories. Deloxide/fuzz CI remain disabled by policy.

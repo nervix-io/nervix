@@ -2359,6 +2359,12 @@ impl SessionServiceImpl {
                     .verified("this statement requires a request domain, which was resolved above");
                 self.describe_window_processor(domain, describe).await
             }
+            Statement::DescribeInferencer(describe) => {
+                let domain = domain
+                    .as_ref()
+                    .verified("this statement requires a request domain, which was resolved above");
+                self.describe_inferencer(domain, describe).await
+            }
             Statement::DescribeWasmProcessor(describe) => {
                 let domain = domain
                     .as_ref()
@@ -2459,6 +2465,12 @@ impl SessionServiceImpl {
                     .as_ref()
                     .verified("this statement requires a request domain, which was resolved above");
                 self.show_processor_state(domain, show).await
+            }
+            Statement::ShowWasmProcessorState(show) => {
+                let domain = domain
+                    .as_ref()
+                    .verified("this statement requires a request domain, which was resolved above");
+                self.show_wasm_processor_state(domain, show).await
             }
             Statement::ShowUdfs(_) => {
                 let domain = domain

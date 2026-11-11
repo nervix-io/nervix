@@ -166,3 +166,35 @@ Feature: Web console visual creation
     And selector ".create-status" contains "Completed"
     And selector ".terminal" contains "created resource 'recovered_bundle'" exactly 1 times
     And selector ".resource-dialog" contains "recovered_bundle"
+
+  @visual_create_pending_choices
+  Scenario Outline: A pending create keeps its own outcome while its choice controls wait
+    Given a <cluster_size> node nervix cluster is started
+    When the web console is opened on the leader node
+    Then selector ".topbar-status .pill.ok" contains "CONNECTED"
+    When selector ".create-menu-button" is pressed with "Enter"
+    And selector ".create-menu [data-create-kind='domain']" is pressed with "Enter"
+    And selector ".create-name" is filled with "{{domain}}"
+    Then selector ".create-pace-options [data-value='PACED']" exists
+    And selector ".create-preview" contains "CREATE UNPACED DOMAIN {{domain}};"
+    Given command response delivery on every node pauses after execution
+    When selector ".create-submit" is pressed with "Enter"
+    Then the command response delivery pause on the node that executes the command is reached
+    And selector ".create-status" contains "Submitting"
+    When selector ".create-pace-options [data-value='PACED']" is clicked by script
+    And selector ".create-submit" is clicked by script
+    Then selector ".create-status" contains "Submitting" for 1000 milliseconds
+    And selector ".create-preview" contains "CREATE UNPACED DOMAIN {{domain}};"
+    And selector ".create-submit:disabled" exists
+    And selector ".create-pace-options .create-choice-search:disabled" exists
+    And selector ".create-pace-options [data-value='PACED']:disabled" exists
+    When the command response delivery pause is released on every node
+    Then selector ".create-status" contains "Completed"
+    And selector ".terminal" contains "created domain '{{domain}}'" exactly 1 times
+    And selector ".terminal" does not contain "CREATE PACED DOMAIN"
+    And selector ".create-pace-options .create-choice-search:enabled" exists
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |

@@ -931,6 +931,9 @@ impl Statement {
             Self::DescribeReorderer(describe) => {
                 Ok(format!("DESCRIBE REORDERER {};", describe.name.as_str()))
             }
+            Self::DescribeInferencer(describe) => {
+                Ok(format!("DESCRIBE INFERENCER {};", describe.name.as_str()))
+            }
             Self::DescribeEmitter(describe) => {
                 Ok(format!("DESCRIBE EMITTER {};", describe.name.as_str()))
             }
@@ -938,14 +941,10 @@ impl Statement {
                 "DESCRIBE WINDOW PROCESSOR {};",
                 describe.name.as_str()
             )),
-            Self::DescribeWasmProcessor(describe) => {
-                let mut statement = format!("DESCRIBE WASM PROCESSOR {}", describe.name.as_str());
-                if describe.format != InspectionFormat::Text {
-                    statement.push_str(" FORMAT JSON");
-                }
-                statement.push(';');
-                Ok(statement)
-            }
+            Self::DescribeWasmProcessor(describe) => Ok(format!(
+                "DESCRIBE WASM PROCESSOR {};",
+                describe.name.as_str()
+            )),
             Self::DescribeUdf(describe) => Ok(format!("DESCRIBE UDF {};", describe.name.as_str())),
             Self::DescribePlacement(describe) => {
                 Ok(format!("DESCRIBE PLACEMENT {};", describe.name.as_str()))
@@ -992,6 +991,12 @@ impl Statement {
                     show.format,
                 )
             }
+            Self::ShowWasmProcessorState(show) => state_inspection_text(
+                format!("SHOW WASM PROCESSOR {} STATE", show.processor.as_str()),
+                show.selection.as_ref(),
+                show.page.as_ref(),
+                show.format,
+            ),
             Self::ShowClusterStatus(_) => Ok("SHOW CLUSTER STATUS;".to_string()),
             Self::DescribeCluster(_) => Ok("DESCRIBE CLUSTER;".to_string()),
             Self::ActivateLicense(activate) => {
