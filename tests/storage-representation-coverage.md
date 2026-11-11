@@ -61,7 +61,7 @@ datetimes or bytes. JSON, CBOR and AVRO retain their own wire type enums; CBOR c
 native representation types, and an AVRO array nests its item type, arrays included, to a
 bounded depth. The Model/archive, registry and consensus properties preserve those complete
 values, including inferencer state bindings and their initial expressions.
-The `NERVIX EMIT INST` registry signature and `raft_wasm_inspection_` consensus namespace
+The `NERVIX EMIT INST` registry signature and `raft_inferencer_wasm_inspection_runtime_policy_` consensus namespace
 identify the current Model layout before decoding.
 
 `ALTER INGESTOR` and `ALTER EMITTER` statement generators draw, for every entity, each change its
@@ -70,7 +70,7 @@ Kafka's and Pulsar's `SET START AT`, a declared quiesce mode and `SET CLIENT` wh
 or writes through a client. They mix them with the shared operations, the in-place construction
 changes of a route or an emitter, and an emitter's envelope clauses and properties. The
 Model/archive, consensus and canonical Plexus properties preserve the complete operations in order,
-and the `raft_wasm_inspection_` consensus namespace identifies the statement layout the
+and the `raft_inferencer_wasm_inspection_runtime_policy_` consensus namespace identifies the statement layout the
 transactions it keeps are stored in before decoding.
 
 `RESET WASM PROCESSOR ... STATE` statement generators draw a processor and an unbranched,
@@ -157,6 +157,11 @@ boundaries. Scheduled Models, commit-plan transitions and queued statements also
 through `consensus-state-records`, `consensus-state-corruption` and `consensus-raft-records`.
 The Iceberg namespace and table Model recipe reaches those same consensus consumers through
 schedules, commit-plan transitions and queued statements; their domains advance with it too.
+The current `DESCRIBE INFERENCER` Statement variant is included in the canonical statement and
+formatter generators. Its archived discriminant layout is fenced by the current consensus
+namespace and state encoding; state, corruption and Raft-record domains advance together. The
+separate `inferencer-describe-envelope` target covers the typed observation request and complete
+success/refusal reply through the bounded interconnect codec, plus summary JSON equality.
 Their domain versions and case/input budgets are listed in the
 [target register](../docs/src/property-testing-and-fuzzing.md#target-and-representation-register).
 

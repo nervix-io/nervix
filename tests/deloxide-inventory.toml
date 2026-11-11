@@ -3884,6 +3884,8 @@ workloads = [
 [[owner]]
 path = "crates/checkpoint-replication/src/replication.rs"
 workloads = [
+  "scenario.inferencer-description",
+  "stress.inferencer-description",
   "scenario.materialized-bulk-generations",
   "scenario.materialized-delayed-coordinator",
   "stress.materialized-bulk-generations",
@@ -4434,6 +4436,30 @@ workloads = [
   "stress.diagnostic-nodes",
   "stress.diagnostic-server-processes",
 ]
+
+[[owner]]
+path = "src/metrics/inferencer.rs"
+workloads = ["scenario.inferencer-description", "stress.inferencer-description"]
+
+[[workload]]
+coverage = "Inference descriptions sample the existing checkpoint-progress mutex on the owner, register and retire retained metric children, and restore both branches after STOP/START. The standalone warning mutex's failure cadence is checked by ordinary owner units; this transport workload does not inject snapshot failures, and Prometheus internals and shared-reference ordering are outside detector evidence."
+examples = 2
+feature = "tests/features/runtime/inferencer_describe.feature"
+id = "scenario.inferencer-description"
+invariant = "Every node reports current inference branch counts and revisions without values, and both branch sums survive STOP/START with truthful reset and restore counts."
+invocation = "scenarios"
+scenario = "Every node reads state counts and progress while interleaved branches keep their values private"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: STOP/START restores both real tensor branches while the summary samples the owner's tracked progress lock; it does not qualify warning failures, Prometheus internals or shared-reference ordering."
+examples = 2
+feature = "tests/features/runtime/inferencer_describe.feature"
+id = "stress.inferencer-description"
+invariant = "Every node reports current inference branch counts and revisions without values, and both branch sums survive STOP/START with truthful reset and restore counts."
+invocation = "stress-restore-scenarios"
+scenario = "Every node reads state counts and progress while interleaved branches keep their values private"
+selections = ["deloxide-stress-restore"]
 
 [[owner]]
 path = "src/metrics/interconnection.rs"

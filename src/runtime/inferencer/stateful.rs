@@ -304,15 +304,23 @@ impl PreparedStatefulInference {
     pub(in crate::runtime) fn same_binding(&self, other: &Self) -> bool {
         self.inputs == other.inputs && self.outputs == other.outputs && self.state == other.state
     }
-    pub(in crate::runtime) fn instantiate(&self) -> StatefulInferenceSession {
+    pub(in crate::runtime) fn instantiate(
+        &self,
+        state_bytes: crate::metrics::InferencerBranchBytes,
+    ) -> StatefulInferenceSession {
         StatefulInferenceSession {
             session: None,
             generation: self.initial.clone(),
+            _state_bytes: state_bytes,
         }
     }
 }
 
 impl StatefulInferenceSession {
+    pub(in crate::runtime) fn state_metrics(&self) -> crate::metrics::InferencerStateMetrics {
+        self._state_bytes.recorder()
+    }
+
     pub(in crate::runtime) fn generation(&self) -> Arc<NativeGeneration> {
         self.generation.clone()
     }
@@ -335,6 +343,7 @@ struct BoundSession {
 pub(in crate::runtime) struct StatefulInferenceSession {
     session: Option<BoundSession>,
     generation: Arc<NativeGeneration>,
+    _state_bytes: crate::metrics::InferencerBranchBytes,
 }
 impl std::fmt::Debug for StatefulInferenceSession {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

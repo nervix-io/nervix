@@ -707,7 +707,9 @@ impl RelayProcessorTemplate {
                         .replicated_inferencer_state(placement, &prepared.state)
                         .await
                         .change_context_lazy(context)?;
-                    let session = Box::new(replicated_state.restore_session(prepared, incarnation));
+                    let metrics = runtime.inferencer_state_metrics(domain, &self.processor, unit);
+                    let session =
+                        Box::new(replicated_state.restore_session(prepared, incarnation, metrics));
                     let snapshot_bytes = prepared
                         .state
                         .snapshot_bytes()

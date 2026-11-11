@@ -518,15 +518,15 @@ status, keeping the start version, start mode, clock, schedule and incremental s
 
 The current emitter Models carry explicit key expressions, source-partition routing and
 expression-only SQS FIFO groups. The dedicated database owns exactly four current keyspaces:
-`raft_wasm_inspection_runtime_policy_logs`, `raft_wasm_inspection_runtime_policy_meta`, `raft_wasm_inspection_runtime_policy_state`, and
-`raft_wasm_inspection_runtime_policy_snapshots`. Opening it validates the complete keyspace namespace before reading
+`raft_inferencer_wasm_inspection_runtime_policy_logs`, `raft_inferencer_wasm_inspection_runtime_policy_meta`, `raft_inferencer_wasm_inspection_runtime_policy_state`, and
+`raft_inferencer_wasm_inspection_runtime_policy_snapshots`. Opening it validates the complete keyspace namespace before reading
 any records. The committed cluster-parameter record stores ordered typed TLS cipher suites and
 key-exchange groups; recovery validates their complete pair before returning that record.
 The record also carries the coherent remote acknowledgement group, payload unfold policy,
 node runtime capacities and local shutdown budgets. Parameter durations use validated, lossless
 seconds/nanoseconds projections so ordinary Raft records keep their inline footprint bound.
 This namespace identifies the current Model shape, including the stored transaction statement
-layout with `SHOW WASM PROCESSOR ... STATE` and a `DESCRIBE WASM PROCESSOR` that names only its
+layout with `DESCRIBE INFERENCER`, `SHOW WASM PROCESSOR ... STATE` and a `DESCRIBE WASM PROCESSOR` that names only its
 processor, and the separate JSON
 and CBOR wire type enums (CBOR has six types), AVRO representation types whose arrays declare their item type, explicit `BASE64` codec encoding, a Pulsar
 subscription's required type, an owned Pulsar subscription's required start position, a Kafka
@@ -542,7 +542,7 @@ whose signaling data exists only on its WebSockets variant, the branch partition
 resolved branch declaration of the committed schedule carries, and the partition epoch the
 committed schedule records for every branch whose count changed. It identifies
 the current statement shape as well, which the statements a transaction keeps are stored in:
-`ALTER BRANCH` among those statements, an `ALTER INGESTOR` or `ALTER EMITTER` operation that
+`ALTER BRANCH` and `DESCRIBE INFERENCER` among those statements, an `ALTER INGESTOR` or `ALTER EMITTER` operation that
 changes one part of its entity's body, an envelope clause or the properties, or one part of a
 construction where it stands, including the typed `payload` expression scope and a
 `RESET WASM PROCESSOR ... STATE` that names its processor and scope and takes its domain from

@@ -22,6 +22,14 @@ use super::*;
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum RuntimeObservationError {
+    #[error("inferencer execution unit {target:?} is not current on this node")]
+    InferencerUnitNotCurrent { target: DomainNodeUnitRef },
+    #[error("failed to admit or execute an inferencer state summary")]
+    InferencerExecution,
+    #[error("inferencer state summary counts exceed their representation")]
+    InferencerCounts,
+    #[error("inferencer state observation was cancelled")]
+    InferencerCancelled,
     #[error("{reason}")]
     DomainInstantiation { domain: DomainName, reason: String },
     #[error("domain '{}' is not instantiated", .domain.as_str())]
