@@ -1127,7 +1127,7 @@ impl ReceiverState {
             captured.push(request);
             captured.len()
         };
-        self.captured_count.send_replace(count);
+        publish_observed_total(&self.captured_count, count);
         Capture::Kept
     }
 
@@ -1145,7 +1145,7 @@ impl ReceiverState {
             }
             faults.total
         };
-        self.fault_count.send_replace(total);
+        publish_observed_total(&self.fault_count, total);
     }
 
     fn latest_fault(&self) -> LatestFault {
@@ -1161,6 +1161,54 @@ impl ReceiverState {
 
     fn has_fault(&self, expected: fn(&ReceiverFault) -> bool) -> bool {
         self.faults.lock().kept.iter().any(expected)
+    }
+}
+
+/// Publishes a collection total after its lock is released. Concurrent observations can arrive
+/// in reverse order, and a delayed observation must not rewind the published total.
+fn publish_observed_total(counter: &watch::Sender<usize>, observed: usize) {
+    counter.send_modify(|published| {
+        *published = (*published).max(observed);
+    });
+}
+
+#[cfg(test)]
+mod count_publication_tests {
+    //! Layer: test harness.
+    //! Owns: delayed capture and fault count publication regressions.
+    //! Depends on: the real receiver state and its count publication boundary.
+    //! Must not know: Nervix graphs, emitter scheduling or connection parsing.
+
+    use super::*;
+
+    #[test]
+    fn a_delayed_capture_observation_cannot_rewind_the_published_total() {
+        let state = ReceiverState::new(LengthPolicy::Lenient);
+        for index in 0..4 {
+            let request = CapturedRequest {
+                method: "POST".to_string(),
+                target: format!("/events/{index}"),
+                version: http::Version::HTTP_11,
+                headers: Vec::new(),
+                body: Vec::new(),
+                received_at: Instant::now(),
+            };
+            assert!(matches!(state.capture(request), Capture::Kept));
+        }
+        // The third capture released its collection lock before the fourth capture published.
+        // Its delayed notification must leave the four real captures visible to count waiters.
+        publish_observed_total(&state.captured_count, 3);
+        assert_eq!(*state.captured_count.borrow(), state.captured.lock().len());
+    }
+
+    #[test]
+    fn a_delayed_fault_observation_cannot_rewind_the_published_total() {
+        let state = ReceiverState::new(LengthPolicy::Lenient);
+        for connection in 0..4 {
+            state.record(ReceiverFault::IncompleteRequest { connection });
+        }
+        publish_observed_total(&state.fault_count, 3);
+        assert_eq!(*state.fault_count.borrow(), state.fault_total());
     }
 }
 

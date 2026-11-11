@@ -99,7 +99,9 @@ jq -c -s '
     | $rows[($window * 12):($window * 12 + 12)]
     | {branch_name: .[0].branch_name, records: length, first_index: .[0].branch_index,
        last_index: .[-1].branch_index,
-       membership: (map(pow(4; .branch_index % 24)) | add), sequence_sum: (map(.sequence) | add)}' \
+       membership: (map(pow(4; .branch_index % 24)) | add), sequence_sum: (map(.sequence) | add),
+       sequences: map(.sequence), sequence_vector: map(.sequence),
+       first_sequence: .[0].sequence, last_sequence: .[-1].sequence}' \
     "${input}" >"${tmp_dir}/windows-by-branch.ndjson"
 jq -c -s 'sort_by(.last_index, .branch_name)[]' "${tmp_dir}/windows-by-branch.ndjson" >"${tmp_dir}/windows.ndjson"
 jq -c '. + {profile_branch: .branch_name, profile_version: (if .sequence < 40 then 1 else 2 end)}' \
@@ -180,6 +182,20 @@ window_edit() {
     local output="$2"
     jq -c --argjson input "$(jq -s '.' "${input}")" "${filter}" "${tmp_dir}/windows.ndjson" >"${output}"
 }
+window_edit 'if .branch_name == "alpha" and .first_index == 25
+             then .sequences |= reverse else . end' "${tmp_dir}/window-reversed-list.ndjson"
+expect_failure 'window collected its rows in reverse order' 'collected sequence' \
+    "${tmp_dir}/window.json" "${state}" window --input "${input}" \
+    --output "${tmp_dir}/window-reversed-list.ndjson" --boundaries "${tmp_dir}/crash.json" \
+    --result "${tmp_dir}/window.json"
+for corruption in '.sequences = .sequences[1:]' '.sequences = null' '.sequences[5] += 1' '.sequences = 7'; do
+    window_edit "if .branch_name == \"alpha\" and .first_index == 25 then ${corruption} else . end" \
+        "${tmp_dir}/window-corrupt-list.ndjson"
+    expect_failure "window collected sequence corruption: ${corruption}" 'collected sequence' \
+        "${tmp_dir}/window.json" "${state}" window --input "${input}" \
+        --output "${tmp_dir}/window-corrupt-list.ndjson" --boundaries "${tmp_dir}/crash.json" \
+        --result "${tmp_dir}/window.json"
+done
 # Alpha's index 31 is sequence 60; beta's index 31 is 61. Swapping the row leaves the membership.
 window_edit 'if .branch_name == "alpha" and .first_index == 25 then .sequence_sum += 1 else . end' \
     "${tmp_dir}/window-wrong-branch.ndjson"
@@ -218,18 +234,85 @@ window_edit 'if .branch_name == "alpha" and .first_index == 25
     "${tmp_dir}/window-replay.ndjson"
 jq -c 'if .records == 13 then .records = 12 | .membership -= pow(4; 36 % 24) | .sequence_sum -= 70
        | .last_index = 35 else . end' "${tmp_dir}/window-replay.ndjson" >"${tmp_dir}/window-replay-12.ndjson"
-jq -c 'if .branch_name == "alpha" and .first_index == 37
+jq -c 'if .branch_name == "alpha" and .first_index == 25
+       then .sequences = ([48, 50, 52, 52] + [range(54; 70; 2)])
+       elif .branch_name == "alpha" and .first_index == 37
        then .first_index = 36 | .membership += pow(4; 36 % 24) - pow(4; 48 % 24) | .sequence_sum += 70 - 94
+            | .sequences = [range(70; 94; 2)]
             | .last_index = 47
        elif .branch_name == "alpha" and .first_index == 49
        then .first_index = 48 | .membership += pow(4; 48 % 24) - pow(4; 60 % 24) | .sequence_sum += 94 - 118
-            | .last_index = 59
-       else . end' "${tmp_dir}/window-replay-12.ndjson" >"${tmp_dir}/window-replay-shifted.ndjson"
+            | .last_index = 59 | .sequences = [range(94; 118; 2)]
+       else . end
+       | .sequence_vector = .sequences | .first_sequence = .sequences[0] | .last_sequence = .sequences[-1]' \
+    "${tmp_dir}/window-replay-12.ndjson" >"${tmp_dir}/window-replay-shifted.ndjson"
 expect_pass 'window replayed a row of the volatile interval' "${state}" window --input "${input}" \
     --output "${tmp_dir}/window-replay-shifted.ndjson" --boundaries "${tmp_dir}/crash.json" \
     --result "${tmp_dir}/window.json"
 jq -e '.replay_duplicates.rows == 1' "${tmp_dir}/window.json" >/dev/null \
     || fail 'the window verdict did not count the replayed volatile row separately'
+# A restored prefix can already contain two volatile inputs when their source replays both.
+# Their second appearances follow that prefix; sorting every occurrence would reject valid state.
+window_edit 'if .branch_name == "alpha" and .first_index == 25
+             then .membership += pow(4; 27 % 24) + pow(4; 28 % 24) - pow(4; 35 % 24) - pow(4; 36 % 24)
+                  | .sequence_sum += 52 + 54 - 68 - 70 | .last_index = 34
+                  | .sequences = ([48, 50, 52, 54, 52, 54] + [range(56; 68; 2)])
+             elif .branch_name == "alpha" and .first_index == 37
+             then .membership += pow(4; 35 % 24) + pow(4; 36 % 24) - pow(4; 47 % 24) - pow(4; 48 % 24)
+                  | .sequence_sum += 68 + 70 - 92 - 94 | .first_index = 35 | .last_index = 46
+                  | .sequences = [range(68; 92; 2)]
+             elif .branch_name == "alpha" and .first_index == 49
+             then .membership += pow(4; 47 % 24) + pow(4; 48 % 24) - pow(4; 59 % 24) - pow(4; 60 % 24)
+                  | .sequence_sum += 92 + 94 - 116 - 118 | .first_index = 47 | .last_index = 58
+                  | .sequences = [range(92; 116; 2)]
+             else . end
+             | .sequence_vector = .sequences | .first_sequence = .sequences[0] | .last_sequence = .sequences[-1]' \
+    "${tmp_dir}/window-replayed-prefix.ndjson"
+expect_pass 'window retained a prefix before two volatile inputs replayed' "${state}" window --input "${input}" \
+    --output "${tmp_dir}/window-replayed-prefix.ndjson" --boundaries "${tmp_dir}/crash.json" \
+    --result "${tmp_dir}/window.json"
+jq -e '.replay_duplicates.rows == 2' "${tmp_dir}/window.json" >/dev/null \
+    || fail 'the window verdict did not count both replayed volatile inputs'
+# A replay can cross a window boundary: the next window keeps its tail before the prefix repeats.
+jq -c -s '
+    . as $input
+    | [$input[] | select(.branch_name == "alpha")] as $alpha
+    | [[$alpha[] | .,
+          (if .sequence == 58 then range(0; 3) | $alpha[] | select(.sequence >= 52 and .sequence <= 58)
+           else empty end)],
+       [$input[] | select(.branch_name == "beta")]][] as $branch
+    | range(0; ($branch | length); 12) as $start
+    | $branch[$start:$start + 12]
+    | {branch_name: .[0].branch_name, records: length,
+       first_index: (map(.branch_index) | min), last_index: (map(.branch_index) | max),
+       membership: (map(pow(4; .branch_index % 24)) | add), sequence_sum: (map(.sequence) | add),
+       sequences: map(.sequence), sequence_vector: map(.sequence),
+       first_sequence: .[0].sequence, last_sequence: .[-1].sequence}' \
+    "${input}" >"${tmp_dir}/window-replay-across-boundary.ndjson"
+jq -c -s 'sort_by(.last_index, .branch_name)[]' "${tmp_dir}/window-replay-across-boundary.ndjson" \
+    >"${tmp_dir}/window-replay-across-boundary-ordered.ndjson"
+expect_pass 'window retained a tail before a volatile prefix replay crossed its boundary' \
+    "${state}" window --input "${input}" --output "${tmp_dir}/window-replay-across-boundary-ordered.ndjson" \
+    --boundaries "${tmp_dir}/crash.json" --result "${tmp_dir}/window.json"
+jq -e '.replay_duplicates.rows == 12' "${tmp_dir}/window.json" >/dev/null \
+    || fail 'the boundary replay verdict did not count all repeated volatile inputs'
+# Keep the multiset and endpoints, but exchange two interior rows of the replayed prefix.
+jq -c 'if .branch_name == "alpha" and .sequences[0] == 56 and .sequences[2] == 52
+       then .sequences[2] = 54 | .sequences[3] = 52 else . end' \
+    "${tmp_dir}/window-replay-across-boundary-ordered.ndjson" >"${tmp_dir}/window-replay-reordered.ndjson"
+expect_failure 'window reordered interior rows of a replayed prefix' 'collected sequence' \
+    "${tmp_dir}/window.json" "${state}" window --input "${input}" \
+    --output "${tmp_dir}/window-replay-reordered.ndjson" --boundaries "${tmp_dir}/crash.json" \
+    --result "${tmp_dir}/window.json"
+for corruption in '.sequence_vector[5] += 1' '.first_sequence += 1' '.last_sequence += 1' \
+    '.sequences = (.sequences[1:] + .sequences[:1]) | .sequence_vector = .sequences'; do
+    window_edit "if .branch_name == \"alpha\" and .first_index == 25 then ${corruption} else . end" \
+        "${tmp_dir}/window-order-probe-corrupt.ndjson"
+    expect_failure "window order probe corruption: ${corruption}" 'collected sequence' \
+        "${tmp_dir}/window.json" "${state}" window --input "${input}" \
+        --output "${tmp_dir}/window-order-probe-corrupt.ndjson" --boundaries "${tmp_dir}/crash.json" \
+        --result "${tmp_dir}/window.json"
+done
 window_edit 'if .branch_name == "beta" and .first_index == 13 then .last_index = 40 else . end' \
     "${tmp_dir}/window-undecodable.ndjson"
 expect_failure 'window membership that cannot be decoded' 'cannot be decoded' \
@@ -365,8 +448,11 @@ expect_failure 'inferencer state reset after the fault' 'state durable at the mi
     "${tmp_dir}/inferencer.json" inferencer_verdict "${tmp_dir}/inferred-reset.ndjson" "${tmp_dir}/inferred-crash.json"
 jq -c '{branch_name, score: [(if .sequence >= 56 then .branch_index + 6 else .branch_index end)]}' "${input}" \
     >"${tmp_dir}/inferred-above.ndjson"
-expect_failure 'inferencer restored more rows than were admitted' 'exceeded the records admitted before recovery' \
-    "${tmp_dir}/inferencer.json" inferencer_verdict "${tmp_dir}/inferred-above.ndjson" "${tmp_dir}/inferred-crash.json"
+# The checkpoint can include repeated volatile admissions whose outputs were lost at the fault.
+expect_pass 'inferencer checkpoint already counted volatile redeliveries with unobserved outputs' \
+    inferencer_verdict "${tmp_dir}/inferred-above.ndjson" "${tmp_dir}/inferred-crash.json"
+jq -e '.restored_counts == {alpha: [34], beta: [34]} and .count_excess == {alpha: 6, beta: 6}' \
+    "${tmp_dir}/inferencer.json" >/dev/null || fail 'the inferencer verdict did not retain the replay count excess'
 jq -c 'if .branch_name == "alpha" and .score[0] >= 48 then .score[0] += 1 else . end' \
     "${tmp_dir}/inferred-restored.ndjson" >"${tmp_dir}/inferred-skipped.ndjson"
 expect_failure 'inferencer counts after recovery skipped' 'did not advance by one per record' \

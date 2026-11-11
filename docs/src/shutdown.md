@@ -754,8 +754,10 @@ A forced recovery of a stateful inferencer stages, for every branch of the lifec
 the newest tensor snapshot that survives on the destination or on another node the unit is
 assigned to, within the recovery's preparation deadline. A replica receives the generations its
 owner publishes, so a promoted replica continues each branch from at least the generation it last
-received. Inputs admitted after that generation were acknowledged once their output was dispatched
-and are not replayed, so the recovered state skips their updates. A branch the recovered lifecycle
+received. Recovery can skip updates made after that generation. Inference releases its input
+acknowledgement shares after dispatching output; another attached consumer can still hold the
+ingestor's position. A redelivered input invokes the model again, even when its update is already
+in the restored snapshot. A branch the recovered lifecycle
 names, but whose tensors no surviving node holds, starts from its declared `INITIAL` tensors, and
 `SHOW CLUSTER STATUS` reports `state_recovery=reset` with `inferencer:missing_checkpoint`. When no
 surviving node holds the branch lifecycle either, as after losing an owner that had no replica,
@@ -1185,6 +1187,13 @@ window whose retained rows exceed one 8 MiB snapshot section is persisted the wa
 relay is: its periodic and stopping checkpoints seal in bounded pieces to a quota-owned file, and
 its segments are synchronized before the header that selects them, so a restored window larger
 than the bulk memory budget survives a graceful restart with the rows it admitted afterwards.
+
+`COLLECT_VEC` and `COLLECT_ARRAY` use those retained input and argument columns, including
+list-valued arguments. Their sequence order survives with the window's rows through stop/start,
+restart, planned handoff and restore; promotion continues from the checkpoint the replica holds.
+`WITHOUT STATE` restores no retained rows, so a collecting window starts empty. The public recovery
+scenarios compare complete scalar and multidimensional lists in two interleaved branches; a
+partitioned restore checks each unit's lists independently.
 
 Durability is not uniform across those rows, and the difference is operationally visible:
 

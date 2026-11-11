@@ -1930,7 +1930,8 @@ fn each_relay_grant_refusal_counts_under_its_own_reason_and_fails_a_request_by_i
             | RelayGrantRefusal::ForeignRegistrar
             | RelayGrantRefusal::ContentConflict
             | RelayGrantRefusal::OutOfOrder
-            | RelayGrantRefusal::AdmissionActive => StreamResetReason::Peer,
+            | RelayGrantRefusal::AdmissionActive
+            | RelayGrantRefusal::ChannelUnopened => StreamResetReason::Peer,
         };
         assert_eq!(class, expected, "{refusal}");
         assert_eq!(

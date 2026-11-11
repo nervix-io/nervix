@@ -358,11 +358,16 @@ Feature: Entity-pause model alterations
       """
       {"tenant":"acme","value":"input-acme"}
       """
-    And these Plexus commands fail with "node_work_items=1"
+    # The drain must see pending work; concurrent intake and dispatch can contribute more than one item.
+    And these Plexus commands fail with "node_work_items="
       """
       ALTER JUNCTION enrich_parked SET DETACHED;
       """
-    And these Plexus commands are executed on the leader node
+    Then the last command error does not contain
+      """
+      node_work_items=0
+      """
+    When these Plexus commands are executed on the leader node
       """
       SHOW CREATE JUNCTION enrich_parked;
       """

@@ -58,6 +58,36 @@ const ELEMENTS: usize = 3;
 const BODY_BYTES: usize = 64;
 
 #[nervix_primitives::test]
+async fn every_relay_grant_refusal_round_trips_through_the_bounded_codec() {
+    let executor = Executor::default();
+    for refusal in RelayGrantRefusal::iter() {
+        let response = RelayGrantResponse {
+            receiver_epoch: 41,
+            disposition: RelayGrantDisposition::Refused(refusal),
+        };
+        let bytes = encode_rkyv(
+            &executor,
+            MemoryClass::Management,
+            CpuClass::Control,
+            4096,
+            response.clone(),
+        )
+        .await
+        .assured("a bounded grant refusal encodes");
+        let decoded = decode_rkyv::<RelayGrantResponse>(
+            &executor,
+            MemoryClass::Management,
+            CpuClass::Control,
+            bytes,
+        )
+        .await
+        .assured("a bounded grant refusal decodes");
+        assert_eq!(decoded.into_value(), response);
+        assert_eq!(executor.snapshot().management_memory.reserved_bytes, 0);
+    }
+}
+
+#[nervix_primitives::test]
 async fn nested_request_bulk_admission_refuses_a_queued_charge_without_waiting() {
     use futures_util::FutureExt as _;
 

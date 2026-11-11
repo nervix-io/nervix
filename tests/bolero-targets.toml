@@ -3088,7 +3088,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/interconnect/src/__fuzz__/wire__properties__bolero_relay_messages_reach_the_receiver_whole/corpus"
-domain_version = 15
+domain_version = 16
 features = []
 id = "relay-wire-messages"
 invariant = "Every relay grant request with its delivery position, body length, branch key fields to the bit, row watermarks, registrations and admission, the payload the receiver rebuilds from it, and every grant reply, its typed refusals included, admission exchange, acknowledgement resolution, connection hello with its prerequisite record and accepted or refused connection answer round trip through the bounded codec, and nothing stays charged."
@@ -3756,7 +3756,7 @@ manifest = "Cargo.toml"
 max_input_bytes = 160
 package = "nervix-connector-iceberg"
 random_iterations = 256
-source = "crates/connectors/iceberg/src/table/mod.rs"
+source = "crates/connectors/iceberg/src/table/tests.rs"
 test = "table::tests::bolero_nested_iceberg_datetimes_are_narrowed_at_every_depth"
 test_target = "lib"
 

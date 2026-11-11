@@ -993,6 +993,27 @@ fn restarted_receiver_fences_unresolved_relay(
                             );
                         }
                         trace.record("client", "retained relay returned indeterminate");
+                        let continued = RelayDelivery {
+                            sequence: 1,
+                            ..FIRST
+                        };
+                        let error = client
+                            .send(
+                                &peer,
+                                Envelope::RelayPayload(relay_payload(continued, 83, &client)),
+                            )
+                            .await
+                            .expect_err("a new receiver cannot continue a channel it never opened");
+                        assert!(
+                            matches!(
+                                error.current_context(),
+                                TransportError::RelayGrantRefused(
+                                    nervix_interconnect::RelayGrantRefusal::ChannelUnopened
+                                )
+                            ),
+                            "the refusal proves no body was admitted: {error:?}"
+                        );
+                        trace.record("client", "continued channel was definitely unadmitted");
                         fresh.send_replace(true);
                         client
                             .send(

@@ -98,11 +98,12 @@ Feature: Licensing refresh and committed deadline crossings
       """
       policy: licensed fresh
       """
+    And node "node-1" eventually reports raft voters "<voters>"
 
     Examples:
-      | cluster_size | joining_node |
-      | 1            | node-2       |
-      | 3            | node-4       |
+      | cluster_size | joining_node | voters               |
+      | 1            | node-2       | node-1               |
+      | 3            | node-4       | node-1,node-2,node-3 |
 
   Scenario Outline: A service refusal is reported without renewing the decision on <cluster_size> nodes
     Given an HTTPS licensing test service is available
