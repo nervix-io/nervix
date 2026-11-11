@@ -138,7 +138,7 @@ fn shuttle_first_delivery_binding_racing_terminal_retirement_cannot_publish_a_li
 /// read from its fingerprint, so the keys are found rather than assumed.
 fn keys_of_two_partitions() -> (Option<BranchKey>, Option<BranchKey>) {
     let count = std::num::NonZeroU16::new(2).assured("two is not zero");
-    let partitioning = RelayPartitioning::Partitioned(BranchPartitions::Direct(count));
+    let partitioning = RelayPartitioning::Partitioned(ResolvedBranchPartitions::Direct(count));
     let mut first = None;
     let mut second = None;
     for tenant in ["acme", "beta", "eta", "theta", "nu", "xi"] {

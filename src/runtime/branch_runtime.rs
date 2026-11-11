@@ -593,7 +593,20 @@ impl BranchRuntime {
         }
     }
 
+    fn rebind_input_origin(&mut self, key: &Option<BranchKey>) {
+        if BranchKey::same_origin(&self.key, key) {
+            return;
+        }
+        self.key = key.clone();
+        for relay in self.relays.values_mut() {
+            if relay.key.is_some() {
+                relay.rebind_key(key.clone());
+            }
+        }
+    }
+
     pub(super) async fn dispatch(&mut self, batch: RelayRecordBatch) {
+        self.rebind_input_origin(&batch.key);
         if let Err(error) = self.refresh_domain_routing() {
             for ack in &batch.acks {
                 ack.no_ack(error.to_string());
@@ -665,6 +678,7 @@ impl BranchRuntime {
         incoming_relay: &RelayName,
         batch: RelayRecordBatch,
     ) {
+        self.rebind_input_origin(&batch.key);
         if let Err(error) = self.refresh_domain_routing() {
             for ack in &batch.acks {
                 ack.no_ack(error.to_string());
@@ -1278,6 +1292,19 @@ impl BranchExecutionRuntime {
         for message in inputs {
             nervix_primitives::task::consume_budget().await;
             let key = message.key.clone();
+            if (key
+                .as_ref()
+                .is_some_and(|key| key.external_partition().is_some())
+                || template
+                    .partition_transition
+                    .as_ref()
+                    .is_some_and(|transition| transition.needs_key_lookup()))
+                && instances
+                    .stored_key(&key)
+                    .is_some_and(|stored| !BranchKey::same_origin(stored, &key))
+            {
+                instances.replace_key(key.clone());
+            }
             let instance = if let Some(state) = instances.touch(&key, accepted_at) {
                 GetOrCreateBranchInstance {
                     state,

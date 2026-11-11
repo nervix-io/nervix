@@ -303,6 +303,33 @@ impl PlacementAnalysis {
         })
     }
 
+    /// Refresh only unit correspondence after observation resolves an inherited count. Model
+    /// corridors and their dependency edges stay as validated; no edge is added a second time.
+    pub(in crate::registry) fn refresh_units(
+        &mut self,
+        domain: &DomainName,
+        indices: &HashMap<NodeRef, NodeIndex>,
+        graph: &DiGraph<ActiveNode, EdgeKind>,
+    ) -> Result<(), Report<RegistryError>> {
+        let mut pairs = self.explicit_pairs.iter_mut().collect::<Vec<_>>();
+        pairs.sort_by(|(left, _), (right, _)| left.cmp(right));
+        for (pair, resolved) in pairs {
+            let correspondence = hop_correspondence(pair, indices, graph);
+            if !correspondence.class.permits(resolved.policy) {
+                return Err(Report::new(RegistryError::PlacementHopPolicy {
+                    domain: domain.clone(),
+                    from: pair.left.clone(),
+                    to: pair.right.clone(),
+                    class: correspondence.class,
+                    policy: resolved.policy,
+                    rules: resolved.winning_rules.clone(),
+                }));
+            }
+            resolved.correspondence = correspondence;
+        }
+        Ok(())
+    }
+
     pub(in crate::registry) fn effective(&self) -> EffectivePlacementPlan {
         EffectivePlacementPlan {
             pairs: self.explicit_pairs.clone(),
@@ -1535,19 +1562,21 @@ mod tests {
         );
         assert_eq!(plan.require_groups.len(), 1);
         assert_eq!(plan.require_groups[0].members.len(), 5);
-        let schedule = graph.schedule_for_domain(
-            &domain,
-            &[
-                ClusterNodeName::parse("node-1").expect("valid name"),
-                ClusterNodeName::parse("node-2").expect("valid name"),
-            ],
-            0,
-            None,
-            &crate::registry::uniform_capabilities(&[
-                ClusterNodeName::parse("node-1").expect("valid name"),
-                ClusterNodeName::parse("node-2").expect("valid name"),
-            ]),
-        );
+        let schedule = graph
+            .schedule_for_domain(
+                &domain,
+                &[
+                    ClusterNodeName::parse("node-1").expect("valid name"),
+                    ClusterNodeName::parse("node-2").expect("valid name"),
+                ],
+                0,
+                None,
+                &crate::registry::uniform_capabilities(&[
+                    ClusterNodeName::parse("node-1").expect("valid name"),
+                    ClusterNodeName::parse("node-2").expect("valid name"),
+                ]),
+            )
+            .assured("the fixture topology resolves");
         let owner = scheduled_node(&schedule, ModelKind::Ingestor, "ing")
             .assigned_single_node()
             .expect("ingestor should be assigned");

@@ -72,12 +72,29 @@ impl Arbitrary<'_> {
         }
     }
 
-    /// A partition count anywhere in its 16-bit range, biased towards its boundaries, so the
-    /// default single partition, the smallest partitioned count and the largest count all appear.
+    /// A current branch declaration, including discovered and grouped inheritance.
     pub fn branch_partitions(&mut self) -> BranchPartitions {
+        match self.entropy.up_to(2) {
+            0 => BranchPartitions::Direct(self.branch_partition_count()),
+            1 => BranchPartitions::Inherited,
+            _ => BranchPartitions::InheritedGrouped(self.branch_partition_count()),
+        }
+    }
+
+    /// A resolved layout across the complete 16-bit count range.
+    pub fn resolved_branch_partitions(&mut self) -> nervix_models::ResolvedBranchPartitions {
+        let count = self.branch_partition_count();
+        if self.entropy.flag() {
+            nervix_models::ResolvedBranchPartitions::Inherited(count)
+        } else {
+            nervix_models::ResolvedBranchPartitions::Direct(count)
+        }
+    }
+
+    fn branch_partition_count(&mut self) -> NonZeroU16 {
         let count = self.entropy.boundary_biased(1..=u64::from(u16::MAX));
         let count = u16::try_from(count).verified("the range above ends at u16::MAX");
-        BranchPartitions::Direct(NonZeroU16::new(count).verified("the range above starts at one"))
+        NonZeroU16::new(count).verified("the range above starts at one")
     }
 
     /// A virtual host answering one or more hostnames, optionally with a TLS resource.

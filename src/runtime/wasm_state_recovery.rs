@@ -31,6 +31,7 @@ pub(crate) struct WasmStateRecoveryRequest {
     placement: RuntimeStatePlacement,
     generation: WasmStateGeneration,
     rejection: WasmSavedStateRejection,
+    unit: Option<Unit>,
 }
 
 impl WasmStateRecoveryRequest {
@@ -63,9 +64,17 @@ impl WasmStateRecoveryRequest {
     /// The reset target this refused lifetime selects: the branch that was refused, or the
     /// processor's explicit unbranched execution.
     pub(crate) fn target(&self) -> WasmStateResetTarget {
-        match BranchKey::to_remote_key(&self.placement.branch_key) {
-            Some(fields) => WasmStateResetTarget::Branch(fields),
-            None => WasmStateResetTarget::Unbranched,
+        let key = BranchKey::to_remote_key(&self.placement.branch_key);
+        if key.is_branched() {
+            match self.unit {
+                Some(unit) => WasmStateResetTarget::BranchInUnit {
+                    unit,
+                    key: Box::new(key),
+                },
+                None => WasmStateResetTarget::Branch(key),
+            }
+        } else {
+            WasmStateResetTarget::Unbranched
         }
     }
 }
@@ -104,6 +113,41 @@ impl RaisedWasmStateRecoveries {
 }
 
 impl Runtime {
+    /// A cold lifetime request keeps the installed unit when field hashing cannot address it.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            bounded,
+            key = "one admitted guest reset or claimed refused guest generation",
+            bound = "one installed-domain lookup; its synchronous guard ends before the request \
+                     is sent",
+            reason = "unit selection follows the refused-lifetime claim or the branch's \
+                      guest-reset fence"
+        )
+    )]
+    pub(super) fn wasm_lifetime_unit(
+        &self,
+        domain: &DomainName,
+        processor: &ModelName,
+        unit: Unit,
+    ) -> Option<Unit> {
+        let execution = self.inner.executions.get(domain)?;
+        let node = execution
+            .revision
+            .nodes
+            .get(&NodeRef::new(ModelKind::WasmProcessor, processor.clone()))?;
+        let inherited = node
+            .resolved_branching
+            .as_ref()
+            .and_then(|branching| branching.partitions())
+            .is_some_and(|partitions| partitions.is_inherited())
+            || node
+                .partition_transition
+                .as_ref()
+                .is_some_and(|transition| transition.previous.is_inherited());
+        inherited.then_some(unit)
+    }
+
     /// Start draining the refused guest-state lifetimes this node raises.
     ///
     /// Called once while the node starts. Until it is, a branch that is refused reports the refusal
@@ -149,6 +193,7 @@ impl Runtime {
             placement: placement.clone(),
             generation,
             rejection,
+            unit: self.wasm_lifetime_unit(&placement.domain, &placement.identifier, placement.unit),
         };
         if sender.try_send(request).is_err() {
             // The control plane has either stopped draining, which happens as the node stops, or

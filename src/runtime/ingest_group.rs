@@ -159,6 +159,8 @@ pub(in crate::runtime) struct RefusedEntry<T> {
 
 #[derive(Debug, Error)]
 pub(in crate::runtime) enum IngestGroupError {
+    #[error("the route cannot admit an inherited key before its topology resolves")]
+    AwaitingPartitionTopology,
     #[error("received {ack_sets} ACK sets for {metadata_rows} ingest metadata rows")]
     PayloadSidecarCount {
         metadata_rows: usize,
@@ -1013,22 +1015,52 @@ impl IngestRouteCollector {
 
 /// The relay and branch key a routed message is grouped under. Branch identity is part of the key
 /// because a relay batch carries exactly one branch key.
-#[derive(PartialEq, Eq, Hash)]
 pub(super) struct RoutedGroupKey {
     pub(super) relay: RelayName,
     pub(super) key: Option<BranchKey>,
 }
 
 /// A borrowed grouping key avoids reference-count traffic while an existing group is found.
-#[derive(Hash)]
 struct RoutedGroupLookup<'a> {
     relay: &'a RelayName,
     key: &'a Option<BranchKey>,
 }
 
+impl std::hash::Hash for RoutedGroupKey {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        RoutedGroupLookup {
+            relay: &self.relay,
+            key: &self.key,
+        }
+        .hash(state);
+    }
+}
+impl PartialEq for RoutedGroupKey {
+    fn eq(&self, other: &Self) -> bool {
+        RoutedGroupLookup {
+            relay: &self.relay,
+            key: &self.key,
+        }
+        .equivalent(other)
+    }
+}
+impl Eq for RoutedGroupKey {}
+impl std::hash::Hash for RoutedGroupLookup<'_> {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.relay.hash(state);
+        self.key.hash(state);
+        if let Some(partition) = self.key.as_ref().and_then(BranchKey::inherited_origin) {
+            partition.hash(state);
+        }
+    }
+}
+
 impl Equivalent<RoutedGroupKey> for RoutedGroupLookup<'_> {
     fn equivalent(&self, key: &RoutedGroupKey) -> bool {
-        self.relay == &key.relay && self.key == &key.key
+        self.relay == &key.relay
+            && self.key == &key.key
+            && self.key.as_ref().and_then(BranchKey::inherited_origin)
+                == key.key.as_ref().and_then(BranchKey::inherited_origin)
     }
 }
 
@@ -1846,7 +1878,7 @@ impl Runtime {
             })?;
             let mut route_keys = (0..rows.len()).map(|_| None).collect::<Vec<_>>();
             let mut branch_state_snapshot = HashMap::default();
-            if let BoundRouteBranch::Constructed(branch_program) = &output.branch {
+            if let Some((branch_program, partition_field)) = output.branch.construction() {
                 let successful = outcomes
                     .iter()
                     .enumerate()
@@ -1888,6 +1920,39 @@ impl Runtime {
                             relay: output.relay.clone(),
                         })?;
                     branch_state_snapshot = relay_state_snapshot_from_side_inputs(&side_inputs);
+                    let external_partitions = match partition_field {
+                        Some(projection) => {
+                            let partitions = projection.partitions.ok_or_else(|| {
+                                Report::new(IngestGroupError::AwaitingPartitionTopology)
+                            })?;
+                            let source = projection.source.ok_or_else(|| {
+                                Report::new(IngestGroupError::AwaitingPartitionTopology)
+                            })?;
+                            Some(
+                                rows.ingest_metadata
+                                    .external_partitions(projection.field, &input_rows, source)
+                                    .change_context(IngestGroupError::Metadata {
+                                        operation: IngestMetadataOperation::Select,
+                                    })?
+                                    .into_iter()
+                                    .map(|partition| {
+                                        let unit =
+                                            partitions.unit_of(partition).ok_or_else(|| {
+                                                Report::new(
+                                                    IngestGroupError::AwaitingPartitionTopology,
+                                                )
+                                            })?;
+                                        Ok(nervix_models::InheritedPartitionOrigin {
+                                            partition,
+                                            epoch: projection.epoch,
+                                            unit,
+                                        })
+                                    })
+                                    .collect::<Result<Vec<_>, Report<IngestGroupError>>>()?,
+                            )
+                        }
+                        None => None,
+                    };
                     let evaluated = evaluate_output_branch_program(
                         ProgramRun {
                             executor: self.executor(),
@@ -1898,6 +1963,7 @@ impl Runtime {
                         &output_batch,
                         &input_keys,
                         &side_inputs,
+                        external_partitions.as_deref(),
                     )
                     .await
                     .change_context(IngestGroupError::BranchProgram {

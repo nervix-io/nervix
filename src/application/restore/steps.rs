@@ -30,8 +30,8 @@ use nervix_consensus::{CommandExecution, ConsensusError, RestoreStepEffect};
 use nervix_interconnect::{RuntimeState, StatePlacementEnvelope, backup::RestoreStateInventory};
 use nervix_models::{
     BranchKeyFingerprint, ClusterNodeName, CoordinationIdentity, DomainName, ModelKind, NodeRef,
-    RemoteRuntimeField, ResourceId, ResourceUploadIdentity, ResourceUploadKey, RestoreState,
-    RestoreStateAuthority, RestoreStep, SchemaFingerprint, UserName,
+    ResourceId, ResourceUploadIdentity, ResourceUploadKey, RestoreState, RestoreStateAuthority,
+    RestoreStep, SchemaFingerprint, UserName,
 };
 use nervix_primitives::sync::Arc;
 
@@ -115,16 +115,11 @@ pub(in crate::application) fn restored_upload_key(
 
 /// An archived branch key as the typed runtime fields a restored placement names.
 pub(super) fn remote_branch_key(
-    branch: Option<&Vec<nervix_backup::StateField>>,
-) -> Option<Vec<RemoteRuntimeField>> {
-    let fields = branch?;
-    Some(
-        fields
-            .iter()
-            .cloned()
-            .map(|field| field.into_remote())
-            .collect(),
-    )
+    branch: &nervix_models::BranchKeyFields<nervix_backup::StateField>,
+) -> nervix_models::RemoteBranchKey {
+    branch
+        .clone()
+        .map_fields(nervix_backup::StateField::into_remote)
 }
 
 /// The planned domain restored under `target`.
@@ -216,7 +211,7 @@ impl SessionServiceImpl {
             unit: nervix_models::Unit,
             schema: SchemaFingerprint,
             branch_fingerprint: Option<BranchKeyFingerprint>,
-            branch_key: Option<Vec<RemoteRuntimeField>>,
+            branch_key: nervix_models::RemoteBranchKey,
             runtime_state: RuntimeState,
             revision: u64,
         }
@@ -257,7 +252,9 @@ impl SessionServiceImpl {
         // A branch's partitions divide some entities: their archived state is restored in the unit
         // the restored count places each key in, whichever unit archived it.
         let partitions = scheduled
-            .map(|scheduled| RestoredPartitions::of(scheduled, archive.states_for(&domain.source)));
+            .map(|scheduled| RestoredPartitions::of(scheduled, archive.states_for(&domain.source)))
+            .transpose()
+            .map_err(|error| StepFailure::Failed(format!("{error:#}")))?;
         // Stage lifecycle before guest saves; the published generation contains both at once.
         for first_lifecycle in [true, false] {
             nervix_primitives::task::consume_budget().await;
@@ -301,7 +298,7 @@ impl SessionServiceImpl {
                         unit: descriptor.unit,
                         schema: descriptor.schema,
                         branch_fingerprint: descriptor.branch_fingerprint,
-                        branch_key: remote_branch_key(descriptor.branch.as_ref()),
+                        branch_key: remote_branch_key(&descriptor.branch),
                         runtime_state: RuntimeState::Inferencer {
                             schema: descriptor.schema,
                             model: descriptor.model,
@@ -314,7 +311,7 @@ impl SessionServiceImpl {
                             unit: lifecycle.unit,
                             schema: lifecycle.schema,
                             branch_fingerprint: None,
-                            branch_key: None,
+                            branch_key: nervix_models::RemoteBranchKey::Unbranched,
                             runtime_state: RuntimeState::BranchLru {
                                 schema: lifecycle.schema,
                             },
@@ -330,7 +327,7 @@ impl SessionServiceImpl {
                             unit: offsets.unit,
                             schema: offsets.schema,
                             branch_fingerprint: None,
-                            branch_key: None,
+                            branch_key: nervix_models::RemoteBranchKey::Unbranched,
                             runtime_state: RuntimeState::KafkaOffset,
                             revision: offsets.revision,
                         }
@@ -342,7 +339,7 @@ impl SessionServiceImpl {
                             unit: descriptor.unit,
                             schema: descriptor.schema,
                             branch_fingerprint: None,
-                            branch_key: None,
+                            branch_key: nervix_models::RemoteBranchKey::Unbranched,
                             runtime_state: RuntimeState::MaterializedRelay {
                                 schema: descriptor
                                     .schema
@@ -360,7 +357,7 @@ impl SessionServiceImpl {
                             unit: descriptor.unit,
                             schema: descriptor.schema,
                             branch_fingerprint: descriptor.branch_fingerprint,
-                            branch_key: remote_branch_key(descriptor.branch.as_ref()),
+                            branch_key: remote_branch_key(&descriptor.branch),
                             runtime_state: RuntimeState::Deduplicator {
                                 schema: descriptor.schema,
                             },
@@ -375,7 +372,7 @@ impl SessionServiceImpl {
                         unit: descriptor.unit,
                         schema: descriptor.schema,
                         branch_fingerprint: descriptor.branch_fingerprint,
-                        branch_key: remote_branch_key(descriptor.branch.as_ref()),
+                        branch_key: remote_branch_key(&descriptor.branch),
                         runtime_state: RuntimeState::WindowProcessor {
                             schema: descriptor.schema,
                         },
@@ -389,7 +386,7 @@ impl SessionServiceImpl {
                         unit: descriptor.unit,
                         schema: descriptor.schema,
                         branch_fingerprint: descriptor.branch_fingerprint,
-                        branch_key: remote_branch_key(descriptor.branch.as_ref()),
+                        branch_key: remote_branch_key(&descriptor.branch),
                         runtime_state: RuntimeState::WasmProcessor {
                             schema: descriptor.schema,
                             generation: descriptor.generation,
@@ -413,9 +410,12 @@ impl SessionServiceImpl {
                             // Restored per unit of the restored count, before or after this pass.
                             continue;
                         }
-                        let Some(unit) =
-                            partitions.section_unit(&reference, unit, branch_fingerprint.as_ref())
-                        else {
+                        let Some(unit) = partitions.section_unit(
+                            &reference,
+                            unit,
+                            branch_fingerprint.as_ref(),
+                            branch_key.inherited_origin(),
+                        ) else {
                             tracing::debug!(domain = %domain.target, entity = %reference.identifier, "skipped a key's state that a copy in the key's own unit supersedes");
                             continue;
                         };
@@ -738,7 +738,7 @@ impl SessionServiceImpl {
                         kind: reference.kind,
                         identifier: reference.identifier.clone(),
                         unit: lifecycle.unit,
-                        branch_key: None,
+                        branch_key: nervix_models::RemoteBranchKey::Unbranched,
                     },
                     branch_fingerprint: None,
                     revision: lifecycle.revision,
@@ -826,7 +826,7 @@ impl SessionServiceImpl {
                         kind: reference.kind,
                         identifier: reference.identifier.clone(),
                         unit: *unit,
-                        branch_key: None,
+                        branch_key: nervix_models::RemoteBranchKey::Unbranched,
                     },
                     branch_fingerprint: None,
                     revision,
@@ -1093,6 +1093,7 @@ impl SessionServiceImpl {
                 archive.models_text(&domain.source),
                 &domain.target,
                 lease,
+                domain.partitions.as_ref(),
             )
             .await;
         if result.is_not_leader() {

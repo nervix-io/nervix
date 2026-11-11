@@ -2317,3 +2317,24 @@ entity = "ZEROMQ PULL INGESTOR"
 scenarios = [
   { feature = "tests/features/runtime/zeromq_ingestion.feature", scenario = "ZeroMQ ingestor delivers JSON payloads to a subscribed relay" },
 ]
+
+[[capability]]
+capability = "PARTITIONS INHERITED"
+entity = "KAFKA TOPIC INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/inherited_partitions.feature", scenario = "A Kafka domain-offset reader runs one instance with each <partitioning> partition" },
+]
+
+[[capability]]
+capability = "PARTITIONS INHERITED"
+entity = "PULSAR TOPIC INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/inherited_partitions.feature", scenario = "A Pulsar <subscription_type> reader follows the inherited partition topics" },
+]
+
+[[capability]]
+capability = "metadata.partition"
+entity = "PULSAR TOPIC INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/inherited_partitions.feature", scenario = "A Pulsar <subscription_type> reader follows the inherited partition topics" },
+]

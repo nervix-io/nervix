@@ -19,9 +19,11 @@
     )
 )]
 
+#[cfg(test)]
+use nervix_models::RemoteRuntimeField;
 use nervix_models::{
     BranchKeyFingerprint, BranchName, DomainName, NodeRef, PartitionEpochNumber,
-    RemoteRuntimeField, RemoteRuntimeRecordMetadata, Timestamp, Unit,
+    RemoteRuntimeRecordMetadata, Timestamp, Unit,
 };
 use rkyv::{Archive, Deserialize, Serialize};
 
@@ -99,7 +101,7 @@ pub enum PartitionClaimOutcome {
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq)]
 pub struct PartitionCatalogKey {
     pub fingerprint: BranchKeyFingerprint,
-    pub key: Vec<RemoteRuntimeField>,
+    pub key: nervix_models::RemoteBranchKey,
 }
 
 /// One page of a catalog shard: the keys one holding unit holds that the current count places in
@@ -125,10 +127,16 @@ pub struct UnitPartitionHoldings {
 /// What one unit's owner is asked about a branch's partition transition.
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq)]
 pub enum PartitionTransitionRequest {
+    /// Locate one demanded key when the external publisher's partitioner is unknown. This never
+    /// broadcasts a complete key catalog to every destination partition.
+    Locate {
+        subject: PartitionClaimSubject,
+        fingerprint: BranchKeyFingerprint,
+    },
     /// Release or forget one key at its holding unit.
     Claim {
         subject: PartitionClaimSubject,
-        key: Vec<RemoteRuntimeField>,
+        key: nervix_models::RemoteBranchKey,
         step: PartitionClaimStep,
     },
     /// The keys one holding unit holds that land in the claimant's unit, after the cursor a
@@ -148,9 +156,17 @@ pub enum PartitionTransitionRequest {
 
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq)]
 pub enum PartitionTransitionAnswer {
+    Located(Option<PartitionKeyLocation>),
     Claim(PartitionClaimOutcome),
     CatalogShard(PartitionCatalogShard),
     Holdings(Vec<UnitPartitionHoldings>),
+}
+
+/// The admitted origin of a retained copy, used to select the newest installed claimant when
+/// several topology changes occur before a previous holder has forgotten its copy.
+#[derive(Debug, Clone, Copy, Archive, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PartitionKeyLocation {
+    pub origin: Option<nervix_models::InheritedPartitionOrigin>,
 }
 
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq)]
@@ -215,11 +231,19 @@ mod properties {
             }
         }
 
-        fn key(&self) -> Vec<RemoteRuntimeField> {
-            vec![RemoteRuntimeField {
+        fn key(&self) -> nervix_models::RemoteBranchKey {
+            let fields = vec![RemoteRuntimeField {
                 name: "tenant".to_string(),
                 value: RemoteRuntimeValue::I64(self.value),
             }]
+            .into_boxed_slice();
+            let origin =
+                (!self.keys.is_multiple_of(2)).then(|| nervix_models::InheritedPartitionOrigin {
+                    partition: nervix_models::ExternalPartition::new(self.holder),
+                    epoch: self.subject().epoch,
+                    unit: self.subject().holder,
+                });
+            nervix_models::RemoteBranchKey::branched(fields, origin)
         }
 
         fn requests(&self) -> Vec<PartitionTransitionRequest> {
@@ -265,7 +289,7 @@ mod properties {
                     kind: ModelKind::Deduplicator,
                     identifier: ModelName::parse("distinct").assured("the name is valid"),
                     unit: Unit::partition(self.holder),
-                    branch_key: Some(self.key()),
+                    branch_key: self.key(),
                 },
                 snapshot: StateSnapshotEnvelope {
                     lsm: self.lsm,

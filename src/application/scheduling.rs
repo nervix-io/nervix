@@ -17,12 +17,11 @@
     )
 )]
 
-use std::{collections::BTreeSet, fmt, num::NonZeroU64, time::Duration};
+use std::{collections::BTreeSet, fmt, time::Duration};
 
-use ahash::{HashMap, HashMapExt, HashSet};
+use ahash::HashSet;
 use error_stack::{Report, ResultExt as _};
 use meticulous::{OptionExt as _, ResultExt as _};
-use nervix_connector_kafka::TopicPartitionInspector;
 use nervix_consensus::{
     CommandExecution, ConsensusError, DomainMutationLease, DomainPlanningInputs, GossipState,
     TransactionScheduleEligibility,
@@ -31,19 +30,14 @@ use nervix_interconnect::{
     RequestError, StoppingNodeDrainAction, StoppingNodeDrainRequest, StoppingNodeDrainResponse,
 };
 use nervix_models::{
-    ClusterNodeIdentity, ClusterNodeName, DomainName, IngestorEntity, IngestorName, KafkaIngestor,
-    KafkaOffsetMode, KafkaPartitionSchedule, KafkaTopicIngestor, Model, ModelKind, ModelName,
-    NodeRef, NodeUnitRef, PlacementGroupSchedule, QuiesceLevel, ScheduledNode, Unit,
+    ClusterNodeIdentity, ClusterNodeName, DomainName, NodeUnitRef, PlacementGroupSchedule,
+    QuiesceLevel, ScheduledNode, Unit,
 };
-use nervix_primitives::{
-    sync::CancellationToken,
-    time::{Instant, sleep},
-};
+use nervix_primitives::time::{Instant, sleep};
 use tracing::{info, warn};
 
 use super::{
     AppError,
-    background_task::BackgroundTask,
     command_result::{CommandDisposition, CommandResult, LeaderRedirect},
     describe_output::format_placement_unit_nodes,
     model_mutation::{command_error, command_ok, quiesce_level_message},
@@ -130,9 +124,6 @@ impl StartupVoterObservations {
     }
 }
 
-pub(in crate::application) const LEADER_KAFKA_PARTITION_WATCH_INTERVAL: Duration =
-    Duration::from_secs(1);
-
 pub(in crate::application) const RUNTIME_REVISION_READINESS_PROPAGATION_BOUND: Duration =
     Duration::from_secs(30);
 
@@ -158,17 +149,6 @@ pub(in crate::application) enum SchedulePublicationError {
     Replace { domain: DomainName },
     #[error("failed to instantiate runtime schedule for domain '{domain}'")]
     Apply { domain: DomainName },
-}
-
-#[derive(Debug, thiserror::Error)]
-enum KafkaPartitionPublicationError {
-    #[error(
-        "failed to publish Kafka partition schedule for ingestor '{ingestor}' in domain '{domain}'"
-    )]
-    Update {
-        domain: DomainName,
-        ingestor: IngestorName,
-    },
 }
 
 /// A drain's retained leadership observation, borrowed at its reporting boundary.
@@ -440,12 +420,6 @@ impl ShutdownDrainAnswer {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub(in crate::application) struct KafkaPartitionWatcherKey {
-    domain: DomainName,
-    ingestor: IngestorName,
-}
-
 /// The schedule change one model mutation makes: what the domain is scheduled as now, what it
 /// would be scheduled as, and how many runtime nodes that move relocates.
 #[derive(Default)]
@@ -456,22 +430,6 @@ pub(in crate::application) struct ScheduleTransition {
     pub(in crate::application) inputs: Option<DomainPlanningInputs>,
     pub(in crate::application) planning: Option<DomainSchedulePlanningSnapshot>,
     pub(in crate::application) transaction_eligibility: Option<TransactionScheduleEligibility>,
-}
-
-/// One Kafka partition watcher the leader runs: the ingestor it watches for, and the task doing
-/// the watching.
-pub(in crate::application) struct KafkaPartitionWatcherTask {
-    spec: KafkaPartitionWatcherSpec,
-    pub(in crate::application) task: BackgroundTask,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct KafkaPartitionWatcherSpec {
-    domain: DomainName,
-    ingestor: IngestorName,
-    topic: String,
-    instances: NonZeroU64,
-    client: nervix_models::CreateClientKafka,
 }
 
 impl SessionServiceImpl {
@@ -504,7 +462,11 @@ impl SessionServiceImpl {
             schedule,
             relocations,
             ..
-        } = planning.prepare(&inputs, domain, graph, inputs.schedule());
+        } = planning
+            .prepare(&inputs, domain, graph, inputs.schedule())
+            .change_context(SchedulePublicationError::InvalidInputs {
+                domain: domain.clone(),
+            })?;
         self.validate_domain_planning_inputs(&inputs)
             .await
             .change_context(SchedulePublicationError::InvalidInputs {
@@ -530,11 +492,12 @@ impl SessionServiceImpl {
         Ok(relocations)
     }
 
+    #[cfg(test)]
     pub(in crate::application) async fn prepare_domain_schedule(
         &self,
         inputs: DomainPlanningInputs,
         graph: Option<ActiveGraph>,
-    ) -> PreparedDomainSchedule {
+    ) -> error_stack::Result<PreparedDomainSchedule, crate::registry::RegistryError> {
         let snapshot = self
             .capture_domain_schedule_planning_snapshot(&inputs)
             .await;
@@ -617,7 +580,7 @@ impl SessionServiceImpl {
                 planning.cluster_nodes(),
             );
             #[cfg(feature = "testing")]
-            let mut schedule = graph.schedule_for_domain_with_mode(
+            let schedule = graph.schedule_for_domain_with_mode(
                 &domain,
                 cluster_nodes,
                 usize::try_from(self.cluster_parameters().replica_count())
@@ -627,7 +590,7 @@ impl SessionServiceImpl {
                 planning.capabilities(),
             );
             #[cfg(not(feature = "testing"))]
-            let mut schedule = graph.schedule_for_domain(
+            let schedule = graph.schedule_for_domain(
                 &domain,
                 cluster_nodes,
                 usize::try_from(self.cluster_parameters().replica_count())
@@ -635,6 +598,12 @@ impl SessionServiceImpl {
                 inputs.schedule(),
                 planning.capabilities(),
             );
+            let mut schedule = match schedule {
+                Ok(schedule) => schedule,
+                Err(error) => {
+                    return command_error(format!("cannot resolve domain '{domain}': {error:#}"));
+                }
+            };
             Self::merge_existing_schedule_data(&mut schedule, inputs.schedule(), preservable_nodes);
             if let Err(error) = self.validate_domain_planning_inputs(&inputs).await {
                 return command_error(format!(
@@ -891,6 +860,18 @@ impl SessionServiceImpl {
                     inputs.schedule(),
                     planning.capabilities(),
                 );
+                let desired = match desired {
+                    Ok(desired) => desired,
+                    Err(error) => {
+                        failed = true;
+                        failed_domains.insert(domain.clone());
+                        outcomes.push(format!(
+                            "- domain={domain} owner={node_id} failed: {error:#}"
+                        ));
+                        handled_this_iteration = true;
+                        break;
+                    }
+                };
                 let Some(current_domain) = inputs.schedule() else {
                     if let Err(error) = self.validate_domain_planning_inputs(&inputs).await {
                         failed = true;
@@ -2144,23 +2125,6 @@ impl SessionServiceImpl {
 
         for node in schedule.nodes.values_mut() {
             if let Some(existing_node) = existing.nodes.get(&node.identity()) {
-                node.kafka_partition_schedule = existing_node.kafka_partition_schedule.clone();
-                if node.units.keys().ne(existing_node.units.keys())
-                    && let Some(previous) = &node.kafka_partition_schedule
-                {
-                    let count = NonZeroU64::new(
-                        u64::try_from(node.units.len()).assured("unit counts fit u64"),
-                    )
-                    .verified("a scheduled intake has at least one unit");
-                    node.kafka_partition_schedule = Some(KafkaPartitionSchedule::new(
-                        count,
-                        previous.observed_partitions.clone(),
-                        previous
-                            .rebalance_epoch
-                            .checked_add(1)
-                            .assured("a cluster cannot publish 2^64 partition rebalances"),
-                    ));
-                }
                 node.continue_wasm_state_generations_of(existing_node);
             }
         }
@@ -2329,299 +2293,6 @@ impl SessionServiceImpl {
 
     fn scheduled_node_should_follow_desired_assignment(node: &ScheduledNode) -> bool {
         node.config.executes_on_every_cluster_node()
-    }
-
-    fn kafka_partition_watcher_specs(
-        &self,
-        schedule: &nervix_models::ClusterSchedule,
-    ) -> Vec<KafkaPartitionWatcherSpec> {
-        let mut specs = Vec::new();
-        for domain_schedule in schedule.domains.values() {
-            for node in domain_schedule.nodes.values() {
-                let Model::Ingestor(ingestor) = node.config.as_ref() else {
-                    continue;
-                };
-                let Some(IngestorEntity::Kafka(KafkaIngestor::Topic(KafkaTopicIngestor {
-                    client,
-                    topic,
-                    offset_mode: KafkaOffsetMode::Domain,
-                    ..
-                }))) = ingestor.input.transport_entity()
-                else {
-                    continue;
-                };
-                let Some(client_node) = domain_schedule
-                    .nodes
-                    .get(&NodeRef::new(ModelKind::Client, ModelName::from(client)))
-                else {
-                    continue;
-                };
-                let Model::ClientKafka(client_model) = client_node.config.as_ref() else {
-                    continue;
-                };
-                specs.push(KafkaPartitionWatcherSpec {
-                    domain: domain_schedule.domain.clone(),
-                    ingestor: ingestor.name.clone(),
-                    topic: topic.as_str().to_string(),
-                    instances: NonZeroU64::new(
-                        u64::try_from(node.units.len()).assured("a unit count fits u64"),
-                    )
-                    .assured("an ingestor has units"),
-                    client: client_model.clone(),
-                });
-            }
-        }
-        specs.sort_by(|left, right| {
-            left.domain
-                .cmp(&right.domain)
-                .then_with(|| left.ingestor.cmp(&right.ingestor))
-        });
-        specs
-    }
-
-    async fn publish_kafka_partition_schedule(
-        &self,
-        domain: &DomainName,
-        ingestor: &IngestorName,
-        topic: &str,
-        instances: NonZeroU64,
-        observed_partitions: Vec<i32>,
-    ) -> error_stack::Result<(), KafkaPartitionPublicationError> {
-        let leader = self.inner.consensus.current_leader().await;
-        if leader.as_ref() != Some(self.inner.consensus.local_node_id()) {
-            return Ok(());
-        }
-
-        let inputs = self.inner.consensus.domain_planning_inputs(domain).await;
-        let Some(existing_domain_schedule) = inputs.schedule() else {
-            return Ok(());
-        };
-        let mut next_domain_schedule = existing_domain_schedule.clone();
-        let Some(ingestor_node) = next_domain_schedule.nodes.get_mut(&NodeRef::new(
-            ModelKind::Ingestor,
-            ModelName::from(ingestor),
-        )) else {
-            return Ok(());
-        };
-        let Model::Ingestor(ingestor_model) = ingestor_node.config.as_ref() else {
-            return Ok(());
-        };
-        let Some(IngestorEntity::Kafka(KafkaIngestor::Topic(KafkaTopicIngestor {
-            topic: scheduled_topic,
-            offset_mode: KafkaOffsetMode::Domain,
-            ..
-        }))) = ingestor_model.input.transport_entity()
-        else {
-            return Ok(());
-        };
-        if scheduled_topic.as_str() != topic
-            || u64::try_from(ingestor_node.units.len()).assured("unit counts fit u64")
-                != instances.get()
-        {
-            return Ok(());
-        }
-
-        let mut next_schedule = KafkaPartitionSchedule::new(instances, observed_partitions, 0);
-        if let Some(existing_schedule) = ingestor_node.kafka_partition_schedule.as_ref() {
-            if existing_schedule.observed_partitions == next_schedule.observed_partitions
-                && existing_schedule.instance_assignments == next_schedule.instance_assignments
-            {
-                return Ok(());
-            }
-            next_schedule.rebalance_epoch = existing_schedule
-                .rebalance_epoch
-                .checked_add(1)
-                .assured("a cluster cannot observe 2^64 partition rebalances");
-        }
-        ingestor_node.kafka_partition_schedule = Some(next_schedule);
-        self.inner
-            .consensus
-            .update_kafka_partition_schedule(inputs, next_domain_schedule)
-            .await
-            .change_context(KafkaPartitionPublicationError::Update {
-                domain: domain.clone(),
-                ingestor: ingestor.clone(),
-            })
-    }
-
-    pub(in crate::application) async fn reconcile_kafka_partition_watchers(
-        &self,
-        schedule: &nervix_models::ClusterSchedule,
-        tasks: &mut HashMap<KafkaPartitionWatcherKey, KafkaPartitionWatcherTask>,
-    ) {
-        let leader = self.inner.consensus.current_leader().await;
-        if leader.as_ref() != Some(self.inner.consensus.local_node_id()) {
-            for (_, watcher) in tasks.drain() {
-                watcher.task.stop().await;
-            }
-            return;
-        }
-
-        let desired = self
-            .kafka_partition_watcher_specs(schedule)
-            .into_iter()
-            .map(|spec| {
-                (
-                    KafkaPartitionWatcherKey {
-                        domain: spec.domain.clone(),
-                        ingestor: spec.ingestor.clone(),
-                    },
-                    spec,
-                )
-            })
-            .collect::<HashMap<_, _>>();
-
-        let mut stale_keys = Vec::new();
-        for (key, watcher) in tasks.iter() {
-            if desired.get(key) != Some(&watcher.spec) || watcher.task.handle.is_finished() {
-                stale_keys.push(key.clone());
-            }
-        }
-        for key in stale_keys {
-            if let Some(watcher) = tasks.remove(&key) {
-                watcher.task.stop().await;
-            }
-        }
-
-        for (key, spec) in desired {
-            if tasks.get(&key).is_some_and(|watcher| watcher.spec == spec) {
-                continue;
-            }
-            let cancel = CancellationToken::new();
-            let cancel_child = cancel.clone();
-            let service = self.clone();
-            let spec_for_task = spec.clone();
-            let handle = nervix_primitives::task::spawn(async move {
-                let resolved = match service.inner.runtime.resolve_client_config(
-                    &spec_for_task.domain,
-                    spec_for_task.client.mount.as_ref(),
-                    &spec_for_task.client.config,
-                ) {
-                    Ok(resolved) => resolved,
-                    Err(error) => {
-                        service.broadcast_error(format!(
-                            "failed to resolve Kafka partition watcher client config for ingestor \
-                             '{}' in domain '{}': {error:#}",
-                            spec_for_task.ingestor.as_str(),
-                            spec_for_task.domain.as_str(),
-                        ));
-                        return;
-                    }
-                };
-                let _mounts = resolved.mounts;
-                let inspector = match TopicPartitionInspector::new(
-                    &resolved.entries,
-                    format!(
-                        "nervix_schedule_watch_{}_{}",
-                        spec_for_task.domain.as_str(),
-                        spec_for_task.ingestor.as_str()
-                    ),
-                    service.inner.runtime.executor().clone(),
-                ) {
-                    Ok(inspector) => inspector,
-                    Err(error) => {
-                        service.broadcast_error(format!(
-                            "failed to create Kafka partition watcher for ingestor '{}' in domain \
-                             '{}': {error:#}",
-                            spec_for_task.ingestor.as_str(),
-                            spec_for_task.domain.as_str(),
-                        ));
-                        return;
-                    }
-                };
-                let mut last_observed = None::<Vec<i32>>;
-                loop {
-                    nervix_primitives::task::consume_budget().await;
-                    let mut partitions =
-                        match inspector.partitions(spec_for_task.topic.as_str()).await {
-                            Ok(partitions) => partitions,
-                            // The ingestor's connector reports a topic the broker does not have,
-                            // so the watcher records it as a topic without partitions and
-                            // publishes the real schedule once the topic is provisioned.
-                            Err(error) if error.current_context().is_missing_topic() => Vec::new(),
-                            Err(error) => {
-                                service.broadcast_error(format!(
-                                    "failed to inspect Kafka partitions for ingestor '{}' in \
-                                     domain '{}': {error:#}",
-                                    spec_for_task.ingestor.as_str(),
-                                    spec_for_task.domain.as_str(),
-                                ));
-                                nervix_primitives::select! {
-                                    _ = service.inner.drain_support_shutdown.cancelled() => break,
-                                    _ = cancel_child.cancelled() => break,
-                                    _ = sleep(LEADER_KAFKA_PARTITION_WATCH_INTERVAL) => continue,
-                                }
-                            }
-                        };
-                    partitions.sort_unstable();
-                    if last_observed.as_ref() != Some(&partitions) {
-                        if let Err(error) = service
-                            .publish_kafka_partition_schedule(
-                                &spec_for_task.domain,
-                                &spec_for_task.ingestor,
-                                spec_for_task.topic.as_str(),
-                                spec_for_task.instances,
-                                partitions.clone(),
-                            )
-                            .await
-                        {
-                            service.broadcast_error(format!(
-                                "failed to publish Kafka partition schedule for ingestor '{}' in \
-                                 domain '{}': {error:#}",
-                                spec_for_task.ingestor.as_str(),
-                                spec_for_task.domain.as_str(),
-                            ));
-                        } else {
-                            last_observed = Some(partitions);
-                        }
-                    }
-                    nervix_primitives::select! {
-                        _ = service.inner.drain_support_shutdown.cancelled() => break,
-                        _ = cancel_child.cancelled() => break,
-                        _ = sleep(LEADER_KAFKA_PARTITION_WATCH_INTERVAL) => {}
-                    }
-                }
-            });
-            tasks.insert(
-                key,
-                KafkaPartitionWatcherTask {
-                    spec,
-                    task: BackgroundTask { cancel, handle },
-                },
-            );
-        }
-    }
-}
-
-/// Keeps the Kafka partition watchers of the schedule current while this node leads, re-reading the
-/// committed schedule whenever it changes and at the leader's watch interval, and stops every
-/// watcher it started when `shutdown` ends the loop.
-pub(in crate::application) async fn run_kafka_partition_watchers(
-    service: SessionServiceImpl,
-    shutdown: CancellationToken,
-) {
-    let mut schedule_rx = service.inner.consensus.subscribe_schedule();
-    let mut tasks: HashMap<KafkaPartitionWatcherKey, KafkaPartitionWatcherTask> = HashMap::new();
-
-    loop {
-        nervix_primitives::task::consume_budget().await;
-        let schedule = service.inner.consensus.current_schedule().await;
-        service
-            .reconcile_kafka_partition_watchers(&schedule, &mut tasks)
-            .await;
-        nervix_primitives::select! {
-            _ = shutdown.cancelled() => break,
-            changed = schedule_rx.changed() => {
-                if changed.is_err() {
-                    break;
-                }
-            }
-            _ = sleep(LEADER_KAFKA_PARTITION_WATCH_INTERVAL) => {}
-        }
-    }
-
-    for (_, watcher) in tasks {
-        watcher.task.stop().await;
     }
 }
 

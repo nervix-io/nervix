@@ -519,10 +519,13 @@ fn materialized_sections(groups: u32) -> Vec<TestSection> {
             entity: entity.clone(),
             group,
             identities: vec![crate::MaterializedRecordIdentity {
-                branch: Some(vec![StateField {
-                    name: "tenant".into(),
-                    value: StateValue::U32(group),
-                }]),
+                branch: nervix_models::BranchKeyFields::Direct(
+                    (vec![StateField {
+                        name: "tenant".into(),
+                        value: StateValue::U32(group),
+                    }])
+                    .into(),
+                ),
                 watermarks: nervix_models::RemoteRuntimeRecordMetadata {
                     ingested_at_low_watermark: Timestamp::from_unix_nanos(100),
                     ingested_at_high_watermark: Timestamp::from_unix_nanos(200),
@@ -828,7 +831,7 @@ fn an_unsupported_wasm_descriptor_skips_its_guest_blob_together() {
         entity: entity.clone(),
         schema: SchemaFingerprint::from_digest([3; 32]),
         branch_fingerprint: None,
-        branch: None,
+        branch: nervix_models::BranchKeyFields::Unbranched,
         generation: WasmStateGeneration::FIRST,
         revision: 4,
     };
@@ -891,7 +894,7 @@ fn unsupported_deduplicator_and_window_descriptors_skip_their_groups_together() 
         entity: deduplicator.clone(),
         schema: SchemaFingerprint::from_digest([3; 32]),
         branch_fingerprint: None,
-        branch: None,
+        branch: nervix_models::BranchKeyFields::Unbranched,
         revision: 5,
         keys: 1,
         groups: 1,
@@ -903,7 +906,7 @@ fn unsupported_deduplicator_and_window_descriptors_skip_their_groups_together() 
         schema: SchemaFingerprint::from_digest([4; 32]),
         model: nervix_models::WindowModelDigest::from_digest([5; 32]),
         branch_fingerprint: None,
-        branch: None,
+        branch: nervix_models::BranchKeyFields::Unbranched,
         revision: 6,
         incarnation: 1,
         first_sequence: Some(0),

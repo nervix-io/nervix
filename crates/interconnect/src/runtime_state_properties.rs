@@ -17,7 +17,7 @@ use nervix_arbitrary::{Arbitrary, Domain, assert_remote_keys_eq};
 use nervix_execution::Executor;
 use nervix_models::{
     ClusterNodeIdentity, ClusterNodeIncarnation, CoordinationIdentity, ModelName, NodeRef,
-    SchemaFingerprint, WasmStateGeneration,
+    RemoteRuntimeField, SchemaFingerprint, WasmStateGeneration,
 };
 
 use super::*;
@@ -805,7 +805,18 @@ fn runtime_state_wire_variant_boundaries() {
             nervix_primitives::task::consume_budget().await;
             for kind in ModelKind::iter() {
                 nervix_primitives::task::consume_budget().await;
-                for branch_key in [None, Some(fields.clone())] {
+                for branch_key in [
+                    nervix_models::RemoteBranchKey::Unbranched,
+                    nervix_models::RemoteBranchKey::Direct(fields.clone().into()),
+                    nervix_models::RemoteBranchKey::branched(
+                        fields.clone().into(),
+                        Some(nervix_models::InheritedPartitionOrigin {
+                            partition: nervix_models::ExternalPartition::new(7),
+                            epoch: nervix_models::PartitionEpochNumber::FIRST,
+                            unit: nervix_models::Unit::partition(3),
+                        }),
+                    ),
+                ] {
                     nervix_primitives::task::consume_budget().await;
                     let placement = StatePlacementEnvelope {
                         domain: DomainName::parse("boundaries").assured("a fixed valid domain"),
@@ -874,11 +885,14 @@ fn runtime_state_wire_variant_boundaries() {
                 epoch: u64::MAX,
                 sequence: u64::MAX,
             },
-            removed: vec![None, Some(fields.clone())],
+            removed: vec![
+                nervix_models::RemoteBranchKey::Unbranched,
+                nervix_models::RemoteBranchKey::Direct(fields.clone().into()),
+            ],
             revised: states
                 .into_iter()
                 .map(|state| BranchCheckpointRevision {
-                    branch_key: Some(fields.clone()),
+                    branch_key: nervix_models::RemoteBranchKey::Direct(fields.clone().into()),
                     state,
                     lsm: u64::MAX,
                 })

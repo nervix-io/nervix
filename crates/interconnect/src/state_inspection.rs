@@ -15,12 +15,50 @@ use std::collections::BTreeSet;
 
 use nervix_models::{
     BranchKeyFingerprint, ClusterNodeIdentity, DomainName, NodeRef, ProcessorStateSection,
-    RelayName, RemoteRuntimeField, SchemaField, SchemaFingerprint, StateInspectionBranchSelection,
+    RelayName, SchemaField, SchemaFingerprint, StateInspectionBranchSelection,
     StateInspectionCounts, StateInspectionOrigin, StateInspectionRejection, Unit,
 };
 use rkyv::{Archive, Deserialize, Serialize};
 
-use crate::{InterconnectStreamRequest, PoolClass, RequestSubquota};
+use crate::{InterconnectRequest, InterconnectStreamRequest, PoolClass, RequestSubquota};
+
+/// Copy selection during a partition transition, checked against the complete owner census.
+#[derive(Debug, Clone, PartialEq, Eq, Archive, Serialize, Deserialize)]
+pub struct MaterializedPartitionFilter {
+    pub catalog: nervix_models::StateInspectionKeyCatalog,
+    pub excluded: BTreeSet<BranchKeyFingerprint>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Archive, Serialize, Deserialize)]
+pub struct ReadMaterializedKeyCatalog {
+    pub read: ReadMaterializedStatePage,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Archive, Serialize, Deserialize)]
+pub struct MaterializedKeyCatalogResponse {
+    pub result: Result<nervix_models::StateInspectionKeyCatalog, StateInspectionRejection>,
+}
+
+impl InterconnectRequest for ReadMaterializedKeyCatalog {
+    type Response = MaterializedKeyCatalogResponse;
+    const NAME: &'static str = "read_materialized_key_catalog";
+    const CLASS: PoolClass = PoolClass::Bulk;
+    const SUBQUOTA: RequestSubquota = RequestSubquota::Snapshot;
+    const DEADLINE: crate::RequestDeadline = crate::RequestDeadline::Request;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Archive, Serialize, Deserialize)]
+pub struct ReadPartitionedMaterializedStatePage {
+    pub read: ReadMaterializedStatePage,
+    pub filter: MaterializedPartitionFilter,
+}
+
+impl InterconnectStreamRequest for ReadPartitionedMaterializedStatePage {
+    const NAME: &'static str = "read_partitioned_materialized_state_page";
+    const CLASS: PoolClass = PoolClass::Bulk;
+    const SUBQUOTA: RequestSubquota = RequestSubquota::Snapshot;
+    const DEADLINE: crate::RequestDeadline = crate::RequestDeadline::Request;
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Archive, Serialize, Deserialize)]
 pub struct ReadMaterializedStatePage {
@@ -104,7 +142,7 @@ pub struct ProcessorStatePageDescriptor {
     pub origin: StateInspectionOrigin,
     /// The selected catalog before partition exclusions, present exactly when requested. Comparing
     /// it with the coordinator's census detects a claim racing the read.
-    pub partition_catalog: Option<BTreeSet<BranchKeyFingerprint>>,
+    pub partition_catalog: nervix_models::StateInspectionKeyCatalog,
     pub counts: StateInspectionCounts,
     pub offset: u64,
     pub last_branch: Option<BranchKeyFingerprint>,
@@ -118,7 +156,7 @@ pub struct ProcessorStatePageDescriptor {
 pub struct ProcessorStateRunTransfer {
     pub section: ProcessorStateSection,
     /// The branch key's typed fields; absent for unbranched state.
-    pub branch: Option<Vec<RemoteRuntimeField>>,
+    pub branch: nervix_models::RemoteBranchKey,
     pub rows: u64,
 }
 
@@ -145,6 +183,17 @@ mod tests {
 
     use super::*;
     use crate::RkyvMessage;
+
+    fn key_catalog(
+        arbitrary: &mut nervix_arbitrary::Arbitrary<'_>,
+        keys: BTreeSet<BranchKeyFingerprint>,
+    ) -> nervix_models::StateInspectionKeyCatalog {
+        let mut catalog = nervix_models::StateInspectionKeyCatalog::requested();
+        for key in keys {
+            catalog.insert(key, arbitrary.remote_branch_key().inherited_origin());
+        }
+        catalog
+    }
 
     /// A rejection a processor page reply can carry.
     fn rejection(choice: u8) -> StateInspectionRejection {
@@ -299,15 +348,18 @@ mod tests {
                                     |_| arbitrary.entropy().byte(),
                                 )));
                             }
-                            Some(catalog)
+                            key_catalog(&mut arbitrary, catalog)
                         }
-                        None => None,
+                        None => nervix_models::StateInspectionKeyCatalog::Unrequested,
                     };
                     let branches = match (&partition_catalog, &request.partition_exclusions) {
-                        (Some(catalog), Some(excluded)) => {
-                            u64::try_from(catalog.difference(excluded).count())
-                                .assured("the fixture catalog is bounded")
-                        }
+                        (catalog, Some(excluded)) if catalog.is_requested() => u64::try_from(
+                            catalog
+                                .fingerprints()
+                                .filter(|key| !excluded.contains(*key))
+                                .count(),
+                        )
+                        .assured("the fixture catalog is bounded"),
                         _ => arbitrary.positive_u64().get(),
                     };
                     Ok(ProcessorStatePageDescriptor {
@@ -414,8 +466,39 @@ mod tests {
                         }),
                     })
                 };
+                let mut catalog_keys = BTreeSet::from([branch]);
+                for _ in 0..arbitrary.entropy().byte() % 4 {
+                    catalog_keys.insert(BranchKeyFingerprint::new(std::array::from_fn(|_| {
+                        arbitrary.entropy().byte()
+                    })));
+                }
+                let catalog = key_catalog(&mut arbitrary, catalog_keys);
+                let catalog_reply = MaterializedKeyCatalogResponse {
+                    result: if arbitrary.entropy().flag() {
+                        Ok(catalog.clone())
+                    } else {
+                        Err(rejection(arbitrary.entropy().byte()))
+                    },
+                };
+                let mut census_read = request.clone();
+                census_read.max_rows = 0;
+                let census = ReadMaterializedKeyCatalog { read: census_read };
+                let partitioned = ReadPartitionedMaterializedStatePage {
+                    read: request.clone(),
+                    filter: MaterializedPartitionFilter {
+                        excluded: catalog
+                            .fingerprints()
+                            .filter(|_| arbitrary.entropy().flag())
+                            .copied()
+                            .collect(),
+                        catalog,
+                    },
+                };
                 runtime.block_on(async {
                     let executor = Executor::default();
+                    assert_round_trip(&executor, census).await;
+                    assert_round_trip(&executor, catalog_reply).await;
+                    assert_round_trip(&executor, partitioned).await;
                     let class = PoolClass::Bulk;
                     let (encoded, _charge) = request
                         .clone()

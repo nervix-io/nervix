@@ -1,4 +1,5 @@
 mod byte_pace;
+mod metric_total;
 mod paced_connection;
 mod paced_interconnect;
 mod snapshot_receive;
@@ -2746,15 +2747,7 @@ impl Cluster {
         metric_name: &str,
         label_fragments: &[String],
     ) -> io::Result<f64> {
-        let url = self.observability_metrics_url(node_id)?;
-        let client = reqwest::Client::new();
-        let response = timeout(STATUS_WAIT_BUDGET, async {
-            let response = client.get(&url).send().await?;
-            response.text().await
-        })
-        .await
-        .map_err(io::Error::other)?
-        .map_err(io::Error::other)?;
+        let response = self.observability_metric_text(node_id).await?;
         for line in response.lines() {
             if line.starts_with('#') || !line_starts_with_metric(line, metric_name) {
                 continue;
@@ -2772,6 +2765,19 @@ impl Cluster {
         Err(io::Error::other(format!(
             "node '{node_id}' exposed no sample of '{metric_name}' with labels {label_fragments:?}"
         )))
+    }
+
+    async fn observability_metric_text(&self, node_id: &str) -> io::Result<String> {
+        let url = self.observability_metrics_url(node_id)?;
+        let client = reqwest::Client::new();
+        let response = timeout(STATUS_WAIT_BUDGET, async {
+            let response = client.get(&url).send().await?;
+            response.text().await
+        })
+        .await
+        .map_err(io::Error::other)?
+        .map_err(io::Error::other)?;
+        Ok(response)
     }
 
     pub(crate) fn node_ids(&self) -> Vec<String> {

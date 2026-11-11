@@ -32,6 +32,69 @@ async fn instance_metric_has_numeric_values(
     assert_numeric_metric_lines(world, step, &prefix, output);
 }
 
+#[then(
+    expr = "within {string} DESCRIBE INGESTOR {string} metric {string} {string} relay {string} \
+            totals {int}"
+)]
+async fn ingestor_metric_totals_across_instances(
+    world: &mut ScenarioWorld,
+    duration: String,
+    ingestor: String,
+    metric: String,
+    direction: String,
+    relay: String,
+    expected: u64,
+) {
+    let duration = parse_duration_text(&duration).assured("the scenario declares a valid wait");
+    let ingestor = expand_placeholders(world, &ingestor);
+    let metric = expand_placeholders(world, &metric);
+    let direction = expand_placeholders(world, &direction);
+    let relay = expand_placeholders(world, &relay);
+    let prefix = format!("{metric} {direction} relay={relay} ");
+    let node = current_leader_node(world).await;
+    let deadline = PhaseDeadline::after(duration);
+    let mut last_output = None;
+    let mut last_error = None;
+    loop {
+        nervix_primitives::task::consume_budget().await;
+        match run_plexus_commands_on_node(world, &node, &format!("DESCRIBE INGESTOR {ingestor};"))
+            .await
+        {
+            Ok(output) => {
+                // DESCRIBE queries each current unit's owner and deduplicates its durable
+                // series. Include every instance and predecessor physical-node contribution.
+                let mut samples = 0;
+                let mut total = 0_u64;
+                for line in output
+                    .lines()
+                    .map(str::trim)
+                    .filter(|line| line.starts_with(&prefix))
+                {
+                    let value = metric_line_value(line, "total")
+                        .assured("a matching metric reports its total")
+                        .parse::<u64>()
+                        .assured("a message metric has an integral nonnegative total");
+                    total = total
+                        .checked_add(value)
+                        .assured("the bounded fixture total fits u64");
+                    samples += 1;
+                }
+                last_output = Some(output);
+                if samples > 0 && total == expected {
+                    return;
+                }
+            }
+            Err(error) => last_error = Some(error),
+        }
+        assert!(
+            !deadline.has_passed(),
+            "DESCRIBE INGESTOR {ingestor} metric '{prefix}' did not total {expected}: \
+             output={last_output:?}, error={last_error:?}"
+        );
+        deadline.pause(Duration::from_millis(100)).await;
+    }
+}
+
 pub(crate) struct UnitPlacements {
     owners: BTreeMap<u64, String>,
 }
@@ -533,7 +596,7 @@ async fn wait_for_each_instance_ready_on_its_owner(
 ) {
     let duration = parse_duration_text(&duration).assured("the scenario writes a valid timeout");
     let deadline = PhaseDeadline::after(duration);
-    let node_id = current_leader_node(world).await;
+    let node_id = running_leader_node(world).await;
     let mut last_description = None;
     let mut last_error = None;
     loop {

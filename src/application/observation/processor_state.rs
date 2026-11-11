@@ -52,7 +52,7 @@ use crate::{
     state_inspection_cursor::StateInspectionCursor,
 };
 
-mod partition;
+pub(super) mod partition;
 
 /// One section of a processor's state before the owner appends its own columns: which section it
 /// is, the payload fields its rows carry, and, for a reorderer, whether each order key carries
@@ -68,7 +68,7 @@ struct SectionLayout {
 struct ProcessorLayout {
     node: ScheduledNode,
     sections: Vec<SectionLayout>,
-    moving_partitions: Option<nervix_models::BranchPartitions>,
+    moving_partitions: Option<nervix_models::ResolvedBranchPartitions>,
 }
 
 /// A section's complete fields, as the owner names and types the columns it appends.
@@ -209,7 +209,10 @@ fn relay_schema_fields(
 
 fn branch_fields(node: &ScheduledNode) -> Vec<SchemaField> {
     match &node.resolved_branching {
-        Some(ResolvedBranching::Branched { schema, .. }) => schema.fields.clone(),
+        Some(
+            ResolvedBranching::Branched { schema, .. }
+            | ResolvedBranching::AwaitingTopology { schema, .. },
+        ) => schema.fields.clone(),
         Some(ResolvedBranching::Unbranched) | None => Vec::new(),
     }
 }
@@ -681,7 +684,8 @@ impl SessionServiceImpl {
         let selection = resolve_selection(show, branching)?;
         let branch = match branching {
             ResolvedBranching::Unbranched => None,
-            ResolvedBranching::Branched { branch, schema, .. } => Some(
+            ResolvedBranching::Branched { branch, schema, .. }
+            | ResolvedBranching::AwaitingTopology { branch, schema } => Some(
                 RowBranch::new(branch.clone(), schema.fields.clone()).map_err(|error| {
                     inspection_refusal(error, StateInspectionRejection::NotReady)
                 })?,
@@ -800,7 +804,7 @@ impl SessionServiceImpl {
             };
             let page = self.processor_unit_page(request, &plan).await?;
             if let Some(partitions) = &partitions {
-                partitions.validate(**unit, page.descriptor.partition_catalog.as_ref())?;
+                partitions.validate(**unit, &page.descriptor.partition_catalog)?;
             }
             let replicas = unit_replicas(&plan.layout.node, placement, &owner);
             let descriptor = &page.descriptor;

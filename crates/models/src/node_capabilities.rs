@@ -58,6 +58,7 @@ pub struct ConnectorHostCapabilities {
     pub retry_jitter_percent: u8,
     pub kafka_domain_assignment_retry: std::time::Duration,
     pub kafka_partition_watch_interval: std::time::Duration,
+    pub partition_topology_poll_interval: std::time::Duration,
     pub syslog_intake_queue_capacity: NonZeroU64,
     pub syslog_read_chunk_bytes: NonZeroU64,
 }

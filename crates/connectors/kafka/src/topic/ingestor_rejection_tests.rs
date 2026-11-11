@@ -7,7 +7,7 @@
 //!   domain-owned offsets that resume a partition, reset it at a new start point, or start it
 //!   without a recorded offset.
 //! - **Depends on.** The connector contract, librdkafka's mock broker and the boundary's
-//!   thread-blocking lock and watch channel.
+//!   thread-blocking lock.
 //! - **Must not know.** Runtime graph ownership, registry Models or cluster placement.
 
 use std::time::Duration;
@@ -19,10 +19,10 @@ use nervix_connector::{
     IngestorMessage as _, IngestorReadCancellation, IngestorResume,
 };
 use nervix_models::{
-    ClientConfigEntry, IngestStartPosition, KafkaPartitionSchedule, KafkaTopicName, Timestamp,
+    ClientConfigEntry, ExternalPartitionAssignment, IngestStartPosition, KafkaTopicName, Timestamp,
 };
 use nervix_primitives::{
-    sync::{Arc, blocking::Mutex, watch},
+    sync::{Arc, blocking::Mutex},
     time::{Instant, timeout},
 };
 use rdkafka::{
@@ -42,6 +42,150 @@ use super::{
 };
 
 const TOPIC: &str = "orders";
+
+#[nervix_primitives::test]
+async fn a_group_keeps_uncommitted_partitions_unread_until_its_replacement_opens() {
+    use rdkafka::{
+        ClientConfig,
+        producer::{FutureProducer, FutureRecord},
+    };
+
+    for commit in [
+        KafkaGroupCommit::EachAcknowledgedBatch,
+        KafkaGroupCommit::DriverCadence,
+    ] {
+        let broker = MockCluster::new(1).assured("the mock cluster has one broker");
+        broker
+            .create_topic(TOPIC, 3, 1)
+            .assured("the topic has three native partitions");
+        let mut plan = group_plan(&broker, commit);
+        let KafkaTopicIngestorOffsetMode::ConsumerGroup {
+            committed_partitions,
+            ..
+        } = &mut plan.offset_mode
+        else {
+            unreachable!("this fixture reads through a consumer group");
+        };
+        *committed_partitions = Some(Box::new(super::KafkaGroupPartitionRead::new(
+            nervix_models::ExternalPartitionSet::Partitioned(
+                std::num::NonZeroU32::new(2).assured("two is positive"),
+            ),
+        )));
+        let mut first = KafkaTopicIngestor::open(&plan, 0)
+            .await
+            .assured("the first reader opens");
+        first.resume().await.assured("the first reader subscribes");
+        let producer: FutureProducer = ClientConfig::new()
+            .set("bootstrap.servers", broker.bootstrap_servers())
+            .create()
+            .assured("the producer opens");
+        for partition in [2, 0] {
+            producer
+                .send(
+                    FutureRecord::<(), str>::to(TOPIC)
+                        .partition(partition)
+                        .payload("event"),
+                    Duration::from_secs(10),
+                )
+                .await
+                .map_err(|(error, _)| error)
+                .assured("the broker stores this partition's event");
+        }
+        let positions = read_positions(&mut first).await;
+        assert_eq!(positions, vec![position(0, 1)]);
+        first
+            .acknowledge(&positions)
+            .await
+            .assured("the admitted position is acknowledged");
+        let cancellation = IngestorReadCancellation::new();
+        let request = IngestorBatchRequest {
+            max_messages: std::num::NonZeroUsize::MIN,
+            batch_timeout: None,
+        };
+        let consumer = first.consumer.clone();
+        let control = super::KafkaControl::new(
+            &plan.offset_mode.consumer_config(&plan.config),
+            plan.executor.clone(),
+        )
+        .assured("the cursor observer has a bounded control owner");
+        let held = async {
+            loop {
+                let retained = control
+                    .run(&consumer, |consumer, budget| {
+                        let mut partitions = TopicPartitionList::new();
+                        partitions.add_partition(TOPIC, 2);
+                        let positions = consumer
+                            .committed_offsets(partitions, budget.remaining()?)
+                            .map_err(error_stack::Report::new)
+                            .map_err(|error| {
+                                error.change_context(KafkaTopicIngestorError::Initialize)
+                            })?;
+                        Ok(positions
+                            .find_partition(TOPIC, 2)
+                            .is_some_and(|partition| partition.offset() == Offset::Offset(0)))
+                    })
+                    .await
+                    .assured("the broker answers the held partition's cursor");
+                if retained {
+                    break;
+                }
+                nervix_primitives::time::sleep(Duration::from_millis(10)).await;
+            }
+        };
+        nervix_primitives::select! {
+            result = first.next_batch(request, &cancellation) => {
+                result.assured("the read itself remains valid while an unadmitted position is held");
+                panic!("a partition outside the committed observation remains unread");
+            }
+            result = timeout(READ_DEADLINE, held) => {
+                result.assured("the first reader retains the unadmitted partition's next unread offset");
+            }
+        }
+        first
+            .suspend()
+            .await
+            .assured("the first reader leaves its group");
+        first.close().await.assured("the first reader closes");
+        // The host drops a replaced connector after closing it. Retaining this consumer or the
+        // cursor observer would keep the original native group member alive during the next join.
+        drop(first);
+        drop(consumer);
+        drop(control);
+
+        let KafkaTopicIngestorOffsetMode::ConsumerGroup {
+            committed_partitions,
+            start_at,
+            ..
+        } = &mut plan.offset_mode
+        else {
+            unreachable!("this fixture reads through a consumer group");
+        };
+        *committed_partitions = Some(Box::new(super::KafkaGroupPartitionRead::new(
+            nervix_models::ExternalPartitionSet::Partitioned(
+                std::num::NonZeroU32::new(3).assured("three is positive"),
+            ),
+        )));
+        *start_at = IngestStartPosition::Latest;
+        let mut replacement = KafkaTopicIngestor::open(&plan, 0)
+            .await
+            .assured("the replacement opens");
+        replacement
+            .resume()
+            .await
+            .assured("the replacement subscribes");
+        let positions = read_positions(&mut replacement).await;
+        assert_eq!(
+            positions,
+            vec![position(2, 1)],
+            "the held record keeps its original broker offset"
+        );
+        replacement
+            .acknowledge(&positions)
+            .await
+            .assured("the replacement acknowledges the held record");
+        replacement.close().await.assured("the replacement closes");
+    }
+}
 
 #[nervix_primitives::test]
 async fn an_explicit_start_resolves_the_whole_topic_before_any_instance_polls() {
@@ -466,10 +610,12 @@ impl KafkaDomainOffsetServices for ScriptedDomainOffsets {
         Ok(KafkaDomainOffsetInitialization {
             generation,
             start,
-            schedule: Some(KafkaPartitionSchedule {
-                observed_partitions: vec![0],
-                rebalance_epoch: 0,
-                instance_assignments: vec![vec![0]],
+            assignment: Some(ExternalPartitionAssignment {
+                partitions: nervix_models::ExternalPartitionSet::Partitioned(
+                    std::num::NonZeroU32::MIN,
+                ),
+                readers: std::num::NonZeroU64::MIN,
+                epoch: 0,
             }),
         })
     }
@@ -495,8 +641,6 @@ struct DomainIngestor {
     ingestor: KafkaTopicIngestor,
     stored: Arc<Mutex<Vec<KafkaOffsetPosition>>>,
     resets: Arc<Mutex<Vec<KafkaOffsetPosition>>>,
-    /// Held so the ingestor's partition watch stays open.
-    _partition_watch: watch::Sender<u64>,
 }
 
 /// A domain-offset ingestor whose domain starts it as `start` says.
@@ -506,7 +650,6 @@ async fn domain_ingestor(
 ) -> DomainIngestor {
     let stored = Arc::new(Mutex::new(Vec::new()));
     let resets = Arc::new(Mutex::new(Vec::new()));
-    let (partition_watch, rebalanced) = watch::channel(0);
     let plan = KafkaTopicIngestorPlan {
         settings: crate::KafkaTopicIngestorSettings::default(),
         executor: nervix_execution::Executor::default(),
@@ -519,7 +662,6 @@ async fn domain_ingestor(
                 stored: Arc::clone(&stored),
                 resets: Arc::clone(&resets),
             }),
-            rebalance: rebalanced,
         },
     };
     let ingestor = KafkaTopicIngestor::open(&plan, 0)
@@ -529,7 +671,6 @@ async fn domain_ingestor(
         ingestor,
         stored,
         resets,
-        _partition_watch: partition_watch,
     }
 }
 
@@ -725,6 +866,7 @@ fn a_consumer_group_starts_where_its_statement_declares() {
             group_id: "readers".to_string(),
             commit: KafkaGroupCommit::EachAcknowledgedBatch,
             start_at,
+            committed_partitions: None,
         };
 
         let config = mode.consumer_config(&entries);
@@ -737,7 +879,6 @@ fn a_consumer_group_starts_where_its_statement_declares() {
 
 #[test]
 fn a_domain_offset_consumer_past_what_a_partition_retains_moves_to_the_earliest_record() {
-    let (_partition_watch, rebalanced) = watch::channel(0);
     let mode = KafkaTopicIngestorOffsetMode::Domain {
         group_id: "orders-domain".to_string(),
         offsets: KafkaDomainOffsetHost::new(ScriptedDomainOffsets {
@@ -745,7 +886,6 @@ fn a_domain_offset_consumer_past_what_a_partition_retains_moves_to_the_earliest_
             stored: Arc::new(Mutex::new(Vec::new())),
             resets: Arc::new(Mutex::new(Vec::new())),
         }),
-        rebalance: rebalanced,
     };
 
     let config = mode.consumer_config(&[entry("bootstrap.servers", "127.0.0.1:9092")]);

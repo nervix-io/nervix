@@ -226,8 +226,9 @@ async fn partition_drains_count_their_own_transit_and_queues_while_the_domain_ke
     let runtime = Runtime::default();
     let domain = domain("default");
     let relay = named::<RelayName>("orders");
-    let partitioning =
-        RelayPartitioning::of_partitions(nervix_models::BranchPartitions::Direct(nonzero!(2u16)));
+    let partitioning = RelayPartitioning::of_partitions(
+        nervix_models::ResolvedBranchPartitions::Direct(nonzero!(2u16)),
+    );
     let services = RelayBoundaryServices::new(
         RelayBoundaryFanout::branch_collapse_with_capacity(nonzero!(2usize)),
         0,
@@ -803,7 +804,7 @@ async fn inbound_subscription_wait_does_not_hold_domain_execution() {
                 domain: inbound_domain,
                 relay,
                 unit: Unit::SINGLE,
-                key: None,
+                key: nervix_models::RemoteBranchKey::Unbranched,
                 batch_ipc,
                 metadata: vec![metadata],
                 acks: vec![None],
@@ -1379,7 +1380,7 @@ async fn a_remote_payload_that_does_not_decode_names_its_defect() {
     let one_row = || vec![test_runtime_row([]).metadata().to_remote()];
     let cases = [
         (
-            Some(Vec::new()),
+            nervix_models::RemoteBranchKey::Direct(Vec::new().into()),
             one_row(),
             vec![None],
             RemoteRelayDecodeError::BranchKey,
@@ -1387,7 +1388,7 @@ async fn a_remote_payload_that_does_not_decode_names_its_defect() {
              field",
         ),
         (
-            None,
+            nervix_models::RemoteBranchKey::Unbranched,
             Vec::new(),
             vec![None],
             RemoteRelayDecodeError::MetadataCount {
@@ -1397,7 +1398,7 @@ async fn a_remote_payload_that_does_not_decode_names_its_defect() {
             "remote metadata count 0 does not match batch row count 1",
         ),
         (
-            None,
+            nervix_models::RemoteBranchKey::Unbranched,
             one_row(),
             vec![None, None],
             RemoteRelayDecodeError::AckCount { acks: 2, rows: 1 },
@@ -1509,7 +1510,7 @@ async fn a_subscription_fanout_that_does_not_decode_is_refused() {
                 domain: domain.clone(),
                 relay: relay.clone(),
                 unit: Unit::SINGLE,
-                key: None,
+                key: nervix_models::RemoteBranchKey::Unbranched,
                 batch_ipc: batch_ipc.clone(),
                 metadata,
                 acks,
@@ -1600,11 +1601,11 @@ async fn a_routed_detached_batch_needs_no_attached_consumer() {
 #[rstest::rstest]
 #[case::whole(RelayPartitioning::Whole, false)]
 #[case::partition(
-    RelayPartitioning::of_partitions(nervix_models::BranchPartitions::Direct(nonzero!(2u16))),
+    RelayPartitioning::of_partitions(nervix_models::ResolvedBranchPartitions::Direct(nonzero!(2u16))),
     false
 )]
 #[case::partition_common(
-    RelayPartitioning::of_partitions(nervix_models::BranchPartitions::Direct(nonzero!(2u16))),
+    RelayPartitioning::of_partitions(nervix_models::ResolvedBranchPartitions::Direct(nonzero!(2u16))),
     true
 )]
 #[nervix_primitives::test]
@@ -1614,6 +1615,7 @@ async fn a_detached_consumer_joining_during_attached_backpressure_receives_the_b
 ) {
     let fanout = match partitioning {
         RelayPartitioning::Whole => RelayBoundaryFanout::direct_with_capacity(nonzero!(1usize)),
+        RelayPartitioning::AwaitingTopology => panic!("this fixture binds a resolved relay"),
         RelayPartitioning::Partitioned(_) => {
             RelayBoundaryFanout::branch_collapse_with_capacity(nonzero!(1usize))
         }
@@ -2934,7 +2936,7 @@ async fn a_payload_for_a_relay_this_node_has_not_instantiated_names_its_domain_a
         domain: target.clone(),
         relay: relay.clone(),
         unit: Unit::SINGLE,
-        key: None,
+        key: nervix_models::RemoteBranchKey::Unbranched,
         batch_ipc: batch_ipc.clone(),
         metadata: Vec::new(),
         acks: Vec::new(),

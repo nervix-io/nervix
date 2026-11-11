@@ -1600,7 +1600,7 @@ fn deserialize_value(bytes: &[u8]) -> Result<Model, Report<RegistryError>> {
 }
 
 // The header identifies the current persisted Model shape before archive decoding.
-const MODEL_ARCHIVE_HEADER: &[u8; 16] = b"NERVIX EMIT INST";
+const MODEL_ARCHIVE_HEADER: &[u8; 16] = b"NERVIX PARTITION";
 
 #[cfg(test)]
 #[cfg_attr(
@@ -2037,7 +2037,8 @@ mod tests {
                 &crate::registry::uniform_capabilities(&[
                     ClusterNodeName::parse("node-1").expect("valid name")
                 ]),
-            );
+            )
+            .assured("the fixture topology resolves");
         let scheduled_relay = schedule
             .nodes
             .get(&NodeRef::new(

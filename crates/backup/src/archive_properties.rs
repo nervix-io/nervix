@@ -87,6 +87,9 @@ impl Case {
         }
         for domain in &self.domains {
             assert_record(&domain.record);
+            if let Some(partitions) = &domain.partitions {
+                assert_record(partitions);
+            }
             for resource in &domain.resources {
                 assert_record(&resource.record);
             }
@@ -330,6 +333,7 @@ impl Case {
                 });
             }
             domains.push(DescribedDomain {
+                partitions: original.partitions.clone(),
                 capture: original.capture.clone(),
                 record: original.record.clone(),
                 models: location(SectionPath::domain_models(&original.record.domain)),

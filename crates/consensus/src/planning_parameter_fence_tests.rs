@@ -91,7 +91,12 @@ fn schedule_commands(inputs: &DomainPlanningInputs) -> Vec<ConsensusCommand> {
             schedule: Some(Box::new(schedule.clone())),
             mutation: None,
         },
-        ConsensusCommand::UpdateKafkaPartitionSchedule {
+        ConsensusCommand::UpdatePartitionTopology {
+            tenure: LeaderTenure {
+                leader_id: ClusterNodeName::parse("node-1")
+                    .assured("valid literal cluster node name"),
+                term: 0,
+            },
             inputs: Box::new(inputs.clone()),
             schedule: Box::new(schedule.clone()),
         },
@@ -206,4 +211,182 @@ fn planning_parameter_fence_current_inputs_still_publish_each_schedule_writer() 
             Some(&domain)
         );
     }
+}
+
+#[cfg(feature = "shuttle")]
+#[test]
+fn shuttle_partition_observation_and_instance_assignment_publish_one_epoch() {
+    use std::num::{NonZeroU16, NonZeroU32, NonZeroU64};
+
+    use nervix_models::{
+        ExternalPartitionSet, InheritedPartitionLayout, PartitionEpochNumber,
+        PartitionSourceFingerprint, ResolvedBranchPartitions, SourcePartitionObservation, Unit,
+    };
+    use nervix_primitives::{
+        sync::{Arc, blocking::Mutex},
+        thread,
+    };
+
+    fn assignment(count: u16) -> DomainSchedule {
+        let domain = DomainName::parse("orders").assured("valid fixture domain");
+        let branch = nervix_models::BranchName::parse("by_tenant").assured("valid fixture branch");
+        let source = nervix_models::IngestorName::parse("input").assured("valid fixture ingestor");
+        let mut values =
+            nervix_arbitrary::Arbitrary::new(&[], nervix_arbitrary::Domain::Vocabulary);
+        let model = values
+            .model_of(nervix_arbitrary::ModelVariant::Ingestor)
+            .try_map_resource_versions(|_, _| Ok::<_, ()>(1_u64))
+            .assured("the fixture pins its resources");
+        let nervix_models::Model::Ingestor(mut intake) = model else {
+            unreachable!("the requested fixture is an ingestor")
+        };
+        intake.name = source.clone();
+        intake.input = values.ingestor_input_of(nervix_models::IngestorEntityKind::Kafka(
+            nervix_models::KafkaIngestorEntity::Topic,
+        ));
+        let nervix_models::IngestorInput::Transport(input) = &mut intake.input else {
+            unreachable!("Kafka is a transport")
+        };
+        let nervix_models::IngestorEntity::Kafka(nervix_models::KafkaIngestor::Topic(topic)) =
+            &mut input.source
+        else {
+            unreachable!("the fixture selects Kafka")
+        };
+        topic.instances = nervix_models::IngestorInstances::PerPartition;
+        let units = (0..u64::from(count))
+            .map(|index| Unit::try_instance(index).assured("the bounded instance fits"))
+            .collect::<Vec<_>>();
+        let node = nervix_models::ScheduledNode::new(
+            nervix_models::Model::Ingestor(intake),
+            nervix_models::SchemaFingerprint::from_digest([1; 32]),
+        )
+        .with_units(&units);
+        let mut schedule = DomainSchedule::new(domain, [node], Vec::new());
+        let count = NonZeroU16::new(count).assured("fixture counts are positive");
+        schedule.partition_topology.sources.insert(
+            source,
+            SourcePartitionObservation {
+                configuration: PartitionSourceFingerprint::from_digest([2; 32]),
+                partitions: Some(ExternalPartitionSet::Partitioned(NonZeroU32::from(count))),
+                epoch: u64::from(count.get()),
+            },
+        );
+        schedule
+            .partition_topology
+            .branches
+            .insert(branch.clone(), InheritedPartitionLayout::Identity(count));
+        schedule.partition_epochs.insert(
+            branch,
+            nervix_models::BranchPartitionEpoch {
+                number: PartitionEpochNumber::new(
+                    NonZeroU64::new(u64::from(count.get())).assured("positive fixture epoch"),
+                ),
+                partitions: ResolvedBranchPartitions::Inherited(count),
+                transition: None,
+            },
+        );
+        schedule
+    }
+
+    fn assert_coherent(state: &StateMachineData, domain: &DomainName) {
+        let schedule = state
+            .schedule
+            .domains
+            .get(domain)
+            .assured("the initial schedule stays installed");
+        let count = schedule
+            .partition_topology
+            .branches
+            .values()
+            .next()
+            .assured("the fixture declares a layout")
+            .partitions()
+            .count()
+            .get();
+        assert_eq!(schedule.nodes[0].units.len(), usize::from(count));
+        assert_eq!(
+            schedule
+                .partition_epochs
+                .values()
+                .next()
+                .assured("the fixture has an epoch")
+                .number
+                .get(),
+            u64::from(count)
+        );
+        assert_eq!(
+            schedule
+                .partition_topology
+                .sources
+                .values()
+                .next()
+                .assured("the fixture has a source")
+                .partitions
+                .assured("the source is observed")
+                .count()
+                .get(),
+            u32::from(count)
+        );
+    }
+
+    nervix_model_harness::shuttle::check_dfs(
+        || {
+            let mut state = seeded_state();
+            let initial = assignment(8);
+            let domain = initial.domain.clone();
+            state.replace_domain_schedule(&domain, Some(&initial));
+            let captured = state.domain_planning_inputs(&domain);
+            let state = Arc::new(Mutex::new(state));
+            let observer = thread::spawn({
+                let state = state.clone();
+                let captured = captured.clone();
+                move || {
+                    apply_consensus_command_at(
+                        &mut state.lock(),
+                        &ConsensusCommand::UpdatePartitionTopology {
+                            tenure: LeaderTenure {
+                                leader_id: ClusterNodeName::parse("node-1")
+                                    .assured("valid fixture node"),
+                                term: 7,
+                            },
+                            inputs: Box::new(captured),
+                            schedule: Box::new(assignment(12)),
+                        },
+                        AppliedEntryContext { leader_term: 7 },
+                    )
+                    .response
+                }
+            });
+            let reconfiguration = thread::spawn({
+                let state = state.clone();
+                move || {
+                    apply_consensus_command_at(
+                        &mut state.lock(),
+                        &ConsensusCommand::ReplaceDomainSchedule {
+                            inputs: Box::new(captured),
+                            schedule: Some(Box::new(assignment(16))),
+                            mutation: None,
+                        },
+                        AppliedEntryContext { leader_term: 7 },
+                    )
+                    .response
+                }
+            });
+            for _ in 0..3 {
+                assert_coherent(&state.lock(), &domain);
+                thread::yield_now();
+            }
+            let observed = observer.join().assured("the observation task completes");
+            let changed = reconfiguration
+                .join()
+                .assured("the assignment task completes");
+            assert_ne!(
+                observed == ConsensusResponse::Applied,
+                changed == ConsensusResponse::Applied,
+                "exactly one plan can publish from one captured revision"
+            );
+            assert_coherent(&state.lock(), &domain);
+        },
+        Some(256),
+    );
 }

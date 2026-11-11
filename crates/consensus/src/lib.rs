@@ -488,7 +488,8 @@ pub enum ConsensusCommand {
         schedule: Option<Box<DomainSchedule>>,
         mutation: Option<Box<DomainMutationLease>>,
     },
-    UpdateKafkaPartitionSchedule {
+    UpdatePartitionTopology {
+        tenure: LeaderTenure,
         inputs: Box<DomainPlanningInputs>,
         schedule: Box<DomainSchedule>,
     },
@@ -822,7 +823,7 @@ impl std::fmt::Display for ConsensusCommand {
                     write!(f, "clear-domain-schedule:{}", inputs.domain().as_str())
                 }
             }
-            Self::UpdateKafkaPartitionSchedule { inputs, .. } => {
+            Self::UpdatePartitionTopology { inputs, .. } => {
                 write!(
                     f,
                     "update-kafka-partition-schedule:{}",
@@ -3936,18 +3937,20 @@ impl Proposer {
         Self::applied_response(response.data)
     }
 
-    /// Publish connector-owned Kafka partition metadata against the schedule it was derived from.
+    /// Publish external partition topology against the schedule it was derived from.
     ///
     /// This narrow update is allowed while a domain mutation owns broader model work. The broader
     /// plan carries its own captured inputs and will conflict if this metadata changed its base.
-    pub async fn update_kafka_partition_schedule(
+    pub async fn update_partition_topology(
         &self,
+        tenure: LeaderTenure,
         inputs: DomainPlanningInputs,
         schedule: DomainSchedule,
     ) -> error_stack::Result<(), ConsensusError> {
         let response = self
             .inner
-            .client_write(ConsensusCommand::UpdateKafkaPartitionSchedule {
+            .client_write(ConsensusCommand::UpdatePartitionTopology {
+                tenure,
                 inputs: Box::new(inputs),
                 schedule: Box::new(schedule),
             })
@@ -6199,7 +6202,16 @@ fn apply_consensus_command_at(
             state.replace_domain_schedule(domain, schedule.as_deref());
             changes.schedule_changed = true;
         }
-        ConsensusCommand::UpdateKafkaPartitionSchedule { inputs, schedule } => {
+        ConsensusCommand::UpdatePartitionTopology {
+            tenure,
+            inputs,
+            schedule,
+        } => {
+            if context.leader_term != tenure.term {
+                return AppliedConsensusCommand::conflict(
+                    "partition observation leader tenure changed".to_string(),
+                );
+            }
             if let Err(reason) = validate_domain_planning_inputs(state, inputs) {
                 return AppliedConsensusCommand::conflict(reason.to_string());
             }
@@ -9502,7 +9514,7 @@ mod tests {
     }
 
     #[test]
-    fn kafka_metadata_can_advance_under_domain_ownership_and_fences_the_broader_plan() {
+    fn partition_topology_can_advance_under_domain_ownership_and_fences_the_broader_plan() {
         let mut state = StateMachineData::default();
         let stale = captured_inputs(&state, "tenant");
         let owner = super::DomainMutationOwner::transaction("transaction".to_string());
@@ -9515,14 +9527,18 @@ mod tests {
         .assured("an unowned domain admits the transaction");
         state.domain_mutations.insert(domain("tenant"), lease);
 
-        let kafka_update = apply_consensus_command(
+        let topology_update = apply_consensus_command(
             &mut state,
-            &ConsensusCommand::UpdateKafkaPartitionSchedule {
+            &ConsensusCommand::UpdatePartitionTopology {
                 inputs: stale.clone(),
+                tenure: LeaderTenure {
+                    leader_id: ClusterNodeName::parse("node-1").assured("valid fixture node"),
+                    term: 0,
+                },
                 schedule: Box::new(domain_schedule("tenant")),
             },
         );
-        assert_eq!(kafka_update.response, ConsensusResponse::Applied);
+        assert_eq!(topology_update.response, ConsensusResponse::Applied);
 
         let mutation = state.domain_mutations.get(&domain("tenant")).cloned();
         let broader = apply_consensus_command(

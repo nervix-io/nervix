@@ -27,7 +27,7 @@ use super::{
     ownership_handoff::{planned_relocation_count, prefer_former_owners_as_replicas},
     session_service::SessionServiceImpl,
 };
-use crate::registry::ActiveGraph;
+use crate::registry::{ActiveGraph, RegistryError};
 
 /// A domain schedule computed from a candidate graph, with how many runtime nodes it moves off
 /// the node that owns them today.
@@ -138,26 +138,69 @@ impl DomainSchedulePlanningSnapshot {
         domain: &DomainName,
         graph: Option<ActiveGraph>,
         current: Option<&DomainSchedule>,
-    ) -> PreparedDomainSchedule {
+    ) -> Result<PreparedDomainSchedule, Report<RegistryError>> {
+        self.prepare_observed(inputs, domain, graph, current, None)
+    }
+
+    pub(in crate::application) fn prepare_observed(
+        &self,
+        inputs: &DomainPlanningInputs,
+        domain: &DomainName,
+        graph: Option<ActiveGraph>,
+        current: Option<&DomainSchedule>,
+        observed: Option<&nervix_models::PartitionTopology>,
+    ) -> Result<PreparedDomainSchedule, Report<RegistryError>> {
+        self.prepare_partition_topology(inputs, domain, graph, current, observed, None)
+    }
+
+    /// Installs captured coordinates before restored state is staged. Subsequent live decisions
+    /// use the installed schedule and observation path normally.
+    pub(in crate::application) fn prepare_restored(
+        &self,
+        inputs: &DomainPlanningInputs,
+        domain: &DomainName,
+        graph: Option<ActiveGraph>,
+        current: Option<&DomainSchedule>,
+        snapshot: Option<&nervix_models::PartitionTopologySnapshot>,
+    ) -> Result<PreparedDomainSchedule, Report<RegistryError>> {
+        self.prepare_partition_topology(
+            inputs,
+            domain,
+            graph,
+            current,
+            snapshot.map(|snapshot| &snapshot.topology),
+            snapshot,
+        )
+    }
+
+    fn prepare_partition_topology(
+        &self,
+        inputs: &DomainPlanningInputs,
+        domain: &DomainName,
+        graph: Option<ActiveGraph>,
+        current: Option<&DomainSchedule>,
+        observed: Option<&nervix_models::PartitionTopology>,
+        restored: Option<&nervix_models::PartitionTopologySnapshot>,
+    ) -> Result<PreparedDomainSchedule, Report<RegistryError>> {
+        let empty = nervix_models::PartitionTopology::default();
+        let topology = match (observed, current) {
+            (Some(topology), _) => topology,
+            (None, Some(schedule)) => &schedule.partition_topology,
+            (None, None) => &empty,
+        };
         let schedule = match graph {
             Some(graph) => {
-                #[cfg(feature = "testing")]
-                let mut schedule = graph.schedule_for_domain_with_mode(
+                let mut schedule = graph.schedule_for_domain_with_topology(
                     domain,
                     &self.cluster_nodes,
                     self.replica_count,
                     current,
+                    #[cfg(feature = "testing")]
                     self.mode.scheduler_mode(),
                     &self.capabilities,
-                );
-                #[cfg(not(feature = "testing"))]
-                let mut schedule = graph.schedule_for_domain(
-                    domain,
-                    &self.cluster_nodes,
-                    self.replica_count,
-                    current,
-                    &self.capabilities,
-                );
+                    topology,
+                    restored,
+                )?;
                 SessionServiceImpl::merge_existing_schedule_data(
                     &mut schedule,
                     current,
@@ -169,12 +212,12 @@ impl DomainSchedulePlanningSnapshot {
             None => None,
         };
         let relocations = planned_relocation_count(current, schedule.as_ref());
-        PreparedDomainSchedule {
+        Ok(PreparedDomainSchedule {
             schedule,
             relocations,
             inputs: inputs.clone(),
             planning: self.clone(),
-        }
+        })
     }
 
     pub(in crate::application) fn live_voters(&self) -> &[ClusterNodeName] {

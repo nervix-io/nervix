@@ -13,14 +13,14 @@ use nervix_models::{
     BranchKeyFingerprint, ClusterNodeIdentity, ClusterNodeIncarnation, ClusterNodeName,
     CommandExecutionReference, DomainClockAuthority, DomainClockAuthorityRevision,
     DomainClockState, DomainConfig, DomainName, DomainPace, DomainSchedule, DomainStartPoint,
-    DomainState, DomainStatus, KafkaPartitionSchedule, Model, ModelName, NodeRef,
-    OwnershipStateComponent, OwnershipStateRecoveryOutcome, OwnershipStateReset,
-    OwnershipStateResetCause, OwnershipTransition, PlacementGroupSchedule,
-    RequestedResourceVersion, ResolvedBranching, ResourceId, ResourceNodeState, ResourceNodeStatus,
-    ResourceReplicaKey, ResourceUpload, ResourceUploadIdentity, ResourceUploadKey,
-    ResourceUploadState, ResourceVersion, RestoreStateAuthority, ScheduledNode, SchemaFingerprint,
-    Timestamp, WasmSavedStateRejection, WasmStateRecoveryAdmission, WasmStateRecoveryOutcome,
-    WasmStateResetPhase, WasmStateResetReason, WasmStateResetScope,
+    DomainState, DomainStatus, Model, ModelName, NodeRef, OwnershipStateComponent,
+    OwnershipStateRecoveryOutcome, OwnershipStateReset, OwnershipStateResetCause,
+    OwnershipTransition, PlacementGroupSchedule, RequestedResourceVersion, ResolvedBranching,
+    ResourceId, ResourceNodeState, ResourceNodeStatus, ResourceReplicaKey, ResourceUpload,
+    ResourceUploadIdentity, ResourceUploadKey, ResourceUploadState, ResourceVersion,
+    RestoreStateAuthority, ScheduledNode, SchemaFingerprint, Timestamp, WasmSavedStateRejection,
+    WasmStateRecoveryAdmission, WasmStateRecoveryOutcome, WasmStateResetPhase,
+    WasmStateResetReason, WasmStateResetScope,
 };
 
 use crate::Arbitrary;
@@ -93,6 +93,7 @@ impl Arbitrary<'_> {
         };
         let assignment = duration();
         let watch = duration();
+        let topology_poll = duration();
         let mut positive = || {
             std::num::NonZeroU64::new(self.entropy.boundary_biased(1..=65_536))
                 .assured("bounded intake capacities fit native channel and address limits")
@@ -102,6 +103,7 @@ impl Arbitrary<'_> {
             retry_jitter_percent: jitter,
             kafka_domain_assignment_retry: assignment,
             kafka_partition_watch_interval: watch,
+            partition_topology_poll_interval: topology_poll,
             syslog_intake_queue_capacity: positive(),
             syslog_read_chunk_bytes: positive(),
         }
@@ -346,14 +348,17 @@ impl Arbitrary<'_> {
 
     /// The partition count of a generated relay's branch, from one through
     /// [`SCHEDULED_PARTITIONS`], for a scheduled relay or a relay whose batches a case routes.
-    pub fn scheduled_branch_partitions(&mut self) -> nervix_models::BranchPartitions {
+    pub fn scheduled_branch_partitions(&mut self) -> nervix_models::ResolvedBranchPartitions {
         let count = self
             .entropy
             .boundary_biased(1..=u64::from(SCHEDULED_PARTITIONS));
         let count = u16::try_from(count).verified("the range above ends below u16::MAX");
-        nervix_models::BranchPartitions::Direct(
-            std::num::NonZeroU16::new(count).verified("the range above starts at one"),
-        )
+        let count = std::num::NonZeroU16::new(count).verified("the range above starts at one");
+        if self.entropy.flag() {
+            nervix_models::ResolvedBranchPartitions::Inherited(count)
+        } else {
+            nervix_models::ResolvedBranchPartitions::Direct(count)
+        }
     }
 
     /// A placement unit of a scheduled node: its one `Single` unit, or a partition or instance
@@ -545,41 +550,16 @@ impl Arbitrary<'_> {
         model
     }
 
-    /// A Kafka partition number, landing on zero, the extremes and their neighbours as often as
-    /// elsewhere.
-    fn partition(&mut self) -> i32 {
-        match self.entropy.byte() % 6 {
-            0 => 0,
-            1 => i32::MIN,
-            2 => i32::MAX,
-            3 => -1,
-            4 => 1,
-            _ => {
-                let bits = self.entropy.up_to(u64::from(u32::MAX));
-                let bits = u32::try_from(bits).verified("the draw ends at u32::MAX");
-                bits.cast_signed()
-            }
-        }
-    }
-
-    /// The Kafka partitions a leader observed for one ingestor and how its instances share them.
-    pub fn kafka_partition_schedule(&mut self) -> KafkaPartitionSchedule {
-        let observed_partitions = self.records(Self::partition);
-        let rebalance_epoch = self.entropy.any_u64();
-        let instance_assignments = self.records(|arbitrary| arbitrary.records(Self::partition));
-        KafkaPartitionSchedule {
-            observed_partitions,
-            rebalance_epoch,
-            instance_assignments,
-        }
-    }
-
     /// The branch declaration a scheduled node carries: none resolved yet, unbranched, or branched
     /// by a named branch with its complete key schema and its partition count.
     fn resolved_branching(&mut self) -> Option<ResolvedBranching> {
-        match self.entropy.byte() % 3 {
+        match self.entropy.byte() % 4 {
             0 => None,
             1 => Some(ResolvedBranching::unbranched()),
+            2 => Some(ResolvedBranching::awaiting_topology(
+                self.name(),
+                self.create_schema(),
+            )),
             _ => {
                 let branch = self.name();
                 let schema = self.create_schema();
@@ -692,7 +672,25 @@ impl Arbitrary<'_> {
             WasmStateResetScope::Unbranched => None,
             WasmStateResetScope::AllBranches => return,
         };
-        let Some(generations) = node.wasm_state_generations_of_branch(branch) else {
+        let origin = match (
+            branch,
+            node.resolved_branching
+                .as_ref()
+                .and_then(|branching| branching.partitions()),
+        ) {
+            (Some(_), Some(partitions)) if partitions.is_inherited() => {
+                let partition =
+                    nervix_models::ExternalPartition::new(u32::from(self.entropy.byte()));
+                Some(nervix_models::InheritedPartitionOrigin {
+                    partition,
+                    epoch: nervix_models::PartitionEpochNumber::FIRST,
+                    unit: partitions.unit_of(partition.seed()),
+                })
+            }
+            _ => None,
+        };
+        let unit = origin.map(|origin| origin.unit);
+        let Some(generations) = node.wasm_state_generations_of_key(branch, unit) else {
             return;
         };
         let generation = generations.of_reset_scope(&scope);
@@ -700,7 +698,7 @@ impl Arbitrary<'_> {
             WasmSavedStateRejection::SnapshotEnvelope,
             WasmSavedStateRejection::ApplicationState,
         ]);
-        let admission = node.admit_wasm_state_recovery(scope, generation, rejection);
+        let admission = node.admit_wasm_state_recovery(scope, generation, rejection, unit);
         let request = match admission {
             Some(
                 WasmStateRecoveryAdmission::Admitted(request)
@@ -720,26 +718,22 @@ impl Arbitrary<'_> {
             WasmStateRecoveryOutcome::Recovered,
             WasmStateRecoveryOutcome::Failed,
         ]);
-        node.settle_wasm_state_recovery(&scope, &request, outcome);
+        node.settle_wasm_state_recovery(&scope, &request, outcome, unit);
     }
 
     /// One entry of a domain schedule, built the way the scheduler builds one: any Model with its
-    /// resource versions pinned, its schema fingerprint and resolved branching, the Kafka
-    /// partitions it shares out, where it is placed, an ownership move in progress, and for a WASM
+    /// resource versions pinned, its schema fingerprint and resolved or pending branching,
+    /// where it is placed, an ownership move in progress, and for a WASM
     /// processor the guest-state lifetimes, resets and recovery attempts it has published.
     pub fn scheduled_node(&mut self) -> ScheduledNode {
         let config = self.pinned_model();
         let fingerprint = self.schema_fingerprint();
         let branching = self.resolved_branching();
         let mut node = ScheduledNode::new(config, fingerprint).with_resolved_branching(branching);
-        if self.entropy.flag() {
-            let partitions = self.kafka_partition_schedule();
-            node = node.with_kafka_partitions(partitions);
-        }
         let primary = self.optional_cluster_node();
         let assigned = self.records(Self::rule_name::<ClusterNodeName>);
         node = node.placed_on(primary, assigned);
-        if self.entropy.flag() {
+        if !node.units.is_empty() && self.entropy.flag() {
             let transition = self.ownership_transition();
             let units = std::num::NonZeroUsize::new(node.units.len())
                 .assured("every scheduled node is scheduled as at least one unit");
@@ -777,20 +771,81 @@ impl Arbitrary<'_> {
         for epoch in self.records(Self::branch_partition_epoch) {
             partition_epochs.insert(self.name::<nervix_models::BranchName>(), epoch);
         }
-        DomainSchedule::new(domain, nodes, placement_groups).with_partition_epochs(partition_epochs)
+        DomainSchedule::new(domain, nodes, placement_groups)
+            .with_partition_epochs(partition_epochs)
+            .with_partition_topology(self.partition_topology())
+    }
+
+    pub fn partition_topology(&mut self) -> nervix_models::PartitionTopology {
+        use nervix_models::{
+            InheritedPartitionLayout, PartitionSourceFingerprint, PartitionTopology,
+            SourcePartitionObservation,
+        };
+        let mut topology = PartitionTopology::default();
+        for _ in 0..self.entropy.count(3) {
+            let name = self.rule_name();
+            let configuration =
+                PartitionSourceFingerprint::from_digest(std::array::from_fn(|_| {
+                    self.entropy.byte()
+                }));
+            let partitions = if self.entropy.flag() {
+                Some(self.external_partition_set())
+            } else {
+                None
+            };
+            topology.sources.insert(
+                name,
+                SourcePartitionObservation {
+                    configuration,
+                    partitions,
+                    epoch: self.entropy.any_u64(),
+                },
+            );
+        }
+        for _ in 0..self.entropy.count(3) {
+            let groups = self.scheduled_branch_partitions().count();
+            let layout = if self.entropy.flag() {
+                InheritedPartitionLayout::Identity(groups)
+            } else {
+                InheritedPartitionLayout::Grouped {
+                    source_count: self.external_partition_set().count(),
+                    groups,
+                }
+            };
+            topology.branches.insert(self.rule_name(), layout);
+        }
+        for name in topology.sources.keys() {
+            if self.entropy.flag() {
+                topology.suspended.insert(name.clone());
+            }
+        }
+        topology
+    }
+
+    pub fn external_partition_set(&mut self) -> nervix_models::ExternalPartitionSet {
+        use nervix_models::ExternalPartitionSet;
+        if self.entropy.flag() {
+            ExternalPartitionSet::Unpartitioned
+        } else {
+            let count = u32::try_from(self.entropy.boundary_biased(1..=u64::from(u32::MAX)))
+                .verified("count is within u32");
+            ExternalPartitionSet::Partitioned(
+                std::num::NonZeroU32::new(count).verified("positive partition count"),
+            )
+        }
     }
 
     /// The partition epoch of one branch whose count changed since it was created: a later epoch,
     /// settled or in a transition from the count before it.
     pub fn branch_partition_epoch(&mut self) -> nervix_models::BranchPartitionEpoch {
-        let number = self.entropy.boundary_biased(2..=u64::MAX);
+        let number = self.entropy.boundary_biased(1..=u64::MAX);
         let number = nervix_models::PartitionEpochNumber::new(
-            std::num::NonZeroU64::new(number).verified("the range above starts at two"),
+            std::num::NonZeroU64::new(number).verified("the range above starts at one"),
         );
-        let partitions = self.branch_partitions();
+        let partitions = self.resolved_branch_partitions();
         let transition = if self.entropy.flag() {
             Some(nervix_models::PartitionTransition {
-                previous: self.branch_partitions(),
+                previous: self.resolved_branch_partitions(),
             })
         } else {
             None

@@ -92,7 +92,22 @@ impl Descriptors<'_> {
         for field in &fields {
             assert_eq!(StateField::from_remote(field.clone().into_remote()), *field);
         }
-        let branch = if branched { Some(fields) } else { None };
+        let branch = if branched {
+            let origin = self
+                .0
+                .entropy()
+                .flag()
+                .then(|| nervix_models::InheritedPartitionOrigin {
+                    partition: nervix_models::ExternalPartition::new(u32::from(
+                        self.0.entropy().byte(),
+                    )),
+                    epoch: nervix_models::PartitionEpochNumber::new(self.0.positive_u64()),
+                    unit: crate::archive_values::Values(self.0.clone()).unit(),
+                });
+            nervix_models::BranchKeyFields::branched(fields.into(), origin)
+        } else {
+            nervix_models::BranchKeyFields::Unbranched
+        };
         let branch_fingerprint = if branched {
             Some(BranchKeyFingerprint::new(std::array::from_fn(|_| {
                 self.0.entropy().byte()
@@ -162,11 +177,11 @@ fn bolero_malformed_wasm_descriptors_fail_at_the_owning_boundary() {
                         "WASM state generation"
                     }
                     1 => {
-                        wire.branch = Some(vec![]);
+                        wire.branch = nervix_models::BranchKeyFields::Direct(Vec::new().into());
                         "branch key"
                     }
                     2 => {
-                        wire.branch = None;
+                        wire.branch = nervix_models::BranchKeyFields::Unbranched;
                         "WASM branch fingerprint"
                     }
                     3 => {
@@ -174,14 +189,16 @@ fn bolero_malformed_wasm_descriptors_fail_at_the_owning_boundary() {
                         "WASM branch fingerprint"
                     }
                     4 => {
-                        wire.branch.as_mut().assured("the descriptor is branched")[0]
+                        wire.branch
+                            .fields_mut()
+                            .assured("the descriptor is branched")[0]
                             .name
                             .clear();
                         "branch field name"
                     }
                     5 => {
                         wire.branch
-                            .as_mut()
+                            .fields_mut()
                             .assured("the descriptor is branched")
                             .reverse();
                         "branch field order"

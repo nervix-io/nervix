@@ -571,7 +571,7 @@ pub(super) fn test_named_branching(
                 })
                 .collect(),
         },
-        nervix_models::BranchPartitions::ONE,
+        nervix_models::ResolvedBranchPartitions::ONE,
     )
 }
 
@@ -952,8 +952,14 @@ pub(super) fn planned_entrypoints_for_test(
         .collect::<ScheduledNodes>();
     let activation = DomainActivationPlan::from_scheduled_nodes(domain, &nodes)
         .assured("the fixture surfaces resolve");
-    EntrypointPlans::from_scheduled_nodes(domain, &nodes, &activation)
-        .assured("the fixture entrypoints plan")
+    EntrypointPlans::from_scheduled_nodes(
+        domain,
+        &nodes,
+        &activation,
+        &nervix_models::PartitionTopology::default(),
+        &BTreeMap::new(),
+    )
+    .assured("the fixture entrypoints plan")
 }
 
 /// The relays an entrypoint test plans over: every relay holds one schema of `fields`, decoded by
@@ -1003,7 +1009,7 @@ impl EntrypointTestDomain<'_> {
                 name: named("entrypoint_branch"),
                 fields: Self::schema_fields(self.branch_fields),
             },
-            nervix_models::BranchPartitions::ONE,
+            nervix_models::ResolvedBranchPartitions::ONE,
         )
     }
 
@@ -1106,8 +1112,14 @@ impl EntrypointTestDomain<'_> {
             .collect::<ScheduledNodes>();
         let activation = DomainActivationPlan::from_scheduled_nodes(domain, &nodes)
             .assured("the fixture surfaces resolve");
-        let entrypoints = EntrypointPlans::from_scheduled_nodes(domain, &nodes, &activation)
-            .assured("the fixture entrypoints plan");
+        let entrypoints = EntrypointPlans::from_scheduled_nodes(
+            domain,
+            &nodes,
+            &activation,
+            &nervix_models::PartitionTopology::default(),
+            &BTreeMap::new(),
+        )
+        .assured("the fixture entrypoints plan");
         EntrypointTestPlans { entrypoints, nodes }
     }
 

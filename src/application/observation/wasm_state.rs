@@ -140,15 +140,8 @@ fn wasm_origin(
 /// sampled, without branch entries.
 pub(in crate::application) fn wasm_unit_summaries(
     node: &ScheduledNode,
-    checkpoints: Vec<WasmCheckpointInspection>,
+    mut by_unit: BTreeMap<Unit, Vec<WasmCheckpointInspection>>,
 ) -> Result<Vec<(Unit, WasmUnitStateInspection)>, WasmStateInspectionError> {
-    let mut by_unit = BTreeMap::<Unit, Vec<WasmCheckpointInspection>>::new();
-    for checkpoint in checkpoints {
-        let Some(unit) = node.unit_of_branch(checkpoint.branch.as_ref()) else {
-            continue;
-        };
-        by_unit.entry(unit).or_default().push(checkpoint);
-    }
     let mut summaries = Vec::with_capacity(node.units.len());
     for (unit, scheduled) in &node.units {
         let sampled = by_unit.remove(unit).unwrap_or_default();
@@ -476,16 +469,31 @@ impl SessionServiceImpl {
             .units
             .get(&request.unit)
             .ok_or(StateInspectionRejection::StaleContinuation)?;
-        let mut checkpoints = Vec::new();
-        for checkpoint in self
-            .inner
-            .runtime
-            .inspect_wasm_processor_state_for(&request.domain, request.processor.clone())
-        {
-            if node.unit_of_branch(checkpoint.branch.as_ref()) == Some(request.unit) {
-                checkpoints.push(checkpoint);
+        let epoch = node
+            .partition_branch()
+            .and_then(|branch| domain_schedule.partition_epochs.get(branch));
+        let checkpoints = if node.has_inherited_partition_state(epoch) {
+            self.inner
+                .runtime
+                .inspect_inherited_wasm_processor_state_for(
+                    &request.domain,
+                    &nervix_models::ModelName::from(&request.processor),
+                )
+                .remove(&request.unit)
+                .unwrap_or_default()
+        } else {
+            let mut checkpoints = Vec::new();
+            for checkpoint in self
+                .inner
+                .runtime
+                .inspect_wasm_processor_state_for(&request.domain, request.processor.clone())
+            {
+                if node.unit_of_branch(checkpoint.branch.as_ref()) == Some(request.unit) {
+                    checkpoints.push(checkpoint);
+                }
             }
-        }
+            checkpoints
+        };
         let selection = WasmUnitStateSelection::of_unit(scheduled, checkpoints, request.selection)
             .map_err(|error| inspection_refusal(error, StateInspectionRejection::NotReady))?;
         let origin = wasm_origin(local, &selection);

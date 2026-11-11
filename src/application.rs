@@ -118,10 +118,11 @@ use nervix_primitives::{
 };
 use observability_http::serve_observability_http;
 use ownership_handoff::{FORCED_OWNERSHIP_RECOVERY_BUDGET, ForcedOwnershipRecoveryCoordinator};
+use partition_topology::run_partition_topology_watchers;
 use public_listener::{PublicListener, PublicListenerKind};
+use scheduling::StartupVoterObservations;
 #[cfg(feature = "testing")]
 use scheduling::VOTER_OBSERVATION_GRACE;
-use scheduling::{StartupVoterObservations, run_kafka_partition_watchers};
 use session::grpc::SessionGrpcService;
 pub use session_service::SessionServiceImpl;
 use session_service::{
@@ -197,6 +198,7 @@ mod process;
 pub use process::run_cli;
 #[cfg(not(feature = "shuttle"))]
 pub use process::run_server_process;
+mod partition_topology;
 mod public_listener;
 mod relocation;
 mod resource;
@@ -1546,7 +1548,7 @@ impl Application {
                                 };
                                 let current_domain = current_schedule.domain(&domain);
                                 #[cfg(feature = "testing")]
-                                let mut schedule = graph.schedule_for_domain_with_mode(
+                                let schedule = graph.schedule_for_domain_with_mode(
                                     &domain,
                                     &schedulable_node_ids,
                                     usize::try_from(automatic_schedule_input.runtime_state().parameters.verified("scheduling starts after parameter seeding").values.replica_count()).assured("the committed replica count fits a supported target"),
@@ -1554,13 +1556,17 @@ impl Application {
                                     scheduler_mode,
                                  &scheduling_capabilities,);
                                 #[cfg(not(feature = "testing"))]
-                                let mut schedule = graph.schedule_for_domain(
+                                let schedule = graph.schedule_for_domain(
                                     &domain,
                                     &schedulable_node_ids,
                                     usize::try_from(automatic_schedule_input.runtime_state().parameters.verified("scheduling starts after parameter seeding").values.replica_count()).assured("the committed replica count fits a supported target"),
                                     current_domain,
                                     &scheduling_capabilities,
                                 );
+                                let mut schedule = match schedule {
+                                    Ok(schedule) => schedule,
+                                    Err(error) => { warn!(domain = domain.as_str(), error = %format_args!("{error:#}"), "failed to resolve partition topology"); continue; }
+                                };
                                 let mut failover_existing = current_domain.cloned();
                                 if let Some(existing) = &mut failover_existing {
                                     let failover_moves =
@@ -2007,6 +2013,16 @@ impl Application {
             async move { service.stream_materialized_inspection_page(request).await }
         }).change_context(AppError::RegisterInterconnectRequestHandler)?;
         let processor_inspection_service = service.clone();
+        let partitioned_inspection_service = service.clone();
+        interconnect.register_stream_handler::<nervix_interconnect::ReadPartitionedMaterializedStatePage, _, _>(move |_context, request| {
+            let service = partitioned_inspection_service.clone();
+            async move { service.stream_partitioned_materialized_inspection_page(request).await }
+        }).change_context(AppError::RegisterInterconnectRequestHandler)?;
+        let materialized_catalog_service = service.clone();
+        interconnect.register_handler::<nervix_interconnect::ReadMaterializedKeyCatalog, _, _>(move |_context, request| {
+            let service = materialized_catalog_service.clone();
+            async move { service.handle_materialized_key_catalog(request).await }
+        }).change_context(AppError::RegisterInterconnectRequestHandler)?;
         interconnect
             .register_stream_handler::<nervix_interconnect::ReadProcessorStatePage, _, _>(
                 move |_context, request| {
@@ -2185,6 +2201,16 @@ impl Application {
             .change_context(AppError::RegisterInterconnectRequestHandler)?;
 
         let describe_lookup_service = service.clone();
+        let inherited_wasm_service = service.clone();
+        interconnect.register_handler::<nervix_interconnect::DescribeInheritedWasmStateRequest, _, _>(move |_context, request| {
+            let service = inherited_wasm_service.clone();
+            async move {
+                nervix_interconnect::DescribeInheritedWasmStateResponse {
+                    result: service.handle_describe_inherited_wasm_request(request).await,
+                }
+            }
+        }).change_context(AppError::RegisterInterconnectRequestHandler)?;
+
         interconnect
             .register_handler::<RemoteDescribeLookupRequest, _, _>(move |_context, request| {
                 let service = describe_lookup_service.clone();
@@ -2654,10 +2680,10 @@ impl Application {
             retirements.stop_all().await;
         }));
 
-        let kafka_schedule_service = service.clone();
-        let kafka_schedule_shutdown = shutdown.clone();
+        let partition_topology_service = service.clone();
+        let partition_topology_shutdown = shutdown.clone();
         background_tasks.push(nervix_primitives::task::spawn(async move {
-            run_kafka_partition_watchers(kafka_schedule_service, kafka_schedule_shutdown).await;
+            run_partition_topology_watchers(partition_topology_service, partition_topology_shutdown).await;
         }));
 
         let (interconnect_relay_payload_lane, interconnect_relay_payload_rx) =

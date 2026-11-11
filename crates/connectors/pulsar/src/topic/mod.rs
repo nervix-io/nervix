@@ -29,6 +29,8 @@
 mod connection;
 mod ingestor;
 mod message_times;
+mod partition_observation;
+pub use partition_observation::{PulsarPartitionObservationError, PulsarTopicPartitionInspector};
 
 impl nervix_connector::EmitterConnector for PulsarTopicEmitter {
     const KIND: nervix_models::EmitterEntityKind = Self::KIND;

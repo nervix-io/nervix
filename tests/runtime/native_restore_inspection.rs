@@ -47,12 +47,7 @@ pub fn assert_native_checkpoint_values(
                     .into_iter()
                     .map(|entry| {
                         (
-                            entry.key.map(|fields| {
-                                fields
-                                    .into_iter()
-                                    .map(StateField::from_remote)
-                                    .collect::<Vec<_>>()
-                            }),
+                            entry.key.map_fields(StateField::from_remote),
                             entry.last_ingestion,
                             entry.incarnation,
                         )

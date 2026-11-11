@@ -36,7 +36,7 @@ async fn a_retired_transition_applies_the_batch_its_materialized_unit_parked() {
     let relay = named::<RelayName>("profiles");
     let unit = Unit::partition(5);
     let partitions = |count: u16| {
-        nervix_models::BranchPartitions::Direct(
+        nervix_models::ResolvedBranchPartitions::Direct(
             std::num::NonZeroU16::new(count).expect("the test counts are positive"),
         )
     };

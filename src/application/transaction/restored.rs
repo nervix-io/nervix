@@ -47,6 +47,7 @@ pub(in crate::application) struct RestoredDomainInputs<'a> {
     pub(in crate::application) resources: &'a BTreeSet<ResourceName>,
     /// Exactly the versions the restore imports, each completed.
     pub(in crate::application) completed: ResourceUploads,
+    pub(in crate::application) partitions: Option<&'a nervix_models::PartitionTopologySnapshot>,
 }
 
 impl SessionServiceImpl {
@@ -98,7 +99,13 @@ impl SessionServiceImpl {
             0,
             false,
             |graph, current, attribution| {
-                let prepared = schedule_inputs.prepare(&planning_inputs, &domain, graph, current);
+                let prepared = schedule_inputs.prepare_restored(
+                    &planning_inputs,
+                    &domain,
+                    graph,
+                    current,
+                    inputs.partitions,
+                )?;
                 let ownership_moves = planned_ownership_moves(current, prepared.schedule.as_ref())
                     .into_iter()
                     .map(|moved| OwnershipMoveImpact {
@@ -108,10 +115,10 @@ impl SessionServiceImpl {
                         destination: moved.destination,
                         attribution: attribution.clone(),
                     });
-                TransactionScheduleDecision {
+                Ok(TransactionScheduleDecision {
                     schedule: prepared.schedule,
                     ownership_moves: CanonicalImpactSet::new(ownership_moves),
-                }
+                })
             },
         )
     }

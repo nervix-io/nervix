@@ -50,7 +50,7 @@ impl Materialized {
                 "materialized watermarks",
             );
             record = group.identities.clone();
-            record.identities[0].branch = Some(Vec::new());
+            record.identities[0].branch = nervix_models::BranchKeyFields::Direct(Vec::new().into());
             rejects_field::<MaterializedIdentitiesRecord>(
                 record.encode().assured("an empty branch encodes"),
                 "branch key",

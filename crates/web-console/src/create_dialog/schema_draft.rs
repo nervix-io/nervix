@@ -473,7 +473,7 @@ impl Default for BranchDraft {
             if_not_exists: false,
             schema: None,
             ttl: String::new(),
-            partitions: nervix_models::BranchPartitions::ONE.count().to_string(),
+            partitions: nervix_models::BranchPartitions::ONE.to_string(),
             limit_instances: false,
             max_instances: String::new(),
         }
@@ -847,7 +847,12 @@ mod tests {
 
         branch.partitions = " 4 ".to_string();
         let model = branch.build().assured("four partitions are a valid count");
-        assert_eq!(model.partitions.count().get(), 4);
+        assert_eq!(
+            model.partitions,
+            nervix_models::BranchPartitions::Direct(
+                std::num::NonZeroU16::new(4).assured("positive test count")
+            )
+        );
         assert_canonical_round_trip(Model::Branch(model), false);
 
         for invalid in ["0", "65536", "", "four", "-1"] {

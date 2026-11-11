@@ -125,8 +125,11 @@ impl DomainState {
     ) -> Result<Self, Report<RegistryError>> {
         let mut graph = DiGraph::<ActiveNode, EdgeKind>::new();
         let mut indices = HashMap::new();
+        let mut has_inherited_partitions = false;
 
         for (key, model) in models {
+            has_inherited_partitions |=
+                matches!(model, Model::Branch(branch) if branch.partitions.is_inherited());
             let resolved_branching = match model {
                 Model::Relay(relay) => Some(resolved_branch_selection(
                     domain,
@@ -1697,6 +1700,7 @@ impl DomainState {
             }));
         }
 
+        super::partition_topology::validate_producers(domain, models)?;
         validate_vhost_hostnames(domain, models)?;
         validate_endpoint_paths(domain, models)?;
         infer_stream_branchings(domain, models, &indices, &mut graph)?;
@@ -1709,6 +1713,7 @@ impl DomainState {
                 graph,
                 indices,
                 placement,
+                has_inherited_partitions,
             },
         })
     }

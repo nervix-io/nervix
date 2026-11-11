@@ -47,21 +47,34 @@ pub(crate) enum RuntimeObservationError {
     },
 }
 
-pub(super) fn kafka_domain_offset_describe_from_schedule(
+pub(super) fn kafka_domain_offset_describe_from_topology(
     topic: &str,
     instances: NonZeroU64,
-    schedule: &KafkaPartitionSchedule,
+    observation: &nervix_models::SourcePartitionObservation,
 ) -> KafkaDomainOffsetDescribe {
-    let mut instance_assignments = schedule.instance_assignments.clone();
-    let expected_instances = instances.get().arch_into();
-    if instance_assignments.len() < expected_instances {
-        instance_assignments.resize(expected_instances, Vec::new());
+    let count = match observation.partitions {
+        Some(set) => set.count().get(),
+        None => 0,
+    };
+    let observed_partitions = (0..count)
+        .map(|index| {
+            i32::try_from(index)
+                .verified("Kafka observations contain coordinates representable by the driver")
+        })
+        .collect::<Vec<_>>();
+    let mut instance_assignments = vec![Vec::new(); instances.get().arch_into()];
+    for partition in &observed_partitions {
+        let index = u64::try_from(*partition).verified("Kafka partition indices are nonnegative")
+            % instances.get();
+        instance_assignments
+            [usize::try_from(index).verified("the planned instance count is addressable")]
+        .push(*partition);
     }
     KafkaDomainOffsetDescribe {
         topic: topic.to_string(),
         instances: instances.get(),
-        observed_partitions: schedule.observed_partitions.clone(),
-        rebalance_epoch: schedule.rebalance_epoch,
+        observed_partitions,
+        rebalance_epoch: observation.epoch,
         instance_assignments,
     }
 }
@@ -428,21 +441,49 @@ impl Runtime {
         processor: impl Into<ModelName>,
     ) -> Vec<WasmCheckpointInspection> {
         let processor = processor.into();
+        let mut checkpoints = Vec::new();
+        self.visit_wasm_processor_checkpoints(domain, &processor, |_, checkpoint| {
+            checkpoints.push(checkpoint)
+        });
+        checkpoints.sort_by_key(|checkpoint| checkpoint.branch);
+        checkpoints
+    }
+
+    pub(crate) fn inspect_inherited_wasm_processor_state_for(
+        &self,
+        domain: &DomainName,
+        processor: &ModelName,
+    ) -> std::collections::BTreeMap<Unit, Vec<WasmCheckpointInspection>> {
+        let mut units = std::collections::BTreeMap::<Unit, Vec<WasmCheckpointInspection>>::new();
+        self.visit_wasm_processor_checkpoints(domain, processor, |unit, checkpoint| {
+            units.entry(unit).or_default().push(checkpoint);
+        });
+        for checkpoints in units.values_mut() {
+            checkpoints.sort_by_key(|checkpoint| checkpoint.branch);
+        }
+        units
+    }
+
+    fn visit_wasm_processor_checkpoints(
+        &self,
+        domain: &DomainName,
+        processor: &ModelName,
+        mut visit: impl FnMut(Unit, WasmCheckpointInspection),
+    ) {
         let Some(execution) = self.inner.executions.get(domain) else {
-            return Vec::new();
+            return;
         };
         let entity = NodeRef::new(ModelKind::WasmProcessor, processor.clone());
         let Some(scheduled) = execution.revision.nodes.get(&entity) else {
-            return Vec::new();
+            return;
         };
         let dispatcher = self.inner.remote_dispatcher.load_full();
         let local = dispatcher.as_deref().map(RemoteDispatcher::local_node_id);
-        let mut checkpoints = Vec::new();
         for state in self.inner.replicated_wasm_processor_states.iter() {
             let placement = &state.placement;
             if &placement.domain != domain
                 || placement.kind != ModelKind::WasmProcessor
-                || placement.identifier != processor
+                || &placement.identifier != processor
                 || (placement.unit != Unit::SINGLE
                     && !Self::scheduled_unit_executes_locally(scheduled, placement.unit, local))
             {
@@ -459,10 +500,8 @@ impl Runtime {
             if generations.of_branch(branch.as_ref()) != state.generation() {
                 continue;
             }
-            checkpoints.push(state.inspection());
+            visit(placement.unit, state.inspection());
         }
-        checkpoints.sort_by_key(|checkpoint| checkpoint.branch);
-        checkpoints
     }
 
     pub(crate) fn describe_domain_statistics(&self, domain: &DomainName) -> Vec<String> {
@@ -915,16 +954,12 @@ impl Runtime {
                     )),
                 ..
             }) = &plan.input
-            && let Some(node) = execution.revision.nodes.get(&NodeRef::new(
-                ModelKind::Ingestor,
-                ModelName::from(ingestor),
-            ))
-            && let Some(schedule) = node.kafka_partition_schedule.as_ref()
+            && let Some(observation) = execution.revision.partition_topology.sources.get(ingestor)
         {
-            Some(kafka_domain_offset_describe_from_schedule(
+            Some(kafka_domain_offset_describe_from_topology(
                 topic.as_str(),
                 *instances,
-                schedule,
+                observation,
             ))
         } else {
             None

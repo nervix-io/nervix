@@ -93,9 +93,7 @@ impl SessionServiceImpl {
             schema: node.schema_fingerprint,
             model: plan.model,
             branch_fingerprint: captured.branch_fingerprint,
-            branch: placement
-                .branch_key
-                .map(|fields| fields.into_iter().map(StateField::from_remote).collect()),
+            branch: placement.branch_key.map_fields(StateField::from_remote),
             incarnation: metadata.incarnation,
             revision: metadata.revision,
             shapes: metadata.shapes,

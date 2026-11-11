@@ -1049,8 +1049,11 @@ impl Runtime {
                         lookups: lookup_runtimes,
                         udfs: udf_executor,
                         relay_branchings,
-                        materialized_stream_reads: self
-                            .materialized_relay_publications(domain, &materialized_stream_specs),
+                        materialized_stream_reads: self.materialized_relay_publications(
+                            domain,
+                            &materialized_stream_specs,
+                            &materialized_stream_owner_nodes,
+                        ),
                         relay_state_epoch: self.relay_state_epoch(domain),
                         materialized_stream_specs,
                         materialized_stream_owner_nodes,
@@ -1852,7 +1855,7 @@ mod tests {
         .with_resolved_branching(Some(ResolvedBranching::branched(
             named("by_tenant"),
             tenant_schema("tenant_key"),
-            nervix_models::BranchPartitions::ONE,
+            nervix_models::ResolvedBranchPartitions::ONE,
         )));
         let schedule = DomainSchedule::new(
             domain.clone(),

@@ -42,6 +42,8 @@ pub(crate) enum StatePageReadError {
     Position,
     #[error("one selected row exceeds the page byte bound")]
     RowTooLarge,
+    #[error("the materialized key census changed during inspection")]
+    CatalogChanged,
 }
 
 /// Effective owner-side bounds after the coordinator and local capability checks.
@@ -63,6 +65,13 @@ pub(crate) struct MaterializedInspectionPage {
     _stored: Option<RestoredMaterializedSnapshot>,
 }
 
+pub(crate) struct MaterializedStateCapture {
+    pub(crate) page: MaterializedInspectionPage,
+    pub(crate) catalog: nervix_models::StateInspectionKeyCatalog,
+    // Keeps the catalog admitted for the lifetime of this capture.
+    _catalog_charge: Option<Reservation>,
+}
+
 impl Runtime {
     pub(crate) fn inspection_executor(&self) -> &nervix_execution::Executor {
         &self.inner.executor
@@ -72,7 +81,7 @@ impl Runtime {
         self.inner.inspection_settings
     }
 
-    pub(crate) async fn local_materialized_state_page(
+    pub(crate) async fn capture_materialized_state_page(
         &self,
         domain: &DomainName,
         relay: &RelayName,
@@ -80,7 +89,9 @@ impl Runtime {
         selection: StateInspectionBranchSelection,
         after: Option<(Option<BranchKeyFingerprint>, u64)>,
         bounds: MaterializedPageBounds,
-    ) -> Result<MaterializedInspectionPage, Report<StatePageReadError>> {
+        catalog_requested: bool,
+        filter: Option<nervix_interconnect::MaterializedPartitionFilter>,
+    ) -> Result<MaterializedStateCapture, Report<StatePageReadError>> {
         let MaterializedPageBounds {
             rows: max_rows,
             bytes: max_bytes,
@@ -260,6 +271,35 @@ impl Runtime {
                 CpuClass::Bulk,
                 metadata,
                 move |_captured_metadata, cancellation| {
+                    let mut catalog = if catalog_requested {
+                        nervix_models::StateInspectionKeyCatalog::requested()
+                    } else {
+                        nervix_models::StateInspectionKeyCatalog::Unrequested
+                    };
+                    let catalog_charge = if catalog_requested {
+                        let bytes = generation
+                            .records()
+                            .len()
+                            .checked_mul(
+                                64 * (std::mem::size_of::<BranchKeyFingerprint>()
+                                    + std::mem::size_of::<
+                                        Option<nervix_models::InheritedPartitionOrigin>,
+                                    >()),
+                            )
+                            .ok_or_else(|| Report::new(StatePageReadError::Admission))?;
+                        let bytes = u64::try_from(bytes)
+                            .map_err(|_| Report::new(StatePageReadError::Admission))?;
+                        if bytes > max_bytes {
+                            return Err(Report::new(StatePageReadError::RowTooLarge));
+                        }
+                        Some(
+                            scan_executor
+                                .try_reserve(MemoryClass::Bulk, bytes.max(1))
+                                .change_context(StatePageReadError::Admission)?,
+                        )
+                    } else {
+                        None
+                    };
                     let capacity = max_rows.min(generation.records().len());
                     let metadata_bytes = capacity
                         .checked_mul(
@@ -311,6 +351,14 @@ impl Runtime {
                                 branch == Some(wanted)
                             }
                         } {
+                            continue;
+                        }
+                        if catalog_requested && let Some(key) = &record.branch {
+                            catalog.insert(key.fingerprint(), key.inherited_origin());
+                        }
+                        if filter.as_ref().is_some_and(|filter| {
+                            branch.is_some_and(|branch| filter.excluded.contains(&branch))
+                        }) {
                             continue;
                         }
                         match branch {
@@ -387,16 +435,26 @@ impl Runtime {
                         schema,
                         selected,
                     );
-                    Ok(MaterializedInspectionPage {
-                        fingerprint: fingerprint.finish(),
-                        counts,
-                        generation: selected,
-                        offset: next,
-                        last_branch: previous_branch,
-                        more: next < counts.rows,
-                        stage,
-                        _metadata: metadata,
-                        _stored: stored,
+                    if filter
+                        .as_ref()
+                        .is_some_and(|filter| filter.catalog != catalog)
+                    {
+                        return Err(Report::new(StatePageReadError::CatalogChanged));
+                    }
+                    Ok(MaterializedStateCapture {
+                        page: MaterializedInspectionPage {
+                            fingerprint: fingerprint.finish(),
+                            counts,
+                            generation: selected,
+                            offset: next,
+                            last_branch: previous_branch,
+                            more: next < counts.rows,
+                            stage,
+                            _metadata: metadata,
+                            _stored: stored,
+                        },
+                        catalog,
+                        _catalog_charge: catalog_charge,
                     })
                 },
             )

@@ -15,17 +15,19 @@
 use std::{cmp::Reverse, collections::BTreeMap};
 
 use ahash::{HashMap, HashMapExt, HashSet, HashSetExt};
+use error_stack::Report;
 use meticulous::OptionExt;
 use nervix_models::{
     ClusterNodeName, DomainName, DomainSchedule, Model, ModelKind, NodeCapabilities, NodeRef,
-    NodeUnitRef, PlacementGroupSchedule, PlacementPolicy, ScheduledNode, ScheduledNodes,
-    SchemaFingerprint, Unit,
+    NodeUnitRef, PartitionTopology, PlacementGroupSchedule, PlacementPolicy, ScheduledNode,
+    ScheduledNodes, SchemaFingerprint, Unit,
 };
 use num_rational::Ratio;
 use petgraph::{Direction, graph::DiGraph, prelude::NodeIndex, visit::EdgeRef};
 use sorted_vec::SortedSet;
 
 use crate::registry::{
+    RegistryError,
     graph::{ActiveGraph, ActiveNode, EdgeKind, is_schedulable_model, schedulable_depth},
     partition_epochs::PartitionEpochs,
     placement::{PlacementPair, PlacementTopology, ResolvedPlacementPair},
@@ -547,7 +549,7 @@ impl ActiveGraph {
         replica_count: usize,
         existing: Option<&DomainSchedule>,
         capabilities: &BTreeMap<ClusterNodeName, NodeCapabilities>,
-    ) -> DomainSchedule {
+    ) -> Result<DomainSchedule, Report<RegistryError>> {
         #[cfg(feature = "testing")]
         {
             self.schedule_for_domain_inner(
@@ -580,7 +582,7 @@ impl ActiveGraph {
         existing: Option<&DomainSchedule>,
         scheduler_mode: SchedulerMode,
         capabilities: &BTreeMap<ClusterNodeName, NodeCapabilities>,
-    ) -> DomainSchedule {
+    ) -> Result<DomainSchedule, Report<RegistryError>> {
         self.schedule_for_domain_inner(
             domain,
             cluster_nodes,
@@ -599,6 +601,91 @@ impl ActiveGraph {
         existing: Option<&DomainSchedule>,
         #[cfg(feature = "testing")] scheduler_mode: SchedulerMode,
         capabilities: &BTreeMap<ClusterNodeName, NodeCapabilities>,
+    ) -> Result<DomainSchedule, Report<RegistryError>> {
+        let empty = PartitionTopology::default();
+        let topology = match existing {
+            Some(schedule) => &schedule.partition_topology,
+            None => &empty,
+        };
+        self.schedule_for_domain_with_topology(
+            domain,
+            cluster_nodes,
+            replica_count,
+            existing,
+            #[cfg(feature = "testing")]
+            scheduler_mode,
+            capabilities,
+            topology,
+            None,
+        )
+    }
+
+    /// Place the graph only after its observation-dependent units and placement rules resolve.
+    pub(crate) fn schedule_for_domain_with_topology(
+        &self,
+        domain: &DomainName,
+        cluster_nodes: &[ClusterNodeName],
+        replica_count: usize,
+        existing: Option<&DomainSchedule>,
+        #[cfg(feature = "testing")] scheduler_mode: SchedulerMode,
+        capabilities: &BTreeMap<ClusterNodeName, NodeCapabilities>,
+        topology: &PartitionTopology,
+        restored: Option<&nervix_models::PartitionTopologySnapshot>,
+    ) -> Result<DomainSchedule, Report<RegistryError>> {
+        let specs = super::partition_topology::source_specs(domain, self)?;
+        let empty = PartitionTopology::default();
+        let previous = match (restored, existing) {
+            (Some(snapshot), _) => &snapshot.topology,
+            (None, Some(schedule)) => &schedule.partition_topology,
+            (None, None) => &empty,
+        };
+        let decision = super::partition_topology::decide(self, &specs, previous, &topology.sources);
+        let topology = &decision.topology;
+        let changed_sources =
+            super::partition_topology::changed_source_branches(domain, &specs, topology, existing)?;
+        let graph = self.resolve_partition_topology(domain, topology, existing, restored)?;
+        let epochs = match restored {
+            Some(snapshot) => {
+                PartitionEpochs::restored(snapshot, &graph.branch_partitions(topology, existing))
+                    .ok_or_else(|| {
+                        Report::new(RegistryError::PartitionTopology {
+                            domain: domain.clone(),
+                        })
+                    })?
+            }
+            None => PartitionEpochs::decide(
+                existing,
+                &graph.branch_partitions(topology, existing),
+                topology,
+                &changed_sources,
+                &graph.branches_with_keyed_state(),
+            ),
+        };
+        Ok(graph.schedule_resolved_for_domain(
+            domain,
+            cluster_nodes,
+            replica_count,
+            existing,
+            #[cfg(feature = "testing")]
+            scheduler_mode,
+            capabilities,
+            topology,
+            epochs,
+            restored.is_some(),
+        ))
+    }
+
+    fn schedule_resolved_for_domain(
+        &self,
+        domain: &DomainName,
+        cluster_nodes: &[ClusterNodeName],
+        replica_count: usize,
+        existing: Option<&DomainSchedule>,
+        #[cfg(feature = "testing")] scheduler_mode: SchedulerMode,
+        capabilities: &BTreeMap<ClusterNodeName, NodeCapabilities>,
+        topology: &PartitionTopology,
+        epochs: PartitionEpochs,
+        restored: bool,
     ) -> DomainSchedule {
         let cluster_nodes = SortedSet::from_unsorted(
             cluster_nodes
@@ -662,11 +749,6 @@ impl ActiveGraph {
             .collect::<HashMap<_, _>>();
 
         let mut scheduled_nodes = ScheduledNodes::with_capacity(nodes.len());
-        let epochs = PartitionEpochs::decide(
-            existing,
-            &self.branch_partitions(),
-            &self.branches_with_keyed_state(),
-        );
         for PlacementCandidate { index, node, .. } in nodes {
             let key = node.node_ref();
             let units = epochs.scheduled_units(&node);
@@ -838,12 +920,17 @@ impl ActiveGraph {
                 }
             })
             .collect();
-        DomainSchedule {
+        let mut schedule = DomainSchedule {
             domain: domain.clone(),
             nodes: scheduled_nodes,
             placement_groups,
             partition_epochs: epochs.into_map(),
+            partition_topology: topology.clone(),
+        };
+        if !restored {
+            super::partition_topology::continue_source_epochs(&mut schedule, existing);
         }
+        schedule
     }
 }
 
@@ -891,6 +978,8 @@ pub(crate) fn uniform_capabilities(
 mod tests {
     use std::fs;
 
+    use meticulous::ResultExt as _;
+
     #[test]
     fn committed_capacity_weights_partition_owners_and_repeats_the_same_assignment() {
         let path = temp_db_path();
@@ -908,7 +997,9 @@ mod tests {
         let large = capabilities.get_mut(&nodes[1]).expect("middle node claim");
         large.cpu_count = std::num::NonZeroU64::new(2);
         large.memory_bytes = std::num::NonZeroU64::new(2);
-        let schedule = graph.schedule_for_domain(&domain, &nodes, 0, None, &capabilities);
+        let schedule = graph
+            .schedule_for_domain(&domain, &nodes, 0, None, &capabilities)
+            .assured("the fixture topology resolves");
         let relay = scheduled_node(&schedule, ModelKind::Relay, "tenant_events");
         let counts = nodes
             .iter()
@@ -923,10 +1014,14 @@ mod tests {
         assert_eq!(counts, vec![8, 16, 8]);
         assert_eq!(
             schedule,
-            graph.schedule_for_domain(&domain, &nodes, 0, None, &capabilities)
+            graph
+                .schedule_for_domain(&domain, &nodes, 0, None, &capabilities)
+                .assured("the fixture topology resolves")
         );
         capabilities.remove(&nodes[2]);
-        let restricted = graph.schedule_for_domain(&domain, &nodes, 0, None, &capabilities);
+        let restricted = graph
+            .schedule_for_domain(&domain, &nodes, 0, None, &capabilities)
+            .assured("the fixture topology resolves");
         assert!(
             scheduled_node(&restricted, ModelKind::Relay, "tenant_events")
                 .units
@@ -980,22 +1075,24 @@ mod tests {
         let graph = registry
             .active_graph(&domain)
             .expect("graph should be installed");
-        let schedule = graph.schedule_for_domain_with_mode(
-            &domain,
-            &[
-                ClusterNodeName::parse("node-1").expect("valid name"),
-                ClusterNodeName::parse("node-2").expect("valid name"),
-                ClusterNodeName::parse("node-3").expect("valid name"),
-            ],
-            0,
-            None,
-            SchedulerMode::Random,
-            &crate::registry::uniform_capabilities(&[
-                ClusterNodeName::parse("node-1").expect("valid name"),
-                ClusterNodeName::parse("node-2").expect("valid name"),
-                ClusterNodeName::parse("node-3").expect("valid name"),
-            ]),
-        );
+        let schedule = graph
+            .schedule_for_domain_with_mode(
+                &domain,
+                &[
+                    ClusterNodeName::parse("node-1").expect("valid name"),
+                    ClusterNodeName::parse("node-2").expect("valid name"),
+                    ClusterNodeName::parse("node-3").expect("valid name"),
+                ],
+                0,
+                None,
+                SchedulerMode::Random,
+                &crate::registry::uniform_capabilities(&[
+                    ClusterNodeName::parse("node-1").expect("valid name"),
+                    ClusterNodeName::parse("node-2").expect("valid name"),
+                    ClusterNodeName::parse("node-3").expect("valid name"),
+                ]),
+            )
+            .assured("the fixture topology resolves");
 
         let owner = scheduled_node(&schedule, ModelKind::Ingestor, "ing")
             .assigned_single_node()
@@ -1045,19 +1142,21 @@ mod tests {
         let graph = registry
             .active_graph(&domain)
             .expect("graph should be installed");
-        let schedule = graph.schedule_for_domain(
-            &domain,
-            &[
-                ClusterNodeName::parse("node-1").expect("valid name"),
-                ClusterNodeName::parse("node-2").expect("valid name"),
-            ],
-            0,
-            None,
-            &crate::registry::uniform_capabilities(&[
-                ClusterNodeName::parse("node-1").expect("valid name"),
-                ClusterNodeName::parse("node-2").expect("valid name"),
-            ]),
-        );
+        let schedule = graph
+            .schedule_for_domain(
+                &domain,
+                &[
+                    ClusterNodeName::parse("node-1").expect("valid name"),
+                    ClusterNodeName::parse("node-2").expect("valid name"),
+                ],
+                0,
+                None,
+                &crate::registry::uniform_capabilities(&[
+                    ClusterNodeName::parse("node-1").expect("valid name"),
+                    ClusterNodeName::parse("node-2").expect("valid name"),
+                ]),
+            )
+            .assured("the fixture topology resolves");
 
         let intake = scheduled_node(&schedule, ModelKind::Ingestor, "ing")
             .assigned_single_node()
@@ -1124,19 +1223,21 @@ mod tests {
         let graph = registry
             .active_graph(&domain)
             .expect("graph should be installed");
-        let schedule = graph.schedule_for_domain(
-            &domain,
-            &[
-                ClusterNodeName::parse("node-1").expect("valid name"),
-                ClusterNodeName::parse("node-2").expect("valid name"),
-            ],
-            0,
-            None,
-            &crate::registry::uniform_capabilities(&[
-                ClusterNodeName::parse("node-1").expect("valid name"),
-                ClusterNodeName::parse("node-2").expect("valid name"),
-            ]),
-        );
+        let schedule = graph
+            .schedule_for_domain(
+                &domain,
+                &[
+                    ClusterNodeName::parse("node-1").expect("valid name"),
+                    ClusterNodeName::parse("node-2").expect("valid name"),
+                ],
+                0,
+                None,
+                &crate::registry::uniform_capabilities(&[
+                    ClusterNodeName::parse("node-1").expect("valid name"),
+                    ClusterNodeName::parse("node-2").expect("valid name"),
+                ]),
+            )
+            .assured("the fixture topology resolves");
 
         assert_eq!(
             scheduled_node(&schedule, ModelKind::Ingestor, "ing_a").assigned_single_node(),
@@ -1243,13 +1344,15 @@ mod tests {
         let graph = registry
             .active_graph(&domain)
             .assured("the batch installed the graph");
-        let schedule = graph.schedule_for_domain(
-            &domain,
-            &three_nodes(),
-            1,
-            None,
-            &crate::registry::uniform_capabilities(&three_nodes()),
-        );
+        let schedule = graph
+            .schedule_for_domain(
+                &domain,
+                &three_nodes(),
+                1,
+                None,
+                &crate::registry::uniform_capabilities(&three_nodes()),
+            )
+            .assured("the fixture topology resolves");
         let upstream = scheduled_node(&schedule, ModelKind::Relay, "events");
         let processor = scheduled_node(&schedule, ModelKind::Junction, "route");
         assert_eq!(processor.units.len(), 4);
@@ -1279,13 +1382,15 @@ mod tests {
             .expect("graph should be installed");
         let nodes = three_nodes();
 
-        let schedule = graph.schedule_for_domain(
-            &domain,
-            &nodes,
-            0,
-            None,
-            &crate::registry::uniform_capabilities(&nodes),
-        );
+        let schedule = graph
+            .schedule_for_domain(
+                &domain,
+                &nodes,
+                0,
+                None,
+                &crate::registry::uniform_capabilities(&nodes),
+            )
+            .assured("the fixture topology resolves");
 
         let relay = scheduled_node(&schedule, ModelKind::Relay, "tenant_events");
         let units = relay.units.keys().copied().collect::<Vec<_>>();
@@ -1324,13 +1429,15 @@ mod tests {
         assert_eq!(relay.execution_node(), None);
         assert_eq!(relay.execution_nodes().len(), 3);
 
-        let again = graph.schedule_for_domain(
-            &domain,
-            &nodes,
-            0,
-            None,
-            &crate::registry::uniform_capabilities(&nodes),
-        );
+        let again = graph
+            .schedule_for_domain(
+                &domain,
+                &nodes,
+                0,
+                None,
+                &crate::registry::uniform_capabilities(&nodes),
+            )
+            .assured("the fixture topology resolves");
         assert_eq!(again, schedule, "the same inputs place the same partitions");
 
         let _ = fs::remove_dir_all(path);
@@ -1348,13 +1455,15 @@ mod tests {
             .active_graph(&domain)
             .expect("graph should be installed");
 
-        let schedule = graph.schedule_for_domain(
-            &domain,
-            &three_nodes(),
-            1,
-            None,
-            &crate::registry::uniform_capabilities(&three_nodes()),
-        );
+        let schedule = graph
+            .schedule_for_domain(
+                &domain,
+                &three_nodes(),
+                1,
+                None,
+                &crate::registry::uniform_capabilities(&three_nodes()),
+            )
+            .assured("the fixture topology resolves");
 
         let relay = scheduled_node(&schedule, ModelKind::Relay, "tenant_state");
         assert_eq!(relay.units.len(), 2);
@@ -1396,19 +1505,21 @@ mod tests {
         let graph = registry
             .active_graph(&domain)
             .expect("graph should be installed");
-        let schedule = graph.schedule_for_domain(
-            &domain,
-            &[
-                ClusterNodeName::parse("node-1").expect("valid name"),
-                ClusterNodeName::parse("node-2").expect("valid name"),
-            ],
-            0,
-            None,
-            &crate::registry::uniform_capabilities(&[
-                ClusterNodeName::parse("node-1").expect("valid name"),
-                ClusterNodeName::parse("node-2").expect("valid name"),
-            ]),
-        );
+        let schedule = graph
+            .schedule_for_domain(
+                &domain,
+                &[
+                    ClusterNodeName::parse("node-1").expect("valid name"),
+                    ClusterNodeName::parse("node-2").expect("valid name"),
+                ],
+                0,
+                None,
+                &crate::registry::uniform_capabilities(&[
+                    ClusterNodeName::parse("node-1").expect("valid name"),
+                    ClusterNodeName::parse("node-2").expect("valid name"),
+                ]),
+            )
+            .assured("the fixture topology resolves");
 
         assert_eq!(
             scheduled_node(&schedule, ModelKind::Ingestor, "ing_a")
@@ -1439,21 +1550,23 @@ mod tests {
         let graph = registry
             .active_graph(&domain)
             .expect("graph should be installed");
-        let schedule = graph.schedule_for_domain(
-            &domain,
-            &[
-                ClusterNodeName::parse("node-1").expect("valid name"),
-                ClusterNodeName::parse("node-2").expect("valid name"),
-                ClusterNodeName::parse("node-3").expect("valid name"),
-            ],
-            0,
-            None,
-            &crate::registry::uniform_capabilities(&[
-                ClusterNodeName::parse("node-1").expect("valid name"),
-                ClusterNodeName::parse("node-2").expect("valid name"),
-                ClusterNodeName::parse("node-3").expect("valid name"),
-            ]),
-        );
+        let schedule = graph
+            .schedule_for_domain(
+                &domain,
+                &[
+                    ClusterNodeName::parse("node-1").expect("valid name"),
+                    ClusterNodeName::parse("node-2").expect("valid name"),
+                    ClusterNodeName::parse("node-3").expect("valid name"),
+                ],
+                0,
+                None,
+                &crate::registry::uniform_capabilities(&[
+                    ClusterNodeName::parse("node-1").expect("valid name"),
+                    ClusterNodeName::parse("node-2").expect("valid name"),
+                    ClusterNodeName::parse("node-3").expect("valid name"),
+                ]),
+            )
+            .assured("the fixture topology resolves");
 
         let ingestor_node = scheduled_node(&schedule, ModelKind::Ingestor, "ing")
             .assigned_single_node()
@@ -1537,24 +1650,28 @@ mod tests {
             named::<ClusterNodeName>("node-2"),
             named::<ClusterNodeName>("node-3"),
         ];
-        let expected = graph.schedule_for_domain_with_mode(
-            &domain,
-            &cluster_nodes,
-            0,
-            None,
-            SchedulerMode::Random,
-            &crate::registry::uniform_capabilities(&cluster_nodes),
-        );
+        let expected = graph
+            .schedule_for_domain_with_mode(
+                &domain,
+                &cluster_nodes,
+                0,
+                None,
+                SchedulerMode::Random,
+                &crate::registry::uniform_capabilities(&cluster_nodes),
+            )
+            .assured("the fixture topology resolves");
         for _ in 0..32 {
             assert_eq!(
-                graph.schedule_for_domain_with_mode(
-                    &domain,
-                    &cluster_nodes,
-                    0,
-                    None,
-                    SchedulerMode::Random,
-                    &crate::registry::uniform_capabilities(&cluster_nodes),
-                ),
+                graph
+                    .schedule_for_domain_with_mode(
+                        &domain,
+                        &cluster_nodes,
+                        0,
+                        None,
+                        SchedulerMode::Random,
+                        &crate::registry::uniform_capabilities(&cluster_nodes),
+                    )
+                    .assured("the fixture topology resolves"),
                 expected,
                 "periodic reconciliation must not move an unchanged random schedule"
             );
@@ -1598,13 +1715,15 @@ mod tests {
             named::<ClusterNodeName>("node-2"),
             named::<ClusterNodeName>("node-3"),
         ];
-        let schedule = graph.schedule_for_domain(
-            &domain,
-            &cluster_nodes,
-            0,
-            None,
-            &crate::registry::uniform_capabilities(&cluster_nodes),
-        );
+        let schedule = graph
+            .schedule_for_domain(
+                &domain,
+                &cluster_nodes,
+                0,
+                None,
+                &crate::registry::uniform_capabilities(&cluster_nodes),
+            )
+            .assured("the fixture topology resolves");
         let ingestor = scheduled_node(&schedule, ModelKind::Ingestor, "ing");
         assert_eq!(ingestor.single_unit().assigned_nodes, cluster_nodes);
         assert_eq!(ingestor.execution_node(), None);
@@ -1635,14 +1754,16 @@ mod tests {
         let observed_cross_node_path = (0..32).any(|suffix| {
             let scheduled_domain =
                 DomainName::parse(&format!("test_{suffix}")).expect("valid test domain");
-            let schedule = graph.schedule_for_domain_with_mode(
-                &scheduled_domain,
-                &cluster_nodes,
-                0,
-                None,
-                SchedulerMode::Random,
-                &crate::registry::uniform_capabilities(&cluster_nodes),
-            );
+            let schedule = graph
+                .schedule_for_domain_with_mode(
+                    &scheduled_domain,
+                    &cluster_nodes,
+                    0,
+                    None,
+                    SchedulerMode::Random,
+                    &crate::registry::uniform_capabilities(&cluster_nodes),
+                )
+                .assured("the fixture topology resolves");
             let ingestor =
                 scheduled_node(&schedule, ModelKind::Ingestor, "ing").assigned_single_node();
             let processor = scheduled_node(&schedule, ModelKind::Deduplicator, "p99_proc")
@@ -1706,19 +1827,21 @@ mod tests {
         let graph = registry
             .active_graph(&domain)
             .expect("graph should be installed");
-        let schedule = graph.schedule_for_domain(
-            &domain,
-            &[
-                ClusterNodeName::parse("node-1").expect("valid name"),
-                ClusterNodeName::parse("node-2").expect("valid name"),
-            ],
-            0,
-            None,
-            &crate::registry::uniform_capabilities(&[
-                ClusterNodeName::parse("node-1").expect("valid name"),
-                ClusterNodeName::parse("node-2").expect("valid name"),
-            ]),
-        );
+        let schedule = graph
+            .schedule_for_domain(
+                &domain,
+                &[
+                    ClusterNodeName::parse("node-1").expect("valid name"),
+                    ClusterNodeName::parse("node-2").expect("valid name"),
+                ],
+                0,
+                None,
+                &crate::registry::uniform_capabilities(&[
+                    ClusterNodeName::parse("node-1").expect("valid name"),
+                    ClusterNodeName::parse("node-2").expect("valid name"),
+                ]),
+            )
+            .assured("the fixture topology resolves");
 
         assert_eq!(
             scheduled_node(&schedule, ModelKind::Ingestor, "ing_a")
@@ -1800,21 +1923,23 @@ mod tests {
         let graph = registry
             .active_graph(&domain)
             .expect("graph should be installed");
-        let schedule = graph.schedule_for_domain(
-            &domain,
-            &[
-                ClusterNodeName::parse("node-1").expect("valid name"),
-                ClusterNodeName::parse("node-2").expect("valid name"),
-                ClusterNodeName::parse("node-3").expect("valid name"),
-            ],
-            0,
-            None,
-            &crate::registry::uniform_capabilities(&[
-                ClusterNodeName::parse("node-1").expect("valid name"),
-                ClusterNodeName::parse("node-2").expect("valid name"),
-                ClusterNodeName::parse("node-3").expect("valid name"),
-            ]),
-        );
+        let schedule = graph
+            .schedule_for_domain(
+                &domain,
+                &[
+                    ClusterNodeName::parse("node-1").expect("valid name"),
+                    ClusterNodeName::parse("node-2").expect("valid name"),
+                    ClusterNodeName::parse("node-3").expect("valid name"),
+                ],
+                0,
+                None,
+                &crate::registry::uniform_capabilities(&[
+                    ClusterNodeName::parse("node-1").expect("valid name"),
+                    ClusterNodeName::parse("node-2").expect("valid name"),
+                    ClusterNodeName::parse("node-3").expect("valid name"),
+                ]),
+            )
+            .assured("the fixture topology resolves");
 
         assert_eq!(
             scheduled_node(&schedule, ModelKind::Ingestor, "http_ing")
@@ -1829,13 +1954,15 @@ mod tests {
 
         let live_nodes = [named("node-1"), named("node-2"), named("node-3")];
         for eligible in [Vec::new(), vec![named("node-2")]] {
-            let mut schedule = graph.schedule_for_domain(
-                &domain,
-                &eligible,
-                0,
-                None,
-                &crate::registry::uniform_capabilities(&eligible),
-            );
+            let mut schedule = graph
+                .schedule_for_domain(
+                    &domain,
+                    &eligible,
+                    0,
+                    None,
+                    &crate::registry::uniform_capabilities(&eligible),
+                )
+                .assured("the fixture topology resolves");
             super::assign_server_listener_nodes(&mut schedule, &live_nodes);
             let listener = scheduled_node(&schedule, ModelKind::Ingestor, "http_ing");
             assert_eq!(listener.single_unit().assigned_nodes, live_nodes);
@@ -1909,34 +2036,38 @@ mod tests {
         let graph = registry
             .active_graph(&domain)
             .expect("graph should be installed");
-        let initial_schedule = graph.schedule_for_domain(
-            &domain,
-            &[
-                ClusterNodeName::parse("node-1").expect("valid name"),
-                ClusterNodeName::parse("node-2").expect("valid name"),
-                ClusterNodeName::parse("node-3").expect("valid name"),
-            ],
-            0,
-            None,
-            &crate::registry::uniform_capabilities(&[
-                ClusterNodeName::parse("node-1").expect("valid name"),
-                ClusterNodeName::parse("node-2").expect("valid name"),
-                ClusterNodeName::parse("node-3").expect("valid name"),
-            ]),
-        );
-        let reduced_schedule = graph.schedule_for_domain(
-            &domain,
-            &[
-                ClusterNodeName::parse("node-1").expect("valid name"),
-                ClusterNodeName::parse("node-3").expect("valid name"),
-            ],
-            0,
-            None,
-            &crate::registry::uniform_capabilities(&[
-                ClusterNodeName::parse("node-1").expect("valid name"),
-                ClusterNodeName::parse("node-3").expect("valid name"),
-            ]),
-        );
+        let initial_schedule = graph
+            .schedule_for_domain(
+                &domain,
+                &[
+                    ClusterNodeName::parse("node-1").expect("valid name"),
+                    ClusterNodeName::parse("node-2").expect("valid name"),
+                    ClusterNodeName::parse("node-3").expect("valid name"),
+                ],
+                0,
+                None,
+                &crate::registry::uniform_capabilities(&[
+                    ClusterNodeName::parse("node-1").expect("valid name"),
+                    ClusterNodeName::parse("node-2").expect("valid name"),
+                    ClusterNodeName::parse("node-3").expect("valid name"),
+                ]),
+            )
+            .assured("the fixture topology resolves");
+        let reduced_schedule = graph
+            .schedule_for_domain(
+                &domain,
+                &[
+                    ClusterNodeName::parse("node-1").expect("valid name"),
+                    ClusterNodeName::parse("node-3").expect("valid name"),
+                ],
+                0,
+                None,
+                &crate::registry::uniform_capabilities(&[
+                    ClusterNodeName::parse("node-1").expect("valid name"),
+                    ClusterNodeName::parse("node-3").expect("valid name"),
+                ]),
+            )
+            .assured("the fixture topology resolves");
 
         assert_eq!(
             scheduled_node(&initial_schedule, ModelKind::Ingestor, "ws_ing")

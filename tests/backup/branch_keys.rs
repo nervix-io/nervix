@@ -13,6 +13,7 @@ use nervix_backup::{
     MaterializedIdentitiesRecord, StateField, StateValue, WasmStateDescriptor,
     WindowStateDescriptor,
 };
+use nervix_models::BranchKeyFields;
 
 use super::{
     restore::{copy_of_archive, write_archive},
@@ -34,12 +35,13 @@ enum KeyAlteration {
 }
 
 impl KeyAlteration {
-    fn alter(&self, key: &mut Option<Vec<StateField>>) {
-        let Some(fields) = key.as_mut() else {
-            panic!("every key a scenario alters names a concrete branch");
-        };
+    fn alter(&self, key: &mut BranchKeyFields<StateField>) {
+        let (fields, origin) = std::mem::replace(key, BranchKeyFields::Unbranched)
+            .into_parts()
+            .assured("every key a scenario alters names a concrete branch");
+        let mut fields = fields.into_vec();
         match self {
-            Self::Rename { field, name } => Self::named(fields, field).name = name.clone(),
+            Self::Rename { field, name } => Self::named(&mut fields, field).name = name.clone(),
             Self::Remove { field } => {
                 let before = fields.len();
                 fields.retain(|archived| archived.name != *field);
@@ -50,16 +52,16 @@ impl KeyAlteration {
                 value: StateValue::String("added".to_string()),
             }),
             Self::Retype { field } => {
-                Self::named(fields, field).value = StateValue::String("retyped".to_string());
+                Self::named(&mut fields, field).value = StateValue::String("retyped".to_string());
             }
             Self::Unbranch => {
-                *key = None;
                 return;
             }
         }
         // An archived key lists its fields in name order, which the archive reader requires of
         // every key, so only the restore's check against the branch declaration can refuse it.
         fields.sort_by(|left, right| left.name.cmp(&right.name));
+        *key = BranchKeyFields::branched(fields.into_boxed_slice(), origin);
     }
 
     /// The field of `fields` named `field`. A scenario's branch keys hold a few fields each, which

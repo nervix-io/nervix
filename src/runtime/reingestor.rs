@@ -418,6 +418,12 @@ impl Runtime {
                 .map(|row| batch.keys[*row].clone())
                 .collect::<Vec<_>>();
             let keys = match &output.branch {
+                BoundRouteBranch::Inherited(_) => {
+                    return Err(PlannedGeneralFailure::new(
+                        Report::new(PlannedGeneralError::InheritedBranchConstruction),
+                        batch.acks.clone(),
+                    ));
+                }
                 BoundRouteBranch::Unbranched => vec![None; output_batch.batch().num_rows()],
                 BoundRouteBranch::Preserved => input_keys,
                 BoundRouteBranch::Constructed(branch_program) => {
@@ -431,6 +437,7 @@ impl Runtime {
                         &output_batch,
                         &input_keys,
                         &scope.side_inputs,
+                        None,
                     )
                     .await
                     .map_err(|error| PlannedGeneralFailure::new(error, batch.acks.clone()))?;

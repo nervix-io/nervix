@@ -336,7 +336,7 @@ async fn a_partition_handoff_hides_only_its_materialized_dependency_until_the_fe
     let nervix_models::ResolvedBranching::Branched { partitions, .. } = &mut branching else {
         unreachable!("the fixture declares a named branch");
     };
-    *partitions = nervix_models::BranchPartitions::Direct(nonzero_ext::nonzero!(2u16));
+    *partitions = nervix_models::ResolvedBranchPartitions::Direct(nonzero_ext::nonzero!(2u16));
     let partitioning = RelayPartitioning::of(Some(&branching));
     let services = Arc::new(RelayBoundaryServices::new(
         RelayBoundaryFanout::branch_collapse_with_capacity(nonzero_ext::nonzero!(1usize)),
@@ -431,7 +431,11 @@ async fn a_partition_handoff_hides_only_its_materialized_dependency_until_the_fe
     let routing = DomainRoutingSnapshot {
         relay_services: [(relay.clone(), services.clone())].into_iter().collect(),
         relay_branchings: [(relay.clone(), branching)].into_iter().collect(),
-        materialized_stream_reads: runtime.materialized_relay_publications(&domain, &specs),
+        materialized_stream_reads: runtime.materialized_relay_publications(
+            &domain,
+            &specs,
+            &HashMap::default(),
+        ),
         materialized_stream_specs: specs,
         materialized_stream_owner_nodes: [(
             relay.clone(),

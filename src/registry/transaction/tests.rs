@@ -61,13 +61,15 @@ pub(super) fn scheduled_snapshot(
         .graph;
     let node = ClusterNodeName::parse("node-a")
         .assured("the scheduler fixture node is an identifier-shaped literal");
-    let schedule = graph.schedule_for_domain(
-        &domain,
-        std::slice::from_ref(&node),
-        0,
-        None,
-        &crate::registry::uniform_capabilities(std::slice::from_ref(&node)),
-    );
+    let schedule = graph
+        .schedule_for_domain(
+            &domain,
+            std::slice::from_ref(&node),
+            0,
+            None,
+            &crate::registry::uniform_capabilities(std::slice::from_ref(&node)),
+        )
+        .assured("the fixture topology resolves");
     TransactionPlanningSnapshot {
         parameters: nervix_models::ClusterParameterValues::default(),
         domain: domain_state(status),
@@ -100,11 +102,11 @@ pub(super) fn preserve_schedule(
     _graph: Option<ActiveGraph>,
     current: Option<&DomainSchedule>,
     _attribution: &ImpactAttribution,
-) -> TransactionScheduleDecision {
-    TransactionScheduleDecision {
+) -> Result<TransactionScheduleDecision, error_stack::Report<crate::registry::RegistryError>> {
+    Ok(TransactionScheduleDecision {
         schedule: current.cloned(),
         ownership_moves: CanonicalImpactSet::default(),
-    }
+    })
 }
 
 fn set_partitions(count: std::num::NonZeroU16) -> Statement {
@@ -122,8 +124,8 @@ fn schedule_moving_by_tenant_from_four_to_eight() -> DomainSchedule {
             named("by_tenant"),
             nervix_models::BranchPartitionEpoch::changed(
                 None,
-                nervix_models::BranchPartitions::Direct(nonzero!(4u16)),
-                nervix_models::BranchPartitions::Direct(nonzero!(8u16)),
+                nervix_models::ResolvedBranchPartitions::Direct(nonzero!(4u16)),
+                nervix_models::ResolvedBranchPartitions::Direct(nonzero!(8u16)),
             ),
         )]),
     )
@@ -565,15 +567,17 @@ fn ownership_moves_raise_a_running_step_to_entity_pause() {
         &[statement],
         0,
         false,
-        move |_graph, current, attribution| TransactionScheduleDecision {
-            schedule: current.cloned(),
-            ownership_moves: CanonicalImpactSet::new([OwnershipMoveImpact {
-                node: nervix_models::ImpactNodeCoverage::all_executions(moved.clone()),
-                unit: nervix_models::Unit::SINGLE,
-                source: source.clone(),
-                destination: destination.clone(),
-                attribution: attribution.clone(),
-            }]),
+        move |_graph, current, attribution| {
+            Ok(TransactionScheduleDecision {
+                schedule: current.cloned(),
+                ownership_moves: CanonicalImpactSet::new([OwnershipMoveImpact {
+                    node: nervix_models::ImpactNodeCoverage::all_executions(moved.clone()),
+                    unit: nervix_models::Unit::SINGLE,
+                    source: source.clone(),
+                    destination: destination.clone(),
+                    attribution: attribution.clone(),
+                }]),
+            })
         },
     )
     .assured("the model creation and captured schedule decision are valid");
@@ -615,23 +619,29 @@ fn stopped_schedule_move_keeps_the_execution_gate_without_reporting_a_pause() {
         &[statement],
         0,
         false,
-        move |graph, _current, attribution| TransactionScheduleDecision {
-            schedule: graph.map(|graph| {
-                graph.schedule_for_domain(
-                    &domain,
-                    std::slice::from_ref(&destination),
-                    0,
-                    None,
-                    &crate::registry::uniform_capabilities(std::slice::from_ref(&destination)),
-                )
-            }),
-            ownership_moves: CanonicalImpactSet::new([OwnershipMoveImpact {
-                node: ImpactNodeCoverage::all_executions(moved.clone()),
-                unit: nervix_models::Unit::SINGLE,
-                source: source.clone(),
-                destination: destination.clone(),
-                attribution: attribution.clone(),
-            }]),
+        move |graph, _current, attribution| {
+            Ok(TransactionScheduleDecision {
+                schedule: graph.map(|graph| {
+                    graph
+                        .schedule_for_domain(
+                            &domain,
+                            std::slice::from_ref(&destination),
+                            0,
+                            None,
+                            &crate::registry::uniform_capabilities(std::slice::from_ref(
+                                &destination,
+                            )),
+                        )
+                        .assured("the fixture topology resolves")
+                }),
+                ownership_moves: CanonicalImpactSet::new([OwnershipMoveImpact {
+                    node: ImpactNodeCoverage::all_executions(moved.clone()),
+                    unit: nervix_models::Unit::SINGLE,
+                    source: source.clone(),
+                    destination: destination.clone(),
+                    attribution: attribution.clone(),
+                }]),
+            })
         },
     )
     .assured("the stopped relay change has a captured ownership transition");
@@ -718,17 +728,23 @@ fn entity_pause_report_and_execution_share_the_exact_affected_graph() {
         &statements,
         0,
         false,
-        move |graph, _current, _attribution| TransactionScheduleDecision {
-            schedule: graph.map(|graph| {
-                graph.schedule_for_domain(
-                    &domain,
-                    std::slice::from_ref(&cluster_node),
-                    0,
-                    None,
-                    &crate::registry::uniform_capabilities(std::slice::from_ref(&cluster_node)),
-                )
-            }),
-            ownership_moves: CanonicalImpactSet::default(),
+        move |graph, _current, _attribution| {
+            Ok(TransactionScheduleDecision {
+                schedule: graph.map(|graph| {
+                    graph
+                        .schedule_for_domain(
+                            &domain,
+                            std::slice::from_ref(&cluster_node),
+                            0,
+                            None,
+                            &crate::registry::uniform_capabilities(std::slice::from_ref(
+                                &cluster_node,
+                            )),
+                        )
+                        .assured("the fixture topology resolves")
+                }),
+                ownership_moves: CanonicalImpactSet::default(),
+            })
         },
     )
     .assured("the junction mode change has a complete scheduled plan");
@@ -848,17 +864,23 @@ fn schedule_reassignment_raises_a_dynamic_change_to_an_entity_pause() {
         &[statement],
         0,
         false,
-        move |graph, _current, _attribution| TransactionScheduleDecision {
-            schedule: graph.map(|graph| {
-                graph.schedule_for_domain(
-                    &domain,
-                    std::slice::from_ref(&destination),
-                    0,
-                    None,
-                    &crate::registry::uniform_capabilities(std::slice::from_ref(&destination)),
-                )
-            }),
-            ownership_moves: CanonicalImpactSet::default(),
+        move |graph, _current, _attribution| {
+            Ok(TransactionScheduleDecision {
+                schedule: graph.map(|graph| {
+                    graph
+                        .schedule_for_domain(
+                            &domain,
+                            std::slice::from_ref(&destination),
+                            0,
+                            None,
+                            &crate::registry::uniform_capabilities(std::slice::from_ref(
+                                &destination,
+                            )),
+                        )
+                        .assured("the fixture topology resolves")
+                }),
+                ownership_moves: CanonicalImpactSet::default(),
+            })
         },
     )
     .assured("the dynamic relay change has a captured reassignment");
@@ -905,17 +927,23 @@ fn schedule_rebuild_raises_entity_creation_to_a_domain_pause() {
         &[statement],
         0,
         false,
-        move |graph, _current, _attribution| TransactionScheduleDecision {
-            schedule: graph.map(|graph| {
-                graph.schedule_for_domain(
-                    &domain,
-                    std::slice::from_ref(&cluster_node),
-                    0,
-                    None,
-                    &crate::registry::uniform_capabilities(std::slice::from_ref(&cluster_node)),
-                )
-            }),
-            ownership_moves: CanonicalImpactSet::default(),
+        move |graph, _current, _attribution| {
+            Ok(TransactionScheduleDecision {
+                schedule: graph.map(|graph| {
+                    graph
+                        .schedule_for_domain(
+                            &domain,
+                            std::slice::from_ref(&cluster_node),
+                            0,
+                            None,
+                            &crate::registry::uniform_capabilities(std::slice::from_ref(
+                                &cluster_node,
+                            )),
+                        )
+                        .assured("the fixture topology resolves")
+                }),
+                ownership_moves: CanonicalImpactSet::default(),
+            })
         },
     )
     .assured("the relay creation has a captured schedule rebuild");
@@ -970,17 +998,23 @@ fn drop_recreate_retains_both_sides_of_a_rewired_graph() {
         &statements,
         0,
         false,
-        move |graph, _current, _attribution| TransactionScheduleDecision {
-            schedule: graph.map(|graph| {
-                graph.schedule_for_domain(
-                    &domain,
-                    std::slice::from_ref(&cluster_node),
-                    0,
-                    None,
-                    &crate::registry::uniform_capabilities(std::slice::from_ref(&cluster_node)),
-                )
-            }),
-            ownership_moves: CanonicalImpactSet::default(),
+        move |graph, _current, _attribution| {
+            Ok(TransactionScheduleDecision {
+                schedule: graph.map(|graph| {
+                    graph
+                        .schedule_for_domain(
+                            &domain,
+                            std::slice::from_ref(&cluster_node),
+                            0,
+                            None,
+                            &crate::registry::uniform_capabilities(std::slice::from_ref(
+                                &cluster_node,
+                            )),
+                        )
+                        .assured("the fixture topology resolves")
+                }),
+                ownership_moves: CanonicalImpactSet::default(),
+            })
         },
     )
     .assured("the junction replacement leaves a valid graph");

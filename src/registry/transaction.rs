@@ -17,7 +17,7 @@ use error_stack::{Report, ResultExt as _};
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::{
     ActivationAction, ActivationImpact, ActualExecutionStepImpact, AffectedTopology,
-    AttributedGateBoundary, AttributedImpactNode, BranchName, CanonicalImpactSet,
+    AttributedGateBoundary, AttributedImpactNode, BranchName, BranchPartitions, CanonicalImpactSet,
     CommandExecutionReference, ConfigurationImpact, ConfigurationTransition, DomainLifecycleAction,
     DomainLifecycleImpact, DomainName, DomainSchedule, DomainState as ControlDomainState,
     DomainStatus, DynamicModelUpdate, ExecutionStepImpactReport, ForceFlushImpact,
@@ -26,11 +26,11 @@ use nervix_models::{
     ImpactTopologyEdge, ModelChangeAspect, ModelIndex, NodeRef, OperationImpactReason,
     OperationImpactReport, OwnershipMoveImpact, PauseRequirement, PlannedExecutionStepImpact,
     QuiesceLevel, QuiesceSubgraph, RebuildImpact, RebuildReason, RequestedResourceVersion,
-    ResetWasmState, ResourceBindingImpact, ResourceCatalogAction, ResourceCatalogImpact,
-    ResourceName, ResourceUploads, ResourceVersionResolutionError, StateBranchSelectionError,
-    StateResetImpact, Statement, TransactionCommitPlanStep, TransactionCommitStepKind,
-    TransactionImpactReport, TransactionOperation, TransactionOperationNumber,
-    TransactionOperationRange, TransactionPosition,
+    ResetWasmState, ResolvedBranchPartitions, ResourceBindingImpact, ResourceCatalogAction,
+    ResourceCatalogImpact, ResourceName, ResourceUploads, ResourceVersionResolutionError,
+    StateBranchSelectionError, StateResetImpact, Statement, TransactionCommitPlanStep,
+    TransactionCommitStepKind, TransactionImpactReport, TransactionOperation,
+    TransactionOperationNumber, TransactionOperationRange, TransactionPosition,
 };
 use thiserror::Error;
 
@@ -164,6 +164,8 @@ impl PlannedTransaction {
 pub(crate) enum TransactionPlanningError {
     #[error("cluster parameters have not been seeded")]
     ClusterParametersUnseeded,
+    #[error("domain '{domain}' schedule could not resolve its partition topology")]
+    Schedule { domain: DomainName },
     #[error("domain '{domain}' does not exist")]
     DomainNotFound { domain: DomainName },
     #[error("domain '{domain}' is paused by a model alteration")]
@@ -278,7 +280,8 @@ impl TransactionPlanningError {
             | Self::UdfPreparation { operation }
             | Self::BranchPartitionsStillMoving { operation, .. } => Some(*operation),
             Self::ResetIdentityMissing { operation } => Some(*operation),
-            Self::ClusterParametersUnseeded
+            Self::Schedule { .. }
+            | Self::ClusterParametersUnseeded
             | Self::DomainNotFound { .. }
             | Self::DomainPaused { .. }
             | Self::ConcurrentDomainAlter { .. }
@@ -485,7 +488,7 @@ impl Registry {
             Option<ActiveGraph>,
             Option<&DomainSchedule>,
             &ImpactAttribution,
-        ) -> TransactionScheduleDecision,
+        ) -> Result<TransactionScheduleDecision, Report<super::RegistryError>>,
     {
         let parameters = snapshot.parameters;
         let domain = snapshot.domain.id.clone();
@@ -741,7 +744,7 @@ impl Registry {
             Option<ActiveGraph>,
             Option<&DomainSchedule>,
             &ImpactAttribution,
-        ) -> TransactionScheduleDecision,
+        ) -> Result<TransactionScheduleDecision, Report<super::RegistryError>>,
     {
         let ModelRunPlanningInput {
             parameters,
@@ -893,37 +896,18 @@ impl Registry {
             });
         }
         let expected_schedule = current_schedule.clone();
-        let (planned, next_schedule, ownership_moves, base_level) = match preflight.planned {
-            Some(planned) => {
-                let base_level = planned.quiesce().level();
-                if planned.is_noop() {
-                    (
-                        Some(planned),
-                        current_schedule,
-                        CanonicalImpactSet::default(),
-                        QuiesceLevel::Dynamic,
-                    )
-                } else {
-                    let decision = schedule(
-                        planned.candidate_graph(),
-                        current_schedule.as_ref(),
-                        &attribution,
-                    );
-                    (
-                        Some(planned),
-                        decision.schedule,
-                        decision.ownership_moves,
-                        base_level,
-                    )
-                }
-            }
-            None => (
-                None,
-                current_schedule,
-                CanonicalImpactSet::default(),
-                QuiesceLevel::Dynamic,
-            ),
-        };
+        let planned = preflight.planned;
+        let (decision, base_level) = schedule_model_run(
+            domain,
+            planned.as_ref(),
+            current_schedule,
+            &attribution,
+            schedule,
+        )?;
+        let TransactionScheduleDecision {
+            schedule: next_schedule,
+            ownership_moves,
+        } = decision;
         let schedule_delta =
             ScheduleDelta::between(expected_schedule.as_ref(), next_schedule.as_ref());
         let ownership_level = if ownership_moves.is_empty() {
@@ -1062,6 +1046,44 @@ fn ensure_domain_not_paused(
     Ok(())
 }
 
+/// Applies scheduling only to a complete mutation that changes the graph, retaining the
+/// current schedule for incomplete and no-op model runs.
+fn schedule_model_run<F>(
+    domain: &DomainName,
+    planned: Option<&PlannedMutations>,
+    current_schedule: Option<DomainSchedule>,
+    attribution: &ImpactAttribution,
+    schedule: &mut F,
+) -> Result<(TransactionScheduleDecision, QuiesceLevel), Report<TransactionPlanningError>>
+where
+    F: FnMut(
+        Option<ActiveGraph>,
+        Option<&DomainSchedule>,
+        &ImpactAttribution,
+    ) -> Result<TransactionScheduleDecision, Report<super::RegistryError>>,
+{
+    if let Some(planned) = planned
+        && !planned.is_noop()
+    {
+        let decision = schedule(
+            planned.candidate_graph(),
+            current_schedule.as_ref(),
+            attribution,
+        )
+        .change_context(TransactionPlanningError::Schedule {
+            domain: domain.clone(),
+        })?;
+        return Ok((decision, planned.quiesce().level()));
+    }
+    Ok((
+        TransactionScheduleDecision {
+            schedule: current_schedule,
+            ownership_moves: CanonicalImpactSet::default(),
+        },
+        QuiesceLevel::Dynamic,
+    ))
+}
+
 /// `ALTER BRANCH … SET PARTITIONS` begins the branch's next partition epoch on a running, paused
 /// or stopped domain alike. While keys placed under the epoch's previous count may still lie
 /// outside their partition, a change to yet another count is refused, so every key keeps exactly
@@ -1087,7 +1109,14 @@ fn ensure_branch_partitions_change_is_settled(
     let Some(transition) = &epoch.transition else {
         return Ok(());
     };
-    if requested == epoch.partitions {
+    let unchanged = match (requested, epoch.partitions) {
+        (BranchPartitions::Direct(requested), ResolvedBranchPartitions::Direct(current)) => {
+            requested == current
+        }
+        _ => schedule.nodes.get(&NodeRef::new(nervix_models::ModelKind::Branch, &alter.branch))
+            .is_some_and(|node| matches!(node.config.as_ref(), nervix_models::Model::Branch(branch) if branch.partitions == requested)),
+    };
+    if unchanged {
         return Ok(());
     }
     Err(Report::new(

@@ -1338,7 +1338,7 @@ impl AlterBranch {
             .iter()
             .map(|operation| match operation {
                 AlterBranchOperation::SetPartitions { partitions } => {
-                    format!("SET PARTITIONS {}", partitions.count())
+                    format!("SET PARTITIONS {partitions}")
                 }
             })
             .collect::<Vec<_>>()
@@ -1881,7 +1881,7 @@ impl CreateBranch {
         // One partition is the default every declaration without a count has, so its canonical
         // rendering omits it.
         if self.partitions != BranchPartitions::ONE {
-            rendered.push_str(&format!(" PARTITIONS {}", self.partitions.count()));
+            rendered.push_str(&format!(" PARTITIONS {}", self.partitions));
         }
         if let Some(eviction) = &self.eviction {
             match eviction {

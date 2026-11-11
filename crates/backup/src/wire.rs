@@ -11,6 +11,57 @@
 
 use rkyv::{Archive, Deserialize, Serialize};
 
+#[derive(Debug, Clone, PartialEq, Eq, Archive, Serialize, Deserialize)]
+pub(crate) struct PartitionTopologyWire {
+    pub domain: String,
+    pub sources: Vec<PartitionSourceWire>,
+    pub branches: Vec<InheritedLayoutWire>,
+    pub suspended: Vec<String>,
+    pub epochs: Vec<PartitionEpochWire>,
+    pub holding: Vec<(String, Vec<UnitWire>)>,
+    pub intake_units: Vec<(String, u16)>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Archive, Serialize, Deserialize)]
+pub(crate) struct PartitionSourceWire {
+    pub name: String,
+    pub configuration: [u8; 32],
+    pub partitions: Option<ExternalPartitionSetWire>,
+    pub epoch: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Archive, Serialize, Deserialize)]
+pub(crate) enum ExternalPartitionSetWire {
+    Unpartitioned,
+    Partitioned(u32),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Archive, Serialize, Deserialize)]
+pub(crate) struct InheritedLayoutWire {
+    pub name: String,
+    pub layout: InheritedGroupingWire,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Archive, Serialize, Deserialize)]
+pub(crate) enum InheritedGroupingWire {
+    Identity(u16),
+    Grouped { source_count: u32, groups: u16 },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Archive, Serialize, Deserialize)]
+pub(crate) enum PartitionLayoutWire {
+    Direct(u16),
+    Inherited(u16),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Archive, Serialize, Deserialize)]
+pub(crate) struct PartitionEpochWire {
+    pub name: String,
+    pub number: u64,
+    pub partitions: PartitionLayoutWire,
+    pub previous: Option<PartitionLayoutWire>,
+}
+
 /// The archive's eight-byte, four-byte-aligned rank for an execution unit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Archive, Serialize, Deserialize)]
 pub(crate) struct UnitWire {
@@ -280,7 +331,7 @@ pub(crate) struct WasmStateDescriptorWire {
     pub(crate) unit: UnitWire,
     pub(crate) schema: [u8; 32],
     pub(crate) branch_fingerprint: Option<[u8; 32]>,
-    pub(crate) branch: Option<Vec<StateField>>,
+    pub(crate) branch: nervix_models::BranchKeyFields<StateField>,
     pub(crate) generation: u64,
     pub(crate) revision: u64,
 }
@@ -316,7 +367,7 @@ pub(crate) struct BranchLifecycleWire {
 
 #[derive(Debug, Clone, PartialEq, Archive, Serialize, Deserialize)]
 pub(crate) struct BranchLifecycleEntryWire {
-    pub(crate) key: Option<Vec<StateField>>,
+    pub(crate) key: nervix_models::BranchKeyFields<StateField>,
     pub(crate) last_ingestion_unix_nanos: i64,
     pub(crate) incarnation: u64,
 }

@@ -24,9 +24,9 @@ impl Arbitrary<'_> {
     /// An absent key, or one to three distinct, canonically ordered fields. Values nest at most
     /// twice with at most three elements per collection. Datetimes are valid RFC 3339 and every
     /// float is finite, including signed zeros, so runtime branch validation can read every key.
-    pub fn remote_branch_key(&mut self) -> Option<Vec<RemoteRuntimeField>> {
+    pub fn remote_branch_key(&mut self) -> nervix_models::RemoteBranchKey {
         if !self.entropy().flag() {
-            return None;
+            return nervix_models::RemoteBranchKey::Unbranched;
         }
         let count = self.entropy().count(2) + 1;
         let mut fields = Vec::with_capacity(count);
@@ -37,7 +37,25 @@ impl Arbitrary<'_> {
                 value,
             });
         }
-        Some(fields)
+        if self.entropy().flag() {
+            nervix_models::RemoteBranchKey::Direct(fields.into_boxed_slice())
+        } else {
+            let partition =
+                nervix_models::ExternalPartition::new(u32::from_le_bytes(bytes(self.entropy())));
+            nervix_models::RemoteBranchKey::Inherited(Box::new(
+                nervix_models::InheritedRemoteBranchKey {
+                    fields: fields.into_boxed_slice(),
+                    origin: nervix_models::InheritedPartitionOrigin {
+                        partition,
+                        unit: nervix_models::Unit::partition(partition.index()),
+                        epoch: nervix_models::PartitionEpochNumber::new(
+                            std::num::NonZeroU64::new(u64::from_le_bytes(bytes(self.entropy())))
+                                .unwrap_or(std::num::NonZeroU64::MIN),
+                        ),
+                    },
+                },
+            ))
+        }
     }
 
     fn remote_branch_value(&mut self, depth: u8) -> Value {
@@ -131,10 +149,11 @@ fn bytes<const N: usize>(entropy: &mut Entropy<'_>) -> [u8; N] {
 /// every float bit. Unlike ordinary floating equality, this distinguishes both signed zeros and
 /// NaN payloads, including floats nested in arrays and vectors.
 pub fn assert_remote_keys_eq(
-    actual: &Option<Vec<RemoteRuntimeField>>,
-    expected: &Option<Vec<RemoteRuntimeField>>,
+    actual: &nervix_models::RemoteBranchKey,
+    expected: &nervix_models::RemoteBranchKey,
 ) {
-    match (actual, expected) {
+    assert_eq!(actual.inherited_origin(), expected.inherited_origin());
+    match (actual.fields(), expected.fields()) {
         (None, None) => {}
         (Some(actual), Some(expected)) => {
             assert_eq!(actual.len(), expected.len());
@@ -172,11 +191,11 @@ fn assert_elements_eq(actual: &[Element], expected: &[Element]) {
 mod tests {
     use super::*;
 
-    fn key(value: Value) -> Option<Vec<RemoteRuntimeField>> {
-        Some(vec![RemoteRuntimeField {
+    fn key(value: Value) -> nervix_models::RemoteBranchKey {
+        nervix_models::RemoteBranchKey::Direct(Box::new([RemoteRuntimeField {
             name: "value".to_string(),
             value,
-        }])
+        }]))
     }
 
     #[test]

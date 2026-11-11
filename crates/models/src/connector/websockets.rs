@@ -203,6 +203,7 @@ const WEBSOCKETS_CONNECTION_METADATA: IngestorMetadataDeclaration =
 
 impl IngestorDeclaration for WebsocketsConnectionIngestor {
     const CAPABILITIES: IngestorEntityCapabilities = IngestorEntityCapabilities {
+        external_partitions: crate::IngestorExternalPartitions::None,
         events: crate::DeclaredEvents::NONE,
         instancing: crate::IngestorInstancingCapability::Single,
         headers: Some(HeaderModel::lowercase(HeaderLayout::RepeatsByName)),
@@ -288,6 +289,7 @@ const WEBSOCKETS_ENDPOINT_METADATA: IngestorMetadataDeclaration =
 
 impl IngestorDeclaration for WebsocketsEndpointIngestor {
     const CAPABILITIES: IngestorEntityCapabilities = IngestorEntityCapabilities {
+        external_partitions: crate::IngestorExternalPartitions::None,
         events: crate::DeclaredEvents::NONE,
         instancing: crate::IngestorInstancingCapability::Single,
         // The opening HTTP upgrade request's fields, as the server's header map keeps them: names in

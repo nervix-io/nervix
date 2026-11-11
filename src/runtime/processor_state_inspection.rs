@@ -541,7 +541,7 @@ impl From<StateInspectionBranchSelection> for ProcessorStateSelection {
 
 /// One execution unit's page of the rows its reorderer or correlator branches hold.
 pub(crate) struct ProcessorStatePage {
-    pub(crate) partition_catalog: Option<BTreeSet<BranchKeyFingerprint>>,
+    pub(crate) partition_catalog: nervix_models::StateInspectionKeyCatalog,
     /// The exact cut the page was read from: every selected branch's identity, lifetime and handled
     /// events.
     pub(crate) fingerprint: [u8; 32],
@@ -757,7 +757,7 @@ impl Runtime {
             .processor_state_sections(processor.kind, copies)
             .await?;
         Ok(ProcessorStatePage {
-            partition_catalog: None,
+            partition_catalog: nervix_models::StateInspectionKeyCatalog::Unrequested,
             fingerprint: digest.finish(),
             generation,
             counts,

@@ -17,12 +17,37 @@
 )]
 
 use nervix_models::{
-    CommandExecutionReference, CoordinationIdentity, DomainName, ModelName, RemoteRuntimeField,
+    CommandExecutionReference, CoordinationIdentity, DomainName, ModelName,
     WasmSavedStateRejection, WasmStateResetReason, WasmStateResetScope,
 };
 use rkyv::{Archive, Deserialize, Serialize};
 
 use crate::{InterconnectRequest, PoolClass, RemoteOperationFailure, RequestSubquota};
+
+/// Inherited checkpoint diagnostics keep the actual unit; fields alone cannot reconstruct an
+/// external partitioner's decision. The aggregate metrics exchange stays field-only.
+#[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DescribeInheritedWasmStateRequest {
+    pub domain: DomainName,
+    pub processor: ModelName,
+}
+
+#[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DescribeInheritedWasmStateResponse {
+    pub result: Result<
+        Vec<(
+            nervix_models::Unit,
+            Vec<nervix_models::WasmCheckpointInspection>,
+        )>,
+        RemoteOperationFailure,
+    >,
+}
+
+impl InterconnectRequest for DescribeInheritedWasmStateRequest {
+    type Response = DescribeInheritedWasmStateResponse;
+    const NAME: &'static str = "describe_inherited_wasm_state";
+    const DEADLINE: crate::RequestDeadline = crate::RequestDeadline::Setup;
+}
 
 /// The owner-side stage of one coordinated WASM guest-state reset.
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq)]
@@ -30,7 +55,7 @@ pub enum WasmStateResetRuntimeAction {
     /// Quiesce the selected branch tasks and construct their fresh initial guest snapshots. A
     /// `published` request resumes a generation that is already durable and can never roll back.
     Prepare {
-        branch_key: Option<Vec<RemoteRuntimeField>>,
+        branch_key: nervix_models::RemoteBranchKey,
         published: bool,
         reason: WasmStateResetReason,
     },
@@ -60,8 +85,14 @@ pub struct WasmStateResetRuntimeResponse {
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq)]
 pub enum WasmStateResetTarget {
     Unbranched,
-    Branch(Vec<RemoteRuntimeField>),
+    Branch(nervix_models::RemoteBranchKey),
     AllBranches,
+    /// An inherited or retained branch's actual execution, including keys with no external
+    /// witness yet. Boxing keeps field-based targets at their existing footprint.
+    BranchInUnit {
+        unit: nervix_models::Unit,
+        key: Box<nervix_models::RemoteBranchKey>,
+    },
 }
 
 /// Invoke the durable reset coordinator on the current control-plane leader.
@@ -119,6 +150,79 @@ impl InterconnectRequest for CoordinateWasmStateResetRequest {
     const CLASS: PoolClass = PoolClass::Management;
     const SUBQUOTA: RequestSubquota = RequestSubquota::Admission;
     const DEADLINE: crate::RequestDeadline = crate::RequestDeadline::Recovery;
+}
+
+#[cfg(all(
+    test,
+    not(any(feature = "shuttle", feature = "loom", feature = "turmoil"))
+))]
+mod tests {
+    //! Layer: test harness.
+    //! - **Owns.** Exact unit and checkpoint witnesses through the production wire codec.
+    //! - **Depends on.** Current WASM messages and bounded wire admission.
+    //! - **Must not know.** Guest execution, scheduling or a broker.
+
+    use meticulous::ResultExt as _;
+    use nervix_execution::Executor;
+    use nervix_models::{
+        BranchKeyFingerprint, Unit, WasmCheckpointInspection, WasmCheckpointStage,
+        WasmCheckpointState, WasmStateGeneration,
+    };
+
+    use super::*;
+    use crate::RkyvMessage;
+
+    async fn round_trip<M: RkyvMessage + Clone + PartialEq + std::fmt::Debug>(message: M) {
+        let executor = Executor::default();
+        let class = PoolClass::Management;
+        let (bytes, _charge) = message
+            .clone()
+            .encode_rkyv(executor.clone(), class, class.payload_limit(&executor))
+            .await
+            .assured("the bounded message encodes");
+        let (decoded, _charge) = M::decode_rkyv(executor, class, bytes)
+            .await
+            .assured("the current message decodes");
+        assert_eq!(decoded, message);
+    }
+
+    #[nervix_primitives::test]
+    async fn inherited_checkpoint_diagnostics_keep_the_actual_units_and_lifetimes() {
+        let request = DescribeInheritedWasmStateRequest {
+            domain: "events".try_into().assured("valid domain"),
+            processor: "guest".try_into().assured("valid processor"),
+        };
+        round_trip(request).await;
+        let checkpoint = |byte| WasmCheckpointInspection {
+            branch: Some(BranchKeyFingerprint::new([byte; 32])),
+            state: WasmCheckpointState {
+                generation: WasmStateGeneration::FIRST,
+                committed_revision: Some(std::num::NonZeroU64::MIN),
+                latest_revision: std::num::NonZeroU64::new(2),
+                stage: WasmCheckpointStage::Captured,
+                required_replicas: Some(1),
+                confirmed_replicas: Some(0),
+            },
+        };
+        round_trip(DescribeInheritedWasmStateResponse {
+            result: Ok(vec![
+                (Unit::partition(3), vec![checkpoint(7)]),
+                (Unit::partition(1), vec![checkpoint(13)]),
+            ]),
+        })
+        .await;
+        round_trip(WasmStateResetTarget::BranchInUnit {
+            unit: Unit::partition(3),
+            key: Box::new(nervix_models::RemoteBranchKey::Direct(
+                vec![nervix_models::RemoteRuntimeField {
+                    name: "tenant".to_string(),
+                    value: nervix_models::RemoteRuntimeValue::String("alpha".to_string()),
+                }]
+                .into(),
+            )),
+        })
+        .await;
+    }
 }
 
 impl InterconnectRequest for RecoverWasmProcessorStateRequest {

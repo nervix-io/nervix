@@ -1968,11 +1968,14 @@ mod impact_report_tests {
         let fingerprint = BranchKeyFingerprint::of_canonical_text(r#"{"tenant":"acme-secret"}"#);
         let seed = fingerprint.partition_seed();
         assert_eq!(seed.get(), 0x26c2_a362_2b11_2535);
-        let four = crate::BranchPartitions::Direct(
+        let four = crate::ResolvedBranchPartitions::Direct(
             std::num::NonZeroU16::new(4).assured("four is not zero"),
         );
         assert_eq!(four.unit_of(seed), Unit::partition(1));
-        assert_eq!(crate::BranchPartitions::ONE.unit_of(seed), Unit::SINGLE);
+        assert_eq!(
+            crate::ResolvedBranchPartitions::ONE.unit_of(seed),
+            Unit::SINGLE
+        );
         assert_eq!(
             four.units(),
             vec![
@@ -1982,8 +1985,11 @@ mod impact_report_tests {
                 Unit::partition(3)
             ]
         );
-        assert_eq!(crate::BranchPartitions::ONE.units(), vec![Unit::SINGLE]);
-        let largest = crate::BranchPartitions::Direct(std::num::NonZeroU16::MAX);
+        assert_eq!(
+            crate::ResolvedBranchPartitions::ONE.units(),
+            vec![Unit::SINGLE]
+        );
+        let largest = crate::ResolvedBranchPartitions::Direct(std::num::NonZeroU16::MAX);
         let crate::UnitKind::Partition(partition) = largest.unit_of(seed).kind() else {
             panic!("a branch of many partitions places a key in one of them");
         };

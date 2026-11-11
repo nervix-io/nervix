@@ -205,6 +205,8 @@ pub(crate) struct PlannedDomain {
     /// The shapes the archived deduplicator keys and window rows must have under the restored
     /// models, resolved once from them.
     pub(crate) branch_state_schemas: BranchStateSchemas,
+    /// Captured inherited coordinates, restored before any broker observation can change them.
+    pub(crate) partitions: Option<nervix_models::PartitionTopologySnapshot>,
 }
 
 /// One completed resource version a restore imports.
@@ -455,6 +457,10 @@ fn plan_domain(
         models: pinned,
         materialized_schemas,
         branch_state_schemas,
+        partitions: described
+            .partitions
+            .as_ref()
+            .map(|record| record.snapshot.clone()),
     })
 }
 
@@ -656,6 +662,7 @@ mod tests {
 
     fn described(name: &str, versions: Vec<DescribedResourceVersion>) -> DescribedDomain {
         DescribedDomain {
+            partitions: None,
             capture: DomainCapture {
                 domain: domain(name),
                 revision: 7,

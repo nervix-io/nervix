@@ -95,6 +95,7 @@
   - [VM Functions](./vm-functions.md)
   - [Wire Schema Binding](./wire-schema-binding.md)
   - [Relay](./relay.md)
+  - [Inherited Partitions](./partitioning.md)
   - [WASM State And Recovery](./wasm-state.md)
   - [Backup And Restore Architecture](./backup-and-restore-architecture.md)
   - [Shutdown And Recovery](./shutdown.md)
