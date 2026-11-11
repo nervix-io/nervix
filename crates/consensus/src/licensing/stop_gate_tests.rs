@@ -388,3 +388,89 @@ fn a_closed_gate_refuses_a_pause_recovery_that_would_resume_the_domain() {
     assert_eq!(paused.status, DomainStatus::Paused);
     assert_eq!(paused.stop_cause, None);
 }
+
+#[test]
+fn a_closed_gate_refuses_a_transaction_start_step_planned_before_it_closed() {
+    let mut state = ephemeral_state();
+    assert_eq!(
+        put(&mut state, "tenant", DomainStatus::Stopped),
+        ConsensusResponse::Applied
+    );
+    let owner = nervix_models::UserName::parse("operator")
+        .assured("the fixture owner is an identifier-shaped literal");
+    let activity = crate::TransactionActivity::from_timeout(
+        Timestamp::from_unix_nanos(1),
+        std::time::Duration::from_secs(60),
+    );
+    let mut transaction = crate::ReplicatedTransaction::open(
+        "tx".to_owned(),
+        domain("tenant"),
+        owner.clone(),
+        activity,
+    );
+    transaction
+        .queue(
+            &owner,
+            &domain("tenant"),
+            activity,
+            1,
+            crate::TransactionStatement::test_admitted(crate::TransactionStatementRequest {
+                request_reference: nervix_models::CommandExecutionReference::parse("start.0")
+                    .assured("the fixture reference is a valid request reference"),
+                expected_position: 0,
+                source: "START".to_owned(),
+                statement: nervix_models::Statement::StartDomain(nervix_models::StartDomain {
+                    start: DomainStartPoint::Resume,
+                }),
+            }),
+            crate::TransactionQueueLimits {
+                max_statements: 1,
+                max_source_bytes: 1024,
+            },
+        )
+        .assured("an open transaction of its owner queues one statement within its limits");
+    // Planning admitted the START while the gate was open; the gate closes before its step commits.
+    let effect = crate::TransactionStepEffect::StartDomain {
+        inputs: Box::new(state.domain_planning_inputs(&domain("tenant"))),
+        start: DomainStartPoint::Resume,
+        clock: None,
+        authority: None,
+    };
+    let reason = pass_expiry(&mut state);
+    let result = crate::TransactionStepResult {
+        impact: crate::transaction::test_commit_plan("tx", 1).steps[0]
+            .impact
+            .clone(),
+        result: crate::TransactionCommandResult {
+            success: true,
+            message: "started".to_owned(),
+            diagnostics: Vec::new(),
+            already_existed: false,
+            admission: None,
+        },
+    };
+    let refused = crate::validate_transaction_step_effect(
+        &state,
+        &transaction,
+        0,
+        1,
+        &result,
+        &effect,
+        Some(&crate::TransactionOutcome::Committed),
+    )
+    .expect_err("a closed gate refuses the START step");
+    let crate::TransactionMutationError::LicensingStop {
+        id,
+        reason: refused_reason,
+    } = refused.current_context()
+    else {
+        panic!("the START step is refused by the licensing stop, not {refused:?}");
+    };
+    assert_eq!(id, "tx");
+    assert_eq!(*refused_reason, reason);
+    let tenant = state
+        .domains
+        .get(&domain("tenant"))
+        .verified("created above");
+    assert_eq!(tenant.status, DomainStatus::Stopped);
+}
