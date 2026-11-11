@@ -378,8 +378,6 @@ stateDiagram-v2
     QueuedUntilReconnect --> QueuedInTransaction: recovered outcome
     QueuedUntilReconnect --> Completed: recovered outcome
     QueuedUntilReconnect --> Failed: recovered outcome
-    Submitting --> Editing: search or selection in a choice control
-    QueuedUntilReconnect --> Editing: search or selection in a choice control
     Failed --> Submitting: Create again
     QueuedInTransaction --> Editing: edit
     Completed --> Editing: edit
@@ -387,13 +385,18 @@ stateDiagram-v2
 ```
 
 Each submission is an attempt identified by its number and the draft revision it was built from.
-The form applies an outcome only to its active attempt. Its fields are disabled while that attempt
-is pending; its choice controls stay live, and a search or selection in one is an edit. An edit
-returns the form to **Editing** and drops the attempt, so a late outcome of a superseded attempt
-changes nothing in the form while the transcript still reports it. Create is refused, by the
-disabled button and by the submit handler itself, while the attempt is submitting, waiting for
-reconnection, queued in a transaction or completed. Only an edit or a failure allows another
-attempt, so a repeated click cannot submit the same draft twice.
+The form applies an outcome only to its active attempt. While that attempt is submitting or queued
+until reconnect, the form's fields and its choice controls are disabled, a choice control's search,
+choices, **Load more** and **Retry** included. A selection is an edit of the draft, and a search,
+though it is no draft content, asks again by advancing the draft revision, so neither can run until
+the attempt has its outcome. The draft therefore stays the one the attempt was built from, and the
+form reports that attempt's own outcome. Once the attempt is queued in a transaction, completed or
+failed, the controls are live again. An edit then returns the form to **Editing** and drops the
+attempt, so a late outcome of a superseded attempt changes nothing in the form while the transcript
+still reports it. Create is refused, by the disabled button and by the submit handler itself, while
+the attempt is submitting, waiting for reconnection, queued in a transaction or completed. Within
+the open form, only an edit or a failure allows another attempt, so a repeated click cannot submit
+the same draft twice.
 
 An outcome that admits the command into the attached transaction shows **Queued in transaction**
 with its position, and a staged create is never shown as applied. **Completed** appears only for a
@@ -444,6 +447,10 @@ It does not guarantee more than that:
   parses it. An explicit `UNBRANCHED` or `BRANCHED BY` choice builds an executable route.
 - REPL completion and the forms differ where they share no rule: codec references in the REPL are
   not filtered by direction, and the forms' compatible-relay targets have no REPL counterpart.
+- Reopening the dialog while its attempt is pending returns the form to **Editing** and enables
+  **Create**, so a retained draft can be submitted again before its first attempt answers.
+- **Use current domain** stays enabled while an attempt is pending, and using it moves the draft
+  and drops the attempt.
 - Text completion offers only what the grammar names at the cursor, so a position that introduces a
   new name offers nothing.
 - The console uses choice lookups; among the client libraries, the Rust client exposes them, while
@@ -521,11 +528,12 @@ body rules, and the completion walk must stay clean.
 
 - `just test-web-console` runs the console's unit tests. The creation matrix test holds the menu to
   every family. The dialog tests cover canonical queries and masked passwords, discarding replies
-  for an older draft revision or connection, progress changing only for the active attempt, scope
-  changes invalidating references, generated subscription names and an accessible render. The
-  visual form tests cover the forms' controls, choices and submissions, secret masking and the
-  graph's **PLACE** action, and the emitter and processor tests cover their forms and Models. The
-  session loop's tests cover superseded lookups, the request window and reply kinds.
+  for an older draft revision or connection, progress changing only for the active attempt, choice
+  controls disabled while an attempt is pending, scope changes invalidating references, generated
+  subscription names and an accessible render. The visual form tests cover the forms' controls,
+  choices and submissions, secret masking and the graph's **PLACE** action, and the emitter and
+  processor tests cover their forms and Models. The session loop's tests cover superseded lookups,
+  the request window and reply kinds.
 - `just test-placement-members` runs the server's tests of the placement-member rule across
   validation, REPL completion and typed choices, with the configured-choice resolver's tests.
 - `just plexus-completion-walk` fails on any completion branch that accepting the parser's own
@@ -556,11 +564,12 @@ reads, and the Go and Node probes reproduce the corpus report in the client conf
 
 ### Public Scenarios
 
-- The fifteen `tests/features/web-console/visual_create*.feature` files hold 66 scenarios and 40
+- The fifteen `tests/features/web-console/visual_create*.feature` files hold 66 scenarios and 41
   outlines. Every outline but the schema type matrix runs on one and three nodes.
-  `visual_create_graph.feature` builds a complete graph in one transaction on three nodes, and
+  `visual_create_graph.feature` builds a complete graph in one transaction on three nodes,
   `visual_create_initial_choices.feature` covers forms opened before the console's first domain
-  publication.
+  publication, and `visual_create.feature` holds a create's reply back while its choice controls
+  are used.
 - `connector_presentation.feature` checks that visual connector choices follow the entity
   declarations, on one and three nodes.
 - `plexus_repl.feature` covers REPL completion, connector completion and a full request window.
@@ -568,10 +577,11 @@ reads, and the Go and Node probes reproduce the corpus report in the client conf
   rejection of a cursor inside a character and of page sizes 0 and 101, and
   `tools/cli_session.feature` and the connector declaration features cover CLI and connector
   completion.
-- `just test-visual-window-correlator`, `just test-visual-generator-inferencer-wasm` and
-  `just test-visual-placement-graph` run their feature files with the server's prerequisites; the
-  other files run through `just test-scenarios --input <feature>`. `just coverage-visual-create`
-  measures the Model, language, wire, browser and server owners together.
+- `just test-visual-create`, `just test-visual-window-correlator`,
+  `just test-visual-generator-inferencer-wasm` and `just test-visual-placement-graph` run their
+  feature files with the server's prerequisites; the other files run through
+  `just test-scenarios --input <feature>`. `just coverage-visual-create` measures the Model,
+  language, wire, browser and server owners together.
 
 ### Test Policy
 
