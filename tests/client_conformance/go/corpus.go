@@ -1333,6 +1333,86 @@ func corpus(directory string) error {
 	return nil
 }
 
+// optionalNumber renders an optional scalar, or `none` when the frame omits it.
+func optionalNumber[T uint32 | uint64](value *T) string {
+	if value == nil {
+		return "none"
+	}
+	return fmt.Sprintf("%d", *value)
+}
+
+// wasmFingerprint renders a branch fingerprint, which must be exactly 32 bytes.
+func wasmFingerprint(fingerprint *session.Fingerprint) (string, error) {
+	if fingerprint == nil || fingerprint.BytesLength() != 32 {
+		return "", errors.New("a WASM branch is not a 32-byte fingerprint")
+	}
+	return hex.EncodeToString(fingerprint.BytesBytes()), nil
+}
+
+// wasmUnitLines renders one unit's WASM guest-state facts: its counts, its latest reset and every
+// returned branch entry's checkpoint and recovery.
+func wasmUnitLines(state *session.WasmUnitStateFacts) ([]string, error) {
+	checkpoints := state.Checkpoints(nil)
+	recoveries := state.Recoveries(nil)
+	if checkpoints == nil || recoveries == nil {
+		return nil, errors.New("a WASM unit lacks its counts")
+	}
+	lines := []string{fmt.Sprintf("STATE_WASM_UNIT default_generation=%d entries=%d total=%d empty=%d captured=%d locally_durable=%d awaiting_replicas=%d replica_confirmed=%d failed=%d attempted=%d recovered=%d recovery_failed=%d", state.DefaultGeneration(), state.Entries(), checkpoints.Total(), checkpoints.Empty(), checkpoints.Captured(), checkpoints.LocallyDurable(), checkpoints.AwaitingReplicas(), checkpoints.ReplicaConfirmed(), checkpoints.Failed(), recoveries.Attempted(), recoveries.Recovered(), recoveries.Failed())}
+	if reset := state.Reset(nil); reset != nil {
+		scope := ""
+		switch reset.ScopeType() {
+		case session.WasmStateScopeWasmUnbranchedScope:
+			scope = "unbranched"
+		case session.WasmStateScopeWasmBranchScope:
+			value := new(session.WasmBranchScope)
+			if err := union(reset.Scope, value); err != nil {
+				return nil, err
+			}
+			branch, err := wasmFingerprint(value.Branch(nil))
+			if err != nil {
+				return nil, err
+			}
+			scope = "branch:" + branch
+		case session.WasmStateScopeWasmAllBranchesScope:
+			scope = "all_branches"
+		default:
+			return nil, errors.New("unknown WASM reset scope")
+		}
+		phase, reason, readiness := reset.Phase(), reset.Reason(), reset.Readiness()
+		if phase == nil || reason == nil || readiness == nil {
+			return nil, errors.New("a WASM reset lacks its phase, reason or readiness")
+		}
+		lines = append(lines, fmt.Sprintf("STATE_WASM_RESET request=%s scope=%s phase=%s reason=%s generation=%d readiness=%s", reset.Request(), scope, session.EnumNamesWasmResetPhase[*phase], session.EnumNamesWasmResetReason[*reason], reset.Generation(), session.EnumNamesWasmResetReadiness[*readiness]))
+	}
+	for i := 0; i < state.BranchesLength(); i++ {
+		entry := new(session.WasmBranchStateFacts)
+		state.Branches(entry, i)
+		branch := "unbranched"
+		if fingerprint := entry.Branch(nil); fingerprint != nil {
+			rendered, err := wasmFingerprint(fingerprint)
+			if err != nil {
+				return nil, err
+			}
+			branch = rendered
+		}
+		if checkpoint := entry.Checkpoint(nil); checkpoint != nil {
+			stage := checkpoint.Stage()
+			if stage == nil {
+				return nil, errors.New("a WASM checkpoint lacks its stage")
+			}
+			lines = append(lines, fmt.Sprintf("STATE_WASM_CHECKPOINT branch=%s generation=%d committed=%s latest=%s stage=%s required=%s confirmed=%s", branch, checkpoint.Generation(), optionalNumber(checkpoint.CommittedRevision()), optionalNumber(checkpoint.LatestRevision()), session.EnumNamesWasmCheckpointStage[*stage], optionalNumber(checkpoint.RequiredReplicas()), optionalNumber(checkpoint.ConfirmedReplicas())))
+		}
+		if recovery := entry.Recovery(nil); recovery != nil {
+			rejection, outcome := recovery.Rejection(), recovery.Outcome()
+			if rejection == nil || outcome == nil {
+				return nil, errors.New("a WASM recovery lacks its rejection or outcome")
+			}
+			lines = append(lines, fmt.Sprintf("STATE_WASM_RECOVERY branch=%s generation=%d rejection=%s request=%s outcome=%s", branch, recovery.Generation(), session.EnumNamesWasmSavedStateRejection[*rejection], recovery.Request(), session.EnumNamesWasmRecoveryOutcome[*outcome]))
+		}
+	}
+	return lines, nil
+}
+
 func stateInspectionLines(state *session.StateInspection) ([]string, error) {
 	var lines []string
 	switch state.EntityType() {
@@ -1369,6 +1449,9 @@ func stateInspectionLines(state *session.StateInspection) ([]string, error) {
 		return nil, errors.New("inspection lacks counts")
 	}
 	lines = append(lines, fmt.Sprintf("STATE_PAGE branches=%d rows=%d bytes=%d units=%d continuation=%s", counts.Branches(), counts.Rows(), counts.Bytes(), page.UnitCount(), orNone(page.Continuation())))
+	if binding := page.WasmBinding(nil); binding != nil {
+		lines = append(lines, fmt.Sprintf("STATE_WASM_BINDING resource=%s version=%d file=%s", binding.Resource(), binding.Version(), binding.File()))
+	}
 	for i := 0; i < page.UnitsLength(); i++ {
 		unit := new(session.StateInspectionUnit)
 		page.Units(unit, i)
@@ -1401,6 +1484,13 @@ func stateInspectionLines(state *session.StateInspection) ([]string, error) {
 			replicas = append(replicas, string(unit.Replicas(r)))
 		}
 		lines = append(lines, fmt.Sprintf("STATE_UNIT owner=%s replicas=%s node=%s incarnation=%d fingerprint=%s generation=%d revision=%d stage=%s branches=%d rows=%d bytes=%d", unit.Owner(), strings.Join(replicas, ","), origin.Node(), origin.Incarnation(), hex.EncodeToString(origin.FingerprintBytes()), origin.Generation(), origin.Revision(), session.EnumNamesStateInspectionStage[*origin.Stage()], counts.Branches(), counts.Rows(), counts.Bytes()))
+		if wasm := unit.Wasm(nil); wasm != nil {
+			rendered, err := wasmUnitLines(wasm)
+			if err != nil {
+				return nil, err
+			}
+			lines = append(lines, rendered...)
+		}
 		for j := 0; j < unit.SectionsLength(); j++ {
 			section := new(session.StateInspectionSection)
 			unit.Sections(section, j)

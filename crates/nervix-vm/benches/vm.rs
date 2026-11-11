@@ -26,8 +26,16 @@ use thiserror::Error;
 #[path = "vm/workloads.rs"]
 mod workloads;
 
+#[path = "vm/list_statistics.rs"]
+mod list_statistics;
+
 #[path = "vm/list_arithmetic.rs"]
 mod list_arithmetic;
+#[path = "vm/list_shapes.rs"]
+mod list_shapes;
+
+#[path = "vm/list_conversions.rs"]
+mod list_conversions;
 
 #[cfg(feature = "benchmark-allocations")]
 #[path = "vm/allocation_probe.rs"]
@@ -2866,6 +2874,9 @@ criterion_group!(
     json_extraction_benches,
     string_search_benches,
     workloads::workload_shape_benches,
-    list_arithmetic::benches
+    list_statistics::list_statistic_benches,
+    list_shapes::list_shape_benches,
+    list_arithmetic::benches,
+    list_conversions::list_conversion_benches
 );
 criterion_main!(benches);

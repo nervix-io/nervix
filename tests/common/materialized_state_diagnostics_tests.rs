@@ -162,7 +162,9 @@ fn inspection(value: Option<&str>) -> nervix_client_wire::StateInspection {
                 },
                 counts,
                 sections,
+                wasm: None,
             }],
+            wasm_binding: None,
         }),
     }
 }

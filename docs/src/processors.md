@@ -254,7 +254,7 @@ Deduplication state is branch-local. Duplicate details are logged at `debug` or 
 
 ```plexus
 SHOW DEDUPLICATOR unique_notifications STATE
-  FOR BRANCH VALUES { tenant = 'alpha' } LIMIT 100 FORMAT JSON;
+  FOR BRANCH KEY { tenant = 'alpha' } LIMIT 100 FORMAT JSON;
 ```
 
 `SHOW DEDUPLICATOR <name> STATE` reads one immutable publication per selected branch through the
@@ -351,7 +351,7 @@ pause.
 SHOW REORDERER ordered_notifications STATE
   FOR ALL BRANCHES LIMIT 100 FORMAT JSON;
 SHOW REORDERER ordered_notifications STATE
-  FOR BRANCH VALUES { tenant = 'alpha' } FORMAT TEXT;
+  FOR BRANCH KEY { tenant = 'alpha' } FORMAT TEXT;
 ```
 
 `SHOW REORDERER <name> STATE` reads the rows the reorderer holds back, as one `pending` section per
@@ -434,6 +434,13 @@ same ordering as `FIRST` and `LAST`. Its argument must be required; use `coalesc
 field. A collecting route needs a message `WIDTH` or `MAX STATE SIZE`. Collection shares the
 retained argument column with `FIRST` and `LAST`, including through snapshot restore, and its
 values and structure remain visible through the existing state inspection commands.
+
+Use `COLLECT_ARRAY(input.value)` under `WIDTH n MESSAGES` without a duration to produce a required
+`ARRAY` of exactly `n` values. A fixed tensor axis can consume that field directly. The width sets
+the result type; the output schema must match it exactly. A new width requires a new window
+processor. Both collection forms use the existing branch-local retained columns through restart
+and ownership changes. See the [sampled-sequence example](quickstart-generators.md#collect-samples-for-a-fixed-tensor)
+for a generator feeding a count window and an inferencer.
 
 `MAX STATE SIZE <bytes>` caps the live state of each concrete branch. It charges retained Arrow
 input and argument allocations, row handles, branch keys, and the reserved capacity of every
@@ -552,6 +559,14 @@ CREATE INFERENCER score_events
 ```
 
 Every required route-output field is explicit. The source input is not implicitly inherited.
+
+Shape a fixed sequence to the model's exact input dimensions with
+[`list_reshape`, `list_flatten`, and `list_transpose`](filter-map-functions.md#array-and-vector-functions).
+For example, an `ARRAY<F32, 6>` field maps to `DENSE TENSOR<F32>[2, 3]` with
+`list_reshape(input.sequence, 2, 3)`. The dimensions are positive integer literals with the same
+element count as the input. Nervix validates them when the statement is applied, so the shape
+operation may be used in `INPUTS`, which has no message-error route. Shaping preserves sensitivity;
+the mapped input must still be required and have the model's exact `F32` element type.
 
 `USING RESOURCE` requires `VERSION <n>` or `VERSION LATEST`. The inferencer loads the model file
 from the one version it stores, so a later upload of the resource does not change the scoring
@@ -684,17 +699,36 @@ An `ATTACHED` WASM processor, the default, acknowledges an input only after the 
 checkpoint that covers it is on the stable storage of the branch's owner and of every replica the
 schedule assigns the processor; relay fan-out acknowledges the input of a `DETACHED` one upstream.
 A checkpoint that cannot get there negatively acknowledges what it covers and recreates the branch's
-guest from its last completed checkpoint. `DESCRIBE WASM PROCESSOR` reads the committed binding,
-default state generation, latest coordinated reset and retained rejected-state recoveries together
-with the owner's current checkpoint stages and revisions. Each reported branch uses a fixed-size
-opaque fingerprint rather than a branch value. Required and confirmed replica counts are shown for
-checkpoints captured on the current owner; a restored checkpoint whose earlier boundary is unknown
-reports those counts as unknown. Counts cover every active branch, while detailed branch and
-recovery entries are bounded. `DESCRIBE WASM PROCESSOR <name> FORMAT JSON` serializes the same
-typed state inspection used by the text output; the command also returns it as a typed client
-outcome in either format. See
+guest from its last completed checkpoint. `DESCRIBE WASM PROCESSOR` summarizes the committed
+binding and, per execution unit, the default state generation, the latest coordinated reset with its
+readiness, the recorded rejected-state recoveries by outcome and the counts of the owner's current
+checkpoint stages.
+
+### Read guest-state facts from Plexus
+
+`SHOW WASM PROCESSOR <processor> STATE` reads the facts behind that summary through the typed state
+inspection envelope, branch by branch, with the clauses every `SHOW ... STATE` statement shares:
+
+```plexus
+SHOW WASM PROCESSOR normalize_events STATE;
+SHOW WASM PROCESSOR normalize_events STATE FOR BRANCH KEY { tenant = 'acme' } FORMAT JSON;
+SHOW WASM PROCESSOR normalize_events STATE FOR ALL BRANCHES LIMIT 100 FORMAT JSON;
+SHOW WASM PROCESSOR normalize_events STATE LIMIT 100 AFTER '<continuation>' FORMAT JSON;
+```
+
+Every unit reports its owner and replicas, its default generation, its latest reset with the reset's
+request reference, scope, phase, reason, generation and readiness, and complete counts of its
+selected entries, checkpoint stages and recovery outcomes. Each selected branch with a checkpoint in
+its current lifetime or a recorded recovery has one entry, in branch order, named by a fixed-size
+opaque fingerprint rather than a branch value: its checkpoint's generation, committed and latest
+revision, stage and required and confirmed replica counts, and its recovery's refused generation,
+rejection, request and outcome. Required and confirmed replica counts are shown for checkpoints
+captured on the current owner; a restored checkpoint whose earlier boundary is unknown reports those
+counts as unknown. `LIMIT` bounds the entries of one reply, and a reply that stops early carries a
+continuation that `AFTER` resumes under the same committed schedule. `FORMAT JSON` renders the same
+typed envelope the command returns to clients in either format. See
 [Checkpoints And Acknowledgements](wasm-processor-guests.md#checkpoints-and-acknowledgements) and
-[WASM State And Recovery](wasm-state.md).
+[WASM State And Recovery](wasm-state.md#observability).
 
 ### Reset guest state from Plexus
 
@@ -708,11 +742,11 @@ domain is a different processor and keeps its state. The scope is mandatory:
 USE sales;
 RESET WASM PROCESSOR normalize_events STATE FOR UNBRANCHED;
 RESET WASM PROCESSOR normalize_events STATE FOR ALL BRANCHES;
-RESET WASM PROCESSOR normalize_events STATE FOR BRANCH VALUES { tenant = 'acme' };
+RESET WASM PROCESSOR normalize_events STATE FOR BRANCH KEY { tenant = 'acme' };
 ```
 
 Use `FOR UNBRANCHED` only for an unbranched processor. Use `FOR ALL BRANCHES` or exact
-`FOR BRANCH VALUES` fields only for a branched processor. Values must match the declared branch
+`FOR BRANCH KEY` fields only for a branched processor. Key fields must match the declared branch
 schema exactly. A selected branch must already be active; the command does not create one.
 The selected branch loses its previous guest computation state and starts from the guest's initial
 state. Sibling branches keep their state and continue processing.

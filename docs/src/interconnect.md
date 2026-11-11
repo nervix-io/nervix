@@ -331,6 +331,12 @@ tasks. Responses carry the complete classified failure chain. A transport succes
 the receiver performed the requested action; the Raft-backed `Publishing` and `Ready` schedule
 phases remain the durability and usability boundaries.
 
+The coordinator retains a runtime reply's typed failure beneath the context of its action:
+unpublished preparation, abort, or committed preparation/activation. The owner's complete cause
+therefore reaches the command diagnostic, including a selected branch that has no active
+execution. A transport failure uses the same action context; it does not by itself establish that
+a reset generation was published.
+
 One more management request belongs to the same operation. A processor that declares
 `ON REJECTED STATE RESET` raises a refused guest-state lifetime from the node that owns the branch,
 and that node forwards it to the current leader as a typed recovery request naming the domain, the
@@ -509,8 +515,8 @@ reference, both in Models and in queued transaction statements. It also covers a
 `RESET WASM PROCESSOR ... STATE`, which names its processor and scope and takes its domain from its
 transaction.
 It also covers fixed-width 64-bit counts in Models, transaction commands and records,
-and WASM inspection results. These fields use the vocabulary's `CountAsU64` adapter and checked
-native decoding; an unrepresentable count fails decoding. Window processor state has current
+and the unit pages of the WASM state page operation. These fields use the vocabulary's `CountAsU64`
+adapter and checked native decoding; an unrepresentable count fails decoding. Window processor state has current
 runtime-state kind tag `8`, and its bulk snapshot codec validates the `NVXWIN64` frame signature
 before decoding histogram delayed-removal bucket indices in the same count representation.
 
@@ -2578,3 +2584,27 @@ against the descriptor before any row reaches a Row frame. A typed refusal carri
 coordinator writes Row frames at the session reporting boundary, as for materialized pages.
 The inspection deadline controls stream admission and setup through
 `request_stream_with_timeout`, and the request type's `DEADLINE` projects from the configured request budget, like the materialized page operation. The caller's explicit remaining inspection deadline remains authoritative.
+
+## WASM State Page Operation
+
+`read_wasm_state_page` is a process-targeted unary request in the Commands class. It names the
+domain, the WASM processor, one execution unit, the committed control revision the coordinator
+planned the read at, the resolved branch selector, the key of the last entry an earlier page
+returned, an entry limit and the exact owner process. The owner waits until it has applied that
+control revision and refuses a newer one as a stale continuation, so any change committed between
+two pages, a reset included, ends the read rather than mixing two schedules. It then checks that it executes the unit and
+that the target names its own incarnation, and reads the unit's committed lifetimes, reset and
+recoveries beside the checkpoints its runtime samples for the unit's branches. Selection, counting
+and the entry limit apply on the owner, so only the selected page crosses the interconnect.
+
+The reply is a typed rkyv value. A page carries the read origin (the owner's identity, a SHA-256
+fingerprint of the unit's selected facts, its newest lifetime and committed revision) and the
+unit's page: complete counts over the selection, at most the requested entries in entry order, and
+whether entries remain after the last one. A refusal carries the envelope's typed reason. The owner
+caps the entries at what one Commands payload holds: every archived entry fits 512 bytes, and room
+for two entries is left for the unit's own facts. A coordinator refuses a page that returned no
+entry while entries remained and it allowed some, instead of issuing a continuation that cannot
+advance. The request runs under the caller's remaining inspection deadline through
+`request_with_timeout`, and its `DEADLINE` projects from the configured request budget, like the
+other state inspection page operations. Branches cross the interconnect only as fingerprints, and
+no guest state bytes travel with the facts.

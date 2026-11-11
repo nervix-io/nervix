@@ -2,7 +2,6 @@
 
 use error_stack::Report;
 use flatbuffers::WIPOffset;
-use meticulous::ResultExt as _;
 use nervix_models::{
     BackupArchiveSummary, CommandExecutionReference, ResourceDescription, RestoreReport,
     TransactionInspection, TransactionOperationAdmission, TransactionPreviewIdentity,
@@ -338,8 +337,6 @@ pub struct CommandOutcome {
     /// It may name a transaction other than `transaction`, which keeps describing this session's
     /// own binding.
     pub inspection: Option<Box<TransactionInspection>>,
-    /// The typed state read by a WASM processor description.
-    pub wasm_state: Option<Box<nervix_models::WasmStateInspection>>,
     /// A bounded typed read of runtime state.
     pub state: Option<Box<crate::StateInspection>>,
     /// The versions, entries and bindings read by a description of every version of a resource,
@@ -401,15 +398,6 @@ impl CommandOutcome {
             Some(inspection) => Some(encode_inspection(encoder, inspection)?),
             None => None,
         };
-        let wasm_state = match &self.wasm_state {
-            Some(inspection) => {
-                let json = serde_json::to_string(inspection).assured(
-                    "WASM state inspection contains only serde-compatible control-plane values",
-                );
-                Some(encoder.text("CommandOutcome.wasm_state", &json)?)
-            }
-            None => None,
-        };
         let state = self
             .state
             .as_ref()
@@ -440,7 +428,6 @@ impl CommandOutcome {
                 transaction,
                 transaction_admission,
                 inspection,
-                wasm_state,
                 state,
                 resource,
                 backup,
@@ -497,19 +484,6 @@ impl CommandOutcome {
             Some(inspected) => Some(Box::new(decode_inspection(decoder, inspected)?)),
             None => None,
         };
-        let wasm_state = match outcome.wasm_state() {
-            Some(json) => {
-                let json = decoder.text("CommandOutcome.wasm_state", json)?;
-                let inspection = serde_json::from_str(&json).map_err(|error| {
-                    Report::new(error).change_context(WireDecodeError::InvalidValue {
-                        field: "CommandOutcome.wasm_state",
-                        kind: "WASM state inspection",
-                    })
-                })?;
-                Some(Box::new(inspection))
-            }
-            None => None,
-        };
         let state = outcome
             .state()
             .map(|state| {
@@ -538,7 +512,6 @@ impl CommandOutcome {
             transaction,
             transaction_admission,
             inspection,
-            wasm_state,
             state,
             resource,
             backup,

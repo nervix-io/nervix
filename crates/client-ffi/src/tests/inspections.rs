@@ -64,7 +64,9 @@ fn inspected() -> CommandOutcome {
                     omitted_rows: 0,
                     watermarks: None,
                 }],
+                wasm: None,
             }],
+            wasm_binding: None,
         }),
     }));
     outcome

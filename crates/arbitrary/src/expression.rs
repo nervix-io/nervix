@@ -166,7 +166,7 @@ impl Arbitrary<'_> {
             },
             ExpressionForm::Cast => Expression::Cast {
                 expression: Box::new(self.expression_within(below)),
-                target: self.conversion_type(),
+                target: self.declared_type(),
             },
             ExpressionForm::Call => Expression::Call {
                 function: self.function_name(),
@@ -228,7 +228,7 @@ impl Arbitrary<'_> {
             },
             ExpressionForm::TryCast => Expression::TryCast {
                 expression: Box::new(self.expression_within(below)),
-                target: self.conversion_type(),
+                target: self.declared_type(),
             },
             ExpressionForm::JsonValue => Expression::JsonValue {
                 document: Box::new(self.expression_within(below)),
@@ -379,16 +379,8 @@ impl Arbitrary<'_> {
         }
     }
 
-    /// A type a conversion names. Plexus converts only to scalar types; the vocabulary holds any.
-    pub fn conversion_type(&mut self) -> ParseAsType {
-        match self.domain {
-            Domain::Plexus => self.entropy.pick(SCALAR_TYPES),
-            Domain::Vocabulary => self.declared_type(),
-        }
-    }
-
-    /// A type a schema field or a JSON read declares: a scalar, or a list or fixed-length array of
-    /// declared types nested at most [`TYPE_DEPTH`] deep.
+    /// A type a schema field declares, a JSON read reads as or a conversion converts to: a scalar,
+    /// or a list or fixed-length array of declared types nested at most [`TYPE_DEPTH`] deep.
     pub fn declared_type(&mut self) -> ParseAsType {
         self.declared_type_within(TYPE_DEPTH)
     }

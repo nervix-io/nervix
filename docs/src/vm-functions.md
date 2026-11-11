@@ -141,11 +141,14 @@ Lowering also removes surface forms the compiler does not need to know about:
 
 Lowering resolves datetime builtins further than other calls, because their literal arguments
 choose the kernel. It resolves literal units, time zones, formats, and bin widths once into a
-`DatetimeFunction`, and the call keeps only its row-valued arguments. Every other name is parsed,
-case-insensitively, into the closed `FunctionName` enum. An alias such as `ceiling`, `power`, or
-`substring` maps to the same variant as `ceil`, `pow`, or `substr`, and messages always use the
-canonical name. A name that matches nothing becomes `FunctionName::Unknown`, which the compiler
-rejects.
+`DatetimeFunction`, and the call keeps only its row-valued arguments. The list statistics resolve
+the same way into a `ListStatistic` in `frontend/list_statistics.rs`: `list_quantile` reads its
+percentile from its numeric literal and `list_median` names the 50th percentile, so each call keeps
+only its list, and a percentile that is no literal or lies outside 0 to 100 is a `FrontendError`.
+Every other name is parsed, case-insensitively, into the closed `FunctionName` enum. An alias such
+as `ceiling`, `power`, or `substring` maps to the same variant as `ceil`, `pow`, or `substr`, and
+messages always use the canonical name. A name that matches nothing becomes
+`FunctionName::Unknown`, which the compiler rejects.
 
 A span in the VM is an operation ordinal, not a source offset: the i-th assignment, the route
 `WHERE`, or the j-th `INVOKE`. Every node inside one operation shares that operation's span. The
@@ -467,6 +470,7 @@ All paths are relative to the repository root.
 | `crates/nervix-vm/src/text_column.rs` | The bounded builder for `STRING` and `BYTES` values whose length an argument chooses |
 | `crates/nervix-vm/src/text_search.rs`, `regexp.rs` | Splitting, joining, `LIKE`, `contains_any`, NFC normalization, and regular expressions with their caches |
 | `crates/nervix-vm/src/membership.rs`, `extremum.rs`, `count.rs` | `IN` sets, `greatest`, `least`, and `clamp`, and integer counts read without narrowing |
+| `crates/nervix-vm/src/list_statistics.rs` and its `frontend/`, `semantics/` and `runtime/` children | The list statistics: their names, resolved percentile, semantics and arm execution; the lowering of their literal percentile; their element and result types and the order check `min` and `max` share; their kernels |
 | `crates/nervix-vm/src/bytes.rs` | Encodings, hashes, and UTF-8 conversion of `BYTES` |
 | `crates/nervix-vm/src/json.rs` | Typed JSON extraction over one parse per document |
 | `crates/nervix-vm/src/ip_address.rs`, `url_component.rs` | IP addresses, CIDR networks, and URL components |
@@ -1036,6 +1040,16 @@ The reference owns each family's contract. These notes describe its implementati
   - Construction and `concat` use Arrow `interleave`. `slice` builds indices for one `take`.
   - `ListElements` in the catalog decides, when the call is compiled, which functions reject
     nested elements, so no batch reaches a kernel with an element type it cannot read.
+  - `list_reshape` resolves positive literal dimensions at lowering and validates their product
+    against the fixed input shape at compilation. Execution rebuilds the list levels around the
+    same innermost child buffer; fixed `list_flatten` also reuses its child buffer. Rebuilt levels
+    expand the input container's null mask, including for sliced inputs.
+  - `list_flatten` removes one level. With a variable level it composes offsets and shares the
+    child values where their validity permits; hidden null children of a null fixed container are
+    omitted when constructing a vector with required elements.
+  - `list_transpose` gathers the second-level child once, then exchanges the two outer fixed
+    levels. Deeper levels remain whole. `first`, `last`, and `nth` select nested list values through
+    the same Arrow `take` as scalar elements.
   - Explicit list arithmetic validates exact numeric leaf types and fixed inner shapes in
     `semantics/list_arithmetic.rs`. Its runtime owner applies the existing checked numeric kernels
     to a whole fixed child run; ragged pairs and per-row scalar operands use a segmented pass.
@@ -1045,6 +1059,16 @@ The reference owns each family's contract. These notes describe its implementati
     validity are shared; a sliced vector normalizes only its active offset span. Child-field
     metadata stays with its exact type. No per-row payload value or scalar broadcast column is
     constructed.
+  - The list statistics in `runtime/list_statistics.rs` work on each list's slice of the child
+    buffer. A variance or standard deviation calls the window statistics' `moments` kernel and
+    `Estimator` in `nervix-simd-kernels` once per list, after one non-finite mask over the whole
+    child buffer marks the lists that fail. A quantile copies one list's values at a time into a
+    scratch buffer the batch reuses, selects the lower rank with `select_nth_unstable_by` under
+    Arrow's total order and takes the least value above it for the upper rank, interpolating with
+    the window quantiles' `QuantileRank`, so the column is never reordered. `list_argmin` and
+    `list_argmax` scan the child values where they lie, comparing them as `min` and `max` do and
+    replacing the extreme only on a strictly more extreme value. A variance runs over the whole
+    batch in a conditional arm, like `mean`; a quantile runs over the selected rows only.
 - **Bytes, encodings, and hashes.** `BYTES` is an Arrow `Binary` column.
   - Encoders check each output's length against the column before encoding.
   - `bytes_from_utf8` reuses the text's buffers without copying.
@@ -1061,6 +1085,16 @@ The reference owns each family's contract. These notes describe its implementati
   - URLs parse with the `url` crate, and the functions never resolve a host or fetch anything.
 - **Conversions.** `AS` and `TRY_CAST` share one cast path through Arrow's safe cast. A `STRING`
   read as a number follows Arrow's parser.
+  - `CastTarget::between` alone decides which pairs of types convert. Validation, compilation and
+    constant set elements read it, so a refused pair has one `CastRefusal` with one message.
+  - A list cast compiles to a `ListCast` plan prepared once from the validated pair. The plan holds
+    each level's container change and the item field it converts to, and the element conversion.
+  - The kernel converts the innermost child values with the scalar conversion. It then rebuilds
+    each level from the input's offsets and validity, reusing the element values when their type
+    is unchanged. It gathers by index only when a row fails or a null row's layout is one the
+    target cannot keep, such as a `VEC` hiding elements that do not convert.
+  - A list cast whose elements read or write text runs over an arm's selected rows only, as a
+    scalar text cast does. Every other list cast converts the whole batch.
 
 ## Context, Determinism, And Extension Boundaries
 
@@ -1168,8 +1202,15 @@ and diagnostics.
 Registry validation compiles the same route with the same compiler when the processor is applied.
 It also rejects arguments containing `BYTES`, checks the sketch budget, and requires a message
 `WIDTH` or `MAX STATE SIZE` for `COLLECT_VEC`. Collection refuses a nullable argument with a typed
-route error and a `coalesce` instruction. Its injected result is a required `VEC` whose non-null
-item has the argument's exact type, including a nested array or vector.
+route error and a `coalesce` instruction. `COLLECT_VEC` injects a required `VEC` whose non-null
+item has the argument's exact type, including a nested array or vector. For `COLLECT_ARRAY`, the
+vocabulary projects a positive message width only from a count-only bound. Validation refuses
+other bounds with the processor, route, function and authored bound; compilation receives that
+same width during validation, installation and restored argument-schema construction. The
+compiler wraps the argument type in a required fixed-size list of that width, independently of
+the assigned field. Widths and necessarily present nested fixed-list field lengths exceeding
+Arrow's signed 32-bit representation are refused before allocation. Per-node relay byte limits
+remain emission admission, since capabilities do not select graph acceptance.
 
 Cold state inspection projects the same argument program through
 `CompiledWindowRoute::argument_inspection_fields` with the input schema's sensitivity and the
@@ -1216,6 +1257,11 @@ for each row.
 Gathering checks cancellation between runs and preserves nested types and floating-point bits.
 Accepted retained work waits for a worker place under the branch task's existing lifetime.
 
+The fixed form checks the retained count against its compiled width before capturing or charging
+the gather. Both forms gather the same child column; only the final Arrow container differs.
+The vector adds two offsets, while the fixed array has no outer offset buffer. Neither form adds
+an accumulator, retained column, snapshot field or publication protocol.
+
 Before a collection route publishes, its final output is checked against the relay decoded limit
 and qualified by the bounded IPC encoder against the encoded limit. That qualification has a cost
 separate from destination encoding; `window_collection` benchmarks the complete route emission,
@@ -1240,7 +1286,7 @@ window's relay emission or couple branch execution to a subscribing client's set
 | `moments` | `AVG`, variances, standard deviations | Two-pass centered count, mean, and M2 with one Chan merge per run, in a two-stack window | Refold typed surviving runs |
 | `co_moments` | Covariances, `CORR` | Two-pass centered co-moments with one Chan merge per run; `CORR` clamped to `[-1, 1]` | Refold typed surviving runs |
 | `extremes`, `sequence`, `arg_extremes` | `MIN`/`MAX`, `FIRST`/`LAST`, `ARG_MIN`/`ARG_MAX` | Monotonic candidate deque ordered by value, arrival, or key; ties keep the earliest row | Drop front candidates older than the first survivor |
-| `sequence` | `COLLECT_VEC` | Gather every retained argument in ingestion-low-watermark/admission order, sharing the argument and endpoint structure with `FIRST`/`LAST` | Read only the surviving rows; no extra retained state |
+| `sequence` | `COLLECT_VEC`, `COLLECT_ARRAY` | Gather every retained argument in ingestion-low-watermark/admission order, sharing the argument and endpoint structure with `FIRST`/`LAST` | Read only the surviving rows; no extra retained state |
 | `linear_histogram` | `PERCENTILE_LINEAR_HISTOGRAM` | Fixed-range buckets, answered with a bucket midpoint | Immediately, or after the configured delay on the domain clock |
 | `hll` | `APPROX_COUNT_DISTINCT` | HyperLogLog over the first 8 bytes of a BLAKE3 hash of a type-tagged key, with linear counting at small cardinalities | Rebuilt from survivors |
 | `quantile_sketch` | `APPROX_QUANTILE` | t-digest capped at its capacity, merging the least-cost adjacent centroids; exact while it holds every value | Rebuilt from survivors |

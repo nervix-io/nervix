@@ -17,7 +17,7 @@
 
 use std::time::Duration;
 
-use ahash::{HashMap, HashSet};
+use ahash::HashSet;
 use arch_into::ArchInto;
 use nervix_dataflow_graph::{DataflowNodeHealth, DataflowNodeStatus};
 use nervix_interconnect::{
@@ -32,8 +32,8 @@ use nervix_models::{
     KafkaIngestor, KafkaOffsetMode, KafkaTopicIngestor, Model, ModelKind, ModelName, NodeRef,
     NodeUnitRef, PlacementName, PlacementPolicy, ProcessorInputs, ProcessorOutputs,
     RequestedResourceVersion, ResourceDescription, ResourceEntryContent, ResourceManifestEntry,
-    ResourceUsage, ResourceVersionEntries, ScheduledNode, Unit, UnitKind, WasmStateInspection,
-    WasmUnitStateInspection, expression_to_plexus,
+    ResourceUsage, ResourceVersionEntries, ScheduledNode, Unit, UnitKind, WasmUnitStateInspection,
+    expression_to_plexus,
 };
 use nervix_vm::window::{WindowAggregateDemand, WindowAggregateProgram, WindowArguments};
 use sorted_vec::SortedSet;
@@ -41,6 +41,7 @@ use sorted_vec::SortedSet;
 use crate::{
     registry::{
         PlacementEndpointPairPlan, PlacementPlan, PlacementRequireGroupPlan, PlacementRulePlan,
+        placement_members,
     },
     runtime::{DecodeRejection, IngestorDescribe as RuntimeIngestorDescribe, TransportPosition},
 };
@@ -1175,7 +1176,7 @@ pub(in crate::application) fn format_wasm_processor_describe_output(
     name: impl Into<ModelName>,
     processor: &nervix_models::CreateWasmProcessor,
     scheduled_node: Option<&ScheduledNode>,
-    inspection: Option<&WasmStateInspection>,
+    summaries: &[(Unit, WasmUnitStateInspection)],
 ) -> String {
     let name = name.into();
     let mut lines = vec![
@@ -1210,128 +1211,15 @@ pub(in crate::application) fn format_wasm_processor_describe_output(
         "replicated state: true".to_string(),
     ]);
     lines.extend(format_processor_output_lines(&processor.output_routes));
-    if let Some(inspection) = inspection {
-        for unit in &inspection.units {
-            if let nervix_models::UnitKind::Partition(partition) = unit.unit.kind() {
-                lines.push(format!("state partition: {partition}"));
-            }
-            lines.extend(format_wasm_state_reset_lines(Some(unit)));
-            lines.extend(format_wasm_state_recovery_lines(Some(unit)));
-            lines.extend(format_wasm_checkpoint_lines(Some(unit)));
+    // The summary of each unit's lifetimes and counts; `SHOW WASM PROCESSOR ... STATE` pages the
+    // branch entries behind them.
+    for (unit, summary) in summaries {
+        if let nervix_models::UnitKind::Partition(partition) = unit.kind() {
+            lines.push(format!("state partition: {partition}"));
         }
+        lines.extend(nervix_client_wire::wasm_unit_summary_lines(summary));
     }
     lines.join("\n")
-}
-
-fn format_wasm_state_reset_lines(inspection: Option<&WasmUnitStateInspection>) -> Vec<String> {
-    let Some(inspection) = inspection else {
-        return Vec::new();
-    };
-    let mut lines = vec![format!(
-        "state default generation: {}",
-        inspection.default_generation
-    )];
-    let Some(reset) = &inspection.reset else {
-        return lines;
-    };
-    let scope = reset.reset.scope().kind();
-    lines.push(format!(
-        "state reset: {}, {scope}, generation {}",
-        reset.reset.phase().as_ref(),
-        reset.generation
-    ));
-    lines.push(format!(
-        "state reset reason: {}",
-        reset.reset.reason().as_ref()
-    ));
-    if let Some(readiness) = inspection.reset_readiness {
-        lines.push(format!("state reset readiness: {}", readiness.as_ref()));
-    }
-    lines
-}
-
-/// What became of the one recovery attempt each refused guest-state lifetime was worth.
-///
-/// A refusal that is still being worked on, one that started a fresh lifetime, and one that spent
-/// its attempt without producing a usable lifetime are the three states an operator acts on, so all
-/// three are reported. The branch is named by the scope alone, because a branch key may carry
-/// payload values.
-fn format_wasm_state_recovery_lines(inspection: Option<&WasmUnitStateInspection>) -> Vec<String> {
-    let Some(inspection) = inspection else {
-        return Vec::new();
-    };
-    let mut lines = Vec::new();
-    for recovery in &inspection.recoveries {
-        let selected = recovery.scope.kind();
-        lines.push(format!(
-            "rejected state recovery: {selected}, {}, {} (generation {})",
-            recovery.rejection, recovery.outcome, recovery.generation
-        ));
-    }
-    if inspection.omitted_recoveries > 0 {
-        lines.push(format!(
-            "rejected state recoveries omitted: {}",
-            inspection.omitted_recoveries
-        ));
-    }
-    lines
-}
-
-fn format_wasm_checkpoint_lines(inspection: Option<&WasmUnitStateInspection>) -> Vec<String> {
-    let Some(inspection) = inspection else {
-        return Vec::new();
-    };
-    let mut lines = Vec::new();
-    for checkpoint in &inspection.checkpoints {
-        let branch = match checkpoint.branch {
-            Some(fingerprint) => fingerprint.to_string(),
-            None => "unbranched".to_string(),
-        };
-        let committed = match checkpoint.committed_revision {
-            Some(revision) => revision.to_string(),
-            None => "none".to_string(),
-        };
-        let latest = match checkpoint.latest_revision {
-            Some(revision) => revision.to_string(),
-            None => "none".to_string(),
-        };
-        let required = match checkpoint.required_replicas {
-            Some(count) => count.to_string(),
-            None => "unknown".to_string(),
-        };
-        let confirmed = match checkpoint.confirmed_replicas {
-            Some(count) => count.to_string(),
-            None => "unknown".to_string(),
-        };
-        lines.push(format!(
-            "checkpoint branch={branch} generation={} committed_revision={committed} \
-             latest_revision={latest} stage={} required_replicas={required} \
-             confirmed_replicas={confirmed}",
-            checkpoint.generation,
-            checkpoint.stage.as_ref(),
-        ));
-    }
-    let counts = &inspection.checkpoint_counts;
-    lines.insert(0, format!("state structures: {}", counts.total));
-    lines.insert(
-        1,
-        format!("checkpoints awaiting local storage: {}", counts.captured),
-    );
-    lines.insert(
-        2,
-        format!(
-            "checkpoints awaiting replicas: {}",
-            counts.awaiting_replicas
-        ),
-    );
-    lines.insert(3, format!("failed checkpoints: {}", counts.failed));
-    if inspection.omitted_checkpoints > 0 {
-        lines.push(format!(
-            "checkpoints omitted: {}",
-            inspection.omitted_checkpoints
-        ));
-    }
-    lines
 }
 
 /// The text `DESCRIBE RESOURCE <name>` prints for `description`.
@@ -1611,48 +1499,20 @@ pub(in crate::application) fn placement_rule_coverage_status(
     }
 }
 
+/// The placement members whose names start with `prefix`, as the placement owner offers them to
+/// the console's member choices: eligible runtime nodes with unambiguous names.
 pub(in crate::application) fn placement_runtime_node_ref_suggestions(
     models: &[Model<RequestedResourceVersion>],
     prefix: &str,
 ) -> Vec<String> {
     let prefix = prefix.to_ascii_lowercase();
-    let eligible = models
-        .iter()
-        .filter(|model| {
-            placement_member_model_is_eligible(model) && model.name().as_str().starts_with(&prefix)
-        })
-        .map(|model| model.name())
-        .collect::<Vec<_>>();
-
-    let mut counts = HashMap::<ModelName, usize>::default();
-    for identifier in &eligible {
-        *counts.entry(identifier.clone()).or_default() += 1;
+    let mut suggestions = Vec::new();
+    for member in placement_members(models) {
+        if member.identifier.as_str().starts_with(&prefix) {
+            suggestions.push(member.identifier.to_string());
+        }
     }
-    eligible
-        .into_iter()
-        .filter(|identifier| counts.get(identifier) == Some(&1))
-        .map(|identifier| identifier.to_string())
-        .collect()
-}
-
-fn placement_member_model_is_eligible<Version>(model: &Model<Version>) -> bool {
-    match model {
-        Model::Generator(_)
-        | Model::Inferencer(_)
-        | Model::WasmProcessor(_)
-        | Model::Reingestor(_)
-        | Model::Lookup(_)
-        | Model::Junction(_)
-        | Model::Deduplicator(_)
-        | Model::Correlator(_)
-        | Model::Reorderer(_)
-        | Model::WindowProcessor(_)
-        | Model::Emitter(_) => true,
-        // Ingestors that execute on every node are outside placement rules.
-        Model::Ingestor(ingestor) => !ingestor.input.executes_on_every_cluster_node(),
-        Model::Relay(_) => true,
-        _ => false,
-    }
+    suggestions
 }
 
 pub(in crate::application) fn ordered_placement_corridor(
@@ -1960,9 +1820,10 @@ mod tests {
         use super::super::test_fixtures::{named, scheduled_node};
 
         let scheduled = scheduled_node("intake", ModelKind::Ingestor);
-        assert!(placement_member_model_is_eligible(
-            scheduled.config.as_ref()
-        ));
+        assert_eq!(
+            placement_members(std::slice::from_ref(scheduled.config.as_ref())),
+            vec![placement_member("intake", ModelKind::Ingestor)]
+        );
 
         let sources: [IngestorEntity; 3] = [
             HttpEndpointIngestor {
@@ -1998,7 +1859,7 @@ mod tests {
             };
             input.source = source;
             assert!(model.executes_on_every_cluster_node());
-            assert!(!placement_member_model_is_eligible(model.as_ref()));
+            assert!(placement_members(std::slice::from_ref(model.as_ref())).is_empty());
         }
     }
 }

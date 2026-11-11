@@ -25,8 +25,16 @@ use arrow_schema::DataType;
 use meticulous::OptionExt as _;
 use strum::{AsRefStr, EnumString, IntoEnumIterator as _, IntoStaticStr, VariantNames};
 
-pub use crate::datetime::{DatetimeFormat, DatetimeParser, Zone};
-use crate::json::JsonExtraction;
+pub use crate::{
+    datetime::{DatetimeFormat, DatetimeParser, Zone},
+    list_shape::{
+        ArrayDimensions, ListShapeArgumentError, ListShapeFunction, ListShapeFunctionName,
+    },
+};
+use crate::{
+    json::JsonExtraction,
+    list_statistics::{ListStatistic, ListStatisticName},
+};
 
 /// Identifies one semantic operation in a lowered VM program.
 ///
@@ -597,6 +605,10 @@ pub enum FunctionName {
     RegexpExtract,
     #[strum(disabled)]
     Datetime(DatetimeFunction),
+    #[strum(disabled)]
+    ListShape(ListShapeFunction),
+    #[strum(disabled)]
+    ListStatistic(ListStatistic),
     LeakSensitive,
     LookupHashMap,
     ReadHeader,
@@ -908,6 +920,7 @@ pub enum WindowAggregateFunction {
     Avg,
     BoolAnd,
     BoolOr,
+    CollectArray,
     CollectVec,
     Corr,
     Count,
@@ -971,6 +984,11 @@ impl PartialOrd for WindowAggregateInvocation {
 }
 
 impl WindowAggregateFunction {
+    /// Whether the function gathers the retained argument as a list value.
+    pub const fn collects_values(self) -> bool {
+        matches!(self, Self::CollectArray | Self::CollectVec)
+    }
+
     pub fn plexus_name(&self) -> &str {
         self.as_ref()
     }
@@ -984,6 +1002,7 @@ impl WindowAggregateFunction {
             Self::Avg
             | Self::BoolAnd
             | Self::BoolOr
+            | Self::CollectArray
             | Self::CollectVec
             | Self::Count
             | Self::CountIf
@@ -1010,6 +1029,7 @@ impl WindowAggregateFunction {
             | Self::ApproxTopK
             | Self::BoolAnd
             | Self::BoolOr
+            | Self::CollectArray
             | Self::CollectVec
             | Self::Count
             | Self::CountIf
@@ -1036,6 +1056,8 @@ impl FunctionName {
             .map(|function| function.as_str().to_string())
             .collect::<Vec<_>>();
         names.extend(DatetimeFunctionName::iter().map(|function| function.to_string()));
+        names.extend(ListShapeFunctionName::iter().map(|function| function.to_string()));
+        names.extend(ListStatisticName::iter().map(|function| function.to_string()));
         names.extend(["ceiling", "power", "substring"].map(str::to_string));
         names.sort();
         names.dedup();
@@ -1321,6 +1343,8 @@ impl FunctionName {
             Self::RegexpSubstr => "regexp_substr",
             Self::RegexpExtract => "regexp_extract",
             Self::Datetime(function) => function.name().into(),
+            Self::ListShape(function) => function.name().into(),
+            Self::ListStatistic(statistic) => statistic.name().into(),
             Self::LeakSensitive => "leak_sensitive",
             Self::LookupHashMap => "lookup_hash_map",
             Self::ReadHeader => "read_header",
@@ -1424,6 +1448,7 @@ mod completion_tests {
         assert!(names.contains(&"coalesce".to_string()));
         assert!(names.contains(&"date_add".to_string()));
         assert!(names.contains(&"ceiling".to_string()));
+        assert!(names.contains(&"list_quantile".to_string()));
         assert!(!names.contains(&"read_header".to_string()));
         assert!(!names.contains(&"write_header".to_string()));
         assert!(names.windows(2).all(|pair| pair[0] < pair[1]));

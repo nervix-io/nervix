@@ -157,6 +157,21 @@ fn generator_materialized_relay_choices_round_trip_with_and_without_a_branch() {
 }
 
 #[test]
+fn placement_member_choices_round_trip_with_their_domain() {
+    let message = ClientMessage {
+        request_id: request(5),
+        request: ClientRequest::Choice(ChoiceLookupRequest::new(
+            ChoiceTarget::PlacementMember,
+            vec![ChoiceSelection {
+                value: ChoiceValue::Domain(name("tenant")),
+            }],
+            "scor".to_string(),
+        )),
+    };
+    assert_eq!(round_trip_client(&message), message);
+}
+
+#[test]
 fn bolero_processor_choice_request_round_trip() {
     bolero::check!()
         .with_iterations(128)

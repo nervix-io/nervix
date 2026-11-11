@@ -107,7 +107,7 @@ mod inspection_clauses_tests {
         for selector in [
             "FOR ALL BRANCHES",
             "FOR UNBRANCHED",
-            "FOR BRANCH VALUES { tenant = 'alpha', shard = -7 }",
+            "FOR BRANCH KEY { tenant = 'alpha', shard = -7 }",
         ] {
             let text = format!(
                 "SHOW RELAY events MATERIALIZED STATE {selector} LIMIT 2 AFTER \
@@ -150,9 +150,9 @@ mod inspection_clauses_tests {
             "LIMIT 18446744073709551616",
             "AFTER 'position'",
             "LIMIT 1 AFTER 3",
-            "FOR BRANCH VALUES {}",
-            "FOR BRANCH VALUES { tenant = 'a', tenant = 'b' }",
-            "FOR BRANCH VALUES { tenant = null }",
+            "FOR BRANCH KEY {}",
+            "FOR BRANCH KEY { tenant = 'a', tenant = 'b' }",
+            "FOR BRANCH KEY { tenant = null }",
             "FORMAT JSON LIMIT 1",
             "FOR UNBRANCHED FOR ALL BRANCHES",
             "FORMAT XML",
@@ -169,7 +169,7 @@ mod inspection_clauses_tests {
     fn completion_composes_the_current_state_clauses_without_statement_leakage() {
         for (prefix, expected) in [
             ("SHOW RELAY events MATERIALIZED STATE FOR ", "ALL BRANCHES"),
-            ("SHOW RELAY events MATERIALIZED STATE FOR ", "BRANCH VALUES"),
+            ("SHOW RELAY events MATERIALIZED STATE FOR ", "BRANCH KEY"),
             ("SHOW RELAY events MATERIALIZED STATE FORMAT ", "JSON"),
             ("SHOW RELAY events MATERIALIZED STATE LIMIT 1 ", "AFTER"),
         ] {

@@ -155,7 +155,8 @@ fn field_reference<'src>()
     choice((scoped, bare)).boxed()
 }
 
-fn cast_type<'src>()
+/// A scalar type name, in any letter case.
+fn scalar_type<'src>()
 -> impl Parser<'src, &'src [Token], ParseAsType, extra::Err<ParseError<'src>>> + Clone {
     raw_identifier().try_map(|name, span| {
         let ty = match name.to_ascii_uppercase().as_str() {
@@ -179,8 +180,9 @@ fn cast_type<'src>()
     })
 }
 
-/// A declared result type: a scalar type as `cast_type` reads it, or a `VEC<...>` or
-/// `ARRAY<..., n>` of declared types written as a schema field declares them.
+/// A declared type, which a conversion converts to and a JSON read reads as: a scalar type as
+/// `scalar_type` reads it, or a `VEC<...>` or `ARRAY<..., n>` of declared types written as a schema
+/// field declares them.
 fn declared_type<'src>()
 -> impl Parser<'src, &'src [Token], ParseAsType, extra::Err<ParseError<'src>>> + Clone {
     recursive(|declared| {
@@ -247,7 +249,7 @@ fn declared_type<'src>()
                     element: Box::new(element),
                 }),
         );
-        choice((array, vector, cast_type())).boxed()
+        choice((array, vector, scalar_type())).boxed()
     })
 }
 
@@ -348,10 +350,10 @@ impl ComparisonSuffix {
     }
 }
 
-/// A postfix `AS <type>`, which converts the operand before it.
+/// A postfix `AS <type>`, which converts the operand before it to a declared type.
 fn cast_suffix<'src>()
 -> impl Parser<'src, &'src [Token], ParseAsType, extra::Err<ParseError<'src>>> + Clone {
-    kw(Identifier::As).ignore_then(cast_type())
+    kw(Identifier::As).ignore_then(declared_type())
 }
 
 /// An operand followed by the postfix casts `suffix` reads, each converting everything before it.
@@ -591,7 +593,7 @@ fn expression<'src>()
             // `AS`. The operand reads every other postfix cast as its own and leaves the one the
             // closing parenthesis follows to the conversion.
             let conversion = kw(Identifier::As)
-                .ignore_then(cast_type())
+                .ignore_then(declared_type())
                 .then_ignore(tok(Token::RParen));
             let operand_cast_suffix = cast_suffix().and_is(conversion.clone().not());
             let try_cast = kw(Identifier::TryCast)
@@ -1692,6 +1694,141 @@ mod tests {
             r#"JSON_VALUE(input.doc, '$["odd key"].y[3]' AS ARRAY<U8, 2, 2>) AS STRING"#,
             "JSON_EXISTS(coalesce(input.doc, '{}'), '$.a.b')",
             "NOT JSON_EXISTS(input.doc, '$')",
+        ] {
+            let expression = parsed(source);
+            let rendered = nervix_models::expression_to_plexus(&expression)
+                .unwrap_or_else(|error| panic!("`{source}` must render: {error}"));
+            assert_eq!(parsed(&rendered), expression, "`{rendered}` changed");
+        }
+    }
+
+    fn vec_of(element: ParseAsType) -> ParseAsType {
+        ParseAsType::Vec {
+            element: Box::new(element),
+        }
+    }
+
+    fn array_of(element: ParseAsType, len: u32) -> ParseAsType {
+        ParseAsType::Array {
+            element: Box::new(element),
+            len: NonZeroU32::new(len).expect("test array lengths are positive"),
+        }
+    }
+
+    #[test]
+    fn parses_a_conversion_to_a_declared_list_type_in_any_letter_case() {
+        assert_eq!(
+            parsed("input.readings AS VEC<F32>"),
+            cast(field("readings"), vec_of(ParseAsType::F32))
+        );
+        assert_eq!(
+            parsed("input.readings as array<float32, 64>"),
+            cast(field("readings"), array_of(ParseAsType::F32, 64))
+        );
+        // `ARRAY<F64, 64, 2>` is 64 arrays of two, and `>>` closes two lists.
+        assert_eq!(
+            parsed("TRY_CAST(input.matrix AS ARRAY<F64, 64, 2>)"),
+            try_cast(field("matrix"), array_of(array_of(ParseAsType::F64, 2), 64))
+        );
+        assert_eq!(
+            parsed("Try_Cast(input.matrix as Vec<Vec<I32>>)"),
+            try_cast(field("matrix"), vec_of(vec_of(ParseAsType::I32)))
+        );
+        assert_eq!(
+            parsed("input.matrix AS VEC<ARRAY<BOOL, 2>>"),
+            cast(field("matrix"), vec_of(array_of(ParseAsType::Bool, 2)))
+        );
+    }
+
+    #[test]
+    fn a_list_conversion_binds_as_tightly_as_a_scalar_conversion() {
+        // An operator after a list type applies to the converted value.
+        assert_eq!(
+            parsed("input.left AS VEC<I64> = input.right"),
+            Expression::Binary {
+                operator: BinaryOperator::Equal,
+                left: Box::new(cast(field("left"), vec_of(ParseAsType::I64))),
+                right: Box::new(field("right")),
+            }
+        );
+        // A comparison after a scalar type is still a comparison, not the start of a list type.
+        assert_eq!(
+            parsed("input.low AS I64 < input.high"),
+            Expression::Binary {
+                operator: BinaryOperator::LessThan,
+                left: Box::new(cast(field("low"), ParseAsType::I64)),
+                right: Box::new(field("high")),
+            }
+        );
+        // The lengths of an argument's type end where the next argument begins.
+        assert_eq!(
+            parsed("nth(input.pair AS ARRAY<F32, 2>, 0)"),
+            Expression::Call {
+                function: BuiltinFunctionName::parse("nth").expect("valid function name"),
+                arguments: vec![
+                    cast(field("pair"), array_of(ParseAsType::F32, 2)),
+                    Expression::Literal(Literal::I64(0)),
+                ],
+            }
+        );
+        // Every postfix conversion but the last belongs to a tolerant conversion's operand.
+        assert_eq!(
+            parsed("TRY_CAST(input.raw AS VEC<I64> AS ARRAY<STRING, 3>)"),
+            try_cast(
+                cast(field("raw"), vec_of(ParseAsType::I64)),
+                array_of(ParseAsType::String, 3)
+            )
+        );
+        assert_eq!(
+            parsed("input.raw AS VEC<I64> AS VEC<F64>"),
+            cast(
+                cast(field("raw"), vec_of(ParseAsType::I64)),
+                vec_of(ParseAsType::F64)
+            )
+        );
+    }
+
+    #[test]
+    fn rejects_a_list_conversion_target_a_schema_field_could_not_declare() {
+        for source in [
+            "input.raw AS VEC<I64",
+            "input.raw AS VEC",
+            "input.raw AS VEC<>",
+            "input.raw AS ARRAY<I64>",
+            "input.raw AS ARRAY<, 2>",
+            "input.raw AS ARRAY<I64, 0>",
+            "input.raw AS ARRAY<I64, -1>",
+            "input.raw AS ARRAY<I64, 2147483648>",
+            "input.raw AS ARRAY<I64, 2,>",
+            "input.raw AS LIST<I64>",
+            "TRY_CAST(input.raw AS VEC<I64>",
+            "TRY_CAST(input.raw AS ARRAY<I64, 2)",
+            "TRY_CAST(input.raw AS VEC<UNKNOWN>)",
+        ] {
+            assert!(
+                parse_expression(source).is_err(),
+                "`{source}` must be rejected"
+            );
+        }
+        let error = parse_expression("input.raw AS ARRAY<I64, 0>")
+            .expect_err("a zero-length array must be rejected");
+        assert!(
+            error
+                .to_string()
+                .contains("array length must be a positive unsigned integer"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn a_rendered_list_conversion_reparses_to_the_same_expression() {
+        for source in [
+            "input.readings AS VEC<F32>",
+            "TRY_CAST(input.matrix AS ARRAY<F64, 64, 2>)",
+            "TRY_CAST(input.matrix AS VEC<VEC<I32>>) AS VEC<ARRAY<U8, 2>>",
+            "nth(input.pair AS ARRAY<DATETIME, 2>, 0) AS STRING",
+            "input.left AS VEC<I64> IS NOT DISTINCT FROM input.right AS VEC<I64>",
+            "CASE WHEN input.flag THEN input.raw AS ARRAY<BYTES, 1> END",
         ] {
             let expression = parsed(source);
             let rendered = nervix_models::expression_to_plexus(&expression)

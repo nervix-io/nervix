@@ -25,7 +25,7 @@ pub(crate) fn branch_selection<'src>()
     kw(Identifier::For).ignore_then(choice((
         kw(Identifier::Unbranched).to(StateBranchSelection::Unbranched),
         kw_phrase2(Identifier::All, Identifier::Branches).to(StateBranchSelection::AllBranches),
-        kw_phrase2(Identifier::Branch, Identifier::Values)
+        kw_phrase2(Identifier::Branch, Identifier::Key)
             .ignore_then(branch_fields())
             .map(StateBranchSelection::Branch),
     )))
@@ -84,11 +84,59 @@ pub(crate) fn branch_fields<'src>()
                 if !names.insert(&field.name) {
                     return Err(Rich::custom(
                         span,
-                        format!("duplicate branch field '{}'", field.name.as_str()),
+                        format!("duplicate branch key field '{}'", field.name.as_str()),
                     ));
                 }
             }
             Ok(fields)
         })
         .boxed()
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::statement::{parse_statement, suggest_statement};
+
+    const HEADS: [&str; 7] = [
+        "RESET WASM PROCESSOR counter STATE",
+        "SHOW WASM PROCESSOR counter STATE",
+        "SHOW RELAY events MATERIALIZED STATE",
+        "SHOW REORDERER held STATE",
+        "SHOW CORRELATOR held STATE",
+        "SHOW DEDUPLICATOR held STATE",
+        "SHOW WINDOW PROCESSOR held STATE",
+    ];
+
+    #[test]
+    fn every_state_command_completes_the_composed_branch_key_phrase() {
+        for head in HEADS {
+            let input = format!("{head} FOR ");
+            let mut suggestions = suggest_statement(&input, input.len());
+            suggestions.sort();
+            assert_eq!(
+                suggestions,
+                ["ALL BRANCHES", "BRANCH KEY", "UNBRANCHED"],
+                "{input}"
+            );
+
+            let input = format!("{head} FOR BRANCH ");
+            assert_eq!(suggest_statement(&input, input.len()), ["KEY"], "{input}");
+        }
+    }
+
+    #[test]
+    fn every_state_command_requires_a_complete_literal_key() {
+        for head in HEADS {
+            for key in [
+                "{}",
+                "{ tenant = 'alpha', tenant = 'beta' }",
+                "{ tenant = null }",
+                "{ tenant = input.tenant }",
+                "{ tenant = 'alpha' } FOR ALL BRANCHES",
+            ] {
+                let input = format!("{head} FOR BRANCH KEY {key};");
+                assert!(parse_statement(&input).is_err(), "{input}");
+            }
+        }
+    }
 }
