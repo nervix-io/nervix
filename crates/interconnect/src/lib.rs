@@ -43,7 +43,9 @@ pub use relay_slicing::RelaySliceCursor;
 mod connection;
 mod entropy;
 mod identity;
+mod inferencer_description;
 mod kafka_start;
+mod listener;
 mod node_drain;
 mod observation;
 mod operation;
@@ -67,7 +69,9 @@ pub use connection::{
 };
 pub use entropy::TransportEntropy;
 pub use identity::{JoinTerms, TlsConfigBundle, TransportIdentity};
+pub use inferencer_description::DescribeInferencerRequest;
 pub use kafka_start::{KafkaStartAction, KafkaStartRequest, KafkaStartResponse};
+pub use listener::{AcceptRetryDelay, AcceptRetryDelayError, is_connection_accept_failure};
 pub use node_drain::{
     StoppingNodeDrainAction, StoppingNodeDrainRequest, StoppingNodeDrainResponse,
 };
@@ -145,6 +149,8 @@ pub(crate) const RKYV_RECORD_OVERHEAD_BYTES: u64 = 4 * 1024;
 pub struct TransportOptions {
     pub relay_retention: RelayRetentionSettings,
     pub reconnect_jitter_permille: u16,
+    /// Positive pause after a node-local accept failure.
+    pub accept_retry_delay: nervix_models::Setting<AcceptRetryDelay>,
     /// Explicit receiver claims; absence derives each limit from the supplied executor.
     pub peer_receive: Option<settings::PeerReceiveSettings>,
     pub max_peers: usize,

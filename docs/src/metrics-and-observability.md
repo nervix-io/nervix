@@ -42,7 +42,7 @@ Graph metric series use these labels:
 - `target_kind`: runtime target kind, such as `RELAY`, `INGESTOR`, `JUNCTION`, `DEDUPLICATOR`, `REINGESTOR`, `WINDOW_PROCESSOR`, `EMITTER`, or `LOOKUP`
 - `target`: relay or node name
 - `physical_node_id`: Nervix cluster node where the metric was observed
-- `direction`: `received` or `sent`
+- `direction`: `received` or `sent` for traffic, `state` for inferencer state
 - `relay`: logical relay associated with the observation, or `-` when no relay applies
 - `peer_kind` and `peer`: relay peer labels for node-to-relay observations, or `-` when no peer applies
 - `partition`: the partition of a partitioned relay or processor recording the series, or `-`
@@ -118,6 +118,13 @@ Nervix records these raw metric families:
   while their branch changes its partition count
 - `nervix_branch_partition_keys_claimed_total`: total concrete keys the physical node's units claimed
   from the unit a previous partition count placed them in
+- `nervix_inferencer_state_bytes`: declared native tensor bytes held by active stateful branches
+- `nervix_inferencer_snapshot_failures_total`: failed inferencer snapshot publication or persistence
+  attempts
+- `nervix_inferencer_restored_branches_total`: branches initialized from a matching published
+  tensor generation
+- `nervix_inferencer_reset_branches_total`: branches initialized from their declared `INITIAL`,
+  including their first start
 - `nervix_ingestor_quiesce_buffered_records`: raw payloads currently retained in an ingestor's
   per-instance quiesce buffers, including a payload that is draining until its messages enter
   their ingest group
@@ -814,6 +821,34 @@ relay-buffer metric series.
 
 A `-` value means the derived value is not available. This is common for domain-clock values when no domain timestamp has been observed or when the observed domain-time span is zero.
 
+## Inferencer State
+
+Every inferencer execution unit registers its four state families at zero when it starts, including
+a stateless unit. They use the processor label set with `target_kind="INFERENCER"`,
+`direction="state"`, and `relay`, `peer_kind` and `peer` set to `-`. The unit supplies `partition`
+and `instance`; concrete branch keys are never labels. State replicas do not register another
+execution owner's series. The series are withdrawn when their unit and retained reporting handles
+end.
+
+`nervix_inferencer_state_bytes` counts declared native `F32` bytes once for each active branch's
+state session. Ending that session releases its count. It excludes ONNX session allocations,
+snapshot framing, temporary encoding buffers and stored replica snapshots. The initialization
+counters distinguish a branch restored from a matching generation from one started from `INITIAL`;
+the latter includes a fresh branch and a branch whose previous incarnation cannot be reused.
+
+`nervix_inferencer_snapshot_failures_total` counts failed snapshot publication and persistence
+attempts, including a failed final write. Failures log at `warn` at most once per unit per
+snapshot interval, including during shutdown. Every failure increments the counter even when
+its warning is suppressed. Input rows do not trigger snapshot-failure logs.
+
+`DESCRIBE INFERENCER` keeps the static model declarations and each unit's published-state counts,
+bytes and revision progress in typed fields before rendering text. Its counts read the published
+generations and can lag the live session until publication. Each revision summary is a maximum
+over independent branch-local sequences at that stage. It is not a common checkpoint or a
+readiness verdict. Replica progress is the owner's latest confirmed observation; unavailable
+progress stays unavailable, and a known revision zero stays zero. No tensor or branch-key value
+is read to produce the summary.
+
 ## Branch Lifecycle Signals
 
 Prometheus exposes branch lifecycle state without a concrete branch-key label:
@@ -1005,3 +1040,12 @@ they exclude the graph wait. A broker ingestor's transient failure clears once i
 confirms an acknowledgement again; a paced ingestor's clears once a poll or resume succeeds.
 Recording touches retained atomic children, with no label resolution or registry access, and
 changes no delivery, retry or error policy.
+
+## Listener Capacity Observations
+
+Startup logs and each node's committed `DESCRIBE CLUSTER` claim expose every
+[Listener Bound](node-settings.md#listener-bounds). The existing execution memory metrics include
+`class="intake"`: its capacity is independent of `relay`, reserved bytes follow retained HTTP input
+and body-assembly workers, and the reservation/rejection counters retain their direct-admission meaning. A refused oversize
+body leaves no retained intake reservation or admitted relay payload. `nervix_sessions` returns to
+its preceding value when HTTP/2 keepalive reaps an unresponsive gRPC session.

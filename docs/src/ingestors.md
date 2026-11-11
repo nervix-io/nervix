@@ -3178,6 +3178,11 @@ its [transport contract](connector-contract.md#http-client-transport):
 
 ### `HTTP ENDPOINT` And `WEBSOCKETS ENDPOINT`
 
+The node's [Listener Bounds](node-settings.md#listener-bounds) apply before endpoint dispatch:
+connection, header, TLS, idle and HTTP body limits, accounted body admission, explicit WebSocket
+frame/message bounds, and the 413/408/431/503 input outcomes. These are local Nervix capacities;
+the endpoint's delivery, quiesce and acknowledgement contract still owns graph admission.
+
 #### HTTP ENDPOINT
 
 <!-- connector-matrix:ingest-http-endpoint:start -->
@@ -3363,9 +3368,9 @@ The physical ACK timeout starts when a complete payload obtains its window slot.
 and fits the supported physical deadline range. Downstream keepalive does not restart it. The
 window uses immediate admission: it never queues a request for a response slot. A window already
 full at the HTTP head refuses before reading the body; dispatch checks capacity again after the
-body completes, so competing requests cannot overrun the window. It does not bound
-HTTP request-head or body reads. HTTP request bodies retain their separately declared unbounded
-limit, and WebSocket messages retain the driver's message and frame limits.
+body completes, so competing requests cannot overrun the window. HTTP request-head and body reads,
+input memory and WebSocket message and frame sizes follow the node's separately declared
+[Listener Bounds](node-settings.md#listener-bounds).
 
 In `MODE NO ACK`, admission still answers HTTP 202 without waiting for downstream acknowledgement.
 A codec refusal becomes a decode rejection consumed by `ON GENERAL ERROR`; it also answers 202.

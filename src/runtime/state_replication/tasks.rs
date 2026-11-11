@@ -22,6 +22,28 @@ use nervix_primitives::sync::DropGuard;
 
 use super::*;
 
+/// Inference writers retain their recorder; other writers carry a zero-sized reporter.
+pub(in crate::runtime) trait SnapshotFailureReporter:
+    Send + Sync + 'static
+{
+    const REPORTS_FAILURES: bool;
+    fn failed(&self, runtime: &Runtime) -> bool;
+}
+
+impl SnapshotFailureReporter for () {
+    const REPORTS_FAILURES: bool = false;
+    fn failed(&self, _runtime: &Runtime) -> bool {
+        true
+    }
+}
+
+impl SnapshotFailureReporter for crate::metrics::InferencerStateMetrics {
+    const REPORTS_FAILURES: bool = true;
+    fn failed(&self, runtime: &Runtime) -> bool {
+        self.snapshot_failed(Instant::now(), runtime.state_snapshot_interval())
+    }
+}
+
 /// The snapshot owners observe policy at their existing bounded replication-poll boundary. A
 /// changed interval starts a fresh period; unrelated policy changes never postpone a checkpoint.
 struct SnapshotCadence {
@@ -286,11 +308,14 @@ impl Runtime {
     /// The task runs under the runtime's [`StateSnapshotTasks`], not under its branch task, so a
     /// runtime that stops waits for that last write. The handle this returns only lets a branch
     /// that stops in time wait for it too; dropping it leaves the task with the runtime.
-    pub(in crate::runtime) fn spawn_published_branch_state_snapshot_task(
+    pub(in crate::runtime) fn spawn_published_branch_state_snapshot_task<
+        R: SnapshotFailureReporter,
+    >(
         &self,
         shutdown_tx: &watch::Sender<bool>,
         state: PublishedBranchState,
         snapshot_requests: mpsc::Sender<ProcessorSnapshotRequest>,
+        reporter: R,
     ) -> Option<JoinHandle<()>> {
         let store = self.inner.state_store.as_ref()?.clone();
         let mut cadence = SnapshotCadence::new(self.state_snapshot_interval(), Instant::now());
@@ -304,25 +329,29 @@ impl Runtime {
                 nervix_primitives::select! {
                     changed = shutdown_rx.changed() => {
                         if changed.is_err() || *shutdown_rx.borrow() {
-                            if let Err(error) = state.request_publication(&snapshot_requests).await {
+                            if let Err(error) = state.request_publication(&snapshot_requests).await
+                                && (!R::REPORTS_FAILURES || reporter.failed(&runtime))
+                            {
                                 warn!(
                                     kind = state.placement().kind.as_str(),
                                     error = %format_args!("{error:#}"),
                                     "failed to publish branch state during shutdown"
                                 );
                             }
-                            runtime.persist_stopped_branch_state(&state, &store).await;
+                            runtime.persist_stopped_branch_state(&state, &store, &reporter).await;
                             break;
                         }
                     }
                     // A stopping runtime has ended its branch tasks, so nothing publishes for this
                     // state any more and what was published last is what a restart restores.
                     _ = runtime_stopping.cancelled() => {
-                        runtime.persist_stopped_branch_state(&state, &store).await;
+                        runtime.persist_stopped_branch_state(&state, &store, &reporter).await;
                         break;
                     }
                     _ = sleep(runtime.inner.state_replication_poll_interval.min(runtime.state_snapshot_interval())) => {
-                        if let Err(error) = state.request_publication(&snapshot_requests).await {
+                        if let Err(error) = state.request_publication(&snapshot_requests).await
+                            && (!R::REPORTS_FAILURES || reporter.failed(&runtime))
+                        {
                             warn!(
                                 kind = state.placement().kind.as_str(),
                                 error = %format_args!("{error:#}"),
@@ -344,11 +373,15 @@ impl Runtime {
                                 state.placement(), state.replication(), lsm,
                             ),
                             Ok(None) => {}
-                            Err(error) => warn!(
+                            Err(error) => {
+                                if !R::REPORTS_FAILURES || reporter.failed(&runtime) {
+                                warn!(
                                 kind = state.placement().kind.as_str(),
                                 error = %format_args!("{error:#}"),
                                 "failed to persist branch state snapshot"
-                            ),
+                                );
+                                }
+                            },
                         }
                     }
                 }
@@ -370,10 +403,11 @@ impl Runtime {
 
     /// Write what a branch that has stopped published last, and offer the checkpoint to its
     /// replicas.
-    async fn persist_stopped_branch_state(
+    async fn persist_stopped_branch_state<R: SnapshotFailureReporter>(
         &self,
         state: &PublishedBranchState,
         store: &RuntimeStateStore,
+        reporter: &R,
     ) {
         self.wait_for_slow_last_write(state.placement()).await;
         let persisted = state
@@ -382,11 +416,15 @@ impl Runtime {
         match persisted {
             Ok(Some(lsm)) => self.announce_checkpoint(state.placement(), state.replication(), lsm),
             Ok(None) => {}
-            Err(error) => warn!(
-                kind = state.placement().kind.as_str(),
-                error = %format_args!("{error:#}"),
-                "failed to flush branch state snapshot during shutdown"
-            ),
+            Err(error) => {
+                if !R::REPORTS_FAILURES || reporter.failed(self) {
+                    warn!(
+                    kind = state.placement().kind.as_str(),
+                    error = %format_args!("{error:#}"),
+                    "failed to flush branch state snapshot during shutdown"
+                    );
+                }
+            }
         }
     }
 
