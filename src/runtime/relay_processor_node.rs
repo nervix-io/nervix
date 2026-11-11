@@ -622,16 +622,19 @@ impl RelayProcessorNode {
                             return;
                         }
                     };
-                    let key_result = execute_program_with_selection_in_context(
-                        branch.runtime.executor(),
-                        &key_program.program,
-                        &vm_batch,
-                        &VmExecutionContext {
-                            now: execution_now,
-                            injector: None,
-                        },
-                    )
-                    .await;
+                    let key_result = batch
+                        .keep_alive_while_pending(
+                            execute_accepted_program_with_selection_in_context(
+                                branch.runtime.executor().accepted_work(),
+                                &key_program.program,
+                                &vm_batch,
+                                &VmExecutionContext {
+                                    now: execution_now,
+                                    injector: None,
+                                },
+                            ),
+                        )
+                        .await;
                     let key_result = match key_result {
                         Ok(result) => result,
                         Err(error) => {
@@ -762,14 +765,16 @@ impl RelayProcessorNode {
                         return;
                     };
                     // Every route's aggregate arguments are evaluated over the whole batch once.
-                    let evaluated = evaluate_window_arguments(
-                        branch.runtime.executor(),
-                        plan,
-                        compiled_aggregates,
-                        first_message.record.batch(),
-                        execution_now,
-                    )
-                    .await;
+                    let evaluated = messages
+                        .as_slice()
+                        .keep_alive_while_pending(evaluate_window_arguments(
+                            branch.runtime.executor(),
+                            plan,
+                            compiled_aggregates,
+                            first_message.record.batch(),
+                            execution_now,
+                        ))
+                        .await;
                     let mut evaluated = match evaluated {
                         Ok(evaluated) => evaluated,
                         Err(failure) => {
@@ -966,16 +971,21 @@ impl RelayProcessorNode {
                             return;
                         }
                     };
-                    let key_result = execute_program_with_selection_in_context(
-                        branch.runtime.executor(),
-                        &program.program,
-                        &vm_batch,
-                        &VmExecutionContext {
-                            now: execution_now,
-                            injector: None,
-                        },
-                    )
-                    .await;
+                    let key_result = batch
+                        .keep_alive_while_pending(
+                            output_buffers.as_slice().keep_alive_while_pending(
+                                execute_accepted_program_with_selection_in_context(
+                                    branch.runtime.executor().accepted_work(),
+                                    &program.program,
+                                    &vm_batch,
+                                    &VmExecutionContext {
+                                        now: execution_now,
+                                        injector: None,
+                                    },
+                                ),
+                            ),
+                        )
+                        .await;
                     let key_result = match key_result {
                         Ok(result) => result,
                         Err(error) => {
@@ -1170,18 +1180,23 @@ impl RelayProcessorNode {
                             message,
                             materialized_state: materialized_state.clone(),
                         };
-                        match correlate_incoming_message(
-                            ProgramRun {
-                                executor: branch.runtime.executor(),
-                                now: execution_now,
-                            },
-                            where_program,
-                            side,
-                            *match_policy,
-                            state,
-                            incoming,
-                        )
-                        .await
+                        match batch
+                            .keep_alive_while_pending(
+                                correlations.as_slice().keep_alive_while_pending(
+                                    correlate_incoming_message(
+                                        ProgramRun {
+                                            executor: branch.runtime.executor(),
+                                            now: execution_now,
+                                        },
+                                        where_program,
+                                        side,
+                                        *match_policy,
+                                        state,
+                                        incoming,
+                                    ),
+                                ),
+                            )
+                            .await
                         {
                             Ok(Some(pair)) => correlations.push(pair),
                             Ok(None) => {}
@@ -1272,15 +1287,16 @@ impl RelayProcessorNode {
                         } else {
                             pair_acks.iter().map(AckSet::attached).collect()
                         };
-                        let outcomes = match evaluate_correlator_output_batch(
-                            branch.runtime.executor(),
-                            &self.processor,
-                            output_program,
-                            &matched,
-                            route_acks,
-                            execution_now,
-                        )
-                        .await
+                        let outcomes = match state
+                            .keep_alive_while_pending(evaluate_correlator_output_batch(
+                                branch.runtime.executor(),
+                                &self.processor,
+                                output_program,
+                                &matched,
+                                route_acks,
+                                execution_now,
+                            ))
+                            .await
                         {
                             Ok(outcomes) => outcomes,
                             Err(failure) => {
@@ -1326,19 +1342,20 @@ impl RelayProcessorNode {
                                 }
                             }
                         }
-                        enqueue_correlator_output(
-                            CorrelatorOutputContext {
-                                branch,
-                                node_kind: self.kind,
-                                processor: &self.processor,
-                                error_policies: &self.error_policies,
-                                output_routes,
-                            },
-                            output_index,
-                            messages,
-                            execution_now,
-                        )
-                        .await;
+                        state
+                            .keep_alive_while_pending(enqueue_correlator_output(
+                                CorrelatorOutputContext {
+                                    branch,
+                                    node_kind: self.kind,
+                                    processor: &self.processor,
+                                    error_policies: &self.error_policies,
+                                    output_routes,
+                                },
+                                output_index,
+                                messages,
+                                execution_now,
+                            ))
+                            .await;
                     }
                 }
                 RelayProcessorOperationNode::Junction { output_routes } => {
@@ -2305,7 +2322,13 @@ mod tests {
 
     impl OneProcessorBranch {
         async fn new(shape: impl FnOnce(&mut RelayProcessorTemplate)) -> Self {
-            let runtime = Runtime::default();
+            Self::with_runtime(Runtime::default(), shape).await
+        }
+
+        async fn with_runtime(
+            runtime: Runtime,
+            shape: impl FnOnce(&mut RelayProcessorTemplate),
+        ) -> Self {
             let domain = domain("default");
             install_unpaced_test_domain(&runtime, &domain);
             let node = named::<ModelName>("node");
@@ -2315,6 +2338,14 @@ mod tests {
                 .get_mut(&node)
                 .assured("the fixture declares its one processor");
             shape(processor);
+            if processor.kind == ModelKind::Deduplicator {
+                publish_state_identity(
+                    &runtime,
+                    &domain,
+                    processor.kind,
+                    processor.processor.clone(),
+                );
+            }
             let mut branch = template
                 .instantiate(&runtime, &domain, None, 1)
                 .await
@@ -2383,6 +2414,71 @@ mod tests {
             acks,
         )
         .assured("one test row forms a relay batch")
+    }
+
+    #[nervix_primitives::test]
+    async fn accepted_work_deduplicator_retains_keys_without_reporting_worker_pressure() {
+        let executor = single_worker_executor();
+        let runtime = Runtime::with_environment(
+            RuntimeEnvironment::transient(executor.clone()),
+            RuntimeSettings::default(),
+        )
+        .assured("the test executor is valid");
+        let mut node = OneProcessorBranch::with_runtime(runtime, |processor| {
+            processor.kind = ModelKind::Deduplicator;
+            let keys = vec![expression("input.value")];
+            let program = compile_deduplicator_key_program(
+                &named("node"),
+                &[named("incoming")],
+                &keys,
+                test_schema(&[("value", ParseAsType::I64)]).arrow_schema(),
+                None,
+                offloaded_vm_settings(),
+            )
+            .assured("the deduplicator key compiles");
+            processor.operation = RelayProcessorOperationTemplate::Deduplicator {
+                output_routes: RelayProcessorOutputsTemplate { routes: Vec::new() },
+                deduplicate_on: keys,
+                max_time: Duration::from_secs(60),
+                compiled_key_program: Some(program),
+            };
+        })
+        .await;
+        let (acks, completed) = AckSet::root();
+        accepted_work_after_cpu_room(
+            &executor,
+            nervix_execution::CpuClass::Data,
+            node.hand(accepted_large_value_batch(acks)),
+        )
+        .await;
+        assert_no_runtime_events(&mut node.events).await;
+        assert_eq!(
+            nervix_primitives::time::timeout(Duration::from_secs(5), completed.wait())
+                .await
+                .assured("the input finishes after admission"),
+            AckOutcome::Ack
+        );
+        let processor = node
+            .branch
+            .processors
+            .get_mut(&named::<ModelName>("node"))
+            .assured("the branch still owns its processor");
+        let RelayProcessorOperationNode::Deduplicator { keyspace, .. } = &mut processor.operation
+        else {
+            panic!("the fixture installs a deduplicator");
+        };
+        assert!(
+            !keyspace.reserve_new_key(
+                DeduplicatorKey::new(vec![ReorderKeyPart::Int64(1)]),
+                node.branch
+                    .domain_clock
+                    .snapshot()
+                    .assured("the domain is running")
+                    .now(),
+                Duration::from_secs(60)
+            )
+        );
+        assert_eq!(executor.snapshot().data_cpu.refused, 0);
     }
 
     fn text_batch(acks: AckSet) -> RelayRecordBatch {

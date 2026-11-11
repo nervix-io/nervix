@@ -421,19 +421,20 @@ impl Runtime {
                 BoundRouteBranch::Unbranched => vec![None; output_batch.batch().num_rows()],
                 BoundRouteBranch::Preserved => input_keys,
                 BoundRouteBranch::Constructed(branch_program) => {
-                    let outcomes = evaluate_output_branch_program(
-                        ProgramRun {
-                            executor: self.executor(),
-                            now: execution_now,
-                        },
-                        branch_program,
-                        &input_batch,
-                        &output_batch,
-                        &input_keys,
-                        &scope.side_inputs,
-                    )
-                    .await
-                    .map_err(|error| PlannedGeneralFailure::new(error, batch.acks.clone()))?;
+                    let outcomes = batch
+                        .keep_alive_while_pending(evaluate_output_branch_program(
+                            ProgramRun {
+                                executor: self.executor(),
+                                now: execution_now,
+                            },
+                            branch_program,
+                            &input_batch,
+                            &output_batch,
+                            &input_keys,
+                            &scope.side_inputs,
+                        ))
+                        .await
+                        .map_err(|error| PlannedGeneralFailure::new(error, batch.acks.clone()))?;
                     // A row whose branch cannot be constructed fails the reingestor's whole
                     // batch, which its error policy then reports.
                     let mut keys = Vec::with_capacity(outcomes.len());
@@ -1408,6 +1409,73 @@ mod tests {
             .stop(Duration::from_secs(1))
             .await
             .expect("relay owner should stop");
+    }
+
+    #[nervix_primitives::test]
+    async fn accepted_work_reingestor_filter_keeps_its_batch_and_acknowledgements() {
+        let executor = single_worker_executor();
+        let runtime = Runtime::with_environment(
+            RuntimeEnvironment::transient(executor.clone()),
+            RuntimeSettings::default(),
+        )
+        .assured("the test executor is valid");
+        let domain = domain("accepted");
+        install_unpaced_test_domain(&runtime, &domain);
+        let clock = runtime
+            .bind_domain_clock(&domain)
+            .assured("the test domain is running");
+        let schema = test_schema(&[("value", ParseAsType::I64)]);
+        let program = offloaded_route_program(&schema, "INHERIT ALL WHERE input.value > 0");
+        let (acks, completed) = AckSet::root();
+        let batch = accepted_large_value_batch(acks);
+        let routing = DomainRoutingSnapshot::default();
+        let reingestor = named("node");
+        let policies = ErrorPolicies::handled_by_log();
+        let senders = HashMap::default();
+        let mut events = runtime.subscribe_events();
+        let output = accepted_work_after_cpu_room(
+            &executor,
+            nervix_execution::CpuClass::Data,
+            runtime.filter_reingestor_batch(
+                ReingestorDispatchContext {
+                    routing: &routing,
+                    domain: &domain,
+                    reingestor: &reingestor,
+                    mode: AckMode::Attached,
+                    error_policies: &policies,
+                    branched_senders: &senders,
+                    domain_clock: &clock,
+                    execution_now: clock.snapshot().assured("the clock is running").now(),
+                },
+                &program,
+                MessageErrorOperation::FilterWhere,
+                batch,
+                &HashMap::default(),
+            ),
+        )
+        .await
+        .assured("the reingestor retains its accepted input while the class is full");
+        assert_eq!(output.message_count(), 1025);
+        assert_eq!(
+            output
+                .batch
+                .value(0, "value")
+                .assured("the value column is readable"),
+            Some(RuntimeValue::I64(1))
+        );
+        assert_eq!(
+            output
+                .batch
+                .value(1024, "value")
+                .assured("last row is readable"),
+            Some(RuntimeValue::I64(1025))
+        );
+        for acknowledgement in &output.acks {
+            acknowledgement.ack_success();
+        }
+        assert_eq!(completed.wait().await, AckOutcome::Ack);
+        assert_no_runtime_events(&mut events).await;
+        assert_eq!(executor.snapshot().data_cpu.refused, 0);
     }
 
     #[nervix_primitives::test]

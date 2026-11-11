@@ -1,3 +1,10 @@
+//! Acknowledgement renewal for retained runtime work and connector reconnect cadence.
+//!
+//! Layer: data plane.
+//! - **Owns.** Borrowed acknowledgement scopes and bounded reconnect delays.
+//! - **Depends on.** Runtime ACK sets, retry settings and primitive timers.
+//! - **Must not know.** Source protocols, graph planning, worker admission or error policies.
+
 use nervix_connector::ParsedRetryPolicy;
 
 use super::*;
@@ -12,6 +19,12 @@ use super::*;
 pub(in crate::runtime) trait AcknowledgementKeepalive {
     fn keep_alive(&self);
 
+    /// False proves this scope has no acknowledgement obligation. Owners of large retained state
+    /// may answer conservatively and defer walking it until a renewal is actually due.
+    fn needs_keepalive(&self) -> bool {
+        true
+    }
+
     /// Await `future` while reporting these acknowledgements alive every
     /// `REMOTE_ACK_ALIVE_INTERVAL`, as a remote receiver reports the acknowledgements it holds, so
     /// an ingestor's `ACK TIMEOUT` does not expire while work done on their behalf is still under
@@ -20,6 +33,9 @@ pub(in crate::runtime) trait AcknowledgementKeepalive {
     where
         F: std::future::Future,
     {
+        if !self.needs_keepalive() {
+            return future.await;
+        }
         self.keep_alive();
         self.keep_alive_while_pending(future).await
     }
@@ -32,6 +48,9 @@ pub(in crate::runtime) trait AcknowledgementKeepalive {
     where
         F: std::future::Future,
     {
+        if !self.needs_keepalive() {
+            return future.await;
+        }
         let mut future = std::pin::pin!(future);
         loop {
             nervix_primitives::task::consume_budget().await;
@@ -46,8 +65,84 @@ pub(in crate::runtime) trait AcknowledgementKeepalive {
 }
 
 impl AcknowledgementKeepalive for AckSet {
+    fn needs_keepalive(&self) -> bool {
+        !self.is_empty()
+    }
+
     fn keep_alive(&self) {
         self.ack_alive();
+    }
+}
+
+impl AcknowledgementKeepalive for [AckSet] {
+    fn needs_keepalive(&self) -> bool {
+        self.iter().any(|acks| !acks.is_empty())
+    }
+
+    fn keep_alive(&self) {
+        for acks in self {
+            acks.ack_alive();
+        }
+    }
+}
+
+impl AcknowledgementKeepalive for [RelayMessage] {
+    fn needs_keepalive(&self) -> bool {
+        self.iter().any(|message| !message.acks.is_empty())
+    }
+
+    fn keep_alive(&self) {
+        for message in self {
+            message.acks.ack_alive();
+        }
+    }
+}
+
+impl AcknowledgementKeepalive for [CorrelatorPendingMessage] {
+    fn needs_keepalive(&self) -> bool {
+        self.iter().any(|pending| !pending.message.acks.is_empty())
+    }
+
+    fn keep_alive(&self) {
+        for pending in self {
+            pending.message.acks.ack_alive();
+        }
+    }
+}
+
+impl AcknowledgementKeepalive for CorrelatorBranchState {
+    fn needs_keepalive(&self) -> bool {
+        !self.pending_left.is_empty() || !self.pending_right.is_empty()
+    }
+
+    fn keep_alive(&self) {
+        self.pending_left.as_slice().keep_alive();
+        self.pending_right.as_slice().keep_alive();
+    }
+}
+
+impl AcknowledgementKeepalive for [(CorrelatorPendingMessage, CorrelatorPendingMessage)] {
+    fn needs_keepalive(&self) -> bool {
+        !self.is_empty()
+    }
+
+    fn keep_alive(&self) {
+        for (left, right) in self {
+            left.message.acks.ack_alive();
+            right.message.acks.ack_alive();
+        }
+    }
+}
+
+impl AcknowledgementKeepalive for [ReordererOutputBuffer] {
+    fn needs_keepalive(&self) -> bool {
+        self.iter().any(|buffer| buffer.acks().next().is_some())
+    }
+
+    fn keep_alive(&self) {
+        for acknowledgement in self.iter().flat_map(ReordererOutputBuffer::acks) {
+            acknowledgement.ack_alive();
+        }
     }
 }
 

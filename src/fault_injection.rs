@@ -46,6 +46,7 @@ use nervix_recovery::NoReceiver as _;
 
 use crate::registry::SchedulerMode;
 
+mod accepted_work;
 mod application_progress;
 mod backup_cut;
 #[cfg(test)]

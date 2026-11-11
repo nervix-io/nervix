@@ -848,8 +848,8 @@ async fn evaluate_route_arguments(
     .change_context(WindowProcessorError::ProjectAggregateInput)?;
     #[cfg(test)]
     WINDOW_ARGUMENT_VM_EXECUTIONS.with(|executions| executions.set(executions.get() + 1));
-    let result = execute_program_with_selection_in_context(
-        executor,
+    let result = execute_accepted_program_with_selection_in_context(
+        executor.accepted_work(),
         argument_program,
         &input,
         &VmExecutionContext {
@@ -1141,8 +1141,8 @@ fn evaluate_window_value<'a>(
                         .collect(),
                 )
                 .change_context(WindowProcessorError::AggregateExprInput)?;
-                let result = execute_program_with_selection_in_context(
-                    executor,
+                let result = execute_accepted_program_with_selection_in_context(
+                    executor.accepted_work(),
                     program,
                     &input,
                     &VmExecutionContext {
@@ -2487,6 +2487,92 @@ mod tests {
             batch_value(&record, "total_latency"),
             Some(RuntimeValue::I64(30))
         );
+    }
+
+    #[nervix_primitives::test]
+    async fn accepted_work_window_keeps_rows_and_accumulators_while_waiting() {
+        let executor = single_worker_executor();
+        let mut window = TestWindow::with_settings(
+            "SET total_latency = SUM(input.latency)",
+            &[field("latency", ParseAsType::I64)],
+            &[field("total_latency", ParseAsType::I64)],
+            None,
+            offloaded_vm_settings(),
+        );
+        window.executor = executor.clone();
+        let refused = accepted_work_after_cpu_room(
+            &executor,
+            nervix_execution::CpuClass::Data,
+            window.admit(
+                vec![int64((0..1025).map(|_| Some(1)))],
+                &(1..=1025).collect::<Vec<_>>(),
+            ),
+        )
+        .await;
+        assert!(refused.is_empty());
+        assert_eq!(window.state.entries.len(), 1025);
+        let output = accepted_zero_charge_work_after_cpu_room(
+            &executor,
+            nervix_execution::CpuClass::Data,
+            window.emit(),
+        )
+        .await
+        .assured("the window emits after worker room frees");
+        assert_eq!(
+            batch_value(&output, "total_latency"),
+            Some(RuntimeValue::I64(1025))
+        );
+        assert_eq!(window.state.entries.len(), 1025);
+        let filled = FilledCpuClass::fill(&executor, nervix_execution::CpuClass::Data).await;
+        let mut waiting = Box::pin(window.admit(vec![int64([Some(100)])], &[1026]));
+        assert!(futures_util::poll!(waiting.as_mut()).is_pending());
+        drop(waiting);
+        assert_eq!(
+            window.state.entries.len(),
+            1025,
+            "abandoning a wait does not partially admit rows"
+        );
+        assert_eq!(executor.snapshot().relay_memory.reserved_bytes, 0);
+        filled.release().await;
+        assert_eq!(executor.snapshot().data_cpu.refused, 0);
+    }
+
+    #[nervix_primitives::test]
+    async fn accepted_work_window_emission_keeps_rows_and_accumulators_while_waiting() {
+        let executor = single_worker_executor();
+        let mut window = TestWindow::with_settings(
+            "SET total_latency = SUM(input.latency)",
+            &[field("latency", ParseAsType::I64)],
+            &[field("total_latency", ParseAsType::I64)],
+            None,
+            offloaded_vm_settings(),
+        );
+        window.executor = executor.clone();
+        assert!(
+            window
+                .admit(vec![int64([Some(10), Some(20)])], &[1, 2])
+                .await
+                .is_empty()
+        );
+        let output = accepted_zero_charge_work_after_cpu_room(
+            &executor,
+            nervix_execution::CpuClass::Data,
+            window.emit(),
+        )
+        .await
+        .assured("the retained window emits after room frees");
+        assert_eq!(
+            batch_value(&output, "total_latency"),
+            Some(RuntimeValue::I64(30))
+        );
+        assert_eq!(window.state.entries.len(), 2);
+        let filled = FilledCpuClass::fill(&executor, nervix_execution::CpuClass::Data).await;
+        let mut waiting = Box::pin(window.emit());
+        assert!(futures_util::poll!(waiting.as_mut()).is_pending());
+        drop(waiting);
+        assert_eq!(window.state.entries.len(), 2);
+        assert_eq!(executor.snapshot().relay_memory.reserved_bytes, 0);
+        filled.release().await;
     }
 
     #[nervix_primitives::test]

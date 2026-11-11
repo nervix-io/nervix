@@ -56,6 +56,7 @@
     )
 )]
 
+mod accepted_work;
 mod cancellation;
 mod executor;
 mod limits;
@@ -81,6 +82,7 @@ pub use settings::{
 };
 
 pub use crate::{
+    accepted_work::{AcceptedCpu, AcceptedWork},
     cancellation::{Cancellation, Cancelled},
     executor::{ExecutionFailure, Executor, ExecutorSnapshot},
     limits::{

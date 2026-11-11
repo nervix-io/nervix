@@ -18,6 +18,7 @@ name = "nervix-rate-limit"
 checks = [
   "tests::shuttle_checks::shuttle_a_dropped_job_waiting_for_a_place_gives_up_its_place_and_charge",
   "tests::shuttle_checks::shuttle_a_job_waiting_for_a_place_takes_the_first_freed_place",
+  "tests::shuttle_checks::shuttle_accepted_cpu_preparation_returns_waiting_and_reserved_places_with_their_charges",
   "tests::shuttle_checks::shuttle_consensus_storage_preserves_admission_order_and_returns_every_permit",
   "tests::shuttle_checks::shuttle_full_wait_queue_is_exact_typed_backpressure",
   "tests::shuttle_checks::shuttle_occupied_bulk_execution_leaves_control_execution_untouched",
@@ -243,6 +244,7 @@ checks = [
   "runtime::materialized_state::tests::shuttle_checks::shuttle_replica_synchronization_preserves_the_restored_materialized_revision",
   "runtime::partition_claims::shuttle_tests::shuttle_a_claimed_key_runs_its_input_once_in_arrival_order_after_its_state_installs",
   "runtime::partition_holdings::shuttle_tests::shuttle_a_successor_unit_owner_keeps_its_holdings_when_its_predecessor_withdraws",
+  "runtime::processor_branch_task::tests::accepted_work_shuttle::shuttle_accepted_branch_wait_cancellation_races_worker_room_and_eviction",
   "runtime::processor_state_inspection::shuttle_tests::shuttle_a_branch_inspection_answers_whole_batches_in_arrival_order_or_is_refused_after_the_end",
   "runtime::relay_boundary::branch_presence_shuttle_tests::shuttle_a_replaced_owner_never_publishes_over_its_successor",
   "runtime::relay_boundary::branch_presence_shuttle_tests::shuttle_an_observer_sees_every_owner_step_whole_and_never_an_older_one",

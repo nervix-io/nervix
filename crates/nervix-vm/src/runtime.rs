@@ -58,7 +58,9 @@ use chrono::DateTime;
 use error_stack::Report;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_approx_into::ApproxInto as _;
-use nervix_execution::{Cancellation, CpuClass, ExecutionError, Executor, MemoryClass};
+use nervix_execution::{
+    AcceptedWork, Cancellation, CpuClass, ExecutionError, Executor, MemoryClass,
+};
 use nervix_models::Timestamp;
 use nervix_primitives::sync::StdArc;
 use nervix_recovery::Reported as _;
@@ -831,6 +833,91 @@ pub async fn execute_predicate_in_context(
 /// instructions whether its caller stopped waiting, and stops there if it did.
 pub async fn execute_program_with_selection_in_context(
     executor: &Executor,
+    program: &nervix_primitives::sync::Arc<CompiledProgram>,
+    batch: &TypedBatch,
+    context: &ExecutionContext,
+) -> error_stack::Result<ExecutionResult, RuntimeError> {
+    execute_program_for_work(ProgramWork::Request(executor), program, batch, context).await
+}
+
+/// Execute a program for data its caller has accepted and keeps. The VM chooses its class and
+/// charge; a full class waits in FIFO order until the owner ends the future or room frees.
+///
+/// ```
+/// use nervix_execution::Executor;
+/// use nervix_primitives::sync::Arc;
+/// use nervix_vm::{CompiledProgram, ExecutionContext, TypedBatch,
+///     execute_accepted_program_with_selection_in_context};
+/// async fn accepted(executor: &Executor, program: &Arc<CompiledProgram>, batch: &TypedBatch,
+///     context: &ExecutionContext) {
+///     let _ = execute_accepted_program_with_selection_in_context(
+///         executor.accepted_work(), program, batch, context).await;
+/// }
+/// ```
+///
+/// Request work cannot be passed as accepted work without binding that ownership contract:
+///
+/// ```compile_fail
+/// use nervix_execution::Executor;
+/// use nervix_primitives::sync::Arc;
+/// use nervix_vm::{CompiledProgram, ExecutionContext, TypedBatch,
+///     execute_accepted_program_with_selection_in_context};
+/// async fn request(executor: &Executor, program: &Arc<CompiledProgram>, batch: &TypedBatch,
+///     context: &ExecutionContext) {
+///     let _ = execute_accepted_program_with_selection_in_context(
+///         executor, program, batch, context).await;
+/// }
+/// ```
+pub async fn execute_accepted_program_with_selection_in_context(
+    work: AcceptedWork<'_>,
+    program: &nervix_primitives::sync::Arc<CompiledProgram>,
+    batch: &TypedBatch,
+    context: &ExecutionContext,
+) -> error_stack::Result<ExecutionResult, RuntimeError> {
+    execute_program_for_work(ProgramWork::Accepted(work), program, batch, context).await
+}
+
+/// Each public operation binds its purpose before entering the common VM implementation.
+#[derive(Clone, Copy)]
+enum ProgramWork<'a> {
+    Request(&'a Executor),
+    Accepted(AcceptedWork<'a>),
+}
+
+impl<'a> ProgramWork<'a> {
+    fn limits(self) -> &'a nervix_execution::OperationLimits {
+        match self {
+            Self::Request(executor) => executor.limits(),
+            Self::Accepted(work) => work.limits(),
+        }
+    }
+
+    async fn reserve(
+        self,
+        class: MemoryClass,
+        bytes: u64,
+    ) -> Result<nervix_execution::Reservation, Report<nervix_execution::AdmissionError>> {
+        match self {
+            Self::Request(executor) => executor.reserve(class, bytes).await,
+            Self::Accepted(work) => work.reserve(class, bytes).await,
+        }
+    }
+
+    async fn run_cpu<T: Send + 'static>(
+        self,
+        class: CpuClass,
+        charge: nervix_execution::Reservation,
+        job: impl FnOnce(nervix_execution::Reservation, &Cancellation) -> T + Send + 'static,
+    ) -> Result<T, Report<ExecutionError>> {
+        match self {
+            Self::Request(executor) => executor.run_cpu(class, charge, job).await,
+            Self::Accepted(work) => work.run_cpu(class, charge, job).await,
+        }
+    }
+}
+
+async fn execute_program_for_work<'a>(
+    executor: ProgramWork<'a>,
     program: &nervix_primitives::sync::Arc<CompiledProgram>,
     batch: &TypedBatch,
     context: &ExecutionContext,

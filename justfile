@@ -1630,6 +1630,33 @@ test-shuttle-checks filter="":
     if [[ -n "$evidence" ]]; then report=(--report "$evidence"); fi
     python3 -m scripts.shuttle_checks --target-dir {{ quote(cargo_target_dir) }} run {{ quote(filter) }} "${report[@]}"
 
+# Run a focused package through the same inventory, exploration and nondeterminism gates as CI.
+# The ordinary test-shuttle recipe still qualifies the entire registered inventory.
+test-shuttle-package package filter="": download-onnxruntime
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    export CARGO_TARGET_DIR={{ quote(cargo_target_dir + "/shuttle") }}
+    export NERVIX_SHUTTLE_PACKAGE={{ quote(package) }}
+    export NERVIX_SHUTTLE_FILTER={{ quote(filter) }}
+    python3 - <<'PYTHON'
+    import os
+    from pathlib import Path
+    from scripts import shuttle_checks
+
+    root = Path.cwd()
+    inventory = shuttle_checks.parse_inventory((root / shuttle_checks.INVENTORY).read_text())
+    package = os.environ["NERVIX_SHUTTLE_PACKAGE"]
+    scope = shuttle_checks.Inventory(checks={package: inventory.checks[package]})
+    target = Path(os.environ["CARGO_TARGET_DIR"]).resolve()
+    target.mkdir(parents=True, exist_ok=True)
+    report = Path(os.environ.get("NERVIX_MODEL_EVIDENCE", str(target / f"{package}-focused.json")))
+    raise SystemExit(shuttle_checks.run_checks(
+        shuttle_checks.Commands(root), scope, target,
+        os.environ["NERVIX_SHUTTLE_FILTER"], report=report, jobs=1,
+    ))
+    PYTHON
+
 # Compile every package `test-shuttle-checks` explores, as it builds them, without running a check.
 [private]
 build-shuttle-checks:
@@ -3558,6 +3585,10 @@ bench-smoke-bodies:
 # transformation. Extra arguments are forwarded to Criterion.
 bench-admitted-work *args: build-web-console
     cargo bench --package nervix-server --bench admitted_work --features benchmarks -- {{ args }}
+
+# Measure an exact preserved build when comparing admitted work before and after a source change.
+bench-admitted-work-executable executable *args:
+    {{ quote(executable) }} {{ quote(args) }}
 
 # Real RabbitMQ write costs. Serialize measurements across checkouts of this repository.
 bench-rabbitmq-publish *args:

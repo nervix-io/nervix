@@ -976,20 +976,22 @@ pub(super) async fn dispatch_wasm_output_route(
             .map(|field| format!("generated.{}", field.name()))
             .collect(),
     };
-    let lookup_columns = match compute_lookup_hash_map_columns(
-        context.branch.runtime.executor(),
-        program,
-        &FilterMapBatchInputs {
-            carrier: &decoded.batch.batch,
-            namespace_batches: &[],
-            keys: &decoded.batch.keys,
-            side_inputs: &side_inputs,
-            ingest_metadata: None,
-        },
-        execution_now,
-        None,
-    )
-    .await
+    let lookup_columns = match decoded
+        .batch
+        .keep_alive_while_pending(compute_lookup_hash_map_columns(
+            context.branch.runtime.executor(),
+            program,
+            &FilterMapBatchInputs {
+                carrier: &decoded.batch.batch,
+                namespace_batches: &[],
+                keys: &decoded.batch.keys,
+                side_inputs: &side_inputs,
+                ingest_metadata: None,
+            },
+            execution_now,
+            None,
+        ))
+        .await
     {
         Ok(columns) => columns,
         Err(error) => {
@@ -1041,16 +1043,18 @@ pub(super) async fn dispatch_wasm_output_route(
             return None;
         }
     };
-    let executed = match execute_program_with_selection_in_context(
-        context.branch.runtime.executor(),
-        &program.compiled,
-        &vm_input,
-        &VmExecutionContext {
-            now: execution_now,
-            injector: None,
-        },
-    )
-    .await
+    let executed = match decoded
+        .batch
+        .keep_alive_while_pending(execute_accepted_program_with_selection_in_context(
+            context.branch.runtime.executor().accepted_work(),
+            &program.compiled,
+            &vm_input,
+            &VmExecutionContext {
+                now: execution_now,
+                injector: None,
+            },
+        ))
+        .await
     {
         Ok(executed) => executed,
         Err(error) => {
@@ -1500,6 +1504,107 @@ mod tests {
         assert_eq!(outputs[0].batch.batch().num_rows(), 0);
         assert_eq!(outputs[0].batch.batch().num_columns(), 1);
         assert_eq!(outputs[0].batch.batch().schema(), schema.arrow_schema());
+    }
+
+    #[nervix_primitives::test]
+    async fn accepted_work_wasm_route_waits_before_deciding_its_guest_output_ack() {
+        let executor = single_worker_executor();
+        let runtime = Runtime::with_environment(
+            RuntimeEnvironment::transient(executor.clone()),
+            RuntimeSettings::default(),
+        )
+        .assured("the test executor is valid");
+        let domain = domain("accepted");
+        install_unpaced_test_domain(&runtime, &domain);
+        let processor = named("node");
+        let mut branch = junction_branch_template("node", "incoming")
+            .instantiate(&runtime, &domain, None, 1)
+            .await
+            .assured("the branch instantiates")
+            .into_inner();
+        branch
+            .refresh_domain_routing()
+            .assured("the domain publishes its routing");
+        let schema = test_schema(&[("value", ParseAsType::I64)]);
+        let route = "INHERIT ALL WHERE input.value < 0";
+        let mut output = RelayProcessorOutputNode {
+            relay: named("outgoing"),
+            construction: construction(route),
+            flush_policy: None,
+            message_error_policy: nervix_models::MessageErrorPolicy::Log,
+            pending: Vec::new(),
+            flush_timer: BranchBufferTimer::default(),
+            compiled_program: Some(offloaded_route_program(&schema, route)),
+        };
+        let (acks, completed) = AckSet::root();
+        let batch = accepted_large_value_batch(acks);
+        let policies = ErrorPolicies::handled_by_log();
+        let execution_now = branch
+            .domain_clock
+            .snapshot()
+            .assured("the clock is running")
+            .now();
+        let mut events = runtime.subscribe_events();
+        let result = accepted_work_after_cpu_room(
+            &executor,
+            nervix_execution::CpuClass::Data,
+            dispatch_wasm_output_route(
+                WasmRouteDispatchContext {
+                    branch: &mut branch,
+                    node_kind: ModelKind::WasmProcessor,
+                    processor: &processor,
+                    error_policies: &policies,
+                    execution_now,
+                },
+                WasmDecodedOutputBatch {
+                    batch,
+                    uninitialized_columns: HashSet::default(),
+                },
+                &mut output,
+            ),
+        )
+        .await
+        .assured("a full class does not fail an already accepted guest output");
+        assert!(
+            result.is_empty(),
+            "the real route filters the row after admission"
+        );
+        assert_eq!(completed.wait().await, AckOutcome::Ack);
+        assert_no_runtime_events(&mut events).await;
+        assert_eq!(executor.snapshot().data_cpu.refused, 0);
+    }
+
+    #[nervix_primitives::test]
+    async fn accepted_work_wasm_input_encoding_keeps_the_batch_until_data_room_frees() {
+        let executor = single_worker_executor();
+        let (acks, completed) = AckSet::root();
+        let batch = accepted_large_value_batch(acks);
+        let mut next_token = 1;
+        let (envelope, mut ack_map) = accepted_work_after_cpu_room(
+            &executor,
+            nervix_execution::CpuClass::Data,
+            crate::runtime::wasm_processor::wasm_envelope_from_relay_batch(
+                &executor,
+                &batch,
+                &mut next_token,
+            ),
+        )
+        .await
+        .assured("the full data class cannot fail an accepted guest input");
+        let WasmEnvelope::Input {
+            arrow_ipc_batch, ..
+        } = envelope
+        else {
+            panic!("the input encoder constructs an input envelope");
+        };
+        assert!(!arrow_ipc_batch.is_empty());
+        assert_eq!(ack_map.len(), 1025);
+        assert_eq!(next_token, 1026);
+        for (_, input) in ack_map.drain() {
+            input.acks.ack_success();
+        }
+        assert_eq!(completed.wait().await, AckOutcome::Ack);
+        assert_eq!(executor.snapshot().data_cpu.refused, 0);
     }
 
     #[test]

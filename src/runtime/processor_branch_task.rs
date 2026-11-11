@@ -1472,8 +1472,11 @@ async fn run_processor_branch_task(
                 match received {
                     Some(ProcessorBranchInput { relay, batch, work }) => {
                         events.record();
-                        branch
-                            .execute_processor_input(&processor, &relay, batch)
+                        runtime_handle.inner.fault_injection
+                            .run_accepted_processor_input(
+                                branch.owner.node.in_domain(&domain),
+                                branch.execute_processor_input(&processor, &relay, batch),
+                            )
                             .await;
                         quiesce_gauges.observe(&branch, &processor);
                         drop(work);
@@ -1646,17 +1649,23 @@ pub(super) async fn stop_processor_branch_task(
     mode: ProcessorBranchStopMode,
 ) {
     let processor = processor.into();
-    entry
-        .commands
-        .send(ProcessorBranchCommand::Stop(mode))
-        .await
-        .means_shutdown("processor branch task");
-    let Some(mut task) = entry.task.lock().take() else {
-        return;
-    };
-    match nervix_primitives::time::timeout(PROCESSOR_BRANCH_TASK_SHUTDOWN_GRACE, &mut task).await {
-        Ok(Ok(())) => {}
-        Ok(Err(error)) => {
+    let mut task = None;
+    let stopped = nervix_primitives::time::timeout(PROCESSOR_BRANCH_TASK_SHUTDOWN_GRACE, async {
+        entry
+            .commands
+            .send(ProcessorBranchCommand::Stop(mode))
+            .await
+            .means_shutdown("processor branch task");
+        task = entry.task.lock().take();
+        match task.as_mut() {
+            Some(task) => Some(task.await),
+            None => None,
+        }
+    })
+    .await;
+    match stopped {
+        Ok(Some(Ok(()))) | Ok(None) => {}
+        Ok(Some(Err(error))) => {
             warn!(
                 domain = domain.as_str(),
                 processor = processor.as_str(),
@@ -1673,6 +1682,9 @@ pub(super) async fn stop_processor_branch_task(
                 grace_period = %humantime::format_duration(PROCESSOR_BRANCH_TASK_SHUTDOWN_GRACE),
                 "processor branch task exceeded shutdown grace period; aborting"
             );
+            let Some(task) = task.or_else(|| entry.task.lock().take()) else {
+                return;
+            };
             task.abort();
             if let Err(error) = task.await
                 && !error.is_cancelled()
@@ -2108,6 +2120,189 @@ mod tests {
             ended.is_ok(),
             "a branch task kept running after the handle its processor task held was dropped"
         );
+    }
+
+    /// Start at the execution boundary of an accepted batch. The real branch task handle owns
+    /// the real accepted CPU future; graph evaluation before that boundary is outside this check.
+    async fn waiting_branch_task_for_test(
+        executor: &Executor,
+    ) -> (ProcessorBranchTask, oneshot::Receiver<()>) {
+        let (input, input_rx) = mpsc::channel(1);
+        let (commands, command_rx) = mpsc::channel(1);
+        let (ready, is_ready) = oneshot::channel();
+        let (ended, has_ended) = oneshot::channel::<()>();
+        let executor = executor.clone();
+        let task = nervix_primitives::task::spawn(async move {
+            let _input_rx = input_rx;
+            let _command_rx = command_rx;
+            let _ended = ended;
+            let charge = executor
+                .try_reserve(nervix_execution::MemoryClass::Relay, 1)
+                .assured("the test's accepted job has one byte of working memory");
+            let mut run = Box::pin(executor.accepted_work().run_cpu(
+                nervix_execution::CpuClass::Data,
+                charge,
+                |_, _| (),
+            ));
+            assert!(futures_util::poll!(run.as_mut()).is_pending());
+            ready
+                .send(())
+                .assured("the check waits for the full-queue admission");
+            run.await.assured("a released accepted job runs");
+        });
+        is_ready
+            .await
+            .assured("the real CPU future reaches its full-queue wait");
+        (
+            ProcessorBranchTask {
+                input,
+                commands,
+                task: nervix_primitives::sync::blocking::Mutex::new(Some(AbortOnDropHandle::new(
+                    task,
+                ))),
+            },
+            has_ended,
+        )
+    }
+
+    #[nervix_primitives::test]
+    async fn accepted_work_stop_bounds_a_full_command_queue_while_the_branch_waits() {
+        let executor = single_worker_executor();
+        let filled = FilledCpuClass::fill(&executor, nervix_execution::CpuClass::Data).await;
+        let (entry, ended) = waiting_branch_task_for_test(&executor).await;
+        let (response, _answer) = oneshot::channel();
+        entry
+            .commands
+            .try_send(ProcessorBranchCommand::Checkpoint {
+                purpose: ProcessorCheckpointPurpose::BackupCut,
+                response,
+            })
+            .assured("one pending checkpoint fills the branch's command queue");
+        let stopped = timeout(
+            PROCESSOR_BRANCH_TASK_SHUTDOWN_GRACE * 3,
+            stop_processor_branch_task(
+                &domain("accepted"),
+                named::<ModelName>("node"),
+                &None,
+                &entry,
+                ProcessorBranchStopMode::Evict,
+            ),
+        )
+        .await;
+        // Clean up the old implementation too: its send waits before it ever takes this handle.
+        let unfinished = entry.task.lock().take();
+        if let Some(task) = unfinished {
+            task.abort();
+            task.await
+                .discarded("the old unbounded stop is cancelled after its red oracle");
+        }
+        ended
+            .await
+            .expect_err("ending the task drops its unsent completion guard");
+        assert_eq!(executor.snapshot().relay_memory.reserved_bytes, 0);
+        filled.release().await;
+        assert!(
+            stopped.is_ok(),
+            "the existing shutdown grace must include waiting to send STOP"
+        );
+        assert_eq!(executor.snapshot().data_cpu.pending, 0);
+        assert_eq!(executor.snapshot().data_cpu.refused, 0);
+    }
+
+    #[cfg(feature = "shuttle")]
+    mod accepted_work_shuttle {
+        use super::*;
+
+        #[derive(Clone, Copy)]
+        enum End {
+            StopGrace,
+            TtlEviction,
+            MaxInstancesEviction,
+        }
+
+        /// The CPU future and branch task handle are production owners. Ending the registry
+        /// races the worker-place wake, including transfer to an already admitted job. The
+        /// ordinary stop test separately proves the grace includes command admission; here the
+        /// stop grace has expired and its owner drops the registry, as a parent task's abort does.
+        #[test]
+        fn shuttle_accepted_branch_wait_cancellation_races_worker_room_and_eviction() {
+            nervix_model_harness::shuttle::check_interleavings(|| {
+                shuttle::future::block_on(async {
+                    for end in [End::StopGrace, End::TtlEviction, End::MaxInstancesEviction] {
+                        nervix_primitives::task::consume_budget().await;
+                        let executor = single_worker_executor();
+                        let filled = FilledCpuClass::fill_with_bulk_charge(
+                            &executor,
+                            nervix_execution::CpuClass::Data,
+                        )
+                        .await;
+                        let (entry, ended) = waiting_branch_task_for_test(&executor).await;
+                        assert_eq!(executor.snapshot().relay_memory.reserved_bytes, 1);
+                        let mut instances = ProcessorBranches::new();
+                        let at = Timestamp::from_unix_nanos(0);
+                        drop(instances.insert_restored(
+                            None,
+                            at,
+                            1,
+                            ProcessorBranchSlot::Live(entry),
+                        ));
+                        let ending = nervix_primitives::task::spawn(async move {
+                            match end {
+                                End::StopGrace => drop(instances),
+                                End::TtlEviction => {
+                                    let expired = instances.expire(
+                                        Timestamp::from_unix_nanos(1_000_000_000),
+                                        Duration::from_secs(1),
+                                    );
+                                    assert_eq!(expired.len(), 1);
+                                    drop(expired);
+                                }
+                                End::MaxInstancesEviction => {
+                                    let successor = string_branch_key("tenant", "successor");
+                                    drop(instances.insert_restored(successor, at, 2,
+                                        ProcessorBranchSlot::Released(crate::runtime::processor_partition_moves::ReleasedProcessorBranch {
+                                            last_activity: at, incarnation: 2, checkpoints: Vec::new(),
+                                        })));
+                                    let evicted = instances
+                                        .evict_lru_to_capacity(std::num::NonZeroUsize::MIN);
+                                    assert_eq!(evicted.len(), 1);
+                                    assert!(evicted[0].0.is_none(), "the oldest branch is evicted");
+                                    drop(evicted);
+                                }
+                            }
+                        });
+                        let releasing = nervix_primitives::task::spawn(filled.release());
+                        ending
+                            .await
+                            .assured("the real registry ends or evicts its branch");
+                        releasing.await.assured("the occupied class is released");
+                        ended
+                            .await
+                            .expect_err("the branch body ends and drops its completion guard");
+                        // A later requester must obtain the returned place; a counter alone
+                        // would miss a semaphore permit stranded by a cancelled queue waiter.
+                        let probe = executor
+                            .try_reserve(nervix_execution::MemoryClass::Relay, 1)
+                            .assured("the probe's one-byte charge fits");
+                        executor
+                            .run_cpu(nervix_execution::CpuClass::Data, probe, |_, _| ())
+                            .await
+                            .assured("ending the branch returns the actual queue place");
+                        let snapshot = executor.snapshot();
+                        assert_eq!(snapshot.relay_memory.reserved_bytes, 0);
+                        assert_eq!(snapshot.bulk_memory.reserved_bytes, 0);
+                        assert_eq!(snapshot.data_cpu.running, 0);
+                        assert_eq!(snapshot.data_cpu.pending, 0);
+                        // The branch may be withdrawn after queue admission but before it runs.
+                        assert!((3..=4).contains(&snapshot.data_cpu.admitted));
+                        assert!((3..=4).contains(&snapshot.data_cpu.completed));
+                        assert!(snapshot.data_cpu.completed <= snapshot.data_cpu.admitted);
+                        assert!(snapshot.data_cpu.admitted - snapshot.data_cpu.completed <= 1);
+                        assert_eq!(snapshot.data_cpu.refused, 0);
+                    }
+                });
+            });
+        }
     }
 
     #[nervix_primitives::test]

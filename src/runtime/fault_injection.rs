@@ -26,6 +26,14 @@ use crate::ConfiguredFaultInjection;
 
 #[cfg(not(feature = "testing"))]
 impl ConfiguredFaultInjection {
+    pub(in crate::runtime) async fn run_accepted_processor_input<F: std::future::Future>(
+        &self,
+        _processor: DomainNodeRef,
+        future: F,
+    ) -> F::Output {
+        future.await
+    }
+
     pub(in crate::runtime) async fn pause_processor_partition_install_if_armed(
         &self,
         _domain: &DomainName,

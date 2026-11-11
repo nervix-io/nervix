@@ -669,21 +669,22 @@ impl MappedValuesProjection {
                     self.program.label
                 ))
         })?;
-        let result = execute_program_with_selection_in_context(
-            executor,
-            &self.program.program,
-            &input,
-            &VmExecutionContext {
-                now: execution_now,
-                injector: None,
-            },
-        )
-        .await
-        .map_err(|error| {
-            error
-                .change_context(EmitterRuntimeError::EncodeBatch)
-                .attach_printable(format!("{} VALUES execution failed", self.program.label))
-        })?;
+        let result = batch
+            .keep_alive_while_pending(execute_accepted_program_with_selection_in_context(
+                executor.accepted_work(),
+                &self.program.program,
+                &input,
+                &VmExecutionContext {
+                    now: execution_now,
+                    injector: None,
+                },
+            ))
+            .await
+            .map_err(|error| {
+                error
+                    .change_context(EmitterRuntimeError::EncodeBatch)
+                    .attach_printable(format!("{} VALUES execution failed", self.program.label))
+            })?;
         let row_count = batch.batch.batch().num_rows();
         if result.batch.row_count() != row_count {
             return Err(
@@ -905,6 +906,37 @@ mod tests {
             .downcast_ref::<arrow_array::Int64Array>()
             .expect("the mapped column keeps its exact type");
         assert_eq!(doubled.values().as_ref(), [0, 2, 4]);
+    }
+
+    #[nervix_primitives::test]
+    async fn accepted_work_emitter_values_mapping_keeps_every_selected_row() {
+        let executor = single_worker_executor();
+        let projection = test_projection();
+        let batch = test_batch(1025);
+        let projected = accepted_work_after_cpu_room(
+            &executor,
+            nervix_execution::CpuClass::Data,
+            projection.project(
+                &executor,
+                4,
+                &batch,
+                Timestamp::from_unix_nanos(7),
+                &[0, 1024],
+            ),
+        )
+        .await
+        .assured("a full data class cannot fail the accepted emitter mapping");
+        let rows = projected.emitter_carrier(None);
+        assert_eq!(rows.selected_rows, [0, 1024]);
+        assert_eq!(rows.batch.num_rows(), 1025);
+        let doubled = rows
+            .batch
+            .column(2)
+            .as_any()
+            .downcast_ref::<arrow_array::Int64Array>()
+            .assured("the mapped column keeps its exact type");
+        assert_eq!(doubled.value(1024), 2048);
+        assert_eq!(executor.snapshot().data_cpu.refused, 0);
     }
 
     /// A column keeps the nullability its expression infers, while the mapped batch makes every

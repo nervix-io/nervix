@@ -507,6 +507,61 @@ async fn a_reservation_holds_its_class_until_it_is_dropped() {
 }
 
 #[nervix_primitives::test]
+async fn accepted_cpu_places_hold_the_charge_and_return_reusable_capacity_when_run_or_abandoned() {
+    let executor = small_executor();
+    let work = executor.accepted_work();
+    let charge = work
+        .reserve(MemoryClass::Relay, 1024)
+        .await
+        .expect("the operation fits");
+    let place = work
+        .prepare_cpu(crate::CpuClass::Data, charge)
+        .await
+        .expect("a place is available");
+    let request = executor
+        .try_reserve(MemoryClass::Relay, 0)
+        .expect("a zero charge fits");
+    let refusal = executor
+        .run_cpu(crate::CpuClass::Data, request, |_, _| ())
+        .await
+        .expect_err("a request cannot overtake a retained place");
+    assert!(matches!(
+        refusal.current_context(),
+        ExecutionError::QueueFull { .. }
+    ));
+    drop(place);
+    assert_eq!(executor.snapshot().relay_memory.reserved_bytes, 0);
+    assert_eq!(executor.snapshot().data_cpu.pending, 0);
+    let charge = work
+        .reserve(MemoryClass::Relay, 1024)
+        .await
+        .expect("the returned charge is reusable");
+    let result = work
+        .prepare_cpu(crate::CpuClass::Data, charge)
+        .await
+        .expect("the place is reusable")
+        .run(|_, _| 7)
+        .await
+        .expect("prepared accepted work completes");
+    assert_eq!(result, 7);
+    let charge = work
+        .reserve(MemoryClass::Relay, 1024)
+        .await
+        .expect("the completed charge is reusable");
+    assert_eq!(
+        work.run_cpu(crate::CpuClass::Data, charge, |_, _| 14)
+            .await
+            .expect("accepted work runs"),
+        14
+    );
+    let snapshot = executor.snapshot();
+    assert_eq!(snapshot.relay_memory.reserved_bytes, 0);
+    assert_eq!(snapshot.data_cpu.pending, 0);
+    assert_eq!(snapshot.data_cpu.running, 0);
+    assert_eq!(snapshot.data_cpu.admitted, snapshot.data_cpu.completed);
+}
+
+#[nervix_primitives::test]
 async fn an_operation_larger_than_its_class_is_refused_rather_than_queued() {
     let executor = small_executor();
     let capacity = executor.snapshot().management_memory.capacity_bytes;
@@ -1265,12 +1320,11 @@ mod shuttle_checks {
             let job_order = StdArc::clone(order);
             let task = nervix_primitives::task::spawn(async move {
                 announce_after_first_pending(
-                    waiter.run_cpu_with(
-                        CpuClass::Data,
-                        QueueAdmission::WaitForPlace,
-                        charge,
-                        move |_, _| job_order.lock().push(label),
-                    ),
+                    waiter
+                        .accepted_work()
+                        .run_cpu(CpuClass::Data, charge, move |_, _| {
+                            job_order.lock().push(label)
+                        }),
                     registered,
                 )
                 .await
@@ -1393,6 +1447,67 @@ mod shuttle_checks {
     #[test]
     fn shuttle_a_dropped_job_waiting_for_a_place_gives_up_its_place_and_charge() {
         check_random_and_pct(dropped_waiting_admission_invariant);
+    }
+
+    #[test]
+    fn shuttle_accepted_cpu_preparation_returns_waiting_and_reserved_places_with_their_charges() {
+        check_random_and_pct(|| {
+            shuttle::future::block_on(async {
+                let executor = small_executor();
+                let full = FullDataQueue::fill(&executor).await;
+                let charge = executor
+                    .try_reserve(MemoryClass::Relay, 1024)
+                    .assured("the waiting operation has a bounded charge");
+                let mut waiting =
+                    Box::pin(executor.accepted_work().prepare_cpu(CpuClass::Data, charge));
+                assert!(
+                    std::future::poll_fn(|cx| Poll::Ready(waiting.as_mut().poll(cx)))
+                        .await
+                        .is_pending()
+                );
+                assert_eq!(executor.snapshot().relay_memory.reserved_bytes, 3 * 1024);
+                drop(waiting);
+                assert_eq!(executor.snapshot().relay_memory.reserved_bytes, 2 * 1024);
+                full.release().await;
+                assert_every_permit_returned(&executor);
+
+                let charge = executor
+                    .try_reserve(MemoryClass::Relay, 1024)
+                    .assured("the prepared operation has a bounded charge");
+                let place = executor
+                    .accepted_work()
+                    .prepare_cpu(CpuClass::Data, charge)
+                    .await
+                    .assured("the prepared operation takes the freed place");
+                assert_eq!(executor.snapshot().data_cpu.pending, 1);
+                let request_charge = executor
+                    .try_reserve(MemoryClass::Relay, 1024)
+                    .assured("the request's independent charge fits");
+                let refusal = executor
+                    .run_cpu(CpuClass::Data, request_charge, |_, _| ())
+                    .await
+                    .expect_err("a request cannot overtake the reserved place");
+                assert!(matches!(
+                    refusal.current_context(),
+                    ExecutionError::QueueFull { .. }
+                ));
+                drop(place);
+                assert_every_permit_returned(&executor);
+                let charge = executor
+                    .try_reserve(MemoryClass::Relay, 1024)
+                    .assured("returned capacity is reusable");
+                let result = executor
+                    .accepted_work()
+                    .prepare_cpu(CpuClass::Data, charge)
+                    .await
+                    .assured("a successor gets the returned place")
+                    .run(|_, _| 7)
+                    .await
+                    .assured("the successor executes");
+                assert_eq!(result, 7);
+                assert_every_permit_returned(&executor);
+            })
+        });
     }
 
     fn consensus_admission_order_invariant() {

@@ -137,7 +137,13 @@ pub(super) async fn flush_branch_inferencer_output(
                 return;
             }
         };
-        match inferencer::OnnxInferencerSession::load(branch.runtime.executor(), &path).await {
+        match forwarded
+            .keep_alive_while_pending(inferencer::OnnxInferencerSession::load(
+                branch.runtime.executor(),
+                &path,
+            ))
+            .await
+        {
             Ok(loaded) => *session = Some(loaded),
             Err(error) => {
                 branch.runtime.handle_internal_processor_error_for_acks(
@@ -227,16 +233,18 @@ pub(super) async fn flush_branch_inferencer_output(
             return;
         }
     };
-    let mapped_result = match execute_program_with_selection_in_context(
-        branch.runtime.executor(),
-        &compiled_input_program.program,
-        &mapped_vm_input,
-        &VmExecutionContext {
-            now: execution_now,
-            injector: None,
-        },
-    )
-    .await
+    let mapped_result = match messages
+        .as_slice()
+        .keep_alive_while_pending(execute_accepted_program_with_selection_in_context(
+            branch.runtime.executor().accepted_work(),
+            &compiled_input_program.program,
+            &mapped_vm_input,
+            &VmExecutionContext {
+                now: execution_now,
+                injector: None,
+            },
+        ))
+        .await
     {
         Ok(result) => result,
         Err(error) => {
@@ -279,14 +287,15 @@ pub(super) async fn flush_branch_inferencer_output(
             return;
         }
     };
-    let output_columns = match session
-        .execute(
+    let output_columns = match messages
+        .as_slice()
+        .keep_alive_while_pending(session.execute(
             branch.runtime.executor(),
             &mapped_batch,
             inputs,
             output_schema,
             execution_mode,
-        )
+        ))
         .await
     {
         Ok(output_fields) => output_fields,
