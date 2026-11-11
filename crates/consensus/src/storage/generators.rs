@@ -2220,10 +2220,11 @@ const COMMAND_BYTES: usize = 4096;
 /// How many commands the command check builds from one seeded input.
 const COMMANDS_PER_SEED: usize = 4;
 
-/// How many bytes one seeded input of the record check holds. A complete revision, with every
-/// family drawn before the bytes run out, reads about 38 KiB on average, so this leaves room for
-/// the families drawn last.
-const REVISION_BYTES: usize = 64 * 1024;
+/// How many bytes one seeded input of the record check holds. A complete revision reads about
+/// 42 KiB on average, but about one in five reads past 64 KiB, and a revision whose bytes run out
+/// draws the families drawn last, command executions among them, empty. This leaves room for them
+/// in all but a few revisions.
+const REVISION_BYTES: usize = 128 * 1024;
 
 /// `length` bytes that differ from seed to seed: the BLAKE3 output stream of the seed, which
 /// spreads the late choices of a value between seeds as evenly as the first.

@@ -534,7 +534,8 @@ Emitter statements exchanged through the control plane use explicit `KEY` expres
 `payload` expression scope, typed materialized relay inspection, ingestor read interactions,
 corridor/domain-wide placement coverage, pace-only domain configuration, exact partition/instance
 relocation selections, ingestor acknowledgement and connector lifecycle observations, and the current
-transaction operation and commit-step alternatives. Peers must
+transaction operation and commit-step alternatives, and the engine and connector host capabilities
+in each node's incarnation-bound claim. Peers must
 match it exactly.
 
 Execution-unit identities use an eight-byte rank with four-byte archive alignment. Single and
@@ -2477,6 +2478,21 @@ the freeze of that same unit. A sibling instance's control or ACK count cannot a
 back the selected handoff. The current wire fingerprint identifies this required request shape;
 peers must use the same current contract. Its fingerprint also includes the required committed
 cluster-parameter publication.
+
+## Inferencer Unit Observation
+
+An inferencer describe request names the domain, inferencer, execution unit and expected pinned
+model fingerprint. Its receiver verifies the current model binding and that it executes that
+unit. The reply carries typed branch and byte counts, publication and persistence revisions, and
+the owner's confirmed progress for its current replicas. The control plane composes these unit
+facts with the stored tensor declarations and placement before rendering the description.
+
+Collection visits immutable state publications on the bounded executor, checks cancellation
+between entries and reads only counts and revision metadata. It never encodes a tensor or a branch
+key. Revision zero is a known baseline; absence means no progress was observed. The per-unit
+revision at each stage is the highest observed branch-local revision, not a common checkpoint.
+This request uses the ordinary bounded control-request transport and deadline. It neither requests
+publication nor changes replication progress or gossip.
 
 ## Cluster Parameter Observations
 

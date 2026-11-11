@@ -16,6 +16,7 @@
     )
 )]
 
+mod inferencer;
 mod inspection_pages;
 mod materialized_state;
 mod processor_descriptions;
@@ -111,6 +112,11 @@ struct LookupTarget {
 
 #[derive(Debug, thiserror::Error)]
 pub(in crate::application) enum ObservationError {
+    #[error("inferencer '{}' changed while preparing its description in domain '{}'", .name.as_str(), .domain.as_str())]
+    InferencerConfigurationChanged {
+        domain: DomainName,
+        name: nervix_models::InferencerName,
+    },
     #[error("failed to describe {kind} '{name}' in domain '{domain}' locally", kind = .entity.kind.as_str(), name = .entity.identifier.as_str())]
     LocalDescribe { domain: DomainName, entity: NodeRef },
     #[error("failed to describe {kind} '{name}' in domain '{domain}' on node '{node}'", kind = .entity.kind.as_str(), name = .entity.identifier.as_str())]
