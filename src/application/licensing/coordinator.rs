@@ -207,6 +207,9 @@ async fn reconcile(
         }
     }
     let due = RefreshTrigger::Automatic(*notification_due).needs_refresh(initialized, now);
+    if !pending && !due {
+        *notification_due = None;
+    }
     let revocations = initialized
         .record
         .trust
