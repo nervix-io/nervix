@@ -311,6 +311,81 @@ mod ordinary {
         >());
     }
 
+    /// Configuration borrows the selected connected descriptor and preserves its I/O lifetime.
+    #[cfg(all(feature = "native", not(feature = "turmoil")))]
+    #[crate::test]
+    async fn native_tcp_keepalive_configures_the_existing_connection() {
+        use std::{future::poll_fn, pin::Pin, time::Duration};
+
+        use meticulous::ResultExt as _;
+        use tokio::io::{AsyncRead as _, AsyncWrite as _, ReadBuf};
+        let listener = crate::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .assured("loopback listener");
+        let address = listener.local_addr().assured("bound address");
+        let mut client = crate::net::TcpStream::connect(address)
+            .await
+            .assured("loopback connect");
+        let (mut accepted, _) = listener.accept().await.assured("loopback accept");
+        let local = accepted.local_addr().assured("connected address");
+        crate::net::configure_tcp_keepalive(
+            &accepted,
+            Duration::from_secs(60),
+            Duration::from_secs(10),
+            3,
+        )
+        .assured("kernel keepalive options");
+        assert!(
+            socket2::SockRef::from(&accepted)
+                .keepalive()
+                .assured("kernel keepalive state")
+        );
+        #[cfg(target_os = "linux")]
+        {
+            let options = socket2::SockRef::from(&accepted);
+            assert_eq!(
+                options
+                    .tcp_keepalive_time()
+                    .assured("Linux exposes TCP_KEEPIDLE on this connected socket"),
+                Duration::from_secs(60)
+            );
+            assert_eq!(
+                options
+                    .tcp_keepalive_interval()
+                    .assured("Linux exposes TCP_KEEPINTVL on this connected socket"),
+                Duration::from_secs(10)
+            );
+            assert_eq!(
+                options
+                    .tcp_keepalive_retries()
+                    .assured("Linux exposes TCP_KEEPCNT on this connected socket"),
+                3
+            );
+        }
+        assert_eq!(accepted.local_addr().assured("same descriptor"), local);
+        let mut sent = 0;
+        while sent < b"bounded".len() {
+            let count = poll_fn(|cx| Pin::new(&mut client).poll_write(cx, &b"bounded"[sent..]))
+                .await
+                .assured("write after configuration");
+            assert!(count > 0, "the connected peer accepts fixture bytes");
+            sent += count;
+        }
+        let mut bytes = [0; 7];
+        let mut read = ReadBuf::new(&mut bytes);
+        while read.remaining() != 0 {
+            let before = read.filled().len();
+            poll_fn(|cx| Pin::new(&mut accepted).poll_read(cx, &mut read))
+                .await
+                .assured("read after configuration");
+            assert!(
+                read.filled().len() > before,
+                "the connected peer remains open"
+            );
+        }
+        assert_eq!(&bytes, b"bounded");
+    }
+
     /// An admitted CPU job runs on the blocking pool, off the thread of the task that submitted it.
     #[cfg(all(feature = "native", not(feature = "turmoil")))]
     #[crate::test]

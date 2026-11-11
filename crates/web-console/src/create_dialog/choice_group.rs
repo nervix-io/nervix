@@ -24,6 +24,11 @@ use super::{
     request_choices,
 };
 
+/// One typed choice control: its search, its choices, and the buttons that page and refresh them.
+///
+/// The whole group is disabled while the form's attempt is pending, as the form's fields are. A
+/// selection edits the draft and a search asks again by advancing the draft revision, so either
+/// would drop the attempt before its own outcome arrives.
 #[component]
 pub(super) fn ChoiceGroup(
     class_name: &'static str,
@@ -38,7 +43,10 @@ pub(super) fn ChoiceGroup(
 ) -> impl IntoView {
     let ChoiceControlSignals { search, load } = signals.choice_signals(control);
     view! {
-        <fieldset class=format!("create-choice-group {class_name}")>
+        <fieldset
+            class=format!("create-choice-group {class_name}")
+            disabled=move || signals.progress.get().is_pending()
+        >
             <legend>{label}</legend>
             <label class="create-choice-search-label">
                 <span class="sr-only">{format!("Search {label}")}</span>
