@@ -173,6 +173,8 @@ pub enum StatementVariant {
     DescribeLicense,
     ActivateLicense,
     RefreshLicense,
+    ReleaseLicense,
+    RotateLicenseClusterKey,
     AlterBranch,
     DescribeBranch,
     AlterCluster,
@@ -251,6 +253,8 @@ impl StatementVariant {
             Statement::DescribeLicense(_) => Self::DescribeLicense,
             Statement::ActivateLicense(_) => Self::ActivateLicense,
             Statement::RefreshLicense(_) => Self::RefreshLicense,
+            Statement::ReleaseLicense(_) => Self::ReleaseLicense,
+            Statement::RotateLicenseClusterKey(_) => Self::RotateLicenseClusterKey,
         }
     }
 }
@@ -820,6 +824,12 @@ impl Arbitrary<'_> {
             }
             StatementVariant::RefreshLicense => {
                 Statement::RefreshLicense(nervix_models::RefreshLicense)
+            }
+            StatementVariant::ReleaseLicense => {
+                Statement::ReleaseLicense(nervix_models::ReleaseLicense)
+            }
+            StatementVariant::RotateLicenseClusterKey => {
+                Statement::RotateLicenseClusterKey(nervix_models::RotateLicenseClusterKey)
             }
         }
     }
