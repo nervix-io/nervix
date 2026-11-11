@@ -247,7 +247,11 @@ fn families(
         }
         output.push(requests);
         let mut connected = family(5, MetricType::GAUGE);
-        sample(&mut connected, &[], 0.0);
+        let value = match observations {
+            Some(handle) if handle.stream_connected() => 1.0,
+            _ => 0.0,
+        };
+        sample(&mut connected, &[], value);
         output.push(connected);
     }
     let mut transitions = family(6, MetricType::GAUGE);

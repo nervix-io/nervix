@@ -1526,6 +1526,51 @@ run.then(
   },
 );
 
+/** An optional scalar, or `none` when the frame omits it. */
+const optionalNumber = (value: bigint | number | null): string => (value === null ? 'none' : `${value}`);
+
+/** A branch fingerprint, which must be exactly 32 bytes. */
+function wasmFingerprint(fingerprint: wire.Fingerprint | null): string {
+  const bytes = member(member(fingerprint).bytesArray());
+  if (bytes.length !== 32) throw new Error('a WASM branch is not a 32-byte fingerprint');
+  return hex(bytes);
+}
+
+/** One unit's WASM guest-state facts: its counts, its latest reset and every returned branch entry. */
+function wasmUnitLines(state: wire.WasmUnitStateFacts): string[] {
+  const checkpoints = member(state.checkpoints());
+  const recoveries = member(state.recoveries());
+  const lines = [`STATE_WASM_UNIT default_generation=${state.defaultGeneration()} entries=${state.entries()} total=${checkpoints.total()} empty=${checkpoints.empty()} captured=${checkpoints.captured()} locally_durable=${checkpoints.locallyDurable()} awaiting_replicas=${checkpoints.awaitingReplicas()} replica_confirmed=${checkpoints.replicaConfirmed()} failed=${checkpoints.failed()} attempted=${recoveries.attempted()} recovered=${recoveries.recovered()} recovery_failed=${recoveries.failed()}`];
+  const reset = state.reset();
+  if (reset !== null) {
+    let scope: string;
+    switch (reset.scopeType()) {
+      case wire.WasmStateScope.WasmUnbranchedScope: scope = 'unbranched'; break;
+      case wire.WasmStateScope.WasmBranchScope: {
+        const value = member(reset.scope(new wire.WasmBranchScope()) as wire.WasmBranchScope | null);
+        scope = `branch:${wasmFingerprint(value.branch())}`; break;
+      }
+      case wire.WasmStateScope.WasmAllBranchesScope: scope = 'all_branches'; break;
+      default: throw new Error('unknown WASM reset scope');
+    }
+    lines.push(`STATE_WASM_RESET request=${reset.request()} scope=${scope} phase=${wire.WasmResetPhase[member(reset.phase())]} reason=${wire.WasmResetReason[member(reset.reason())]} generation=${reset.generation()} readiness=${wire.WasmResetReadiness[member(reset.readiness())]}`);
+  }
+  for (let i = 0; i < state.branchesLength(); i += 1) {
+    const entry = member(state.branches(i));
+    const fingerprint = entry.branch();
+    const branch = fingerprint === null ? 'unbranched' : wasmFingerprint(fingerprint);
+    const checkpoint = entry.checkpoint();
+    if (checkpoint !== null) {
+      lines.push(`STATE_WASM_CHECKPOINT branch=${branch} generation=${checkpoint.generation()} committed=${optionalNumber(checkpoint.committedRevision())} latest=${optionalNumber(checkpoint.latestRevision())} stage=${wire.WasmCheckpointStage[member(checkpoint.stage())]} required=${optionalNumber(checkpoint.requiredReplicas())} confirmed=${optionalNumber(checkpoint.confirmedReplicas())}`);
+    }
+    const recovery = entry.recovery();
+    if (recovery !== null) {
+      lines.push(`STATE_WASM_RECOVERY branch=${branch} generation=${recovery.generation()} rejection=${wire.WasmSavedStateRejection[member(recovery.rejection())]} request=${recovery.request()} outcome=${wire.WasmRecoveryOutcome[member(recovery.outcome())]}`);
+    }
+  }
+  return lines;
+}
+
 function stateInspectionLines(state: wire.StateInspection): string[] {
   const lines: string[] = [];
   if (state.entityType() === wire.StateInspectionEntity.DomainNodeInspectionEntity) {
@@ -1544,6 +1589,8 @@ function stateInspectionLines(state: wire.StateInspection): string[] {
   const page = member(state.result(new wire.StateInspectionPage()) as wire.StateInspectionPage | null);
   const counts = member(page.counts());
   lines.push(`STATE_PAGE branches=${counts.branches()} rows=${counts.rows()} bytes=${counts.bytes()} units=${page.unitCount()} continuation=${page.continuation() ?? 'none'}`);
+  const binding = page.wasmBinding();
+  if (binding !== null) lines.push(`STATE_WASM_BINDING resource=${binding.resource()} version=${binding.version()} file=${binding.file()}`);
   for (let i = 0; i < page.unitsLength(); i += 1) {
     const unit = member(page.units(i));
     let placement = 'single';
@@ -1565,6 +1612,8 @@ function stateInspectionLines(state: wire.StateInspection): string[] {
     const replicas: string[] = [];
     for (let r = 0; r < unit.replicasLength(); r += 1) replicas.push(member(unit.replicas(r)));
     lines.push(`STATE_UNIT owner=${unit.owner()} replicas=${replicas.join(',')} node=${origin.node()} incarnation=${origin.incarnation()} fingerprint=${hex(member(origin.fingerprintArray()))} generation=${origin.generation()} revision=${origin.revision()} stage=${wire.StateInspectionStage[member(origin.stage())]} branches=${counts.branches()} rows=${counts.rows()} bytes=${counts.bytes()}`);
+    const wasm = unit.wasm();
+    if (wasm !== null) lines.push(...wasmUnitLines(wasm));
     for (let j = 0; j < unit.sectionsLength(); j += 1) {
       const section = member(unit.sections(j));
       const watermarks = section.watermarks();

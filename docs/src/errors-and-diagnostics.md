@@ -4032,3 +4032,12 @@ Admission refusals retain their typed quota cause through the domain or membersh
 grant also ends at its original signed offline deadline, even if a later refresh renews the
 activation's offline allowance. Only a signed acknowledgement or administrator extension can move
 the committed grant deadline later.
+
+## Licensing Notification Failures
+
+The outbound licensing stream retains typed setup, transport, idle-timeout, content-type,
+notification-payload and identifier failures. Each interruption ends that response and reconnects
+under the declared backoff; polling and signed deadlines remain independent. Parser failures keep
+their concrete cause in a sanitized context whose rendering contains no untrusted event data.
+Tickets use sensitive authorization headers and never enter URLs or logs. An invalidation hint
+cannot become a permission or a record-rejection outcome.

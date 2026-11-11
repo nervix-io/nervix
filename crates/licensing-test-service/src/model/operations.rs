@@ -236,6 +236,7 @@ impl Model {
             held.decision.conditions.usage = FREE_POLICY.usage();
             held.capacity_until = None;
         }
+        self.notify_change();
     }
 
     pub fn active_activation_count(&self) -> usize {

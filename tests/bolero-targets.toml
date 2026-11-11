@@ -748,7 +748,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/plexus/src/__fuzz__/canonical_round_trip_tests__bolero_statement_roundtrip_canonical_plexus/corpus"
-domain_version = 71
+domain_version = 72
 features = []
 id = "plexus-statement"
 invariant = "Canonical Plexus of every generated current statement form, session-only forms included, reparses through the client and server grammars to the complete statement."
@@ -778,7 +778,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/plexus/src/__fuzz__/canonical_round_trip_tests__bolero_statement_text_is_canonical_or_rejected/corpus"
-domain_version = 70
+domain_version = 71
 features = []
 id = "plexus-statement-text"
 invariant = "Edited canonical text is either rejected with located diagnostics or read as statements whose canonical Plexus reparses to them."
@@ -793,7 +793,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/plexus-format/src/__fuzz__/format_round_trip_tests__bolero_formatted_documents_keep_their_statements/corpus"
-domain_version = 70
+domain_version = 71
 features = []
 id = "plexus-format-document"
 invariant = "Formatting a generated document with gaps, comments and either line ending keeps its statements and comments and is idempotent."
@@ -808,7 +808,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/plexus-format/src/__fuzz__/format_round_trip_tests__bolero_formatter_text_is_formatted_or_rejected/corpus"
-domain_version = 69
+domain_version = 70
 features = []
 id = "plexus-format-text"
 invariant = "Edited documents are either refused as unparseable or formatted without changing their statements, idempotently."
@@ -1198,7 +1198,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/models/tests/representations/__fuzz__/models__bolero_models_and_statements_round_trip_through_their_archives/corpus"
-domain_version = 69
+domain_version = 70
 features = []
 id = "models-archived-models"
 invariant = "Every generated Model family and statement form keeps every field through its archive, and a stored Model widens to requested versions and pins back to itself."
@@ -1633,10 +1633,10 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/models/tests/representations/__fuzz__/models__bolero_archived_counts_round_trip/corpus"
-domain_version = 4
+domain_version = 5
 features = []
 id = "models-archived-counts"
-invariant = "Every vocabulary count preserves its complete native value in its owning Model, statement, transaction identity, plan header and per-unit WASM inspection archive, including partition units with independent generations."
+invariant = "Every vocabulary count preserves its complete native value in its owning Model, statement, transaction identity, plan header and WASM unit inspection and page archives, including entry, checkpoint-stage and recovery-outcome counts."
 manifest = "Cargo.toml"
 max_input_bytes = 16
 package = "nervix-models"
@@ -1843,10 +1843,10 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/client-wire/src/tests/properties/__fuzz__/tests__properties__replies__bolero_replies_keep_complete_values/corpus"
-domain_version = 14
+domain_version = 16
 features = []
 id = "client-replies"
-invariant = "Every current reply family decodes to the complete original typed value, including dispositions, typed subscribe and clock attach refusals, diagnostics, metadata, per-unit WASM generations, resets and checkpoints, and client I/O."
+invariant = "Every current reply family decodes to the complete original typed value, including dispositions, typed subscribe and clock attach refusals, diagnostics, metadata, the WASM state envelope tables with every checkpoint stage, reset scope, phase, reason and readiness, recovery outcome and rejection, entry counts and pinned binding, and client I/O."
 manifest = "Cargo.toml"
 max_input_bytes = 4096
 package = "nervix-client-wire"
@@ -2593,7 +2593,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/consensus/src/storage/__fuzz__/storage__properties__bolero_consensus_state_records_recover_every_stored_value/corpus"
-domain_version = 66
+domain_version = 67
 features = []
 id = "consensus-state-records"
 invariant = "A generated replicated state holding records of every family, including unit-keyed schedules with their branch partition epochs, stored by the consensus state writer into a real keyspace, and a second revision stored as the changes from it each recover with complete equality of every record, index and metadata field."
@@ -2608,7 +2608,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/consensus/src/storage/__fuzz__/storage__properties__bolero_corrupt_consensus_state_records_fail_typed_or_recover_canonically/corpus"
-domain_version = 66
+domain_version = 67
 features = []
 id = "consensus-state-corruption"
 invariant = "Flipped, truncated, extended, rekeyed, copied, unknown and missing consensus state records free every decoding allocation and either fail recovery with the typed invalid-state failure or recover a state stored under its own canonical keys whose readers' invariants hold and which recovers again unchanged."
@@ -4799,6 +4799,36 @@ test_target = "lib"
 
 [[target]]
 case_timeout_seconds = 10
+corpus = "crates/interconnect/src/__fuzz__/wasm_state_inspection__tests__bolero_wasm_state_page_messages_round_trip/corpus"
+domain_version = 3
+features = []
+id = "interconnect-wasm-state-inspection"
+invariant = "Every field of the owner WASM state page request and its typed page or refusal survives the production admitted rkyv codec unchanged, including selectors, resume keys, entry limits, process origins, lifetimes, resets, complete counts and every branch entry's checkpoint and recovery."
+manifest = "Cargo.toml"
+max_input_bytes = 512
+package = "nervix-interconnect"
+random_iterations = 128
+source = "crates/interconnect/src/wasm_state_inspection.rs"
+test = "wasm_state_inspection::tests::bolero_wasm_state_page_messages_round_trip"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "src/__fuzz__/state_inspection_cursor__wasm_tests__bolero_wasm_state_inspection_cursor_round_trips/corpus"
+domain_version = 3
+features = ["testing"]
+id = "wasm-state-inspection-cursor"
+invariant = "Canonical opaque WASM continuations preserve every domain, processor, control revision, selector, unit and last entry key, unbranched or fingerprinted, through the production bounded encoding and decoding pair."
+manifest = "Cargo.toml"
+max_input_bytes = 512
+package = "nervix-server"
+random_iterations = 128
+source = "src/state_inspection_cursor.rs"
+test = "state_inspection_cursor::wasm_tests::bolero_wasm_state_inspection_cursor_round_trips"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
 corpus = "crates/benchmark/tests/__fuzz__/bolero_metrics_report_round_trip/corpus"
 domain_version = 1
 features = []
@@ -4815,10 +4845,10 @@ test_target = "test:metrics_report_properties"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/licensing-protocol/src/__fuzz__/representation_properties__bolero_protocol_json_roundtrip/corpus"
-domain_version = 3
+domain_version = 4
 features = []
 id = "licensing-protocol-json-roundtrip"
-invariant = "Every current signed decision status, operation, stream ticket, trust document, proof of life, decision and trust-bundle response, key, condition and problem detail preserves the complete typed value and canonical payload bytes, including Unicode, optional fields and unknown external values."
+invariant = "Every current notification, signed decision status, operation, stream ticket, trust document, proof of life, decision and trust-bundle response, key, condition and problem detail preserves the complete typed value and canonical payload bytes, including Unicode, optional fields and unknown external values."
 manifest = "Cargo.toml"
 max_input_bytes = 256
 package = "nervix-licensing-protocol"

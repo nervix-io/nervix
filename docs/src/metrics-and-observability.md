@@ -354,6 +354,13 @@ supply no licensing authority.
 See [Cluster Licensing](node-settings.md#cluster-licensing) for `DESCRIBE LICENSE` and the
 committed node/domain usage definitions.
 
+For an activated leader, `stream_connected` is 1 while an admitted licensing SSE response is held
+and returns to 0 when that exact response ends or is cancelled. Followers expose no leader-local
+stream sample. A healthy stream grants nothing and does not alter any signed deadline. Setup
+refusals and transport failures use the existing `events.subscribe` outcome counters; successful
+stream admission is observed by the gauge, without claiming a decision was committed.
+
+
 ## Client Ingestors
 
 The six client-ingestor families describe the node that executes the ingestor and use `domain` and

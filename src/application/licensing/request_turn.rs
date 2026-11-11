@@ -1,7 +1,7 @@
-//! Serialize licensing requests while letting an operator expedite a sleeping refresh retry.
+//! Serialize licensing requests and coalesce operator and notification retry wakeups.
 //!
 //! Layer: control plane.
-//! - **Owns.** One request turn and one coalescing refresh wakeup per node.
+//! - **Owns.** One request turn and independent coalescing operator/notification wakeups per node.
 //! - **Depends on.** Selected async mutual exclusion, notification and pure future polling.
 //! - **Must not know.** HTTP, signed documents, policy grants or graph execution.
 
@@ -13,11 +13,25 @@ use nervix_recovery::Discarded as _;
 pub(in crate::application) struct LicensingRequests {
     turn: Mutex<()>,
     refresh: Notify,
+    notifications: Notify,
 }
 
 impl LicensingRequests {
+    pub(super) fn expedite(&self) {
+        self.notifications.notify_one();
+    }
+
+    fn consume_notification(&self) {
+        self.notifications.notified().now_or_never().discarded(
+            "the new attempt already represents a preceding notification, if one remains",
+        );
+    }
     pub(super) async fn background(&self) -> MutexGuard<'_, ()> {
-        self.turn.lock().await
+        let turn = self.turn.lock().await;
+        // A queued attempt already represents every hint that preceded its turn. A signal left
+        // by a completed request must not shorten this attempt's first automatic retry.
+        self.consume_notification();
+        turn
     }
 
     pub(super) async fn foreground(&self) -> MutexGuard<'_, ()> {
@@ -29,10 +43,18 @@ impl LicensingRequests {
         self.refresh.notified().now_or_never().discarded(
             "the foreground attempt owns the turn whether its stored wakeup was consumed or absent",
         );
+        self.consume_notification();
         turn
     }
 
     pub(super) async fn refresh_requested(&self) {
+        nervix_primitives::select! {
+            _ = self.refresh.notified() => {},
+            _ = self.notifications.notified() => {},
+        }
+    }
+
+    pub(super) async fn foreground_requested(&self) {
         self.refresh.notified().await;
     }
 }
@@ -70,5 +92,78 @@ mod tests {
         let turn = requests.foreground().await;
         assert!(requests.refresh_requested().now_or_never().is_none());
         drop(turn);
+    }
+
+    #[nervix_primitives::test]
+    async fn a_notification_preserves_the_release_turn_until_an_operator_requests_it() {
+        let requests = LicensingRequests::default();
+        let release = requests.background().await;
+        requests.expedite();
+        assert!(requests.foreground_requested().now_or_never().is_none());
+        assert!(requests.refresh_requested().now_or_never().is_some());
+        let mut operator = std::pin::pin!(requests.foreground());
+        assert!(futures_util::poll!(&mut operator).is_pending());
+        timeout(Duration::from_secs(1), requests.foreground_requested())
+            .await
+            .assured("the waiting operator, rather than a notification, yields release's turn");
+        drop(release);
+        let operator = timeout(Duration::from_secs(1), operator)
+            .await
+            .assured("the operator takes the released turn");
+        drop(operator);
+        assert!(requests.refresh_requested().now_or_never().is_none());
+    }
+
+    #[nervix_primitives::test]
+    async fn a_queued_background_attempt_consumes_the_hint_that_requested_it() {
+        let requests = LicensingRequests::default();
+        let foreground = requests.foreground().await;
+        let mut background = std::pin::pin!(requests.background());
+        assert!(futures_util::poll!(&mut background).is_pending());
+        requests.expedite();
+        drop(foreground);
+        let background = background.await;
+        assert!(
+            requests.refresh_requested().now_or_never().is_none(),
+            "the queued attempt already represents the hint; its first retry keeps its backoff"
+        );
+        drop(background);
+    }
+
+    #[nervix_primitives::test]
+    async fn a_hint_wakes_a_foreground_retry_before_the_queued_background_attempt() {
+        let requests = LicensingRequests::default();
+        let foreground = requests.foreground().await;
+        let mut background = std::pin::pin!(requests.background());
+        assert!(futures_util::poll!(&mut background).is_pending());
+        requests.expedite();
+        timeout(Duration::from_secs(1), requests.refresh_requested())
+            .await
+            .assured("a hint wakes whichever refresh currently holds the turn");
+        assert!(futures_util::poll!(&mut background).is_pending());
+        drop(foreground);
+        let background = background.await;
+        assert!(requests.refresh_requested().now_or_never().is_none());
+        drop(background);
+    }
+
+    #[nervix_primitives::test]
+    async fn a_queued_background_attempt_preserves_another_waiting_operators_wakeup() {
+        let requests = LicensingRequests::default();
+        let current = requests.foreground().await;
+        let mut background = std::pin::pin!(requests.background());
+        assert!(futures_util::poll!(&mut background).is_pending());
+        let mut foreground = std::pin::pin!(requests.foreground());
+        assert!(futures_util::poll!(&mut foreground).is_pending());
+        drop(current);
+        let background = background.await;
+        assert!(
+            requests.refresh_requested().now_or_never().is_some(),
+            "the next operator must still be able to expedite the owner ahead of its turn"
+        );
+        drop(background);
+        let foreground = foreground.await;
+        assert!(requests.refresh_requested().now_or_never().is_none());
+        drop(foreground);
     }
 }
