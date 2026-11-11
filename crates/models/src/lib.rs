@@ -48,6 +48,7 @@ mod inferencer_model_fingerprint;
 mod inferencer_state_summary;
 mod ingestor_input;
 mod json_path;
+mod listener_bounds;
 mod message_error;
 mod model_index;
 mod name_spelling;
@@ -288,6 +289,7 @@ pub use inferencer_model_fingerprint::InferencerModelFingerprint;
 pub use inferencer_state_summary::{InferencerReplicaProgress, InferencerStateSummary};
 pub use ingestor_input::{IngestorInput, TransportIngestorInput};
 pub use json_path::{JsonPath, JsonPathError, JsonPathStep};
+pub use listener_bounds::ListenerBounds;
 pub use message_error::{
     FieldPath, MessageErrorCode, MessageErrorOperation, StructuredMessageError,
 };

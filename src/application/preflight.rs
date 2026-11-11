@@ -62,6 +62,8 @@ pub enum PreflightError {
     ConsensusCapacity,
     #[error("the executor's memory budgets cannot hold the operations its limits admit")]
     ExecutionLimits,
+    #[error("the listener bounds do not fit intake memory")]
+    ListenerLimits,
     #[error("the peer receive bounds do not fit the resolved executor")]
     PeerReceiveLimits,
     #[error("the client endpoint capacities do not fit the node memory")]
@@ -186,6 +188,10 @@ impl Preflight<'_> {
         let config = ExecutionSettings::resolve(self.settings.execution, cpu_count, memory_bytes)
             .change_context(PreflightError::ExecutionLimits)?
             .config();
+        self.settings
+            .listeners
+            .validate_intake(config.budgets.intake)
+            .change_context(PreflightError::ListenerLimits)?;
         super::RuntimeThreadSettings::resolve(
             self.settings.runtime_threads,
             cpu_count,
@@ -237,6 +243,7 @@ impl Preflight<'_> {
             ),
             engines: self.settings.runtime.engine_capabilities(),
             connector_host: self.settings.runtime.connector_host.capabilities(),
+            listeners: self.settings.listeners.bounds(),
             cpu_count,
             memory_bytes,
             receive: peer_receive.bounds(),
