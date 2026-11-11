@@ -3937,3 +3937,15 @@ focused canonical runner is `just test-outward-tls-publication`; full CI retains
 inventory. The cache mutex's diagnostic applicability and unrun scope are recorded in the Deloxide
 inventory. Public one-/three-node scenarios use real native/console/HTTPS and shared HTTP connector
 handshakes, including retained traffic and dynamic certificate rebinding.
+
+## HTTP Input And Connection Ownership
+
+Public connection leases are owned by the socket I/O wrapper and survive HTTP upgrade. Idle
+expiry observes read and write progress; completed connection tasks are reaped during service.
+The HTTP/1 body collector and its plaintext I/O owner share only a bounded allocation-accounting
+ledger behind one selected blocking mutex. It stores one read range, an aggregate executor
+reservation and an optional typed refusal; no records, ACKs or graph state are shared there. The
+lock is never held over I/O, a wait, a copy or graph dispatch. Its input guard releases the charge
+on cancellation/refusal, or transfers it to the exclusively owned assembled body. Multi-frame
+assembly carries its reservation onto the executor worker through cancellation. The registered production-owner Shuttle check explores allocation observation racing input cancellation
+and verifies that the entire charge returns. This adds no concurrent map and changes no concurrent-map ledger entry.

@@ -15,6 +15,8 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum AppError {
+    #[error("invalid listener bounds")]
+    InvalidListenerSettings,
     #[error("invalid cluster parameters")]
     InvalidClusterParameters,
     #[error("{parameter} is a first-bootstrap seed; use ALTER CLUSTER SET")]

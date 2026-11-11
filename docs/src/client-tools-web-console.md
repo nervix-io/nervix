@@ -190,10 +190,12 @@ cleartext value is never added to terminal history.
 Submitting uses the same durable command path as the REPL. The form therefore keeps the command's
 execution reference through redirects and reconnects, uses the attached transaction's expected
 position, and reports **Editing**, **Submitting**, **Queued until reconnect**, **Queued in
-transaction**, **Completed**, or **Failed** from the correlated outcome. A queued transaction
-operation is not presented as externally complete. A successful standalone resource create opens
-the existing resource version dialog, where upload identity and completion continue to be owned by
-the upload workflow.
+transaction**, **Completed**, or **Failed** from the correlated outcome. While the command is
+submitting or queued until reconnect, the form's fields and typed choices, their searches included,
+are disabled along with **Create**, so the draft cannot change or be sent again and the form reports
+that command's own outcome. A queued transaction operation is not presented as externally complete.
+A successful standalone resource create opens the existing resource version dialog, where upload
+identity and completion continue to be owned by the upload workflow.
 
 The **Create** menu also opens forms for internal schemas, JSON/CBOR/AVRO wire schemas, and named
 branches. Schema fields are added in declaration order and can be moved or removed. An internal
