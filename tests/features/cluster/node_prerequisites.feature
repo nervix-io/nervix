@@ -110,7 +110,7 @@ Feature: Node prerequisites
     And node "node-<cluster_size>" is stopped
     And node-<cluster_size> starts with memory-limit = 32MiB
     When node "node-<cluster_size>" attempts to start
-    Then node "node-<cluster_size>" refused to start because "the execution memory budgets of 101.25MiB exceed node memory 32MiB"
+    Then node "node-<cluster_size>" refused to start because "the execution memory budgets of 229.25MiB exceed node memory 32MiB"
     Given node-<cluster_size> starts with memory-limit = 4GiB
     When node "node-<cluster_size>" is started
     Then node "node-<cluster_size>" eventually observes a stable leader

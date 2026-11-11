@@ -18,9 +18,9 @@ use nervix_execution::{
     ConsensusStoragePendingJobs, ConsensusStorageWorkers, ControlCpuPendingJobs, ControlCpuWorkers,
     CredentialsCpuPendingJobs, CredentialsCpuWorkers, CredentialsMemory, DataCpuPendingJobs,
     DataCpuWorkers, ExecutionOverrides, ExtensionCpuPendingJobs, ExtensionCpuWorkers,
-    FilesystemStoragePendingJobs, FilesystemStorageWorkers, ManagementMemory, RelayDecodedBytes,
-    RelayEncodedBytes, RelayMemory, RelayScratchBytes, ResidentReplicationBatches,
-    RestoreMetadataMemory, StateReadCacheMemory, StateReadMemory,
+    FilesystemStoragePendingJobs, FilesystemStorageWorkers, IntakeMemory, ManagementMemory,
+    RelayDecodedBytes, RelayEncodedBytes, RelayMemory, RelayScratchBytes,
+    ResidentReplicationBatches, RestoreMetadataMemory, StateReadCacheMemory, StateReadMemory,
 };
 use nervix_models::SettingDefinition;
 
@@ -99,6 +99,8 @@ pub struct ExecutionArgs {
     pub restore_metadata_memory_bytes: Option<HumanBytes>,
     #[arg(id = CredentialsMemory::NAME, long = CredentialsMemory::NAME, env = "NERVIX_EXECUTION_CREDENTIALS_MEMORY_BYTES", help = "Reserved credentials capacity; omitted values derive from node memory")]
     pub credentials_memory_bytes: Option<HumanBytes>,
+    #[arg(id = IntakeMemory::NAME, long = IntakeMemory::NAME, env = "NERVIX_EXECUTION_INTAKE_MEMORY_BYTES", help = "Retained public input capacity, separate from decode workers; defaults to a share of node memory")]
+    pub intake_memory_bytes: Option<HumanBytes>,
     #[arg(id = RelayEncodedBytes::NAME, long = RelayEncodedBytes::NAME, env = "NERVIX_EXECUTION_RELAY_ENCODED_BYTES", help = "Local relay encoded bytes bound; omitted values fit the resolved class budget")]
     pub relay_encoded_bytes: Option<HumanBytes>,
     #[arg(id = RelayDecodedBytes::NAME, long = RelayDecodedBytes::NAME, env = "NERVIX_EXECUTION_RELAY_DECODED_BYTES", help = "Local relay decoded bytes bound; omitted values fit the resolved class budget")]
@@ -156,6 +158,7 @@ impl ExecutionArgs {
             bulk_window_memory_bytes: self.bulk_window_memory_bytes.map(|bytes| bytes.0),
             restore_metadata_memory_bytes: self.restore_metadata_memory_bytes.map(|bytes| bytes.0),
             credentials_memory_bytes: self.credentials_memory_bytes.map(|bytes| bytes.0),
+            intake_memory_bytes: self.intake_memory_bytes.map(|bytes| bytes.0),
             relay_encoded_bytes: self.relay_encoded_bytes.map(|bytes| bytes.0),
             relay_decoded_bytes: self.relay_decoded_bytes.map(|bytes| bytes.0),
             relay_scratch_bytes: self.relay_scratch_bytes.map(|bytes| bytes.0),
@@ -200,6 +203,7 @@ impl ExecutionArgs {
             bulk_window_memory_bytes: settings.bulk_window_memory_bytes.map(HumanBytes),
             restore_metadata_memory_bytes: settings.restore_metadata_memory_bytes.map(HumanBytes),
             credentials_memory_bytes: settings.credentials_memory_bytes.map(HumanBytes),
+            intake_memory_bytes: settings.intake_memory_bytes.map(HumanBytes),
             relay_encoded_bytes: settings.relay_encoded_bytes.map(HumanBytes),
             relay_decoded_bytes: settings.relay_decoded_bytes.map(HumanBytes),
             relay_scratch_bytes: settings.relay_scratch_bytes.map(HumanBytes),
@@ -278,6 +282,7 @@ impl ExecutionArgs {
             self.restore_metadata_memory_bytes,
         );
         command_line.optional(CredentialsMemory::NAME, self.credentials_memory_bytes);
+        command_line.optional(IntakeMemory::NAME, self.intake_memory_bytes);
         command_line.optional(RelayEncodedBytes::NAME, self.relay_encoded_bytes);
         command_line.optional(RelayDecodedBytes::NAME, self.relay_decoded_bytes);
         command_line.optional(RelayScratchBytes::NAME, self.relay_scratch_bytes);

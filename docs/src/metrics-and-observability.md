@@ -1042,3 +1042,12 @@ they exclude the graph wait. A broker ingestor's transient failure clears once i
 confirms an acknowledgement again; a paced ingestor's clears once a poll or resume succeeds.
 Recording touches retained atomic children, with no label resolution or registry access, and
 changes no delivery, retry or error policy.
+
+## Listener Capacity Observations
+
+Startup logs and each node's committed `DESCRIBE CLUSTER` claim expose every
+[Listener Bound](node-settings.md#listener-bounds). The existing execution memory metrics include
+`class="intake"`: its capacity is independent of `relay`, reserved bytes follow retained HTTP input
+and body-assembly workers, and the reservation/rejection counters retain their direct-admission meaning. A refused oversize
+body leaves no retained intake reservation or admitted relay payload. `nervix_sessions` returns to
+its preceding value when HTTP/2 keepalive reaps an unresponsive gRPC session.

@@ -487,6 +487,90 @@ fn choice_states_render_hints_and_failures_with_their_own_presentation() {
     });
 }
 
+/// Whether a rendered choice group's fieldset, which holds its search, its choices and its retry and
+/// paging buttons, is disabled.
+fn choice_group_disabled(markup: &str) -> bool {
+    let start = markup
+        .find("<fieldset")
+        .assured("a choice group renders as one fieldset");
+    let tag = &markup[start..];
+    let end = tag.find('>').assured("the rendered fieldset tag is closed");
+    tag[..end].contains("disabled")
+}
+
+#[test]
+fn a_pending_attempt_disables_its_choice_controls_until_its_outcome_arrives() {
+    super::super::initialize_test_executor();
+    Owner::new().with(|| {
+        let signals = CreateSignals::new();
+        signals.open(CreateKind::Domain, None, "trigger");
+        let pace = |value, label: &str| Choice {
+            value: ChoiceValue::DomainPace(value),
+            presentation: ChoicePresentation {
+                label: label.to_string(),
+                detail: None,
+                group: None,
+            },
+        };
+        signals
+            .choice_signals(ChoiceControl::DomainPace)
+            .load
+            .set(ChoiceLoad::Ready {
+                choices: vec![
+                    pace(DomainPaceChoice::Unpaced, "UNPACED"),
+                    pace(DomainPaceChoice::Paced, "PACED"),
+                ],
+                page_cursor: Some("more-pace".to_string()),
+            });
+        let request_tx = RwSignal::new(None);
+        let session_generation = RwSignal::new(1);
+        let render = || {
+            ChoiceGroup(
+                ChoiceGroupProps::builder()
+                    .class_name("create-pace-options")
+                    .label("Pace")
+                    .control(ChoiceControl::DomainPace)
+                    .signals(signals)
+                    .request_tx(request_tx)
+                    .session_generation(session_generation)
+                    .build(),
+            )
+            .to_html()
+        };
+
+        let editing = render();
+        assert!(editing.contains("data-value=\"PACED\""));
+        assert!(editing.contains("Load more"));
+        assert!(!choice_group_disabled(&editing));
+
+        let (attempt, revision) = signals.begin_submission(true);
+        assert_eq!(signals.progress.get_untracked(), CreateProgress::Submitting);
+        assert!(choice_group_disabled(&render()));
+
+        signals.connection_lost();
+        assert_eq!(
+            signals.progress.get_untracked(),
+            CreateProgress::QueuedReconnect
+        );
+        assert!(choice_group_disabled(&render()));
+
+        assert!(signals.completed(attempt, revision));
+        assert!(!choice_group_disabled(&render()));
+
+        signals.edit();
+        let (staged, staged_revision) = signals.begin_submission(false);
+        assert!(choice_group_disabled(&render()));
+        signals.queued_transaction(staged, staged_revision, 1);
+        assert!(!choice_group_disabled(&render()));
+
+        signals.edit();
+        let (refused, refused_revision) = signals.begin_submission(true);
+        assert!(choice_group_disabled(&render()));
+        signals.failed(refused, refused_revision, "already exists".to_string());
+        assert!(!choice_group_disabled(&render()));
+    });
+}
+
 #[test]
 fn paced_domain_and_password_validation_report_the_owning_field() {
     let mut draft = DomainDraft {
