@@ -497,8 +497,11 @@ Completion resolves the semantic expectations of the composed Plexus grammar at 
 Connector functions use the selected entity's scope in filters, HTTP request expressions and
 `ALTER` constructions. Metadata candidates come from that ingestor's declaration; a timestamp
 position offers its datetime metadata fields. Header reads belong to supported ingestor entities
-and header writes to supported emitter `INVOKE` positions. Both transports return these candidates
-as text edits; [CLI Completion](./client-tools-cli.md#completion) describes their application.
+and header writes to supported emitter `INVOKE` positions. A codec position offers the codecs
+that work in the direction its clause uses them, and a relay position the relays that agree with
+those its statement names before it, by the rules the structured choices apply;
+[Suggestions](./sessions.md#suggestions) lists them. Both transports return these candidates as
+text edits; [CLI Completion](./client-tools-cli.md#completion) describes their application.
 
 Semantic completion of placement members offers only placement-eligible runtime nodes. HTTP
 endpoint, WebSocket endpoint and Syslog listener ingestors execute on every cluster node, so their

@@ -36,16 +36,16 @@ use chumsky::prelude::*;
 use meticulous::OptionExt as _;
 use nervix_models::{
     AlterIngestor, AlterIngestorOperation, AlterTransportIngestorOperation, ClientProducerIngestor,
-    CreateIngestor, CreateStatement, IngestTimestampSource, IngestorAlteration, IngestorEntity,
-    IngestorEntityKind, IngestorEntityModel, IngestorInput, IngestorName, IngestorReferenceKind,
-    ShowIngestors, TransportIngestorInput,
+    CodecDirection, CreateIngestor, CreateStatement, IngestTimestampSource, IngestorAlteration,
+    IngestorEntity, IngestorEntityKind, IngestorEntityModel, IngestorInput, IngestorName,
+    IngestorReferenceKind, ShowIngestors, TransportIngestorInput,
 };
 
 use crate::{
     lexer::{Identifier, Token},
     parser_support::{
         ConstructionChanges, LexedInput, ParseError, ParseFromSourceError,
-        alter_ingestor_route_body, alter_op_separator, boxed_choice, client_ref, codec_ref,
+        alter_ingestor_route_body, alter_op_separator, boxed_choice, client_ref, codec_for,
         construction_alteration, field_ref, filter_where_clause, flushed_ingestor_outputs,
         general_error_policy, if_not_exists_clause, ingestor_name, into_parse_error, kw,
         kw_phrase2, lex_input, relay_ref, set_general_error_policy, suggest_from, tok,
@@ -122,7 +122,7 @@ where
         .then_ignore(kw(Identifier::From))
         .then(body)
         .then_ignore(kw_phrase2(Identifier::Decode, Identifier::Using))
-        .then(codec_ref())
+        .then(codec_for(CodecDirection::Decoding))
         .map(|((name, source), codec)| DeclaredInput {
             name,
             input: IngestorInput::Transport(TransportIngestorInput {
@@ -311,7 +311,7 @@ where
 {
     kw(Identifier::Set)
         .ignore_then(kw_phrase2(Identifier::Decode, Identifier::Using))
-        .ignore_then(codec_ref())
+        .ignore_then(codec_for(CodecDirection::Decoding))
         .map(|codec| AlterTransportIngestorOperation::SetDecodeUsing { codec })
         .boxed()
 }

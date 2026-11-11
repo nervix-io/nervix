@@ -105,8 +105,9 @@ null and message-error rules; scalar operators do not select list arithmetic.
 
 For interactive authoring, the [CLI](https://docs.nervix.io/client-tools-cli.html) and
 [web console](https://docs.nervix.io/client-tools-web-console.html) use the same server completion
-contract. Refer users to those chapters for cursor edits, transaction-aware candidates, and
-completion status messages, and completing multi-word creation heads. For connector expression
+contract. Refer users to those chapters for cursor edits, transaction-aware candidates, codec and
+relay candidates narrowed to what the statement can accept, and completion status messages, and
+completing multi-word creation heads. For connector expression
 completion, including filters, HTTP request expressions, ALTER constructions, metadata fields and
 entity-specific header functions, follow
 the CLI's Completion section.

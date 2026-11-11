@@ -24,9 +24,9 @@ use nervix_client_wire::{
 use nervix_consensus::{Administrator, CommandExecutionTransactionTarget, Proposer};
 use nervix_interconnect::Transport;
 use nervix_models::{
-    BuiltinFunctionScope, CommandExecutionReference, DomainName, Model, ModelName, PlacementPolicy,
-    RequestedResourceVersion, ResourceId, ResourceName, ResourceVersionStatus, SemanticReference,
-    Statement, TransactionPosition,
+    BuiltinFunctionScope, CodecDirection, CommandExecutionReference, DomainName, Model, ModelIndex,
+    ModelName, PlacementPolicy, RelayQuestion, RequestedResourceVersion, ResourceId, ResourceName,
+    ResourceVersionStatus, SemanticReference, Statement, TransactionPosition,
 };
 use nervix_plexus::{
     Token, Word,
@@ -454,7 +454,7 @@ impl CompletionContext {
 /// One captured basis for every semantic question in a completion request.
 struct CompletionSnapshot<'a> {
     domain: Option<&'a DomainName>,
-    models: &'a [Model<RequestedResourceVersion>],
+    models: &'a ModelIndex<RequestedResourceVersion>,
     resources: &'a ResourceVersionStatus,
     domains: &'a [DomainName],
     queued_resources: &'a [String],
@@ -492,7 +492,7 @@ impl CompletionSnapshot<'_> {
         match reference {
             SemanticReference::Model(kind) => self
                 .models
-                .iter()
+                .models()
                 .filter(|model| {
                     model.kind() == kind
                         && model.name().as_str().starts_with(&prefix)
@@ -502,13 +502,15 @@ impl CompletionSnapshot<'_> {
                 .collect(),
             SemanticReference::IngestorReference(source) => self
                 .models
-                .iter()
+                .models()
                 .filter(|model| source.admits(model) && model.name().as_str().starts_with(&prefix))
                 .map(|model| model.name().to_string())
                 .collect(),
+            SemanticReference::Codec(direction) => self.codecs(direction, &prefix),
+            SemanticReference::Relay(question) => self.relays(&question, &prefix),
             SemanticReference::SchemaField(schema_name) => self
                 .models
-                .iter()
+                .models()
                 .filter_map(|model| match model {
                     Model::Schema(schema) if schema.name == schema_name => Some(schema),
                     _ => None,
@@ -519,7 +521,7 @@ impl CompletionSnapshot<'_> {
                 .collect(),
             SemanticReference::WireSchemaField(kind, schema_name) => self
                 .models
-                .iter()
+                .models()
                 .filter(|model| model.kind() == kind)
                 .flat_map(|model| match model {
                     Model::WireJsonSchema(schema) if schema.name == schema_name => schema
@@ -542,14 +544,12 @@ impl CompletionSnapshot<'_> {
                 .filter(|name| name.starts_with(&prefix))
                 .collect(),
             SemanticReference::RelayField(relay_name) => {
-                let Some(schema_name) = self.models.iter().find_map(|model| match model {
-                    Model::Relay(relay) if relay.name == relay_name => Some(&relay.schema),
-                    _ => None,
-                }) else {
+                let Some(relay) = self.models.relay(&relay_name) else {
                     return Vec::new();
                 };
+                let schema_name = &relay.schema;
                 self.models
-                    .iter()
+                    .models()
                     .filter_map(|model| match model {
                         Model::Schema(schema) if &schema.name == schema_name => Some(schema),
                         _ => None,
@@ -603,10 +603,45 @@ impl CompletionSnapshot<'_> {
                 completed_resource_version_suggestions(self.resources, domain, resource, &prefix)
             }
             SemanticReference::RuntimeNode => {
-                placement_runtime_node_ref_suggestions(self.models, &prefix)
+                placement_runtime_node_ref_suggestions(self.models.models(), &prefix)
             }
             SemanticReference::Domain | SemanticReference::SessionSubscription => Vec::new(),
         }
+    }
+}
+
+impl CompletionSnapshot<'_> {
+    /// The codecs that work in `direction`, by the rule the decoding- and encoding-codec choices
+    /// apply, whose names start with `prefix`.
+    fn codecs(&self, direction: CodecDirection, prefix: &str) -> Vec<String> {
+        let mut names = Vec::new();
+        for model in self.models.models() {
+            let Model::Codec(codec) = model else {
+                continue;
+            };
+            if direction.admits(&codec.wire_format) && codec.name.as_str().starts_with(prefix) {
+                names.push(codec.name.to_string());
+            }
+        }
+        names
+    }
+
+    /// The relays `question` accepts, by the rule the relay choices apply, whose names start with
+    /// `prefix`. A question naming a relay the snapshot does not configure accepts none.
+    fn relays(&self, question: &RelayQuestion, prefix: &str) -> Vec<String> {
+        let Some(rule) = question.rule(|name| self.models.relay(name)) else {
+            return Vec::new();
+        };
+        let mut names = Vec::new();
+        for model in self.models.models() {
+            let Model::Relay(relay) = model else {
+                continue;
+            };
+            if rule.admits(relay) && relay.name.as_str().starts_with(prefix) {
+                names.push(relay.name.to_string());
+            }
+        }
+        names
     }
 }
 
@@ -1407,7 +1442,7 @@ impl SessionServiceImpl {
                         .registry
                         .resulting_models(selected, &queued.models)
                     {
-                        Ok(models) => models,
+                        Ok(models) => models.into_iter().collect::<ModelIndex<_>>(),
                         Err(_) => {
                             return SuggestOutcome {
                                 status: SuggestionStatus::LookupFailed,
@@ -1416,10 +1451,10 @@ impl SessionServiceImpl {
                             };
                         }
                     },
-                    None => Vec::new(),
+                    None => ModelIndex::new(),
                 }
             } else {
-                Vec::new()
+                ModelIndex::new()
             };
             let resources = self.inner.consensus.current_resources().await;
             let domain_names = domains.into_keys().collect::<Vec<_>>();
@@ -1863,6 +1898,7 @@ mod tests {
     mod application_deadline;
     mod completion_context;
     mod page_continuation;
+    mod reference_completion;
 
     use std::time::Duration;
 

@@ -586,7 +586,7 @@ mod tests {
         // filter, such as the next relay of the list, is offered inside it.
         let input = "CREATE JUNCTION route_parcels FROM parcels WHERE input.status IN ('void', ";
         let suggestions = suggest_create_junction(input, input.len());
-        assert!(!suggestions.contains(&"ref:relay".to_string()));
+        assert!(!suggestions.contains(&"ref:input_relay".to_string()));
         assert!(!suggestions.contains(&"UNBRANCHED".to_string()));
         assert!(!suggestions.contains(&"COLLECT FOR".to_string()));
 
@@ -598,7 +598,7 @@ mod tests {
             "unexpected suggestions: {suggestions:?}"
         );
         assert!(suggestions.contains(&",".to_string()));
-        assert!(!suggestions.contains(&"ref:relay".to_string()));
+        assert!(!suggestions.contains(&"ref:input_relay".to_string()));
         assert!(!suggestions.contains(&")".to_string()));
     }
 
@@ -786,7 +786,7 @@ mod tests {
     fn suggests_relay_reference_after_from_comma() {
         let input = "CREATE JUNCTION join_streams FROM ss1, ";
         let suggestions = suggest_create_junction(input, input.len());
-        assert!(suggestions.contains(&"ref:relay".to_string()));
+        assert!(suggestions.contains(&"ref:input_relay".to_string()));
         assert!(!suggestions.contains(&"TO".to_string()));
     }
 

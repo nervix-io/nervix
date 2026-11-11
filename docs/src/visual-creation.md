@@ -9,7 +9,8 @@ draft is the semantic Model the language would have parsed, rendered as canonica
 submitted through the durable command path the REPL uses. The server answers text completion from
 the composed Plexus grammar and a form's typed choice lookups from typed questions. Both read the
 same domain configuration with the session's queued transaction applied, and where they offer the
-same thing they apply the rule registry validation applies.
+same thing they apply one rule: the rule registry validation applies, or one the vocabulary owns for
+both.
 
 This chapter explains how those parts fit together, what each one guarantees and where it stops,
 how to extend them and which evidence qualifies them. It describes the system as it stands. The
@@ -33,8 +34,8 @@ following chapters own the contracts it connects:
 
 | Layer | Owner | Owns | Must not know |
 | --- | --- | --- | --- |
-| Vocabulary | `nervix-models` | Models and `ModelKind`; Models generic over the resource version they bind; canonical Plexus; connector and entity declarations; codec direction and the reference-admission rules; `SemanticReference`, the kind of value a completion position names | Parser labels, sessions, presentation |
-| Language | `nervix-plexus` | The composed client statement grammar and the completion expectations it yields at a cursor; `parse_expression`, which reads one embedded expression; canonical rendering of session-local statements such as `CREATE SUBSCRIPTION` | Registries, sessions, browser state |
+| Vocabulary | `nervix-models` | Models and `ModelKind`; Models generic over the resource version they bind; canonical Plexus; connector and entity declarations; codec direction and the reference-admission rules; the questions both resolvers answer: `SemanticReference`, the kind of value a completion position names, `CodecDirection`, and `RelayQuestion` with the `RelayRule` it applies | Parser labels, sessions, presentation |
+| Language | `nervix-plexus` | The composed client statement grammar and the completion expectations it yields at a cursor, with the role labels of codec and relay positions and the relays a statement names before the cursor; `parse_expression`, which reads one embedded expression; canonical rendering of session-local statements such as `CREATE SUBSCRIPTION` | Registries, sessions, browser state |
 | Wire | `nervix-client-wire` | `SuggestRequest`, `SuggestOutcome`, `ChoiceLookupRequest`, `ChoiceOutcome`, the 66 `ChoiceTarget` values, `ChoiceValue`, `ChoicePresentation` and their page bounds | What a target means |
 | Decisions | The registry | Folding queued statements into a domain's Models; placement-member eligibility | Sessions, transports, paging |
 | Server edge | The session service | The concurrent lane that serves both requests; the text-completion resolver; the configured-choice resolver; page bases and cursors | Browser controls |
@@ -203,8 +204,10 @@ furthest point it reached, or the statement's tail when the input is complete. A
 becomes a literal item. A composed keyword phrase, such as `WINDOW PROCESSOR` or
 `KAFKA TOPIC INGESTOR`, is one item whose replacement range widens over phrase words already typed
 on either side of the cursor. A reference label, `ref:<kind>`, becomes a reference to Models of that
-kind, narrowed to the clients or endpoints that the ingestor head's declaration admits. Resource,
-version, runtime-node, domain, subscription and field labels name their own references. An
+kind, narrowed to the clients or endpoints that the ingestor head's declaration admits. A codec that
+a clause decodes or encodes with is labelled with that direction, and a relay with the part it
+plays in its statement, so both resolve through the rules in [Shared Rules](#shared-rules).
+Resource, version, runtime-node, domain, subscription and field labels name their own references. An
 expression position offers the built-in functions, the header reads or writes and the metadata
 fields the selected entity declares, and the domain's `udf::` functions. A position where a new name
 is typed offers nothing. A local-path position yields one local-directory item covering the quoted
@@ -286,24 +289,47 @@ longer matches answers `StaleContext`.
 ### Shared Rules
 
 Text completion and typed choices are answered by two resolvers: one over the semantic references
-the grammar's positions name, and one over the typed questions forms ask. Both start from the same
-input, the domain's Models with the queued prefix folded in by one registry function, and where both
-offer the same thing they apply the rule registry validation applies:
+the grammar's positions name, and one over the typed questions forms ask. They stay two because they
+answer differently. Text completion returns names that start with the word at the cursor, each with
+an exact edit, and a choice returns typed values with their presentation, searched by substring and
+bound by a content digest. What either offers is decided once. Both start from the same input, the
+domain's Models with the queued prefix folded in by one registry function, and where both offer the
+same thing they apply one rule, the one registry validation applies or one the vocabulary owns for
+both:
 
 | Rule | Owner | Applied by |
 | --- | --- | --- |
 | Which runtime nodes a placement rule may name | The registry's placement-member rule | Validation, REPL completion, the placement-member target |
 | Which clients or endpoints an ingestor entity reads through | `IngestorReferenceKind::admits`, over the entity declaration | REPL completion, the ingestor-reference targets; validation reads the same declaration |
 | Which clients an emitter entity publishes through | `EmitterReferenceKind::admits_client` | The emitter-reference targets, validation |
-| Whether a codec decodes or encodes | The codec format's `supports_decoding` and `supports_encoding` | The decoding- and encoding-codec targets, validation |
+| Whether a codec decodes or encodes | `CodecDirection::admits`, over the codec format's `supports_decoding` and `supports_encoding` | Validation, REPL completion after `DECODE USING` and `ENCODE USING`, the decoding-codec target the ingestor and hash-map forms ask, the encoding-codec target the emitter form asks |
+| Which relays a position accepts beside the relays already named | `RelayQuestion`, and the `RelayRule` it becomes with those relays read from the snapshot | REPL completion at relay positions, the relay targets |
 | Whether an entity reads or writes headers | The entity declaration's header capability | REPL expression completion, validation |
 
-Two differences remain where the paths share no rule. The grammar names every codec reference with
-one label, so REPL completion offers each codec of the domain after `DECODE USING` and
-`ENCODE USING` alike, while the forms offer only codecs with the direction the clause needs.
-Validation refuses a codec without that direction either way. The compatible-relay targets, which
-require a further input's exact schema and branch, also have no REPL counterpart: text completion
-offers every relay where the grammar expects one. In both cases the command's validation decides.
+The vocabulary's completion module owns the questions both resolvers answer. `SemanticReference`
+carries a codec's direction or a relay question to text completion, and a form's configured question
+carries the same values to the choice resolver. A relay question accepts:
+
+| Question | Accepts | REPL position | Choice target |
+| --- | --- | --- | --- |
+| Processor input | The first input's schema on exactly its branching | A processor's further `FROM` relay and a correlator side's further relay | A processor's further input relays, and a correlator side's timeout relay |
+| Processor branch | Exactly the branching of the source: the first input, the first left relay for a correlator's right side, the side's first relay for a correlator's timeout relay, or a generator's materialized relay | The route relay of a processor that keeps its input's branch, a processor's `ON MESSAGE ERROR SEND TO` relay, a correlator's first `RIGHT FROM` relay and a correlator side's timeout relay | A processor's output and error relays |
+| Processor state | Materialized state on exactly the first input's branching | A processor's `USING MATERIALIZED STATE` | A processor's materialized relay |
+| Emitter input | The first input's schema on any branching | An emitter's further `FROM` relay | An emitter's further input relays |
+| Emitter state | Materialized state on the one branching every input shares | An emitter's `USING MATERIALIZED STATE` | An emitter's materialized relay |
+| Emitter error | The one branching every input shares | An emitter's `ON MESSAGE ERROR SEND TO` | An emitter's error relay |
+| On branch | Exactly one branch, or no branch | An ingestor's `ON MESSAGE ERROR SEND TO`, with no branch | An ingestor's route relays and its error relay with no branch, and the first relay of each input list of a processor other than a reingestor, on the branch its form chose first |
+| Generator state | Materialized state on any branching | A generator's `USING MATERIALIZED STATE`, which its branch clause follows | None, because the form chooses the generator's branch first |
+| Materialized on branch | Materialized state on exactly one branch, or on no branch | None, because a generator's branch follows its relay | A generator's materialized relay, on the branch its form chose first |
+
+The grammar labels these positions with their role: `ref:decoding_codec` and `ref:encoding_codec`,
+and for relays `ref:input_relay`, `ref:state_relay`, `ref:output_relay`, `ref:error_relay`,
+`ref:left_timeout_relay` and `ref:right_timeout_relay`. The relays a question names are read from
+the statement written before the cursor, with the grammar's own clause parsers and with statement
+heads composed from the Model kinds' keyword phrases; completion never inspects the input text. A
+relay position that asks none of these questions, such as a statement's first input, offers every
+relay of the domain. Diagnostics keep naming these positions `ref:relay` and `ref:codec`, so a role
+narrows completion without changing what an error says.
 
 ## Requests In The Console
 
@@ -454,8 +480,16 @@ It does not guarantee more than that:
 - A reingestor route whose branch action preserves the incoming branch builds a route without a
   branch clause, which the route grammar refuses, so that form's command fails when the server
   parses it. An explicit `UNBRANCHED` or `BRANCHED BY` choice builds an executable route.
-- REPL completion and the forms differ where they share no rule: codec references in the REPL are
-  not filtered by direction, and the forms' compatible-relay targets have no REPL counterpart.
+- REPL completion narrows a relay only by what its statement writes before the cursor. A
+  statement's first input and an ingestor's or reingestor's route relay are offered from every
+  relay, and a generator's materialized relay from every relay with materialized state on any
+  branching, because the clauses that narrow them further follow them. The relay positions of an
+  `ALTER` statement are not compared with the relays its stored Model reads.
+- A correlator's timeout relay must be on the correlator's branch, and validation accepts any
+  schema that provides, field by field, what the side's records carry. No vocabulary question
+  decides that compatibility yet. REPL completion therefore offers every relay on the branch and
+  leaves the schema to validation, while the form's timeout picker asks the narrower *Processor
+  input* question and offers only relays with the side's own schema.
 - Text completion offers only what the grammar names at the cursor, so a position that introduces a
   new name offers nothing.
 - The console uses choice lookups; among the client libraries, the Rust client exposes them, while
@@ -522,8 +556,13 @@ It does not guarantee more than that:
 ### Adding A Completion Position
 
 Completion follows the grammar, so a new position needs only the right label: `ref:<kind>` for a
-reference to a Model, a name label where a new name is typed, which offers nothing, and keyword
-phrases composed from the shared token definition so that completion offers each as one item. The
+reference to a Model, a role label where a codec or relay reference must agree with its clause or
+with relays its statement names, a name label where a new name is typed, which offers nothing, and
+keyword phrases composed from the shared token definition so that completion offers each as one
+item. A codec position takes the parser for its direction and a relay position the parser for its
+role. A new role, or a relay its statement names in a new clause, extends the grammar's reference
+roles and the relays completion reads from the statement, and answers through a `RelayQuestion`
+that the matching choice target shares. The
 [statement-head contract](./architecture.md#statement-heads-and-body-properties) owns the head and
 body rules, and the completion walk must stay clean.
 
@@ -541,6 +580,10 @@ body rules, and the completion walk must stay clean.
   the request window and reply kinds.
 - `just test-placement-members` runs the server's tests of the placement-member rule across
   validation, REPL completion and typed choices, with the configured-choice resolver's tests.
+- The vocabulary's tests hold `CodecDirection` and `RelayRule` to each rule. The grammar's tests
+  check the role label of every codec and relay position and the question the client grammar
+  reads for it from the statement, and that diagnostics keep the reference's kind. The session
+  service's tests complete each role against queued Models.
 - `just plexus-completion-walk` fails on any completion branch that accepting the parser's own
   suggestions cannot complete, and `just plexus-completion-walk-deep` searches further and reports.
   The walk drives the parser directly, not the session.
@@ -584,7 +627,8 @@ reads, and the Go and Node probes reproduce the corpus report in the client conf
   `runtime/session_protocol.feature` pages semantic completion through every domain and covers the
   rejection of a cursor inside a character and of page sizes 0 and 101, and
   `tools/cli_session.feature` and the connector declaration features cover CLI and connector
-  completion.
+  completion. `tools/cli_reference_completion.feature` completes every codec and relay role
+  position through the CLI on one and three nodes, and `just test-reference-completion` runs it.
 - `just test-visual-create`, `just test-visual-window-correlator`,
   `just test-visual-generator-inferencer-wasm` and `just test-visual-placement-graph` run their
   feature files with the server's prerequisites; the other files run through

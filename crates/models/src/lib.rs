@@ -116,7 +116,9 @@ pub use command::{
     CommandExecutionReference, CommandExecutionReferenceError,
     CommandExecutionReferenceTimestampError,
 };
-pub use completion::{BuiltinFunctionScope, SemanticReference};
+pub use completion::{
+    BuiltinFunctionScope, CodecDirection, RelayQuestion, RelayRule, SemanticReference,
+};
 pub use connector::{
     AcknowledgementConfirmation, AzureBlobConfigEntry, BufferBound, BufferCapacity, BufferOverflow,
     CLICKHOUSE_VALUE_ENCODINGS, CLIENT_CONFIG_REDACTION, ChoiceRequirement, ClickHouseConfigEntry,

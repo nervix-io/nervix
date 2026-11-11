@@ -18,6 +18,7 @@ Feature: Web console visual hash map and Roto UDF creation
       CREATE SCHEMA visual_lookup_entry (id STRING, value I64);
       CREATE WIRE JSON SCHEMA visual_lookup_wire MODE STRICT (id string, value integer);
       CREATE WIRE JSON CODEC visual_lookup_codec FROM WIRE SCHEMA visual_lookup_wire TO SCHEMA visual_lookup_entry;
+      CREATE JAQ JSON CODEC visual_lookup_encoder TO SCHEMA visual_lookup_entry WITH JAQ TRANSFORMATIONS ON EMITTING '.';
       """
     And the web console is opened on the leader node
     Then selector ".domain-menu [data-domain='{{domain}}'].active" exists
@@ -30,8 +31,9 @@ Feature: Web console visual hash map and Roto UDF creation
     When selector ".create-hash-resource [data-value='visual_lookup_bundle']" is clicked
     Then selector ".create-hash-version [data-value='LATEST']" exists
     When selector ".create-hash-version [data-value='LATEST']" is clicked
-    And selector ".create-hash-codec .create-choice-search" is filled with "visual_lookup_codec"
+    And selector ".create-hash-codec .create-choice-search" is filled with "visual_lookup"
     Then selector ".create-hash-codec [data-value='visual_lookup_codec']" exists
+    And selector ".create-hash-codec [data-value='visual_lookup_encoder']" does not exist
     When selector ".create-hash-codec [data-value='visual_lookup_codec']" is clicked
     Then selector ".create-hash-key [data-value='id']" exists
     When selector ".create-hash-key [data-value='id']" is clicked

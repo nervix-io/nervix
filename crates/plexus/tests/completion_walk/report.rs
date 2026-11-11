@@ -363,9 +363,9 @@ impl Baseline {
             "# Accepted Plexus completion-walk findings, one signature per line.\n# Format: \
              kind<TAB>label<TAB>context. Regenerate with --update-baseline.\n#\n# Empty is the \
              intended state: every branch completion offers can be completed. A new\n# entry is a \
-             defect -- fix it rather than accept it.\n#\n# `just plexus-completion-walk` digs \
-             past this budget and reports one more, where a\n# MongoDB conflict target has to \
-             name a column the VALUES record maps and still leave\n# another field to update. \
+             defect -- fix it rather than accept it.\n#\n# `just plexus-completion-walk-deep` \
+             digs past this budget and reports one more, where a\n# MongoDB conflict target has \
+             to name a column the VALUES record maps and still leave\n# another field to update. \
              That constraint relates the values at two positions rather\n# than their shapes, so \
              the grammar cannot express it and no naming scheme the walk\n# can apply satisfies \
              both halves at once.\n",
