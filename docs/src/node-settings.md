@@ -433,6 +433,33 @@ already processed creation, Nervix adopts the matching activation through an aut
 `REFRESH LICENSE` runs immediately on the leader, outside domain transactions, and completes when
 the newer signed decision commits or the service or cluster returns a typed refusal.
 
+```plexus
+ROTATE LICENSE CLUSTER KEY;
+RELEASE LICENSE;
+```
+
+`ROTATE LICENSE CLUSTER KEY` preserves the cluster UUID, activation, ephemeral expiry and every
+signed deadline. In activated mode the pending key and exact signed request commit before sending;
+the current key authorizes the request and the pending key proves possession. Only the verified
+rotation completion installs both the next generation and its decision. A lost response replays
+the retained request identity and bytes, including across leadership changes, and a definitive
+service refusal abandons the pending key. Free and released clusters rotate locally without
+service access or provisioned service trust.
+
+`RELEASE LICENSE` commits the free target policy before contacting the service. It returns after
+that local commit; `DESCRIBE LICENSE` reports `mode: released`, `policy: releasing` and
+`release: awaiting service confirmation` while the leader retries notification. Existing grants
+retain their deadlines, reported as the typed `grants_until` timestamp. Confirmation does not
+restart or extend them. Once confirmation arrives and no grant remains, the mode becomes free.
+An expired ephemeral activation refuses release with `Expired`. Activation in released mode
+first finishes any outstanding notification, then creates a new activation with a new lifetime.
+Local rotations remain available during a service outage; the pending release keeps its original
+signing capability until confirmation, even after several rotations and restart.
+
+An administrator transfers an activation through the licensing service. The former cluster's
+next refresh reports `transferred` and targets the free policy; a rebuilt cluster activates with
+its own permanent identity and consumes the freed activation slot.
+
 The service is the compiled deployment `https://licensing.nervix.io`. Plexus and node options
 supply no alternative address or trust anchors. HTTPS uses the node resolver and outward TLS
 policy, HTTP/1.1 or HTTP/2, no redirects and no environment proxy. Activation requires the build's
@@ -459,7 +486,10 @@ each replica verifies apply, and recovery and snapshot installation rebuild veri
 original signed bytes and the independent activation binding. A semantically invalid document
 loads as `degraded`, reports `decision_unverifiable`, grants the free policy and prompts refresh.
 Structural record corruption refuses startup. Revoking a working key prevents new decisions;
-a previously committed decision remains verified with its signing-key-revoked observation.
+a previously committed decision remains verified with its signing-key-revoked observation and
+prompts an immediate refresh. Root-authenticated trust documents commit independently of an
+unacceptable new decision. A supplied root succession authorizes later epochs; an epoch without
+that chain is refused without replacing the committed decision.
 
 Licensing time is committed and monotone. The leader proposes physical observations at deadline
 crossings independently of its refresh attempt. The derived refresh state is `licensed fresh`,

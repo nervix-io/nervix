@@ -13,11 +13,20 @@
 mod activation;
 mod archive;
 mod environment;
+#[cfg(test)]
+mod operation_tests;
+mod release;
+mod request;
+mod rotation;
 pub use activation::{
     ActivationBinding, ActivationState, LicenseDecisionError, LicenseVerification,
-    ReceivedLicenseDecision, StoredDecision, VerifiedLicenseDecision,
+    ReceivedLicenseDecision, StoredDecision, StoredDecisionOperation, VerifiedLicenseDecision,
 };
 pub use environment::{LICENSING_SERVICE, LicensingEnvironment};
+pub use release::{
+    AwaitingLicenseRelease, ReleaseConfirmation, ReleaseState, StoredLicenseTransitions,
+};
+pub use request::PreparedLicensingRequest;
 #[cfg(test)]
 pub(crate) mod tests;
 #[cfg(test)]
@@ -38,8 +47,12 @@ use crate::{ClusterIdentity, Observer};
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
 pub enum LicensingMode {
-    Free,
+    Free {
+        #[rkyv(with = rkyv::with::Map<crate::cluster_identity::archive::UuidBytes>)]
+        last_release: Option<uuid::Uuid>,
+    },
     Activated(Box<ActivationState>),
+    Released(Box<ReleaseState>),
 }
 
 /// Exact externally signed bytes and their retained document identity. Succession has no working kid.
@@ -81,7 +94,7 @@ impl LicensingRecord {
         Self {
             licensing_time,
             trust: Vec::new(),
-            mode: LicensingMode::Free,
+            mode: LicensingMode::Free { last_release: None },
         }
     }
 
@@ -92,7 +105,7 @@ impl LicensingRecord {
         if self.licensing_time < identity.created_at {
             return Err(Report::new(LicensingRecordError::Time));
         }
-        if let LicensingMode::Activated(activation) = &self.mode {
+        if let Some(activation) = self.mode.decision_state() {
             let binding = &activation.binding;
             let lifetime_valid = match (binding.kind, binding.ephemeral_expires_at) {
                 (nervix_licensing_vocabulary::ActivationKind::Persistent, None) => true,
@@ -111,6 +124,9 @@ impl LicensingRecord {
             {
                 return Err(Report::new(LicensingRecordError::Activation));
             }
+        }
+        if let LicensingMode::Released(release) = &self.mode {
+            release.validate(identity)?;
         }
         for document in &self.trust {
             let valid = match document.typ {
@@ -132,6 +148,7 @@ pub struct ClusterLicensingState {
     pub identity: ClusterIdentity,
     pub record: Arc<LicensingRecord>,
     pub verification: Option<LicenseVerification>,
+    pub rotation: Option<crate::ClusterKeyRotation>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -150,6 +167,7 @@ impl Observer {
                 identity: identity.public(),
                 record: record.clone(),
                 verification: state.licensing_verification.clone(),
+                rotation: identity.pending_rotation(),
             }),
             (None, None) => None,
             _ => unreachable!("installation and recovery preserve the licensing singleton pair"),
@@ -173,6 +191,7 @@ pub(super) fn admit_domain(
 ) -> error_stack::Result<(), nervix_licensing_vocabulary::LicensingRefusal> {
     use nervix_licensing_vocabulary::{QuotaConstraint, QuotaName};
     if let (Some(record), Some(Ok(verified))) = (&state.licensing, &state.licensing_verification)
+        && let LicensingMode::Activated(_) = &record.mode
         && verified
             .decision
             .timing
@@ -207,6 +226,23 @@ pub(super) fn apply(
     use crate::{
         AppliedConsensusCommand, ConsensusCommand, ConsensusConflict, StateMachineChanges,
     };
+
+    if matches!(
+        command,
+        ConsensusCommand::ReleaseLicense { .. }
+            | ConsensusCommand::PrepareLicenseReleaseRequest { .. }
+            | ConsensusCommand::ConfirmRelease { .. }
+    ) {
+        return release::apply(state, command);
+    }
+    if matches!(
+        command,
+        ConsensusCommand::PrepareClusterKeyRotationRequest { .. }
+            | ConsensusCommand::CompleteClusterKeyRotation { .. }
+            | ConsensusCommand::AbandonClusterKeyRotation { .. }
+    ) {
+        return rotation::apply(state, command);
+    }
 
     let (Some(identity), Some(record)) = (&state.cluster_identity, &state.licensing) else {
         return AppliedConsensusCommand::conflict(ConsensusConflict::LicenseDecision {
@@ -245,6 +281,7 @@ pub(super) fn apply(
         ConsensusCommand::AdvanceLicensingTime { observed_at } => {
             let mut advanced = record.as_ref().clone();
             advanced.licensing_time = advanced.licensing_time.max(*observed_at);
+            advanced.finish_release_if_unneeded();
             Ok(advanced)
         }
         _ => unreachable!("only licensing commands enter their owner"),

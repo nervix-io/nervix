@@ -414,9 +414,9 @@ pub use state_inspection_settings::{
     StateInspectionSettings, StateInspectionSettingsError,
 };
 pub use statement::{
-    AckWindow, ActivateLicense, AlterBranch, AlterBranchError, AlterBranchOperation,
-    AlterGenerator, AlterGeneratorError, AlterGeneratorOperation, AlterIngestor,
-    AlterIngestorError, AlterIngestorOperation, AlterRelay, AlterRelayError, AlterRelayOperation,
+    AckWindow, AlterBranch, AlterBranchError, AlterBranchOperation, AlterGenerator,
+    AlterGeneratorError, AlterGeneratorOperation, AlterIngestor, AlterIngestorError,
+    AlterIngestorOperation, AlterRelay, AlterRelayError, AlterRelayOperation,
     AlterTransportIngestorOperation, BranchEviction, BranchPartitions, BranchSelection,
     CodecBatchContainer, CodecEncoding, CodecEncodingRule, CodecJaqFormat, CodecJaqTransformations,
     CodecProtobufConfig, CodecWireFormat, CordonNode, CreateBranch, CreateCodec, CreateDomain,
@@ -429,16 +429,16 @@ pub use statement::{
     DescribeWindowProcessor, DomainConfig, DomainPace, DomainStartPoint, DomainState, DomainStatus,
     DomainTick, DrainNode, DropModel, DropNode, EndpointKind, EndpointType, ErrorPolicies,
     GeneralErrorPolicy, IngestTimestampSource, InspectionFormat, LookupQuery,
-    MaterializedRelayState, MessageErrorPolicy, Model, ModelKind, PartitionSeed, RefreshLicense,
-    RelayBranching, Relocation, RelocationMember, RelocationPreferenceOverride,
-    RelocationPreferenceStrategy, RelocationSelection, RelocationUnitSelection, ResolvedBranching,
-    ResolvedCodecWireFormat, RetryPolicy, ShowClusterStatus, ShowCreate, ShowEmitters,
-    ShowIngestors, ShowPlacements, ShowProcessorState, ShowRelayMaterializedState,
-    ShowTransactions, ShowUdfs, SignalingProtobufConfig, SignalingProtocolOnConnect, SignalingStep,
-    SignalingWaitStep, SignalingWireFormat, StartDomain, StateInspectedProcessor,
-    StateInspectionPageRequest, Statement, StopDomain, SubscriptionBinding,
-    SubscriptionDeliveryBehavior, SubscriptionLiteral, UncordonNode, UniquelyKindedModel,
-    UploadResource, VhostTlsResource, WireSchemaLookup, default_relay_buffer,
+    MaterializedRelayState, MessageErrorPolicy, Model, ModelKind, PartitionSeed, RelayBranching,
+    Relocation, RelocationMember, RelocationPreferenceOverride, RelocationPreferenceStrategy,
+    RelocationSelection, RelocationUnitSelection, ResolvedBranching, ResolvedCodecWireFormat,
+    RetryPolicy, ShowClusterStatus, ShowCreate, ShowEmitters, ShowIngestors, ShowPlacements,
+    ShowProcessorState, ShowRelayMaterializedState, ShowTransactions, ShowUdfs,
+    SignalingProtobufConfig, SignalingProtocolOnConnect, SignalingStep, SignalingWaitStep,
+    SignalingWireFormat, StartDomain, StateInspectedProcessor, StateInspectionPageRequest,
+    Statement, StopDomain, SubscriptionBinding, SubscriptionDeliveryBehavior, SubscriptionLiteral,
+    UncordonNode, UniquelyKindedModel, UploadResource, VhostTlsResource, WireSchemaLookup,
+    default_relay_buffer,
 };
 pub use timestamp::{AtomicTimestamp, Timestamp, TimestampError};
 pub use udf::{CreateUdf, UdfArgument, UdfLanguage, UdfReturn};
@@ -457,8 +457,9 @@ pub use window_model_digest::WindowModelDigest;
 
 mod licensing;
 pub use licensing::{
-    LicensingConnectionState, LicensingConnectivity, LicensingConnectivityPublication,
-    LicensingTransportFailure,
+    ActivateLicense, LicensingConnectionState, LicensingConnectivity,
+    LicensingConnectivityPublication, LicensingTransportFailure, RefreshLicense, ReleaseLicense,
+    RotateLicenseClusterKey,
 };
 
 /// The existing host's single relay admission budget. The runtime settings owner adopts this

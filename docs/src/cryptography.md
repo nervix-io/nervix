@@ -286,6 +286,13 @@ or copying private DER must protect and clear their own storage. Public extracti
 backend's SEC 1 uncompressed point or returns its fixed-width `x` and `y` coordinates without
 implementing another point encoder.
 
+Cluster rotation keeps the current and pending signing capabilities separate: the current key
+signs the outer request and the pending key signs its challenge-bound possession proof. Exact
+signed request bytes are retained before transmission because reconstructing a randomized proof
+would change its idempotency digest. A release awaiting service confirmation retains its original
+key until confirmation, independently of later local cluster rotations. These bounded private
+owners use the same zeroization and redacted diagnostic contract.
+
 The boundary tests retain the complete P-256/SHA-256 section of the
 [NIST CAVP FIPS 186-4 verification vectors](https://csrc.nist.gov/projects/cryptographic-algorithm-validation-program/digital-signatures),
 including invalid signatures, changed messages and changed public keys. Registered bounded

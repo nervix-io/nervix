@@ -102,10 +102,12 @@ mod cluster_parameters;
 mod command_execution;
 mod licensing;
 pub use licensing::{
-    ActivationBinding, ActivationState, ClusterLicensingState, LICENSING_SERVICE,
-    LicenseDecisionError, LicenseVerification, LicensingEnvironment, LicensingMode,
-    LicensingRecord, LicensingSnapshot, ReceivedLicenseDecision, StoredDecision,
-    StoredTrustDocument, VerifiedLicenseDecision,
+    ActivationBinding, ActivationState, AwaitingLicenseRelease, ClusterLicensingState,
+    LICENSING_SERVICE, LicenseDecisionError, LicenseVerification, LicensingEnvironment,
+    LicensingMode, LicensingRecord, LicensingSnapshot, PreparedLicensingRequest,
+    ReceivedLicenseDecision, ReleaseConfirmation, ReleaseState, StoredDecision,
+    StoredDecisionOperation, StoredLicenseTransitions, StoredTrustDocument,
+    VerifiedLicenseDecision,
 };
 mod node_records;
 #[cfg(any(test, feature = "testing"))]
@@ -114,7 +116,8 @@ use append_submission_fault::AppendSubmissionFault;
 #[cfg(feature = "testing")]
 use append_submission_fault::AppendSubmissionFaults;
 pub use cluster_identity::{
-    ClusterIdentity, ClusterIdentityError, ClusterIdentityRecord, ClusterSigner,
+    ClusterIdentity, ClusterIdentityError, ClusterIdentityRecord, ClusterKeyRotation,
+    ClusterSigner, PendingClusterKey,
 };
 pub use cluster_parameters::ClusterParameterPlanningInputs;
 mod connectivity_fault;
@@ -144,7 +147,7 @@ pub use command_execution::{
     CommandExecutionStatementDisposition, CommandExecutionStatementResult,
     CommandExecutionTransactionOperation, CommandExecutionTransactionRequest,
     CommandExecutionTransactionStatus, CommandExecutionTransactionTarget, DiagnosticSpan,
-    RecordedBackupArchive,
+    LicensingCommandOutcome, RecordedBackupArchive,
 };
 pub use domain_mutation::{
     DomainMutationError, DomainMutationLease, DomainMutationOwner, DomainMutationRecoveryFence,
@@ -435,6 +438,26 @@ pub enum ConsensusCommand {
     InstallClusterIdentity {
         identity: Box<ClusterIdentityRecord>,
     },
+    BeginClusterKeyRotation {
+        identity: Box<ClusterIdentity>,
+        pending_key: Box<PendingClusterKey>,
+    },
+    PrepareClusterKeyRotationRequest {
+        #[rkyv(with = cluster_identity::archive::UuidBytes)]
+        request_id: uuid::Uuid,
+        request: Box<PreparedLicensingRequest>,
+    },
+    CompleteClusterKeyRotation {
+        #[rkyv(with = cluster_identity::archive::UuidBytes)]
+        request_id: uuid::Uuid,
+        decision: Box<ReceivedLicenseDecision>,
+    },
+    AbandonClusterKeyRotation {
+        reference: nervix_models::CommandExecutionReference,
+        code: nervix_licensing_vocabulary::ProblemCode,
+        #[rkyv(with = cluster_identity::archive::UuidBytes)]
+        request_id: uuid::Uuid,
+    },
     ActivateLicense {
         binding: Box<ActivationBinding>,
         decision: Box<ReceivedLicenseDecision>,
@@ -448,6 +471,23 @@ pub enum ConsensusCommand {
     },
     AdvanceLicensingTime {
         observed_at: nervix_models::Timestamp,
+    },
+    ReleaseLicense {
+        reference: nervix_models::CommandExecutionReference,
+        binding: Box<ActivationBinding>,
+        #[rkyv(with = cluster_identity::archive::UuidBytes)]
+        request_id: uuid::Uuid,
+        released_at: nervix_models::Timestamp,
+    },
+    PrepareLicenseReleaseRequest {
+        #[rkyv(with = cluster_identity::archive::UuidBytes)]
+        request_id: uuid::Uuid,
+        request: Box<PreparedLicensingRequest>,
+    },
+    ConfirmRelease {
+        #[rkyv(with = cluster_identity::archive::UuidBytes)]
+        request_id: uuid::Uuid,
+        decision: Option<Box<ReceivedLicenseDecision>>,
     },
     SeedClusterParameters {
         values: ClusterParameterValues,
@@ -685,6 +725,11 @@ pub enum ConsensusResponse {
     Error,
 )]
 pub enum ConsensusConflict {
+    #[error("cluster key rotation was refused")]
+    ClusterKeyRotation {
+        #[source]
+        reason: ClusterIdentityError,
+    },
     #[error("licensing decision was refused")]
     LicenseDecision {
         #[source]
@@ -789,6 +834,17 @@ impl std::fmt::Display for ConsensusCommand {
             Self::ApplyLicenseDecision { .. } => f.write_str("apply-license-decision"),
             Self::InstallTrustDocuments { .. } => f.write_str("install-trust-documents"),
             Self::AdvanceLicensingTime { .. } => f.write_str("advance-licensing-time"),
+            Self::BeginClusterKeyRotation { .. } => f.write_str("begin-cluster-key-rotation"),
+            Self::PrepareClusterKeyRotationRequest { .. } => {
+                f.write_str("prepare-cluster-key-rotation-request")
+            }
+            Self::CompleteClusterKeyRotation { .. } => f.write_str("complete-cluster-key-rotation"),
+            Self::AbandonClusterKeyRotation { .. } => f.write_str("abandon-cluster-key-rotation"),
+            Self::ReleaseLicense { .. } => f.write_str("release-license"),
+            Self::PrepareLicenseReleaseRequest { .. } => {
+                f.write_str("prepare-license-release-request")
+            }
+            Self::ConfirmRelease { .. } => f.write_str("confirm-release"),
             Self::SeedClusterParameters { .. } => f.write_str("seed-cluster-parameters"),
             Self::AlterClusterParameters { reference, .. } => {
                 write!(f, "alter-cluster-parameters:{reference}")
@@ -2074,7 +2130,11 @@ impl ConsensusError {
             return report.to_string();
         };
         match error {
-            Self::Conflict(ConsensusConflict::LicensingQuota { .. }) => format!("{report:#}"),
+            Self::Conflict(
+                ConsensusConflict::LicensingQuota { .. }
+                | ConsensusConflict::LicenseDecision { .. }
+                | ConsensusConflict::ClusterKeyRotation { .. },
+            ) => format!("{report:#}"),
             Self::Storage => match report.downcast_ref::<io::Error>() {
                 Some(source) => format!("consensus storage failed: {source}"),
                 None => error.to_string(),
@@ -3691,16 +3751,19 @@ impl Proposer {
         match response {
             ConsensusResponse::Applied => Ok(()),
             ConsensusResponse::Conflict(reason) => {
-                let refusal = match &reason {
-                    ConsensusConflict::LicensingQuota { refusal } => Some(*refusal),
-                    _ => None,
-                };
-                match refusal {
-                    Some(refusal) => {
-                        Err(Report::new(refusal).change_context(ConsensusError::Conflict(reason)))
+                let report = match &reason {
+                    ConsensusConflict::LicensingQuota { refusal } => {
+                        Report::new(*refusal).change_context(ConsensusError::Conflict(reason))
                     }
-                    None => Err(Report::new(ConsensusError::Conflict(reason))),
-                }
+                    ConsensusConflict::LicenseDecision { reason: cause } => {
+                        Report::new(*cause).change_context(ConsensusError::Conflict(reason))
+                    }
+                    ConsensusConflict::ClusterKeyRotation { reason: cause } => {
+                        Report::new(*cause).change_context(ConsensusError::Conflict(reason))
+                    }
+                    _ => Report::new(ConsensusError::Conflict(reason)),
+                };
+                Err(report)
             }
             ConsensusResponse::Transaction(_) | ConsensusResponse::OrphanedPauseRecovery(_) => {
                 Err(Report::new(ConsensusError::UnexpectedResponse))
@@ -5980,9 +6043,21 @@ fn apply_consensus_command_at(
         ConsensusCommand::InstallClusterIdentity { identity } => {
             return cluster_identity::install(state, identity);
         }
+        ConsensusCommand::BeginClusterKeyRotation {
+            identity,
+            pending_key,
+        } => {
+            return cluster_identity::begin_rotation(state, identity, pending_key);
+        }
         ConsensusCommand::ActivateLicense { .. }
         | ConsensusCommand::ApplyLicenseDecision { .. }
         | ConsensusCommand::InstallTrustDocuments { .. }
+        | ConsensusCommand::PrepareClusterKeyRotationRequest { .. }
+        | ConsensusCommand::CompleteClusterKeyRotation { .. }
+        | ConsensusCommand::AbandonClusterKeyRotation { .. }
+        | ConsensusCommand::ReleaseLicense { .. }
+        | ConsensusCommand::PrepareLicenseReleaseRequest { .. }
+        | ConsensusCommand::ConfirmRelease { .. }
         | ConsensusCommand::AdvanceLicensingTime { .. } => {
             return licensing::apply(state, command);
         }
@@ -6143,6 +6218,9 @@ fn apply_consensus_command_at(
                     "command execution reference '{reference}' is bound to a different owner or \
                      request"
                 ));
+            }
+            if !state.licensing_command_can_finish(&execution, result) {
+                return AppliedConsensusCommand::applied(StateMachineChanges::default());
             }
             match &execution.state {
                 CommandExecutionState::Applying { .. } => {
