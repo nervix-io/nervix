@@ -33,10 +33,9 @@ pub(in crate::runtime) trait AcknowledgementKeepalive {
     where
         F: std::future::Future,
     {
-        if !self.needs_keepalive() {
-            return future.await;
+        if self.needs_keepalive() {
+            self.keep_alive();
         }
-        self.keep_alive();
         self.keep_alive_while_pending(future).await
     }
 
@@ -48,10 +47,12 @@ pub(in crate::runtime) trait AcknowledgementKeepalive {
     where
         F: std::future::Future,
     {
+        // Pin before selecting the empty-ACK path so this wrapper stores the owned future once.
+        // Borrowing that one future on both paths also keeps nested delivery futures bounded.
+        let mut future = std::pin::pin!(future);
         if !self.needs_keepalive() {
             return future.await;
         }
-        let mut future = std::pin::pin!(future);
         loop {
             nervix_primitives::task::consume_budget().await;
             nervix_primitives::select! {
@@ -136,12 +137,12 @@ impl AcknowledgementKeepalive for [(CorrelatorPendingMessage, CorrelatorPendingM
 
 impl AcknowledgementKeepalive for [ReordererOutputBuffer] {
     fn needs_keepalive(&self) -> bool {
-        self.iter().any(|buffer| buffer.acks().next().is_some())
+        self.iter().any(ReordererOutputBuffer::has_acknowledgements)
     }
 
     fn keep_alive(&self) {
-        for acknowledgement in self.iter().flat_map(ReordererOutputBuffer::acks) {
-            acknowledgement.ack_alive();
+        for buffer in self {
+            buffer.ack_alive();
         }
     }
 }
