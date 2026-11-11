@@ -1798,11 +1798,14 @@ and output topic:
   the smallest and largest index, the sum of the sequences, and the sum of 4 raised to each index
   modulo 24. The base-4 digits of that last sum tell which rows the window held, and how often.
   Its `sequences` field is `COLLECT_ARRAY(input.sequence)`: twelve sequence numbers in retained
-  order. The verifier requires exactly the accepted-input values and multiplicities selected by
-  the decoded membership, with first occurrences in source order. Missing, changed, reordered
-  first occurrences and other-branch elements fail even when the count and sum match. Permitted
-  volatile inputs may replay after their retained prefix; their repeated appearances need not be
-  adjacent, and the existing volatile-interval checks still constrain their multiplicity.
+  order. Its `sequence_vector` is the same argument collected with `COLLECT_VEC`, and
+  `first_sequence` and `last_sequence` use `FIRST` and `LAST`. The verifier compares the two
+  collections at every position and checks those independent endpoint anchors, then requires
+  exactly the values and multiplicities decoded from membership. Missing, changed, reordered and
+  other-branch elements fail even when the count and sum match. Source order is also checked
+  before the fault and outside the volatile interval. Inside that interval, a retained tail can
+  precede a redelivered prefix across a window boundary; producer sequence alone cannot identify
+  its admission order. The volatile-interval checks still constrain losses and repeated rows.
 - **The junction `chaos_enrich`.** It reads the branch's row of the materialized relay
   `chaos_profiles`, which a second ingestor fills from `chaos_profile_input`. Its `DEFAULT` names no
   branch.
@@ -1901,8 +1904,10 @@ expectations:
   after it dispatches the row's output, and persists its state on the snapshot interval. A branch
   therefore continues after the fault from a restored count `C`: the updates after its last
   checkpoint are skipped, and a volatile row the source redelivers counts again. `C` must be at
-  least the branch's records before the milestone and at most its records admitted before
-  recovery. Every count after the fault that does not follow the branch's previous count by one,
+  least the branch's records before the milestone. Redeliveries can already be reflected in that
+  checkpoint, including callbacks whose output was not observed. The distinct-input ledger and
+  observed output replays therefore do not give an upper bound on `C`. Every count after the
+  fault that does not follow the branch's previous count by one,
   such as the first count `C + 1` of the restored branch or an output a former owner delivered
   before its fence took effect, must start again from such a `C`. The verdict records every
   restored count, the final counts and their excess over the accepted records.
@@ -1913,8 +1918,8 @@ Every verdict also requires:
 - the first occurrence of every key of each branch
 - every record in the enriched and counted outputs
 - windows of 12 rows of one branch, with the sums they report and the complete collected sequence
-  matching their smallest index, largest index and decoded membership, with first occurrences in
-  source order
+  matching their smallest index, largest index and decoded membership, the vector projection at
+  every position, and independent first/last anchors; source order outside the replay interval
 - guest counts that equal the branch index before the fault and advance by one per record after
   recovery
 - inferencer outputs that are each one whole count of an accepted branch, that count 1, 2, 3 and

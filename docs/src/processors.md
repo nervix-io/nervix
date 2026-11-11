@@ -613,8 +613,10 @@ flush-time execution and supports the existing per-message and batched tensor de
 Each admitted batch publishes an immutable tensor generation. Nervix persists the newest
 generation on the runtime state snapshot interval and once more during a graceful stop; replicas
 receive the same generation. A restart continues from the newest surviving snapshot for that
-model binding and branch incarnation. Inputs admitted after that snapshot have already been
-acknowledged and are not replayed, so recovery can skip those state updates. A graceful stop
+model binding and branch incarnation. Recovery can skip updates made after that snapshot.
+Inference releases its input acknowledgement shares after dispatch, but another attached consumer
+can still hold the ingestor's position. A redelivered input invokes the model again, including when
+the restored state already reflects it. A graceful stop
 persists the final generation before the branch ends. `STOP` followed by `START` retains it.
 A planned ownership handoff, by `RELOCATE`, a node drain or a placement change, carries the
 generation each branch published at the handoff's freeze, so the new owner continues every branch

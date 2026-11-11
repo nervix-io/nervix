@@ -23,9 +23,10 @@ dedup requires every first occurrence of a key in its branch to be emitted, a la
 pass only when its key was first seen in the volatile interval, and identical replays only after a
 fault.
 
-window decodes each 12-row window's membership and requires its twelve collected values to match
-that membership, with first occurrences in source order. Replayed volatile inputs may follow a
-retained prefix. Its rows must belong to its branch with the sums it reports, every row outside
+window decodes each 12-row window's membership and requires its array and vector to agree at every
+position, with independent FIRST/LAST anchors and exactly that membership. Source order is required
+outside the volatile replay interval; a retained tail can precede a redelivered prefix inside it.
+Its rows must belong to its branch with the sums it reports, every row outside
 the volatile interval must be aggregated exactly once, and each row admitted before the milestone
 must survive the fault.
 
@@ -42,9 +43,10 @@ per admitted record, in output order. An output equal to its branch's previous o
 of that output. Without a fault every branch counts 1, 2, 3 and so on up to its accepted records,
 with no replay. With a fault, every output before it counts the same way, and covers at least the
 branch's records before the milestone. After the fault a branch may continue from a restored
-count C, its first count then C + 1: C must hold every record before the milestone and at most the
-records admitted before recovery. A periodic checkpoint skips the updates after it, and a
-redelivered input counts again, so nothing more bounds C. Every count after the fault that does not
+count C, its first count then C + 1: C must hold every record before the milestone. A periodic
+checkpoint skips the updates after it, and redeliveries can already be counted in the checkpoint,
+including callbacks whose outputs were not observed. Distinct source records do not bound C.
+Every count after the fault that does not
 follow its branch's previous count by one, including an output a former owner delivered before its
 fence took effect, starts again from such a C. The counts that end the run advance by one per
 output through at least as many outputs as the branch has records after recovery.
@@ -227,14 +229,24 @@ window() {
                           and (($members | map(.index) | min) == $window.first_index)
                           and (($members | map(.index) | max) == $window.last_index)),
               own_branch: (all($resolved[]; .record != null and .record.branch_name == $window.branch_name)),
-              # First appearances stay ordered. A volatile prefix can then be replayed
-              # after its retained copy; the existing multiplicity checks bound those replays.
+              # Array and vector projections retain the same order, anchored independently by
+              # FIRST and LAST. Source order is known outside the replay interval; inside it a
+              # retained tail can precede a redelivered prefix, even across window boundaries.
               sequence_matches: (if ($window.sequences | type) == "array" then
                 ($window.sequences | length) == 12
+                and ($window.sequence_vector | type) == "array"
+                and $window.sequences == $window.sequence_vector
+                and $window.sequences[0] == $window.first_sequence
+                and $window.sequences[-1] == $window.last_sequence
                 and ($window.sequences | sort) == $expected_sequence
-                and ($window.sequences | first_occurrences) == ($expected_sequence | unique)
+                and (if $strict or $offset < $pre
+                        or all($resolved[]; class(.record.sequence) != "volatile")
+                     then ($window.sequences | first_occurrences) == ($expected_sequence | unique)
+                     else true end)
                 else false end),
               sequences: $window.sequences,
+              sequence_vector: $window.sequence_vector,
+              first_sequence: $window.first_sequence, last_sequence: $window.last_sequence,
               sum_matches: ((if all($resolved[]; .record != null)
                              then ($resolved | map(.count * .record.sequence) | add) else null end) == $window.sequence_sum),
               members: ($resolved | map({index, count, sequence: .record.sequence}))}] as $windows
@@ -489,7 +501,7 @@ inferencer() {
            | {branch_name: $branch,
               records: ($records | length),
               milestone_records: ($records | map(select(class(.sequence) == "milestone")) | length),
-              admitted_before_recovery: ($records | map(select(class(.sequence) != "recovered")) | length),
+              distinct_records_before_recovery: ($records | map(select(class(.sequence) != "recovered")) | length),
               recovered_records: ($records | map(select(class(.sequence) == "recovered")) | length),
               outputs: ($observed | length),
               counted_before_fault: ($counts | map(select(.before_fault)) | length),
@@ -511,9 +523,8 @@ inferencer() {
         | [$per_branch[] | . as $branch | .breaks[] | select(.before_fault | not)
            | {branch_name: $branch.branch_name, offset, restored: (.to - 1),
               milestone_records: $branch.milestone_records,
-              admitted_before_recovery: $branch.admitted_before_recovery}] as $restorations
+              distinct_records_before_recovery: $branch.distinct_records_before_recovery}] as $restorations
         | [$restorations[] | select(.restored < .milestone_records)] as $below_milestone
-        | [$restorations[] | select(.restored > .admitted_before_recovery)] as $above_admitted
         | [$per_branch[] | select(($strict | not) and .final_run_length < .recovered_records)] as $unsteady
         | [$per_branch[] | select(($strict | not) and (.recovered_records == 0 or .counted_after_fault == 0))] as $unexercised
         | [
@@ -526,8 +537,6 @@ inferencer() {
              then "records acknowledged by the milestone had no count before the fault" else empty end),
             (if ($below_milestone | length) > 0
              then "a branch count after the fault fell below the records durable at the milestone: state durable at the milestone was lost" else empty end),
-            (if ($above_admitted | length) > 0
-             then "a branch count after the fault exceeded the records admitted before recovery" else empty end),
             (if ($unsteady | length) > 0
              then "branch counts after recovery did not advance by one per record" else empty end),
             (if ($unexercised | length) > 0
@@ -545,7 +554,6 @@ inferencer() {
                      replays_without_a_fault: ($violating_replays | length),
                      milestone_records_uncounted_before_the_fault: ($uncovered_milestone | length),
                      restored_below_milestone: ($below_milestone | length),
-                     restored_above_admitted: ($above_admitted | length),
                      unsteady_after_recovery: ($unsteady | length)},
             restored_counts: ($per_branch | map({key: .branch_name,
                                                  value: [.breaks[] | select(.before_fault | not) | .to - 1]})

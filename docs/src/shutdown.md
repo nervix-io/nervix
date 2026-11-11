@@ -754,8 +754,10 @@ A forced recovery of a stateful inferencer stages, for every branch of the lifec
 the newest tensor snapshot that survives on the destination or on another node the unit is
 assigned to, within the recovery's preparation deadline. A replica receives the generations its
 owner publishes, so a promoted replica continues each branch from at least the generation it last
-received. Inputs admitted after that generation were acknowledged once their output was dispatched
-and are not replayed, so the recovered state skips their updates. A branch the recovered lifecycle
+received. Recovery can skip updates made after that generation. Inference releases its input
+acknowledgement shares after dispatching output; another attached consumer can still hold the
+ingestor's position. A redelivered input invokes the model again, even when its update is already
+in the restored snapshot. A branch the recovered lifecycle
 names, but whose tensors no surviving node holds, starts from its declared `INITIAL` tensors, and
 `SHOW CLUSTER STATUS` reports `state_recovery=reset` with `inferencer:missing_checkpoint`. When no
 surviving node holds the branch lifecycle either, as after losing an owner that had no replica,
