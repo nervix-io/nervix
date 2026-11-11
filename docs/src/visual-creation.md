@@ -542,7 +542,8 @@ body rules, and the completion walk must stay clean.
 
 ### Representations
 
-These registered Bolero properties qualify the drafts and the wire messages. The [target
+These registered Bolero properties qualify the drafts, the wire messages and the page
+continuations. The [target
 register](./property-testing-and-fuzzing.md#target-and-representation-register) records their
 domains and bounds.
 
@@ -557,6 +558,8 @@ domains and bounds.
 | `console-processor-drafts` | Processor drafts rebuild every complete Model of the nine processor families |
 | `client-requests`, `client-replies` | Suggestion and choice requests and outcomes keep their complete values through the wire codec |
 | `client-processor-choice-request` | A processor's choice request keeps its target and dependencies through the wire codec |
+| `completion-page-continuations`, `choice-page-continuations` | A page continuation keeps its revision, position, query digest and candidate digest through its text, and paging with the continuations a basis issues returns every candidate once and in order |
+| `completion-page-cursors-malformed`, `choice-page-cursors-malformed` | Cursor text continues a page only when it is a continuation that page's basis issued within its candidates, never panics, and never continues a page of another revision, question or candidate set |
 
 The wire crate's tests check that the checked-in conformance corpus, which holds suggestion and
 choice requests and outcomes with every `ChoiceValue` member, is exactly what its encoder writes and
@@ -604,6 +607,7 @@ harness.
 
 - The conformance corpus holds 2 of the 66 choice targets, `Ready` outcomes only, and no
   local-directory suggestion.
-- No property generates suggestion or choice page cursors or drives the server's paging.
+- The page-continuation properties drive each page basis directly, not a session: the revision
+  reads around a page and the console's continued requests rest on the public scenarios alone.
 - No scenario sends a choice lookup through a session outside the browser forms.
 - The completion walk exercises the parser, not `SuggestRequest` or its paging.
