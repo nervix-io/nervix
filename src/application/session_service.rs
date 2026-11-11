@@ -610,6 +610,7 @@ impl CompletionSnapshot<'_> {
     }
 }
 
+/// The revision and completion query a page continuation is bound to.
 struct CompletionPageBasis {
     revision: u64,
     query_digest: String,
@@ -620,6 +621,76 @@ struct ChoicePageBasis {
     revision: u64,
     query_digest: String,
     content_digest: Option<String>,
+}
+
+/// Where a completion or choice page continues: the position after the last candidate a page
+/// returned, bound to the revision, query digest and candidate digest of the basis that issued it.
+///
+/// Its text, which a client returns unchanged, is `{revision}:{end}:{query}:{candidates}`: two
+/// decimal integers and the basis's lowercase hexadecimal digests, so no part holds the separator.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PageContinuation<'digests> {
+    revision: u64,
+    end: usize,
+    query_digest: &'digests str,
+    candidate_digest: &'digests str,
+}
+
+/// Why cursor text is not a page continuation.
+#[derive(Debug, thiserror::Error)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::error_boundary(
+        outcome,
+        reason = "text that is not a page continuation projects to the typed stale-context status"
+    )
+)]
+enum PageContinuationRefusal {
+    #[error("the page cursor does not hold exactly four colon-separated parts")]
+    Shape,
+    #[error("the page cursor's revision is not an unsigned decimal integer")]
+    Revision(#[source] std::num::ParseIntError),
+    #[error("the page cursor's position is not an unsigned decimal integer")]
+    Position(#[source] std::num::ParseIntError),
+}
+
+impl<'digests> PageContinuation<'digests> {
+    /// The cursor text a page outcome carries for its client to return unchanged.
+    fn encode(&self) -> String {
+        format!(
+            "{}:{}:{}:{}",
+            self.revision, self.end, self.query_digest, self.candidate_digest
+        )
+    }
+
+    /// The continuation `text` holds, borrowing its digests from it. Whether it continues a page
+    /// is its basis's decision.
+    fn decode(text: &'digests str) -> Result<Self, PageContinuationRefusal> {
+        let Some((revision, rest)) = text.split_once(':') else {
+            return Err(PageContinuationRefusal::Shape);
+        };
+        let Some((end, rest)) = rest.split_once(':') else {
+            return Err(PageContinuationRefusal::Shape);
+        };
+        let Some((query_digest, candidate_digest)) = rest.split_once(':') else {
+            return Err(PageContinuationRefusal::Shape);
+        };
+        if candidate_digest.contains(':') {
+            return Err(PageContinuationRefusal::Shape);
+        }
+        let revision = revision
+            .parse::<u64>()
+            .map_err(PageContinuationRefusal::Revision)?;
+        let end = end
+            .parse::<usize>()
+            .map_err(PageContinuationRefusal::Position)?;
+        Ok(Self {
+            revision,
+            end,
+            query_digest,
+            candidate_digest,
+        })
+    }
 }
 
 impl ChoicePageBasis {
@@ -643,11 +714,11 @@ impl ChoicePageBasis {
         self
     }
 
-    /// Non-security BLAKE3: checks selected candidates/revision; authentication is separate.
-    fn page(&self, request: &ChoiceLookupRequest, candidates: Vec<Choice>) -> ChoiceOutcome {
+    /// Non-security BLAKE3: binds a page to its content and ordered candidates, not a credential.
+    fn candidate_digest(&self, candidates: &[Choice]) -> String {
         let mut candidate_hasher = blake3::Hasher::new();
         hash_optional_choice_text(&mut candidate_hasher, self.content_digest.as_deref());
-        for candidate in &candidates {
+        for candidate in candidates {
             hash_choice_value(&mut candidate_hasher, &candidate.value);
             hash_choice_text(&mut candidate_hasher, &candidate.presentation.label);
             hash_optional_choice_text(
@@ -659,25 +730,36 @@ impl ChoicePageBasis {
                 candidate.presentation.group.as_deref(),
             );
         }
-        let candidate_digest = candidate_hasher.finalize().to_hex().to_string();
+        candidate_hasher.finalize().to_hex().to_string()
+    }
+
+    /// The continuation this basis issues for a page that ends at `end` of the candidates
+    /// `candidate_digest` binds.
+    fn continuation<'basis>(
+        &'basis self,
+        end: usize,
+        candidate_digest: &'basis str,
+    ) -> PageContinuation<'basis> {
+        PageContinuation {
+            revision: self.revision,
+            end,
+            query_digest: &self.query_digest,
+            candidate_digest,
+        }
+    }
+
+    /// Checks the cursor against the selected candidates and revision; authentication is separate.
+    fn page(&self, request: &ChoiceLookupRequest, candidates: Vec<Choice>) -> ChoiceOutcome {
+        let candidate_digest = self.candidate_digest(&candidates);
         let offset = match request.page_cursor() {
             Some(cursor) => {
-                let mut parts = cursor.split(':');
-                let revision = parts.next().and_then(|value| value.parse::<u64>().ok());
-                let offset = parts.next().and_then(|value| value.parse::<usize>().ok());
-                let query = parts.next();
-                let candidates = parts.next();
-                if parts.next().is_some()
-                    || revision != Some(self.revision)
-                    || query != Some(self.query_digest.as_str())
-                    || candidates != Some(candidate_digest.as_str())
-                {
-                    return stale_choice_outcome();
-                }
-                let Some(offset) = offset else {
+                let Ok(continuation) = PageContinuation::decode(cursor) else {
                     return stale_choice_outcome();
                 };
-                offset
+                if continuation != self.continuation(continuation.end, &candidate_digest) {
+                    return stale_choice_outcome();
+                }
+                continuation.end
             }
             None => 0,
         };
@@ -690,10 +772,7 @@ impl ChoicePageBasis {
             .checked_add(take)
             .assured("a choice page cannot extend beyond its bounded candidates");
         let page_cursor = if end < candidates.len() {
-            Some(format!(
-                "{}:{end}:{}:{candidate_digest}",
-                self.revision, self.query_digest
-            ))
+            Some(self.continuation(end, &candidate_digest).encode())
         } else {
             None
         };
@@ -778,6 +857,14 @@ fn stale_choice_outcome() -> ChoiceOutcome {
         status: ChoiceStatus::StaleContext,
         choices: Vec::new(),
         page_cursor: None,
+    }
+}
+
+fn stale_suggest_outcome() -> SuggestOutcome {
+    SuggestOutcome {
+        status: SuggestionStatus::StaleContext,
+        suggestions: Vec::new(),
+        continuation: None,
     }
 }
 
@@ -941,10 +1028,10 @@ impl CompletionPageBasis {
         }
     }
 
-    /// Non-security BLAKE3: checks completion candidate/revision consistency, not access permission.
-    fn page(&self, request: &SuggestRequest, candidates: Vec<Suggestion>) -> SuggestOutcome {
+    /// Non-security BLAKE3: binds a page to its ordered candidates, not to a credential.
+    fn candidate_digest(candidates: &[Suggestion]) -> String {
         let mut candidate_hasher = blake3::Hasher::new();
-        for candidate in &candidates {
+        for candidate in candidates {
             let bytes = candidate.value.as_bytes();
             let length = u64::try_from(bytes.len())
                 .assured("a candidate value fits the bounded session frame");
@@ -962,42 +1049,42 @@ impl CompletionPageBasis {
                 SuggestionKind::LocalDirectoryLookup => 1,
             }]);
         }
-        let candidate_digest = candidate_hasher.finalize().to_hex().to_string();
+        candidate_hasher.finalize().to_hex().to_string()
+    }
+
+    /// The continuation this basis issues for a page that ends at `end` of the candidates
+    /// `candidate_digest` binds.
+    fn continuation<'basis>(
+        &'basis self,
+        end: usize,
+        candidate_digest: &'basis str,
+    ) -> PageContinuation<'basis> {
+        PageContinuation {
+            revision: self.revision,
+            end,
+            query_digest: &self.query_digest,
+            candidate_digest,
+        }
+    }
+
+    /// Checks the continuation against the completion candidates and revision, not access
+    /// permission.
+    fn page(&self, request: &SuggestRequest, candidates: Vec<Suggestion>) -> SuggestOutcome {
+        let candidate_digest = Self::candidate_digest(&candidates);
         let offset = match request.continuation() {
-            Some(continuation) => {
-                let mut parts = continuation.split(':');
-                let revision = parts.next().and_then(|value| value.parse::<u64>().ok());
-                let offset = parts.next().and_then(|value| value.parse::<usize>().ok());
-                let digest = parts.next();
-                let candidates = parts.next();
-                if parts.next().is_some()
-                    || revision != Some(self.revision)
-                    || digest != Some(self.query_digest.as_str())
-                    || candidates != Some(candidate_digest.as_str())
-                {
-                    return SuggestOutcome {
-                        status: SuggestionStatus::StaleContext,
-                        suggestions: Vec::new(),
-                        continuation: None,
-                    };
-                }
-                let Some(offset) = offset else {
-                    return SuggestOutcome {
-                        status: SuggestionStatus::StaleContext,
-                        suggestions: Vec::new(),
-                        continuation: None,
-                    };
+            Some(cursor) => {
+                let Ok(continuation) = PageContinuation::decode(cursor) else {
+                    return stale_suggest_outcome();
                 };
-                offset
+                if continuation != self.continuation(continuation.end, &candidate_digest) {
+                    return stale_suggest_outcome();
+                }
+                continuation.end
             }
             None => 0,
         };
         if offset > candidates.len() {
-            return SuggestOutcome {
-                status: SuggestionStatus::StaleContext,
-                suggestions: Vec::new(),
-                continuation: None,
-            };
+            return stale_suggest_outcome();
         }
         let available = candidates.len() - offset;
         let take = request.page_size().min(available);
@@ -1005,10 +1092,7 @@ impl CompletionPageBasis {
             .checked_add(take)
             .assured("the page take cannot exceed the candidates after its offset");
         let continuation = if end < candidates.len() {
-            Some(format!(
-                "{}:{end}:{}:{candidate_digest}",
-                self.revision, self.query_digest
-            ))
+            Some(self.continuation(end, &candidate_digest).encode())
         } else {
             None
         };
@@ -1276,11 +1360,7 @@ impl SessionServiceImpl {
         {
             Ok(queued) => queued,
             Err(_) => {
-                return SuggestOutcome {
-                    status: SuggestionStatus::StaleContext,
-                    continuation: None,
-                    suggestions: Vec::new(),
-                };
+                return stale_suggest_outcome();
             }
         };
 
@@ -1420,11 +1500,7 @@ impl SessionServiceImpl {
             })
         });
         if self.inner.consensus.current_revision().await != revision_before {
-            return SuggestOutcome {
-                status: SuggestionStatus::StaleContext,
-                continuation: None,
-                suggestions: Vec::new(),
-            };
+            return stale_suggest_outcome();
         }
         page_basis.page(&req, response_suggestions)
     }
@@ -1786,6 +1862,7 @@ pub(in crate::application) fn conflicting_reference(
 mod tests {
     mod application_deadline;
     mod completion_context;
+    mod page_continuation;
 
     use std::time::Duration;
 

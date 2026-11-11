@@ -351,7 +351,10 @@ impl PersistentCommandRequest {
                     };
                     if matches!(
                         statement,
-                        Statement::ActivateLicense(_) | Statement::RefreshLicense(_)
+                        Statement::ActivateLicense(_)
+                            | Statement::RefreshLicense(_)
+                            | Statement::ReleaseLicense(_)
+                            | Statement::RotateLicenseClusterKey(_)
                     ) {
                         return Err(Report::new(
                             PersistentCommandRequestError::UnqueueableStatement {
@@ -597,6 +600,65 @@ impl SessionServiceImpl {
         }
     }
 
+    /// Checks the complete retained request identity before reusing a durable command.
+    async fn validate_persistent_command_retry(
+        &self,
+        reference: &CommandExecutionReference,
+        owner: &UserName,
+        request: &PersistentCommandRequest,
+        existing: &CommandExecution,
+    ) -> Result<(), Box<CommandResult>> {
+        if existing.is_expired() {
+            return Err(Box::new(self.refuse_expired_reference(reference)));
+        }
+        if let Some(conflict) = existing.request_conflict(
+            owner,
+            request.domain.as_ref(),
+            request.expected_transaction_position,
+            request.digest,
+        ) {
+            return Err(Box::new(conflicting_reference(reference, conflict)));
+        }
+        if !transaction_targets_match(existing, request) {
+            return Err(Box::new(conflicting_reference(
+                reference,
+                CommandExecutionRequestConflict::Position,
+            )));
+        }
+        if let (
+            Some(password_credential),
+            PersistentCommandRequestBody::Statement {
+                statement: Statement::CreateUser(create),
+                ..
+            },
+        ) = (existing.password_credential(), &request.body)
+        {
+            let verified = verify_password_credential(
+                self.inner.runtime.executor(),
+                password_credential.clone(),
+                create.body.password.clone(),
+            )
+            .await;
+            let matched = match verified {
+                Ok(matched) => matched,
+                Err(error) => {
+                    return Err(Box::new(command_error(format!(
+                        "could not compare the retried password with the admitted one: {error}"
+                    ))));
+                }
+            };
+            if !matched {
+                // The password is left out of the request digest, so a retry that changed it
+                // is a different command under the same reference.
+                return Err(Box::new(conflicting_reference(
+                    reference,
+                    CommandExecutionRequestConflict::Content,
+                )));
+            }
+        }
+        Ok(())
+    }
+
     pub(in crate::application) async fn admit_persistent_command(
         &self,
         reference: CommandExecutionReference,
@@ -609,54 +671,8 @@ impl SessionServiceImpl {
             .current_command_execution(&reference)
             .await
         {
-            if existing.is_expired() {
-                return Err(Box::new(self.refuse_expired_reference(&reference)));
-            }
-            if let Some(conflict) = existing.request_conflict(
-                &owner,
-                request.domain.as_ref(),
-                request.expected_transaction_position,
-                request.digest,
-            ) {
-                return Err(Box::new(conflicting_reference(&reference, conflict)));
-            }
-            if !transaction_targets_match(&existing, request) {
-                return Err(Box::new(conflicting_reference(
-                    &reference,
-                    CommandExecutionRequestConflict::Position,
-                )));
-            }
-            if let (
-                Some(password_credential),
-                PersistentCommandRequestBody::Statement {
-                    statement: Statement::CreateUser(create),
-                    ..
-                },
-            ) = (existing.password_credential(), &request.body)
-            {
-                let verified = verify_password_credential(
-                    self.inner.runtime.executor(),
-                    password_credential.clone(),
-                    create.body.password.clone(),
-                )
-                .await;
-                let matched = match verified {
-                    Ok(matched) => matched,
-                    Err(error) => {
-                        return Err(Box::new(command_error(format!(
-                            "could not compare the retried password with the admitted one: {error}"
-                        ))));
-                    }
-                };
-                if !matched {
-                    // The password is left out of the request digest, so a retry that changed it
-                    // is a different command under the same reference.
-                    return Err(Box::new(conflicting_reference(
-                        &reference,
-                        CommandExecutionRequestConflict::Content,
-                    )));
-                }
-            }
+            self.validate_persistent_command_retry(&reference, &owner, request, &existing)
+                .await?;
             return Ok(CommandAdmission::Existing(existing));
         }
 
@@ -667,6 +683,18 @@ impl SessionServiceImpl {
             .await;
 
         let effect = match &request.body {
+            PersistentCommandRequestBody::Statement {
+                statement: Statement::RotateLicenseClusterKey(_),
+                ..
+            } => self
+                .prepare_cluster_key_rotation()
+                .map_err(|error| Box::new(command_error(format!("{error:#}"))))?,
+            PersistentCommandRequestBody::Statement {
+                statement: Statement::ReleaseLicense(_),
+                ..
+            } => self
+                .prepare_license_release()
+                .map_err(|error| Box::new(command_error(format!("{error:#}"))))?,
             PersistentCommandRequestBody::Statement {
                 statement: Statement::ActivateLicense(activate),
                 ..
@@ -988,6 +1016,13 @@ impl SessionServiceImpl {
                     .await;
                 }
             },
+            CommandExecutionEffect::RotateLicenseClusterKey { identity, .. } => {
+                self.rotate_license_cluster_key(&execution.reference, *identity)
+                    .await
+            }
+            CommandExecutionEffect::ReleaseLicense { binding, .. } => {
+                self.release_license(&execution.reference, *binding).await
+            }
             CommandExecutionEffect::ActivateLicense { binding, decision } => {
                 self.apply_license_activation(&execution.reference, *binding, *decision)
                     .await

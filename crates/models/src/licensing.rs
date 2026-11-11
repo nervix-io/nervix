@@ -1,10 +1,11 @@
-//! Incarnation-bound licensing connectivity observations and the licensing stop reason.
+//! Licensing statement values, incarnation-bound connectivity observations and the licensing stop
+//! reason.
 //!
 //! Layer: vocabulary.
-//! - **Owns.** Typed local connectivity, a reporting leader's tenure binding and why licensing
-//!   stops processing.
-//! - **Depends on.** Node identities, timestamps and serialization.
-//! - **Must not know.** Decisions, grants, service requests, gossip or policy evaluation.
+//! - **Owns.** Licensing statement bodies, credential redaction, local connectivity/tenure bindings
+//!   and why licensing stops processing.
+//! - **Depends on.** Licensing vocabulary, node identities, timestamps and serialization.
+//! - **Must not know.** Parser state, transport requests, policy decisions or runtime enforcement.
 
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
@@ -71,4 +72,41 @@ pub enum LicensingConnectionState {
 pub enum LicensingTransportFailure {
     Transport,
     Timeout,
+}
+
+/// An activation credential is transient input; durable execution retains only verified output.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize)]
+pub struct ActivateLicense {
+    pub kind: nervix_licensing_vocabulary::ActivationKind,
+    pub license_key: String,
+}
+
+impl std::fmt::Debug for ActivateLicense {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ActivateLicense")
+            .field("kind", &self.kind)
+            .finish_non_exhaustive()
+    }
+}
+
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
+pub struct RefreshLicense;
+
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
+pub struct ReleaseLicense;
+
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
+pub struct RotateLicenseClusterKey;
+
+impl Drop for ActivateLicense {
+    fn drop(&mut self) {
+        zeroize::Zeroize::zeroize(&mut self.license_key);
+    }
 }

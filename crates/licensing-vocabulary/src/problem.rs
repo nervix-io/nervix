@@ -5,13 +5,15 @@
 //! - **Depends on.** Serialization and primitive values.
 //! - **Must not know.** HTTP clients, problem-detail bodies, cryptography, Models or clocks.
 
+use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
 
 macro_rules! problem_codes {
     ($($variant:ident => ($code:literal, $status:literal, $title:literal, $retry:literal)),* $(,)?) => {
-        #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+        #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize)]
         pub enum ProblemCode { $(#[serde(rename = $code)] $variant,)* }
         impl ProblemCode {
+            pub const ALL: &'static [Self] = &[$(Self::$variant,)*];
             pub const fn as_str(self) -> &'static str { match self { $(Self::$variant => $code,)* } }
             pub const fn status(self) -> u16 { match self { $(Self::$variant => $status,)* } }
             pub const fn title(self) -> &'static str { match self { $(Self::$variant => $title,)* } }
