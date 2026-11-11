@@ -40,6 +40,8 @@ fn claim(incarnation: u64, bytes: u64) -> NodeCapabilityRecord {
             ClusterNodeIncarnation::new(incarnation),
         ),
         capabilities: NodeCapabilities {
+            runtime: nervix_models::DataPlaneSettings::default().capabilities(),
+            shutdown: nervix_models::ShutdownSettings::default().capabilities(),
             interconnect: nervix_interconnect::TransportSettings::default().capabilities(),
             dns: nervix_arbitrary::Arbitrary::new(&[], nervix_arbitrary::Domain::Vocabulary)
                 .node_capability_record()
@@ -208,6 +210,7 @@ fn capability_roll(run: ScenarioRun) -> Result<(), SimulationError> {
                     .await
                     .assured("the restarted peer answers within the host bound");
                     let make_payload = |sequence, bytes: Vec<u8>| RelayPayload {
+                        ack_timing: nervix_models::RemoteAckTiming::default(),
                         decoded_bytes: 0,
                         delivery: RelayDelivery {
                             channel_incarnation: [85; 16],

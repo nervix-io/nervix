@@ -68,6 +68,8 @@ pub enum PreflightError {
     ClientEndpointCapacity,
     #[error("the native runtime capacities do not fit the node")]
     RuntimeCapacity,
+    #[error("the committed runtime deadlines exceed this node’s drain/shutdown budget")]
+    RuntimeDeadlines,
     #[error("the derived memory pressure configuration is invalid")]
     MemoryPressure,
     #[error("the preflight's filesystem work could not be admitted")]
@@ -124,6 +126,7 @@ pub(in crate::application) struct PreflightOutcome {
     pub(in crate::application) dns: DnsResolver,
     pub(in crate::application) memory: NodeMemory,
     pub(in crate::application) capabilities: nervix_models::NodeCapabilities,
+    pub(in crate::application) data_plane: nervix_models::DataPlaneSettings,
     pub(in crate::application) peer_receive: nervix_interconnect::PeerReceiveSettings,
     pub(in crate::application) client_endpoints: crate::runtime::ClientEndpointSettings,
     pub(in crate::application) memory_pressure: crate::memory_pressure::MemoryPressureSettings,
@@ -147,6 +150,37 @@ struct PreparedDirectory {
 }
 
 impl Preflight<'_> {
+    fn runtime_capacity_for_volume(
+        &self,
+        capacity: ByteUnit,
+    ) -> Result<nervix_models::DataPlaneSettings, Report<PreflightError>> {
+        match self
+            .settings
+            .runtime
+            .data_plane
+            .for_temporary_volume(capacity.as_u64())
+        {
+            Ok(settings) => Ok(settings),
+            Err(error) => {
+                let context = match *error.current_context() {
+                    nervix_models::DataPlaneSettingsError::SnapshotVolume {
+                        setting,
+                        quota,
+                        ..
+                    } => PreflightError::QuotaExceedsVolume {
+                        setting,
+                        quota: ByteUnit::Byte(quota),
+                        capacity,
+                        directory: StagingDirectory::Temporary,
+                        path: self.temp_dir.to_path_buf(),
+                    },
+                    _ => PreflightError::RuntimeCapacity,
+                };
+                Err(error.change_context(context))
+            }
+        }
+    }
+
     /// Runs every check, refusing the node at the first one that fails.
     pub(in crate::application) async fn run(
         self,
@@ -222,7 +256,9 @@ impl Preflight<'_> {
             .peer_receive
             .resolve(executor.limits())
             .change_context(PreflightError::PeerReceiveLimits)?;
-        let capabilities = nervix_models::NodeCapabilities {
+        let mut capabilities = nervix_models::NodeCapabilities {
+            runtime: self.settings.runtime.data_plane.capabilities(),
+            shutdown: self.settings.shutdown.capabilities(),
             interconnect: self.settings.interconnect.capabilities(),
             dns: self.settings.dns.capabilities(),
             node_database: self.settings.node_database.capabilities(cpu_count),
@@ -278,6 +314,8 @@ impl Preflight<'_> {
             prepare_directory(&executor, StagingDirectory::Database, self.db_path).await?;
         let temporary =
             prepare_directory(&executor, StagingDirectory::Temporary, self.temp_dir).await?;
+        let data_plane = self.runtime_capacity_for_volume(temporary.capacity)?;
+        capabilities.runtime = data_plane.capabilities();
         let restore_staging_max_bytes = self
             .settings
             .runtime
@@ -314,6 +352,7 @@ impl Preflight<'_> {
             dns,
             memory,
             capabilities,
+            data_plane,
             peer_receive,
             client_endpoints,
             memory_pressure,
@@ -415,4 +454,16 @@ pub(in crate::application) fn validate_resource_volume(
         }
     }
     Ok(())
+}
+
+/// Validate the selected bootstrap or committed policy before running a domain or publishing
+/// readiness. A returning node's command-line seeds never substitute for its committed policy.
+pub(in crate::application) fn validate_runtime_budget(
+    parameters: &nervix_models::ClusterParameterValues,
+    node: &nervix_models::ClusterNodeName,
+    shutdown: nervix_models::ShutdownCapabilities,
+) -> Result<(), Report<PreflightError>> {
+    parameters
+        .validate_runtime_budget(node, shutdown)
+        .change_context(PreflightError::RuntimeDeadlines)
 }

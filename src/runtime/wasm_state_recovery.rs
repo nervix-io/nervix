@@ -15,14 +15,9 @@
 
 use super::*;
 
-/// How many refused lifetimes may be waiting for the control plane to decide at once.
-///
-/// A refused lifetime is raised once and held until the control plane answers it, so this bounds
-/// distinct lifetimes rather than repeated reports of one. Beyond this many, a branch reports its
-/// refusal as usual and leaves the raise to a later record.
-const WASM_STATE_RECOVERY_QUEUE: usize = 32;
-
 /// One refused guest-state lifetime, as its owner reports it to the control plane.
+/// The configured queue counts distinct lifetimes, each retained until a decision; an overflowing
+/// request reports the refusal as usual and leaves the raise to a later record.
 ///
 /// The placement and the refused generation are read from one another at construction and are never
 /// set apart, so a request cannot name a placement of one lifetime and a generation of another.
@@ -111,7 +106,8 @@ impl Runtime {
     pub(crate) fn attach_wasm_state_recovery_coordinator(
         &self,
     ) -> mpsc::Receiver<WasmStateRecoveryRequest> {
-        let (sender, receiver) = mpsc::channel(WASM_STATE_RECOVERY_QUEUE);
+        let (sender, receiver) =
+            mpsc::channel(self.inner.data_plane.wasm_recovery_capacity().arch_into());
         self.inner
             .wasm_state_recovery_requests
             .store(Some(StdArc::new(sender)));

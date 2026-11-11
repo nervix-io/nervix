@@ -1079,6 +1079,8 @@ impl LeadershipMove {
 #[derive(Debug, Clone)]
 pub(crate) struct TestClusterConfig {
     pub licensing_test_support: nervix_server::ConfiguredLicensingTestSupport,
+    pub runtime_parameters: nervix_models::ClusterParameterSeedValues,
+    pub runtime_capabilities: nervix_models::DataPlaneSettingOverrides,
     pub replica_count: usize,
     pub scheduler_mode: Option<SchedulerMode>,
     pub state_snapshot_interval: Duration,
@@ -1119,6 +1121,8 @@ impl Default for TestClusterConfig {
     fn default() -> Self {
         Self {
             licensing_test_support: nervix_server::ConfiguredLicensingTestSupport::default(),
+            runtime_parameters: Default::default(),
+            runtime_capabilities: Default::default(),
             replica_count: TEST_REPLICA_COUNT,
             scheduler_mode: None,
             state_snapshot_interval: TEST_STATE_SNAPSHOT_INTERVAL,
@@ -1153,7 +1157,7 @@ impl TestClusterConfig {
     /// The settings `node_id` starts with: the cluster's own, with the settings a scenario named
     /// for that node applied over them exactly as the server's command line reads them.
     fn node_settings(&self, node_id: &str) -> io::Result<NodeSettings> {
-        let settings = NodeSettings {
+        let mut settings = NodeSettings {
             raft: RaftTimings::resolve(Some(self.raft_heartbeat_interval))
                 .map_err(|report| io::Error::other(format!("{report:#}")))?,
             raft_retention: self.raft_retention,
@@ -1190,6 +1194,9 @@ impl TestClusterConfig {
             .map_err(|report| io::Error::other(format!("{report:#}")))?,
             ..NodeSettings::default()
         };
+        settings.runtime.data_plane =
+            nervix_models::DataPlaneSettings::resolve(self.runtime_capabilities)
+                .map_err(|report| io::Error::other(format!("{report:#}")))?;
         let Some(overrides) = self.node_setting_overrides.get(node_id) else {
             return Ok(settings);
         };
@@ -4659,6 +4666,18 @@ impl NodeHandle {
         }
         let mut settings = self.config.node_settings(&self.spec.node_id)?;
         let db_path = self.spec.db_path()?;
+        if self.spec.allow_bootstrap && !db_path.join("consensus").exists() {
+            // Scenario policy seeds enter through the same first-bootstrap input as CLI values.
+            // Returning nodes and every other member learn the committed policy from the cluster.
+            if settings.parameter_seeds.domain_drain_timeout.is_none() {
+                settings.parameter_seeds.domain_drain_timeout =
+                    self.config.runtime_parameters.domain_drain_timeout;
+            }
+            if settings.parameter_seeds.entity_gate_deadline.is_none() {
+                settings.parameter_seeds.entity_gate_deadline =
+                    self.config.runtime_parameters.entity_gate_deadline;
+            }
+        }
         if self.spec.allow_bootstrap
             && !db_path.join("consensus").exists()
             && settings.parameter_seeds.password_iterations.is_none()
@@ -4793,8 +4812,9 @@ impl NodeHandle {
             Duration::ZERO
         };
         let domain_drain_timeout = self
-            .fault_injection
-            .domain_drain_timeout()
+            .config
+            .runtime_parameters
+            .domain_drain_timeout
             .unwrap_or(nervix_models::DomainDrainTimeout::DEFAULT);
         let configured_phase_floor = application_drain_timeout
             .checked_add(branch_task_stop_timeout(domain_drain_timeout))
@@ -5689,19 +5709,67 @@ pub(crate) struct AcknowledgedHttpPublisher {
 }
 
 impl AcknowledgedHttpPublisher {
+    async fn post(&self, payload: &str) -> io::Result<reqwest::Response> {
+        self.client
+            .post(&self.uri)
+            .header("Host", &self.host)
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .body(payload.to_owned())
+            .send()
+            .await
+            .map_err(io::Error::other)
+    }
+
+    /// Wait through explicit pre-admission refusals, then require a completed graph ACK.
+    /// A failed or ambiguous admitted attempt is returned to the caller without replay.
+    pub(crate) async fn publish_after_admission_refusals(&self, payload: &str) -> io::Result<()> {
+        nervix_primitives::time::timeout(self.wait, async {
+            loop {
+                nervix_primitives::task::consume_budget().await;
+                let response = self.post(payload).await?;
+                let status = response.status();
+                let retry_after = response
+                    .headers()
+                    .get(reqwest::header::RETRY_AFTER)
+                    .cloned();
+                let body = response.bytes().await.map_err(io::Error::other)?;
+                let outcome: serde_json::Value =
+                    serde_json::from_slice(&body).map_err(io::Error::other)?;
+                if status == reqwest::StatusCode::OK
+                    && outcome == serde_json::json!({ "outcome": "completed", "cause": "none" })
+                {
+                    return Ok(());
+                }
+                if status != reqwest::StatusCode::SERVICE_UNAVAILABLE
+                    || outcome["outcome"] != "not_admitted"
+                {
+                    return Err(io::Error::other(format!(
+                        "the post received {status} {outcome} instead of its completed graph \
+                         acknowledgement"
+                    )));
+                }
+                let delay = match retry_after {
+                    Some(value) => Duration::from_secs(
+                        value
+                            .to_str()
+                            .map_err(io::Error::other)?
+                            .parse::<u64>()
+                            .map_err(io::Error::other)?,
+                    ),
+                    None => ACKNOWLEDGED_HTTP_RETRY_DELAY,
+                };
+                sleep(delay).await;
+            }
+        })
+        .await
+        .map_err(|error| io::Error::new(io::ErrorKind::TimedOut, error))?
+    }
+
     /// Posts once and requires a completed graph acknowledgement. A refusal stays a failure;
     /// there is no replay that could introduce another row into a cardinality assertion.
     pub(crate) async fn publish_once(&self, payload: &str) -> io::Result<()> {
         nervix_primitives::time::timeout(self.wait, async {
-            let response = self
-                .client
-                .post(&self.uri)
-                .header("Host", &self.host)
-                .header(reqwest::header::CONTENT_TYPE, "application/json")
-                .body(payload.to_owned())
-                .send()
-                .await
-                .map_err(io::Error::other)?;
+            let response = self.post(payload).await?;
             let status = response.status();
             let body = response.bytes().await.map_err(io::Error::other)?;
             if status != reqwest::StatusCode::OK {
@@ -5749,15 +5817,7 @@ impl AcknowledgedHttpPublisher {
         let deadline = Instant::now() + self.wait;
         loop {
             nervix_primitives::task::consume_budget().await;
-            let response = self
-                .client
-                .post(&self.uri)
-                .header("Host", &self.host)
-                .header(reqwest::header::CONTENT_TYPE, "application/json")
-                .body(payload.to_owned())
-                .send()
-                .await
-                .map_err(io::Error::other)?;
+            let response = self.post(payload).await?;
             let status = response.status();
             let retry_delay = match response.headers().get(reqwest::header::RETRY_AFTER) {
                 Some(value) => {

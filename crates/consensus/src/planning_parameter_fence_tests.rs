@@ -61,6 +61,7 @@ fn publish_timeout(state: &mut StateMachineData, seconds: u64) {
     );
     assert_eq!(admitted.response, ConsensusResponse::Applied);
     let inputs = ClusterParameterPlanningInputs {
+        capabilities: BTreeMap::new(),
         current,
         schedule: ClusterSchedule::from(&state.schedule).domains,
         domains: (&state.domains).into(),

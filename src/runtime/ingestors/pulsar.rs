@@ -64,7 +64,7 @@ impl PulsarTopicIngestorStartPlan {
             unacknowledged_admission: QueueAdmission::RefuseWhenFull,
             client_mounts: resolved.mounts.into_iter().collect(),
         }
-        .open::<PulsarTopicIngestor>(ingestor)
+        .open::<PulsarTopicIngestor>(runtime, ingestor)
         .await
     }
 

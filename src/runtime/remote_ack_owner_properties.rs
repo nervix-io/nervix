@@ -21,8 +21,8 @@ use nervix_models::{
 use nervix_primitives::sync::{Arc, atomic::Ordering, watch};
 
 use super::{
-    ADMISSION_SWEEPS, CLAIMS_CLOSED, PendingRemoteAck, REMOTE_ACK_SILENT_SWEEPS,
-    RelayAdmissionUpdate, RemoteDispatchError, RemoteDispatchRegistry,
+    ADMISSION_SWEEPS, CLAIMS_CLOSED, DeliveryRow, REMOTE_ACK_SILENT_SWEEPS, RelayAdmissionUpdate,
+    RemoteDispatchError, RemoteDispatchRegistry,
     model::{AdmissionUpdate, CorrelationModel, RecordExpectation},
 };
 use crate::runtime_ack::{AckCompletion, AckOutcome, AckProgress, AckRootTracker, AckSet};
@@ -72,6 +72,7 @@ pub(super) struct CorrelationCase {
     admissions: BTreeMap<u64, watch::Receiver<RelayAdmissionUpdate>>,
     probes: BTreeSet<u64>,
     bytes_per_row: usize,
+    bytes_per_delivery: usize,
     memory_capacity: u64,
 }
 
@@ -94,7 +95,10 @@ impl CorrelationCase {
             probes: BTreeSet::from([0, u64::MAX]),
             // The three generated receiver names all have this length. Detached rows inside an
             // attached batch are charged too, until the last attached row ends the delivery.
-            bytes_per_row: std::mem::size_of::<Option<PendingRemoteAck>>() + "node-1".len(),
+            bytes_per_row: std::mem::size_of::<DeliveryRow>() + "node-1".len(),
+            // Captured sweep policy occupies one header in the same allocation. It stays charged
+            // until the last attached record ends, independently of the number of empty rows.
+            bytes_per_delivery: std::mem::size_of::<DeliveryRow>(),
             memory_capacity: snapshot.capacity_bytes,
         };
         case.assert_matches();
@@ -223,7 +227,9 @@ impl CorrelationCase {
     }
 
     fn memory_refusal(&mut self, parameter: u8, mask: u8) {
-        let reserved = self.model.memory(self.bytes_per_row);
+        let reserved = self
+            .model
+            .memory(self.bytes_per_row, self.bytes_per_delivery);
         let available = self
             .memory_capacity
             .checked_sub(reserved)
@@ -345,7 +351,11 @@ impl CorrelationCase {
         assert_eq!(self.owners.deliveries.is_closed(), self.model.closed);
         assert_eq!(self.owners.admissions.is_closed(), self.model.closed);
         let memory = self.owners.executor.snapshot().relay_memory;
-        assert_eq!(memory.reserved_bytes, self.model.memory(self.bytes_per_row));
+        assert_eq!(
+            memory.reserved_bytes,
+            self.model
+                .memory(self.bytes_per_row, self.bytes_per_delivery)
+        );
         assert_eq!(memory.capacity_bytes, self.memory_capacity);
         assert_eq!(self.records.len(), self.model.records.len());
         for (actual, expected) in self.records.iter_mut().zip(&self.model.records) {

@@ -132,6 +132,7 @@ pub(in crate::runtime) fn materialize_output(
     processor: &ModelName,
     output: &BranchedProcessorOutputSpec,
     requirement: FlushPolicyRequirement,
+    immediate_minimum: Duration,
 ) -> error_stack::Result<RelayProcessorOutputTemplate, PlanningError> {
     let flush_policy = match output.flush_policy.as_ref() {
         Some(policy) => Some(parse_branch_flush_policy(
@@ -139,6 +140,7 @@ pub(in crate::runtime) fn materialize_output(
             processor,
             &output.relay,
             policy,
+            immediate_minimum,
         )?),
         None if requirement == FlushPolicyRequirement::Required => {
             return Err(Report::new(PlanningError::MissingFlushPolicy {
@@ -163,10 +165,17 @@ fn materialize_outputs(
     processor: &ModelName,
     outputs: &BranchedProcessorOutputsSpec,
     requirement: FlushPolicyRequirement,
+    immediate_minimum: Duration,
 ) -> error_stack::Result<RelayProcessorOutputsTemplate, PlanningError> {
     let mut routes = Vec::with_capacity(outputs.routes.len());
     for output in &outputs.routes {
-        routes.push(materialize_output(kind, processor, output, requirement)?);
+        routes.push(materialize_output(
+            kind,
+            processor,
+            output,
+            requirement,
+            immediate_minimum,
+        )?);
     }
     Ok(RelayProcessorOutputsTemplate { routes })
 }
@@ -176,13 +185,16 @@ pub(in crate::runtime) fn parse_branch_flush_policy(
     processor: &ModelName,
     route: &RelayName,
     policy: &FlushPolicy,
+    immediate_minimum: Duration,
 ) -> error_stack::Result<RuntimeFlushPolicy, PlanningError> {
     let FlushPolicy::Each {
         interval,
         max_batch_size,
     } = policy
     else {
-        return Ok(RuntimeFlushPolicy::Immediate);
+        return Ok(RuntimeFlushPolicy::Immediate {
+            minimum: immediate_minimum,
+        });
     };
     let parsed_interval = parse_duration_text(interval).change_context_lazy(|| {
         PlanningError::InvalidFlushInterval {
@@ -253,6 +265,7 @@ fn materialize_nodes(
     relay_schemas: &HashMap<RelayName, Arc<CompiledSchema>>,
     udfs: Option<&UdfExecutor>,
     vm_settings: nervix_vm::VmSettings,
+    immediate_minimum: Duration,
 ) -> error_stack::Result<Vec<RelayProcessorTemplate>, PlanningError> {
     let mut out = Vec::new();
     for node in nodes {
@@ -283,6 +296,7 @@ fn materialize_nodes(
                         &node.processor,
                         output_routes,
                         FlushPolicyRequirement::Required,
+                        immediate_minimum,
                     )?,
                     deduplicate_on: deduplicate_on.clone(),
                     max_time: parse_max_time(node.kind, &node.processor, max_time)?,
@@ -364,6 +378,7 @@ fn materialize_nodes(
                         &node.processor,
                         output_routes,
                         FlushPolicyRequirement::NotUsed,
+                        immediate_minimum,
                     )?;
                     for output in &mut materialized_outputs.routes {
                         output.construction.assignments.clear();
@@ -424,6 +439,7 @@ fn materialize_nodes(
                         &node.processor,
                         output_routes,
                         FlushPolicyRequirement::Required,
+                        immediate_minimum,
                     )?,
                     order_by: order_by.clone(),
                     max_time: parse_max_time(node.kind, &node.processor, max_time)?,
@@ -443,6 +459,7 @@ fn materialize_nodes(
                         &node.processor,
                         output_routes,
                         FlushPolicyRequirement::Required,
+                        immediate_minimum,
                     )?,
                     left_relays: left_relays.clone(),
                     right_relays: right_relays.clone(),
@@ -462,6 +479,7 @@ fn materialize_nodes(
                             &node.processor,
                             output_routes,
                             FlushPolicyRequirement::Required,
+                            immediate_minimum,
                         )?,
                     }
                 }
@@ -508,6 +526,7 @@ fn materialize_nodes(
                                 &node.processor,
                                 output_routes,
                                 FlushPolicyRequirement::Required,
+                                immediate_minimum,
                             )?,
                             resource: resource.clone(),
                             resource_version: *resource_version,
@@ -538,6 +557,7 @@ fn materialize_nodes(
                                 &node.processor,
                                 output_routes,
                                 FlushPolicyRequirement::Required,
+                                immediate_minimum,
                             )?,
                             resource: resource.clone(),
                             resource_version: *resource_version,
@@ -561,6 +581,7 @@ fn materialize_nodes(
                         &node.processor,
                         output_routes,
                         FlushPolicyRequirement::NotUsed,
+                        immediate_minimum,
                     )?,
                     resource: resource.clone(),
                     resource_version: *resource_version,
@@ -619,6 +640,7 @@ pub(in crate::runtime) fn materialize_ingestor_route_template(
     unit: Unit,
     route: &PlannedEntryRoute,
     relay_services: &HashMap<RelayName, Arc<RelayBoundaryServices>>,
+    immediate_minimum: Duration,
 ) -> error_stack::Result<IngestorRouteTemplate, PlanningError> {
     let Some(services) = relay_services.get(&route.relay).cloned() else {
         return Err(Report::new(PlanningError::MissingRelayServices {
@@ -632,8 +654,13 @@ pub(in crate::runtime) fn materialize_ingestor_route_template(
         route.relay.clone(),
         RelayProcessorRelayTemplate { services },
     );
-    let flush_policy =
-        parse_branch_flush_policy(kind, identifier, &route.relay, &route.flush_policy)?;
+    let flush_policy = parse_branch_flush_policy(
+        kind,
+        identifier,
+        &route.relay,
+        &route.flush_policy,
+        immediate_minimum,
+    )?;
     let mut branch = BranchInstanceTemplate {
         revision: ProcessorPlanRevision::new(),
         owner: NodeUnitRef::new(NodeRef::new(kind, identifier), unit),
@@ -659,6 +686,13 @@ pub(in crate::runtime) fn materialize_ingestor_route_template(
     })
 }
 
+/// Resolved local execution capacities used while materializing one processor template.
+#[derive(Clone, Copy)]
+pub(in crate::runtime) struct ProcessorTemplateSettings {
+    pub vm: nervix_vm::VmSettings,
+    pub immediate_flush_minimum: Duration,
+}
+
 pub(in crate::runtime) fn materialize_processor_instance_template(
     node: &BranchedProcessorNodeSpec,
     unit: Unit,
@@ -666,7 +700,7 @@ pub(in crate::runtime) fn materialize_processor_instance_template(
     relay_schemas: &HashMap<RelayName, Arc<CompiledSchema>>,
     relay_services: &HashMap<RelayName, Arc<RelayBoundaryServices>>,
     udfs: Option<&UdfExecutor>,
-    vm_settings: nervix_vm::VmSettings,
+    settings: ProcessorTemplateSettings,
 ) -> error_stack::Result<BranchInstanceTemplate, PlanningError> {
     let spec = &node.spec;
     let Some(root_relay) = spec.input_relays.first().cloned() else {
@@ -681,9 +715,15 @@ pub(in crate::runtime) fn materialize_processor_instance_template(
         spec.output_relays(),
         relay_services,
     )?;
-    let template = materialize_nodes(std::slice::from_ref(spec), relay_schemas, udfs, vm_settings)?
-        .pop()
-        .verified("materialize_nodes answers one template per spec and this call passes one spec");
+    let template = materialize_nodes(
+        std::slice::from_ref(spec),
+        relay_schemas,
+        udfs,
+        settings.vm,
+        settings.immediate_flush_minimum,
+    )?
+    .pop()
+    .verified("materialize_nodes answers one template per spec and this call passes one spec");
     let mut processors = HashMap::default();
     processors.insert(spec.processor.clone(), template);
     Ok(BranchInstanceTemplate {
@@ -1223,7 +1263,12 @@ pub(in crate::runtime) async fn bind_published_processor_plans(
                     relay_schemas,
                     relay_services,
                     udfs,
-                    runtime.inner.vm_settings,
+                    ProcessorTemplateSettings {
+                        vm: runtime.inner.vm_settings,
+                        immediate_flush_minimum: runtime
+                            .data_plane_settings()
+                            .immediate_flush_minimum(),
+                    },
                 )?;
                 bind_processor_template_programs(
                     &mut template,

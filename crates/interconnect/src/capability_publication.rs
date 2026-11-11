@@ -62,6 +62,8 @@ mod tests {
                         ClusterNodeIncarnation::new(1),
                     ),
                     capabilities: NodeCapabilities {
+                        runtime: nervix_models::DataPlaneSettings::default().capabilities(),
+                        shutdown: nervix_models::ShutdownSettings::default().capabilities(),
                         interconnect: crate::TransportSettings::default().capabilities(),
                         dns: nervix_arbitrary::Arbitrary::new(
                             &[],

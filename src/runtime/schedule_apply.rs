@@ -733,7 +733,7 @@ impl Runtime {
                     let Some(task) = previous else {
                         continue;
                     };
-                    task.stop(PROCESSOR_BRANCH_TASK_SHUTDOWN_GRACE)
+                    task.stop(self.task_stop_grace())
                         .await
                         .change_context_lazy(|| ExecutionBuildError::StopRelayStateTask {
                             relay: relay.clone(),
@@ -790,7 +790,7 @@ impl Runtime {
                                     .remove(&RelayUnitRef::new(relay.clone(), *unit))
                             });
                     if let Some(task) = previous {
-                        task.stop(PROCESSOR_BRANCH_TASK_SHUTDOWN_GRACE)
+                        task.stop(self.task_stop_grace())
                             .await
                             .change_context_lazy(|| ExecutionBuildError::StopRelayStateTask {
                                 relay: relay.clone(),
@@ -1112,7 +1112,7 @@ impl Runtime {
 
                 for task in previous_state_task {
                     let unit = task.unit;
-                    task.stop(PROCESSOR_BRANCH_TASK_SHUTDOWN_GRACE)
+                    task.stop(self.task_stop_grace())
                         .await
                         .change_context_lazy(|| ExecutionBuildError::StopRelayStateTask {
                             relay: relay.clone(),
@@ -1302,7 +1302,7 @@ impl Runtime {
                 }
                 for runtime in old_entrypoints {
                     nervix_primitives::task::consume_budget().await;
-                    runtime.shutdown().await;
+                    runtime.shutdown(self.task_stop_grace()).await;
                 }
 
                 if Self::scheduled_node_executes_locally(desired_node, local_node_id) {
@@ -1523,7 +1523,7 @@ impl Runtime {
                 let had_old_task = old_task.is_some();
                 let handoffs = if let Some(old_task) = old_task {
                     old_task
-                        .handoff()
+                        .handoff(self.task_stop_grace())
                         .await
                         .change_context_lazy(|| ExecutionBuildError::ProcessorHandoff {
                             node: entity.clone(),
@@ -1603,6 +1603,7 @@ impl Runtime {
                 BoundMessageErrorRoutes::bind(
                     revision.message_errors.clone(),
                     MessageErrorRouteBindingContext {
+                        immediate_minimum: self.data_plane_settings().immediate_flush_minimum(),
                         vm_settings: self.inner.vm_settings,
                         relay_services: &execution.relay_services,
                         materialized_stream_specs: &execution.materialized_stream_specs,
@@ -1709,6 +1710,7 @@ impl Runtime {
                 BoundMessageErrorRoutes::bind(
                     revision.message_errors.clone(),
                     MessageErrorRouteBindingContext {
+                        immediate_minimum: self.data_plane_settings().immediate_flush_minimum(),
                         vm_settings: self.inner.vm_settings,
                         relay_services: &execution.relay_services,
                         materialized_stream_specs: &execution.materialized_stream_specs,
@@ -1820,12 +1822,16 @@ impl Runtime {
                     }
                     for commands in instance_commands {
                         nervix_primitives::task::consume_budget().await;
-                        ScheduledEmitterTask::reconfigure_via(&commands, policy.clone())
-                            .await
-                            .change_context_lazy(|| ExecutionBuildError::ReconfigureEmitterFlush {
-                                emitter: emitter.clone(),
-                            })
-                            .change_context_lazy(build)?;
+                        ScheduledEmitterTask::reconfigure_via(
+                            &commands,
+                            policy.clone(),
+                            self.task_stop_grace(),
+                        )
+                        .await
+                        .change_context_lazy(|| ExecutionBuildError::ReconfigureEmitterFlush {
+                            emitter: emitter.clone(),
+                        })
+                        .change_context_lazy(build)?;
                     }
                 }
             }

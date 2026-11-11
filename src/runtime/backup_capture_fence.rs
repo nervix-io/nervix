@@ -30,7 +30,21 @@ use nervix_primitives::{
 
 // The low bits count publications that acquired the current generation. Closing a generation
 // prevents new publishers from entering; a later generation opens only after its snapshot closes.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the capture fence reserves bit thirty-two as its closed flag"
+    )
+)]
 const CLOSED: u64 = 1 << 32;
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "capture admissions occupy the bits below the closed flag"
+    )
+)]
 const ACTIVE: u64 = CLOSED - 1;
 
 #[derive(Debug, Default)]

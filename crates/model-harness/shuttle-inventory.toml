@@ -264,6 +264,8 @@ checks = [
   "runtime::relay_channel::tests::shuttle_an_audience_registering_during_parent_shutdown_observes_the_ending",
   "runtime::relay_channel::tests::shuttle_cancelling_a_partial_audience_admission_wakes_a_sibling_publisher",
   "runtime::relay_subscription::shuttle_tests::shuttle_an_attachment_racing_a_redefinition_is_refused_or_closed_by_it",
+  "runtime::remote_dispatch::shuttle_tests::shuttle_retained_deliveries_keep_their_policy_and_late_sweeps_skip_missed_ticks",
+  "runtime::remote_dispatch::shuttle_tests::shuttle_registration_deadlines_survive_a_racing_sweep",
   "runtime::remote_dispatch::shuttle_tests::shuttle_a_report_racing_the_final_sweep_keeps_the_share_it_reached",
   "runtime::remote_dispatch::shuttle_tests::shuttle_a_new_registrar_keeps_its_terminal_ack_while_its_live_view_publication_catches_up",
   "runtime::remote_dispatch::shuttle_tests::shuttle_delayed_events_cannot_resolve_a_reused_delivery_position",

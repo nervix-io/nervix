@@ -56,8 +56,24 @@ use nervix_primitives::sync::atomic::AtomicU64;
 use super::*;
 use crate::runtime_schema::ClientBatchLimits;
 
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "one retained client intake job applies backpressure before another is accepted"
+    )
+)]
+const CLIENT_INTAKE_JOB_CAPACITY: usize = 1;
+
 /// The most bytes of a failure's description a producer is told, so an outcome stays one small
 /// frame whatever failed downstream.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "a producer outcome keeps its diagnostic detail within one small response frame"
+    )
+)]
 const MAX_OUTCOME_DETAIL_BYTES: usize = 1024;
 
 /// The identity the serving side of a producer gave one submitted batch, echoed in its outcome.
@@ -777,7 +793,7 @@ impl Runtime {
         );
         let readiness = self.prepare_ingestor_readiness(domain, &ingestor.name, Unit::SINGLE);
         let (shutdown_tx, _) = watch::channel(false);
-        let (jobs, job_receiver) = mpsc::channel(1);
+        let (jobs, job_receiver) = mpsc::channel(CLIENT_INTAKE_JOB_CAPACITY);
         let execution = Arc::new(ClientExecution {
             contract: plan.contract,
             generation,

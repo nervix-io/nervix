@@ -692,6 +692,7 @@ tags = [
   "@client_io_03_generation",
   "@client_wire_subscription_timeout",
   "@remote_ack_owners",
+  "@runtime_settings",
   "@backup_wait",
   "@client_wire_backup_outage",
   "@stopped_checkpoint_writes",
@@ -1302,7 +1303,7 @@ selections = ["deloxide", "deloxide-order", "deloxide-stress"]
 test = "runtime::materialized_state::publication_tests::deloxide_materialized_publications"
 
 [[workload]]
-coverage = "Remote acknowledgement silence sweeps whose ticks are already due when runtime teardown cancels them, and the registry's final resolution, under tracked position guards."
+coverage = "Captured timing cohorts retain their own silence bounds, late sweeps skip missed ticks, and the earliest wake deadline coalesces registrations under its tracked guard without retaining that guard during position scans. Runtime teardown cancels already-due scans before the registry resolves retained acknowledgements. Timers, Notify and scheduling are untracked."
 id = "owner.remote-ack-silence-sweeps"
 invariant = "One fresh diagnostic process ends overrunning silence sweeps through runtime teardown after the sweep in progress, lets the registry resolve the acknowledgement that sweep kept, and records no finding."
 invocation = "owner-tests"
@@ -4603,6 +4604,8 @@ workloads = [
 [[owner]]
 path = "src/runtime/entity_gate.rs"
 workloads = [
+  "scenario.runtime-settings-materialized-capacity",
+  "stress.runtime-settings-materialized-capacity",
   "scenario.ingestor-instance-01",
   "stress.ingestor-instance-01",
   "scenario.ingestor-instance-02",
@@ -4800,6 +4803,8 @@ workloads = [
 [[owner]]
 path = "src/runtime/materialized_state.rs"
 workloads = [
+  "scenario.runtime-settings-materialized-capacity",
+  "stress.runtime-settings-materialized-capacity",
   "scenario.relay-partition-state-failover",
   "stress.relay-partition-state-failover",
   "scenario.restore-publication-coordinator",
@@ -4910,6 +4915,8 @@ workloads = [
 [[owner]]
 path = "src/runtime/remote_ack_owner.rs"
 workloads = [
+  "scenario.runtime-settings-lost-ack",
+  "stress.runtime-settings-lost-ack",
   "owner.remote-ack-silence-sweeps",
   "scenario.remote-ack-branches",
   "scenario.remote-ack-loss",
@@ -6778,3 +6785,104 @@ selections = ["deloxide-stress-restore"]
 gap = "The new per-template client/server cache mutex serializes one bounded config clone and provider replacement. Public outward TLS policy scenarios and the production-owner Shuttle check cover policy/capture behavior in ordinary and modeled modes. Diagnostic campaigns are deliberately unrun under the live Task Execution Template's temporary Deloxide CI/local cost policy; no tracked-lock execution evidence is claimed."
 path = "crates/tls/src/lib.rs"
 workloads = []
+
+
+[[workload]]
+coverage = "Sealed capture, entity-gate drain, staged restore and materialized publication acquire tracked owner locks; HTTP and filesystem waits remain untracked."
+examples = 2
+feature = "tests/features/cluster/runtime_settings.feature"
+id = "scenario.runtime-settings-materialized-capacity"
+invariant = "The acknowledged materialized relay captures and restores all rows within the resolved relay metadata bound."
+invocation = "scenarios"
+scenario = "Materialized metadata above eight MiB captures and restores on <cluster_size> nodes"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: Sealed capture, entity-gate drain, staged restore and materialized publication acquire tracked owner locks; HTTP and filesystem waits remain untracked."
+examples = 2
+feature = "tests/features/cluster/runtime_settings.feature"
+id = "stress.runtime-settings-materialized-capacity"
+invariant = "The acknowledged materialized relay captures and restores all rows within the resolved relay metadata bound."
+invocation = "stress-restore-scenarios"
+scenario = "Materialized metadata above eight MiB captures and restores on <cluster_size> nodes"
+selections = ["deloxide-stress-restore"]
+
+[[workload]]
+coverage = "Parameter commit and runtime teardown reach tracked control-plane and lifecycle locks; duration arithmetic is synchronous and untracked."
+examples = 2
+feature = "tests/features/cluster/runtime_settings.feature"
+id = "scenario.runtime-settings-ack-policy"
+invariant = "A coherent timing group commits atomically and an incoherent update changes nothing."
+invocation = "scenarios"
+scenario = "A remote acknowledgement timing group commits together on <cluster_size> nodes"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: Parameter commit and runtime teardown reach tracked control-plane and lifecycle locks; duration arithmetic is synchronous and untracked."
+examples = 2
+feature = "tests/features/cluster/runtime_settings.feature"
+id = "stress.runtime-settings-ack-policy"
+invariant = "A coherent timing group commits atomically and an incoherent update changes nothing."
+invocation = "stress-scenarios"
+scenario = "A remote acknowledgement timing group commits together on <cluster_size> nodes"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Ingestor lifecycle, relay publication and teardown reach tracked locks; broker I/O, grouping buffers and async timing are untracked."
+examples = 2
+feature = "tests/features/cluster/runtime_settings.feature"
+id = "scenario.runtime-settings-ingest-grouping"
+invariant = "The emitter observes two full three-row groups under local grouping capabilities."
+invocation = "scenarios"
+scenario = "Local ingest grouping closes full three-row batches on <cluster_size> nodes"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: Ingestor lifecycle, relay publication and teardown reach tracked locks; broker I/O, grouping buffers and async timing are untracked."
+examples = 2
+feature = "tests/features/cluster/runtime_settings.feature"
+id = "stress.runtime-settings-ingest-grouping"
+invariant = "The emitter observes two full three-row groups under local grouping capabilities."
+invocation = "stress-scenarios"
+scenario = "Local ingest grouping closes full three-row batches on <cluster_size> nodes"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Committed capability validation and node lifecycle acquire tracked owner locks; pure deadline comparison is outside detector evidence."
+examples = 2
+feature = "tests/features/cluster/runtime_settings.feature"
+id = "scenario.runtime-settings-drain-budget"
+invariant = "Domain and gate policy cannot exceed any live node drain or shutdown capability."
+invocation = "scenarios"
+scenario = "A domain drain cannot exceed a live node's shutdown budget on <cluster_size> nodes"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: Committed capability validation and node lifecycle acquire tracked owner locks; pure deadline comparison is outside detector evidence."
+examples = 2
+feature = "tests/features/cluster/runtime_settings.feature"
+id = "stress.runtime-settings-drain-budget"
+invariant = "Domain and gate policy cannot exceed any live node drain or shutdown capability."
+invocation = "stress-scenarios"
+scenario = "A domain drain cannot exceed a live node's shutdown budget on <cluster_size> nodes"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Remote correlation and root lifecycle use tracked locks; network loss, elapsed timing, Kafka confirmation and async wake ordering are untracked."
+examples = 1
+feature = "tests/features/cluster/runtime_settings.feature"
+id = "scenario.runtime-settings-lost-ack"
+invariant = "A lost terminal ACK expires under the captured short policy and sequential Kafka ingestion resumes within the measured bound."
+invocation = "scenarios"
+scenario = "A committed silence policy expires a lost forwarded acknowledgement sooner"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: Remote correlation and root lifecycle use tracked locks; network loss, elapsed timing, Kafka confirmation and async wake ordering are untracked."
+examples = 1
+feature = "tests/features/cluster/runtime_settings.feature"
+id = "stress.runtime-settings-lost-ack"
+invariant = "A lost terminal ACK expires under the captured short policy and sequential Kafka ingestion resumes within the measured bound."
+invocation = "stress-scenarios"
+scenario = "A committed silence policy expires a lost forwarded acknowledgement sooner"
+selections = ["deloxide-stress"]

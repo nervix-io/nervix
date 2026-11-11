@@ -739,3 +739,83 @@ mod tests {
         );
     }
 }
+
+/// Conservative archive accounting, independent of data values and with no temporary remote
+/// allocation. Each JSON character pays 32 bytes: more than an archived scalar/list element
+/// and its alignment; strings' escaped spelling never understates their encoded bytes. A field
+/// additionally pays 64 bytes for its name/value descriptors. The frame reserves 256 bytes for
+/// its root, vectors, cursor and alignment. One oversized key still makes cursor progress; the
+/// transport's actual frame limit remains the authority for refusing an unrepresentable key.
+#[derive(Clone, Copy)]
+pub(super) struct BranchKeyPageBudget {
+    entries: std::num::NonZeroUsize,
+    remaining: u64,
+}
+impl BranchKeyPageBudget {
+    pub(super) fn entries(self) -> std::num::NonZeroUsize {
+        self.entries
+    }
+    pub(super) fn new(bytes: u64, entry: usize) -> Self {
+        let entries =
+            usize::try_from(bytes / u64::try_from(entry).assured("archive entry size fits u64"))
+                .unwrap_or(usize::MAX)
+                .max(1);
+        Self {
+            entries: std::num::NonZeroUsize::new(entries).assured("at least one entry"),
+            remaining: nervix_primitives::expect_lint!(
+                nervix::clamped_arithmetic,
+                "a frame budget smaller than its envelope leaves zero key capacity",
+                bytes.saturating_sub(256)
+            ),
+        }
+    }
+    pub(super) fn include(&mut self, branch: Option<&BranchKey>, listed: usize) -> bool {
+        let bytes = match branch {
+            Some(key) => {
+                let text = u64::try_from(key.as_str().len()).assured("branch key length fits u64");
+                let fields =
+                    u64::try_from(key.field_count()).assured("branch field count fits u64");
+                let text_bytes = nervix_primitives::expect_lint!(
+                    nervix::clamped_arithmetic,
+                    "an unrepresentable text charge consumes the entire page budget",
+                    text.saturating_mul(32)
+                );
+                let field_bytes = nervix_primitives::expect_lint!(
+                    nervix::clamped_arithmetic,
+                    "an unrepresentable descriptor charge consumes the entire page budget",
+                    fields.saturating_mul(64)
+                );
+                let key_bytes = nervix_primitives::expect_lint!(
+                    nervix::clamped_arithmetic,
+                    "an unrepresentable combined key charge consumes the entire page budget",
+                    text_bytes.saturating_add(field_bytes)
+                );
+                nervix_primitives::expect_lint!(
+                    nervix::clamped_arithmetic,
+                    "adding the fixed key envelope cannot wrap an oversized charge into capacity",
+                    key_bytes.saturating_add(128)
+                )
+            }
+            None => 128,
+        };
+        if bytes > self.remaining && listed != 0 {
+            return false;
+        }
+        self.remaining = nervix_primitives::expect_lint!(
+            nervix::clamped_arithmetic,
+            "the first oversized key is allowed for cursor progress and leaves zero remaining \
+             capacity",
+            self.remaining.saturating_sub(bytes)
+        );
+        true
+    }
+}
+#[cfg(test)]
+impl From<std::num::NonZeroUsize> for BranchKeyPageBudget {
+    fn from(entries: std::num::NonZeroUsize) -> Self {
+        Self {
+            entries,
+            remaining: u64::MAX,
+        }
+    }
+}

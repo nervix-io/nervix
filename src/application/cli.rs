@@ -16,6 +16,7 @@ mod cluster_parameters;
 mod connector_host;
 mod consensus;
 mod consensus_operations;
+mod data_plane;
 mod database;
 #[cfg(feature = "deloxide")]
 mod diagnostics;
@@ -58,7 +59,7 @@ pub use self::{
 
 #[derive(Parser, Debug, Clone)]
 #[command(name = "nervix-server")]
-#[command(about = "Plexus gRPC server")]
+#[command(about = "Nervix gRPC server")]
 pub struct Args {
     /// Who the node is, where it listens and is reached, and the files and directories it uses.
     #[command(flatten)]

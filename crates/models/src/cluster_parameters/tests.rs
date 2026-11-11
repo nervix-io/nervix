@@ -14,8 +14,15 @@ fn parameters(input: &[u8; 384]) -> ClusterParameterValues {
         licensing_request_timeout: Some(generated.licensing_request_timeout()),
         licensing_retry_backoff_max: Some(generated.licensing_retry_backoff_max()),
         licensing_stream_idle_timeout: Some(generated.licensing_stream_idle_timeout()),
+        payload_unfold_limit: Some(generated.payload_unfold_limit()),
         password_iterations: Some(generated.password_iterations()),
         node_unavailability_timeout: Some(generated.node_unavailability_timeout()),
+        remote_ack_alive_interval: Some(generated.remote_ack_alive_interval()),
+        remote_ack_dispatch_timeout: Some(generated.remote_ack_dispatch_timeout()),
+        remote_ack_silence_timeout: Some(generated.remote_ack_silence_timeout()),
+        remote_ack_sweep_interval: Some(generated.remote_ack_sweep_interval()),
+        remote_relay_total_timeout: Some(generated.remote_relay_total_timeout()),
+        remote_relay_instantiation_wait: Some(generated.remote_relay_instantiation_wait()),
         domain_drain_timeout: Some(generated.domain_drain_timeout()),
         entity_gate_deadline: Some(generated.entity_gate_deadline()),
         transaction_idle_timeout: Some(generated.transaction_idle_timeout()),
@@ -98,6 +105,15 @@ fn bolero_cluster_parameter_records_preserve_every_value() {
 fn every_duration_refuses_zero_at_its_definition_boundary() {
     let current = ClusterParameterValues::default();
     let changes = [
+        ClusterParameterChange::LicensingRequestTimeout(Duration::ZERO),
+        ClusterParameterChange::LicensingRetryBackoffMax(Duration::ZERO),
+        ClusterParameterChange::LicensingStreamIdleTimeout(Duration::ZERO),
+        ClusterParameterChange::RemoteAckAliveInterval(Duration::ZERO),
+        ClusterParameterChange::RemoteAckDispatchTimeout(Duration::ZERO),
+        ClusterParameterChange::RemoteAckSilenceTimeout(Duration::ZERO),
+        ClusterParameterChange::RemoteAckSweepInterval(Duration::ZERO),
+        ClusterParameterChange::RemoteRelayTotalTimeout(Duration::ZERO),
+        ClusterParameterChange::RemoteRelayInstantiationWait(Duration::ZERO),
         ClusterParameterChange::NodeUnavailabilityTimeout(Duration::ZERO),
         ClusterParameterChange::DomainDrainTimeout(Duration::ZERO),
         ClusterParameterChange::EntityGateDeadline(Duration::ZERO),
@@ -118,6 +134,43 @@ fn every_duration_refuses_zero_at_its_definition_boundary() {
             &ClusterParameterError::NonPositiveDuration { parameter }
         );
     }
+}
+
+#[test]
+fn compact_parameters_preserve_count_and_full_width_byte_boundaries() {
+    let count = u64::from(u32::MAX);
+    let values = ClusterParameterValues::resolve(ClusterParameterSeedValues {
+        payload_unfold_limit: Some(count),
+        transaction_max_statements: Some(count),
+        transaction_max_open: Some(count),
+        command_execution_capacity: Some(count),
+        replica_count: Some(count),
+        max_batch_messages: Some(count),
+        client_batch_rows: Some(count),
+        http_header_fields: Some(HttpHeaderFields::MAXIMUM),
+        password_iterations: Some(PasswordIterations::MAXIMUM),
+        transaction_max_source_bytes: Some(u64::MAX),
+        resource_max_file_count: Some(u64::MAX),
+        resource_max_archive_bytes: Some(u64::MAX),
+        resource_max_extracted_bytes: Some(u64::MAX),
+        ..Default::default()
+    })
+    .assured("each semantic boundary remains accepted");
+    let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&values).assured("current values archive");
+    assert_eq!(
+        rkyv::from_bytes::<ClusterParameterValues, rkyv::rancor::Error>(&bytes)
+            .assured("current values recover without narrowing"),
+        values
+    );
+    assert_eq!(
+        serde_json::from_value::<ClusterParameterValues>(
+            serde_json::to_value(values).assured("current values encode as JSON"),
+        )
+        .assured("JSON keeps semantic values"),
+        values
+    );
+    assert_eq!(values.payload_unfold_limit(), count);
+    assert_eq!(values.resource_max_archive_bytes(), u64::MAX);
 }
 
 #[test]
@@ -231,4 +284,80 @@ fn delayed_observations_and_installations_preserve_the_newest_coherent_revision(
         }))
         .is_err()
     );
+}
+
+#[test]
+fn remote_ack_timing_changes_are_one_coherent_atomic_group() {
+    let current = ClusterParameterValues::default();
+    let updates = ClusterParameterUpdates::try_from(vec![
+        ClusterParameterChange::RemoteAckAliveInterval(Duration::from_millis(1)),
+        ClusterParameterChange::RemoteAckDispatchTimeout(Duration::from_millis(1)),
+        ClusterParameterChange::RemoteAckSilenceTimeout(Duration::from_millis(10)),
+        ClusterParameterChange::RemoteAckSweepInterval(Duration::from_millis(1)),
+        ClusterParameterChange::RemoteRelayTotalTimeout(Duration::from_millis(50)),
+        ClusterParameterChange::RemoteRelayInstantiationWait(Duration::from_millis(5)),
+    ])
+    .assured("one assignment per timing");
+    let committed = current
+        .changed(&updates)
+        .assured("the complete group is coherent");
+    let invalid = [
+        ClusterParameterChange::RemoteAckSilenceTimeout(Duration::from_millis(4)),
+        ClusterParameterChange::RemoteAckSweepInterval(Duration::from_millis(3)),
+        ClusterParameterChange::RemoteRelayTotalTimeout(Duration::from_millis(2)),
+    ];
+    for change in invalid {
+        let updates = ClusterParameterUpdates::try_from(vec![change]).assured("one assignment");
+        assert!(committed.changed(&updates).is_err());
+        assert_eq!(
+            committed.remote_ack_silence_timeout(),
+            Duration::from_millis(10)
+        );
+        assert_eq!(
+            committed.remote_relay_total_timeout(),
+            Duration::from_millis(50)
+        );
+    }
+}
+
+#[test]
+fn lifecycle_policy_fits_each_local_shutdown_budget_independently() {
+    let node = crate::ClusterNodeName::parse("node-1").assured("fixture name");
+    let values = ClusterParameterValues::default();
+    values
+        .validate_runtime_budget(&node, crate::ShutdownSettings::default().capabilities())
+        .assured("default lifecycle policy fits");
+    for (drain_timeout, shutdown_timeout) in [
+        (Duration::from_secs(29), Duration::from_secs(50)),
+        (Duration::from_secs(50), Duration::from_secs(29)),
+    ] {
+        assert!(
+            values
+                .validate_runtime_budget(
+                    &node,
+                    crate::ShutdownCapabilities {
+                        drain_timeout,
+                        shutdown_timeout
+                    }
+                )
+                .is_err()
+        );
+    }
+    let updates =
+        ClusterParameterUpdates::try_from(vec![ClusterParameterChange::EntityGateDeadline(
+            Duration::from_secs(40),
+        )])
+        .assured("one assignment");
+    let values = values
+        .changed(&updates)
+        .assured("the gate need not be shorter than the domain drain");
+    values
+        .validate_runtime_budget(
+            &node,
+            crate::ShutdownCapabilities {
+                drain_timeout: Duration::from_secs(45),
+                shutdown_timeout: Duration::from_secs(50),
+            },
+        )
+        .assured("both policies fit the node");
 }

@@ -609,6 +609,37 @@ impl<'bytes> GeneratedSettings<'bytes> {
         let mut runtime =
             RuntimeSettings::resolve(Some(self.cluster_duration()), restore_staging_max_bytes)
                 .assured("the runtime settings declare no validation");
+        let count = self.entropy.boundary_biased(1..=u64::from(u32::MAX));
+        let unit = self.cluster_duration();
+        runtime.data_plane =
+            nervix_models::DataPlaneSettings::resolve(nervix_models::DataPlaneSettingOverrides {
+                delivery_capacity: Some(count),
+                ingest_group_max_rows: Some(count),
+                ingest_group_idle_flush: Some(unit),
+                unacknowledged_poll_batch: Some(count),
+                ingestor_error_retry: Some(unit),
+                reconnect_initial: Some(unit),
+                reconnect_max: Some(unit),
+                branch_expiration_scan: Some(unit),
+                replication_poll: Some(unit),
+                catch_up_concurrency: Some(count),
+                catch_up_pages: Some(count),
+                retained_removals: Some(count),
+                snapshot_staging_bytes: Some(count * 2),
+                snapshot_bytes: Some(count),
+                snapshot_describe_timeout: Some(unit),
+                snapshot_fetch_timeout: Some(unit),
+                wasm_checkpoint_timeout: Some(unit),
+                event_capacity: Some(count),
+                wasm_recovery_capacity: Some(count),
+                immediate_flush_minimum: Some(unit),
+                checkpoint_bytes: Some(count),
+                wasm_epoch_tick_interval: Some(unit),
+                wasm_epoch_deadline_ticks: Some(count),
+                wasm_guest_buffer_bytes: Some(count),
+                wasm_optimize: Some(self.entropy.flag()),
+            })
+            .assured("generated runtime settings are coherent");
         runtime.vm = nervix_vm::VmSettings::resolve(nervix_vm::VmSettingOverrides {
             inline_row_limit: Some(
                 usize::try_from(self.entropy.boundary_biased(0..=4096))
@@ -693,6 +724,7 @@ impl<'bytes> GeneratedSettings<'bytes> {
         };
         let interconnect = self.interconnect();
         let dns = self.dns(interconnect.max_peers());
+        let ack_unit = Duration::from_nanos(self.entropy.boundary_biased(1..=1_000_000_000));
         let mut settings = NodeSettings {
             interconnect,
             dns,
@@ -700,6 +732,13 @@ impl<'bytes> GeneratedSettings<'bytes> {
             node_database: self.database(),
             consensus_database: self.database(),
             parameter_seeds: nervix_models::ClusterParameterSeedValues {
+                payload_unfold_limit: Some(count),
+                remote_ack_alive_interval: Some(ack_unit),
+                remote_ack_dispatch_timeout: Some(ack_unit),
+                remote_ack_silence_timeout: Some(ack_unit * 10),
+                remote_ack_sweep_interval: Some(ack_unit),
+                remote_relay_total_timeout: Some(ack_unit * 50),
+                remote_relay_instantiation_wait: Some(ack_unit * 5),
                 tls_cipher_suites: Some(tls_cipher_suites),
                 tls_key_exchange_groups: Some(tls_key_exchange_groups),
                 ..Default::default()

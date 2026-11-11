@@ -27,13 +27,6 @@ use nervix_recovery::Reported as _;
 use super::*;
 use crate::runtime::branch_lifecycle_state::NamedBranches;
 
-/// How many branch checkpoints one round of a replica task fetches and installs at a time.
-const REPLICA_CATCH_UP_CONCURRENCY: usize = 16;
-
-/// How many catalog pages one round reads at most. A round that stops short resumes from the
-/// cursor it reached in the next round.
-const REPLICA_CATCH_UP_PAGES_PER_ROUND: usize = 64;
-
 /// The owner of the runtime state a replica keeps, as the replica task asks it for checkpoints.
 ///
 /// A replica task asks the owner over the interconnect. A benchmark reaches an owner runtime in the
@@ -201,7 +194,7 @@ impl Runtime {
         let mut running = FuturesUnordered::new();
         loop {
             nervix_primitives::task::consume_budget().await;
-            while running.len() < REPLICA_CATCH_UP_CONCURRENCY {
+            while running.len() < self.inner.data_plane.catch_up_concurrency().arch_into() {
                 let Some(step) = steps.next() else {
                     break;
                 };
@@ -300,7 +293,7 @@ impl Runtime {
         branch_lru: &RuntimeStatePlacement,
         checkpoints: &mut ReplicaBranchCheckpoints,
     ) {
-        for _ in 0..REPLICA_CATCH_UP_PAGES_PER_ROUND {
+        for _ in 0..self.inner.data_plane.catch_up_pages() {
             nervix_primitives::task::consume_budget().await;
             let listing = match owner
                 .checkpoint_listing(branch_lru, checkpoints.cursor())

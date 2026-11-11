@@ -21,6 +21,15 @@ use nervix_models::DomainName;
 
 use super::{message_error::MessageErrorHandlingError, *};
 
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the error route admits one pending batch before applying backpressure"
+    )
+)]
+const ERROR_DELIVERY_CAPACITY: usize = 1;
+
 #[derive(Clone)]
 pub(super) struct MessageErrorRouteTarget {
     pub(super) services: Arc<RelayBoundaryServices>,
@@ -97,7 +106,7 @@ impl MessageErrorRouteRuntime {
         )
     )]
     pub(super) fn prepare() -> Arc<Self> {
-        let (sender, input) = mpsc::channel(1);
+        let (sender, input) = mpsc::channel(ERROR_DELIVERY_CAPACITY);
         let (shutdown, shutdown_rx) = watch::channel(false);
         Arc::new(Self {
             retired: CancellationToken::new(),
@@ -724,11 +733,18 @@ mod tests {
         let fanout = RelayBoundaryFanout::direct_with_capacity(
             NonZeroUsize::new(1).expect("non-zero test capacity"),
         );
-        let (task, owner_task) = test_task(RuntimeFlushPolicy::Immediate, fanout);
+        let (task, owner_task) = test_task(
+            RuntimeFlushPolicy::Immediate {
+                minimum: nervix_models::DataPlaneSettings::default().immediate_flush_minimum(),
+            },
+            fanout,
+        );
         let mut plan = test_plan(
             task.route.clone(),
             task.target,
-            RuntimeFlushPolicy::Immediate,
+            RuntimeFlushPolicy::Immediate {
+                minimum: nervix_models::DataPlaneSettings::default().immediate_flush_minimum(),
+            },
         );
         let worker = plan
             .delivery
@@ -990,7 +1006,13 @@ mod tests {
                 max_batch_size: u64::MAX,
             },
         );
-        let mut replacement = test_plan(route.clone(), target, RuntimeFlushPolicy::Immediate);
+        let mut replacement = test_plan(
+            route.clone(),
+            target,
+            RuntimeFlushPolicy::Immediate {
+                minimum: nervix_models::DataPlaneSettings::default().immediate_flush_minimum(),
+            },
+        );
         let worker = runtime.install_message_error_route(&previous);
         Arc::get_mut(&mut previous)
             .assured("the fixture owns its prepared plan")
@@ -1052,7 +1074,12 @@ mod tests {
             Instant::now() + Duration::from_secs(2),
             "block message-error relay delivery",
         );
-        let (task, owner_task) = test_task(RuntimeFlushPolicy::Immediate, fanout);
+        let (task, owner_task) = test_task(
+            RuntimeFlushPolicy::Immediate {
+                minimum: nervix_models::DataPlaneSettings::default().immediate_flush_minimum(),
+            },
+            fanout,
+        );
         let (sender, input) = mpsc::channel(1);
         let (shutdown, shutdown_rx) = watch::channel(false);
         let force_flush = task.runtime.force_flush_participant(
@@ -1115,7 +1142,13 @@ mod tests {
                 nervix_primitives::sync::Arc::new(crate::runtime_ack::AckRootTracker::default()),
             )),
         };
-        let mut plan = test_plan(route.clone(), target, RuntimeFlushPolicy::Immediate);
+        let mut plan = test_plan(
+            route.clone(),
+            target,
+            RuntimeFlushPolicy::Immediate {
+                minimum: nervix_models::DataPlaneSettings::default().immediate_flush_minimum(),
+            },
+        );
         let route_runtime = MessageErrorRouteRuntime::new(runtime.clone(), &plan);
         route_runtime.shutdown().await;
         Arc::get_mut(&mut plan)

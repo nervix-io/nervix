@@ -17,6 +17,8 @@ use crate::application::cli_values::{HumanBytes, HumanDuration};
 #[derive(clap::Args, Debug, Clone, PartialEq)]
 #[command(next_help_heading = "First-bootstrap cluster parameters")]
 pub struct ClusterParameterArgs {
+    #[arg(long = nervix_models::PayloadUnfoldLimit::NAME, env = "NERVIX_PAYLOAD_UNFOLD_LIMIT", help = super::settings::parameter_seed_help(nervix_models::ClusterParameterKey::PayloadUnfoldLimit, "Maximum records unfolded from one ingested payload"))]
+    pub payload_unfold_limit: Option<u64>,
     #[arg(long = nervix_models::TlsCipherSuites::NAME, env = "NERVIX_TLS_CIPHER_SUITES", help = super::settings::parameter_seed_help(nervix_models::ClusterParameterKey::TlsCipherSuites, "First-bootstrap comma-separated algorithm names or aliases"))]
     pub tls_cipher_suites: Option<nervix_crypto_policy::TlsCipherSuites>,
     #[arg(long = nervix_models::TlsKeyExchangeGroups::NAME, env = "NERVIX_TLS_KEY_EXCHANGE_GROUPS", help = super::settings::parameter_seed_help(nervix_models::ClusterParameterKey::TlsKeyExchangeGroups, "First-bootstrap comma-separated algorithm names or aliases"))]
@@ -33,6 +35,19 @@ pub struct ClusterParameterArgs {
     pub domain_drain_timeout: Option<HumanDuration>,
     #[arg(long = nervix_models::EntityGateDeadline::NAME, env = "NERVIX_ENTITY_GATE_DEADLINE", help = super::settings::parameter_seed_help(nervix_models::ClusterParameterKey::EntityGateDeadline, "First-bootstrap seed; change a running cluster with ALTER CLUSTER SET"))]
     pub entity_gate_deadline: Option<HumanDuration>,
+    #[arg(long = nervix_models::RemoteAckAliveInterval::NAME, env = "NERVIX_REMOTE_ACK_ALIVE_INTERVAL", help = super::settings::parameter_seed_help(nervix_models::ClusterParameterKey::RemoteAckAliveInterval, "First-bootstrap seed; change a running cluster with ALTER CLUSTER SET"))]
+    pub remote_ack_alive_interval: Option<HumanDuration>,
+    #[arg(long = nervix_models::RemoteAckDispatchTimeout::NAME, env = "NERVIX_REMOTE_ACK_DISPATCH_TIMEOUT", help = super::settings::parameter_seed_help(nervix_models::ClusterParameterKey::RemoteAckDispatchTimeout, "First-bootstrap seed; change a running cluster with ALTER CLUSTER SET"))]
+    pub remote_ack_dispatch_timeout: Option<HumanDuration>,
+    #[arg(long = nervix_models::RemoteAckSilenceTimeout::NAME, env = "NERVIX_REMOTE_ACK_SILENCE_TIMEOUT", help = super::settings::parameter_seed_help(nervix_models::ClusterParameterKey::RemoteAckSilenceTimeout, "First-bootstrap seed; change a running cluster with ALTER CLUSTER SET"))]
+    pub remote_ack_silence_timeout: Option<HumanDuration>,
+    #[arg(long = nervix_models::RemoteAckSweepInterval::NAME, env = "NERVIX_REMOTE_ACK_SWEEP_INTERVAL", help = super::settings::parameter_seed_help(nervix_models::ClusterParameterKey::RemoteAckSweepInterval, "First-bootstrap seed; change a running cluster with ALTER CLUSTER SET"))]
+    pub remote_ack_sweep_interval: Option<HumanDuration>,
+    #[arg(long = nervix_models::RemoteRelayTotalTimeout::NAME, env = "NERVIX_REMOTE_RELAY_TOTAL_TIMEOUT", help = super::settings::parameter_seed_help(nervix_models::ClusterParameterKey::RemoteRelayTotalTimeout, "First-bootstrap seed; change a running cluster with ALTER CLUSTER SET"))]
+    pub remote_relay_total_timeout: Option<HumanDuration>,
+    #[arg(long = nervix_models::RemoteRelayInstantiationWait::NAME, env = "NERVIX_REMOTE_RELAY_INSTANTIATION_WAIT", help = super::settings::parameter_seed_help(nervix_models::ClusterParameterKey::RemoteRelayInstantiationWait, "First-bootstrap seed; change a running cluster with ALTER CLUSTER SET"))]
+    pub remote_relay_instantiation_wait: Option<HumanDuration>,
+
     #[arg(long = nervix_models::MaxBatchMessages::NAME, env = "NERVIX_MAX_BATCH_MESSAGES", help = super::settings::parameter_seed_help(nervix_models::ClusterParameterKey::MaxBatchMessages, "First-bootstrap seed; change a running cluster with ALTER CLUSTER SET"))]
     pub max_batch_messages: Option<u64>,
     #[arg(long = nervix_models::ClientProducerSessionBytes::NAME, env = "NERVIX_CLIENT_PRODUCER_SESSION_BYTES", help = super::settings::parameter_seed_help(nervix_models::ClusterParameterKey::ClientProducerSessionBytes, "First-bootstrap seed; change a running cluster with ALTER CLUSTER SET"))]
@@ -51,6 +66,15 @@ pub struct ClusterParameterArgs {
 impl ClusterParameterArgs {
     pub(super) fn from_seeds(seeds: &nervix_models::ClusterParameterSeedValues) -> Self {
         Self {
+            payload_unfold_limit: seeds.payload_unfold_limit,
+            remote_ack_alive_interval: seeds.remote_ack_alive_interval.map(HumanDuration),
+            remote_ack_dispatch_timeout: seeds.remote_ack_dispatch_timeout.map(HumanDuration),
+            remote_ack_silence_timeout: seeds.remote_ack_silence_timeout.map(HumanDuration),
+            remote_ack_sweep_interval: seeds.remote_ack_sweep_interval.map(HumanDuration),
+            remote_relay_total_timeout: seeds.remote_relay_total_timeout.map(HumanDuration),
+            remote_relay_instantiation_wait: seeds
+                .remote_relay_instantiation_wait
+                .map(HumanDuration),
             tls_cipher_suites: seeds.tls_cipher_suites,
             tls_key_exchange_groups: seeds.tls_key_exchange_groups,
             password_iterations: seeds.password_iterations,
@@ -89,6 +113,35 @@ impl ClusterParameterArgs {
             nervix_models::LicensingStreamIdleTimeout::NAME,
             self.licensing_stream_idle_timeout,
         );
+        command_line.optional(
+            nervix_models::PayloadUnfoldLimit::NAME,
+            self.payload_unfold_limit,
+        );
+        command_line.optional(
+            nervix_models::RemoteAckAliveInterval::NAME,
+            self.remote_ack_alive_interval,
+        );
+        command_line.optional(
+            nervix_models::RemoteAckDispatchTimeout::NAME,
+            self.remote_ack_dispatch_timeout,
+        );
+        command_line.optional(
+            nervix_models::RemoteAckSilenceTimeout::NAME,
+            self.remote_ack_silence_timeout,
+        );
+        command_line.optional(
+            nervix_models::RemoteAckSweepInterval::NAME,
+            self.remote_ack_sweep_interval,
+        );
+        command_line.optional(
+            nervix_models::RemoteRelayTotalTimeout::NAME,
+            self.remote_relay_total_timeout,
+        );
+        command_line.optional(
+            nervix_models::RemoteRelayInstantiationWait::NAME,
+            self.remote_relay_instantiation_wait,
+        );
+
         command_line.optional(nervix_models::TlsCipherSuites::NAME, self.tls_cipher_suites);
         command_line.optional(
             nervix_models::TlsKeyExchangeGroups::NAME,

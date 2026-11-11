@@ -73,6 +73,23 @@ impl PeerFixture {
     }
 
     fn reserve(&self, channel: u8, sequence: u64, grant_id: u64, epoch: u64) -> ReservedAttempt {
+        self.reserve_with_timing(
+            channel,
+            sequence,
+            grant_id,
+            epoch,
+            nervix_models::RemoteAckTiming::default(),
+        )
+    }
+
+    fn reserve_with_timing(
+        &self,
+        channel: u8,
+        sequence: u64,
+        grant_id: u64,
+        epoch: u64,
+        timing: nervix_models::RemoteAckTiming,
+    ) -> ReservedAttempt {
         let peer = ClusterNodeName::parse("node-1").assured("the fixture peer is valid");
         let registration = RemoteAckRegistration {
             ack_id: grant_id,
@@ -83,6 +100,7 @@ impl PeerFixture {
             registration: registration.clone(),
         };
         let metadata = wire::RelayMetadata {
+            ack_timing: timing,
             decoded_bytes: 0,
             kind: RelayPayloadKind::Routed,
             domain: nervix_models::DomainName::parse("test").assured("the fixture domain is valid"),
@@ -112,6 +130,8 @@ impl PeerFixture {
                 .assured("the fixture's retained metadata fits"),
             choice: AdmissionChoice::new(),
             state: Mutex::new(RelayAdmissionProtocol {
+                next_progress_at: Instant::now() + timing.remote_ack_alive_interval,
+                progress_reporting: false,
                 phase: RelayBodyPhase::Reserved { grant_id },
                 rejection: None,
                 capacity: Some(RelayAdmissionCapacity {
@@ -151,7 +171,7 @@ impl PeerFixture {
         let ReservedAttempt { record, grant } = self.reserve(channel, 0, grant_id, 101);
         assert!(matches!(
             self.owner.register(grant_id, grant),
-            RelayGrantRegistration::Registered
+            RelayGrantRegistration::Registered { .. }
         ));
         record
     }
@@ -162,7 +182,7 @@ impl PeerFixture {
         assert!(
             matches!(
                 self.owner.register(grant_id, grant),
-                RelayGrantRegistration::Registered
+                RelayGrantRegistration::Registered { .. }
             ),
             "channel {channel} is admitted at {sequence}"
         );
@@ -278,7 +298,7 @@ fn remote_relay_frame_cost_with_another_peers_guard_held() {
             let ReservedAttempt { record, grant } = fixture.reserve(1, sequence, grant_id, 101);
             assert!(matches!(
                 fixture.owner.register(grant_id, grant),
-                RelayGrantRegistration::Registered
+                RelayGrantRegistration::Registered { .. }
             ));
             let grant = fixture
                 .owner
@@ -352,7 +372,7 @@ fn cancellation_before_a_grant_and_lost_terminal_replies_retain_channel_order() 
     let ReservedAttempt { record, grant } = fixture.reserve(1, 1, 2, 101);
     assert!(matches!(
         fixture.owner.register(2, grant),
-        RelayGrantRegistration::Registered
+        RelayGrantRegistration::Registered { .. }
     ));
     let claimed = fixture
         .owner
@@ -360,7 +380,16 @@ fn cancellation_before_a_grant_and_lost_terminal_replies_retain_channel_order() 
         .assured("the current epoch claims its exact grant");
     drop(claimed);
     assert!(record.mark_body_received());
-    assert_eq!(record.progress_registration(), record.metadata.admission);
+    let (reports, _) = fixture
+        .owner
+        .due_progress(Instant::now() + record.metadata.ack_timing.remote_ack_alive_interval);
+    assert!(
+        record
+            .metadata
+            .admission
+            .as_ref()
+            .is_some_and(|registration| reports.contains_key(registration))
+    );
     record.mark_admitted();
     assert_eq!(
         fixture.owner.control(&record.attempt, true).0,
@@ -408,7 +437,7 @@ fn the_next_grant_takes_its_position_before_the_outcome_of_the_one_before_return
     assert!(
         matches!(
             fixture.owner.register(2, grant),
-            RelayGrantRegistration::Registered
+            RelayGrantRegistration::Registered { .. }
         ),
         "the next grant takes its position while the outcome before it is in flight"
     );
@@ -489,7 +518,7 @@ fn retiring_a_resolved_attempt_for_the_next_position_counts_a_forgotten_watermar
     let ReservedAttempt { record: _, grant } = fixture.reserve(4, 1, 5, 101);
     assert!(matches!(
         fixture.owner.register(5, grant),
-        RelayGrantRegistration::Registered
+        RelayGrantRegistration::Registered { .. }
     ));
     assert_eq!(fixture.evicted(), 1);
     assert_eq!(
@@ -566,7 +595,12 @@ fn grant_expiry_and_idle_reconciliation_reclaim_every_protocol_collection() {
     };
     fixture
         .owner
-        .register_outbound(&key, 101, &record.admission_key)
+        .register_outbound(
+            &key,
+            101,
+            &record.admission_key,
+            nervix_models::RemoteAckTiming::default(),
+        )
         .assured("the fixture has outbound room");
     assert_eq!(fixture.owner.outbound_epoch(&key), Some(101));
     let expiry = Instant::now()
@@ -616,7 +650,12 @@ fn an_outbound_owner_bounds_correlations_and_fences_receiver_replacement() {
     };
     fixture
         .owner
-        .register_outbound(&key, 101, &first.admission_key)
+        .register_outbound(
+            &key,
+            101,
+            &first.admission_key,
+            nervix_models::RemoteAckTiming::default(),
+        )
         .assured("the first outbound delivery fits");
     let mut second = key.clone();
     second.delivery.channel_incarnation = [2; 16];
@@ -624,7 +663,12 @@ fn an_outbound_owner_bounds_correlations_and_fences_receiver_replacement() {
     admission.registration.ack_id = 2;
     fixture
         .owner
-        .register_outbound(&second, 101, &admission)
+        .register_outbound(
+            &second,
+            101,
+            &admission,
+            nervix_models::RemoteAckTiming::default(),
+        )
         .assured("the next admission has its reserved correlation room");
     let mut third = second.clone();
     third.delivery.channel_incarnation = [3; 16];
@@ -632,7 +676,12 @@ fn an_outbound_owner_bounds_correlations_and_fences_receiver_replacement() {
     third_admission.registration.ack_id = 3;
     let error = fixture
         .owner
-        .register_outbound(&third, 101, &third_admission)
+        .register_outbound(
+            &third,
+            101,
+            &third_admission,
+            nervix_models::RemoteAckTiming::default(),
+        )
         .expect_err("a peer's outbound correlation capacity is finite");
     assert!(matches!(
         error.current_context(),
@@ -640,7 +689,12 @@ fn an_outbound_owner_bounds_correlations_and_fences_receiver_replacement() {
     ));
     let error = fixture
         .owner
-        .register_outbound(&second, 101, &first.admission_key)
+        .register_outbound(
+            &second,
+            101,
+            &first.admission_key,
+            nervix_models::RemoteAckTiming::default(),
+        )
         .expect_err("one admission cannot describe two deliveries");
     assert!(matches!(
         error.current_context(),
@@ -649,7 +703,12 @@ fn an_outbound_owner_bounds_correlations_and_fences_receiver_replacement() {
     assert!(fixture.owner.bind_epoch(102, 2, true));
     let error = fixture
         .owner
-        .register_outbound(&key, 102, &first.admission_key)
+        .register_outbound(
+            &key,
+            102,
+            &first.admission_key,
+            nervix_models::RemoteAckTiming::default(),
+        )
         .expect_err("retained delivery state cannot cross the receiver's process epoch");
     assert!(matches!(
         error.current_context(),
@@ -660,7 +719,12 @@ fn an_outbound_owner_bounds_correlations_and_fences_receiver_replacement() {
     assert_eq!(fixture.owner.outbound_epoch(&second), None);
     fixture
         .owner
-        .register_outbound(&third, 102, &third_admission)
+        .register_outbound(
+            &third,
+            102,
+            &third_admission,
+            nervix_models::RemoteAckTiming::default(),
+        )
         .assured("the reclaimed position admits fresh work in the current epoch");
     fixture.owner.end();
     assert_eq!(fixture.owner.outbound_epoch(&third), None);
@@ -687,7 +751,7 @@ fn a_retained_record_cannot_retire_a_replacement_and_progress_renews_its_lifetim
     } = fixture.reserve(1, 0, 2, 102);
     assert!(matches!(
         fixture.owner.register(2, grant),
-        RelayGrantRegistration::Registered
+        RelayGrantRegistration::Registered { .. }
     ));
     fixture.owner.retire(&first, RelayAdmissionStatus::Admitted);
     assert_eq!(fixture.owner.snapshot().attempts, 1);
@@ -698,7 +762,12 @@ fn a_retained_record_cannot_retire_a_replacement_and_progress_renews_its_lifetim
             .is_none()
     );
     current.mark_admitted();
-    assert_eq!(fixture.owner.progress_registrations().len(), 0);
+    let (reports, next) = fixture.owner.due_progress(Instant::now());
+    assert!(reports.is_empty());
+    assert!(
+        next.is_none(),
+        "an admitted attempt schedules no progress report"
+    );
     let now = Instant::now();
     fixture.owner.sweep(now);
     assert_eq!(fixture.owner.snapshot().attempts, 1);
@@ -810,7 +879,7 @@ fn bolero_relay_owner_sequences_preserve_verdicts_and_bounded_capacity() {
                             fixture.reserve(channel, 0, grant_id, epoch);
                         if matches!(
                             fixture.owner.register(grant_id, grant),
-                            RelayGrantRegistration::Registered
+                            RelayGrantRegistration::Registered { .. }
                         ) {
                             retained.push(RetainedAttempt {
                                 record,
@@ -977,7 +1046,7 @@ fn shuttle_the_next_grant_racing_the_outcome_return_before_it_takes_the_next_pos
         let next = granted.join().assured("the next grant joined");
         assert!(matches!(
             next.registration,
-            RelayGrantRegistration::Registered
+            RelayGrantRegistration::Registered { .. }
         ));
         assert_eq!(fixture.owner.snapshot().attempts, 1);
         assert_eq!(
@@ -1115,7 +1184,7 @@ fn an_outstanding_attempt_keeps_its_channel_known_below_the_floor() {
     let ReservedAttempt { record, grant } = fixture.reserve(1, 1, 2, 101);
     assert!(matches!(
         fixture.owner.register(2, grant),
-        RelayGrantRegistration::Registered
+        RelayGrantRegistration::Registered { .. }
     ));
     fixture.deliver(2, 0, 3);
     fixture.deliver(3, 0, 4);
@@ -1179,7 +1248,7 @@ fn a_new_process_epoch_clears_the_retired_channel_floor() {
     let ReservedAttempt { record: _, grant } = fixture.reserve(1, 0, 4, 102);
     assert!(matches!(
         fixture.owner.register(4, grant),
-        RelayGrantRegistration::Registered
+        RelayGrantRegistration::Registered { .. }
     ));
 }
 
@@ -1294,7 +1363,7 @@ impl TurnoverModel {
         assert!(
             matches!(
                 self.fixture.owner.register(self.grant_id, grant),
-                RelayGrantRegistration::Registered
+                RelayGrantRegistration::Registered { .. }
             ),
             "channel {channel} opened after every forgotten one is admitted"
         );
@@ -1381,7 +1450,7 @@ impl TurnoverModel {
         assert!(
             matches!(
                 self.fixture.owner.register(self.grant_id, grant),
-                RelayGrantRegistration::Registered
+                RelayGrantRegistration::Registered { .. }
             ),
             "{identity:?} is registered at the position it was given"
         );
@@ -1416,7 +1485,7 @@ impl TurnoverModel {
         assert!(
             !matches!(
                 self.fixture.owner.register(self.grant_id, grant),
-                RelayGrantRegistration::Registered
+                RelayGrantRegistration::Registered { .. }
             ),
             "{identity:?} is never admitted twice"
         );
@@ -1479,4 +1548,53 @@ fn bolero_relay_channel_turnover_never_admits_an_identity_twice() {
             }
             model.finish();
         });
+}
+
+#[test]
+fn independent_progress_cohorts_retain_their_send_budgets_and_channel_retention() {
+    let fixture = PeerFixture::new(2);
+    let timing = nervix_models::RemoteAckTiming {
+        remote_ack_alive_interval: Duration::from_millis(1),
+        remote_ack_dispatch_timeout: Duration::from_millis(1),
+        remote_ack_silence_timeout: Duration::from_millis(10),
+        remote_ack_sweep_interval: Duration::from_millis(1),
+        remote_relay_total_timeout: Duration::from_millis(50),
+        remote_relay_instantiation_wait: Duration::from_millis(5),
+    };
+    timing.validate().assured("the short cohort is coherent");
+    let fast = fixture.reserve_with_timing(1, 0, 1, 101, timing);
+    let fast_record = fast.record.clone();
+    assert!(matches!(
+        fixture.owner.register(1, fast.grant),
+        RelayGrantRegistration::Registered { .. }
+    ));
+    assert_eq!(fixture.owner.retention(), Duration::from_millis(100));
+    let slow = fixture.reserve(2, 0, 2, 101);
+    assert!(matches!(
+        fixture.owner.register(2, slow.grant),
+        RelayGrantRegistration::Registered { .. }
+    ));
+    assert_eq!(
+        fixture.owner.retention(),
+        nervix_models::RemoteRelayTotalTimeout::DEFAULT * 2
+    );
+    let now = Instant::now();
+    let (fast_reports, _) = fixture.owner.due_progress(now + Duration::from_millis(2));
+    assert_eq!(fast_reports.len(), 1);
+    assert_eq!(
+        fast_reports.values().next().assured("one fast report").1,
+        timing.remote_ack_dispatch_timeout
+    );
+    // The fast RPC stays in flight while the other cohort becomes due.
+    let (slow_reports, _) = fixture.owner.due_progress(now + Duration::from_millis(101));
+    assert_eq!(slow_reports.len(), 1);
+    assert_eq!(
+        slow_reports.values().next().assured("one slow report").1,
+        nervix_models::RemoteAckDispatchTimeout::DEFAULT
+    );
+    let _next = fast_record.finish_progress_report(now + Duration::from_millis(101));
+    let (again, _) = fixture.owner.due_progress(now + Duration::from_millis(103));
+    assert_eq!(again.len(), 1);
+    assert_eq!(again.keys().next(), fast_reports.keys().next());
+    fixture.owner.end();
 }

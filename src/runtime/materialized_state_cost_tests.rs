@@ -59,6 +59,7 @@ fn materialized_owner_cost() {
             &state,
             StateReplicationRoles::owned_by(None),
             None,
+            2,
         )
         .originator
         .assured("local originator");

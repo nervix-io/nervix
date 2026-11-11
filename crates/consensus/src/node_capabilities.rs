@@ -96,6 +96,13 @@ pub(super) fn announce(
             );
         }
     }
+    if let Some(parameters) = state.parameters
+        && let Err(error) = parameters.values.validate_runtime_capabilities([record])
+    {
+        return AppliedConsensusCommand::conflict(ConsensusConflict::InvalidClusterParameter {
+            issue: error.current_context().clone(),
+        });
+    }
     state
         .node_capabilities
         .insert(identity.node_id().clone(), record.clone());
@@ -166,6 +173,8 @@ mod tests {
         NodeCapabilityRecord {
             identity: ClusterNodeIdentity::new(node, ClusterNodeIncarnation::new(incarnation)),
             capabilities: nervix_models::NodeCapabilities {
+                runtime: nervix_models::DataPlaneSettings::default().capabilities(),
+                shutdown: nervix_models::ShutdownSettings::default().capabilities(),
                 interconnect: nervix_interconnect::TransportSettings::default().capabilities(),
                 dns: nervix_arbitrary::Arbitrary::new(&[], nervix_arbitrary::Domain::Vocabulary)
                     .node_capability_record()

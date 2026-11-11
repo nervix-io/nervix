@@ -56,6 +56,7 @@ impl SettingsArgs {
                 .licensing_stream_idle_timeout
                 .map(|duration| duration.0),
 
+            payload_unfold_limit: self.cluster_parameters.payload_unfold_limit,
             tls_cipher_suites: self.cluster_parameters.tls_cipher_suites,
             tls_key_exchange_groups: self.cluster_parameters.tls_key_exchange_groups,
             password_iterations: self.cluster_parameters.password_iterations,
@@ -63,6 +64,30 @@ impl SettingsArgs {
                 .membership
                 .node_unavailability_timeout
                 .map(|duration| duration.0),
+            remote_ack_alive_interval: self
+                .cluster_parameters
+                .remote_ack_alive_interval
+                .map(|value| value.0),
+            remote_ack_dispatch_timeout: self
+                .cluster_parameters
+                .remote_ack_dispatch_timeout
+                .map(|value| value.0),
+            remote_ack_silence_timeout: self
+                .cluster_parameters
+                .remote_ack_silence_timeout
+                .map(|value| value.0),
+            remote_ack_sweep_interval: self
+                .cluster_parameters
+                .remote_ack_sweep_interval
+                .map(|value| value.0),
+            remote_relay_total_timeout: self
+                .cluster_parameters
+                .remote_relay_total_timeout
+                .map(|value| value.0),
+            remote_relay_instantiation_wait: self
+                .cluster_parameters
+                .remote_relay_instantiation_wait
+                .map(|value| value.0),
             domain_drain_timeout: self
                 .cluster_parameters
                 .domain_drain_timeout
@@ -234,7 +259,7 @@ impl TryFrom<SettingsArgs> for NodeSettings {
         let mut runtime = args
             .runtime
             .settings()
-            .change_context(AppError::InvalidStateInspectionSettings)?;
+            .change_context(AppError::InvalidRuntimeSettings)?;
         runtime.connector_host = args
             .connector_host
             .settings()

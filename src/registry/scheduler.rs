@@ -853,6 +853,8 @@ pub(crate) fn uniform_capabilities(
     nodes: &[ClusterNodeName],
 ) -> BTreeMap<ClusterNodeName, NodeCapabilities> {
     let capabilities = NodeCapabilities {
+        runtime: nervix_models::DataPlaneSettings::default().capabilities(),
+        shutdown: nervix_models::ShutdownSettings::default().capabilities(),
         interconnect: nervix_interconnect::TransportSettings::default().capabilities(),
         dns: nervix_arbitrary::Arbitrary::new(&[], nervix_arbitrary::Domain::Vocabulary)
             .node_capability_record()

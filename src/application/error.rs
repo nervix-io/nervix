@@ -137,7 +137,7 @@ pub enum AppError {
     #[error("invalid peer receive settings")]
     InvalidPeerReceiveSettings,
     #[error("invalid state inspection capabilities")]
-    InvalidStateInspectionSettings,
+    InvalidRuntimeSettings,
     #[error("invalid expression engine capabilities")]
     InvalidVmSettings,
     #[error("invalid connector host settings")]

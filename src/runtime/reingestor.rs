@@ -257,10 +257,15 @@ impl Runtime {
                     &ModelName::from(&plan.name),
                     Unit::SINGLE,
                     &plan.routes,
+                    self.data_plane_settings().immediate_flush_minimum(),
                 )?;
                 templates_by_reingestor.insert(plan.name.clone(), templates);
             }
-            let bound = deps.bind_reingestor_input(&plan, &input)?;
+            let bound = deps.bind_reingestor_input(
+                &plan,
+                &input,
+                self.data_plane_settings().immediate_flush_minimum(),
+            )?;
             bound_inputs.push(BoundInput { bound, consumer });
         }
 
@@ -1342,7 +1347,9 @@ mod tests {
             IngestorRouteTemplate {
                 branch: template,
                 ack_boundary: BranchInstanceAckBoundary::Reingestor(AckMode::Attached),
-                flush_policy: RuntimeFlushPolicy::Immediate,
+                flush_policy: RuntimeFlushPolicy::Immediate {
+                    minimum: nervix_models::DataPlaneSettings::default().immediate_flush_minimum(),
+                },
             },
             Duration::from_secs(30),
         );
@@ -1403,7 +1410,11 @@ mod tests {
                 ),
             ]
         );
-        route_runtime.shutdown().await;
+        route_runtime
+            .shutdown(crate::runtime::entity_gate::task_stop_grace(
+                nervix_models::DomainDrainTimeout::DEFAULT,
+            ))
+            .await;
         owner_task
             .stop(Duration::from_secs(1))
             .await
@@ -1471,7 +1482,9 @@ mod tests {
             template: IngestorRouteTemplate {
                 branch: template.clone(),
                 ack_boundary: BranchInstanceAckBoundary::Reingestor(AckMode::Detached),
-                flush_policy: RuntimeFlushPolicy::Immediate,
+                flush_policy: RuntimeFlushPolicy::Immediate {
+                    minimum: nervix_models::DataPlaneSettings::default().immediate_flush_minimum(),
+                },
             },
             branch_sender,
             pending: HashMap::default(),
@@ -1642,7 +1655,9 @@ mod tests {
                     partition_transition: None,
                 },
                 ack_boundary: BranchInstanceAckBoundary::Reingestor(AckMode::Attached),
-                flush_policy: RuntimeFlushPolicy::Immediate,
+                flush_policy: RuntimeFlushPolicy::Immediate {
+                    minimum: nervix_models::DataPlaneSettings::default().immediate_flush_minimum(),
+                },
             },
             Duration::from_secs(30),
         );
@@ -1682,7 +1697,11 @@ mod tests {
             .load_full();
         let input =
             ExecutionBuildDeps::from_routing(&domain, &routing, nervix_vm::VmSettings::default())
-                .bind_reingestor_input(&plan, &plan.inputs[0])
+                .bind_reingestor_input(
+                    &plan,
+                    &plan.inputs[0],
+                    nervix_models::DataPlaneSettings::default().immediate_flush_minimum(),
+                )
                 .expect("the planned reingestor input binds");
         let (acme_acks, acme_completion) = AckSet::root();
         let (beta_acks, beta_completion) = AckSet::root();
@@ -1877,7 +1896,11 @@ mod tests {
             AckOutcome::Ack
         );
 
-        branched_runtime.shutdown().await;
+        branched_runtime
+            .shutdown(crate::runtime::entity_gate::task_stop_grace(
+                nervix_models::DomainDrainTimeout::DEFAULT,
+            ))
+            .await;
         owner_task
             .stop(Duration::from_secs(1))
             .await
@@ -1986,7 +2009,11 @@ mod tests {
             .load_full();
         let input =
             ExecutionBuildDeps::from_routing(&domain, &routing, nervix_vm::VmSettings::default())
-                .bind_reingestor_input(&plan, &plan.inputs[0])
+                .bind_reingestor_input(
+                    &plan,
+                    &plan.inputs[0],
+                    nervix_models::DataPlaneSettings::default().immediate_flush_minimum(),
+                )
                 .expect("the planned reingestor input binds");
         let output_counters = runtime
             .node_quiesce_counters(&domain, NodeRef::new(ModelKind::Reingestor, &reingestor));
@@ -2245,7 +2272,11 @@ mod tests {
             .load_full();
         let input =
             ExecutionBuildDeps::from_routing(&domain, &routing, nervix_vm::VmSettings::default())
-                .bind_reingestor_input(&plan, &plan.inputs[0])
+                .bind_reingestor_input(
+                    &plan,
+                    &plan.inputs[0],
+                    nervix_models::DataPlaneSettings::default().immediate_flush_minimum(),
+                )
                 .expect("the planned reingestor input binds");
         let mut events = runtime.subscribe_events();
         // No branched entrypoint is installed for the route's relay on this node.

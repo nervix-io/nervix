@@ -29,7 +29,13 @@ fn watches(count: usize) -> NonZeroUsize {
 #[nervix_primitives::test]
 async fn a_charge_the_relay_budget_has_room_for_is_taken_at_once() {
     let executor = Executor::default();
-    let hold = RemoteAckWatchCharge::hold(&executor, watches(3), std::future::pending()).await;
+    let hold = RemoteAckWatchCharge::hold(
+        &executor,
+        watches(3),
+        std::future::pending(),
+        nervix_models::RemoteAckTiming::default().remote_relay_total_timeout,
+    )
+    .await;
 
     let Ok(RemoteAckWatchHold::Charged(charge)) = hold else {
         panic!("an empty relay budget takes three watches' charge at once: {hold:?}");
@@ -48,7 +54,12 @@ async fn a_held_delivery_takes_its_charge_once_room_returns() {
     let occupied = executor
         .try_reserve(MemoryClass::Relay, capacity)
         .assured("an empty relay budget takes its whole capacity");
-    let hold = RemoteAckWatchCharge::hold(&executor, watches(2), std::future::pending());
+    let hold = RemoteAckWatchCharge::hold(
+        &executor,
+        watches(2),
+        std::future::pending(),
+        nervix_models::RemoteAckTiming::default().remote_relay_total_timeout,
+    );
     let mut hold = std::pin::pin!(hold);
 
     assert!(hold.as_mut().now_or_never().is_none());
@@ -76,8 +87,13 @@ async fn watches_the_whole_relay_budget_could_never_hold_are_refused_at_once() {
     let too_many = usize::try_from(capacity / WATCH_BYTES + 1)
         .assured("the default relay budget's watch count fits in usize");
 
-    let hold =
-        RemoteAckWatchCharge::hold(&executor, watches(too_many), std::future::pending()).await;
+    let hold = RemoteAckWatchCharge::hold(
+        &executor,
+        watches(too_many),
+        std::future::pending(),
+        nervix_models::RemoteAckTiming::default().remote_relay_total_timeout,
+    )
+    .await;
 
     let Err(refusal) = hold else {
         panic!("a charge larger than the whole budget is refused: {hold:?}");
@@ -97,11 +113,16 @@ async fn a_cancelled_delivery_ends_its_hold_without_a_charge() {
         .try_reserve(MemoryClass::Relay, capacity)
         .assured("an empty relay budget takes its whole capacity");
     let (cancel, cancelled) = oneshot::channel::<()>();
-    let hold = RemoteAckWatchCharge::hold(&executor, watches(1), async {
-        cancelled
-            .await
-            .discarded("a dropped sender cancels the delivery as surely as a sent value");
-    });
+    let hold = RemoteAckWatchCharge::hold(
+        &executor,
+        watches(1),
+        async {
+            cancelled
+                .await
+                .discarded("a dropped sender cancels the delivery as surely as a sent value");
+        },
+        nervix_models::RemoteAckTiming::default().remote_relay_total_timeout,
+    );
     let mut hold = std::pin::pin!(hold);
 
     assert!(hold.as_mut().now_or_never().is_none());
@@ -123,7 +144,12 @@ async fn a_hold_still_without_room_at_the_admission_bound_is_refused() {
     let occupied = executor
         .try_reserve(MemoryClass::Relay, capacity)
         .assured("an empty relay budget takes its whole capacity");
-    let hold = RemoteAckWatchCharge::hold(&executor, watches(1), std::future::pending());
+    let hold = RemoteAckWatchCharge::hold(
+        &executor,
+        watches(1),
+        std::future::pending(),
+        nervix_models::RemoteAckTiming::default().remote_relay_total_timeout,
+    );
     let mut hold = std::pin::pin!(hold);
 
     assert!(hold.as_mut().now_or_never().is_none());
@@ -142,7 +168,13 @@ async fn a_hold_still_without_room_at_the_admission_bound_is_refused() {
 #[nervix_primitives::test]
 async fn each_ended_watch_returns_its_share_and_the_task_share_returns_with_the_charge() {
     let executor = Executor::default();
-    let hold = RemoteAckWatchCharge::hold(&executor, watches(3), std::future::pending()).await;
+    let hold = RemoteAckWatchCharge::hold(
+        &executor,
+        watches(3),
+        std::future::pending(),
+        nervix_models::RemoteAckTiming::default().remote_relay_total_timeout,
+    )
+    .await;
     let Ok(RemoteAckWatchHold::Charged(mut charge)) = hold else {
         panic!("an empty relay budget takes three watches' charge at once: {hold:?}");
     };

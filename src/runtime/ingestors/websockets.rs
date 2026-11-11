@@ -83,7 +83,7 @@ impl WebsocketsConnectionIngestorStartPlan {
             unacknowledged_admission: QueueAdmission::RefuseWhenFull,
             client_mounts: resolved.mounts.into_iter().collect(),
         }
-        .open::<WebsocketsConnectionIngestor>(ingestor)
+        .open::<WebsocketsConnectionIngestor>(runtime, ingestor)
         .await
     }
 }

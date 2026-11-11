@@ -115,7 +115,7 @@ impl UnfoldingDomain {
     /// Stops every entrypoint the fixture's hosts fed, then the runtime.
     pub(super) async fn finish(self) {
         for entrypoint in &self.entrypoints {
-            entrypoint.shutdown().await;
+            entrypoint.shutdown(self.runtime.task_stop_grace()).await;
         }
         self.runtime
             .shutdown(self.runtime.domain_drain_timeout())

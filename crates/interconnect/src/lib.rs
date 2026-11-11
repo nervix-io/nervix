@@ -193,12 +193,6 @@ impl TransportOptions {
             .verified("the request budget fits twelvefold")
             .min(self.relay_retention.retention())
     }
-    pub(crate) fn relay_progress_send_timeout(&self) -> Duration {
-        (self.request_timeout / 10)
-            .min(self.progress_timeout)
-            .max(Duration::from_nanos(1))
-    }
-
     /// Jitter never increases the configured retry ceiling and consumes no entropy when disabled.
     pub(crate) fn retry_delay(&self, base: Duration) -> Duration {
         if self.reconnect_jitter_permille == 0 {
@@ -311,6 +305,8 @@ pub enum Envelope {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct RelayPayload {
+    /// The sender's validated policy, retained for this delivery across live updates.
+    pub ack_timing: nervix_models::RemoteAckTiming,
     /// Logical decoded bytes measured by the canonical runtime batch owner.
     pub decoded_bytes: u64,
     pub delivery: RelayDelivery,
@@ -1301,6 +1297,8 @@ impl ControlEnvelope {
 
 #[derive(Debug, Error)]
 pub enum TransportError {
+    #[error("invalid relay acknowledgement timing policy")]
+    RelayAckTiming,
     #[error("invalid transport settings")]
     Settings,
     #[error(

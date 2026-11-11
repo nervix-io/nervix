@@ -24,30 +24,43 @@ use error_stack::ResultExt as _;
 #[cfg(test)]
 use nervix_execution::MemoryClass;
 use nervix_execution::Reservation;
+use nervix_models::RemoteAckTiming;
 use nervix_primitives::{
     collections::{ConcurrentQueue, PopError, PushError},
+    publication::ArcSwap,
     sync::{
+        Notify,
         atomic::{AtomicUsize, Ordering},
         blocking::Mutex,
     },
-    time::{Interval, MissedTickBehavior},
 };
 
 use super::{
     relay_memory_hold::{RelayMemoryHold, RelayMemoryHolding},
-    remote_dispatch::{
-        REMOTE_ACK_SILENCE_SWEEP_INTERVAL, REMOTE_ACK_SILENCE_TIMEOUT, REMOTE_ACK_SILENT_SWEEPS,
-        REMOTE_RELAY_TOTAL_TIMEOUT, RelayAdmissionUpdate, RemoteDispatchError,
-    },
+    remote_dispatch::{RelayAdmissionUpdate, RemoteDispatchError},
     *,
 };
 
-const REMOTE_DELIVERY_CAPACITY: usize = 8192;
 // The checked two-sided capacity leaves the top bit free to seal first claims at shutdown.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the top claim bit seals first registrations at shutdown"
+    )
+)]
 const CLAIMS_CLOSED: usize = 1_usize << (usize::BITS - 1);
 // A row's metadata alone exceeds two bytes, so the existing 32-MiB relay wire budget is
 // stricter than this address space. Row positions never overlap delivery generations.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "correlation route identity reserves twenty-four bits for row positions"
+    )
+)]
 const ROW_POSITIONS: u64 = 1 << 24;
+#[cfg(all(test, not(any(feature = "loom", feature = "shuttle"))))]
 const ADMISSION_SWEEPS: u64 =
     REMOTE_RELAY_TOTAL_TIMEOUT.as_secs() / REMOTE_ACK_SILENCE_SWEEP_INTERVAL.as_secs();
 
@@ -63,6 +76,9 @@ pub(super) struct RemoteDispatchRegistry {
     next_admission: AtomicUsize,
     delivery_capacity: usize,
     executor: Executor,
+    timing: ArcSwap<RemoteAckTiming>,
+    changed: Notify,
+    next_sweep: Mutex<Option<Instant>>,
 }
 
 /// How storing the acknowledgement records of one delivery ended.
@@ -70,7 +86,10 @@ pub(super) struct RemoteDispatchRegistry {
 pub(super) enum RecordStorage {
     /// The records are stored, under one registration for each row that carries an
     /// acknowledgement.
-    Stored(Vec<Option<u64>>),
+    Stored {
+        registrations: Vec<Option<u64>>,
+        timing: RemoteAckTiming,
+    },
     /// The delivery stopped needing them while it waited for room to store them.
     Cancelled,
 }
@@ -104,9 +123,94 @@ enum RemoteCorrelationState {
 }
 
 struct DeliveryAcks {
-    rows: Vec<Option<PendingRemoteAck>>,
+    rows: DeliveryRows,
     remaining: usize,
     _memory: Reservation,
+}
+
+/// Keep cohort state in the delivery's existing row allocation. Empty correlation positions
+/// retain no timing state, and each row keeps its existing width and allocation count.
+struct DeliveryRows(Vec<DeliveryRow>);
+enum DeliveryRow {
+    Policy { timing: SweepPolicy, next: Instant },
+    Record(Option<PendingRemoteAck>),
+}
+const _: () =
+    assert!(std::mem::size_of::<DeliveryRow>() <= std::mem::size_of::<Option<PendingRemoteAck>>());
+
+#[derive(Clone, Copy)]
+struct SweepPolicy {
+    interval_nanos: u64,
+    silence_nanos: u64,
+    admission_nanos: u64,
+}
+impl SweepPolicy {
+    fn new(timing: RemoteAckTiming) -> Self {
+        let nanos = |value: std::time::Duration| {
+            u64::try_from(value.as_nanos())
+                .assured("validated timing durations fit in u64 nanoseconds")
+        };
+        Self {
+            interval_nanos: nanos(timing.remote_ack_sweep_interval),
+            silence_nanos: nanos(timing.remote_ack_silence_timeout),
+            admission_nanos: nanos(timing.remote_relay_total_timeout),
+        }
+    }
+    fn interval(self) -> std::time::Duration {
+        std::time::Duration::from_nanos(self.interval_nanos)
+    }
+    fn silent_sweeps(self) -> u64 {
+        self.silence_nanos / self.interval_nanos
+    }
+    fn admission_sweeps(self) -> u64 {
+        self.admission_nanos / self.interval_nanos
+    }
+}
+impl DeliveryRows {
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(reason = "the caller supplies one immediate monotonic clock read for \
+                                   the captured cohort deadline")
+    )]
+    fn new(capacity: usize, timing: RemoteAckTiming, now: impl FnOnce() -> Instant) -> Self {
+        let mut rows = Vec::with_capacity(
+            capacity
+                .checked_add(1)
+                .assured("wire row count leaves room for its cohort"),
+        );
+        rows.push(DeliveryRow::Policy {
+            timing: SweepPolicy::new(timing),
+            next: now() + timing.remote_ack_sweep_interval,
+        });
+        Self(rows)
+    }
+    fn push(&mut self, row: Option<PendingRemoteAck>) {
+        self.0.push(DeliveryRow::Record(row));
+    }
+    fn get_mut(&mut self, index: usize) -> Option<&mut Option<PendingRemoteAck>> {
+        match self.0.get_mut(index.checked_add(1)?)? {
+            DeliveryRow::Record(row) => Some(row),
+            DeliveryRow::Policy { .. } => None,
+        }
+    }
+    fn policy(&mut self) -> (&SweepPolicy, &mut Instant) {
+        match &mut self.0[0] {
+            DeliveryRow::Policy { timing, next } => (timing, next),
+            DeliveryRow::Record(_) => unreachable!("a delivery starts with its cohort"),
+        }
+    }
+    fn iter_mut(&mut self) -> impl Iterator<Item = &mut Option<PendingRemoteAck>> {
+        self.0.iter_mut().skip(1).map(|entry| match entry {
+            DeliveryRow::Record(row) => row,
+            DeliveryRow::Policy { .. } => unreachable!("cohort precedes every record"),
+        })
+    }
+    fn into_records(self) -> impl Iterator<Item = PendingRemoteAck> {
+        self.0.into_iter().filter_map(|entry| match entry {
+            DeliveryRow::Record(row) => row,
+            DeliveryRow::Policy { .. } => None,
+        })
+    }
 }
 
 enum RetiredCorrelation {
@@ -159,42 +263,49 @@ impl PendingRemoteAck {
         }
     }
 
-    fn swept(&mut self) -> bool {
+    fn swept(&mut self, timing: SweepPolicy) -> bool {
         match &mut self.phase {
             RemoteAckPhase::AwaitingAdmission { sweeps } => {
                 *sweeps = sweeps
                     .checked_add(1)
                     .assured("admission sweeps end at the finite admission bound");
-                *sweeps > ADMISSION_SWEEPS
+                *sweeps > timing.admission_sweeps()
             }
             RemoteAckPhase::Admitted { silent_sweeps } => {
                 *silent_sweeps = silent_sweeps
                     .checked_add(1)
                     .assured("silence sweeps end at the finite silence bound");
-                *silent_sweeps > REMOTE_ACK_SILENT_SWEEPS
+                *silent_sweeps > timing.silent_sweeps()
             }
         }
     }
 
-    fn expiration_reason(&self) -> String {
+    fn expiration_reason(&self, timing: SweepPolicy) -> String {
         match self.phase {
             RemoteAckPhase::AwaitingAdmission { .. } => format!(
                 "node '{}' did not admit the forwarded record within {}",
                 self.receiver,
-                humantime::format_duration(REMOTE_RELAY_TOTAL_TIMEOUT)
+                humantime::format_duration(std::time::Duration::from_nanos(timing.admission_nanos))
             ),
             RemoteAckPhase::Admitted { .. } => format!(
                 "node '{}' reported nothing about the forwarded record for {}",
                 self.receiver,
-                humantime::format_duration(REMOTE_ACK_SILENCE_TIMEOUT)
+                humantime::format_duration(std::time::Duration::from_nanos(timing.silence_nanos))
             ),
         }
     }
 }
 
 impl RemoteDispatchRegistry {
-    pub(super) fn new(executor: Executor) -> Self {
-        Self::build(executor, REMOTE_DELIVERY_CAPACITY)
+    pub(super) fn timing(&self) -> RemoteAckTiming {
+        **self.timing.load()
+    }
+    pub(super) fn install_timing(&self, timing: RemoteAckTiming) {
+        self.timing.store(StdArc::new(timing));
+    }
+
+    pub(super) fn new(executor: Executor, capacity: usize) -> Self {
+        Self::build(executor, capacity)
     }
 
     #[cfg(test)]
@@ -226,6 +337,9 @@ impl RemoteDispatchRegistry {
             next_delivery: AtomicUsize::new(0),
             next_admission: AtomicUsize::new(0),
             delivery_capacity: capacity,
+            timing: ArcSwap::from_pointee(RemoteAckTiming::default()),
+            changed: Notify::new(),
+            next_sweep: Mutex::new(None),
             executor,
         }
     }
@@ -320,7 +434,17 @@ impl RemoteDispatchRegistry {
         receiver: ClusterNodeName,
         acks: AckSet,
     ) -> error_stack::Result<u64, RemoteDispatchError> {
-        let registrations = self.register_acks(receiver, vec![acks])?;
+        self.register_ack_with_clock(receiver, acks, Instant::now)
+    }
+
+    #[cfg(test)]
+    pub(super) fn register_ack_with_clock(
+        &self,
+        receiver: ClusterNodeName,
+        acks: AckSet,
+        now: impl FnOnce() -> Instant,
+    ) -> error_stack::Result<u64, RemoteDispatchError> {
+        let registrations = self.register_acks_with_clock(receiver, vec![acks], now)?;
         Ok(registrations
             .into_iter()
             .next()
@@ -343,12 +467,13 @@ impl RemoteDispatchRegistry {
         if acks.iter().all(AckSet::is_empty) {
             return Ok(None);
         }
-        let bytes_per_row = std::mem::size_of::<Option<PendingRemoteAck>>()
+        let bytes_per_row = std::mem::size_of::<DeliveryRow>()
             .checked_add(receiver.as_str().len())
             .assured("a node name and a record owner fit in usize");
         let bytes = acks
             .len()
             .checked_mul(bytes_per_row)
+            .and_then(|bytes| bytes.checked_add(std::mem::size_of::<DeliveryRow>()))
             .assured("a valid relay frame's record owners fit in usize");
         Ok(Some(
             u64::try_from(bytes).assured("a record owner allocation fits in u64"),
@@ -367,10 +492,14 @@ impl RemoteDispatchRegistry {
         receiver: ClusterNodeName,
         acks: Vec<AckSet>,
         deadline: Instant,
+        timing: RemoteAckTiming,
         cancelled: impl std::future::Future<Output = ()>,
     ) -> error_stack::Result<RecordStorage, RemoteDispatchError> {
         let Some(bytes) = Self::record_storage_bytes(&receiver, &acks)? else {
-            return Ok(RecordStorage::Stored(vec![None; acks.len()]));
+            return Ok(RecordStorage::Stored {
+                registrations: vec![None; acks.len()],
+                timing,
+            });
         };
         let holding = RelayMemoryHold::new(bytes, deadline)
             .charge(&self.executor, cancelled)
@@ -379,16 +508,30 @@ impl RemoteDispatchRegistry {
         let RelayMemoryHolding::Charged(memory) = holding else {
             return Ok(RecordStorage::Cancelled);
         };
-        let registrations = self.register_charged_acks(receiver, acks, memory)?;
-        Ok(RecordStorage::Stored(registrations))
+        let registrations =
+            self.register_charged_acks(receiver, acks, memory, timing, Instant::now)?;
+        Ok(RecordStorage::Stored {
+            registrations,
+            timing,
+        })
     }
 
     /// Stores the records of `acks` at once, or refuses them when the relay budget has no room.
-    #[cfg(test)]
+    #[cfg(all(test, not(any(feature = "loom", feature = "shuttle"))))]
     pub(super) fn register_acks(
         &self,
         receiver: ClusterNodeName,
         acks: Vec<AckSet>,
+    ) -> error_stack::Result<Vec<Option<u64>>, RemoteDispatchError> {
+        self.register_acks_with_clock(receiver, acks, Instant::now)
+    }
+
+    #[cfg(test)]
+    fn register_acks_with_clock(
+        &self,
+        receiver: ClusterNodeName,
+        acks: Vec<AckSet>,
+        now: impl FnOnce() -> Instant,
     ) -> error_stack::Result<Vec<Option<u64>>, RemoteDispatchError> {
         let Some(bytes) = Self::record_storage_bytes(&receiver, &acks)? else {
             return Ok(vec![None; acks.len()]);
@@ -397,7 +540,7 @@ impl RemoteDispatchRegistry {
             .executor
             .try_reserve(MemoryClass::Relay, bytes)
             .change_context(RemoteDispatchError::CorrelationMemory)?;
-        self.register_charged_acks(receiver, acks, memory)
+        self.register_charged_acks(receiver, acks, memory, self.timing(), now)
     }
 
     /// Registers the records of `acks`, which `memory` was charged for, to be resolved by
@@ -407,9 +550,11 @@ impl RemoteDispatchRegistry {
         receiver: ClusterNodeName,
         acks: Vec<AckSet>,
         memory: Reservation,
+        timing: RemoteAckTiming,
+        now: impl FnOnce() -> Instant,
     ) -> error_stack::Result<Vec<Option<u64>>, RemoteDispatchError> {
         let remaining = acks.iter().filter(|acks| !acks.is_empty()).count();
-        let mut rows = Vec::with_capacity(acks.len());
+        let mut rows = DeliveryRows::new(acks.len(), timing, now);
         let mut registrations = Vec::with_capacity(acks.len());
         for (row, acks) in acks.into_iter().enumerate() {
             if acks.is_empty() {
@@ -421,11 +566,13 @@ impl RemoteDispatchRegistry {
                 rows.push(Some(PendingRemoteAck::new(receiver.clone(), acks)));
             }
         }
+        let next_sweep = *rows.policy().1;
         let base = self.register(RemoteCorrelationState::Records(DeliveryAcks {
             rows,
             remaining,
             _memory: memory,
         }))?;
+        SilenceSweeps::watching(&self.changed, &self.next_sweep).announce(next_sweep);
         for id in registrations.iter_mut().flatten() {
             *id = base
                 .checked_add(*id)
@@ -439,7 +586,9 @@ impl RemoteDispatchRegistry {
     ) -> error_stack::Result<(u64, watch::Receiver<RelayAdmissionUpdate>), RemoteDispatchError>
     {
         let (sender, receiver) = watch::channel(RelayAdmissionUpdate::Pending);
+        let next_sweep = Instant::now() + self.timing().remote_ack_sweep_interval;
         let id = self.register(RemoteCorrelationState::Admission(sender))?;
+        SilenceSweeps::watching(&self.changed, &self.next_sweep).announce(next_sweep);
         Ok((id, receiver))
     }
 
@@ -671,8 +820,32 @@ impl RemoteDispatchRegistry {
         during()
     }
 
+    #[cfg(test)]
     pub(super) fn fail_silent_acks(&self) -> BTreeMap<ClusterNodeName, usize> {
         let mut failed = BTreeMap::new();
+        SilenceSweeps::watching(&self.changed, &self.next_sweep).sweep_once(|| {
+            let (outcomes, next) = self.sweep_acks(None);
+            failed = outcomes;
+            next
+        });
+        failed
+    }
+
+    /// Count at most one sweep per delivery, even when its timer runs late. Each delivery keeps
+    /// the cadence and report window captured when it registered; a policy update cannot mix them.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(reason = "the delivery owns the bounded row iterator; each step only \
+                                   borrows its next acknowledgement record")
+    )]
+    fn sweep_acks(
+        &self,
+        now: Option<Instant>,
+    ) -> (BTreeMap<ClusterNodeName, usize>, Option<Instant>) {
+        let mut failed = BTreeMap::new();
+        let mut next_sweep: Option<Instant> = None;
+        let admission_interval = self.timing().remote_ack_sweep_interval;
+
         for position in self.swept_positions() {
             let mut slot = self.slots[position].lock();
             let CorrelationSlot::Open {
@@ -687,23 +860,56 @@ impl RemoteDispatchRegistry {
             let mut expired = Vec::new();
             let reclaim = match &mut correlation.state {
                 RemoteCorrelationState::Records(records) => {
-                    for row in &mut records.rows {
+                    let (timing, delivery_next) = records.rows.policy();
+                    let timing = *timing;
+                    if let Some(now) = now {
+                        if now < *delivery_next {
+                            next_sweep = Some(match next_sweep {
+                                Some(next) => next.min(*delivery_next),
+                                None => *delivery_next,
+                            });
+                            continue;
+                        }
+                        *delivery_next = now + timing.interval();
+                    }
+                    let delivery_next = *delivery_next;
+                    for row in records.rows.iter_mut() {
                         if let Some(pending) = row
-                            && pending.swept()
+                            && pending.swept(timing)
                         {
-                            expired.push(
-                                row.take()
-                                    .verified("the swept row was present under the owner guard"),
-                            );
+                            let pending = row
+                                .take()
+                                .verified("the swept row was present under the owner guard");
+                            let reason = pending.expiration_reason(timing);
+                            expired.push((pending, reason));
                             records.remaining = records
                                 .remaining
                                 .checked_sub(1)
                                 .assured("one live record expires exactly once");
                         }
                     }
+                    if records.remaining > 0 {
+                        next_sweep = Some(match next_sweep {
+                            Some(next) => next.min(delivery_next),
+                            None => delivery_next,
+                        });
+                    }
                     records.remaining == 0
                 }
-                RemoteCorrelationState::Admission(admission) => admission.is_closed(),
+                RemoteCorrelationState::Admission(admission) => {
+                    if admission.is_closed() {
+                        true
+                    } else {
+                        if let Some(now) = now {
+                            let next = now + admission_interval;
+                            next_sweep = Some(match next_sweep {
+                                Some(prior) => prior.min(next),
+                                None => next,
+                            });
+                        }
+                        false
+                    }
+                }
             };
             let ended = if reclaim { entry.take() } else { None };
             drop(slot);
@@ -711,32 +917,37 @@ impl RemoteDispatchRegistry {
                 self.recycle(position);
             }
             drop(ended);
-            for pending in expired {
-                pending.acks.no_ack(pending.expiration_reason());
+            for (pending, reason) in expired {
+                pending.acks.no_ack(reason);
                 let count = failed.entry(pending.receiver).or_insert(0_usize);
                 *count = count
                     .checked_add(1)
                     .assured("the charged record count bounds one sweep's outcomes");
             }
         }
-        failed
+        (failed, next_sweep)
     }
 
-    /// Fails every forwarded acknowledgement whose receiver stayed silent past its bound, and logs
-    /// how many each receiver lost.
-    fn expire_silent_acks(&self) {
-        for (receiver, acknowledgements) in self.fail_silent_acks() {
-            warn!(target_node = %receiver, acknowledgements, "remote record acknowledgement owner expired");
-        }
-    }
-
-    /// Sweeps once per silence interval for as long as the task polling it runs.
+    /// Sleep until the earliest retained delivery's next sweep. Register for new work before
+    /// scanning, so an arrival cannot be missed between an empty scan and waiting. Idle registries
+    /// require no periodic scan. Every completed scan yields before it can scan again.
     pub(super) async fn sweep_silent_acks(&self) {
-        SilenceSweeps::every_interval()
-            .run(|| self.expire_silent_acks())
-            .await;
+        SilenceSweeps::watching(&self.changed, &self.next_sweep).run(|| {
+            let (failed, next) = self.sweep_acks(Some(Instant::now()));
+            for (receiver, acknowledgements) in failed {
+                warn!(target_node = %receiver, acknowledgements, "remote record acknowledgement owner expired");
+            }
+            next
+        }).await;
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(
+            reason = "each delivery consumes its bounded owned row iterator before resolving \
+                      those acknowledgement records"
+        )
+    )]
     pub(super) fn shutdown(&self) {
         // Seal first claims before choosing the scan bounds. A claim won before either seal is
         // included even when its registrar has not reached the slot yet: the slot guard then
@@ -763,7 +974,7 @@ impl RemoteDispatchRegistry {
             {
                 match correlation.state {
                     RemoteCorrelationState::Records(records) => {
-                        for pending in records.rows.into_iter().flatten() {
+                        for pending in records.rows.into_records() {
                             pending.acks.no_ack("remote correlation owner ended");
                         }
                     }
@@ -784,48 +995,96 @@ impl Drop for RemoteDispatchRegistry {
     }
 }
 
-/// The cadence of the silence sweep, apart from the sweep it runs.
-pub(super) struct SilenceSweeps {
-    ticks: Interval,
+/// The production sweep driver, shared by runtime and cancellation checks.
+pub(super) struct SilenceSweeps<'a> {
+    changed: &'a Notify,
+    next: &'a Mutex<Option<Instant>>,
 }
-
-impl SilenceSweeps {
-    /// One sweep per silence interval. A sweep that runs late counts once rather than for every
-    /// interval it missed, so a node whose execution stalled fails nothing for the time in which no
-    /// report could have reached it.
-    pub(super) fn every_interval() -> Self {
-        let mut ticks = nervix_primitives::time::interval(REMOTE_ACK_SILENCE_SWEEP_INTERVAL);
-        ticks.set_missed_tick_behavior(MissedTickBehavior::Skip);
-        Self { ticks }
+impl<'a> SilenceSweeps<'a> {
+    pub(super) fn watching(changed: &'a Notify, next: &'a Mutex<Option<Instant>>) -> Self {
+        Self { changed, next }
     }
 
-    /// Sweeps at `ticks`, for a regression that needs a cadence the sweep interval cannot produce.
-    #[cfg(test)]
-    pub(super) fn ticking(ticks: Interval) -> Self {
-        Self { ticks }
-    }
-
-    /// Runs `sweep` at every tick, for as long as the task polling this runs.
-    ///
-    /// A sweep is synchronous, so nothing can end the task while one runs. A sweep that overran
-    /// its interval finds the next tick already due, and a due tick does not suspend the task, so
-    /// the loop returns to the executor after every sweep. A cancellation that arrived during the
-    /// sweep, such as runtime teardown's, then ends the task before the next sweep rather than
-    /// after as many more as the task's cooperative budget allows, and the join waits for the sweep
-    /// in progress and for no other.
     #[cfg_attr(
         nervix_lint,
-        nervix::dispatch(reason = "the caller supplies the one synchronous sweep each tick runs")
+        nervix::context(
+            bounded,
+            reason = "the registry publishes one earliest wake deadline",
+            key = "node remote-correlation registry",
+            bound = "one inline optional deadline per registry"
+        )
     )]
-    pub(super) async fn run(mut self, mut sweep: impl FnMut()) {
+    fn merge_deadline(&self, next: Option<Instant>) -> bool {
+        let Some(next) = next else { return false };
+        let mut published = self.next.lock();
+        match *published {
+            Some(current) if current <= next => false,
+            _ => {
+                *published = Some(next);
+                true
+            }
+        }
+    }
+
+    fn announce(&self, next: Instant) {
+        if self.merge_deadline(Some(next)) {
+            self.changed.notify_one();
+        }
+    }
+
+    /// Consume preceding announcements before scanning. Registrations racing the scan publish
+    /// beside it, and merging its result retains their earlier deadlines. No deadline guard is
+    /// held while visiting correlation positions or resolving their acknowledgements.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(reason = "the owner supplies one bounded registry scan and its deadline")
+    )]
+    fn sweep_once(&self, sweep: impl FnOnce() -> Option<Instant>) {
+        *self.next.lock() = None;
+        self.merge_deadline(sweep());
+    }
+
+    /// Register before scanning and yield after every synchronous sweep. Even an overdue next
+    /// deadline cannot prevent cancellation from running between two sweeps.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(reason = "the caller supplies one synchronous bounded registry sweep \
+                                   and its next deadline; the driver yields between calls")
+    )]
+    pub(super) async fn run(self, mut sweep: impl FnMut() -> Option<Instant>) {
         loop {
             nervix_primitives::task::consume_budget().await;
-            self.ticks.tick().await;
-            sweep();
+            let mut changed = std::pin::pin!(self.changed.notified());
+            changed.as_mut().enable();
+            self.sweep_once(&mut sweep);
             nervix_primitives::task::yield_now().await;
+            loop {
+                let next = *self.next.lock();
+                let notified = if let Some(next) = next {
+                    nervix_primitives::select! {
+                        _ = &mut changed => true,
+                        _ = sleep_until(next) => false,
+                    }
+                } else {
+                    changed.as_mut().await;
+                    true
+                };
+                if !notified {
+                    break;
+                }
+                changed.set(self.changed.notified());
+                changed.as_mut().enable();
+                // An announcement changes only the timer. In particular, ordinary later
+                // arrivals must never turn a per-deadline scan into a per-arrival scan.
+                nervix_primitives::task::yield_now().await;
+            }
         }
     }
 }
+
+#[cfg(all(test, not(feature = "loom")))]
+#[path = "remote_ack_owner_policy_tests.rs"]
+pub(super) mod policy_tests;
 
 #[cfg(all(test, not(any(feature = "loom", feature = "shuttle"))))]
 #[path = "remote_ack_owner_model.rs"]
@@ -838,3 +1097,9 @@ mod properties;
 #[cfg(all(test, not(any(feature = "loom", feature = "shuttle"))))]
 #[path = "remote_ack_owner_tests.rs"]
 mod tests;
+
+#[cfg(all(test, not(any(feature = "loom", feature = "shuttle"))))]
+use super::remote_dispatch::{
+    REMOTE_ACK_SILENCE_SWEEP_INTERVAL, REMOTE_ACK_SILENCE_TIMEOUT, REMOTE_ACK_SILENT_SWEEPS,
+    REMOTE_RELAY_TOTAL_TIMEOUT,
+};

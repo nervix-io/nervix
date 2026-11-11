@@ -751,3 +751,30 @@ mod turmoil_mode {
         assert!(is_same_type::<crate::time::Instant, tokio::time::Instant>());
     }
 }
+
+/// Direct native projections stay real in every mode. This is API conformance, not a modeled
+/// protocol: the real thread's wake permit must survive arriving before its timed park.
+#[cfg(feature = "native")]
+#[test]
+fn the_unmodeled_thread_wake_surface_preserves_the_real_park_permit() {
+    assert!(is_same_type::<
+        crate::unmodeled::thread::Thread,
+        std::thread::Thread,
+    >());
+    let (ready, receiver) = std::sync::mpsc::sync_channel(1);
+    let participant = crate::unmodeled::thread::Builder::new()
+        .spawn(move || {
+            ready
+                .send(std::thread::current())
+                .expect("the observer stays present");
+            crate::unmodeled::thread::park_timeout(std::time::Duration::from_secs(30));
+        })
+        .expect("the conformance thread starts");
+    let thread = receiver
+        .recv_timeout(std::time::Duration::from_secs(10))
+        .expect("the participant announces its wake handle");
+    thread.unpark();
+    participant
+        .join()
+        .expect("the real wake permit ends the bounded park");
+}

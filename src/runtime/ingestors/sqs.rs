@@ -65,7 +65,7 @@ impl SqsQueueIngestorStartPlan {
             unacknowledged_admission: QueueAdmission::RefuseWhenFull,
             client_mounts: resolved.mounts.into_iter().collect(),
         }
-        .open::<SqsQueueIngestor>(ingestor)
+        .open::<SqsQueueIngestor>(runtime, ingestor)
         .await
     }
 }

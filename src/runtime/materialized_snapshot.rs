@@ -63,16 +63,45 @@ use crate::runtime_schema::{
 const SEALED_SNAPSHOT_MAGIC: [u8; 8] = *b"NVXSNAPS";
 
 /// How many bytes every declared length occupies, in the container header and in each section.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the sealed snapshot format encodes lengths as four-byte words"
+    )
+)]
 const LENGTH_PREFIX_BYTES: usize = 4;
 
 /// The prefix each section carries: one byte of kind and its declared length.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "a sealed section carries one kind byte and one length word"
+    )
+)]
 const SECTION_FRAME_BYTES: usize = 1 + LENGTH_PREFIX_BYTES;
 
 /// The prefix the container carries: the magic and the header length that follows it.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the sealed container prefixes its header with magic and one length word"
+    )
+)]
 const CONTAINER_FRAME_BYTES: usize = SEALED_SNAPSHOT_MAGIC.len() + LENGTH_PREFIX_BYTES;
 
 /// What one record's identity costs beside the bytes of its branch key: two watermarks, the option
 /// discriminant, and the relative pointers rkyv writes for the vector holding it.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "snapshot admission accounts for two watermarks option discriminants and \
+                  archived relative pointers"
+    )
+)]
 const IDENTITY_OVERHEAD_BYTES: u64 = 96;
 
 /// Why a materialized relay snapshot could not be sealed or opened.
@@ -80,7 +109,7 @@ const IDENTITY_OVERHEAD_BYTES: u64 = 96;
 pub(crate) enum MaterializedSnapshotError {
     #[error("materialized snapshot memory admission was refused")]
     Admission,
-    #[error("materialized row views exceed one relay's 8 MiB metadata limit")]
+    #[error("materialized row views exceed their addressable runtime metadata bound")]
     MetadataTooLarge,
     #[error("metadata for {records} materialized row views cannot fit an addressable allocation")]
     MetadataAddressability { records: usize },
@@ -196,13 +225,10 @@ struct MaterializedRecordLayout {
     metadata_bytes: u64,
 }
 
-/// The row-view metadata one relay's materialized records may restore.
-const RELAY_ROW_VIEW_BYTES: u64 = 8 * 1024 * 1024;
-
 /// Whose rows an opened container restores, which decides how many row views it may hold.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::runtime) enum RestoredRows {
-    /// A relay's materialized records, within one relay's 8 MiB row-view metadata ceiling.
+    /// A relay's materialized records, within the resolved relay memory budget.
     Relay,
     /// A window's retained rows, which the window's own model bounds: as many as the state-read memory
     /// class holds while the window reopens.
@@ -211,16 +237,16 @@ pub(in crate::runtime) enum RestoredRows {
 
 impl RestoredRows {
     /// The row-view metadata this kind of container may restore, when it has its own ceiling.
-    fn ceiling(self) -> Option<u64> {
+    fn ceiling(self, relay_budget: u64) -> Option<u64> {
         match self {
-            Self::Relay => Some(RELAY_ROW_VIEW_BYTES),
+            Self::Relay => Some(relay_budget),
             Self::Window => None,
         }
     }
 
     /// Whether `bytes` of row-view metadata exceed this kind's own ceiling.
-    fn exceeds_ceiling(self, bytes: u64) -> bool {
-        match self.ceiling() {
+    fn exceeds_ceiling(self, bytes: u64, relay_budget: u64) -> bool {
+        match self.ceiling(relay_budget) {
             Some(ceiling) => bytes > ceiling,
             None => false,
         }
@@ -231,6 +257,7 @@ impl SealedSnapshotHeader {
     fn metadata_layout(
         &self,
         rows: RestoredRows,
+        relay_budget: u64,
     ) -> Result<MaterializedRecordLayout, Report<MaterializedSnapshotError>> {
         if (self.records == 0) != (self.groups == 0) || u64::from(self.groups) > self.records {
             return Err(MaterializedSnapshotError::decoding(
@@ -252,7 +279,7 @@ impl SealedSnapshotHeader {
                 .map_err(|_| Report::new(MaterializedSnapshotError::MetadataTooLarge))?,
             )
             .ok_or_else(|| Report::new(MaterializedSnapshotError::MetadataTooLarge))?;
-        if rows.exceeds_ceiling(metadata_bytes) {
+        if rows.exceeds_ceiling(metadata_bytes, relay_budget) {
             return Err(Report::new(MaterializedSnapshotError::MetadataTooLarge));
         }
         Ok(MaterializedRecordLayout {
@@ -483,7 +510,7 @@ impl SealedMaterializedSnapshot {
             usize::try_from(self.descriptor.length).map_err(MaterializedSnapshotError::encoding)?,
         );
         while let Some(chunk) = reader
-            .next_chunk(64 * 1024)
+            .next_chunk(executor.limits().bulk_chunk_bytes.as_u64())
             .await
             .change_context(MaterializedSnapshotError::Execution)?
         {
@@ -1191,7 +1218,8 @@ impl RestoredMaterializedSnapshot {
         let header = cursor.take_header(executor).await?;
         let identity_limit = executor.limits().snapshot_record_bytes.as_u64();
         let section_limit = executor.limits().snapshot_section_bytes.as_u64();
-        let layout = header.metadata_layout(rows)?;
+        let layout =
+            header.metadata_layout(rows, executor.memory(MemoryClass::Relay).capacity_bytes)?;
         // Admit the row views and uniqueness table before either grows. The columns become
         // materialized runtime state; these arrays are transient until installation consumes them.
         let mut metadata_charge = executor
@@ -1213,7 +1241,10 @@ impl RestoredMaterializedSnapshot {
                 .bytes()
                 .checked_add(identity_bytes)
                 .ok_or_else(|| Report::new(MaterializedSnapshotError::MetadataTooLarge))?;
-            if rows.exceeds_ceiling(identity_bytes) {
+            if rows.exceeds_ceiling(
+                identity_bytes,
+                executor.memory(MemoryClass::Relay).capacity_bytes,
+            ) {
                 return Err(Report::new(MaterializedSnapshotError::MetadataTooLarge));
             }
             metadata_charge
@@ -2612,7 +2643,7 @@ mod tests {
             .await
             .assured("sealed artifact opens");
         let short = reader
-            .next_chunk(64 * 1024)
+            .next_chunk(executor.limits().bulk_chunk_bytes.as_u64())
             .await
             .assured("a bounded chunk reads")
             .assured("the snapshot contains one chunk");
@@ -2647,7 +2678,7 @@ mod tests {
             .await
             .assured("sealed artifact opens");
         while let Some(chunk) = reader
-            .next_chunk(64 * 1024)
+            .next_chunk(executor.limits().bulk_chunk_bytes.as_u64())
             .await
             .assured("a bounded chunk reads")
         {

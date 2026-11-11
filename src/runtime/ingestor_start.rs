@@ -393,10 +393,11 @@ impl Runtime {
         // Every source's tasks end by closing it, so an endpoint source has unbound its routes by
         // the time they have been awaited.
         for task in tasks {
-            Self::await_shutdown_task(task, domain, Some(ingestor), "ingestor").await;
+            self.await_shutdown_task(task, domain, Some(ingestor), "ingestor")
+                .await;
         }
         for branched in branched {
-            branched.shutdown().await;
+            branched.shutdown(self.task_stop_grace()).await;
         }
 
         let placement = RuntimeStatePlacement {
@@ -507,6 +508,7 @@ impl Runtime {
                 &ModelName::from(&ingestor.name),
                 ingestor.unit,
                 &ingestor.routes,
+                self.data_plane_settings().immediate_flush_minimum(),
             )
             .change_context_lazy(|| IngestorStartError::Bind {
                 domain: domain.clone(),
@@ -591,6 +593,8 @@ impl Runtime {
                 line.as_bytes(),
                 &mut decoder,
                 &mut builder,
+                usize::try_from(self.cluster_parameters().payload_unfold_limit())
+                    .assured("validated payload limit fits usize"),
             )
             .await;
             let messages = match decoded {

@@ -52,7 +52,7 @@ fn loom_an_operation_admitted_under_a_superseded_binding_never_outlives_its_rebi
     explore(ADMISSION_FENCE, || {
         let authority = Arc::new(StateAssignmentAuthority::default());
         let token = authority
-            .rebind(StateReplicationRoles::owned_by(None), None)
+            .rebind(StateReplicationRoles::owned_by(None), None, 2)
             .token_for(StateCapability::Originate)
             .assured("a state no node owns is originated where it lives");
         let witness = Arc::new(AtomicUsize::new(0));
@@ -66,7 +66,7 @@ fn loom_an_operation_admitted_under_a_superseded_binding_never_outlives_its_rebi
                 .is_ok()
         });
 
-        authority.rebind(StateReplicationRoles::owned_by(None), None);
+        authority.rebind(StateReplicationRoles::owned_by(None), None, 2);
         // Read the moment the rebind returns, before the join could order the threads.
         let observed = witness.load(Ordering::Relaxed);
         let ran = operation
@@ -92,7 +92,7 @@ fn loom_assignment_drain_observes_every_completed_materialized_publication() {
             let admissions = admissions.clone();
             let payload = payload.clone();
             move || {
-                admissions.wait_until_finished(1);
+                admissions.wait_until_finished(1, 2);
                 assert_eq!(
                     payload.load(Ordering::Relaxed),
                     7,

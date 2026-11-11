@@ -33,7 +33,9 @@ mod command;
 mod completion;
 mod connector;
 mod construction_alteration;
+mod data_plane_settings;
 mod database_settings;
+pub use data_plane_settings::*;
 mod domain_clock;
 mod duration_text;
 mod emitter;
@@ -71,6 +73,8 @@ mod schedule;
 mod schema;
 mod schema_fingerprint;
 mod settings;
+mod shutdown_settings;
+pub use shutdown_settings::*;
 mod state_branch_selection;
 mod state_inspection;
 mod state_inspection_settings;
@@ -300,7 +304,7 @@ pub use nervix_licensing_vocabulary::ActivationKind;
 pub use node_capabilities::{
     ConnectorHostCapabilities, ConsensusCapabilities, DnsAddressFamilies, DnsCapabilities,
     EngineCapabilities, InterconnectCapabilities, InvalidPeerCapacity, MaxPeers, NodeCapabilities,
-    NodeCapabilityRecord, PeerReceiveBounds,
+    NodeCapabilityRecord, PeerReceiveBounds, ShutdownCapabilities,
 };
 pub use node_endpoint::{
     NodeEndpoint, NodeEndpointParseError, NodeServiceUrl, NodeServiceUrlParseError,
@@ -447,7 +451,7 @@ pub use licensing::{
 
 /// The existing host's single relay admission budget. The runtime settings owner adopts this
 /// policy input; transport retention consumes it rather than choosing another timeout.
-pub const HOST_RELAY_ADMISSION_BOUND: std::time::Duration = std::time::Duration::from_secs(300);
+pub const HOST_RELAY_ADMISSION_BOUND: std::time::Duration = RemoteRelayTotalTimeout::DEFAULT;
 
 /// The host's existing keep-alive cadence for unresolved relay acknowledgement admission.
-pub const HOST_RELAY_ALIVE_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
+pub const HOST_RELAY_ALIVE_INTERVAL: std::time::Duration = RemoteAckAliveInterval::DEFAULT;

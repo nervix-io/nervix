@@ -29,10 +29,10 @@ use tracing::info;
 mod settings;
 pub use settings::{DrainTimeout, ShutdownSettings, ShutdownSettingsError, ShutdownTimeout};
 
-pub(super) const DEFAULT_DRAIN_TIMEOUT: Duration = Duration::from_secs(30);
+pub(super) const DEFAULT_DRAIN_TIMEOUT: Duration = nervix_models::DrainTimeout::DEFAULT;
 /// How long a shutdown may take from its first stop request until the process exits. It covers
 /// the default drain timeout and leaves the rest to the services that stop after the drain.
-pub(super) const DEFAULT_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(50);
+pub(super) const DEFAULT_SHUTDOWN_TIMEOUT: Duration = nervix_models::ShutdownTimeout::DEFAULT;
 const _: () = assert!(
     DEFAULT_DRAIN_TIMEOUT.as_nanos() < DEFAULT_SHUTDOWN_TIMEOUT.as_nanos(),
     "the default shutdown timeout must leave terminal teardown time after the default drain"

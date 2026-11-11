@@ -264,7 +264,7 @@ path = "crates/nervix-roto/src/lib.rs"
 reason = "Test participants exercise this owner concurrently outside a node executor; model participants use the selected scheduler."
 
 [[permission]]
-bound = "One epoch thread per WASM runtime, one sleep and one engine epoch increment per configured tick; it ends on the next wake after the stop flag is set or its weak stop reference can no longer upgrade."
+bound = "One epoch thread per WASM runtime lifetime, one bounded park and one engine increment per configured tick; the last owner unparks it, and its expired weak owner reference ends the thread."
 items = ["unmodeled::thread::Builder"]
 owner = "The WASM runtime epoch driver."
 path = "crates/nervix-wasm/src/lib.rs"

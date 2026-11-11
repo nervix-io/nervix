@@ -21,17 +21,6 @@ use nervix_models::UserName;
 
 use super::*;
 
-/// Chosen operational bound for how many decoded ingestor messages accumulate before an ingest group
-/// executes and becomes one Arrow batch per (relay, branch key). A group closes once it holds this
-/// many or more: every message of one payload joins the same group, so a payload that unfolds past
-/// the remaining room carries the group beyond the bound instead of being split. This is
-/// intentionally independent of a Plexus route's flush policy.
-pub(in crate::runtime) const INGEST_GROUP_MAX_ROWS: usize = 1024;
-
-/// Chosen operational bound for how long a partial ingestor group waits when the ingestor
-/// goes quiet. This is intentionally independent of a Plexus route's flush policy.
-pub(in crate::runtime) const INGEST_GROUP_IDLE_FLUSH: Duration = Duration::from_millis(5);
-
 #[derive(Debug, Clone, Copy, strum::Display)]
 pub(in crate::runtime) enum IngestGroupRecordOperation {
     #[strum(serialize = "finish the decoded ingest batch")]
@@ -528,6 +517,7 @@ impl PendingIngestGroup {
         admission: QueueAdmission,
         codec: &Arc<CompiledCodec>,
         payload: &[u8],
+        unfold_limit: usize,
     ) -> Result<(), PayloadDecodeFailure> {
         let row_bound = self.row_bound;
         let records = self
@@ -540,6 +530,7 @@ impl PendingIngestGroup {
             payload,
             &mut self.decoder,
             records,
+            unfold_limit,
         )
         .await;
         match decoded {
@@ -810,6 +801,7 @@ pub(super) struct IngestRouteCollector {
     pub(super) pending: PendingIngestGroup,
     pub(super) routed: IndexMap<RoutedGroupKey, Vec<RelayMessage>, RandomState>,
     pub(super) flush_at: Option<Instant>,
+    idle_flush: Duration,
     /// Whether local input construction was refused during this collector's lifetime. This stays
     /// distinct from downstream ACK failure, which can arrive concurrently with dispatch.
     input_refused: bool,
@@ -825,8 +817,10 @@ impl IngestRouteCollector {
         projection: Arc<IngestMetadataProjection>,
         row_bound: usize,
         metrics: MessageMetricsHandle,
+        idle_flush: Duration,
     ) -> Self {
         Self {
+            idle_flush,
             pending: PendingIngestGroup::new(projection.clone(), row_bound),
             projection,
             row_bound,
@@ -855,9 +849,10 @@ impl IngestRouteCollector {
         admission: QueueAdmission,
         codec: &Arc<CompiledCodec>,
         payload: &[u8],
+        unfold_limit: usize,
     ) -> Result<(), PayloadDecodeFailure> {
         self.pending
-            .decode_payload(executor, admission, codec, payload)
+            .decode_payload(executor, admission, codec, payload, unfold_limit)
             .await
     }
 
@@ -915,7 +910,7 @@ impl IngestRouteCollector {
                 filter_where: filter_where.cloned(),
             });
         }
-        self.flush_at = Some(Instant::now() + INGEST_GROUP_IDLE_FLUSH);
+        self.flush_at = Some(Instant::now() + self.idle_flush);
         Ok(())
     }
 
@@ -985,7 +980,7 @@ impl IngestRouteCollector {
 
     /// The messages the open group has accepted.
     ///
-    /// Ingestors close the group once this reaches [`INGEST_GROUP_MAX_ROWS`]. It counts messages
+    /// Ingestors close the group once this reaches the configured row bound. It counts messages
     /// rather than payloads, and a payload that unfolds past the remaining room overshoots the
     /// bound rather than being split.
     pub(super) fn len(&self) -> usize {
@@ -1310,9 +1305,10 @@ pub(super) async fn decode_ingested_payload(
     payload: &[u8],
     decoder: &mut JsonDecoder,
     builder: &mut RuntimeRecordBatchBuilder,
+    unfold_limit: usize,
 ) -> Result<usize, PayloadDecodeFailure> {
     if !codec.transforms_on_ingestion() {
-        return decode_with_codec(codec, payload, decoder, builder)
+        return decode_with_codec(codec, payload, decoder, builder, unfold_limit)
             .map_err(PayloadDecodeFailure::Codec);
     }
 
@@ -1346,7 +1342,7 @@ pub(super) async fn decode_ingested_payload(
                     ));
                 }
                 unfolding_codec
-                    .unfold_on_ingestion(payload)
+                    .unfold_on_ingestion(payload, unfold_limit)
                     .map_err(PayloadDecodeFailure::Codec)
             },
         )
@@ -2212,8 +2208,12 @@ impl Runtime {
             output_routes: output_routes.clone(),
             filter_where: filter_where.cloned(),
         };
-        let mut collector =
-            IngestRouteCollector::new(IngestMetadataProjection::none(), row_count, metrics.clone());
+        let mut collector = IngestRouteCollector::new(
+            IngestMetadataProjection::none(),
+            row_count,
+            metrics.clone(),
+            self.inner.data_plane.ingest_group_idle_flush(),
+        );
         let routing =
             collector
                 .routing_snapshot(self, domain)
@@ -2254,7 +2254,14 @@ impl Runtime {
         for BatchPayload { payload, entry } in payloads {
             nervix_primitives::task::consume_budget().await;
             let outcome = collector
-                .decode_payload(self.executor(), admission, codec, payload)
+                .decode_payload(
+                    self.executor(),
+                    admission,
+                    codec,
+                    payload,
+                    usize::try_from(self.cluster_parameters().payload_unfold_limit())
+                        .assured("the validated payload bound fits usize"),
+                )
                 .await;
             match outcome {
                 Ok(()) => decoded.push(entry),

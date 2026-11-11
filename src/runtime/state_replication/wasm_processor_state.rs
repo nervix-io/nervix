@@ -19,11 +19,6 @@
 
 use super::*;
 
-/// How often a checkpoint waiting for its replicas rereads the branch's retained unit assignment
-/// publication, which schedule installation replaces, so a changed assignment or owner re-plans or
-/// fails the checkpoint without waiting for its deadline.
-const WASM_CHECKPOINT_REPLAN_INTERVAL: Duration = Duration::from_millis(100);
-
 impl Runtime {
     /// Wait until every assigned replica has installed the branch lifecycle that authorizes a
     /// branch checkpoint. A reset uses this before offering its first guest checkpoint, so a
@@ -101,7 +96,9 @@ impl Runtime {
                 }));
             }
             let recheck = now
-                .checked_add(WASM_CHECKPOINT_REPLAN_INTERVAL)
+                .checked_add(
+                    (self.inner.state_replication_poll_interval / 10).max(Duration::from_nanos(1)),
+                )
                 .assured("a fraction-of-a-second recheck stays within Instant")
                 .min(deadline);
             nervix_primitives::select! {
@@ -377,7 +374,9 @@ impl Runtime {
                 }));
             }
             let recheck = now
-                .checked_add(WASM_CHECKPOINT_REPLAN_INTERVAL)
+                .checked_add(
+                    (self.inner.state_replication_poll_interval / 10).max(Duration::from_nanos(1)),
+                )
                 .assured("a recheck interval of a fraction of a second stays within Instant")
                 .min(deadline);
             nervix_primitives::select! {

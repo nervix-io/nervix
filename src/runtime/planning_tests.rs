@@ -365,6 +365,7 @@ fn eager_binding_prepares_every_processor_family_before_publication() {
         &relay_schemas,
         None,
         nervix_vm::VmSettings::default(),
+        nervix_models::DataPlaneSettings::default().immediate_flush_minimum(),
     )
     .assured("all processor fixtures use exact compatible schemas")
     .into_iter()
@@ -484,7 +485,9 @@ fn eager_binding_classifies_incomplete_published_inputs() {
         output_routes.routes.push(RelayProcessorOutputTemplate {
             output_relay: output.clone(),
             construction: construction("INHERIT ALL"),
-            flush_policy: Some(RuntimeFlushPolicy::Immediate),
+            flush_policy: Some(RuntimeFlushPolicy::Immediate {
+                minimum: nervix_models::DataPlaneSettings::default().immediate_flush_minimum(),
+            }),
             message_error_policy: MessageErrorPolicy::Log,
             compiled_program: None,
         });
@@ -726,6 +729,7 @@ fn planning_parsers_preserve_typed_contract_failures() {
         &processor,
         &output,
         FlushPolicyRequirement::Required,
+        nervix_models::DataPlaneSettings::default().immediate_flush_minimum(),
     )
     .expect_err("an invalid flush batch size must fail");
     assert!(matches!(
@@ -847,6 +851,7 @@ fn planning_parsers_keep_why_duration_text_is_too_long() {
         &processor,
         &output,
         FlushPolicyRequirement::Required,
+        nervix_models::DataPlaneSettings::default().immediate_flush_minimum(),
     )
     .expect_err("a flush interval longer than a duration must fail");
     assert!(matches!(
@@ -918,6 +923,7 @@ fn window_materialization_classifies_output_contract_failures() {
         &HashMap::default(),
         None,
         nervix_vm::VmSettings::default(),
+        nervix_models::DataPlaneSettings::default().immediate_flush_minimum(),
     )
     .expect_err("a window processor without an output must fail");
     assert!(matches!(
@@ -941,6 +947,7 @@ fn window_materialization_classifies_output_contract_failures() {
         &HashMap::default(),
         None,
         nervix_vm::VmSettings::default(),
+        nervix_models::DataPlaneSettings::default().immediate_flush_minimum(),
     )
     .expect_err("window output inheritance must fail lowering");
     assert!(matches!(
@@ -961,6 +968,7 @@ fn window_materialization_classifies_output_contract_failures() {
         &HashMap::default(),
         None,
         nervix_vm::VmSettings::default(),
+        nervix_models::DataPlaneSettings::default().immediate_flush_minimum(),
     )
     .expect_err("window output without runtime schemas must fail compilation");
     assert!(matches!(
@@ -977,6 +985,7 @@ fn inferencer_materialization_requires_an_input_and_schema() {
         &HashMap::default(),
         None,
         nervix_vm::VmSettings::default(),
+        nervix_models::DataPlaneSettings::default().immediate_flush_minimum(),
     )
     .expect_err("an inferencer without input must fail");
     assert!(matches!(
@@ -992,6 +1001,7 @@ fn inferencer_materialization_requires_an_input_and_schema() {
         &HashMap::default(),
         None,
         nervix_vm::VmSettings::default(),
+        nervix_models::DataPlaneSettings::default().immediate_flush_minimum(),
     )
     .expect_err("an inferencer input without a runtime schema must fail");
     assert!(matches!(
@@ -1052,7 +1062,11 @@ fn processor_instance_materialization_requires_an_input_relay() {
         &HashMap::default(),
         &HashMap::default(),
         None,
-        nervix_vm::VmSettings::default(),
+        ProcessorTemplateSettings {
+            vm: nervix_vm::VmSettings::default(),
+            immediate_flush_minimum: nervix_models::DataPlaneSettings::default()
+                .immediate_flush_minimum(),
+        },
     )
     .expect_err("a processor instance without input must fail planning");
 
@@ -1124,6 +1138,7 @@ fn inferencer_input_mappings_compile_when_template_is_materialized() {
         &relay_schemas,
         None,
         nervix_vm::VmSettings::default(),
+        nervix_models::DataPlaneSettings::default().immediate_flush_minimum(),
     )
     .expect_err("invalid INPUTS mapping must fail template materialization");
 
@@ -1150,6 +1165,7 @@ fn missing_flush_policy_identifies_the_node_and_route() {
         &processor,
         &output,
         FlushPolicyRequirement::Required,
+        nervix_models::DataPlaneSettings::default().immediate_flush_minimum(),
     )
     .expect_err("a flush-based route must declare its flush policy");
 
@@ -1184,6 +1200,7 @@ fn invalid_flush_interval_identifies_the_node_and_route() {
         &processor,
         &output,
         FlushPolicyRequirement::Required,
+        nervix_models::DataPlaneSettings::default().immediate_flush_minimum(),
     )
     .expect_err("an invalid flush interval must fail planning");
 
@@ -2332,6 +2349,7 @@ fn window_route_demands_are_offset_by_the_routes_written_before_them() {
         &relay_schemas,
         None,
         nervix_vm::VmSettings::default(),
+        nervix_models::DataPlaneSettings::default().immediate_flush_minimum(),
     )
     .expect("two-route window processor must materialize");
 

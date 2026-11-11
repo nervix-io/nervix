@@ -97,7 +97,9 @@ mod tests {
     use meticulous::ResultExt as _;
 
     use super::*;
-    use crate::{ClusterParameterChange, ClusterParameterUpdates};
+    use crate::{
+        ClusterParameterChange, ClusterParameterUpdates, cluster_parameters::ParameterSetting,
+    };
 
     #[test]
     fn both_lists_change_atomically_without_validating_an_intermediate_pair() {
@@ -167,9 +169,8 @@ mod tests {
         let mut values = ClusterParameterValues::default();
         let groups = TlsKeyExchangeGroups::parse_names(["MLKEM768"])
             .assured("the individual group selection is valid");
-        values.tls_key_exchange_groups =
-            crate::cluster_parameters::ParameterSetting::new(groups, &())
-                .assured("the individual setting has a nonempty unique selection");
+        values.tls_key_exchange_groups = ParameterSetting::new(groups, &())
+            .assured("the individual setting has a nonempty unique selection");
         let json = serde_json::to_vec(&values)
             .assured("the current invalid pair serializes for the boundary test");
         assert!(serde_json::from_slice::<ClusterParameterValues>(&json).is_err());

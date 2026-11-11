@@ -357,6 +357,7 @@ impl ExecutionBuildDeps<'_> {
         &self,
         reingestor: &ReingestorPlan,
         input: &ReingestorInputPlan,
+        immediate_minimum: Duration,
     ) -> error_stack::Result<BoundReingestorInput, EntrypointBindingError> {
         let identifier = ModelName::from(&reingestor.name);
         let target = EntrypointTarget {
@@ -459,6 +460,7 @@ impl ExecutionBuildDeps<'_> {
                 &identifier,
                 relay,
                 &route.flush_policy,
+                immediate_minimum,
             )
             .change_context(EntrypointBindingError::PrepareRoute {
                 kind: ModelKind::Reingestor,
@@ -518,17 +520,24 @@ impl RelayRuntimeHandles<'_> {
         identifier: &ModelName,
         unit: Unit,
         routes: &[PlannedEntryRoute],
+        immediate_minimum: Duration,
     ) -> error_stack::Result<HashMap<RelayName, IngestorRouteTemplate>, EntrypointBindingError>
     {
         let mut templates = HashMap::default();
         for route in routes {
-            let template =
-                materialize_ingestor_route_template(kind, identifier, unit, route, self.services)
-                    .change_context(EntrypointBindingError::PrepareRoute {
-                    kind,
-                    node: identifier.clone(),
-                    relay: route.relay.clone(),
-                })?;
+            let template = materialize_ingestor_route_template(
+                kind,
+                identifier,
+                unit,
+                route,
+                self.services,
+                immediate_minimum,
+            )
+            .change_context(EntrypointBindingError::PrepareRoute {
+                kind,
+                node: identifier.clone(),
+                relay: route.relay.clone(),
+            })?;
             templates.insert(route.relay.clone(), template);
         }
         Ok(templates)
@@ -829,7 +838,11 @@ mod tests {
 
         let bound = surfaces
             .deps(&domain)
-            .bind_reingestor_input(&plan, &plan.inputs[0])
+            .bind_reingestor_input(
+                &plan,
+                &plan.inputs[0],
+                nervix_models::DataPlaneSettings::default().immediate_flush_minimum(),
+            )
             .assured("the planned reingestor input binds");
 
         assert_eq!(bound.reingestor, named("repartition"));
@@ -858,7 +871,11 @@ mod tests {
 
         let error = surfaces
             .deps(&domain)
-            .bind_reingestor_input(&plan, &plan.inputs[0])
+            .bind_reingestor_input(
+                &plan,
+                &plan.inputs[0],
+                nervix_models::DataPlaneSettings::default().immediate_flush_minimum(),
+            )
             .err()
             .assured("an input without resolved branching must not bind");
 
@@ -878,7 +895,11 @@ mod tests {
         let flush = fixture.plan_reingestor(&domain, filtering_reingestor("soon", "25ms"));
         let error = surfaces
             .deps(&domain)
-            .bind_reingestor_input(&flush, &flush.inputs[0])
+            .bind_reingestor_input(
+                &flush,
+                &flush.inputs[0],
+                nervix_models::DataPlaneSettings::default().immediate_flush_minimum(),
+            )
             .err()
             .assured("an unparseable flush interval must not bind");
         assert!(matches!(
@@ -894,7 +915,11 @@ mod tests {
         let collect = fixture.plan_reingestor(&domain, filtering_reingestor("100ms", "later"));
         let error = surfaces
             .deps(&domain)
-            .bind_reingestor_input(&collect, &collect.inputs[0])
+            .bind_reingestor_input(
+                &collect,
+                &collect.inputs[0],
+                nervix_models::DataPlaneSettings::default().immediate_flush_minimum(),
+            )
             .err()
             .assured("an unparseable collection interval must not bind");
         assert!(matches!(
@@ -978,7 +1003,11 @@ mod tests {
         );
         for runtimes in runtimes.branched_entrypoints.into_values() {
             for runtime in runtimes {
-                runtime.shutdown().await;
+                runtime
+                    .shutdown(crate::runtime::entity_gate::task_stop_grace(
+                        nervix_models::DomainDrainTimeout::DEFAULT,
+                    ))
+                    .await;
             }
         }
         for task in runtimes.tasks.into_values().flatten() {
@@ -1069,7 +1098,11 @@ mod tests {
             surfaces.relay_schemas.insert(named(relay), schema);
             let error = surfaces
                 .deps(&domain)
-                .bind_reingestor_input(&plan, &plan.inputs[0])
+                .bind_reingestor_input(
+                    &plan,
+                    &plan.inputs[0],
+                    nervix_models::DataPlaneSettings::default().immediate_flush_minimum(),
+                )
                 .err()
                 .assured("a program that does not compile must not bind");
             let EntrypointBindingError::CompileProgram { program, .. } = error.current_context()

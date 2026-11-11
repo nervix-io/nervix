@@ -50,7 +50,7 @@ impl ZeroMqPullIngestorStartPlan {
             unacknowledged_admission: QueueAdmission::WaitForPlace,
             client_mounts: resolved.mounts.into_iter().collect(),
         }
-        .open::<ZeroMqPullIngestor>(ingestor)
+        .open::<ZeroMqPullIngestor>(runtime, ingestor)
         .await
     }
 }

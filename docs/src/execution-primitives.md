@@ -504,7 +504,7 @@ paths remain visible.
 | Owner | Thread items | Work, count and lifetime bound |
 | --- | --- | --- |
 | Process termination supervision | `thread::spawn_detached` | Two supervisors per process, parked between signals or deadline changes, plus at most one forced-exit watchdog after the single exit claim; supervisors end with the process, and the watchdog waits only the forced-exit report budget |
-| WASM epoch driver | `unmodeled::thread::Builder` | One thread per WASM runtime; one sleep and one engine epoch increment per configured tick; it ends on its next wake after the stop flag is set or the weak stop reference can no longer upgrade |
+| WASM epoch driver | `unmodeled::thread::Builder` | One thread per WASM runtime lifetime; one bounded park and one engine epoch increment per configured tick; the final owner unparks it and its expired weak owner reference ends it |
 | Diagnostic finding recorder | `thread::Builder` | One recording-deadline watchdog at a time, for the one finding the recorder is delivering; a completed potential-order record cancels and joins it, and a record unfinished after ten seconds, or a terminal finding, exits the process |
 | Shared Loom participant launcher | `thread::Builder` | Loom's five slots, including coordinator and body, the branch limit and runner watchdog; participants end within one model execution |
 | Benchmark load driver | `thread::Builder`, `thread::scope` | One joined summary poller per drain owner, and one scoped watermark query per configured partition, each with the request timeout within the driver deadline |
@@ -618,3 +618,9 @@ binds ordinary costs and public/model/fault results to their actual revision and
 Run records, audit registers and measurements belong on the owning task. Architecture documentation
 states durable guarantees and limits, without turning one passing snapshot into a permanent claim
 about later source.
+
+The unmodeled native thread surface also exposes the standard library's `Thread` wake handle and
+`park_timeout` directly. The WASM epoch owner uses them to release its detached engine promptly
+when the final runtime disappears, independently of the configured preemption interval. Its one-time
+wake-handle initialization is real because the external engine thread runs outside every model;
+native lifecycle tests qualify release, without claiming modeled epoch timing or reference-count ordering.

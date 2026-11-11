@@ -59,18 +59,30 @@ pub(in crate::runtime) struct RuntimeReconnectBackoff {
     pub(super) settings: nervix_connector::RetryBackoffSettings,
 }
 
+pub(super) fn reconnect_policy(settings: nervix_models::DataPlaneSettings) -> ParsedRetryPolicy {
+    ParsedRetryPolicy {
+        backoff: settings.reconnect_initial(),
+        max_backoff: settings.reconnect_max(),
+    }
+}
+
 impl Default for RuntimeReconnectBackoff {
     fn default() -> Self {
-        Self {
-            initial: Duration::from_millis(250),
-            next: Duration::from_millis(250),
-            max: Duration::from_secs(30),
-            settings: nervix_connector::RetryBackoffSettings::default(),
-        }
+        Self::from_settings(
+            nervix_models::DataPlaneSettings::default(),
+            nervix_connector::RetryBackoffSettings::default(),
+        )
     }
 }
 
 impl RuntimeReconnectBackoff {
+    pub(super) fn from_settings(
+        settings: nervix_models::DataPlaneSettings,
+        retry: nervix_connector::RetryBackoffSettings,
+    ) -> Self {
+        Self::from_policy(reconnect_policy(settings), retry)
+    }
+
     pub(in crate::runtime) fn from_policy(
         policy: ParsedRetryPolicy,
         settings: nervix_connector::RetryBackoffSettings,
@@ -139,7 +151,7 @@ impl RuntimeReconnectBackoff {
                 changed = shutdown_rx.changed() => {
                     return !(changed.is_err() || *shutdown_rx.borrow());
                 }
-                _ = sleep(remaining.min(Duration::from_millis(100))) => {}
+                _ = sleep(remaining.min(REMOTE_ACK_ALIVE_INTERVAL)) => {}
             }
         }
     }

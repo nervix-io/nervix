@@ -392,6 +392,7 @@ mod tests {
                 config: vec![],
             }),
         );
+        let runtime = Runtime::with_executor(Executor::default());
         for index in [2, 0] {
             let connector = FakeIngestorPlan::new(
                 [(
@@ -421,7 +422,7 @@ mod tests {
             };
             // Only the selected global slot exists, even when index 2 is the first local unit.
             start
-                .open::<FakeIngestor>(&plan.ingestor)
+                .open::<FakeIngestor>(&runtime, &plan.ingestor)
                 .await
                 .expect("only the selected global index opens");
         }

@@ -30,6 +30,13 @@ use crate::runtime::{
 const CHUNK_BYTES: usize = super::super::RESTORE_STATE_CHUNK_BYTES;
 // A retained stored chunk, its Fjall read, the transfer block and the writer's buffer, plus
 // bounded hashing and filesystem metadata. Inline value copies have their own metadata charge.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "branch backup admission covers four stored segments and their framing"
+    )
+)]
 const STAGING_BYTES: u64 = 4 * 64 * 1024 + 8 * 1024;
 
 pub(crate) struct StoredBranchCheckpoint {

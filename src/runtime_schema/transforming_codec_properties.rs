@@ -307,8 +307,15 @@ fn assert_round_trip(
         encoder
             .encode_row_into(row, &mut payload)
             .assured("every number of the codec's domain encodes");
-        let messages = decode_with_codec(codec, &payload, &mut decoder, &mut builder)
-            .assured("a payload the codec wrote decodes");
+        let messages = decode_with_codec(
+            codec,
+            &payload,
+            &mut decoder,
+            &mut builder,
+            usize::try_from(nervix_models::PayloadUnfoldLimit::DEFAULT)
+                .assured("the current default fits usize"),
+        )
+        .assured("a payload the codec wrote decodes");
         assert_eq!(messages, 1, "one payload decodes into one message");
     }
     let decoded = builder

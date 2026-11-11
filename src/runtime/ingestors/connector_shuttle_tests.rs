@@ -329,8 +329,13 @@ fn engagement_during_dispatch(family: IngestorFamily, cause: IngestorQuiesceCaus
                     connector,
                     IngestorHost::new(host),
                     BrokerIngestorPolicy {
+                        error_retry: nervix_models::DataPlaneSettings::default()
+                            .ingestor_error_retry(),
+                        unacknowledged_poll_batch: NonZeroUsize::MIN,
                         acknowledgement: IngestorAckPolicy::None,
-                        retry: INGESTOR_RECONNECT_POLICY,
+                        retry: crate::runtime::reconnect_backoff::reconnect_policy(
+                            nervix_models::DataPlaneSettings::default(),
+                        ),
                         position_class: PositionClass::None,
                     },
                     shutdown_rx,
@@ -345,6 +350,7 @@ fn engagement_during_dispatch(family: IngestorFamily, cause: IngestorQuiesceCaus
                 },
                 NonZeroUsize::MIN,
                 shutdown_rx,
+                nervix_models::DataPlaneSettings::default().ingestor_error_retry(),
             )),
             IngestorFamily::Request => nervix_primitives::task::spawn(run_request_ingestor(
                 connector,
@@ -766,6 +772,8 @@ fn drain_observing_a_confirmation() {
             max_backoff: Duration::from_millis(1),
         };
         let policy = BrokerIngestorPolicy {
+            error_retry: nervix_models::DataPlaneSettings::default().ingestor_error_retry(),
+            unacknowledged_poll_batch: NonZeroUsize::MIN,
             acknowledgement: IngestorAckPolicy::Parallel {
                 max_in_flight: NonZeroUsize::new(2).assured("two is a nonzero batch bound"),
                 batch_timeout: Duration::from_millis(1),
@@ -1007,6 +1015,8 @@ fn drain_observing_a_batch_with_a_refused_payload(queue: &'static [u64]) {
             max_backoff: Duration::from_millis(1),
         };
         let policy = BrokerIngestorPolicy {
+            error_retry: nervix_models::DataPlaneSettings::default().ingestor_error_retry(),
+            unacknowledged_poll_batch: NonZeroUsize::MIN,
             acknowledgement: IngestorAckPolicy::Parallel {
                 max_in_flight: NonZeroUsize::new(2).assured("two is a nonzero batch bound"),
                 batch_timeout: Duration::from_millis(1),
@@ -1161,8 +1171,12 @@ fn instance_unit_handoff() {
                 ChannelIngestor::new(receiver),
                 IngestorHost::new(host),
                 BrokerIngestorPolicy {
+                    error_retry: nervix_models::DataPlaneSettings::default().ingestor_error_retry(),
+                    unacknowledged_poll_batch: NonZeroUsize::MIN,
                     acknowledgement: IngestorAckPolicy::None,
-                    retry: INGESTOR_RECONNECT_POLICY,
+                    retry: crate::runtime::reconnect_backoff::reconnect_policy(
+                        nervix_models::DataPlaneSettings::default(),
+                    ),
                     position_class: PositionClass::None,
                 },
                 shutdown_rx,

@@ -507,7 +507,7 @@ impl Runtime {
                     continue;
                 }
                 let mut sleep = if frozen {
-                    Some(OWNERSHIP_HANDOFF_FREEZE_RECHECK_INTERVAL)
+                    Some((run.runtime.entity_gate_deadline() / 1200).max(Duration::from_nanos(1)))
                 } else {
                     branch_ttl.map(|_| {
                         next_expiration_scan

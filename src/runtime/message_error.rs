@@ -1313,6 +1313,8 @@ mod tests {
                 }],
             },
             MessageErrorRouteBindingContext {
+                immediate_minimum: nervix_models::DataPlaneSettings::default()
+                    .immediate_flush_minimum(),
                 vm_settings: nervix_vm::VmSettings::default(),
                 relay_services: &relay_services,
                 materialized_stream_specs: &HashMap::default(),

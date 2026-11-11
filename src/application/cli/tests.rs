@@ -20,7 +20,7 @@ use crate::application::{
 };
 
 /// The headings of the settings areas, in the order help lists them.
-const SETTINGS_HEADINGS: [&str; 16] = [
+const SETTINGS_HEADINGS: [&str; 17] = [
     "Databases",
     "Consensus capacities",
     "DNS",
@@ -31,6 +31,7 @@ const SETTINGS_HEADINGS: [&str; 16] = [
     "Membership",
     "Scheduling",
     "Runtime state",
+    "Data-plane runtime capabilities",
     "Transactions and commands",
     "Memory pressure",
     "Shutdown",
@@ -40,7 +41,32 @@ const SETTINGS_HEADINGS: [&str; 16] = [
 ];
 
 /// Every setting the settings groups declare, by the name its definition gives it.
-const SETTING_NAMES: [&str; 125] = [
+const SETTING_NAMES: [&str; 150] = [
+    "runtime-delivery-capacity",
+    "runtime-ingest-group-max-rows",
+    "runtime-ingest-group-idle-flush",
+    "runtime-unacknowledged-poll-batch",
+    "runtime-ingestor-error-retry",
+    "runtime-reconnect-initial",
+    "runtime-reconnect-max",
+    "runtime-branch-expiration-scan",
+    "runtime-replication-poll",
+    "runtime-catch-up-concurrency",
+    "runtime-catch-up-pages",
+    "runtime-retained-removals",
+    "runtime-snapshot-staging-bytes",
+    "runtime-snapshot-bytes",
+    "runtime-snapshot-describe-timeout",
+    "runtime-snapshot-fetch-timeout",
+    "runtime-wasm-checkpoint-timeout",
+    "runtime-event-capacity",
+    "runtime-wasm-recovery-capacity",
+    "runtime-immediate-flush-minimum",
+    "runtime-checkpoint-bytes",
+    "runtime-wasm-epoch-tick-interval",
+    "runtime-wasm-epoch-deadline-ticks",
+    "runtime-wasm-guest-buffer-bytes",
+    "runtime-wasm-optimize",
     "connector-retry-multiplier",
     "connector-retry-jitter-percent",
     "kafka-domain-assignment-retry",
@@ -167,6 +193,11 @@ const SETTING_NAMES: [&str; 125] = [
     "client-producer-node-bytes",
     "client-consumer-node-bytes",
 ];
+
+#[test]
+fn the_complete_server_command_has_distinct_argument_identities() {
+    Args::command().debug_assert();
+}
 
 #[test]
 fn durations_render_in_the_largest_unit_that_holds_them_exactly() {

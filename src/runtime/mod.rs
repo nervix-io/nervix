@@ -407,11 +407,10 @@ use branch_lru_state::{
     BranchLruSnapshotError, decode_branch_lru_snapshot, encode_branch_lru_snapshot,
 };
 use branch_runtime::{
-    BRANCH_INSTANCE_EXPIRATION_SCAN_INTERVAL, BranchRuntime, BranchRuntimeMetrics,
-    IngestorRouteRuntime, MaterializedBatchWaitContext, MaterializedDomainHandles,
-    ParkedMaterializedBatch, PendingMaterializedBatch, branch_lru_placement, flush_branch_junction,
-    internal_processor_error_policies, persist_branch_instance_lru_snapshot,
-    publish_branch_instance_lru_snapshot,
+    BranchRuntime, BranchRuntimeMetrics, IngestorRouteRuntime, MaterializedBatchWaitContext,
+    MaterializedDomainHandles, ParkedMaterializedBatch, PendingMaterializedBatch,
+    branch_lru_placement, flush_branch_junction, internal_processor_error_policies,
+    persist_branch_instance_lru_snapshot, publish_branch_instance_lru_snapshot,
 };
 pub(crate) use client_emitter::{
     ClientEmitterAnswer, ClientEmitterDelivery, ClientEmitterDescription, ClientEmitterEndpoint,
@@ -496,7 +495,6 @@ use endpoint_acknowledgement::EndpointRequestPolicy;
 pub(crate) use endpoint_acknowledgement::{EndpointRequestOutcome, EndpointRequestReply};
 pub(crate) use endpoint_route_table::EndpointResolution;
 use endpoint_route_table::{EndpointBinding, EndpointIntakeRoute, EndpointIntakeRoutes};
-pub(in crate::runtime) use entity_gate::OWNERSHIP_HANDOFF_FREEZE_RECHECK_INTERVAL;
 use entity_gate::{
     ActiveDomainAlter, BranchQuiesceGauges, DomainActivityGuard, EntityGateOperation,
     EntityGateTasks, NodeQuiesceCounters, NodeQuiesceWorkGuard, OutputBufferQuiesceGauge,
@@ -525,7 +523,6 @@ use http_request_fields::{
 };
 use inferencer_output::flush_branch_inferencer_output;
 use inferencer_state::ReplicatedInferencerState;
-pub(in crate::runtime) use ingest_group::INGEST_GROUP_MAX_ROWS;
 use ingest_group::{
     BatchPayload, BoundIngestor, BoundIngestorInput, BranchedEntrypointInput, ClientBatchDispatch,
     IngestGroupDispatch, IngestRouteCollector, IngestorDependencies, IngestorRouteRuntimes,
@@ -586,8 +583,8 @@ use planning::{
 };
 use processor_branch_restore::PendingProcessorBranchRestore;
 use processor_branch_task::{
-    PROCESSOR_BRANCH_TASK_SHUTDOWN_GRACE, PreparedProcessorBranch, ProcessorBranchCommand,
-    ProcessorBranchHandoff, ProcessorBranchLifetime, ProcessorBranchTask, ProcessorBranchTaskError,
+    PreparedProcessorBranch, ProcessorBranchCommand, ProcessorBranchHandoff,
+    ProcessorBranchLifetime, ProcessorBranchTask, ProcessorBranchTaskError,
     ProcessorCheckpointPurpose, ProcessorNodeCommand, ProcessorSnapshotRequest,
     SpawnedSnapshotTask,
 };
@@ -668,9 +665,9 @@ pub(crate) use snapshot_staging::{
     SnapshotStagingError, StagedArtifact, StagedArtifactReader, StagedSnapshotWriter,
 };
 use state_replication::{
-    ActivatedRuntimeStateHandoff, CheckpointWriter, DEFAULT_STATE_REPLICATION_POLL_INTERVAL,
-    PreparedForcedRuntimeStateRecovery, PreparedRuntimeStateHandoff, PreparedRuntimeStateSnapshot,
-    PublishedBranchState, RestorableBranchLifecycle,
+    ActivatedRuntimeStateHandoff, CheckpointWriter, PreparedForcedRuntimeStateRecovery,
+    PreparedRuntimeStateHandoff, PreparedRuntimeStateSnapshot, PublishedBranchState,
+    RestorableBranchLifecycle,
 };
 pub(in crate::runtime) use state_store::{
     ForcedRuntimeStateRecoveryAuthorization, ForcedRuntimeStateRecoveryIdentity,
@@ -728,8 +725,8 @@ use vm_input::{
     vm_typed_batch_to_runtime_batch,
 };
 use wasm_checkpoint::{
-    WASM_CHECKPOINT_DEADLINE, WasmCallbackReporting, WasmCheckpointHolds,
-    checkpoint_wasm_guest_state, wasm_callback_decided_tokens,
+    WasmCallbackReporting, WasmCheckpointHolds, checkpoint_wasm_guest_state,
+    wasm_callback_decided_tokens,
 };
 pub(crate) use wasm_guest_state_reset::GuestWasmStateResetRequest;
 use wasm_guest_state_reset::{

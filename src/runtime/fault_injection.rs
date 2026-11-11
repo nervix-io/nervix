@@ -186,18 +186,6 @@ impl ConfiguredFaultInjection {
         None
     }
 
-    pub(in crate::runtime) fn branch_instance_expiration_scan_interval(&self) -> Option<Duration> {
-        None
-    }
-
-    pub(in crate::runtime) fn domain_drain_timeout(&self) -> Option<Duration> {
-        None
-    }
-
-    pub(in crate::runtime) fn entity_gate_deadline(&self) -> Option<Duration> {
-        None
-    }
-
     pub(in crate::runtime) async fn pause_remote_relay_admission_if_armed(
         &self,
         _domain: &DomainName,

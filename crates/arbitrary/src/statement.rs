@@ -290,7 +290,18 @@ enum EnvelopeOperationForm {
 impl Arbitrary<'_> {
     /// A bounded cluster transition naming each parameter once, with independently drawn values.
     fn alter_cluster(&mut self) -> nervix_models::AlterCluster {
+        let ack_unit =
+            std::time::Duration::from_nanos(self.entropy.boundary_biased(1..=1_000_000_000));
         let assignments = vec![
+            nervix_models::ClusterParameterChange::PayloadUnfoldLimit(
+                self.entropy.boundary_biased(1..=u64::from(u32::MAX)),
+            ),
+            nervix_models::ClusterParameterChange::RemoteAckAliveInterval(ack_unit),
+            nervix_models::ClusterParameterChange::RemoteAckDispatchTimeout(ack_unit),
+            nervix_models::ClusterParameterChange::RemoteAckSilenceTimeout(ack_unit * 10),
+            nervix_models::ClusterParameterChange::RemoteAckSweepInterval(ack_unit),
+            nervix_models::ClusterParameterChange::RemoteRelayTotalTimeout(ack_unit * 50),
+            nervix_models::ClusterParameterChange::RemoteRelayInstantiationWait(ack_unit * 5),
             nervix_models::ClusterParameterChange::PasswordIterations(
                 self.entropy
                     .boundary_biased(1..=nervix_models::PasswordIterations::MAXIMUM),

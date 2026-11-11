@@ -12,7 +12,9 @@ use crate::runtime::test_fixtures::{emitter_context, input_batch};
 
 fn task_state(context: &EmitterConnectorContext) -> EmitterTaskState {
     let mut buffer = EmitterBatchBuffer::default();
-    buffer.set_flush_policy(RuntimeFlushPolicy::Immediate);
+    buffer.set_flush_policy(RuntimeFlushPolicy::Immediate {
+        minimum: nervix_models::DataPlaneSettings::default().immediate_flush_minimum(),
+    });
     EmitterTaskState::new(
         EmitterConnectorState::Unavailable {
             retry_open: false,
@@ -597,7 +599,11 @@ impl EmitterLifecycle for DeadlineFinishEmitter {
     async fn finish(&mut self, deadline: Instant) -> EmitterFinishResult {
         if self.overrun {
             nervix_primitives::time::sleep_until(
-                deadline + PROCESSOR_BRANCH_TASK_SHUTDOWN_GRACE + Duration::from_millis(1),
+                deadline
+                    + crate::runtime::entity_gate::task_stop_grace(
+                        nervix_models::DomainDrainTimeout::DEFAULT,
+                    )
+                    + Duration::from_millis(1),
             )
             .await;
         } else {

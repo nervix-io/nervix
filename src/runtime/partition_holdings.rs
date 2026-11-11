@@ -418,6 +418,13 @@ impl Runtime {
             return None;
         }
         let mut keys = Vec::new();
+        let frame_bytes =
+            <PartitionTransitionRequest as nervix_interconnect::InterconnectRequest>::CLASS
+                .payload_limit(self.executor());
+        let mut budget = super::branch_key::BranchKeyPageBudget::new(
+            frame_bytes,
+            std::mem::size_of::<PartitionCatalogKey>(),
+        );
         let mut next = None;
         let lower = match after {
             Some(after) => std::ops::Bound::Excluded(after),
@@ -431,7 +438,7 @@ impl Runtime {
             if misplaced.target != claimant {
                 continue;
             }
-            if keys.len() == limit {
+            if keys.len() == limit || !budget.include(Some(&misplaced.key), keys.len()) {
                 next = keys.last().map(|key: &PartitionCatalogKey| key.fingerprint);
                 break;
             }
@@ -471,9 +478,15 @@ impl Runtime {
                     ),
                     subject.holder,
                 );
-                // A catalog page carries no more keys than a page of branch checkpoints a peer
-                // lists in one control answer.
-                let page = super::state_replication::BRANCH_CHECKPOINT_LISTING_PAGE.get();
+                let bytes =
+                    <PartitionTransitionRequest as nervix_interconnect::InterconnectRequest>::CLASS
+                        .payload_limit(self.executor());
+                let page = super::branch_key::BranchKeyPageBudget::new(
+                    bytes,
+                    std::mem::size_of::<PartitionCatalogKey>(),
+                )
+                .entries()
+                .get();
                 match self.partition_catalog_page(
                     &holder,
                     subject.epoch,

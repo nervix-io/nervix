@@ -1043,11 +1043,11 @@ fn a_malformed_key_segment_names_its_issue() {
 fn an_operation_under_a_replaced_assignment_is_refused() {
     let authority = StateAssignmentAuthority::default();
     let replaced = authority
-        .rebind(StateReplicationRoles::owned_by(None), None)
+        .rebind(StateReplicationRoles::owned_by(None), None, 2)
         .token_for(StateCapability::Originate)
         .assured("a state without roles is originated locally");
     let current = authority
-        .rebind(StateReplicationRoles::owned_by(None), None)
+        .rebind(StateReplicationRoles::owned_by(None), None, 2)
         .token_for(StateCapability::Originate)
         .assured("a state without roles is originated locally");
 

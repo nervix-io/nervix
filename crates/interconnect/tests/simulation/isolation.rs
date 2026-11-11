@@ -762,6 +762,7 @@ impl PeerHost {
             .try_charge_owned(MemoryClass::Relay, arrow_batch())
             .assured("the Arrow fixture fits the relay memory budget");
         RelayPayload {
+            ack_timing: nervix_models::RemoteAckTiming::default(),
             decoded_bytes: 0,
             delivery,
             kind: RelayPayloadKind::Routed,

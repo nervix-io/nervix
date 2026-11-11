@@ -126,7 +126,11 @@ impl InterconnectRelayPayloadLane {
         let routing = match routing {
             Some(routing) => routing,
             None => match runtime
-                .wait_for_domain_routing(&message.payload.domain, &message.payload.relay)
+                .wait_for_domain_routing_with_timing(
+                    &message.payload.domain,
+                    &message.payload.relay,
+                    message.payload.ack_timing,
+                )
                 .await
             {
                 Ok(routing) => routing,
@@ -285,6 +289,7 @@ mod tests {
         let (lane, mut payloads) = InterconnectRelayPayloadLane::new();
         let peer_node_id = ClusterNodeName::parse("node-2").expect("valid node name");
         let routed = RelayPayload {
+            ack_timing: nervix_models::RemoteAckTiming::default(),
             decoded_bytes: 0,
             delivery: nervix_interconnect::RelayDelivery {
                 channel_incarnation: [1; 16],

@@ -42,6 +42,27 @@ use super::{
 
 const DEFAULT_PRIORITY: u8 = 13;
 
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(fixed, reason = "RFC 5424 fixes the maximum hostname header width")
+)]
+const HOSTNAME_BYTES: usize = 255;
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(fixed, reason = "RFC 5424 fixes the maximum app-name header width")
+)]
+const APP_NAME_BYTES: usize = 48;
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(fixed, reason = "RFC 5424 fixes the maximum proc-id header width")
+)]
+const PROC_ID_BYTES: usize = 128;
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(fixed, reason = "RFC 5424 fixes the maximum msg-id header width")
+)]
+const MSG_ID_BYTES: usize = 32;
+
 /// Bytes outside RFC 5424 `PRINTUSASCII`, which no header field may hold.
 struct OutsidePrintUsAscii;
 
@@ -463,10 +484,10 @@ impl<'a> SyslogMessage<'a> {
         }
         let message = required_string(row, "message")?;
         let message = message.strip_prefix('\u{feff}').unwrap_or(message);
-        let hostname = header_value(row, "hostname", 255)?;
-        let app_name = header_value(row, "app_name", 48)?;
-        let proc_id = header_value(row, "proc_id", 128)?;
-        let msg_id = header_value(row, "msg_id", 32)?;
+        let hostname = header_value(row, "hostname", HOSTNAME_BYTES)?;
+        let app_name = header_value(row, "app_name", APP_NAME_BYTES)?;
+        let proc_id = header_value(row, "proc_id", PROC_ID_BYTES)?;
+        let msg_id = header_value(row, "msg_id", MSG_ID_BYTES)?;
         let structured_data = optional_string(row, "structured_data")?;
         if let Some(structured_data) = structured_data {
             let consumed = structured_data_prefix(structured_data, true)

@@ -336,6 +336,104 @@ prerequisite.
 A proposed new prerequisite first has to establish why a committed cluster parameter applied by
 rebuilding its owner cannot express it.
 
+## Data-Plane Runtime Policy And Capacity
+
+Nervix commits domain teardown, entity-gate and remote acknowledgement timing as cluster
+parameters. Server options with the same hyphenated names seed the first bootstrap only; use
+`ALTER CLUSTER SET` to change a running cluster. `DESCRIBE CLUSTER` distinguishes committed
+policy from the policy each node has installed.
+
+| Plexus parameter | Default | Meaning |
+| --- | --- | --- |
+| `DOMAIN_DRAIN_TIMEOUT` | 30s | Budget for draining a domain's admitted work |
+| `ENTITY_GATE_DEADLINE` | 30s | Budget for a coordinated entity gate |
+| `REMOTE_ACK_ALIVE_INTERVAL` | 100ms | Report cadence of a retained remote delivery |
+| `REMOTE_ACK_DISPATCH_TIMEOUT` | 5s | Inactivity budget of a remote admission attempt |
+| `REMOTE_ACK_SILENCE_TIMEOUT` | 15s | Reporting silence allowed after admission |
+| `REMOTE_ACK_SWEEP_INTERVAL` | 1s | Cadence for counting silence and admission sweeps |
+| `REMOTE_RELAY_TOTAL_TIMEOUT` | 5m | Total remote admission budget |
+| `REMOTE_RELAY_INSTANTIATION_WAIT` | 5s | Budget for routing to become available |
+| `PAYLOAD_UNFOLD_LIMIT` | 65,536 | Maximum records one codec unfolds from one ingested payload |
+
+Every duration is positive and no longer than `u32::MAX` seconds. Silence must be strictly greater
+than twice the sum of dispatch timeout and alive interval. The sweep divides both silence and
+total admission budgets exactly, including their nanoseconds. Dispatch and instantiation budgets
+must each fit the total admission budget. Change related values in one statement; an invalid
+combination publishes nothing. The unfold limit is a positive 32-bit record count, independent
+of the maximum declared emitter batch size.
+
+Both domain drain and gate budgets must independently fit every admitted node's local drain and
+shutdown budgets. Parameter transitions capture those capacity claims in their commit fence;
+a concurrently changed claim requires revalidation. A node joining or restarting with insufficient
+local budgets refuses the selected committed policy before readiness. Departed membership retains
+its claim until `DROP NODE`, so increasing lifecycle policy may require updating that node or
+removing its membership first.
+
+Each remote delivery captures the complete timing group once. Its receiver reports and its sender
+sweeps with that group for the delivery's lifetime. Live changes govern new deliveries; they do
+not shorten an earlier delivery's reporting window. A late sweep counts once and skips missed
+ticks. Channel retention covers the largest accepted admission budget within the peer incarnation,
+and a sender rotates before the shortest retained channel budget can expire.
+
+The following are node capabilities, resolved through `RuntimeSettings` and announced with the
+node's immutable incarnation-bound claim. Restart to change them. Each has its `NERVIX_`
+environment variable, formed by uppercasing the option and replacing hyphens with underscores.
+`DESCRIBE CLUSTER` prints the resolved values.
+
+| Server option | Default | Meaning |
+| --- | --- | --- |
+| `--runtime-delivery-capacity` | 8192 | Maximum concurrent remote deliveries in each correlation lane |
+| `--runtime-ingest-group-max-rows` | 1024 | Decoded rows that close an ingest group |
+| `--runtime-ingest-group-idle-flush` | 5ms | Idle deadline of a partial ingest group |
+| `--runtime-unacknowledged-poll-batch` | 1 | Messages requested per unacknowledged broker poll |
+| `--runtime-ingestor-error-retry` | 100ms | Delay after a transient ingestor error |
+| `--runtime-reconnect-initial` | 250ms | Initial reconnect delay for host-owned retry |
+| `--runtime-reconnect-max` | 30s | Maximum reconnect delay for host-owned retry |
+| `--runtime-branch-expiration-scan` | 30s | Cadence of branch lifetime expiration scans |
+| `--runtime-replication-poll` | 1s | Cadence of state replication polls |
+| `--runtime-catch-up-concurrency` | 16 | Checkpoint fetches admitted in one catch-up round |
+| `--runtime-catch-up-pages` | 64 | Catalog pages visited in one catch-up round |
+| `--runtime-retained-removals` | 1024 | Catalog removals retained for incremental replication |
+| `--runtime-snapshot-staging-bytes` | smaller of 128GiB and temporary volume capacity | Concurrent temporary snapshot staging quota |
+| `--runtime-snapshot-bytes` | smaller of 64GiB, staging quota and temporary volume capacity | Largest snapshot staged by one transfer |
+| `--runtime-snapshot-describe-timeout` | 30s | Deadline of describing a sealed state snapshot |
+| `--runtime-snapshot-fetch-timeout` | 30s | Deadline of fetching a sealed state snapshot |
+| `--runtime-wasm-checkpoint-timeout` | 90s | Deadline until every guest checkpoint replica confirms |
+| `--runtime-event-capacity` | 256 | Runtime events retained for a lagging observer |
+| `--runtime-wasm-recovery-capacity` | 32 | Guest-state recovery requests awaiting a decision |
+| `--runtime-immediate-flush-minimum` | 100us | Minimum timer interval for immediate branch flushes |
+| `--runtime-checkpoint-bytes` | 256MiB | Largest state checkpoint accepted by an in-memory transfer |
+| `--runtime-wasm-epoch-tick-interval` | 1ms | WASM epoch preemption quantum |
+| `--runtime-wasm-epoch-deadline-ticks` | 1 | WASM epoch ticks before an asynchronous yield |
+| `--runtime-wasm-guest-buffer-bytes` | 64MiB | Maximum guest invocation buffer |
+| `--runtime-wasm-optimize` | true | Enable WASM compilation optimisation |
+
+Counts are positive and fit the unsigned 32-bit collection bound; byte capacities are positive
+and fit signed 64-bit accounting. Reconnect initial delay cannot exceed its maximum, and a single
+snapshot cannot exceed the concurrent staging quota. Snapshot quotas must fit the volume holding
+the temporary directory, independently of the restore-staging quota on the database volume.
+Group size controls decoded grouping; sequential broker intake still requests exactly one message.
+A connector's declared intake capacity also applies when it is smaller than the configured group.
+Kafka partition watching stays with `--kafka-partition-watch-interval` in the connector host group.
+
+Materialized row-view metadata derives its ceiling from the resolved relay memory budget at both
+capture and restore. Capture metadata retains its Bulk admission; reopened metadata retains its
+State Read admission, preserving isolation between those owners. Provision both the metadata
+reservation and its streaming working set in the relevant pools. Streaming snapshot and transfer
+chunks use the executor's `bulk_chunk_bytes`.
+Catalog pages derive their entry and variable-key byte allowance from the replication frame limit;
+they preserve ordered cursor progress without materializing the entire catalog. Task teardown
+receives one fifteenth of the domain drain budget, two seconds at the default. Internal drain,
+freeze and replication rechecks derive from their owning deadline or replication cadence, with a
+one-nanosecond floor. ONNX sessions use one intra-operation and one inter-operation thread because
+the Data executor already owns parallel admission. State admission spins only with parallel Data
+workers; its bounded spin is followed by the selected thread yield.
+
+Framing, packed identity bits, sequential single-slot handoffs, accounting granules and persisted
+segment sizes remain fixed contracts, with their owning code and format chapters declaring why.
+A sleep-forever sentinel is not a maintenance cadence. The checkpoint transfer capacity remains
+independent of the guest buffer because non-guest state uses the same transfer owner.
+
 ## The Startup Preflight
 
 Before it binds a listener or opens a store, a node checks the environment it is about to run in.
@@ -359,7 +457,11 @@ It refuses to start at the first check that fails, exiting with status `1` and
    database directory: `--restore-staging-max-bytes` when given, otherwise the smaller of 128 GiB
    and that size. It then requires the quota, `--resource-max-archive-bytes` and
    `--resource-max-extracted-bytes` each to fit that size. Each quota is compared with the size on
-   its own, and nothing the volume already holds is subtracted.
+   its own, and nothing the volume already holds is subtracted. The two snapshot staging quotas
+   independently fit the measured temporary volume. Omitted snapshot staging is the smaller of
+   128 GiB and that volume's capacity; an omitted per-transfer bound is the smaller of 64 GiB,
+   the resolved staging quota and that capacity. Explicit values are refused when they do not fit,
+   never reduced. The immutable node claim and runtime use these same resolved values.
 5. It loads its name resolver, as [Name Resolution](name-resolution.md#resolver-lifetime)
    describes.
 
@@ -621,7 +723,8 @@ describes, defaults included.
 | `--password-iterations` | cluster parameter | password creation policy |
 | `--licensing-request-timeout`, `--licensing-retry-backoff-max`, `--licensing-stream-idle-timeout` | cluster parameter | licensing coordination |
 | `--state-snapshot-interval` | cluster parameter | runtime |
-| `--domain-drain-timeout`, `--entity-gate-deadline` | cluster parameter | cluster policy |
+| `--domain-drain-timeout`, `--entity-gate-deadline`, `--remote-ack-*`, `--remote-relay-*`, `--payload-unfold-limit` | cluster parameter | cluster policy |
+| `--runtime-delivery-capacity` and the data-plane runtime options above | node capability | data-plane capacity |
 | `--max-batch-messages`, `--client-producer-session-bytes`, `--client-consumer-session-bytes`, `--udf-code-bytes`, `--http-header-bytes`, `--http-header-fields`, `--client-batch-rows` | cluster parameter | model and session policy |
 | `--restore-staging-max-bytes` | node capability | runtime |
 | `--transaction-idle-timeout`, `--transaction-tombstone-retention`, `--transaction-max-statements`, `--transaction-max-source-bytes`, `--transaction-max-open` | cluster parameter | transaction limits |

@@ -374,6 +374,23 @@ test-window-collection-arrays *args: build-deps build-plexus-format build-test-c
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
     cargo test --package nervix-scenarios --test scenarios -- --input tests/features/runtime/window_collect_array.feature {{ quote(args) }}
 
+# Exercise committed runtime timings and local capacities through the public interface.
+test-runtime-settings *args: build-deps build-plexus-format build-test-cli build-deadlock-report
+    ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)" cargo test --package nervix-scenarios --test scenarios -- --input {{ quote(justfile_directory() / "tests/features/cluster/runtime_settings{,}.feature") }} {{ quote(args) }}
+
+# Collect the focused public settings scenarios into the ordinary Rust coverage profile.
+# Reset counters with coverage-clean-profiles before a fresh collection; this selector appends.
+coverage-runtime-settings output="target/runtime-settings.lcov" *args: build-deps build-plexus-format
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    just coverage-cli-binary
+    just coverage-deadlock-report-binary
+    export NERVIX_TEST_CLI_PATH={{ quote(cargo_target_dir + "/llvm-cov-target/debug/nervix-cli") }}
+    export NERVIX_DEADLOCK_REPORT_TOOL={{ quote(cargo_target_dir + "/llvm-cov-target/debug/nervix-deadlock-report") }}
+    install -m 755 {{ quote(cargo_target_dir + "/debug/nervix-plexus-format") }} {{ quote(cargo_target_dir + "/llvm-cov-target/debug/nervix-plexus-format") }}
+    cargo llvm-cov --no-clean --package nervix-scenarios --test scenarios --no-default-ignore-filename-regex --lcov --output-path {{ quote(output) }} -- --input {{ quote(justfile_directory() / "tests/features/cluster/runtime_settings{,}.feature") }} {{ quote(args) }}
+
 # Observe released and installed processor keys through bounded public inspection pages.
 test-partition-state-inspection *args: build-deps build-plexus-format build-test-cli build-deadlock-report
     ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)" cargo test --package nervix-scenarios --test scenarios -- --input {{ quote(justfile_directory() / "tests/features/runtime/partition_state_inspection{,}.feature") }} {{ quote(args) }}
