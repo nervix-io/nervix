@@ -1179,10 +1179,10 @@ mod count_publication_tests {
     //! Depends on: the real receiver state and its count publication boundary.
     //! Must not know: Nervix graphs, emitter scheduling or connection parsing.
 
-    use super::*;
-
     #[test]
     fn a_delayed_capture_observation_cannot_rewind_the_published_total() {
+        use super::*;
+
         let state = ReceiverState::new(LengthPolicy::Lenient);
         for index in 0..4 {
             let request = CapturedRequest {
@@ -1203,6 +1203,8 @@ mod count_publication_tests {
 
     #[test]
     fn a_delayed_fault_observation_cannot_rewind_the_published_total() {
+        use super::*;
+
         let state = ReceiverState::new(LengthPolicy::Lenient);
         for connection in 0..4 {
             state.record(ReceiverFault::IncompleteRequest { connection });
