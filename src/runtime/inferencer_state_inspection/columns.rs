@@ -5,6 +5,17 @@
 
 use super::*;
 
+/// Start without row/value buffers; admitted page construction owns their growth.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "Arrow columns start at zero row/value capacity so page admission, rather than \
+                  Arrow's eager default, controls their growth"
+    )
+)]
+const EMPTY_COLUMN_CAPACITY: usize = 0;
+
 pub(super) struct Headers {
     fingerprint: StringBuilder,
     incarnation: UInt64Builder,
@@ -19,14 +30,14 @@ pub(super) struct Headers {
 impl Default for Headers {
     fn default() -> Self {
         Self {
-            fingerprint: StringBuilder::with_capacity(0, 0),
-            incarnation: UInt64Builder::with_capacity(0),
-            revision: UInt64Builder::with_capacity(0),
-            persisted: UInt64Builder::with_capacity(0),
-            bytes: UInt64Builder::with_capacity(0),
-            confirmed: UInt64Builder::with_capacity(0),
-            replicas: UInt64Builder::with_capacity(0),
-            stage: StringBuilder::with_capacity(0, 0),
+            fingerprint: StringBuilder::with_capacity(EMPTY_COLUMN_CAPACITY, EMPTY_COLUMN_CAPACITY),
+            incarnation: UInt64Builder::with_capacity(EMPTY_COLUMN_CAPACITY),
+            revision: UInt64Builder::with_capacity(EMPTY_COLUMN_CAPACITY),
+            persisted: UInt64Builder::with_capacity(EMPTY_COLUMN_CAPACITY),
+            bytes: UInt64Builder::with_capacity(EMPTY_COLUMN_CAPACITY),
+            confirmed: UInt64Builder::with_capacity(EMPTY_COLUMN_CAPACITY),
+            replicas: UInt64Builder::with_capacity(EMPTY_COLUMN_CAPACITY),
+            stage: StringBuilder::with_capacity(EMPTY_COLUMN_CAPACITY, EMPTY_COLUMN_CAPACITY),
         }
     }
 }
@@ -79,22 +90,26 @@ impl Tensors {
     pub(super) fn new(index: usize) -> ReadResult<Self> {
         Ok(Self {
             index: u32::try_from(index).change_context(ProcessorStatePageError::Columns)?,
-            input: StringBuilder::with_capacity(0, 0),
-            output: StringBuilder::with_capacity(0, 0),
-            shape: ListBuilder::with_capacity(UInt64Builder::with_capacity(0), 0).with_field(
-                StdArc::new(arrow_schema::Field::new(
-                    "item",
-                    arrow_schema::DataType::UInt64,
-                    false,
-                )),
-            ),
-            values: ListBuilder::with_capacity(Float32Builder::with_capacity(0), 0).with_field(
-                StdArc::new(arrow_schema::Field::new(
-                    "item",
-                    arrow_schema::DataType::Float32,
-                    false,
-                )),
-            ),
+            input: StringBuilder::with_capacity(EMPTY_COLUMN_CAPACITY, EMPTY_COLUMN_CAPACITY),
+            output: StringBuilder::with_capacity(EMPTY_COLUMN_CAPACITY, EMPTY_COLUMN_CAPACITY),
+            shape: ListBuilder::with_capacity(
+                UInt64Builder::with_capacity(EMPTY_COLUMN_CAPACITY),
+                EMPTY_COLUMN_CAPACITY,
+            )
+            .with_field(StdArc::new(arrow_schema::Field::new(
+                "item",
+                arrow_schema::DataType::UInt64,
+                false,
+            ))),
+            values: ListBuilder::with_capacity(
+                Float32Builder::with_capacity(EMPTY_COLUMN_CAPACITY),
+                EMPTY_COLUMN_CAPACITY,
+            )
+            .with_field(StdArc::new(arrow_schema::Field::new(
+                "item",
+                arrow_schema::DataType::Float32,
+                false,
+            ))),
         })
     }
 
