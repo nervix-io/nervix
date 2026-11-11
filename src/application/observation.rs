@@ -25,7 +25,7 @@ use std::{collections::BTreeSet, num::NonZeroU64, time::Duration};
 
 use arch_into::ArchInto;
 use error_stack::{Report, ResultExt as _};
-use meticulous::{OptionExt as _, ResultExt as _};
+use meticulous::OptionExt as _;
 use nervix_dataflow_graph::DataflowNodeHealth;
 use nervix_execution::MemoryClass;
 use nervix_interconnect::{
@@ -48,10 +48,10 @@ use nervix_models::{
     DescribeIngestor, DescribeJunction, DescribeLookup, DescribePlacement, DescribeReingestor,
     DescribeRelay, DescribeReorderer, DescribeResource, DescribeUdf, DescribeWasmProcessor,
     DescribeWindowProcessor, DomainName, DomainStatus, EmitterName, FieldName, IngestorName,
-    InspectionFormat, LookupName, LookupQuery, Model, ModelKind, ModelName, NodeRef, ParseAsType,
+    LookupName, LookupQuery, Model, ModelKind, ModelName, NodeRef, ParseAsType,
     ResourceDescription, ResourceId, ResourceName, ResourceUsage, ResourceVersion,
     ResourceVersionDescription, ResourceVersionEntries, ScheduledNode, SchemaName,
-    UniquelyKindedModel, Unit, UnitKind, WasmStateInspection,
+    UniquelyKindedModel, Unit, UnitKind,
 };
 use nervix_vm::window::{WindowAggregateProgram, lower_window_assignments};
 use tracing::{debug, warn};
@@ -87,6 +87,7 @@ use crate::{registry::RegistryError, runtime::RelayPartitioning, runtime_schema}
 mod emitter_instances;
 mod ingestor_units;
 mod relay_units;
+mod wasm_state;
 
 const REMOTE_DESCRIBE_RELAY_TIMEOUT: Duration = Duration::from_secs(1);
 /// How long DESCRIBE waits for the node that runs an entity, or one of its units, to report the
@@ -1638,26 +1639,31 @@ impl SessionServiceImpl {
             Ok(metrics) => metrics,
             Err(message) => return command_error(format!("{message:#}")),
         };
-        let inspection = scheduled_node
-            .as_ref()
-            .and_then(|node| WasmStateInspection::of_scheduled(node, runtime_details.checkpoints));
-        let message = match describe.format {
-            InspectionFormat::Text => append_metrics_lines(
-                format_wasm_processor_describe_output(
-                    &describe.name,
-                    &processor,
-                    scheduled_node.as_ref(),
-                    inspection.as_ref(),
-                ),
-                runtime_details.metrics,
-            ),
-            InspectionFormat::Json => serde_json::to_string_pretty(&inspection).assured(
-                "WASM inspection contains only strings, numbers, sequences and tagged enums",
-            ),
+        let summaries = match scheduled_node.as_ref() {
+            Some(node) => {
+                match wasm_state::wasm_unit_summaries(node, runtime_details.checkpoints) {
+                    Ok(summaries) => summaries,
+                    Err(error) => {
+                        return command_error(format!(
+                            "failed to summarize the guest state of wasm processor '{}' in domain \
+                             '{}': {error:#}",
+                            describe.name.as_str(),
+                            domain.as_str()
+                        ));
+                    }
+                }
+            }
+            None => Vec::new(),
         };
-        let mut result = command_ok(message);
-        result.wasm_state = inspection.map(Box::new);
-        result
+        command_ok(append_metrics_lines(
+            format_wasm_processor_describe_output(
+                &describe.name,
+                &processor,
+                scheduled_node.as_ref(),
+                &summaries,
+            ),
+            runtime_details.metrics,
+        ))
     }
 
     /// The `M` named `identifier` in `domain`, with the schedule entry that places it.

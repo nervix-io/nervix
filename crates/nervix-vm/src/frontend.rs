@@ -15,7 +15,7 @@
 use std::num::NonZeroU64;
 
 use ahash::{HashSet, HashSetExt};
-use arrow_schema::{DataType, Schema, TimeUnit};
+use arrow_schema::{DataType, Schema};
 use error_stack::{Report, ResultExt as _};
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::{
@@ -168,11 +168,6 @@ pub enum FrontendErrorKind {
         operation: JsonOperation,
         defect: JsonTargetDefect,
     },
-    #[error("cast target expected {expected}, found {found:?}")]
-    UnsupportedCollectionCast {
-        expected: CastTargetKind,
-        found: ParseAsType,
-    },
     #[error("function '{function}' has invalid shape arguments")]
     ListShapeArguments {
         function: crate::program::ListShapeFunctionName,
@@ -264,12 +259,6 @@ pub enum AssignmentTargetSet {
     BareOrBranch,
     #[strum(serialize = "a bare or output field")]
     BareOrOutput,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, strum::Display)]
-pub enum CastTargetKind {
-    #[strum(serialize = "a scalar type")]
-    Scalar,
 }
 
 /// A literal argument that selects what a datetime call computes.
@@ -1496,12 +1485,12 @@ fn lower_expression_with_span(
         },
         ModelExpression::Cast { expression, target } => Expr::Cast {
             expr: Box::new(lower_expression_with_span(expression, scope_policy, span)?),
-            data_type: scalar_data_type(target, span)?,
+            data_type: target.arrow_data_type(),
             on_failure: CastFailure::Error,
         },
         ModelExpression::TryCast { expression, target } => Expr::Cast {
             expr: Box::new(lower_expression_with_span(expression, scope_policy, span)?),
-            data_type: scalar_data_type(target, span)?,
+            data_type: target.arrow_data_type(),
             on_failure: CastFailure::Null,
         },
         ModelExpression::JsonValue {
@@ -1999,35 +1988,6 @@ fn json_value_extraction(
             on_failure,
         },
     })
-}
-
-fn scalar_data_type(target: &ParseAsType, span: Span) -> FrontendResult<DataType> {
-    match target {
-        ParseAsType::U8 => Ok(DataType::UInt8),
-        ParseAsType::I8 => Ok(DataType::Int8),
-        ParseAsType::U16 => Ok(DataType::UInt16),
-        ParseAsType::I16 => Ok(DataType::Int16),
-        ParseAsType::U32 => Ok(DataType::UInt32),
-        ParseAsType::I32 => Ok(DataType::Int32),
-        ParseAsType::U64 => Ok(DataType::UInt64),
-        ParseAsType::I64 => Ok(DataType::Int64),
-        ParseAsType::Bool => Ok(DataType::Boolean),
-        ParseAsType::String => Ok(DataType::Utf8),
-        ParseAsType::Bytes => Ok(DataType::Binary),
-        ParseAsType::Datetime => Ok(DataType::Timestamp(
-            TimeUnit::Nanosecond,
-            Some("+00:00".into()),
-        )),
-        ParseAsType::F32 => Ok(DataType::Float32),
-        ParseAsType::F64 => Ok(DataType::Float64),
-        ParseAsType::Array { .. } | ParseAsType::Vec { .. } => Err(FrontendError::report(
-            span,
-            FrontendErrorKind::UnsupportedCollectionCast {
-                expected: CastTargetKind::Scalar,
-                found: target.clone(),
-            },
-        )),
-    }
 }
 
 #[cfg(test)]
@@ -2575,23 +2535,38 @@ mod tests {
             ),
             FrontendErrorKind::UnexpandedInheritance,
         );
+    }
 
-        let target = ParseAsType::Vec {
-            element: Box::new(ParseAsType::I64),
-        };
-        assert_frontend_error(
-            lower_expression(
-                &ModelExpression::Cast {
-                    expression: Box::new(ModelExpression::Literal(ModelLiteral::I64(1))),
-                    target: target.clone(),
-                },
-                SemanticScopePolicy::read_only("input"),
+    #[test]
+    fn lowers_a_conversion_to_a_list_type_to_the_list_type_a_schema_field_declares() {
+        for (source, on_failure) in [
+            ("input.readings AS ARRAY<F32, 64, 2>", CastFailure::Error),
+            (
+                "TRY_CAST(input.readings AS VEC<VEC<I32>>)",
+                CastFailure::Null,
             ),
-            FrontendErrorKind::UnsupportedCollectionCast {
-                expected: CastTargetKind::Scalar,
-                found: target,
-            },
-        );
+        ] {
+            let parsed = expression(source);
+            let target = match &parsed {
+                ModelExpression::Cast { target, .. } | ModelExpression::TryCast { target, .. } => {
+                    target.clone()
+                }
+                other => panic!("`{source}` parses to a conversion, found {other:?}"),
+            };
+            let lowered = lower_expression(&parsed, SemanticScopePolicy::read_only("input"))
+                .assured("the conversion reads an input field");
+            let Expr::Cast {
+                expr: operand,
+                data_type,
+                on_failure: lowered_failure,
+            } = &lowered.inner
+            else {
+                panic!("`{source}` lowers to a cast, found {lowered:?}");
+            };
+            assert_eq!(*data_type, target.arrow_data_type(), "{source}");
+            assert_eq!(*lowered_failure, on_failure, "{source}");
+            assert_eq!(input_field(operand), "readings");
+        }
     }
 
     #[test]
@@ -2647,23 +2622,6 @@ mod tests {
                 field: "raw".to_string(),
             }),
             "the operand reads the working message field from the input"
-        );
-
-        let target = ParseAsType::Vec {
-            element: Box::new(ParseAsType::I64),
-        };
-        assert_frontend_error(
-            lower_expression(
-                &ModelExpression::TryCast {
-                    expression: Box::new(ModelExpression::Literal(ModelLiteral::I64(1))),
-                    target: target.clone(),
-                },
-                SemanticScopePolicy::read_only("input"),
-            ),
-            FrontendErrorKind::UnsupportedCollectionCast {
-                expected: CastTargetKind::Scalar,
-                found: target,
-            },
         );
     }
 

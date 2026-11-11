@@ -22,8 +22,8 @@ lowercase HTTP field names, and on an emitter that keeps one value per header na
 header name once: a repeated literal name is refused when the statement is validated.
 For outbound WebSockets, read the `WEBSOCKETS CONNECTION` section of Ingestors for literal upgrade
 headers, subprotocol offers, response-header reads, frame metadata and the closed client CONFIG key
-set, including idle deadlines after a delayed host handoff, the trust roots `tls_ca_file` adds to
-and how inspection redacts an endpoint. Offer
+set, including idle deadlines after a delayed host handoff, the trust roots `tls_ca_file` adds to,
+peer Close diagnostics during signaling and how inspection redacts an endpoint. Offer
 subprotocols only through `HEADERS { 'sec-websocket-protocol' = '...' }`, and expect the peer to
 select one of them: any other answer fails the connection.
 For ClickHouse HTTP connection tuning, client certificates, compression and which insert failures
@@ -140,6 +140,8 @@ For cluster continuity and public identity inspection, read
 For activation, refresh, `DESCRIBE LICENSE`, effective policy, credential handling and quota usage, read
 [Node Settings → Cluster Licensing](../../../docs/src/node-settings.md#cluster-licensing) and
 [Licensing Metrics](../../../docs/src/metrics-and-observability.md#licensing-metrics).
+For notification freshness, reconnects and polling fallback, use that chapter’s event-stream contract.
+Treat notification hints as requests to obtain a verified decision, never as permissions.
 Keep licensing commands cluster-scoped and obtain credentials and trust provisioning externally;
 Plexus supplies no service-address or trust-anchor override. The same section owns ephemeral
 expiry and the stop gate: an expired ephemeral cluster refuses `START` and new usage until a new
@@ -552,6 +554,9 @@ literal HTTP polling headers, at model creation and when a later cap is lowered.
     `BRANCHED BY ... SET`, which have no error route;
   - `IN` sets hold non-null constants of the operand's exact type, and string positions count from
     1 while `nth`, `slice`, and JSON path indexes count from 0;
+  - a list changes its element type or container only through `AS` or `TRY_CAST` to the full list
+    type, nested as deep as the operand (`input.readings AS ARRAY<F32, 64>`); a `VEC` that does not
+    hold the `ARRAY`'s length fails its message, and a list never converts to a scalar or `STRING`;
   - before shaping an inferencer input or reading a nested list, read `Expression Functions` →
     `Array And Vector Functions` and `Processors` → `Inferencer`; check the fixed shape and literal
     dimensions rather than treating a change of axes as an element-type conversion;
@@ -914,10 +919,12 @@ literal HTTP polling headers, at model creation and when a later cap is lowered.
   Keep that reference when publication loses leadership while the reset is applying;
   `Command Completion` defines recovery and retained failures.
   See the reset section in `Runtime Nodes` and `Command Completion` before suggesting it.
-- To inspect WASM guest-state progress, use `DESCRIBE WASM PROCESSOR <processor> [FORMAT TEXT|JSON];`.
-  Read its reset phase and generation beside the checkpoint revision and replica counts; both
-  formats use the same typed state inspection. See `Runtime Nodes` and `WASM Processor Guests` for
-  the meaning of each stage and the bounded branch details.
+- To inspect WASM guest-state progress, use
+  `SHOW WASM PROCESSOR <processor> STATE [FOR ...] [LIMIT <n> [AFTER '<continuation>']] [FORMAT TEXT|JSON];`.
+  Read each unit's reset phase, generation and readiness beside every selected branch's checkpoint
+  revision, stage and replica counts; follow a returned continuation with `AFTER` to page the rest.
+  `DESCRIBE WASM PROCESSOR <processor>;` prints only the binding and per-unit summary counts. See
+  `Runtime Nodes` and `WASM Processor Guests` for the meaning of each stage.
 - On a flush-based route, treat `ON MESSAGE ERROR SEND TO` as a separately buffered error output
   governed by that route's same interval and maximum batch-size boundaries. General/global errors
   are node-wide and do not inherit route-local `FLUSH`.

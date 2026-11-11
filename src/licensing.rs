@@ -75,6 +75,19 @@ fn for_node(snapshot: LicensingSnapshot, fault: &ConfiguredFaultInjection) -> Li
 }
 
 impl PolicyHandle {
+    pub(crate) fn set_stream_connected(&self, connected: bool) {
+        self.inner.requests.stream_connected.store(
+            connected,
+            nervix_primitives::sync::atomic::Ordering::Relaxed,
+        );
+    }
+
+    pub(crate) fn stream_connected(&self) -> bool {
+        self.inner
+            .requests
+            .stream_connected
+            .load(nervix_primitives::sync::atomic::Ordering::Relaxed)
+    }
     pub fn new(
         observer: &Observer,
         metrics: &RuntimeMetrics,

@@ -70,6 +70,13 @@ pub enum SideErrorReason {
     NonFiniteListElement(FloatListStatistic),
     #[error("cannot cast value to {target}")]
     CastFailed { target: RegisterType },
+    /// A list element that the conversion of its type cannot convert, which fails its whole list,
+    /// since a list holds no null element.
+    #[error("cannot cast list element to {target}")]
+    ListElementCastFailed { target: RegisterType },
+    /// A `VEC` converted to an `ARRAY` whose length it does not hold.
+    #[error("cannot cast a list of length {found} to an ARRAY of length {expected}")]
+    ListCastLengthMismatch { expected: usize, found: usize },
     #[error("invalid regular expression: {0}")]
     InvalidRegularExpression(regex::Error),
     /// A datetime builtin whose result lies outside the signed Unix-nanosecond range.
@@ -175,6 +182,8 @@ impl SideErrorReason {
             Self::InvalidBytesEncoding(_)
             | Self::InvalidUtf8Bytes
             | Self::CastFailed { .. }
+            | Self::ListElementCastFailed { .. }
+            | Self::ListCastLengthMismatch { .. }
             | Self::UnreadableDatetime(_)
             | Self::UnreadableIpAddress
             | Self::InvalidUrl { .. }
@@ -996,6 +1005,22 @@ mod tests {
         };
         assert_eq!(cast.to_string(), "cannot cast value to Int64");
         assert_eq!(cast.code(), ErrorCode::CastFailed);
+
+        let element = SideErrorReason::ListElementCastFailed {
+            target: RegisterType::Float32,
+        };
+        assert_eq!(element.to_string(), "cannot cast list element to Float32");
+        assert_eq!(element.code(), ErrorCode::CastFailed);
+
+        let length = SideErrorReason::ListCastLengthMismatch {
+            expected: 64,
+            found: 3,
+        };
+        assert_eq!(
+            length.to_string(),
+            "cannot cast a list of length 3 to an ARRAY of length 64"
+        );
+        assert_eq!(length.code(), ErrorCode::CastFailed);
 
         let pattern_error = regex::Error::CompiledTooBig(1024);
         let expected = format!("invalid regular expression: {pattern_error}");

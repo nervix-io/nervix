@@ -95,14 +95,10 @@ const KEY_INSTALLING: &[u8] = b"installing";
 const KEY_VOTE: &[u8] = b"vote";
 const KEY_COMMITTED: &[u8] = b"committed";
 const KEY_LAST_PURGED: &[u8] = b"last_purged";
-const KEYSPACE_LOGS: &str =
-    "raft_infrastructure_capabilities_identity_license_activation_refusals_tls_inference_reset_epoch_engine_host_instances_stopgate_logs";
-const KEYSPACE_META: &str =
-    "raft_infrastructure_capabilities_identity_license_activation_refusals_tls_inference_reset_epoch_engine_host_instances_stopgate_meta";
-const KEYSPACE_STATE_MACHINE: &str =
-    "raft_infrastructure_capabilities_identity_license_activation_refusals_tls_inference_reset_epoch_engine_host_instances_stopgate_state";
-const KEYSPACE_SNAPSHOT: &str =
-    "raft_infrastructure_capabilities_identity_license_activation_refusals_tls_inference_reset_epoch_engine_host_instances_stopgate_snapshots";
+const KEYSPACE_LOGS: &str = "raft_wasm_inspection_stopgate_logs";
+const KEYSPACE_META: &str = "raft_wasm_inspection_stopgate_meta";
+const KEYSPACE_STATE_MACHINE: &str = "raft_wasm_inspection_stopgate_state";
+const KEYSPACE_SNAPSHOT: &str = "raft_wasm_inspection_stopgate_snapshots";
 const KEY_CLUSTER_IDENTITY: &[u8] = b"K";
 const KEY_LICENSING: &[u8] = b"L";
 /// Working memory reserved for ordinary metadata and log storage relative to its operation unit.
@@ -236,7 +232,7 @@ const KEYSPACE_NAMES: [&str; 4] = [
 #[derive(Debug, Clone, Archive, Serialize, Deserialize)]
 #[repr(u8)]
 enum StateEncoding {
-    ClusterState = 30,
+    ClusterState = 31,
 }
 
 #[derive(Debug)]

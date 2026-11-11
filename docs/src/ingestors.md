@@ -3609,6 +3609,12 @@ exactly one value, an output the protocol's format cannot encode, or a `CAPTURE`
 fails or produces no object. A handshake whose TCP has already ended, or whose own write failed, is released without a
 Close.
 
+When the peer sends a Close during signaling, Nervix flushes the queued reply before releasing the
+connection, within the same one-second control-frame budget used after readiness. The reply echoes
+the peer's status and reason, and the transient resume failure retains both as typed values. A
+Close without a status remains distinct from a stream that ended without one. The failed attempt
+still discards its accepted payloads, and the host reconnects on its policy.
+
 For `ws` and `wss`, each initial connection and resume resolves the URL host through the node's
 asynchronous resolver. It tries the returned addresses in order within the configured
 `connect_timeout_ms` budget for DNS, TCP, TLS and the opening upgrade. The upgrade still uses the configured URL for the HTTP Host

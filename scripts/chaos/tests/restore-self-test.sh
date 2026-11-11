@@ -214,4 +214,32 @@ judge uncertain 1 '{"error":{"code":"RESTORE_FAILED","message":"command outcome 
     failed 'ended with status 1 and RESTORE_FAILED'
 judge without-report 137 '' failed 'and no JSON failure report'
 
+# The padded processor's checkpoint wait reads one page of the typed state read: every branch's
+# checkpoint committed at its latest revision and confirmed by the deployment's replica count.
+CHAOS_REPLICA_COUNT=1
+jq -n '{outcome: "page", continuation: null, units: [{wasm: {
+    checkpoints: {total: 3, failed: 0},
+    branches: [range(0;3) | {branch: (. | tostring), recovery: null,
+        checkpoint: {stage: "replica_confirmed", committed_revision: 4, latest_revision: 4, required_replicas: 1, confirmed_replicas: 1}}]}}]}' \
+    >"${tmp_dir}/padded-confirmed.json"
+cp "${tmp_dir}/padded-confirmed.json" "${tmp_dir}/padded-current.json"
+domain_cli_command() { cat "${tmp_dir}/padded-current.json"; }
+restore_guest_checkpoints_committed "${tmp_dir}/padded-evidence.json" \
+    || fail 'the padded checkpoint wait refused three confirmed branches'
+jq '.units[0].wasm.branches[1].checkpoint.latest_revision = 5' "${tmp_dir}/padded-confirmed.json" \
+    >"${tmp_dir}/padded-current.json"
+if restore_guest_checkpoints_committed "${tmp_dir}/padded-evidence.json"; then
+    fail 'the padded checkpoint wait accepted a branch whose latest checkpoint was not committed'
+fi
+jq '.continuation = "unread-entries" | .units[0].wasm.branches |= .[0:2]' "${tmp_dir}/padded-confirmed.json" \
+    >"${tmp_dir}/padded-current.json"
+if restore_guest_checkpoints_committed "${tmp_dir}/padded-evidence.json"; then
+    fail 'the padded checkpoint wait accepted a page that left branch entries unread'
+fi
+jq '{entity: .entity, outcome: "rejected", rejection: "owner_unavailable"}' "${tmp_dir}/padded-confirmed.json" \
+    >"${tmp_dir}/padded-current.json"
+if restore_guest_checkpoints_committed "${tmp_dir}/padded-evidence.json"; then
+    fail 'the padded checkpoint wait accepted a refused state read'
+fi
+
 printf 'restore self-test passed\n'

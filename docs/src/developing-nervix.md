@@ -1248,8 +1248,8 @@ request without the label still checks the book's structure and its tooling.
 
 ### Credential Storage Release Note
 
-This revision requires the current `raft_infrastructure_capabilities_identity_license_activation_refusals_tls_inference_reset_epoch_engine_host_instances_stopgate_*` consensus namespace and `ClusterState`
-encoding 30. A stored state with a different namespace or encoding fails with
+This revision requires the current `raft_wasm_inspection_stopgate_*` consensus namespace and `ClusterState`
+encoding 31. A stored state with a different namespace or encoding fails with
 `invalid consensus record storage; recreate the node's stored state` before user records or log
 entries are decoded. Recreate the node's stored state; no credential conversion is performed.
 User backup records require version 2 and contain the complete typed credential. A users record

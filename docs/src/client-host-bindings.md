@@ -193,7 +193,9 @@ introduces row-map payloads, implicit numeric conversions or per-cell callbacks 
 verified `StateInspection`, and its cached JSON is that envelope's lossless serialization.
 Bindings retain this owner for page/refusal, entity, complete counts, unit identity, ordered
 replicas, captured origin, section and opaque continuation access. They add no second inspection
-representation and derive no typed value from display text.
+representation and derive no typed value from display text. A `SHOW WASM PROCESSOR ... STATE` page
+uses the same page and unit views, and its units have no sections; the bindings have no typed WASM
+views, so its pinned module and each unit's guest-state facts are read from the lossless JSON.
 
 An inspection entity is a domain node or the cluster license. Domain and entity-name accessors
 are optional: they retain their values for a domain node and are absent for the cluster license.

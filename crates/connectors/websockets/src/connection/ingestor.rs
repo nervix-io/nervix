@@ -58,7 +58,8 @@ use tokio_tungstenite::{
 };
 
 use crate::{
-    CompiledSignalingProtocol, SignalingDataEmitter, WebsocketDataFrame, WebsocketSignalingSession,
+    CompiledSignalingProtocol, SignalingDataEmitter, WebsocketDataFrame, WebsocketSignalingError,
+    WebsocketSignalingSession,
 };
 
 const WEBSOCKETS: ConnectorKind = ConnectorKind::Websockets;
@@ -488,15 +489,28 @@ impl IngestorConnector for WebsocketsConnectionIngestor {
             let handshake = pending.complete(session.run(&mut relay, &sink)).await;
             match handshake {
                 Ok(completed) => self.pending = completed,
-                Err(failure) => {
-                    // The upgrade established the connection, so the failed handshake ends it
-                    // with the Close its failure earns, offered without waiting, before the
-                    // connection is released. The attempt's handoff went with the handshake.
-                    let ending = ConnectionEnding::from(failure.current_context());
-                    ending.offer(
-                        &mut relay,
-                        "offering a WebSocket peer whose signaling handshake failed a Close",
-                    );
+                Err(mut failure) => {
+                    // The attempt's handoff went with the failed handshake. A peer Close has
+                    // already queued its exact reply; give it the same bounded flush as a Close
+                    // after readiness. Every other failure keeps its immediate Close offer.
+                    if let WebsocketSignalingError::PeerClosed { .. }
+                    | WebsocketSignalingError::PeerClosedWithoutStatus =
+                        failure.current_context()
+                    {
+                        let answered =
+                            timeout(WEBSOCKETS_CONTROL_FRAME_BUDGET, relay.flush()).await;
+                        failure = match answered {
+                            Ok(Ok(())) => failure,
+                            Ok(Err(error)) => failure.attach_printable(error),
+                            Err(error) => failure.attach_printable(error),
+                        };
+                    } else {
+                        let ending = ConnectionEnding::from(failure.current_context());
+                        ending.offer(
+                            &mut relay,
+                            "offering a WebSocket peer whose signaling handshake failed a Close",
+                        );
+                    }
                     return Err(failure.change_context(IngestorError::Resume {
                         connector: WEBSOCKETS.keyword(),
                     }));

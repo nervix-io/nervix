@@ -57,7 +57,8 @@ async fn failed_handshake_peer(world: &mut ScenarioWorld, behavior: String) {
     let first = match behavior.as_str() {
         "refuses" => FirstHandshake::Refused,
         "stalls" => FirstHandshake::Stalled,
-        _ => panic!("the failed-handshake fixture declares refuses or stalls"),
+        "closes" => FirstHandshake::Closed,
+        _ => panic!("the failed-handshake fixture declares refuses, stalls or closes"),
     };
     initialize_scenario_identity(world);
     let port = draw_scenario_port(world, "WebSocket failed-handshake peer");
@@ -154,6 +155,14 @@ async fn failed_handshake_closed(world: &mut ScenarioWorld, handshake: String, s
     let PeerEvent::UnreadConnectionEnded(ending) = peer.next().await else {
         panic!("the {handshake} handshake's connection ends before the client reconnects");
     };
+    if handshake == "peer_closed"
+        && let UnreadEnding::Closed(Some(frame)) = &ending
+    {
+        assert_eq!(
+            frame.reason, "subscription refused",
+            "the reply echoes the peer's reason"
+        );
+    }
     assert_closed_with(
         ending,
         CloseCode::from(status),

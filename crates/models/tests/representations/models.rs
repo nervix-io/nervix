@@ -133,9 +133,9 @@ fn assert_archived_count_records(count: usize) {
     use meticulous::ResultExt as _;
     use nervix_models::{
         AlterRelay, AlterRelayOperation, CreateRelay, ImpactPlanningBasis, RelayBranching,
-        RelayName, ResourceName, SchemaName, TransactionCommitPlanHeader,
-        TransactionOperationNumber, TransactionPosition, TransactionPreviewIdentity,
-        WasmCheckpointCounts, WasmStateGeneration, WasmStateInspection,
+        RelayName, SchemaName, TransactionCommitPlanHeader, TransactionOperationNumber,
+        TransactionPosition, TransactionPreviewIdentity, WasmCheckpointCounts, WasmRecoveryCounts,
+        WasmStateGeneration, WasmUnitStateInspection, WasmUnitStatePage,
     };
 
     let capacity = match NonZeroUsize::new(count) {
@@ -195,36 +195,33 @@ fn assert_archived_count_records(count: usize) {
             crate::archive_round_trip!(&counts, WasmCheckpointCounts),
             counts
         );
-        let mut inspection = WasmStateInspection {
-            resource: ResourceName::parse("processor").assured("the literal follows the name rule"),
-            resource_version: 1,
-            file: "processor.wasm".to_string(),
-            units: vec![nervix_models::WasmUnitStateInspection {
-                unit: nervix_models::Unit::SINGLE,
-                default_generation: WasmStateGeneration::FIRST,
-                reset: None,
-                reset_readiness: None,
-                recoveries: Vec::new(),
-                omitted_recoveries: count,
-                checkpoint_counts: counts,
-                checkpoints: Vec::new(),
-                omitted_checkpoints: count,
-            }],
+        let mut recoveries = WasmRecoveryCounts::default();
+        match stage % 3 {
+            0 => recoveries.attempted = count,
+            1 => recoveries.recovered = count,
+            _ => recoveries.failed = count,
+        }
+        assert_eq!(
+            crate::archive_round_trip!(&recoveries, WasmRecoveryCounts),
+            recoveries
+        );
+        let state = WasmUnitStateInspection {
+            default_generation: WasmStateGeneration::FIRST,
+            reset: None,
+            entries: count,
+            checkpoints: counts,
+            recoveries,
+            branches: Vec::new(),
         };
         assert_eq!(
-            crate::archive_round_trip!(&inspection, WasmStateInspection),
-            inspection
+            crate::archive_round_trip!(&state, WasmUnitStateInspection),
+            state
         );
-        inspection.units[0].unit = nervix_models::Unit::partition(0);
-        let mut second = inspection.units[0].clone();
-        second.unit = nervix_models::Unit::partition(1);
-        second.default_generation = WasmStateGeneration::try_from(2)
-            .assured("a positive generation identifies the sibling lifetime");
-        inspection.units.push(second);
-        assert_eq!(
-            crate::archive_round_trip!(&inspection, WasmStateInspection),
-            inspection
-        );
+        let page = WasmUnitStatePage {
+            state,
+            more: count > 0,
+        };
+        assert_eq!(crate::archive_round_trip!(&page, WasmUnitStatePage), page);
     }
 }
 

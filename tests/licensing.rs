@@ -20,6 +20,7 @@ use nervix_primitives::time::{sleep, timeout};
 use super::{
     ScenarioWorld, common::status_request::STATUS_WAIT_BUDGET, docstring, expand_placeholders,
 };
+mod notifications;
 
 #[given(expr = "the free licensing quota {string} is limited to {int}")]
 fn limit_quota(world: &mut ScenarioWorld, condition: String, limit: u64) {
@@ -433,8 +434,9 @@ async fn stable_activation(world: &mut ScenarioWorld) {
         .licensing_service
         .as_ref()
         .verified("fixture started")
-        .request_count()
-        .await;
+        .requests()
+        .await
+        .len();
     world.placeholders.insert(
         "license_activation_request_count".to_owned(),
         count.to_string(),
@@ -480,15 +482,16 @@ async fn repeated_activation_is_recovered(world: &mut ScenarioWorld) {
         .placeholders
         .get("license_activation_request_count")
         .verified("first activation request count was retained")
-        .parse::<u64>()
+        .parse::<usize>()
         .assured("count is an integer");
     assert_eq!(
         world
             .licensing_service
             .as_ref()
             .verified("fixture started")
-            .request_count()
-            .await,
+            .requests()
+            .await
+            .len(),
         before
     );
 }

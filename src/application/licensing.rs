@@ -8,8 +8,10 @@
 mod client;
 mod clock;
 mod coordinator;
+mod notifications;
 mod request_turn;
 pub(in crate::application) mod stop_gate;
+mod stream;
 pub(in crate::application) use coordinator::run;
 pub(in crate::application) use request_turn::LicensingRequests;
 pub mod test_support;
