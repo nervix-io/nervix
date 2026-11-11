@@ -434,6 +434,7 @@ fn fixture_domain(id: DomainName) -> nervix_models::DomainState {
         start_version: 0,
         last_start: nervix_models::DomainStartPoint::Resume,
         clock: None,
+        stop_cause: None,
     }
 }
 

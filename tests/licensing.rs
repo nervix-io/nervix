@@ -708,6 +708,102 @@ async fn bounded_service(world: &mut ScenarioWorld) {
         .await;
 }
 
+#[given("an HTTPS licensing test service allows one ephemeral activation")]
+async fn one_ephemeral_slot(world: &mut ScenarioWorld) {
+    use nervix_licensing_protocol::conditions::{ConditionValue, EPHEMERAL_ACTIVATIONS};
+    start_licensing_service(world).await;
+    world
+        .licensing_service
+        .as_ref()
+        .verified("fixture started")
+        .configure(|model| {
+            let mut plan = model.conditions();
+            plan.operating.quotas.insert(
+                EPHEMERAL_ACTIVATIONS.to_owned(),
+                ConditionValue::Known(nervix_server::licensing::Quota::Bounded { value: 1 }),
+            );
+            model.plan(plan);
+        })
+        .await;
+}
+
+/// The server renders an instant through the public timestamp type; the saved observation holds
+/// its normalized RFC 3339 form, so the placeholder carries the server's rendering of that instant.
+#[then(
+    expr = "the ephemeral expiry of license placeholder {string} is saved as placeholder {string}"
+)]
+fn save_ephemeral_expiry(world: &mut ScenarioWorld, license: String, name: String) {
+    let saved = saved_license(world, &license);
+    let expiry = public_license_timestamp(
+        saved
+            .get("ephemeral expires at")
+            .verified("the saved activation is ephemeral"),
+    );
+    let rendered = nervix_models::Timestamp::try_from(expiry)
+        .assured("a committed expiry fits the public timestamp coordinate")
+        .to_string();
+    world.placeholders.insert(name, rendered);
+}
+
+#[when("a licensing notice session is opened on the leader node")]
+async fn open_notice_session(world: &mut ScenarioWorld) {
+    world.licensing_notice_client = Some(leader_license_client(world).await);
+}
+
+#[when(expr = "both licensing clocks pass the {string} deadline")]
+async fn both_clocks_pass_deadline(world: &mut ScenarioWorld, name: String) {
+    let field = match name.as_str() {
+        "ephemeral" => "ephemeral expires at",
+        "refresh_after" => "refresh after",
+        _ => panic!("undeclared licensing deadline"),
+    };
+    let license = current_license(world).await;
+    let after = public_license_timestamp(license.get(field).verified("signed deadline is present"))
+        .checked_add_signed(chrono::TimeDelta::seconds(1))
+        .verified("fixture deadline fits UTC");
+    world
+        .licensing_service
+        .as_ref()
+        .verified("fixture started")
+        .configure(|model| model.set_time(after))
+        .await;
+    world.licensing_clock_offset = after
+        .signed_duration_since(chrono::Utc::now())
+        .to_std()
+        .unwrap_or(Duration::ZERO);
+    world
+        .fault_injection
+        .set_licensing_clock_offset(world.licensing_clock_offset);
+}
+
+#[then(expr = "the licensing service marks placeholder {string} expired and frees its slot")]
+async fn service_expired_activation(world: &mut ScenarioWorld, name: String) {
+    let saved = saved_license(world, &name);
+    let activation = saved
+        .get("activation")
+        .and_then(|text| text.split_whitespace().next())
+        .verified("the saved description names its activation");
+    let activation =
+        uuid::Uuid::parse_str(activation).assured("the public activation id is a UUID");
+    let (expired, occupied) = world
+        .licensing_service
+        .as_ref()
+        .verified("fixture started")
+        .configure(|model| {
+            (
+                model.activation_expired(activation),
+                model.occupied_activations(nervix_models::ActivationKind::Ephemeral),
+            )
+        })
+        .await;
+    assert_eq!(
+        expired,
+        Some(true),
+        "the service still treats the activation as live"
+    );
+    assert_eq!(occupied, 0, "the expired activation still occupies a slot");
+}
+
 #[when("the licensing service becomes unreachable")]
 async fn offline(world: &mut ScenarioWorld) {
     world.licensing_notice_client = Some(leader_license_client(world).await);
@@ -811,19 +907,25 @@ async fn unchanged_deadlines(world: &mut ScenarioWorld, name: String) {
     }
 }
 
-#[then(expr = "a licensing Warning notice saying {string} is observed")]
-async fn licensing_warning(world: &mut ScenarioWorld, text: String) {
+#[then(expr = "a licensing {word} notice saying {string} is observed")]
+async fn licensing_notice(world: &mut ScenarioWorld, level: String, text: String) {
+    let level = match level.as_str() {
+        "Info" => nervix_client_wire::NoticeLevel::Info,
+        "Warning" => nervix_client_wire::NoticeLevel::Warning,
+        "Error" => nervix_client_wire::NoticeLevel::Error,
+        _ => panic!("undeclared notice level {level}"),
+    };
     let client = world
         .licensing_notice_client
         .as_ref()
-        .verified("notice session opened before the deadline crossing");
+        .verified("notice session opened before the licensing transition");
     timeout(STATUS_WAIT_BUDGET, async {
         loop {
             let event = client
                 .next_server_event()
                 .await
                 .assured("public notice stream remains open");
-            if event.level == nervix_client_wire::NoticeLevel::Warning
+            if event.level == level
                 && event.kind == nervix_client_wire::NoticeKind::Licensing
                 && event.message.contains(&text)
             {
@@ -832,7 +934,7 @@ async fn licensing_warning(world: &mut ScenarioWorld, text: String) {
         }
     })
     .await
-    .assured("typed licensing warning arrives");
+    .assured("typed licensing notice arrives");
 }
 
 #[given(expr = "the licensing service refuses with {string}")]

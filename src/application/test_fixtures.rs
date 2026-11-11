@@ -556,6 +556,7 @@ pub(in crate::application) async fn create_test_domain(consensus: &Proposer, raw
         start_version: 0,
         last_start: DomainStartPoint::Resume,
         clock: None,
+        stop_cause: None,
     };
 
     for attempt in 0..50 {

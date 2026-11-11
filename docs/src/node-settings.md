@@ -516,6 +516,37 @@ committed deadline crossings run independently of stream setup, reads and reconn
 A blocked or unavailable stream therefore changes notification latency, never signed permission
 or the polling schedule. Stream state and its cursor are process-local and never persisted.
 
+An ephemeral activation ends at its `ephemeral_expires_at`, fixed when the service created it:
+refreshes, restarts and leader changes keep it, and it never moves later. When committed licensing
+time reaches it, the stop gate closes. The gate is derived from the committed activation binding and
+licensing time, never stored as a flag, and does not depend on the decision's verification, so an
+edited or unverifiable document cannot lift it. A persistent activation never closes it.
+
+While the gate is closed:
+
+- `DESCRIBE LICENSE` reports `policy: stopped` and
+  `processing: stopped by licensing: ephemeral activation expired at <instant>`.
+- Admission refuses all new usage with state `stopped`, `CREATE DOMAIN` and the domains a restore
+  would create included. The cluster never falls back to the free policy.
+- The leader stops every running domain through the ordinary `STOP`, which preserves its persisted
+  runtime state. `DESCRIBE DOMAIN` then reports
+  `stopped by licensing: ephemeral activation expired at <instant>` until the domain's next
+  `START`. An `ALTER` or a backup that holds a domain paused when the gate closes still
+  completes, and its pause ends in the licensing stop instead of a resume. A domain another
+  operation holds is stopped once that operation releases it.
+- Planning refuses `START`, a transactional `START` and `RESTORE ... RESUME` with
+  `licensing stopped processing`. Consensus refuses every other change that would make a domain
+  run: resuming a paused domain and writing a domain record that runs. A restore whose gate closed
+  while it applied leaves its domains stopped with the licensing cause, and its report shows them
+  stopped by licensing.
+- Sessions, `DESCRIBE`, `SHOW`, `BACKUP`, `ALTER`, `UPLOAD RESOURCE`, `CREATE USER` and the
+  licensing statements stay available.
+
+Every node announces the closing to its sessions with an Error notice and the lifting with an Info
+notice. Only a new activation lifts the gate: `ACTIVATE LICENSE` is accepted again once the
+ephemeral activation expired, because the service released its capacity at that instant. Domains
+stay stopped until an operator starts them.
+
 Every node answers `DESCRIBE LICENSE` without selecting a domain or redirecting to the leader.
 It reports the mode, policy, public identity, committed time, processing state and quotas. An
 activation adds its binding, public credential identifier, decision and conditions revisions,

@@ -144,7 +144,9 @@ effective policy, credential handling and quota usage, read
 For notification freshness, reconnects and polling fallback, use that chapter’s event-stream contract.
 Treat notification hints as requests to obtain a verified decision, never as permissions.
 Keep licensing commands cluster-scoped and obtain credentials and trust provisioning externally;
-Plexus supplies no service-address or trust-anchor override.
+Plexus supplies no service-address or trust-anchor override. The same section owns ephemeral
+expiry and the stop gate: an expired ephemeral cluster refuses `START` and new usage until a new
+`ACTIVATE LICENSE`, and the domains licensing stopped still need an explicit `START` afterwards.
 For source UUID inspection and restore behavior, read
 [Backup And Restore](../../../docs/src/backup-and-restore.md#what-a-restore-recreates).
 For authentication refusals and retry behavior, follow

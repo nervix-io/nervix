@@ -518,8 +518,8 @@ status, keeping the start version, start mode, clock, schedule and incremental s
 
 The current emitter Models carry explicit key expressions, source-partition routing and
 expression-only SQS FIFO groups. The dedicated database owns exactly four current keyspaces:
-`raft_licensing_operations_inferencer_wasm_inspection_listener_bounds_node_logs`, `raft_licensing_operations_inferencer_wasm_inspection_listener_bounds_node_meta`, `raft_licensing_operations_inferencer_wasm_inspection_listener_bounds_node_state`, and
-`raft_licensing_operations_inferencer_wasm_inspection_listener_bounds_node_snapshots`. Opening it validates the complete keyspace namespace before
+`raft_licensing_operations_inferencer_wasm_inspection_listener_bounds_stopgate_node_logs`, `raft_licensing_operations_inferencer_wasm_inspection_listener_bounds_stopgate_node_meta`, `raft_licensing_operations_inferencer_wasm_inspection_listener_bounds_stopgate_node_state`, and
+`raft_licensing_operations_inferencer_wasm_inspection_listener_bounds_stopgate_node_snapshots`. Opening it validates the complete keyspace namespace before
 reading any records. The committed cluster-parameter record stores ordered typed TLS cipher
 suites and key-exchange groups; recovery validates their complete pair before returning that
 record. This namespace identifies the current Model shape, including the statement
@@ -549,7 +549,7 @@ committed node records under record-family tag `C`, each with the revision that 
 incarnation-bound capacity claim, including transport, DNS, database, consensus, engine, connector
 host and listener capacities, its detected properties and its tags. The boxed node record
 announcement keeps unrelated command variants within the inline payload-size bound. Its state metadata
-requires the current `ClusterState` encoding, 34, including the cluster identity reference,
+requires the current `ClusterState` encoding, 35, including the cluster identity reference,
 committed cluster parameters, the durable restore installation gate and the unit-keyed committed
 schedule in which a relay of a partitioned branch is scheduled as one unit per partition.
 The current shape also requires inferencer state bindings and their initial expressions,
@@ -801,13 +801,26 @@ and exposes an unverifiable view, while structural decode and identity failures 
 Revocation committed after a decision preserves its verified signature and marks its signing key
 revoked. Derived parsed decisions and verification flags are never persisted.
 
-`ActivateLicense` installs from Free or Released mode and sets the identity's ever-activated fact. Refresh
-proposals retain the independent binding and compare their expected revision with the committed
-revision. An exact verified replay is a no-op even with another expected revision; a lower decision
+`ActivateLicense` installs from Free or Released mode and sets the identity's ever-activated fact.
+It replaces an existing activation only while that activation's stop gate is closed, and only with
+another activation. Refresh proposals retain the independent binding and compare their expected
+revision with the committed revision. An exact verified replay is a no-op even with another expected revision; a lower decision
 or a higher decision from a stale expected revision conflicts. Rejection changes no committed state.
 Trust installation verifies and appends complete document identities, refusing conflicting bytes.
 Time advances retain the maximum committed observation. No apply or recovery path reads a clock or
 opens a connection. The leader's independent timer and request owner propose those facts.
+
+The stop gate is a predicate over the record, never a stored flag: an activated ephemeral binding
+whose `ephemeral_expires_at` committed licensing time has reached. It reads the independent binding,
+not the decision's verification view, so edited bytes cannot lift it. `ReleaseLicense` refuses an
+expired activation through the same predicate, evaluated at the licensing time the release
+establishes. While it is closed, apply
+refuses `StartDomain`, `ResumeDomain`, a model-pause recovery that would resume a domain, a
+`PutDomain` that writes a running or paused record, and a transaction's `START` step with the typed
+`LicensingStop` conflict, and admits no new domain record. A restore's final step under the gate
+leaves its domains stopped with the licensing cause instead of running. `StopDomain` carries the
+cause of the stop, an operator's or licensing's, and the domain record retains it until the next
+start clears it, so every node renders the cause after restart or snapshot installation.
 
 Release admission captures the activation binding. `ReleaseLicense` compares that binding,
 refuses expired ephemeral activation and commits Released mode before any service notification.

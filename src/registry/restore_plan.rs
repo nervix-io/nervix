@@ -433,6 +433,7 @@ fn plan_domain(
         start_version: record.start_version,
         last_start: record.start_point.clone(),
         clock: None,
+        stop_cause: None,
     };
     let mut activation = state.clone();
     if lifecycle == RestoreLifecycle::Resume {
