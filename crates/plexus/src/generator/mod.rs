@@ -28,38 +28,40 @@ use crate::{
 pub fn create_generator_parser<'src>()
 -> impl Parser<'src, &'src [Token], CreateStatement<CreateGenerator>, extra::Err<ParseError<'src>>>
 + Clone {
-    kw(Identifier::Create)
-        .ignore_then(if_not_exists_clause())
-        .then_ignore(kw(Identifier::Generator))
-        .then(generator_name())
-        .then_ignore(kw_phrase3(
-            Identifier::Using,
-            Identifier::Materialized,
-            Identifier::State,
-        ))
-        .then(relay_ref())
-        .then_ignore(kw(Identifier::Each))
-        .then(domain_clock_period_lit())
-        .then(branch_selection())
-        .then(flushed_explicit_processor_outputs())
-        .then_ignore(tok(Token::Semicolon).or_not())
-        .map(
-            |(
-                ((((if_not_exists, name), materialized_relay), each), branched_by),
-                output_routes,
-            )| {
-                CreateStatement::new(
-                    CreateGenerator {
-                        name,
-                        materialized_relay,
-                        branched_by,
-                        each,
-                        output_routes,
-                    },
-                    if_not_exists,
-                )
-            },
-        )
+    crate::labels::finish_creation({
+        kw(Identifier::Create)
+            .ignore_then(if_not_exists_clause())
+            .then_ignore(kw(Identifier::Generator))
+            .then(generator_name())
+            .then_ignore(kw_phrase3(
+                Identifier::Using,
+                Identifier::Materialized,
+                Identifier::State,
+            ))
+            .then(relay_ref())
+            .then_ignore(kw(Identifier::Each))
+            .then(domain_clock_period_lit())
+            .then(branch_selection())
+            .then(flushed_explicit_processor_outputs())
+            .map(
+                |(
+                    ((((if_not_exists, name), materialized_relay), each), branched_by),
+                    output_routes,
+                )| {
+                    CreateStatement::new(
+                        CreateGenerator {
+                            labels: Default::default(),
+                            name,
+                            materialized_relay,
+                            branched_by,
+                            each,
+                            output_routes,
+                        },
+                        if_not_exists,
+                    )
+                },
+            )
+    })
 }
 
 pub fn alter_generator_parser<'src>()

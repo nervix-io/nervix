@@ -112,6 +112,8 @@ pub(in crate::application) struct CapturedSectionStage {
 /// hashes and payload data, and a diagnostic names only where the failure is.
 #[derive(Debug, Error)]
 pub(in crate::application) enum BackupError {
+    #[error("the capture has no committed cluster policy")]
+    ClusterParametersUnseeded,
     #[error("the cluster has not installed its permanent identity")]
     NoClusterIdentity,
     #[error("the cluster has applied no configuration to back up yet")]
@@ -429,7 +431,11 @@ impl SessionServiceImpl {
                     sections.push(self.fetch_captured_section(&inventory, section).await?);
                 }
             }
+            let Some(parameters) = capture.parameters.as_ref() else {
+                return Err(Report::new(BackupError::ClusterParametersUnseeded));
+            };
             captures.push(DomainCapture {
+                entity_label_policy: nervix_models::EntityLabelPolicy::from(parameters),
                 domain: domain.clone(),
                 revision: capture.applied.index,
                 raft_log: RaftLogPosition {

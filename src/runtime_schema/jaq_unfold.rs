@@ -301,6 +301,7 @@ mod tests {
     /// A codec of `format` over a one-field event schema whose ON INGESTION program is `program`.
     fn unfolding_codec(format: CodecJaqFormat, program: &str) -> Arc<CompiledCodec> {
         let schema = Arc::new(compile_schema(&CreateSchema {
+            labels: Default::default(),
             name: named("event"),
             fields: vec![SchemaField {
                 name: named("user_id"),
@@ -316,6 +317,7 @@ mod tests {
         };
         compile_codec(
             &CreateCodec {
+                labels: Default::default(),
                 name: named("unfolding_codec"),
                 wire_format: CodecWireFormat::JaqNative {
                     format,

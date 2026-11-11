@@ -182,6 +182,7 @@ pub(in crate::application) struct CommandResult {
     /// The read of a command that inspected a transaction. It may name a transaction other than
     /// `transaction`, which keeps describing this session's own binding.
     pub(in crate::application) inspection: Option<Box<TransactionInspection>>,
+    pub(in crate::application) entity_labels: Option<Box<nervix_models::EntityLabelsInspection>>,
     pub(in crate::application) state: Option<Box<RenderedStateInspection>>,
     /// The versions, entries and bindings a resource description read.
     pub(in crate::application) resource: Option<Box<ResourceDescription>>,
@@ -203,6 +204,7 @@ impl CommandResult {
             transaction: None,
             transaction_admission: None,
             inspection: None,
+            entity_labels: None,
             state: None,
             resource: None,
             backup: None,

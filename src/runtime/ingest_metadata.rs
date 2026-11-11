@@ -1165,6 +1165,7 @@ mod tests {
     /// A JSON codec over a one-field `value` schema, for tests that decode payloads into a group.
     fn metering_value_codec() -> Arc<CompiledCodec> {
         let schema = Arc::new(compile_schema(&CreateSchema {
+            labels: Default::default(),
             name: named("metering_value"),
             fields: vec![SchemaField {
                 name: named("value"),
@@ -1175,6 +1176,7 @@ mod tests {
         }));
         compile_codec(
             &CreateCodec {
+                labels: Default::default(),
                 name: named("metering_value_codec"),
                 wire_format: CodecWireFormat::Json {
                     wire_schema: named("metering_value_wire"),
@@ -1183,15 +1185,19 @@ mod tests {
                 encoding_rules: Vec::new(),
             },
             schema,
-            ResolvedCodecWireFormat::Json(&CreateWireSchema {
-                name: named("metering_value_wire"),
-                strictness: Default::default(),
-                fields: vec![WireSchemaField {
-                    name: named("value"),
-                    ty: JsonType::Integer,
-                    optional: false,
-                }],
-            }),
+            ResolvedCodecWireFormat::Json(
+                (&CreateWireSchema {
+                    labels: Default::default(),
+                    name: named("metering_value_wire"),
+                    strictness: Default::default(),
+                    fields: vec![WireSchemaField {
+                        name: named("value"),
+                        ty: JsonType::Integer,
+                        optional: false,
+                    }],
+                })
+                    .into(),
+            ),
         )
         .expect("the metering value codec should compile")
     }
@@ -1545,6 +1551,7 @@ mod tests {
                 input: input_schema.arrow_schema(),
                 input_sensitivity: VmSchemaSensitivity::default(),
                 output: Arc::new(compile_schema(&CreateSchema {
+                    labels: Default::default(),
                     name: named("metadata_output"),
                     fields: vec![
                         nervix_models::SchemaField {
@@ -1731,6 +1738,7 @@ mod tests {
             ("raw", ParseAsType::String),
         ]);
         let output_schema = Arc::new(compile_schema(&CreateSchema {
+            labels: Default::default(),
             name: named("header_output"),
             fields: vec![
                 SchemaField {

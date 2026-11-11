@@ -435,6 +435,7 @@ mod tests {
             Model::Relay(source),
             relay("generated", "payload"),
             Model::Generator(CreateGenerator {
+                labels: Default::default(),
                 name: named("refresh"),
                 materialized_relay: named("latest"),
                 branched_by: BranchSelection::unbranched(),
@@ -461,6 +462,7 @@ mod tests {
             relay("outgoing", "payload"),
             syslog_codec("records", "payload"),
             Model::Lookup(CreateLookup {
+                labels: Default::default(),
                 name: named("by_value"),
                 key_field: named("value"),
                 resource: named("lookup_bundle"),
@@ -619,6 +621,7 @@ mod tests {
         let error = plan_result(vec![
             schema("payload"),
             Model::Lookup(CreateLookup {
+                labels: Default::default(),
                 name: named("by_value"),
                 key_field: named("value"),
                 resource: named("lookup_bundle"),
@@ -642,6 +645,7 @@ mod tests {
             schema("payload"),
             syslog_codec("records", "payload"),
             Model::Lookup(CreateLookup {
+                labels: Default::default(),
                 name: named("by_value"),
                 key_field: named("missing"),
                 resource: named("lookup_bundle"),

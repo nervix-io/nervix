@@ -15,7 +15,7 @@ use meticulous::OptionExt as _;
 use nervix_models::{Model, Statement};
 
 use crate::{
-    lexer::Token,
+    lexer::{Identifier, Token, Word},
     parser_support::{
         LexedInput, ParseError, ParseFromSourceError, boxed_choice, completion_context,
         completion_tokens, filter_by_prefix, into_parse_error, lex_input, suggestions_from_errors,
@@ -25,6 +25,7 @@ use crate::{
 pub fn statement_parser<'src>()
 -> impl Parser<'src, &'src [Token], Statement, extra::Err<ParseError<'src>>> + Clone {
     let domain_and_core = boxed_choice!(
+        crate::labels::entity_labels_parser(),
         crate::domain::create_domain_parser().map(Statement::CreateDomain),
         crate::create_resource::create_resource_parser().map(Statement::CreateResource),
         crate::domain::start_domain_parser().map(Statement::StartDomain),
@@ -188,9 +189,13 @@ pub fn parse_statement(input: &str) -> error_stack::Result<Statement, ParseFromS
 pub fn suggest_statement(input: &str, cursor: usize) -> Vec<String> {
     let (source, prefix) = completion_context(input, cursor);
 
-    let Some(tokens) = completion_tokens(&source) else {
+    let Some(mut tokens) = completion_tokens(&source) else {
         return Vec::new();
     };
+
+    if completion_probe(&tokens, &source) {
+        tokens.push(Token::RParen);
+    }
 
     let out = statement_parser()
         .then_ignore(end())
@@ -227,6 +232,48 @@ pub fn suggest_statement(input: &str, cursor: usize) -> Vec<String> {
     }
 
     suggestions_from_errors(out.into_errors(), &prefix)
+}
+
+/// An unmatched closing parenthesis exposes optional continuations in one composed parse.
+/// It cannot be consumed when all source parentheses are closed. An open parenthesized body
+/// keeps ordinary end-of-input expectations instead; string contents are already lexer tokens.
+pub(crate) fn completion_probe(tokens: &[Token], source: &str) -> bool {
+    if !source.ends_with(char::is_whitespace) || matches!(tokens.last(), Some(Token::Semicolon)) {
+        return false;
+    }
+    let selected = matches!(
+        tokens,
+        [
+            Token::Word(Word::KnownWord {
+                iden: Identifier::Create,
+                ..
+            }),
+            ..
+        ] | [
+            Token::Word(Word::KnownWord {
+                iden: Identifier::Set | Identifier::Drop | Identifier::Show,
+                ..
+            }),
+            Token::Word(Word::KnownWord {
+                iden: Identifier::Labels,
+                ..
+            }),
+            ..
+        ]
+    );
+    if !selected {
+        return false;
+    }
+    let mut depth = 0usize;
+    for token in tokens {
+        match token {
+            Token::LParen => depth += 1,
+            Token::RParen if depth == 0 => return false,
+            Token::RParen => depth -= 1,
+            _ => {}
+        }
+    }
+    depth == 0
 }
 
 pub(crate) fn statement_tail(
@@ -268,44 +315,13 @@ fn open_statement_tail(statement: &Statement, tokens: &[Token], normalized: &str
         }
     } else if matches!(statement, Statement::CreateDomain(_)) {
         vec![";".to_string()]
-    } else if let Statement::Create(create) = statement
-        && let Model::Placement(placement) = create.body.as_ref()
-        && placement.rank.is_none()
-    {
-        vec![";".to_string(), "RANK".to_string()]
     } else if (normalized.starts_with("RELOCATE ")
         || normalized.starts_with("DESCRIBE RELOCATION "))
         && normalized.ends_with(" PREFERENCES")
     {
         vec![";".to_string(), "FOR".to_string()]
-    } else if let Statement::Create(create) = &statement
-        && let Model::Branch(branch) = create.body.as_ref()
-    {
-        create_branch_tail(branch, tokens)
     } else {
         Vec::new()
-    }
-}
-
-/// The optional clauses a complete `CREATE BRANCH` can still take, in the order its grammar reads
-/// them: the partition count, then the LRU eviction bound.
-fn create_branch_tail(branch: &nervix_models::CreateBranch, tokens: &[Token]) -> Vec<String> {
-    if branch.eviction.is_some() {
-        return vec![";".to_string()];
-    }
-    let partitions_written = tokens.iter().any(|token| {
-        matches!(
-            token,
-            Token::Word(crate::lexer::Word::KnownWord {
-                iden: crate::lexer::Identifier::Partitions,
-                ..
-            })
-        )
-    });
-    if partitions_written {
-        vec![";".to_string(), "MAX".to_string()]
-    } else {
-        vec![";".to_string(), "MAX".to_string(), "PARTITIONS".to_string()]
     }
 }
 

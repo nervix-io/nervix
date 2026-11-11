@@ -32,6 +32,13 @@ use crate::conformance_support::{assert_offers_exactly, created_model, refused};
 /// keywords.
 type Chosen = BTreeMap<&'static str, &'static str>;
 
+#[test]
+fn every_declared_ingestor_entity_accepts_the_common_metadata_tail() {
+    for kind in IngestorEntityKind::all() {
+        crate::conformance_support::assert_entity_labels_tail(&Generated::of(kind).text());
+    }
+}
+
 /// One ingestor statement of an entity, rendered from what its entity declares.
 struct Generated {
     kind: IngestorEntityKind,

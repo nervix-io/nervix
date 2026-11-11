@@ -182,6 +182,7 @@ async fn processor_branch_tasks_are_created_and_reused_per_branch_key() {
         named::<ModelName>("dedup_users"),
     );
     let schema = Arc::new(compile_schema(&CreateSchema {
+        labels: Default::default(),
         name: named("notification"),
         fields: vec![SchemaField {
             name: named("user_id"),

@@ -468,6 +468,7 @@ mod tests {
     fn correlator_message_error_set_uses_structured_scopes_and_all_optional_partial_output() {
         fn error_schema() -> Model {
             Model::Schema(CreateSchema {
+                labels: Default::default(),
                 name: named("error_schema"),
                 fields: vec![
                     SchemaField {

@@ -478,9 +478,37 @@ impl Registry {
         statements: &[Statement],
         first_operation_index: usize,
         allow_incomplete_final_model_run: bool,
-        mut schedule: F,
+        schedule: F,
     ) -> Result<PlannedTransaction, Report<TransactionPlanningError>>
     where
+        F: FnMut(
+            Option<ActiveGraph>,
+            Option<&DomainSchedule>,
+            &ImpactAttribution,
+        ) -> TransactionScheduleDecision,
+    {
+        Self::plan_transaction_captured(
+            snapshot,
+            statements,
+            first_operation_index,
+            allow_incomplete_final_model_run,
+            schedule,
+            |_| (),
+        )
+        .map(|(plan, ())| plan)
+    }
+
+    /// Project the complete final candidate before its temporary model index is released.
+    pub(crate) fn plan_transaction_captured<F, T, I>(
+        snapshot: TransactionPlanningSnapshot,
+        statements: &[Statement],
+        first_operation_index: usize,
+        allow_incomplete_final_model_run: bool,
+        mut schedule: F,
+        inspect: I,
+    ) -> Result<(PlannedTransaction, T), Report<TransactionPlanningError>>
+    where
+        I: FnOnce(&ModelIndex) -> T,
         F: FnMut(
             Option<ActiveGraph>,
             Option<&DomainSchedule>,
@@ -721,15 +749,19 @@ impl Registry {
             .checked_add(statements.len())
             .assured("a transaction prefix is bounded by its configured statement limit");
         let completeness = combined_completeness(&steps);
-        Ok(PlannedTransaction {
-            domain,
-            first_operation_index,
-            position: TransactionPosition::new(accepted_operations),
-            basis: snapshot.basis,
-            completeness,
-            operations,
-            steps,
-        })
+        let inspected = inspect(&models);
+        Ok((
+            PlannedTransaction {
+                domain,
+                first_operation_index,
+                position: TransactionPosition::new(accepted_operations),
+                basis: snapshot.basis,
+                completeness,
+                operations,
+                steps,
+            },
+            inspected,
+        ))
     }
 
     fn plan_model_run<F>(

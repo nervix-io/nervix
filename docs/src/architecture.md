@@ -238,6 +238,14 @@ are the exception because each format is a separate Model kind and their names c
 `DROP WIRE JSON SCHEMA`, for example, includes the format in the identity. A codec reference
 uses the format already selected by its head.
 
+All persisted domain Models share the optional trailing `LABELS` creation clause. Common
+`SET LABELS ON`, `DROP LABELS ON` and `SHOW LABELS ON` statements use those same typed entity
+references, including the distinct wire-schema kinds. They edit or inspect descriptive metadata
+without selecting another configuration grammar or introducing configuration `ALTER` for a kind
+that lacks it. Shared reference and label clauses have one grammar implementation. The
+[Entity Labels](entity-labels.md) chapter owns their validation, transactions and execution
+independence.
+
 The existing `SIGNALING PROTOCOL ... FORMAT ...` and `UDF ... WITH ROTO_0_13` choices stay within
 their respective statement families. Each family owns those body alternatives, neither has an
 `ALTER`, and both are referenced generically. They do not grant a new endpoint, codec or connector

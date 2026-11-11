@@ -32,6 +32,7 @@ impl Arbitrary<'_> {
     /// A junction merging its inputs into transforming routes.
     pub fn create_junction(&mut self) -> CreateJunction {
         CreateJunction {
+            labels: Default::default(),
             name: self.name(),
             from: self.processor_inputs(true),
             output_routes: self.processor_outputs(
@@ -49,6 +50,7 @@ impl Arbitrary<'_> {
     /// A deduplicator keyed by one or more expressions.
     pub fn create_deduplicator(&mut self) -> CreateDeduplicator {
         CreateDeduplicator {
+            labels: Default::default(),
             name: self.name(),
             from: self.processor_inputs(true),
             output_routes: self.processor_outputs(
@@ -68,6 +70,7 @@ impl Arbitrary<'_> {
     /// A reingestor, whose every route constructs its own outgoing branch.
     pub fn create_reingestor(&mut self) -> CreateReingestor {
         CreateReingestor {
+            labels: Default::default(),
             name: self.name(),
             from: self.processor_inputs(true),
             output_routes: self.processor_outputs(
@@ -84,6 +87,7 @@ impl Arbitrary<'_> {
     /// A correlator matching its left and right inputs by a condition.
     pub fn create_correlator(&mut self) -> CreateCorrelator {
         CreateCorrelator {
+            labels: Default::default(),
             name: self.name(),
             left: self.processor_inputs(true),
             right: self.processor_inputs(true),
@@ -129,6 +133,7 @@ impl Arbitrary<'_> {
     /// A reorderer ordering by one or more expressions.
     pub fn create_reorderer(&mut self) -> CreateReorderer {
         CreateReorderer {
+            labels: Default::default(),
             name: self.name(),
             from: self.processor_inputs(true),
             output_routes: self.processor_outputs(
@@ -160,6 +165,7 @@ impl Arbitrary<'_> {
     pub fn create_window_processor(&mut self) -> CreateWindowProcessor {
         let bounds = self.window_bounds();
         CreateWindowProcessor {
+            labels: Default::default(),
             name: self.name(),
             from: self.processor_inputs(true),
             output_routes: self.processor_outputs(
@@ -268,6 +274,7 @@ impl Arbitrary<'_> {
             }
         }
         CreateInferencer {
+            labels: Default::default(),
             name: self.name(),
             from: self.processor_inputs(true),
             output_routes: self.processor_outputs(
@@ -319,6 +326,7 @@ impl Arbitrary<'_> {
     /// A WASM processor, whose guest owns its emission cadence, so no route flushes.
     pub fn create_wasm_processor(&mut self) -> CreateWasmProcessor<RequestedResourceVersion> {
         CreateWasmProcessor {
+            labels: Default::default(),
             name: self.name(),
             from: self.processor_inputs(true),
             output_routes: self.processor_outputs(
@@ -348,6 +356,7 @@ impl Arbitrary<'_> {
     /// A generator emitting set-only routes from one materialized relay on a clock period.
     pub fn create_generator(&mut self) -> CreateGenerator {
         CreateGenerator {
+            labels: Default::default(),
             name: self.name(),
             materialized_relay: self.name(),
             branched_by: self.branch_selection(),

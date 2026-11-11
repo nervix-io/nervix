@@ -110,7 +110,7 @@ fn client_pool_bounds<'src>()
 /// client, the optional signaling protocol of a WebSockets client, and nothing at all for the rest.
 /// Keeping one chain is what makes `IF NOT EXISTS`, the name, the mount, the configuration block
 /// and the optional terminator identical for every client type.
-fn create_client_parser<'src, B: 'src, T>(
+fn create_client_parser<'src, B: 'src, T: nervix_models::EntityMetadata + Clone + 'src>(
     connector: Identifier,
     schema: ClientConfigSchema,
     before_mount: impl Parser<'src, &'src [Token], B, extra::Err<ParseError<'src>>> + Clone + 'src,
@@ -123,18 +123,19 @@ fn create_client_parser<'src, B: 'src, T>(
     + Clone
     + 'src,
 ) -> impl Parser<'src, &'src [Token], CreateStatement<T>, extra::Err<ParseError<'src>>> + Clone {
-    kw(Identifier::Create)
-        .ignore_then(if_not_exists_clause())
-        .then_ignore(kw_phrase2(connector, Identifier::Client))
-        .then(client_name())
-        .then(before_mount)
-        .then(client_mount())
-        .then_ignore(kw(Identifier::Config))
-        .then(transport_config(schema))
-        .then_ignore(tok(Token::Semicolon).or_not())
-        .map(move |((((if_not_exists, name), between), mount), config)| {
-            CreateStatement::new(build(name, between, mount, config), if_not_exists)
-        })
+    crate::labels::finish_creation({
+        kw(Identifier::Create)
+            .ignore_then(if_not_exists_clause())
+            .then_ignore(kw_phrase2(connector, Identifier::Client))
+            .then(client_name())
+            .then(before_mount)
+            .then(client_mount())
+            .then_ignore(kw(Identifier::Config))
+            .then(transport_config(schema))
+            .map(move |((((if_not_exists, name), between), mount), config)| {
+                CreateStatement::new(build(name, between, mount, config), if_not_exists)
+            })
+    })
 }
 
 macro_rules! declare_client_parsers {
@@ -161,6 +162,7 @@ macro_rules! declare_client_parsers {
                     <$BeforeClient<RequestedResourceVersion>>::DECLARATION.config,
                     empty(),
                     |name, (), mount, config| $BeforeClient {
+                        labels: Default::default(),
                         name,
                         mount,
                         config,
@@ -180,6 +182,7 @@ macro_rules! declare_client_parsers {
                     <$AfterClient<RequestedResourceVersion>>::DECLARATION.config,
                     empty(),
                     |name, (), mount, config| $AfterClient {
+                        labels: Default::default(),
                         name,
                         mount,
                         config,
@@ -199,6 +202,7 @@ macro_rules! declare_client_parsers {
                     <$PooledClient<RequestedResourceVersion>>::DECLARATION.config,
                     client_pool_bounds(),
                     |name, pool, mount, config| $PooledClient {
+                        labels: Default::default(),
                         name,
                         pool,
                         mount,
@@ -281,6 +285,7 @@ pub fn create_client_websockets_parser<'src>() -> impl Parser<
         <CreateClientWebsockets<RequestedResourceVersion>>::DECLARATION.config,
         signaling_protocol_clause().or_not(),
         |name, signaling_protocol, mount, config| CreateClientWebsockets {
+            labels: Default::default(),
             name,
             mount,
             signaling_protocol,

@@ -12823,6 +12823,7 @@ mod tests {
 
     fn completed_outcome(message: &str) -> CommandOutcome {
         CommandOutcome {
+            entity_labels: None,
             execution_reference: command_execution_reference(),
             origin: OutcomeOrigin::Executed,
             disposition: CommandDisposition::Completed {

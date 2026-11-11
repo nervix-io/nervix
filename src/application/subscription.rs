@@ -117,8 +117,8 @@ pub(in crate::application) enum SessionCommandPlanError {
     #[error("REVERT requires an active transaction")]
     RevertWithoutTransaction,
     #[error(
-        "DESCRIBE TRANSACTION and SHOW TRANSACTIONS must be executed separately; they read \
-         transaction state and never join a multi-statement request"
+        "DESCRIBE TRANSACTION, SHOW TRANSACTIONS and SHOW LABELS must be executed separately; \
+         they read transaction state and never join a multi-statement request"
     )]
     MixedTransactionInspection,
     #[error("transaction command is missing its expected queue position")]
@@ -1398,7 +1398,7 @@ impl SessionServiceImpl {
             nervix_models::ResolvedBranching::Branched { branch, schema, .. } => {
                 Some(SubscriptionBranchSchema {
                     name: branch,
-                    schema,
+                    schema: schema.as_ref(),
                     fields: &branch_fields,
                 })
             }
@@ -1866,6 +1866,7 @@ mod tests {
 
     fn user_id_schema() -> Arc<CompiledSchema> {
         Arc::new(runtime_schema::compile_schema(&CreateSchema {
+            labels: Default::default(),
             name: named("event"),
             fields: user_id_fields(),
         }))
@@ -2058,6 +2059,7 @@ mod tests {
         let branching = nervix_models::ResolvedBranching::branched(
             named("by_tenant"),
             nervix_models::CreateSchema {
+                labels: Default::default(),
                 name: named("tenant_key"),
                 fields: vec![SchemaField {
                     name: field.clone(),

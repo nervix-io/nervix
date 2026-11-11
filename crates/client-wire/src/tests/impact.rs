@@ -419,7 +419,7 @@ impl RawReport {
                 body: Some(reply.as_union_value()),
             },
         );
-        finish_raw(builder, root, "NXSM")
+        finish_raw(builder, root, "NXEL")
     }
 
     fn decode_error(&self) -> WireDecodeError {
@@ -659,14 +659,14 @@ fn undeclared_report_members_are_refused() {
         }
     );
     let report = RawReport {
-        aspect: Some(wire::ModelChangeAspect(78)),
+        aspect: Some(wire::ModelChangeAspect(u8::MAX)),
         ..RawReport::default()
     };
     assert_eq!(
         report.decode_error(),
         WireDecodeError::UnknownEnumValue {
             field: "ConfigurationReason.aspect",
-            value: 78,
+            value: 255,
         }
     );
     let report = RawReport {

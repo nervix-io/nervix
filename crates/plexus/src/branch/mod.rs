@@ -42,28 +42,30 @@ fn branch_partitions<'src>()
 pub fn create_branch_parser<'src>()
 -> impl Parser<'src, &'src [Token], CreateStatement<CreateBranch>, extra::Err<ParseError<'src>>> + Clone
 {
-    kw(Identifier::Create)
-        .ignore_then(if_not_exists_clause())
-        .then_ignore(kw(Identifier::Branch))
-        .then(branch_name())
-        .then(branch_definition_header())
-        .then(branch_partitions().or_not())
-        .then(max_instances().or_not())
-        .then_ignore(tok(Token::Semicolon).or_not())
-        .map(
-            |((((if_not_exists, name), (schema, ttl)), partitions), eviction)| {
-                CreateStatement::new(
-                    CreateBranch {
-                        name,
-                        schema,
-                        ttl,
-                        partitions: partitions.unwrap_or(BranchPartitions::ONE),
-                        eviction,
-                    },
-                    if_not_exists,
-                )
-            },
-        )
+    crate::labels::finish_creation({
+        kw(Identifier::Create)
+            .ignore_then(if_not_exists_clause())
+            .then_ignore(kw(Identifier::Branch))
+            .then(branch_name())
+            .then(branch_definition_header())
+            .then(branch_partitions().or_not())
+            .then(max_instances().or_not())
+            .map(
+                |((((if_not_exists, name), (schema, ttl)), partitions), eviction)| {
+                    CreateStatement::new(
+                        CreateBranch {
+                            labels: Default::default(),
+                            name,
+                            schema,
+                            ttl,
+                            partitions: partitions.unwrap_or(BranchPartitions::ONE),
+                            eviction,
+                        },
+                        if_not_exists,
+                    )
+                },
+            )
+    })
 }
 
 pub fn alter_branch_parser<'src>()

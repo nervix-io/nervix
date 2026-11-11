@@ -1137,6 +1137,7 @@ pub(super) fn fixture_uploads(
 fn create_tls_vhost(version: RequestedResourceVersion, if_not_exists: bool) -> Statement {
     Statement::Create(CreateStatement::new(
         Box::new(Model::Vhost(CreateVhost {
+            labels: Default::default(),
             name: named("edge"),
             hostnames: vec!["edge.example.com".to_string()],
             tls: Some(VhostTlsResource {
@@ -1150,6 +1151,7 @@ fn create_tls_vhost(version: RequestedResourceVersion, if_not_exists: bool) -> S
 
 pub(super) fn stored_tls_vhost(name: &str, version: u64) -> Model {
     Model::Vhost(CreateVhost {
+        labels: Default::default(),
         name: named(name),
         hostnames: vec![format!("{name}.example.com")],
         tls: Some(VhostTlsResource {
@@ -1253,6 +1255,7 @@ fn an_incomplete_version_fails_the_operation_that_names_it() {
 #[test]
 fn an_existing_model_skipped_by_if_not_exists_resolves_no_version() {
     let existing: Model = Model::Vhost(CreateVhost {
+        labels: Default::default(),
         name: named("edge"),
         hostnames: vec!["edge.example.com".to_string()],
         tls: Some(VhostTlsResource {

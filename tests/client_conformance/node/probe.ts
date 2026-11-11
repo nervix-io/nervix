@@ -125,8 +125,8 @@ class Exchange {
       throw frame;
     }
     const buffer = new flatbuffers.ByteBuffer(frame);
-    if (!buffer.__has_identifier('NXSM')) {
-      throw new Error('a server frame lacks the NXSM identifier');
+    if (!buffer.__has_identifier('NXEL')) {
+      throw new Error('a server frame lacks the NXEL identifier');
     }
     const message = wire.ServerMessage.getRootAsServerMessage(buffer);
     if (message.bodyType() === wire.ServerBody.SessionEnding) {
@@ -787,6 +787,8 @@ function commandLines(head: string, outcome: wire.CommandOutcome): string[] {
   }
   const state = outcome.state();
   if (state !== null) lines.push(...stateInspectionLines(state));
+  const labels = outcome.entityLabels();
+  if (labels !== null) lines.push(...entityLabelLines(labels));
   return lines;
 }
 
@@ -1091,7 +1093,7 @@ function submissionLine(id: bigint, outcome: wire.SubmissionOutcome): string {
 }
 
 function serverLines(frame: Uint8Array, schema: OpenedSchema): string[] {
-  const message = wire.ServerMessage.getRootAsServerMessage(frameBuffer(frame, 'NXSM'));
+  const message = wire.ServerMessage.getRootAsServerMessage(frameBuffer(frame, 'NXEL'));
   switch (message.bodyType()) {
     case wire.ServerBody.Reply: {
       const reply = member(message.body(new wire.Reply()) as wire.Reply | null);
@@ -1486,7 +1488,7 @@ function corpus(directory: string): void {
     )
     .sort();
   const opened = new Uint8Array(readFileSync(join(directory, 'server_subscription_opened.nxsm')));
-  const openedMessage = wire.ServerMessage.getRootAsServerMessage(frameBuffer(opened, 'NXSM'));
+  const openedMessage = wire.ServerMessage.getRootAsServerMessage(frameBuffer(opened, 'NXEL'));
   const schema = openedSchema(member(openedMessage.body(new wire.Reply()) as wire.Reply | null));
   for (const file of files) {
     const frame = new Uint8Array(readFileSync(join(directory, file)));
@@ -1632,6 +1634,34 @@ function stateInspectionLines(state: wire.StateInspection): string[] {
         }
       }
     }
+  }
+  return lines;
+}
+
+function entityLabelLines(value: wire.EntityLabelsInspection): string[] {
+  const entity = member(value.entity());
+  const policy = member(value.policy());
+  const limits = member(policy.limits());
+  const lines = [`ENTITY_LABELS domain=${value.domain()} kind=${wire.ModelKind[member(entity.kind())].toLowerCase()} name=${entity.name()} policy=${policy.revision()} limits=${limits.count()}/${limits.keyBytes()}/${limits.valueBytes()}/${limits.bytes()}`];
+  switch (value.viewType()) {
+    case wire.EntityLabelView.CommittedEntityLabels: {
+      const view = member(value.view(new wire.CommittedEntityLabels()) as wire.CommittedEntityLabels | null);
+      lines.push(`LABEL_VIEW committed revision=${view.revision()}`);
+      break;
+    }
+    case wire.EntityLabelView.StagedEntityLabels: {
+      const view = member(value.view(new wire.StagedEntityLabels()) as wire.StagedEntityLabels | null);
+      const preview = member(view.preview());
+      const basis = member(member(preview.planningBasis()).bytesArray());
+      if (basis.length !== 32) throw new Error('labels lack preview identity');
+      lines.push(`LABEL_VIEW staged transaction=${text(bytesOf((encoding) => preview.transactionId(encoding)))} position=${preview.position()} basis=${hex(basis)}`);
+      break;
+    }
+    default: throw new Error('labels have an undeclared view');
+  }
+  for (let index = 0; index < value.labelsLength(); index += 1) {
+    const entry = member(value.labels(index));
+    lines.push(`LABEL key=${text(bytesOf((encoding) => entry.key(encoding)))} value=${text(bytesOf((encoding) => entry.value(encoding)))}`);
   }
   return lines;
 }

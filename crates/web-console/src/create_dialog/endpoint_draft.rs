@@ -139,6 +139,7 @@ impl EndpointDraft {
             }
         };
         Ok(CreateEndpoint {
+            labels: Default::default(),
             name,
             on_vhost,
             path: path.to_string(),

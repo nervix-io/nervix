@@ -352,7 +352,7 @@ transport offset conversion. The SDK's indexed authoring and typed-inspection vi
 empty JSON value arrays. These driver representations never enter semantic Models or plans.
 
 A NATS ingestor or emitter Model distinguishes `NATS SUBJECT` and `NATS STREAM` entities in its archived union.
-The registry's `NERVIX EMIT INST` archive signature identifies the current Model layout, including
+The registry's `NERVIX LABELS   ` archive signature identifies the current Model layout, including
 that union, the endpoint kind, the separate JSON and CBOR wire type enums (CBOR has six types), AVRO representation types whose arrays declare their item type, explicit `BASE64` codec
 encoding, a Pulsar subscription's required type and an owned subscription's required start position,
 a Kafka consumer group's required start position, the required 16-bit branch partition count,
@@ -367,8 +367,15 @@ expression scope and an emitter's `INSTANCES` declaration.
 Placement coverage is one semantic choice: a corridor with named endpoints or a domain-wide
 rule. Domain configuration contains its pace; named placement rules belong to the Model index.
 Relocation selects whole nodes or exact partition/instance indices using the shared node identity.
-Consensus's `raft_licensing_operations_inferencer_wasm_inspection_listener_bounds_` keyspaces and current
-`ClusterState` metadata encoding, 33, identify its stored shapes, including the partition count of every resolved
+Cluster parameter declarations select their one inline stored representation after validating the
+semantic value. The six count settings already bounded by `u32::MAX` use four-byte storage; their
+public values and JSON remain unsigned 64-bit integers. All four entity-label limits retain their
+complete unsigned 64-bit range. Duration settings preserve their declared range and nanosecond
+precision in eight bytes. Decoding validates the same declaration before publishing a parameter
+value.
+
+Consensus's `raft_entity_licensing_policy_` keyspaces and current
+`ClusterState` metadata encoding, 35, identify its stored shapes, including the partition count of every resolved
 branch declaration in the committed schedule, the partition epoch the schedule records for each
 branch whose count changed, and the statements a transaction keeps, including per-entity
 `ALTER INGESTOR` and `ALTER EMITTER` operations and a `RESET WASM PROCESSOR ... STATE` that takes
@@ -380,7 +387,7 @@ registry's instancing boundary checks native count conversion and the layout of 
 unit entries before materialization. An unaddressable declaration is a typed validation failure;
 its full-width Model remains representable independently of the target's execution capacity. The
 client placement union carries an instance index as an unsigned 64-bit value. Backup format
-major `7` and its unit-bearing record versions own an eight-byte primitive unit rank. The native
+major `9` and its unit-bearing record versions own an eight-byte primitive unit rank. The native
 `NervixKafkaState` checkpoint contains
 positions and an optional applied explicit-start generation. Pending canonical starts and
 subsequent unit-owned progress use that current shape. An unrecognized signature, namespace or
@@ -806,6 +813,21 @@ and must be recreated. Complete equality properties exercise the production repr
 their range boundaries; see [Property Testing And Fuzzing](./property-testing-and-fuzzing.md).
 
 ## Parameter Authority and Installation
+
+Entity metadata uses one `EntityLabels` map. `LabelKey` validates its exact ASCII spelling at
+construction and JSON/archive decoding; map and removal-list construction reject duplicate
+authored keys before any overwrite. Values are exact UTF-8 strings, including empty values.
+Complete-set acceptance uses `EntityLabelLimits` projected from one captured committed parameter
+record. Registry publication, recovered committed configuration and wire inspection validate
+against that captured policy and their outer representation bounds. Compiled defaults never
+replace a missing policy or normalize invalid stored metadata.
+
+An `EntityLabelsInspection` carries the existing `DomainNodeRef`, complete map and captured
+policy. Its view is explicitly committed, with its applied revision, or staged, with a
+`TransactionPreviewIdentity`. The discriminant determines which identity is present; an absent
+committed revision is never inferred to be zero or to describe a staged candidate. Labels remain
+control-plane state and are excluded from execution identities. [Entity Labels](entity-labels.md)
+owns their product semantics.
 
 `ClusterParameterValues` holds validated class-typed settings with a single definition for each
 default and bound. `ClusterParameterRecord` pairs them with a positive revision. The state machine

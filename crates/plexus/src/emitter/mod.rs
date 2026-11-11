@@ -459,36 +459,38 @@ where
 pub fn create_emitter_parser<'src>()
 -> impl Parser<'src, &'src [Token], CreateStatement<CreateEmitter>, extra::Err<ParseError<'src>>> + Clone
 {
-    kw(Identifier::Create)
-        .ignore_then(if_not_exists_clause())
-        .then(declared_creation())
-        .then(flush_each())
-        .then(message_error_policy())
-        .then(general_error_policy())
-        .then_ignore(tok(Token::Semicolon).or_not())
-        .map(
-            |((((if_not_exists, declared), flush_policy), message), general)| {
-                let parsed = declared.destination;
-                CreateStatement::new(
-                    CreateEmitter {
-                        name: declared.name,
-                        from: declared.from,
-                        instances: declared.instances,
-                        materialized_state: declared.materialized_state,
-                        connector: Box::new(parsed.destination),
-                        body: parsed.body,
-                        envelope: Box::new(parsed.envelope),
-                        batch: parsed.batch,
-                        construction: parsed.construction.unwrap_or_default(),
-                        mode: declared.mode,
-                        flush_policy,
-                        error_policies: ErrorPolicies { message, general },
-                    },
-                    if_not_exists,
-                )
-            },
-        )
-        .boxed()
+    crate::labels::finish_creation({
+        kw(Identifier::Create)
+            .ignore_then(if_not_exists_clause())
+            .then(declared_creation())
+            .then(flush_each())
+            .then(message_error_policy())
+            .then(general_error_policy())
+            .map(
+                |((((if_not_exists, declared), flush_policy), message), general)| {
+                    let parsed = declared.destination;
+                    CreateStatement::new(
+                        CreateEmitter {
+                            labels: Default::default(),
+                            instances: declared.instances,
+                            name: declared.name,
+                            from: declared.from,
+                            materialized_state: declared.materialized_state,
+                            connector: Box::new(parsed.destination),
+                            body: parsed.body,
+                            envelope: Box::new(parsed.envelope),
+                            batch: parsed.batch,
+                            construction: parsed.construction.unwrap_or_default(),
+                            mode: declared.mode,
+                            flush_policy,
+                            error_policies: ErrorPolicies { message, general },
+                        },
+                        if_not_exists,
+                    )
+                },
+            )
+            .boxed()
+    })
 }
 
 fn alteration<'src, S, P, C>(

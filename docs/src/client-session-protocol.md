@@ -112,7 +112,7 @@ root files name the table a frame is rooted at and the four-byte file identifier
 | Root | Identifier | Direction | Carried by |
 | --- | --- | --- | --- |
 | `ClientMessage` | `NXCM` | Client to server | The gRPC `Exchange` stream and the console WebSocket |
-| `ServerMessage` | `NXSM` | Server to client | The gRPC `Exchange` stream and the console WebSocket |
+| `ServerMessage` | `NXEL` | Server to client | The gRPC `Exchange` stream and the console WebSocket |
 | `UploadMessage` | `NXUM` | Client to server | The gRPC `UploadResource` stream |
 | `UploadReply` | `NXUR` | Server to client | The gRPC `UploadResource` stream, exactly once |
 | `BackupDownloadRequest` | `NXBQ` | Client to server | The gRPC `DownloadBackup` call, exactly once |
@@ -2602,6 +2602,22 @@ attachment. The compiled defaults are request preferences, not server admission 
 Placement-policy choices use `ChoiceTarget::PlacementPolicy` with no dependencies. They offer
 policies for named placement rules; the rule's scope and the candidate graph determine which
 policies are applicable. Domain pace is a separate domain-creation choice.
+
+## Entity Label Inspection
+
+`CommandOutcome.entity_labels` carries one `EntityLabelsInspection`, independently of the display
+message and selected `TEXT` or `JSON` presentation. It contains the existing domain/node identity,
+the complete exact string map, captured committed policy revision and four acceptance limits.
+Its required view union is committed, with a required applied revision (zero included), or staged,
+with the complete existing transaction preview identity. Neither variant supplies the other's
+identity by default.
+
+The receiver validates every key, duplicate-key absence, complete-set limits and ordinary outer
+string/vector/transfer bounds. Missing required policy or view fields, undeclared discriminants
+and invalid metadata are refused. Empty values stay distinct from absent keys. The ordinary
+reply-transfer and `ReplyTooLarge` contracts apply to the complete typed outcome and rendering;
+parts never combine separate metadata reads. [Entity Labels](entity-labels.md) owns target,
+transaction and execution semantics.
 
 ## State Inspection Envelope
 

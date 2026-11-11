@@ -2598,6 +2598,7 @@ mod tests {
 
     fn processor_schema(name: &str) -> CreateSchema {
         CreateSchema {
+            labels: Default::default(),
             name: SchemaName::parse(name).expect("schema name must be valid"),
             fields: vec![SchemaField {
                 name: FieldName::parse("value").expect("field name must be valid"),
@@ -2651,6 +2652,7 @@ mod tests {
 
     fn string_passthrough_init() -> WasmBranchInit {
         let schema = CreateSchema {
+            labels: Default::default(),
             name: SchemaName::parse("input_events").expect("schema name must be valid"),
             fields: vec![
                 SchemaField {
@@ -2680,6 +2682,7 @@ mod tests {
 
     fn shared_generated_init() -> WasmBranchInit {
         let input_schema = CreateSchema {
+            labels: Default::default(),
             name: SchemaName::parse("input_events").expect("schema name must be valid"),
             fields: vec![SchemaField {
                 name: FieldName::parse("value").expect("field name must be valid"),
@@ -2689,6 +2692,7 @@ mod tests {
             }],
         };
         let enriched_schema = CreateSchema {
+            labels: Default::default(),
             name: SchemaName::parse("enriched_events").expect("schema name must be valid"),
             fields: vec![
                 input_schema.fields[0].clone(),
@@ -2701,6 +2705,7 @@ mod tests {
             ],
         };
         let audit_schema = CreateSchema {
+            labels: Default::default(),
             name: SchemaName::parse("audit_events").expect("schema name must be valid"),
             fields: vec![
                 input_schema.fields[0].clone(),
@@ -2936,6 +2941,7 @@ mod tests {
     #[test]
     fn wasm_schema_contract_converts_from_nervix_schema_model() {
         let source = CreateSchema {
+            labels: Default::default(),
             name: SchemaName::parse("events").expect("schema name must be valid"),
             fields: vec![
                 SchemaField {

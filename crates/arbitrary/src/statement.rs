@@ -178,6 +178,8 @@ pub enum StatementVariant {
     AlterBranch,
     DescribeBranch,
     AlterCluster,
+    MutateEntityLabels,
+    ShowLabels,
 }
 
 impl StatementVariant {
@@ -185,6 +187,8 @@ impl StatementVariant {
     /// compile until the generator is taught to build it.
     pub fn of(statement: &Statement) -> Self {
         match statement {
+            Statement::MutateEntityLabels(_) => Self::MutateEntityLabels,
+            Statement::ShowLabels(_) => Self::ShowLabels,
             Statement::AlterCluster(_) => Self::AlterCluster,
             Statement::CreateDomain(_) => Self::CreateDomain,
             Statement::CreateUser(_) => Self::CreateUser,
@@ -355,6 +359,18 @@ impl Arbitrary<'_> {
                 self.entropy.between(1..=256),
             ),
             nervix_models::ClusterParameterChange::UdfCodeBytes(self.entropy.between(1..=256)),
+            nervix_models::ClusterParameterChange::EntityLabelsMaxCount(
+                self.entropy.between(0..=256),
+            ),
+            nervix_models::ClusterParameterChange::EntityLabelsMaxKeyBytes(
+                self.entropy.between(0..=256),
+            ),
+            nervix_models::ClusterParameterChange::EntityLabelsMaxValueBytes(
+                self.entropy.between(0..=256),
+            ),
+            nervix_models::ClusterParameterChange::EntityLabelsMaxBytes(
+                self.entropy.between(0..=256),
+            ),
             nervix_models::ClusterParameterChange::HttpHeaderBytes(self.entropy.between(1..=256)),
             nervix_models::ClusterParameterChange::HttpHeaderFields(self.entropy.between(1..=256)),
             nervix_models::ClusterParameterChange::ClientBatchRows(self.entropy.between(1..=256)),
@@ -738,6 +754,35 @@ impl Arbitrary<'_> {
                 name: self.name(),
                 key: self.subscription_literal(),
             }),
+            StatementVariant::MutateEntityLabels => {
+                let kind = self.model_kind();
+                let entity = nervix_models::NodeRef::new(kind, self.model_name_of(kind));
+                let labels = self.entity_labels();
+                let mutation = if self.entropy.flag() {
+                    nervix_models::EntityLabelMutation::Set(labels)
+                } else {
+                    let keys = labels
+                        .iter()
+                        .map(|(key, _)| key.clone())
+                        .collect::<Vec<_>>();
+                    nervix_models::EntityLabelMutation::Drop(
+                        nervix_models::EntityLabelKeys::try_from(keys)
+                            .assured("generated map keys are unique"),
+                    )
+                };
+                Statement::MutateEntityLabels(nervix_models::MutateEntityLabels {
+                    entity,
+                    mutation,
+                })
+            }
+            StatementVariant::ShowLabels => {
+                let kind = self.model_kind();
+                let entity = nervix_models::NodeRef::new(kind, self.model_name_of(kind));
+                Statement::ShowLabels(nervix_models::ShowLabels {
+                    entity,
+                    format: self.inspection_format(),
+                })
+            }
             StatementVariant::ShowCreate => {
                 let kind = self.model_kind();
                 Statement::ShowCreate(ShowCreate {

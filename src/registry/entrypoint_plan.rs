@@ -749,6 +749,7 @@ mod tests {
         let mut models = domain_models();
         models.retain(|model| !matches!(model, Model::Branch(_)));
         models.push(Model::Branch(CreateBranch {
+            labels: Default::default(),
             name: branch_name_for_relay("by_value"),
             schema: named("value_key"),
             ttl: "90s".to_string(),
@@ -889,6 +890,7 @@ mod tests {
     fn rejects_a_node_without_output_routes() {
         let mut models = domain_models();
         models.push(Model::Reingestor(CreateReingestor {
+            labels: Default::default(),
             name: named("silent"),
             from: ProcessorInputs::single(named("events")),
             output_routes: with_inherit_all(ProcessorOutputs::new(Vec::new()))

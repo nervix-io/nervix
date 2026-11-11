@@ -75,6 +75,10 @@ test-bolero filter="": bolero-deps
 test-bolero-focused +filters: bolero-deps
     python3 -c 'import sys; from scripts.bolero import load_inventory, select, test_targets; inventory = load_inventory(); selected = {target.id: target for query in sys.argv[1:] for target in select(inventory, query)}; test_targets(inventory, tuple(selected.values()))' {{ quote(filters) }}
 
+# Prepare only selected ordinary owners, leaving compiled inventory discovery to CI.
+build-bolero-focused +filters: bolero-deps
+    python3 -c 'import sys; from scripts.bolero import load_inventory, select, build_targets; inventory = load_inventory(); selected = {target.id: target for query in sys.argv[1:] for target in select(inventory, query)}; build_targets(tuple(selected.values()))' {{ quote(filters) }}
+
 # Compile every ordinary harness `test-bolero` runs, as it builds them, without running a property.
 build-bolero filter="": bolero-deps
     python3 -m scripts.bolero build {{ quote(filter) }}
@@ -377,6 +381,13 @@ test-window-collection-arrays *args: build-deps build-plexus-format build-test-c
 # Observe released and installed processor keys through bounded public inspection pages.
 test-partition-state-inspection *args: build-deps build-plexus-format build-test-cli build-deadlock-report
     ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)" cargo test --package nervix-scenarios --test scenarios -- --input {{ quote(justfile_directory() / "tests/features/runtime/partition_state_inspection{,}.feature") }} {{ quote(args) }}
+
+# Exercise domain entity metadata through the public command path.
+test-entity-labels *args: build-deps build-plexus-format build-test-cli build-deadlock-report
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    cargo test --package nervix-scenarios --test scenarios -- --input "{{ justfile_directory() }}/tests/features/runtime/entity_labels.feature" {{ quote(args) }}
 
 # Exercise authenticated producer metadata without preparing unrelated host-language drivers.
 test-client-producer-metadata *args: build-deps build-plexus-format build-test-cli build-deadlock-report
@@ -2293,6 +2304,18 @@ test-client-jvm-executable executable *args:
 # Collect the JNI implementation counters from the embedded JVM's current native method table.
 coverage-client-jvm output="lcov-client-jvm.info": build-client-jvm-tests
     CARGO_TARGET_DIR={{ quote(cargo_target_dir) }} cargo llvm-cov --package nervix-client-jvm --features jvm-tests --lib --lcov --output-path {{ quote(output) }}
+
+# Check the native probe sources against the current headers and Java API without linking Rust.
+check-client-probe-sources:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cc -std=c11 -Wall -Wextra -Werror -pthread -fsyntax-only -I crates/client-ffi/include tests/client_conformance/c/probe.c
+    c++ -std=c++17 -Wall -Wextra -Werror -pthread -fsyntax-only -I crates/client-ffi/include tests/client_conformance/cpp/probe.cpp
+    classes={{ quote(cargo_target_dir + "/client-conformance/probe-check") }}
+    mkdir -p "${classes}"
+    javac --release 21 -Xlint:all -Werror -d "${classes}" crates/client-jvm/java/io/nervix/client/*.java tests/client_conformance/java/Probe.java
+    python3 -c 'from pathlib import Path; p = Path("tests/client_conformance/python/probe.py"); compile(p.read_text(), str(p), "exec")'
+    ruby -c tests/client_conformance/ruby/probe.rb
 
 # Build what the cross-language client probes run: the shared Rust binding, the C and C++ probes
 # linked against it, the JNI jar and Java probe, the native Ruby gem, the Python package in its virtual environment,

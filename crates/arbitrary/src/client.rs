@@ -76,6 +76,7 @@ impl Arbitrary<'_> {
             None
         };
         CreateClientWebsockets {
+            labels: Default::default(),
             name: parts.name,
             mount: parts.mount,
             signaling_protocol,

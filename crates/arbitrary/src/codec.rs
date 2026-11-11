@@ -69,6 +69,7 @@ impl Arbitrary<'_> {
             rules
         };
         CreateCodec {
+            labels: Default::default(),
             name,
             wire_format,
             schema,

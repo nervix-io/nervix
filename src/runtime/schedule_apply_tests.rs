@@ -48,6 +48,7 @@ async fn scheduled_relay_placement_does_not_create_metric_replication_state() {
         vec![
             ScheduledNode::new(
                 nervix_models::Model::Schema(CreateSchema {
+                    labels: Default::default(),
                     name: schema.clone(),
                     fields: vec![SchemaField {
                         name: named("value"),
@@ -59,6 +60,7 @@ async fn scheduled_relay_placement_does_not_create_metric_replication_state() {
                 SchemaFingerprint::from_digest([1; 32]),
             ),
             scheduled_model(nervix_models::Model::Relay(CreateRelay {
+                labels: Default::default(),
                 name: relay.clone(),
                 schema,
                 buffer: nonzero!(2usize),
@@ -108,6 +110,7 @@ async fn paused_schedule_keeps_full_execution_without_rebuilding_unchanged_graph
         domain.clone(),
         vec![
             scheduled_model(nervix_models::Model::Schema(CreateSchema {
+                labels: Default::default(),
                 name: schema.clone(),
                 fields: vec![SchemaField {
                     name: named("user_id"),
@@ -117,6 +120,7 @@ async fn paused_schedule_keeps_full_execution_without_rebuilding_unchanged_graph
                 }],
             })),
             scheduled_model(nervix_models::Model::Relay(CreateRelay {
+                labels: Default::default(),
                 name: relay.clone(),
                 schema,
                 buffer: nonzero!(2usize),
@@ -182,6 +186,7 @@ async fn stale_cluster_state_cannot_replace_a_newer_runtime_schedule() {
         },
     )]);
     let schema_node = scheduled_model(nervix_models::Model::Schema(CreateSchema {
+        labels: Default::default(),
         name: schema.clone(),
         fields: vec![SchemaField {
             name: named("user_id"),
@@ -200,6 +205,7 @@ async fn stale_cluster_state_cannot_replace_a_newer_runtime_schedule() {
         vec![
             schema_node,
             scheduled_model(nervix_models::Model::Relay(CreateRelay {
+                labels: Default::default(),
                 name: relay.clone(),
                 schema,
                 buffer: nonzero!(2usize),
@@ -292,6 +298,7 @@ async fn the_largest_revision_still_suppresses_a_later_stale_cluster_state() {
     let relay = named::<RelayName>("notifications");
     let domains = BTreeMap::from([(domain.clone(), unpaced_domain_state(domain.as_str()))]);
     let schema_node = scheduled_model(nervix_models::Model::Schema(CreateSchema {
+        labels: Default::default(),
         name: schema.clone(),
         fields: vec![SchemaField {
             name: named("user_id"),
@@ -310,6 +317,7 @@ async fn the_largest_revision_still_suppresses_a_later_stale_cluster_state() {
         vec![
             schema_node,
             scheduled_model(nervix_models::Model::Relay(CreateRelay {
+                labels: Default::default(),
                 name: relay.clone(),
                 schema,
                 buffer: nonzero!(2usize),
@@ -367,6 +375,7 @@ async fn a_failed_application_leaves_its_revision_ready_to_apply_again() {
     let relay = named::<RelayName>("notifications");
     let domains = BTreeMap::from([(domain.clone(), unpaced_domain_state(domain.as_str()))]);
     let relay_node = scheduled_model(nervix_models::Model::Relay(CreateRelay {
+        labels: Default::default(),
         name: relay.clone(),
         schema: schema.clone(),
         buffer: nonzero!(2usize),
@@ -382,6 +391,7 @@ async fn a_failed_application_leaves_its_revision_ready_to_apply_again() {
         domain.clone(),
         vec![
             scheduled_model(nervix_models::Model::Schema(CreateSchema {
+                labels: Default::default(),
                 name: schema,
                 fields: vec![SchemaField {
                     name: named("user_id"),
@@ -442,6 +452,7 @@ async fn branch_preserving_processors_build_standalone_schedule_nodes() {
     let order_schema = named::<SchemaName>("order_event");
     let order_relay = |name: &str| {
         scheduled_model(nervix_models::Model::Relay(CreateRelay {
+            labels: Default::default(),
             name: named(name),
             schema: order_schema.clone(),
             buffer: nonzero!(2usize),
@@ -461,6 +472,7 @@ async fn branch_preserving_processors_build_standalone_schedule_nodes() {
         domain.clone(),
         vec![
             scheduled_model(nervix_models::Model::Schema(CreateSchema {
+                labels: Default::default(),
                 name: order_schema.clone(),
                 fields: vec![SchemaField {
                     name: named("order_id"),
@@ -475,6 +487,7 @@ async fn branch_preserving_processors_build_standalone_schedule_nodes() {
             order_relay("right_orders"),
             order_relay("joined_orders"),
             scheduled_model(nervix_models::Model::Deduplicator(CreateDeduplicator {
+                labels: Default::default(),
                 name: named("dedup_orders"),
                 from: ProcessorInputs::single(named("orders")),
                 output_routes: processor_routes("projected_orders"),
@@ -486,6 +499,7 @@ async fn branch_preserving_processors_build_standalone_schedule_nodes() {
                 materialized_state: Vec::new(),
             })),
             scheduled_model(nervix_models::Model::Junction(CreateJunction {
+                labels: Default::default(),
                 name: named("join_orders"),
                 from: ProcessorInputs::new(
                     vec![named("left_orders"), named("right_orders")],
@@ -540,6 +554,7 @@ async fn scheduled_processor_entity_swap_is_not_junction_specific() {
         domain.clone(),
         vec![
             scheduled_model(nervix_models::Model::Schema(CreateSchema {
+                labels: Default::default(),
                 name: event_schema.clone(),
                 fields: vec![SchemaField {
                     name: named("event_id"),
@@ -549,6 +564,7 @@ async fn scheduled_processor_entity_swap_is_not_junction_specific() {
                 }],
             })),
             scheduled_model(nervix_models::Model::Relay(CreateRelay {
+                labels: Default::default(),
                 name: named("events"),
                 schema: event_schema.clone(),
                 buffer: nonzero!(2usize),
@@ -556,6 +572,7 @@ async fn scheduled_processor_entity_swap_is_not_junction_specific() {
                 materialized_state: None,
             })),
             scheduled_model(nervix_models::Model::Relay(CreateRelay {
+                labels: Default::default(),
                 name: named("unique_events"),
                 schema: event_schema,
                 buffer: nonzero!(2usize),
@@ -563,6 +580,7 @@ async fn scheduled_processor_entity_swap_is_not_junction_specific() {
                 materialized_state: None,
             })),
             scheduled_model(nervix_models::Model::Deduplicator(CreateDeduplicator {
+                labels: Default::default(),
                 name: processor.clone(),
                 from: ProcessorInputs::single(named("events")),
                 output_routes: with_inherit_all(ProcessorOutputs::single(named("unique_events")))
@@ -725,6 +743,7 @@ async fn scheduled_entity_swap_reinstalls_state_schema_fingerprints() {
         domain.clone(),
         vec![
             scheduled_model(nervix_models::Model::Schema(CreateSchema {
+                labels: Default::default(),
                 name: event_schema.clone(),
                 fields: vec![SchemaField {
                     name: named("event_id"),
@@ -734,6 +753,7 @@ async fn scheduled_entity_swap_reinstalls_state_schema_fingerprints() {
                 }],
             })),
             scheduled_model(nervix_models::Model::Relay(CreateRelay {
+                labels: Default::default(),
                 name: named("events"),
                 schema: event_schema.clone(),
                 buffer: nonzero!(2usize),
@@ -741,6 +761,7 @@ async fn scheduled_entity_swap_reinstalls_state_schema_fingerprints() {
                 materialized_state: None,
             })),
             scheduled_model(nervix_models::Model::Relay(CreateRelay {
+                labels: Default::default(),
                 name: named("unique_events"),
                 schema: event_schema,
                 buffer: nonzero!(2usize),
@@ -748,6 +769,7 @@ async fn scheduled_entity_swap_reinstalls_state_schema_fingerprints() {
                 materialized_state: None,
             })),
             scheduled_model(nervix_models::Model::Deduplicator(CreateDeduplicator {
+                labels: Default::default(),
                 name: processor.clone(),
                 from: ProcessorInputs::single(named("events")),
                 output_routes: with_inherit_all(ProcessorOutputs::single(named("unique_events")))

@@ -617,6 +617,7 @@ mod tests {
 
     fn test_delivery() -> (MessageErrorDelivery, AckCompletion) {
         let schema = Arc::new(compile_schema(&nervix_models::CreateSchema {
+            labels: Default::default(),
             name: named("message_error"),
             fields: Vec::new(),
         }));
@@ -638,6 +639,7 @@ mod tests {
         flush_policy: RuntimeFlushPolicy,
     ) -> Arc<BoundMessageErrorRoute> {
         let schema = Arc::new(compile_schema(&nervix_models::CreateSchema {
+            labels: Default::default(),
             name: named("message_error"),
             fields: Vec::new(),
         }));

@@ -453,6 +453,13 @@ path = "crates/tls/src/shuttle_tests.rs"
 reason = "These finite synchronous model contenders exercise the owner directly, outside node execution jobs."
 
 [[permission]]
+bound = "Two modeled threads per execution, one applied publication writer and one metadata reader, both joined before final assertions and execution completion."
+items = ["thread::spawn"]
+owner = "The entity-label production publication reader's Shuttle check."
+path = "crates/consensus/src/entity_labels/tests.rs"
+reason = "These finite synchronous model contenders exercise the existing applied-state lock and the production metadata capture directly, outside node executor jobs."
+
+[[permission]]
 bound = "One modeled allocation-observation participant per Shuttle execution; it performs one bounded ledger observation and joins before the execution returns. The calling participant cancels the input guard."
 items = ["thread::spawn"]
 owner = "The public HTTP input accounting cancellation check."

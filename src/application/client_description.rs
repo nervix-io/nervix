@@ -79,6 +79,7 @@ impl SessionServiceImpl {
             };
             lines.push(format!("{key}: {value}{origin}"));
         }
+        super::describe_output::append_entity_label_lines(&mut lines, model.labels());
         command_ok(lines.join("\n"))
     }
 }

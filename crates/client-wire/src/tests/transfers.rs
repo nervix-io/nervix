@@ -289,7 +289,7 @@ fn part_frame(request_id: u64, total_bytes: u64, offset: u64, chunk: &[u8]) -> B
             body: Some(reply.as_union_value()),
         },
     );
-    finish_raw(builder, root, "NXSM")
+    finish_raw(builder, root, "NXEL")
 }
 
 #[test]

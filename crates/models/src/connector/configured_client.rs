@@ -208,6 +208,7 @@ macro_rules! configured_client {
             ::rkyv::Deserialize,
         )]
         pub struct $Client<Version = u64> {
+            pub labels: $crate::EntityLabels,
             pub name: $crate::ClientName,
             pub mount: Option<$crate::ClientResourceMount<Version>>,
             pub config: Vec<$crate::ClientConfigEntry>,
@@ -234,6 +235,7 @@ macro_rules! configured_client {
             ::rkyv::Deserialize,
         )]
         pub struct $Client<Version = u64> {
+            pub labels: $crate::EntityLabels,
             pub name: $crate::ClientName,
             pub pool: $crate::ClientPoolBounds,
             pub mount: Option<$crate::ClientResourceMount<Version>>,

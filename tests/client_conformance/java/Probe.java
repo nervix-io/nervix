@@ -1098,7 +1098,7 @@ public final class Probe {
         for (int index = 0; index < retained.size(); index++) {
             Event event = retained.get(index); ByteBuffer view = event.frame();
             require(view.isDirect() && view.isReadOnly(), "a frame must be a read-only direct buffer");
-            require(view.get(4) == 'N' && view.get(7) == 'M', "a retained frame is not a ServerMessage frame");
+            require(view.get(4) == 'N' && view.get(5) == 'X' && view.get(6) == 'E' && view.get(7) == 'L', "a retained frame is not a ServerMessage frame");
             require(event.rowLines(schema).equals(printed.get(index)), "a retained event reads differently");
             byte[] copy = new byte[view.remaining()]; view.duplicate().get(copy); copies.add(copy);
             slices.add(view.asReadOnlyBuffer().slice().duplicate());
@@ -1168,6 +1168,11 @@ public final class Probe {
                 List<String> lines = event.rowLines(schema); lines.forEach(Probe::report); seen += lines.size();
                 printed.add(lines); retained.add(event);
             }
+        }
+        Outcome labelled = session.execute("SHOW LABELS ON RELAY " + relay + " FORMAT TEXT;", null, outcomes);
+        try (var labels = labelled.handle().entityLabels()) {
+            require(labels != null && " retained Δ ".equals(labels.labels().get("probe")), "typed entity labels lost exact metadata");
+            require(relay.equals(labels.entityName()) && labels.revision() != null, "typed entity labels lost identity or revision");
         }
         checkCancellation(session);
         Outcome closed = session.execute("DELETE SUBSCRIPTION " + subscription + ";", null, outcomes);

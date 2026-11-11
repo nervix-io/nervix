@@ -301,6 +301,18 @@ impl Harness {
     async fn new() -> Result<Self, Box<dyn std::error::Error>> {
         Self::with_executor(Executor::default()).await
     }
+    async fn with_committed_parameters() -> Result<Self, Box<dyn std::error::Error>> {
+        let mut harness = Self::new().await?;
+        harness
+            .apply(
+                1,
+                ConsensusCommand::SeedClusterParameters {
+                    values: nervix_models::ClusterParameterValues::resolve(Default::default())?,
+                },
+            )
+            .await?;
+        Ok(harness)
+    }
     async fn with_executor(executor: Executor) -> Result<Self, Box<dyn std::error::Error>> {
         Self::with_licensing(executor, crate::LicensingEnvironment::default()).await
     }
@@ -495,10 +507,11 @@ async fn node_admission_fence_recovers_after_reopen() -> TestResult {
 #[nervix_primitives::test]
 async fn wasm_state_generation_transitions_survive_restart_and_require_the_mutation_lease()
 -> TestResult {
-    let mut harness = Harness::new().await?;
+    let mut harness = Harness::with_committed_parameters().await?;
     let domain = Harness::domain("tenant");
     let processor = ScheduledNode::new(
         Model::WasmProcessor(CreateWasmProcessor {
+            labels: Default::default(),
             name: WasmProcessorName::parse("guest")?,
             from: ProcessorInputs::single(RelayName::parse("input")?),
             output_routes: ProcessorOutputs::single(RelayName::parse("output")?),
@@ -521,7 +534,7 @@ async fn wasm_state_generation_transitions_survive_restart_and_require_the_mutat
     let created = DomainSchedule::new(domain.id.clone(), [processor.clone()], vec![]);
     harness
         .apply(
-            1,
+            2,
             ConsensusCommand::PutDomain {
                 domain_quota: nervix_licensing_vocabulary::Quota::Unlimited,
                 domain: Box::new(domain.clone()),
@@ -536,7 +549,7 @@ async fn wasm_state_generation_transitions_survive_restart_and_require_the_mutat
         .domain_planning_inputs(&domain.id);
     harness
         .apply(
-            2,
+            3,
             ConsensusCommand::ReplaceDomainSchedule {
                 inputs: Box::new(create_inputs),
                 schedule: Some(Box::new(created)),
@@ -548,7 +561,7 @@ async fn wasm_state_generation_transitions_survive_restart_and_require_the_mutat
     let reference = Harness::command_reference(1);
     harness
         .apply(
-            3,
+            4,
             ConsensusCommand::AdmitCommandExecution {
                 execution: Box::new(crate::CommandExecution::applying(
                     reference.clone(),
@@ -595,7 +608,7 @@ async fn wasm_state_generation_transitions_survive_restart_and_require_the_mutat
         .domain_planning_inputs(&domain.id);
     harness
         .apply(
-            4,
+            5,
             ConsensusCommand::ReplaceDomainSchedule {
                 inputs: Box::new(branch_transition_inputs),
                 schedule: Some(Box::new(branch_schedule.clone())),
@@ -610,7 +623,7 @@ async fn wasm_state_generation_transitions_survive_restart_and_require_the_mutat
         .domain_planning_inputs(&domain.id);
     harness
         .apply(
-            5,
+            6,
             ConsensusCommand::ReplaceDomainSchedule {
                 inputs: Box::new(rejected_transition_inputs),
                 schedule: Some(Box::new(every_branch_schedule.clone())),
@@ -630,7 +643,7 @@ async fn wasm_state_generation_transitions_survive_restart_and_require_the_mutat
         .domain_planning_inputs(&domain.id);
     harness
         .apply(
-            6,
+            7,
             ConsensusCommand::ReplaceDomainSchedule {
                 inputs: Box::new(every_branch_transition_inputs),
                 schedule: Some(Box::new(every_branch_schedule.clone())),
@@ -662,12 +675,12 @@ async fn wasm_state_generation_transitions_survive_restart_and_require_the_mutat
 async fn record_state_and_applied_position_recover_together_at_each_boundary() -> TestResult {
     for boundary in [StorageBoundary::BeforeCommit, StorageBoundary::AfterSync] {
         nervix_primitives::task::consume_budget().await;
-        let mut harness = Harness::new().await?;
+        let mut harness = Harness::with_committed_parameters().await?;
         let domain = Harness::domain("tenant");
         let schedule = DomainSchedule::new(domain.id.clone(), [], vec![]);
         harness
             .apply(
-                1,
+                2,
                 ConsensusCommand::PutDomain {
                     domain_quota: nervix_licensing_vocabulary::Quota::Unlimited,
                     domain: Box::new(domain.clone()),
@@ -682,7 +695,7 @@ async fn record_state_and_applied_position_recover_together_at_each_boundary() -
             .domain_planning_inputs(&domain.id);
         harness
             .apply(
-                2,
+                3,
                 ConsensusCommand::ReplaceDomainSchedule {
                     inputs: Box::new(inputs),
                     schedule: Some(Box::new(schedule.clone())),
@@ -705,7 +718,7 @@ async fn record_state_and_applied_position_recover_together_at_each_boundary() -
             .inner
             .faults
             .fail_next(command.to_string(), boundary);
-        assert!(harness.apply(3, command).await.is_err());
+        assert!(harness.apply(4, command).await.is_err());
         assert_eq!(harness.store.inner.state(), preceding);
         assert!(!domain_watch.has_changed()?);
         assert!(!schedule_watch.has_changed()?);
@@ -731,10 +744,10 @@ async fn record_state_and_applied_position_recover_together_at_each_boundary() -
                     recovered.schedule.domain(&changed_domain.id),
                     Some(&schedule)
                 );
-                assert_eq!(recovered.runtime_revision, 3);
+                assert_eq!(recovered.runtime_revision, 4);
                 assert_eq!(
                     harness.store.applied_state().await?.0,
-                    Some(Harness::log_id(3))
+                    Some(Harness::log_id(4))
                 );
             }
         }
@@ -2067,6 +2080,7 @@ async fn replica_update_writes_one_record_and_metadata_amid_unrelated_graphs() -
     for index in 0..10_000 {
         graph_nodes.push(nervix_models::ScheduledNode::new(
             nervix_models::Model::Schema(nervix_models::CreateSchema {
+                labels: Default::default(),
                 name: nervix_models::SchemaName::parse(&format!("schema_{index}"))?,
                 fields: vec![nervix_models::SchemaField {
                     name: nervix_models::FieldName::parse("value")?,

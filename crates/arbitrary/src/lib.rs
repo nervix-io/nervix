@@ -31,6 +31,7 @@ mod cluster_parameters;
 mod codec;
 mod control;
 mod emitter;
+mod entity_labels;
 mod entropy;
 mod expression;
 mod external_name;

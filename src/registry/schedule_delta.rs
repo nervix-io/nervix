@@ -548,6 +548,7 @@ mod tests {
             vec![
                 ScheduledNode::new(
                     Model::Relay(CreateRelay {
+                        labels: Default::default(),
                         name: named("events"),
                         schema: named("event"),
                         buffer: capacity,
@@ -572,6 +573,7 @@ mod tests {
             vec![
                 ScheduledNode::new(
                     Model::Ingestor(CreateIngestor {
+                        labels: Default::default(),
                         name: named("event_source"),
                         output_routes: ProcessorOutputs::new(vec![ProcessorOutput {
                             relay: named("events"),
@@ -615,6 +617,7 @@ mod tests {
             vec![
                 ScheduledNode::new(
                     Model::WasmProcessor(CreateWasmProcessor {
+                        labels: Default::default(),
                         name: named("counting_guest"),
                         from: ProcessorInputs::single(named("events")),
                         output_routes: ProcessorOutputs::single(named("counted_events")),
@@ -714,6 +717,7 @@ mod tests {
                 DomainName::parse("testing").expect("valid domain"),
                 vec![ScheduledNode::new(
                     Model::Vhost(CreateVhost {
+                        labels: Default::default(),
                         name: named("edge"),
                         hostnames: vec!["edge.example.com".to_string()],
                         tls: Some(VhostTlsResource {
@@ -767,6 +771,7 @@ mod tests {
     #[test]
     fn junction_filter_is_dynamic_and_attachment_changes_swap_the_entity() {
         let junction = CreateJunction {
+            labels: Default::default(),
             name: named("route_events"),
             from: ProcessorInputs::single(named("incoming")),
             output_routes: ProcessorOutputs::new(vec![ProcessorOutput::with_flush_policy(
@@ -860,6 +865,7 @@ mod tests {
     #[test]
     fn emitter_flush_is_dynamic_and_client_changes_swap_despite_fingerprint_changes() {
         let emitter = CreateEmitter {
+            labels: Default::default(),
             instances: nervix_models::EmitterInstances::ONE,
             name: named("event_emitter"),
             from: nervix_models::ProcessorInputs::single(named("events")),
@@ -1209,6 +1215,7 @@ mod tests {
             )
         };
         let key_schema = nervix_models::CreateSchema {
+            labels: Default::default(),
             name: named("tenant_key"),
             fields: Vec::new(),
         };
@@ -1216,6 +1223,7 @@ mod tests {
         let relay = |name: &str, materialized: bool| {
             ScheduledNode::new(
                 Model::Relay(CreateRelay {
+                    labels: Default::default(),
                     name: named(name),
                     schema: named("event"),
                     buffer: nonzero!(8usize),

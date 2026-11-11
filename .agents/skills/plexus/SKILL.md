@@ -181,6 +181,10 @@ For the rows a reorderer holds or a correlator's pending records, read
 same clauses and envelope. Read the CLI chapter for one-shot JSON output; programs consume
 `CommandOutcome.state` directly.
 
+For domain entity metadata, read [Entity Labels](../../../docs/src/entity-labels.md) before
+choosing label targets, limits, transaction handling or inspection. Keep descriptive labels
+separate from physical node tags and authorization.
+
 ## Gather the configuration contract
 
 Establish these inputs before finalizing Plexus. Ask only for missing details that materially change

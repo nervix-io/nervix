@@ -375,6 +375,7 @@ fn an_emitter_presents_the_envelope_it_writes_among_its_inspection_rows() {
 #[test]
 fn an_emitter_statement_writes_its_envelope_after_its_payload() {
     let emitter = crate::CreateEmitter {
+        labels: Default::default(),
         instances: crate::EmitterInstances::ONE,
         name: crate::EmitterName::try_from("publish_events").expect("valid emitter name"),
         from: crate::ProcessorInputs::single(

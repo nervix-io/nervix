@@ -108,6 +108,7 @@ impl HashMapDraft {
             return Err(Report::new(HashMapDraftError::PathRequired));
         }
         Ok(CreateLookup {
+            labels: Default::default(),
             name,
             key_field,
             resource: pin.resource,

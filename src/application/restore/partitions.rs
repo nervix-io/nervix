@@ -331,6 +331,7 @@ mod tests {
 
     fn relay_node(count: u16) -> ScheduledNode {
         let relay = CreateRelay {
+            labels: Default::default(),
             name: RelayName::parse("events").assured("the test relay name is valid"),
             schema: SchemaName::parse("event").assured("the test schema name is valid"),
             buffer: NonZeroUsize::MIN,
@@ -338,6 +339,7 @@ mod tests {
             materialized_state: None,
         };
         let key_schema = CreateSchema {
+            labels: Default::default(),
             name: SchemaName::parse("tenant_key").assured("the test schema name is valid"),
             fields: Vec::new(),
         };

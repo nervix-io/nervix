@@ -475,6 +475,21 @@ impl SessionServiceImpl {
 
         for (index, statement) in statements.into_iter().enumerate() {
             match statement {
+                Statement::MutateEntityLabels(edit) => {
+                    let model_id = edit.entity.identifier.clone();
+                    applied.push(AppliedModelMutation {
+                        index,
+                        model: model_id.clone(),
+                        message: format!(
+                            "updated labels on {} '{}' in domain '{}'",
+                            edit.entity.kind.keyword_phrase(),
+                            model_id.as_str(),
+                            domain.as_str()
+                        )
+                        .into(),
+                    });
+                    mutations.push(RegistryMutation::Labels(edit));
+                }
                 Statement::Create(create) => {
                     let if_not_exists = create.if_not_exists;
                     let model = create.body;
@@ -2237,7 +2252,8 @@ impl SessionServiceImpl {
                 };
                 self.stop_domain(domain, stop).await
             }
-            Statement::Create(_)
+            Statement::MutateEntityLabels(_)
+            | Statement::Create(_)
             | Statement::AlterSchema(_)
             | Statement::AlterWireJsonSchema(_)
             | Statement::AlterWireCborSchema(_)
@@ -2397,6 +2413,12 @@ impl SessionServiceImpl {
                     .as_ref()
                     .verified("this statement requires a request domain, which was resolved above");
                 self.lookup_query(domain, query).await
+            }
+            Statement::ShowLabels(show) => {
+                let domain = domain
+                    .as_ref()
+                    .verified("this statement requires a request domain, which was resolved above");
+                self.show_entity_labels(domain, show, session).await
             }
             Statement::ShowCreate(show) => {
                 let domain = domain

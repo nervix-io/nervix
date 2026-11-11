@@ -91,56 +91,58 @@ fn timeout_policy<'src>()
 pub fn create_correlator_parser<'src>()
 -> impl Parser<'src, &'src [Token], CreateStatement<CreateCorrelator>, extra::Err<ParseError<'src>>>
 + Clone {
-    kw(Identifier::Create)
-        .ignore_then(if_not_exists_clause())
-        .then_ignore(kw(Identifier::Correlator))
-        .then(correlator_name())
-        .then(side_from_clauses(Identifier::Left))
-        .then(side_from_clauses(Identifier::Right))
-        .then(ack_mode().or_not())
-        .boxed()
-        .then(correlate_where_clause())
-        .then(match_policy())
-        .then_ignore(kw(Identifier::Max))
-        .then_ignore(kw(Identifier::Time))
-        .then(duration_lit())
-        .then(timeout_policy())
-        .boxed()
-        .then(branch_selection())
-        .then(materialized_state_dependencies())
-        .then(flushed_explicit_processor_outputs())
-        .then_ignore(tok(Token::Semicolon).or_not())
-        .try_map(|value, _span| {
-            let (
-                (
+    crate::labels::finish_creation({
+        kw(Identifier::Create)
+            .ignore_then(if_not_exists_clause())
+            .then_ignore(kw(Identifier::Correlator))
+            .then(correlator_name())
+            .then(side_from_clauses(Identifier::Left))
+            .then(side_from_clauses(Identifier::Right))
+            .then(ack_mode().or_not())
+            .boxed()
+            .then(correlate_where_clause())
+            .then(match_policy())
+            .then_ignore(kw(Identifier::Max))
+            .then_ignore(kw(Identifier::Time))
+            .then(duration_lit())
+            .then(timeout_policy())
+            .boxed()
+            .then(branch_selection())
+            .then(materialized_state_dependencies())
+            .then(flushed_explicit_processor_outputs())
+            .try_map(|value, _span| {
+                let (
                     (
-                        ((((base, correlate_where), match_policy), max_time), timeout_policy),
-                        branched_by,
+                        (
+                            ((((base, correlate_where), match_policy), max_time), timeout_policy),
+                            branched_by,
+                        ),
+                        materialized_state,
                     ),
-                    materialized_state,
-                ),
-                output_routes,
-            ) = value;
-            let ((((if_not_exists, name), left), right), mode) = base;
-            Ok(CreateStatement::new(
-                CreateCorrelator {
-                    name,
-                    left,
-                    right,
                     output_routes,
-                    branched_by,
-                    correlate_where,
-                    match_policy,
-                    max_time,
-                    timeout_policy,
-                    mode: mode.unwrap_or_default(),
-                    filter_where: None,
-                    materialized_state,
-                },
-                if_not_exists,
-            ))
-        })
-        .boxed()
+                ) = value;
+                let ((((if_not_exists, name), left), right), mode) = base;
+                Ok(CreateStatement::new(
+                    CreateCorrelator {
+                        labels: Default::default(),
+                        name,
+                        left,
+                        right,
+                        output_routes,
+                        branched_by,
+                        correlate_where,
+                        match_policy,
+                        max_time,
+                        timeout_policy,
+                        mode: mode.unwrap_or_default(),
+                        filter_where: None,
+                        materialized_state,
+                    },
+                    if_not_exists,
+                ))
+            })
+            .boxed()
+    })
 }
 
 pub fn parse_create_correlator_tokens(

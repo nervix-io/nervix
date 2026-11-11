@@ -41,6 +41,14 @@ pub struct ClusterParameterArgs {
     pub client_consumer_session_bytes: Option<HumanBytes>,
     #[arg(long = nervix_models::UdfCodeBytes::NAME, env = "NERVIX_UDF_CODE_BYTES", help = super::settings::parameter_seed_help(nervix_models::ClusterParameterKey::UdfCodeBytes, "First-bootstrap seed; change a running cluster with ALTER CLUSTER SET"))]
     pub udf_code_bytes: Option<HumanBytes>,
+    #[arg(long = nervix_models::EntityLabelsMaxCount::NAME, env = "NERVIX_ENTITY_LABELS_MAX_COUNT", help = super::settings::parameter_seed_help(nervix_models::ClusterParameterKey::EntityLabelsMaxCount, "First-bootstrap seed; change a running cluster with ALTER CLUSTER SET"))]
+    pub entity_labels_max_count: Option<u64>,
+    #[arg(long = nervix_models::EntityLabelsMaxKeyBytes::NAME, env = "NERVIX_ENTITY_LABELS_MAX_KEY_BYTES", help = super::settings::parameter_seed_help(nervix_models::ClusterParameterKey::EntityLabelsMaxKeyBytes, "First-bootstrap seed; change a running cluster with ALTER CLUSTER SET"))]
+    pub entity_labels_max_key_bytes: Option<HumanBytes>,
+    #[arg(long = nervix_models::EntityLabelsMaxValueBytes::NAME, env = "NERVIX_ENTITY_LABELS_MAX_VALUE_BYTES", help = super::settings::parameter_seed_help(nervix_models::ClusterParameterKey::EntityLabelsMaxValueBytes, "First-bootstrap seed; change a running cluster with ALTER CLUSTER SET"))]
+    pub entity_labels_max_value_bytes: Option<HumanBytes>,
+    #[arg(long = nervix_models::EntityLabelsMaxBytes::NAME, env = "NERVIX_ENTITY_LABELS_MAX_BYTES", help = super::settings::parameter_seed_help(nervix_models::ClusterParameterKey::EntityLabelsMaxBytes, "First-bootstrap seed; change a running cluster with ALTER CLUSTER SET"))]
+    pub entity_labels_max_bytes: Option<HumanBytes>,
     #[arg(long = nervix_models::HttpHeaderBytes::NAME, env = "NERVIX_HTTP_HEADER_BYTES", help = super::settings::parameter_seed_help(nervix_models::ClusterParameterKey::HttpHeaderBytes, "First-bootstrap seed; change a running cluster with ALTER CLUSTER SET"))]
     pub http_header_bytes: Option<HumanBytes>,
     #[arg(long = nervix_models::HttpHeaderFields::NAME, env = "NERVIX_HTTP_HEADER_FIELDS", help = super::settings::parameter_seed_help(nervix_models::ClusterParameterKey::HttpHeaderFields, "First-bootstrap seed; change a running cluster with ALTER CLUSTER SET"))]
@@ -68,6 +76,16 @@ impl ClusterParameterArgs {
                 .map(|bytes| HumanBytes(ubyte::ByteUnit::Byte(bytes))),
             udf_code_bytes: seeds
                 .udf_code_bytes
+                .map(|bytes| HumanBytes(ubyte::ByteUnit::Byte(bytes))),
+            entity_labels_max_count: seeds.entity_labels_max_count,
+            entity_labels_max_key_bytes: seeds
+                .entity_labels_max_key_bytes
+                .map(|bytes| HumanBytes(ubyte::ByteUnit::Byte(bytes))),
+            entity_labels_max_value_bytes: seeds
+                .entity_labels_max_value_bytes
+                .map(|bytes| HumanBytes(ubyte::ByteUnit::Byte(bytes))),
+            entity_labels_max_bytes: seeds
+                .entity_labels_max_bytes
                 .map(|bytes| HumanBytes(ubyte::ByteUnit::Byte(bytes))),
             http_header_bytes: seeds
                 .http_header_bytes
@@ -119,6 +137,22 @@ impl ClusterParameterArgs {
             self.client_consumer_session_bytes,
         );
         command_line.optional(nervix_models::UdfCodeBytes::NAME, self.udf_code_bytes);
+        command_line.optional(
+            nervix_models::EntityLabelsMaxCount::NAME,
+            self.entity_labels_max_count,
+        );
+        command_line.optional(
+            nervix_models::EntityLabelsMaxKeyBytes::NAME,
+            self.entity_labels_max_key_bytes,
+        );
+        command_line.optional(
+            nervix_models::EntityLabelsMaxValueBytes::NAME,
+            self.entity_labels_max_value_bytes,
+        );
+        command_line.optional(
+            nervix_models::EntityLabelsMaxBytes::NAME,
+            self.entity_labels_max_bytes,
+        );
         command_line.optional(nervix_models::HttpHeaderBytes::NAME, self.http_header_bytes);
         command_line.optional(nervix_models::ClientBatchRows::NAME, self.client_batch_rows);
         command_line.optional(

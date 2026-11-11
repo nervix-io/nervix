@@ -1663,6 +1663,7 @@ mod tests {
         .plan_reingestor(
             &domain,
             CreateReingestor {
+                labels: Default::default(),
                 name: named("tenant_partition"),
                 from: ProcessorInputs::single(named("orders")),
                 output_routes: with_inherit_all(ProcessorOutputs::single(named("tenant_orders")))
@@ -1967,6 +1968,7 @@ mod tests {
         .plan_reingestor(
             &domain,
             CreateReingestor {
+                labels: Default::default(),
                 name: reingestor.clone(),
                 from: ProcessorInputs::single(input_relay.clone()),
                 output_routes: with_inherit_all(ProcessorOutputs::single(output_relay.clone()))
@@ -2229,6 +2231,7 @@ mod tests {
         .plan_reingestor(
             &domain,
             CreateReingestor {
+                labels: Default::default(),
                 name: named("tenant_partition"),
                 from: ProcessorInputs::single(input_relay.clone()),
                 output_routes: with_inherit_all(ProcessorOutputs::single(output_relay.clone()))

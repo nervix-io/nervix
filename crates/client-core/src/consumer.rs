@@ -991,6 +991,24 @@ mod shuttle_tests {
         let (frames, _unanswered) = mpsc::channel(1);
         Arc::new(ConsumerAttachment {
             id: ConsumerId::opened_by(RequestId::new(NonZeroU64::MIN)),
+            #[cfg(feature = "arrow")]
+            description: EmitterOpened {
+                domain: DomainName::parse("tenant").assured("literal domain"),
+                emitter: EmitterName::parse("app_output").assured("literal emitter"),
+                fields: vec![],
+                generation: 1,
+                contract: nervix_models::ClientEndpointContract::from_digest([7; 32]),
+                window: nervix_models::AckWindow::Sequential,
+                ack_timeout: Duration::from_secs(30),
+                retry_backoff: Duration::from_millis(100),
+                retry_max_backoff: Duration::from_secs(1),
+                granted: ClientConsumerLimits {
+                    batches: std::num::NonZeroU32::MIN,
+                    bytes: NonZeroU64::MIN,
+                },
+                max_batch_bytes: 1,
+                max_batch_rows: 1,
+            },
             exchange: Arc::new(ExchangeRequests {
                 frames,
                 pending: Arc::new(SyncMutex::new(PendingReplies::new())),

@@ -35,50 +35,52 @@ fn relay_capacity<'src>()
 pub fn create_relay_parser<'src>()
 -> impl Parser<'src, &'src [Token], CreateStatement<CreateRelay>, extra::Err<ParseError<'src>>> + Clone
 {
-    let materialized_state = kw(Identifier::With)
-        .ignore_then(kw(Identifier::Materialized))
-        .ignore_then(kw(Identifier::State))
-        .ignore_then(kw(Identifier::Last))
-        .ignore_then(kw(Identifier::By))
-        .ignore_then(kw(Identifier::Timestamp))
-        .to(MaterializedRelayState::LastByTimestamp);
+    crate::labels::finish_creation({
+        let materialized_state = kw(Identifier::With)
+            .ignore_then(kw(Identifier::Materialized))
+            .ignore_then(kw(Identifier::State))
+            .ignore_then(kw(Identifier::Last))
+            .ignore_then(kw(Identifier::By))
+            .ignore_then(kw(Identifier::Timestamp))
+            .to(MaterializedRelayState::LastByTimestamp);
 
-    let capacity = kw(Identifier::Capacity).ignore_then(relay_capacity());
+        let capacity = kw(Identifier::Capacity).ignore_then(relay_capacity());
 
-    let branched_tail = kw_phrase2(Identifier::Branched, Identifier::By)
-        .ignore_then(branch_ref())
-        .then(capacity.clone().or_not())
-        .map(|(branch, buffer)| (RelayBranching::branched_by(branch), buffer));
+        let branched_tail = kw_phrase2(Identifier::Branched, Identifier::By)
+            .ignore_then(branch_ref())
+            .then(capacity.clone().or_not())
+            .map(|(branch, buffer)| (RelayBranching::branched_by(branch), buffer));
 
-    let unbranched_tail = kw(Identifier::Unbranched)
-        .ignore_then(capacity.clone().or_not())
-        .map(|buffer| (RelayBranching::unbranched(), buffer));
+        let unbranched_tail = kw(Identifier::Unbranched)
+            .ignore_then(capacity.clone().or_not())
+            .map(|buffer| (RelayBranching::unbranched(), buffer));
 
-    let tail = choice((branched_tail, unbranched_tail));
+        let tail = choice((branched_tail, unbranched_tail));
 
-    kw(Identifier::Create)
-        .ignore_then(if_not_exists_clause())
-        .then_ignore(kw(Identifier::Relay))
-        .then(relay_name())
-        .then_ignore(kw(Identifier::Schema))
-        .then(schema_ref())
-        .then(tail)
-        .then(materialized_state.or_not())
-        .then_ignore(tok(Token::Semicolon).or_not())
-        .map(
-            |((((if_not_exists, name), schema), (branching, buffer)), materialized_state)| {
-                CreateStatement::new(
-                    CreateRelay {
-                        name,
-                        schema,
-                        buffer: buffer.unwrap_or_else(default_relay_buffer),
-                        branching,
-                        materialized_state,
-                    },
-                    if_not_exists,
-                )
-            },
-        )
+        kw(Identifier::Create)
+            .ignore_then(if_not_exists_clause())
+            .then_ignore(kw(Identifier::Relay))
+            .then(relay_name())
+            .then_ignore(kw(Identifier::Schema))
+            .then(schema_ref())
+            .then(tail)
+            .then(materialized_state.or_not())
+            .map(
+                |((((if_not_exists, name), schema), (branching, buffer)), materialized_state)| {
+                    CreateStatement::new(
+                        CreateRelay {
+                            labels: Default::default(),
+                            name,
+                            schema,
+                            buffer: buffer.unwrap_or_else(default_relay_buffer),
+                            branching,
+                            materialized_state,
+                        },
+                        if_not_exists,
+                    )
+                },
+            )
+    })
 }
 
 pub fn alter_relay_parser<'src>()

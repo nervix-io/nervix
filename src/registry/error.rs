@@ -841,6 +841,7 @@ mod tests {
         let domain = DomainName::parse("default").expect("valid domain");
         let mut models = full_graph_batch();
         models.push(Model::WireCborSchema(CreateWireSchema {
+            labels: Default::default(),
             name: named("event_cbor"),
             strictness: Default::default(),
             fields: vec![WireSchemaField {
@@ -957,6 +958,7 @@ mod tests {
             .apply_batch(
                 &domain,
                 vec![Model::Placement(CreatePlacement {
+                    labels: Default::default(),
                     name: named("pin_nothing"),
                     scope: nervix_models::PlacementScope::Corridor {
                         from: Vec::new(),

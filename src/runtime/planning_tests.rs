@@ -137,6 +137,7 @@ fn eager_binding_prepares_every_processor_family_before_publication() {
     let right = named::<RelayName>("right_events");
     let features = named::<RelayName>("features");
     let generic_schema = Arc::new(compile_schema(&CreateSchema {
+        labels: Default::default(),
         name: named("event"),
         fields: vec![
             SchemaField {
@@ -169,6 +170,7 @@ fn eager_binding_prepares_every_processor_family_before_publication() {
         ],
     }));
     let window_schema = Arc::new(compile_schema(&CreateSchema {
+        labels: Default::default(),
         name: named("window_result"),
         fields: vec![SchemaField {
             name: named("value"),
@@ -178,6 +180,7 @@ fn eager_binding_prepares_every_processor_family_before_publication() {
         }],
     }));
     let score_schema = Arc::new(compile_schema(&CreateSchema {
+        labels: Default::default(),
         name: named("score_result"),
         fields: vec![SchemaField {
             name: named("score"),
@@ -1070,6 +1073,7 @@ fn inferencer_input_mappings_compile_when_template_is_materialized() {
     let input_relay = named::<RelayName>("features");
     let processor = named::<ModelName>("score_model");
     let input_schema = Arc::new(compile_schema(&CreateSchema {
+        labels: Default::default(),
         name: named("feature_schema"),
         fields: vec![SchemaField {
             name: named("vector"),
@@ -1209,6 +1213,7 @@ fn branched_node_specs_capture_downstream_processing_tree() {
                 kind: ModelKind::Ingestor,
                 identifier: named("orders_ingestor"),
                 model: nervix_models::Model::Ingestor(CreateIngestor {
+                    labels: Default::default(),
                     name: named("orders_ingestor"),
                     output_routes: (ProcessorOutputs::single(named("orders")))
                         .with_flush_policy(FlushPolicy::Each {
@@ -1237,6 +1242,7 @@ fn branched_node_specs_capture_downstream_processing_tree() {
                 kind: ModelKind::Deduplicator,
                 identifier: named("dedup_orders"),
                 model: nervix_models::Model::Deduplicator(CreateDeduplicator {
+                    labels: Default::default(),
                     name: named("dedup_orders"),
                     from: ProcessorInputs::single(named("orders"))
                         .with_collect_policy("25ms".to_string(), Some("2MiB".to_string())),
@@ -1257,6 +1263,7 @@ fn branched_node_specs_capture_downstream_processing_tree() {
                 kind: ModelKind::Deduplicator,
                 identifier: named("dedup_projected_orders"),
                 model: nervix_models::Model::Deduplicator(CreateDeduplicator {
+                    labels: Default::default(),
                     name: named("dedup_projected_orders"),
                     from: ProcessorInputs::single(named("projected_orders")),
                     output_routes: (ProcessorOutputs::single(named("aggregated_orders")))
@@ -1276,6 +1283,7 @@ fn branched_node_specs_capture_downstream_processing_tree() {
                 kind: ModelKind::Emitter,
                 identifier: named("orders_emitter"),
                 model: nervix_models::Model::Emitter(CreateEmitter {
+                    labels: Default::default(),
                     instances: nervix_models::EmitterInstances::ONE,
                     name: named("orders_emitter"),
                     from: ProcessorInputs::single(named("aggregated_orders")),
@@ -1355,6 +1363,7 @@ fn branched_node_specs_capture_window_processor_as_branch_node() {
                 kind: ModelKind::Ingestor,
                 identifier: named("metrics_ingestor"),
                 model: nervix_models::Model::Ingestor(CreateIngestor {
+                    labels: Default::default(),
                     name: named("metrics_ingestor"),
                     output_routes: (ProcessorOutputs::single(named("metrics")))
                         .with_flush_policy(FlushPolicy::Each {
@@ -1383,6 +1392,7 @@ fn branched_node_specs_capture_window_processor_as_branch_node() {
                 kind: ModelKind::WindowProcessor,
                 identifier: named("metric_window"),
                 model: nervix_models::Model::WindowProcessor(CreateWindowProcessor {
+                    labels: Default::default(),
                     name: named("metric_window"),
                     from: ProcessorInputs::single(named("metrics")),
                     output_routes: window_outputs(
@@ -1408,6 +1418,7 @@ fn branched_node_specs_capture_window_processor_as_branch_node() {
                 kind: ModelKind::Deduplicator,
                 identifier: named("dedup_summary"),
                 model: nervix_models::Model::Deduplicator(CreateDeduplicator {
+                    labels: Default::default(),
                     name: named("dedup_summary"),
                     from: ProcessorInputs::single(named("metric_summary")),
                     output_routes: (ProcessorOutputs::single(named("projected_summary")))
@@ -1469,6 +1480,7 @@ fn branched_node_specs_capture_inferencer_as_branch_node() {
                 kind: ModelKind::Ingestor,
                 identifier: named("features_ingestor"),
                 model: nervix_models::Model::Ingestor(CreateIngestor {
+                    labels: Default::default(),
                     name: named("features_ingestor"),
                     output_routes: (ProcessorOutputs::single(named("features")))
                         .with_flush_policy(FlushPolicy::Each {
@@ -1497,6 +1509,7 @@ fn branched_node_specs_capture_inferencer_as_branch_node() {
                 kind: ModelKind::Inferencer,
                 identifier: named("score_model"),
                 model: nervix_models::Model::Inferencer(CreateInferencer {
+                    labels: Default::default(),
                     name: named("score_model"),
                     from: ProcessorInputs::single(named("features")),
                     output_routes: (ProcessorOutputs::single(named("scores")))
@@ -1524,6 +1537,7 @@ fn branched_node_specs_capture_inferencer_as_branch_node() {
                 kind: ModelKind::Deduplicator,
                 identifier: named("dedup_scores"),
                 model: nervix_models::Model::Deduplicator(CreateDeduplicator {
+                    labels: Default::default(),
                     name: named("dedup_scores"),
                     from: ProcessorInputs::single(named("scores")),
                     output_routes: (ProcessorOutputs::single(named("projected_scores")))
@@ -1596,6 +1610,7 @@ fn branched_node_specs_capture_the_processor_behind_a_reingestor() {
                 kind: ModelKind::Reingestor,
                 identifier: named("tenant_partition"),
                 model: nervix_models::Model::Reingestor(CreateReingestor {
+                    labels: Default::default(),
                     name: named("tenant_partition"),
                     from: ProcessorInputs::single(named("orders")),
                     output_routes: with_inherit_all(ProcessorOutputs::single(named(
@@ -1615,6 +1630,7 @@ fn branched_node_specs_capture_the_processor_behind_a_reingestor() {
                 kind: ModelKind::Deduplicator,
                 identifier: named("dedup_orders"),
                 model: nervix_models::Model::Deduplicator(CreateDeduplicator {
+                    labels: Default::default(),
                     name: named("dedup_orders"),
                     from: ProcessorInputs::single(named("tenant_orders")),
                     output_routes: (ProcessorOutputs::single(named("projected_orders")))
@@ -1658,6 +1674,7 @@ fn branched_node_specs_capture_processor_output_route_tree() {
                 kind: ModelKind::Ingestor,
                 identifier: named("orders_ingestor"),
                 model: nervix_models::Model::Ingestor(CreateIngestor {
+                    labels: Default::default(),
                     name: named("orders_ingestor"),
                     output_routes: (ProcessorOutputs::single(named("orders")))
                         .with_flush_policy(FlushPolicy::Each {
@@ -1686,6 +1703,7 @@ fn branched_node_specs_capture_processor_output_route_tree() {
                 kind: ModelKind::Deduplicator,
                 identifier: named("orders_splitter"),
                 model: nervix_models::Model::Deduplicator(CreateDeduplicator {
+                    labels: Default::default(),
                     name: named("orders_splitter"),
                     from: ProcessorInputs::single(named("orders")),
                     output_routes: (ProcessorOutputs::new(vec![
@@ -1723,6 +1741,7 @@ fn branched_node_specs_capture_processor_output_route_tree() {
                 kind: ModelKind::Deduplicator,
                 identifier: named("dedup_urgent"),
                 model: nervix_models::Model::Deduplicator(CreateDeduplicator {
+                    labels: Default::default(),
                     name: named("dedup_urgent"),
                     from: ProcessorInputs::single(named("urgent_orders")),
                     output_routes: (ProcessorOutputs::single(named("urgent_projected")))
@@ -1742,6 +1761,7 @@ fn branched_node_specs_capture_processor_output_route_tree() {
                 kind: ModelKind::Deduplicator,
                 identifier: named("dedup_default"),
                 model: nervix_models::Model::Deduplicator(CreateDeduplicator {
+                    labels: Default::default(),
                     name: named("dedup_default"),
                     from: ProcessorInputs::single(named("default_orders")),
                     output_routes: (ProcessorOutputs::single(named("default_projected")))
@@ -1807,6 +1827,7 @@ fn branched_node_specs_capture_junction_as_single_branch_processor() {
                 kind: ModelKind::Ingestor,
                 identifier: named("left_ingestor"),
                 model: nervix_models::Model::Ingestor(CreateIngestor {
+                    labels: Default::default(),
                     name: named("left_ingestor"),
                     output_routes: (ProcessorOutputs::single(named("left_stream")))
                         .with_flush_policy(FlushPolicy::Each {
@@ -1836,6 +1857,7 @@ fn branched_node_specs_capture_junction_as_single_branch_processor() {
                 kind: ModelKind::Ingestor,
                 identifier: named("right_ingestor"),
                 model: nervix_models::Model::Ingestor(CreateIngestor {
+                    labels: Default::default(),
                     name: named("right_ingestor"),
                     output_routes: (ProcessorOutputs::single(named("right_stream")))
                         .with_flush_policy(FlushPolicy::Each {
@@ -1865,6 +1887,7 @@ fn branched_node_specs_capture_junction_as_single_branch_processor() {
                 kind: ModelKind::Junction,
                 identifier: named("join_streams"),
                 model: nervix_models::Model::Junction(CreateJunction {
+                    labels: Default::default(),
                     name: named("join_streams"),
                     from: ProcessorInputs::new(
                         vec![named("left_stream"), named("right_stream")],
@@ -1885,6 +1908,7 @@ fn branched_node_specs_capture_junction_as_single_branch_processor() {
                 kind: ModelKind::Deduplicator,
                 identifier: named("dedup_joined"),
                 model: nervix_models::Model::Deduplicator(CreateDeduplicator {
+                    labels: Default::default(),
                     name: named("dedup_joined"),
                     from: ProcessorInputs::single(named("joined_stream")),
                     output_routes: (ProcessorOutputs::single(named("projected_joined")))
@@ -1948,6 +1972,7 @@ fn branched_node_specs_capture_single_processor_output_route_tree() {
                 kind: ModelKind::Ingestor,
                 identifier: named("orders_ingestor"),
                 model: nervix_models::Model::Ingestor(CreateIngestor {
+                    labels: Default::default(),
                     name: named("orders_ingestor"),
                     output_routes: (ProcessorOutputs::single(named("orders")))
                         .with_flush_policy(FlushPolicy::Each {
@@ -1977,6 +2002,7 @@ fn branched_node_specs_capture_single_processor_output_route_tree() {
                 kind: ModelKind::Deduplicator,
                 identifier: named("orders_filter"),
                 model: nervix_models::Model::Deduplicator(CreateDeduplicator {
+                    labels: Default::default(),
                     name: named("orders_filter"),
                     from: ProcessorInputs::new(
                         vec![named("orders")],
@@ -2002,6 +2028,7 @@ fn branched_node_specs_capture_single_processor_output_route_tree() {
                 kind: ModelKind::Deduplicator,
                 identifier: named("dedup_projected"),
                 model: nervix_models::Model::Deduplicator(CreateDeduplicator {
+                    labels: Default::default(),
                     name: named("dedup_projected"),
                     from: ProcessorInputs::single(named("projected_orders")),
                     output_routes: (ProcessorOutputs::single(named("aggregated_orders")))
@@ -2061,6 +2088,7 @@ fn branched_node_specs_include_singleton_branch_for_empty_branching() {
                 kind: ModelKind::Ingestor,
                 identifier: named("orders_ingestor"),
                 model: nervix_models::Model::Ingestor(CreateIngestor {
+                    labels: Default::default(),
                     name: named("orders_ingestor"),
                     output_routes: (ProcessorOutputs::single(named("orders")))
                         .with_flush_policy(FlushPolicy::Each {
@@ -2090,6 +2118,7 @@ fn branched_node_specs_include_singleton_branch_for_empty_branching() {
                 kind: ModelKind::Deduplicator,
                 identifier: named("dedup_orders"),
                 model: nervix_models::Model::Deduplicator(CreateDeduplicator {
+                    labels: Default::default(),
                     name: named("dedup_orders"),
                     from: ProcessorInputs::single(named("orders")),
                     output_routes: (ProcessorOutputs::single(named("projected_orders")))
@@ -2124,6 +2153,7 @@ fn branched_processor_specs_do_not_require_an_entrypoint() {
                 kind: ModelKind::Relay,
                 identifier: named("orders"),
                 model: nervix_models::Model::Relay(CreateRelay {
+                    labels: Default::default(),
                     name: named("orders"),
                     schema: named("order_event"),
                     buffer: nonzero!(1usize),
@@ -2135,6 +2165,7 @@ fn branched_processor_specs_do_not_require_an_entrypoint() {
                 kind: ModelKind::Deduplicator,
                 identifier: named("dedup_orders"),
                 model: nervix_models::Model::Deduplicator(CreateDeduplicator {
+                    labels: Default::default(),
                     name: named("dedup_orders"),
                     from: ProcessorInputs::single(named("orders")),
                     output_routes: (ProcessorOutputs::single(named("projected_orders")))
@@ -2168,6 +2199,7 @@ fn branched_wasm_processor_specs_preserve_global_error_policy() {
                 kind: ModelKind::Relay,
                 identifier: named("orders"),
                 model: nervix_models::Model::Relay(CreateRelay {
+                    labels: Default::default(),
                     name: named("orders"),
                     schema: named("order_event"),
                     buffer: nonzero!(1usize),
@@ -2179,6 +2211,7 @@ fn branched_wasm_processor_specs_preserve_global_error_policy() {
                 kind: ModelKind::WasmProcessor,
                 identifier: named("filter_orders"),
                 model: nervix_models::Model::WasmProcessor(CreateWasmProcessor {
+                    labels: Default::default(),
                     name: named("filter_orders"),
                     from: ProcessorInputs::single(named("orders")),
                     output_routes: ProcessorOutputs::single(named("filtered_orders")),
@@ -2218,6 +2251,7 @@ fn window_route_demands_are_offset_by_the_routes_written_before_them() {
     let totals_relay = named::<RelayName>("metric_totals");
     let extremes_relay = named::<RelayName>("metric_extremes");
     let metric_schema = Arc::new(compile_schema(&CreateSchema {
+        labels: Default::default(),
         name: named("metric"),
         fields: vec![
             SchemaField {
@@ -2235,6 +2269,7 @@ fn window_route_demands_are_offset_by_the_routes_written_before_them() {
         ],
     }));
     let totals_schema = Arc::new(compile_schema(&CreateSchema {
+        labels: Default::default(),
         name: named("metric_total"),
         fields: vec![
             SchemaField {
@@ -2264,6 +2299,7 @@ fn window_route_demands_are_offset_by_the_routes_written_before_them() {
         ],
     }));
     let extremes_schema = Arc::new(compile_schema(&CreateSchema {
+        labels: Default::default(),
         name: named("metric_extreme"),
         fields: vec![
             SchemaField {

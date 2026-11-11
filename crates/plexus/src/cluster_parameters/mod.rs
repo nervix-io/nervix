@@ -257,6 +257,30 @@ impl<'src> OfferedAssignments<'src> {
                 ClusterParameterChange::UdfCodeBytes,
             ),
             assignment(
+                ClusterParameterKey::EntityLabelsMaxCount,
+                Identifier::EntityLabelsMaxCount,
+                u64_value("integer_literal"),
+                ClusterParameterChange::EntityLabelsMaxCount,
+            ),
+            assignment(
+                ClusterParameterKey::EntityLabelsMaxKeyBytes,
+                Identifier::EntityLabelsMaxKeyBytes,
+                byte_value(),
+                ClusterParameterChange::EntityLabelsMaxKeyBytes,
+            ),
+            assignment(
+                ClusterParameterKey::EntityLabelsMaxValueBytes,
+                Identifier::EntityLabelsMaxValueBytes,
+                byte_value(),
+                ClusterParameterChange::EntityLabelsMaxValueBytes,
+            ),
+            assignment(
+                ClusterParameterKey::EntityLabelsMaxBytes,
+                Identifier::EntityLabelsMaxBytes,
+                byte_value(),
+                ClusterParameterChange::EntityLabelsMaxBytes,
+            ),
+            assignment(
                 ClusterParameterKey::HttpHeaderBytes,
                 Identifier::HttpHeaderBytes,
                 byte_value(),

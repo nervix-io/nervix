@@ -98,7 +98,8 @@ const EXECUTION_FAMILIES: [ModelVariant; 13] = [
 
 /// Every aspect of a Model change, in declaration order. The vocabulary declares no iterator over
 /// the aspects, so the tests below read every archived aspect back to keep this list complete.
-const MODEL_CHANGE_ASPECTS: [ModelChangeAspect; 78] = [
+const MODEL_CHANGE_ASPECTS: [ModelChangeAspect; 79] = [
+    ModelChangeAspect::EntityLabels,
     ModelChangeAspect::RelayCapacity,
     ModelChangeAspect::RelaySchema,
     ModelChangeAspect::RelayBranching,

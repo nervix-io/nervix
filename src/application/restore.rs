@@ -853,6 +853,7 @@ mod backup_state_warning_tests {
 
         let branch = BranchName::parse("by_tenant").assured("the test branch name is valid");
         let relay = CreateRelay {
+            labels: Default::default(),
             name: RelayName::parse("events").assured("the test relay name is valid"),
             schema: SchemaName::parse("event").assured("the test schema name is valid"),
             buffer: NonZeroUsize::MIN,
@@ -864,6 +865,7 @@ mod backup_state_warning_tests {
             return node;
         };
         let key_schema = CreateSchema {
+            labels: Default::default(),
             name: SchemaName::parse("tenant_key").assured("the test schema name is valid"),
             fields: Vec::new(),
         };

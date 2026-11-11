@@ -718,6 +718,7 @@ mod tests {
     fn wasm_processor(resource_version: u64, max_fuel: NonZeroU64) -> ScheduledNode {
         ScheduledNode::new(
             Model::WasmProcessor(CreateWasmProcessor {
+                labels: Default::default(),
                 name: "guest".try_into().expect("valid processor name"),
                 from: ProcessorInputs::single("input".try_into().expect("valid relay name")),
                 output_routes: ProcessorOutputs::single(
@@ -753,6 +754,7 @@ mod tests {
         let branch = crate::BranchName::try_from("tenants").assured("tenants is a valid name");
         processor.branched_by = BranchSelection::branched_by(branch.clone());
         let schema = crate::CreateSchema {
+            labels: Default::default(),
             name: "tenant_key"
                 .try_into()
                 .assured("tenant_key is a valid name"),
@@ -1403,6 +1405,7 @@ mod tests {
     fn a_unit_without_guest_state_lifetimes_is_refused() {
         let relay = ScheduledNode::new(
             Model::Relay(CreateRelay {
+                labels: Default::default(),
                 name: "plain".try_into().assured("plain is a valid relay name"),
                 schema: "event".try_into().assured("event is a valid schema name"),
                 buffer: nonzero!(1usize),
@@ -1579,6 +1582,7 @@ mod tests {
     fn only_a_scheduled_wasm_processor_carries_state_generations() {
         let relay = ScheduledNode::new(
             Model::Relay(CreateRelay {
+                labels: Default::default(),
                 name: "events".try_into().expect("valid relay name"),
                 schema: "event".try_into().expect("valid schema name"),
                 buffer: nonzero!(1usize),

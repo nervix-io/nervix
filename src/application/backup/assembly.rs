@@ -24,7 +24,7 @@
 
 use std::num::NonZeroU64;
 
-use error_stack::Report;
+use error_stack::{Report, ResultExt as _};
 use meticulous::OptionExt as _;
 use nervix_backup::{
     ArchiveRecord, ArchiveScope, DeclaredResource, DomainRecord, PublishedResourceVersion,
@@ -133,6 +133,21 @@ fn plan_domain(
         &record,
     )?);
 
+    let parameters = capture
+        .parameters
+        .as_ref()
+        .ok_or_else(|| Report::new(BackupError::ClusterParametersUnseeded))?;
+    let limits = nervix_models::EntityLabelLimits::from(&parameters.values);
+    if let Some(schedule) = capture.schedule.domain(domain) {
+        for node in schedule.nodes.values() {
+            node.config
+                .labels()
+                .validate(&limits)
+                .change_context(BackupError::InvalidModels {
+                    domain: domain.clone(),
+                })?;
+        }
+    }
     let document = models_document(domain, capture.schedule.domain(domain))?;
     sections.push(PlannedSection {
         path: SectionPath::domain_models(domain),
@@ -490,6 +505,10 @@ mod tests {
             created_by_node: ClusterNodeName::parse("node-1").assured("valid node"),
         };
         ConfigurationCapture {
+            parameters: Some(nervix_models::ClusterParameterRecord {
+                revision: std::num::NonZeroU64::MIN,
+                values: nervix_models::ClusterParameterValues::default(),
+            }),
             applied: AppliedLogPosition { term: 3, index: 42 },
             domains: BTreeMap::from([
                 (prod.clone(), state("prod", DomainStatus::Running)),

@@ -208,6 +208,7 @@ pub(super) fn compile_window_aggregate_for_test(
     let input_relay = named::<RelayName>("events");
     let output_relay = named::<RelayName>("summary");
     let input_schema = compile_schema(&CreateSchema {
+        labels: Default::default(),
         name: SchemaName::from(&ModelName::from(&input_relay)),
         fields: vec![SchemaField {
             name: named("latency"),
@@ -338,6 +339,7 @@ pub(super) fn branch_model(schema: &str, relay: &str, _fields: &[&str]) -> Plann
         kind: ModelKind::Branch,
         identifier: ModelName::from(&branch.clone()),
         model: nervix_models::Model::Branch(CreateBranch {
+            labels: Default::default(),
             name: branch,
             schema: named(schema),
             ttl: "5m".to_string(),
@@ -529,6 +531,7 @@ pub(super) fn test_domain_clock(domain: &DomainName) -> super::DomainClock {
 
 pub(super) fn test_schema(fields: &[(&str, ParseAsType)]) -> Arc<super::CompiledSchema> {
     Arc::new(compile_schema(&CreateSchema {
+        labels: Default::default(),
         name: named("test_schema"),
         fields: fields
             .iter()
@@ -560,6 +563,7 @@ pub(super) fn test_named_branching(
     ResolvedBranching::branched(
         named(branch),
         CreateSchema {
+            labels: Default::default(),
             name: named("test_branch_schema"),
             fields: fields
                 .iter()
@@ -742,6 +746,7 @@ pub(super) struct OptionalTestField {
 
 pub(super) fn test_optional_schema(fields: &[OptionalTestField]) -> Arc<super::CompiledSchema> {
     Arc::new(compile_schema(&CreateSchema {
+        labels: Default::default(),
         name: named("test_schema"),
         fields: fields
             .iter()
@@ -1000,6 +1005,7 @@ impl EntrypointTestDomain<'_> {
         ResolvedBranching::branched(
             named(&format!("by_{relay}")),
             CreateSchema {
+                labels: Default::default(),
                 name: named("entrypoint_branch"),
                 fields: Self::schema_fields(self.branch_fields),
             },
@@ -1026,6 +1032,7 @@ impl EntrypointTestDomain<'_> {
         let mut nodes = vec![
             ScheduledNode::new(
                 nervix_models::Model::Schema(CreateSchema {
+                    labels: Default::default(),
                     name: named("entrypoint_payload"),
                     fields: Self::schema_fields(self.fields),
                 }),
@@ -1033,6 +1040,7 @@ impl EntrypointTestDomain<'_> {
             ),
             ScheduledNode::new(
                 nervix_models::Model::Schema(CreateSchema {
+                    labels: Default::default(),
                     name: named("entrypoint_branch"),
                     fields: Self::schema_fields(self.branch_fields),
                 }),
@@ -1040,6 +1048,7 @@ impl EntrypointTestDomain<'_> {
             ),
             ScheduledNode::new(
                 nervix_models::Model::WireJsonSchema(nervix_models::CreateJsonWireSchema {
+                    labels: Default::default(),
                     name: named("entrypoint_wire"),
                     strictness: Default::default(),
                     fields: self
@@ -1056,6 +1065,7 @@ impl EntrypointTestDomain<'_> {
             ),
             ScheduledNode::new(
                 nervix_models::Model::Codec(nervix_models::CreateCodec {
+                    labels: Default::default(),
                     name: named("payload_codec"),
                     wire_format: nervix_models::CodecWireFormat::Json {
                         wire_schema: named("entrypoint_wire"),
@@ -1073,6 +1083,7 @@ impl EntrypointTestDomain<'_> {
                 let branch = named::<BranchName>(&format!("by_{relay}"));
                 nodes.push(ScheduledNode::new(
                     nervix_models::Model::Branch(CreateBranch {
+                        labels: Default::default(),
                         name: branch.clone(),
                         schema: named("entrypoint_branch"),
                         ttl: "5m".to_string(),
@@ -1086,6 +1097,7 @@ impl EntrypointTestDomain<'_> {
             nodes.push(
                 ScheduledNode::new(
                     nervix_models::Model::Relay(CreateRelay {
+                        labels: Default::default(),
                         name: named(relay),
                         schema: named("entrypoint_payload"),
                         buffer: nonzero_capacity(2),
@@ -1133,6 +1145,7 @@ impl EntrypointTestDomain<'_> {
     pub(super) fn codec(&self) -> Arc<CompiledCodec> {
         crate::runtime_schema::compile_codec(
             &nervix_models::CreateCodec {
+                labels: Default::default(),
                 name: named("payload_codec"),
                 wire_format: nervix_models::CodecWireFormat::Json {
                     wire_schema: named("entrypoint_wire"),
@@ -1141,19 +1154,23 @@ impl EntrypointTestDomain<'_> {
                 encoding_rules: Vec::new(),
             },
             self.relay_schema(),
-            nervix_models::ResolvedCodecWireFormat::Json(&nervix_models::CreateJsonWireSchema {
-                name: named("entrypoint_wire"),
-                strictness: Default::default(),
-                fields: self
-                    .fields
-                    .iter()
-                    .map(|(name, ty)| nervix_models::WireSchemaField {
-                        name: named(name),
-                        ty: Self::wire_type(ty),
-                        optional: false,
-                    })
-                    .collect(),
-            }),
+            nervix_models::ResolvedCodecWireFormat::Json(
+                (&nervix_models::CreateJsonWireSchema {
+                    labels: Default::default(),
+                    name: named("entrypoint_wire"),
+                    strictness: Default::default(),
+                    fields: self
+                        .fields
+                        .iter()
+                        .map(|(name, ty)| nervix_models::WireSchemaField {
+                            name: named(name),
+                            ty: Self::wire_type(ty),
+                            optional: false,
+                        })
+                        .collect(),
+                })
+                    .into(),
+            ),
         )
         .assured("the fixture codec compiles")
     }
@@ -1339,6 +1356,7 @@ pub(super) fn input_schema() -> Arc<CompiledSchema> {
     SCHEMA
         .get_or_init(|| {
             Arc::new(compile_schema(&CreateSchema {
+                labels: Default::default(),
                 name: SchemaName::from(
                     &ModelName::parse("emitter_input").expect("valid schema name"),
                 ),

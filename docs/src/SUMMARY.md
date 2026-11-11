@@ -37,6 +37,7 @@
 - [Manual](./manual.md)
   - [What It Is Not](./what-it-is-not.md)
   - [Plexus Overview](./plexus-overview.md)
+  - [Entity Labels](./entity-labels.md)
   - [The Working Message](./working-message.md)
   - [Expression Functions](./filter-map-functions.md)
   - [Domains And Time](./domains-and-time.md)

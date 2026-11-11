@@ -470,7 +470,7 @@ class InventoryTests(unittest.TestCase):
         self.assertEqual(
             list(inventory.invocations),
             ["rate-limit-store", "emitter-branch-retirement", "probes", "primitive-conformance", "owner-tests", "scenarios", "paced-simulation",
-             "stress-transaction-retention", "stress-scenarios", "stress-endpoint-acknowledgement", "stress-paced-simulation", "stress-restore-scenarios", "cluster-parameters", "emitter-retained-lifecycle"],
+             "stress-transaction-retention", "stress-scenarios", "stress-endpoint-acknowledgement", "stress-paced-simulation", "stress-restore-scenarios", "cluster-parameters", "emitter-retained-lifecycle", "entity-label-publication", "stress-entity-label-publication"],
         )
         for name in ("scenarios", "paced-simulation"):
             self.assertEqual(inventory.invocations[name].selections, {"deloxide", "deloxide-order"})
@@ -539,13 +539,20 @@ class InventoryTests(unittest.TestCase):
                 REPOSITORY, retention_invocation.inputs, retention_invocation.tags
             )
         }
+        metadata_invocation = inventory.invocations["stress-entity-label-publication"]
+        metadata_identities = {
+            (scenario.feature, scenario.name)
+            for scenario in deloxide_lane.discover_scenarios(
+                REPOSITORY, metadata_invocation.inputs, metadata_invocation.tags
+            )
+        }
         stressed = {}
         for candidate in inventory.workloads.values():
             if candidate.invocation.startswith("stress-"):
                 stressed.setdefault((candidate.feature, candidate.scenario), []).append(candidate)
         expected: set[tuple[str | None, str | None]] = set()
         for workload in inventory.workloads.values():
-            if workload.invocation not in {"scenarios", "paced-simulation"}:
+            if workload.invocation not in {"scenarios", "paced-simulation", "entity-label-publication"}:
                 continue
             if workload.id == "scenario.local-report-triage":
                 continue
@@ -567,6 +574,7 @@ class InventoryTests(unittest.TestCase):
                             (restore_identities, "stress-restore-scenarios"),
                             (endpoint_identities, "stress-endpoint-acknowledgement"),
                             (retention_identities, "stress-transaction-retention"),
+                            (metadata_identities, "stress-entity-label-publication"),
                         )
                         if identity in identities
                     }

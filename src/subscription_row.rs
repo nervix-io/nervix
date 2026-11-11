@@ -23,7 +23,9 @@ use nervix_client_wire::{
     CellWriter, EncodedFrame, RowBranch, RowSchema, ServerFrame, SessionLimits, SubscriptionHandle,
     SubscriptionOpened, SubscriptionRowsEncoder, SubscriptionType, WireEncodeError,
 };
-use nervix_models::{BranchName, CreateSchema, DomainName, FieldName, RelayName, SchemaField};
+use nervix_models::{
+    BranchName, CreateSchema, DomainName, FieldName, RelayName, SchemaField, SchemaRef,
+};
 
 pub use crate::client_row::SubscriptionRowEncodingError;
 use crate::{
@@ -35,7 +37,7 @@ use crate::{
 /// The declared branch schema needed to describe concrete branch keys to a client.
 pub struct SubscriptionBranchSchema<'a> {
     pub name: &'a BranchName,
-    pub schema: &'a CreateSchema,
+    pub schema: SchemaRef<'a>,
     pub fields: &'a [FieldName],
 }
 
@@ -58,7 +60,7 @@ fn subscription_row_branch(
     branch: SubscriptionBranchSchema<'_>,
 ) -> Result<RowBranch, Report<SubscriptionRowEncodingError>> {
     let mut schema_fields = BTreeMap::new();
-    for field in &branch.schema.fields {
+    for field in branch.schema.fields {
         if schema_fields.insert(field.name.clone(), field).is_some() {
             return Err(Report::new(
                 SubscriptionRowEncodingError::DuplicateBranchSchemaField {
@@ -852,6 +854,7 @@ mod tests {
 
     fn payload_schema() -> CreateSchema {
         CreateSchema {
+            labels: Default::default(),
             name: named("events"),
             fields: vec![
                 field("sequence", ParseAsType::I64, false, false),
@@ -873,6 +876,7 @@ mod tests {
 
     fn branch_schema() -> CreateSchema {
         CreateSchema {
+            labels: Default::default(),
             name: named("tenant_key"),
             fields: vec![
                 field("tenant", ParseAsType::String, false, false),
@@ -980,6 +984,7 @@ mod tests {
         )
         .assured("the sliced nested column matches its schema");
         let payload = CreateSchema {
+            labels: Default::default(),
             name: named("events"),
             fields: vec![field(
                 "items",
@@ -1041,6 +1046,7 @@ mod tests {
         )
         .assured("the column matches its Arrow schema");
         let payload = CreateSchema {
+            labels: Default::default(),
             name: named("events"),
             fields: vec![field(
                 "items",
@@ -1154,7 +1160,7 @@ mod tests {
             &payload,
             Some(SubscriptionBranchSchema {
                 name: &branch_name,
-                schema: &branch,
+                schema: branch.definition(),
                 fields: &branch_fields,
             }),
         )
@@ -1241,7 +1247,7 @@ mod tests {
             &payload,
             Some(SubscriptionBranchSchema {
                 name: &branch_name,
-                schema: &branch,
+                schema: branch.definition(),
                 fields: &branch_fields,
             }),
         )
@@ -1331,6 +1337,7 @@ mod tests {
     fn every_arrow_value_kind_keeps_its_exact_wire_type() {
         let fixed_length = NonZeroU32::new(2).assured("the fixed-list length is nonzero");
         let schema = CreateSchema {
+            labels: Default::default(),
             name: named("all_types"),
             fields: vec![
                 field("u8_value", ParseAsType::U8, false, false),
@@ -1461,6 +1468,7 @@ mod tests {
     #[test]
     fn selected_rows_batch_to_the_explicit_row_limit() {
         let schema = CreateSchema {
+            labels: Default::default(),
             name: named("events"),
             fields: vec![field("sequence", ParseAsType::I64, false, false)],
         };
@@ -1502,6 +1510,7 @@ mod tests {
     #[test]
     fn encoded_rows_split_before_the_session_byte_limit() {
         let schema = CreateSchema {
+            labels: Default::default(),
             name: named("events"),
             fields: vec![field("detail", ParseAsType::String, false, false)],
         };
@@ -1543,10 +1552,12 @@ mod tests {
     #[test]
     fn interleaved_branches_keep_their_typed_identity_and_order() {
         let payload = CreateSchema {
+            labels: Default::default(),
             name: named("events"),
             fields: vec![field("sequence", ParseAsType::I64, false, false)],
         };
         let branch = CreateSchema {
+            labels: Default::default(),
             name: named("tenant_key"),
             fields: vec![field("tenant", ParseAsType::String, false, false)],
         };
@@ -1556,7 +1567,7 @@ mod tests {
             &payload,
             Some(SubscriptionBranchSchema {
                 name: &branch_name,
-                schema: &branch,
+                schema: branch.definition(),
                 fields: &branch_fields,
             }),
         )

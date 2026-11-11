@@ -2364,6 +2364,7 @@ mod tests {
             ("normalized", ParseAsType::String),
         ]);
         let emitter = CreateEmitter {
+            labels: Default::default(),
             instances: nervix_models::EmitterInstances::ONE,
             name: named("kafka_notifications"),
             from: ProcessorInputs::single(named("notifications")),
@@ -2614,6 +2615,7 @@ mod tests {
             ("raw", ParseAsType::String),
         ]);
         let output_schema = Arc::new(compile_schema(&CreateSchema {
+            labels: Default::default(),
             name: named("logic_output"),
             fields: vec![
                 nervix_models::SchemaField {

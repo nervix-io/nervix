@@ -21,11 +21,11 @@ use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_connector::RecordEnvelope;
 use nervix_models::{
     AckMode, Assignment, AssignmentTarget, BranchPartitions, CodecName, CreateEmitter,
-    CreateSchema, EmitterInstances, EmitterName, EnvelopeClauseForm, EnvelopeClauseKind,
-    EnvelopeValueType, ErrorPolicies, Expression, FieldName, FlushPolicy, HeaderValues,
-    InputCollectPolicy, MaterializedStateDependency, Model, ModelKind, ModelName, NodeRef,
-    PropertyDeclaration, RelayName, ResolvedBranching, RouteConstruction, ScheduledNodes,
-    SchemaField, SchemaName, Unit, UnitKind, parse_duration_text,
+    EmitterInstances, EmitterName, EnvelopeClauseForm, EnvelopeClauseKind, EnvelopeValueType,
+    ErrorPolicies, Expression, FieldName, FlushPolicy, HeaderValues, InputCollectPolicy,
+    MaterializedStateDependency, Model, ModelKind, ModelName, NodeRef, PropertyDeclaration,
+    RelayName, ResolvedBranching, RouteConstruction, ScheduledNodes, SchemaDefinition, SchemaField,
+    SchemaName, Unit, UnitKind, parse_duration_text,
 };
 use nervix_primitives::sync::{Arc, StdArc};
 use nervix_vm::{
@@ -151,7 +151,7 @@ pub(crate) struct ComputedEnvelopePlan {
 /// Exact declarations keep their schema; only KEY requires inference of a STRING/BYTES field.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum EnvelopeSchemaPlan {
-    Exact(CreateSchema),
+    Exact(SchemaDefinition),
     Inferred(Vec<(FieldName, EnvelopeValueType)>),
 }
 
@@ -784,7 +784,7 @@ impl EmitterEnvelopePlan {
         {
             EnvelopeSchemaPlan::Inferred(Vec::with_capacity(values.len()))
         } else {
-            EnvelopeSchemaPlan::Exact(CreateSchema {
+            EnvelopeSchemaPlan::Exact(SchemaDefinition {
                 name: SchemaName::parse(ENVELOPE_NAMESPACE)
                     .assured("the envelope namespace is a schema name"),
                 fields: Vec::with_capacity(values.len()),
@@ -901,6 +901,7 @@ mod tests {
 
     fn emitter(connector: EmitterEntity, body: EmitterBody) -> CreateEmitter {
         CreateEmitter {
+            labels: Default::default(),
             instances: nervix_models::EmitterInstances::ONE,
             name: named("output"),
             from: ProcessorInputs::single(named("input_relay")),

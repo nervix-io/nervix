@@ -828,6 +828,7 @@ mod tests {
 
     fn schema_with_field(schema: &str, field: &str) -> Arc<CompiledSchema> {
         Arc::new(compile_schema(&CreateSchema {
+            labels: Default::default(),
             name: SchemaName::from(&ModelName::parse(schema).expect("valid schema name")),
             fields: vec![SchemaField {
                 name: FieldName::parse(field).expect("valid field name"),

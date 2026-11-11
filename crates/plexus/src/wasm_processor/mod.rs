@@ -26,7 +26,7 @@ use crate::{
         filter_where_clause, from_relay_clauses, if_not_exists_clause, into_parse_error, kw,
         kw_phrase2, kw_phrase3, lex_input, materialized_state_dependencies, message_error_policy,
         nonzero_u64_value, relay_ref, resource_ref, resource_version_clause,
-        set_or_where_route_construction, string_lit, suggest_from, tok, wasm_processor_name,
+        set_or_where_route_construction, string_lit, suggest_from, wasm_processor_name,
     },
 };
 
@@ -132,74 +132,79 @@ pub fn create_wasm_processor_parser<'src>() -> impl Parser<
     CreateStatement<CreateWasmProcessor<RequestedResourceVersion>>,
     extra::Err<ParseError<'src>>,
 > + Clone {
-    kw(Identifier::Create)
-        .ignore_then(if_not_exists_clause())
-        .then_ignore(kw_phrase2(Identifier::Wasm, Identifier::Processor))
-        .then(wasm_processor_name())
-        .then_ignore(kw(Identifier::From))
-        .then(from_relay_clauses())
-        .then(ack_mode().or_not())
-        .then(filter_where_clause().or_not())
-        .boxed()
-        .then_ignore(kw(Identifier::Using))
-        .then_ignore(kw(Identifier::Resource))
-        .then(resource_ref())
-        .then(resource_version_clause())
-        .then_ignore(kw(Identifier::File))
-        .then(string_lit())
-        .then(wasm_processor_limits())
-        .boxed()
-        .then(branch_selection())
-        .then(materialized_state_dependencies())
-        .then(wasm_processor_outputs())
-        .boxed()
-        .then(rejected_state_policy().or_not())
-        .then(global_error_policy())
-        .then_ignore(tok(Token::Semicolon).or_not())
-        .map(|((base, rejected_state_policy), global_error_policy)| {
-            let (
-                (
+    crate::labels::finish_creation({
+        kw(Identifier::Create)
+            .ignore_then(if_not_exists_clause())
+            .then_ignore(kw_phrase2(Identifier::Wasm, Identifier::Processor))
+            .then(wasm_processor_name())
+            .then_ignore(kw(Identifier::From))
+            .then(from_relay_clauses())
+            .then(ack_mode().or_not())
+            .then(filter_where_clause().or_not())
+            .boxed()
+            .then_ignore(kw(Identifier::Using))
+            .then_ignore(kw(Identifier::Resource))
+            .then(resource_ref())
+            .then(resource_version_clause())
+            .then_ignore(kw(Identifier::File))
+            .then(string_lit())
+            .then(wasm_processor_limits())
+            .boxed()
+            .then(branch_selection())
+            .then(materialized_state_dependencies())
+            .then(wasm_processor_outputs())
+            .boxed()
+            .then(rejected_state_policy().or_not())
+            .then(global_error_policy())
+            .map(|((base, rejected_state_policy), global_error_policy)| {
+                let (
                     (
                         (
                             (
                                 (
                                     (
-                                        ((((if_not_exists, name), from_input), mode), filter_where),
-                                        resource,
+                                        (
+                                            (
+                                                (((if_not_exists, name), from_input), mode),
+                                                filter_where,
+                                            ),
+                                            resource,
+                                        ),
+                                        resource_version,
                                     ),
-                                    resource_version,
+                                    file,
                                 ),
-                                file,
+                                limits,
                             ),
-                            limits,
+                            branched_by,
                         ),
-                        branched_by,
+                        materialized_state,
                     ),
-                    materialized_state,
-                ),
-                outputs,
-            ) = base;
-            let rejected_state_policy = rejected_state_policy.unwrap_or_default();
-            CreateStatement::new(
-                CreateWasmProcessor {
-                    name,
-                    from: from_input,
-                    output_routes: outputs,
-                    branched_by,
-                    resource,
-                    resource_version,
-                    file,
-                    limits,
-                    global_error_policy,
-                    rejected_state_policy,
-                    mode: mode.unwrap_or_default(),
-                    filter_where,
-                    materialized_state,
-                },
-                if_not_exists,
-            )
-        })
-        .boxed()
+                    outputs,
+                ) = base;
+                let rejected_state_policy = rejected_state_policy.unwrap_or_default();
+                CreateStatement::new(
+                    CreateWasmProcessor {
+                        labels: Default::default(),
+                        name,
+                        from: from_input,
+                        output_routes: outputs,
+                        branched_by,
+                        resource,
+                        resource_version,
+                        file,
+                        limits,
+                        global_error_policy,
+                        rejected_state_policy,
+                        mode: mode.unwrap_or_default(),
+                        filter_where,
+                        materialized_state,
+                    },
+                    if_not_exists,
+                )
+            })
+            .boxed()
+    })
 }
 
 pub fn parse_create_wasm_processor_tokens(

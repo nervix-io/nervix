@@ -470,7 +470,7 @@ impl SessionServiceImpl {
                 ));
             }
         };
-        let schema = crate::runtime_schema::compile_schema(&CreateSchema {
+        let schema = crate::runtime_schema::compile_schema(&nervix_models::SchemaDefinition {
             name: nervix_models::SchemaName::parse("inspection")
                 .assured("the fixed schema name is valid"),
             fields: plan.schema.fields.clone(),

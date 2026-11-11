@@ -8,9 +8,9 @@ use std::{num::NonZeroUsize, time::Duration};
 
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::{
-    BranchKeyFingerprint, ClusterNodeName, CreateSchema, DomainClockAuthority, DomainConfig,
-    DomainName, DomainPace, DomainStartPoint, DomainState, DomainStatus, FieldName, ModelKind,
-    ModelName, ParseAsType, RelayName, SchemaName, Timestamp,
+    BranchKeyFingerprint, ClusterNodeName, DomainClockAuthority, DomainConfig, DomainName,
+    DomainPace, DomainStartPoint, DomainState, DomainStatus, FieldName, ModelKind, ModelName,
+    ParseAsType, RelayName, SchemaDefinition, SchemaName, Timestamp,
 };
 use nervix_primitives::{
     sync::{mpsc, watch},
@@ -237,20 +237,24 @@ fn benchmark_schema() -> nervix_primitives::sync::Arc<CompiledSchema> {
     static SCHEMA: OnceLock<nervix_primitives::sync::Arc<CompiledSchema>> = OnceLock::new();
     SCHEMA
         .get_or_init(|| {
-            nervix_primitives::sync::Arc::new(compile_schema(&CreateSchema {
-                name: SchemaName::parse("relay_interaction_benchmark").assured(
-                    "the name is built here from fixed text that satisfies the identifier grammar",
-                ),
-                fields: vec![nervix_models::SchemaField {
-                    name: FieldName::parse("value").assured(
+            nervix_primitives::sync::Arc::new(compile_schema(
+                SchemaDefinition {
+                    name: SchemaName::parse("relay_interaction_benchmark").assured(
                         "the name is built here from fixed text that satisfies the identifier \
                          grammar",
                     ),
-                    ty: ParseAsType::I64,
-                    optional: false,
-                    sensitive: false,
-                }],
-            }))
+                    fields: vec![nervix_models::SchemaField {
+                        name: FieldName::parse("value").assured(
+                            "the name is built here from fixed text that satisfies the identifier \
+                             grammar",
+                        ),
+                        ty: ParseAsType::I64,
+                        optional: false,
+                        sensitive: false,
+                    }],
+                }
+                .as_ref(),
+            ))
         })
         .clone()
 }

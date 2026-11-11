@@ -168,6 +168,7 @@ mod describe_output;
 mod domain_clock;
 mod domain_lifecycle;
 mod entity_gate;
+mod entity_labels;
 mod error;
 mod http_endpoint;
 mod interconnect_relay;

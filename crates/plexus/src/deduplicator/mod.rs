@@ -38,58 +38,60 @@ fn deduplicate_on_exprs<'src>()
 pub fn create_deduplicator_parser<'src>()
 -> impl Parser<'src, &'src [Token], CreateStatement<CreateDeduplicator>, extra::Err<ParseError<'src>>>
 + Clone {
-    kw(Identifier::Create)
-        .ignore_then(if_not_exists_clause())
-        .then_ignore(kw(Identifier::Deduplicator))
-        .then(deduplicator_name())
-        .then_ignore(kw(Identifier::From))
-        .then(from_relay_clauses())
-        .then(ack_mode().or_not())
-        .then(filter_where_clause().or_not())
-        .boxed()
-        .then(deduplicate_on_exprs())
-        .then_ignore(kw(Identifier::Max))
-        .then_ignore(kw(Identifier::Time))
-        .then(duration_lit())
-        .boxed()
-        .then(branch_selection())
-        .then(materialized_state_dependencies())
-        .then(flushed_processor_outputs())
-        .then_ignore(tok(Token::Semicolon).or_not())
-        .map(
-            |(
-                (
+    crate::labels::finish_creation({
+        kw(Identifier::Create)
+            .ignore_then(if_not_exists_clause())
+            .then_ignore(kw(Identifier::Deduplicator))
+            .then(deduplicator_name())
+            .then_ignore(kw(Identifier::From))
+            .then(from_relay_clauses())
+            .then(ack_mode().or_not())
+            .then(filter_where_clause().or_not())
+            .boxed()
+            .then(deduplicate_on_exprs())
+            .then_ignore(kw(Identifier::Max))
+            .then_ignore(kw(Identifier::Time))
+            .then(duration_lit())
+            .boxed()
+            .then(branch_selection())
+            .then(materialized_state_dependencies())
+            .then(flushed_processor_outputs())
+            .map(
+                |(
                     (
                         (
                             (
-                                ((((if_not_exists, name), from_input), mode), filter_where),
-                                deduplicate_on,
+                                (
+                                    ((((if_not_exists, name), from_input), mode), filter_where),
+                                    deduplicate_on,
+                                ),
+                                max_time,
                             ),
-                            max_time,
+                            branched_by,
                         ),
-                        branched_by,
-                    ),
-                    materialized_state,
-                ),
-                outputs,
-            )| {
-                CreateStatement::new(
-                    CreateDeduplicator {
-                        name,
-                        from: from_input,
-                        output_routes: outputs,
-                        branched_by,
-                        deduplicate_on,
-                        max_time,
-                        mode: mode.unwrap_or_default(),
-                        filter_where,
                         materialized_state,
-                    },
-                    if_not_exists,
-                )
-            },
-        )
-        .boxed()
+                    ),
+                    outputs,
+                )| {
+                    CreateStatement::new(
+                        CreateDeduplicator {
+                            labels: Default::default(),
+                            name,
+                            from: from_input,
+                            output_routes: outputs,
+                            branched_by,
+                            deduplicate_on,
+                            max_time,
+                            mode: mode.unwrap_or_default(),
+                            filter_where,
+                            materialized_state,
+                        },
+                        if_not_exists,
+                    )
+                },
+            )
+            .boxed()
+    })
 }
 
 pub fn alter_deduplicator_parser<'src>()

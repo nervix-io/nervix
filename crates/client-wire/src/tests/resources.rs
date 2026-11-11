@@ -195,6 +195,7 @@ fn raw_description(raw: RawDescription<'_>) -> Bytes {
     let outcome = wire::CommandOutcome::create(
         &mut builder,
         &wire::CommandOutcomeArgs {
+            entity_labels: None,
             execution_reference: Some(execution_reference),
             origin: Some(wire::OutcomeOrigin::Executed),
             disposition_type: wire::CommandDisposition::CommandCompleted,

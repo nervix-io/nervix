@@ -337,6 +337,7 @@ pub struct CommandOutcome {
     /// It may name a transaction other than `transaction`, which keeps describing this session's
     /// own binding.
     pub inspection: Option<Box<TransactionInspection>>,
+    pub entity_labels: Option<Box<nervix_models::EntityLabelsInspection>>,
     /// A bounded typed read of runtime state.
     pub state: Option<Box<crate::StateInspection>>,
     /// The versions, entries and bindings read by a description of every version of a resource,
@@ -398,6 +399,11 @@ impl CommandOutcome {
             Some(inspection) => Some(encode_inspection(encoder, inspection)?),
             None => None,
         };
+        let entity_labels = self
+            .entity_labels
+            .as_deref()
+            .map(|labels| crate::entity_labels::encode_entity_labels(labels, encoder))
+            .transpose()?;
         let state = self
             .state
             .as_ref()
@@ -428,6 +434,7 @@ impl CommandOutcome {
                 transaction,
                 transaction_admission,
                 inspection,
+                entity_labels,
                 state,
                 resource,
                 backup,
@@ -484,6 +491,10 @@ impl CommandOutcome {
             Some(inspected) => Some(Box::new(decode_inspection(decoder, inspected)?)),
             None => None,
         };
+        let entity_labels = outcome
+            .entity_labels()
+            .map(|labels| crate::entity_labels::decode_entity_labels(decoder, labels).map(Box::new))
+            .transpose()?;
         let state = outcome
             .state()
             .map(|state| {
@@ -512,6 +523,7 @@ impl CommandOutcome {
             transaction,
             transaction_admission,
             inspection,
+            entity_labels,
             state,
             resource,
             backup,

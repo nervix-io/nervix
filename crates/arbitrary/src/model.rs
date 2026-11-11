@@ -12,6 +12,7 @@ macro_rules! unpooled_client {
     ($arbitrary:ident, $Variant:ident, $Client:ident) => {{
         let parts = $arbitrary.client_parts();
         Model::$Variant(nervix_models::$Client {
+            labels: Default::default(),
             name: parts.name,
             mount: parts.mount,
             config: parts.config,
@@ -25,6 +26,7 @@ macro_rules! pooled_client {
         let parts = $arbitrary.client_parts();
         let pool = $arbitrary.pool_bounds();
         Model::$Variant(nervix_models::$Client {
+            labels: Default::default(),
             name: parts.name,
             pool,
             mount: parts.mount,
@@ -200,7 +202,7 @@ impl Arbitrary<'_> {
 
     /// A Model of the requested family, with every field it declares generated.
     pub fn model_of(&mut self, variant: ModelVariant) -> Model<RequestedResourceVersion> {
-        match variant {
+        let mut model = match variant {
             ModelVariant::Schema => Model::Schema(self.create_schema()),
             ModelVariant::WireJsonSchema => Model::WireJsonSchema(self.json_wire_schema()),
             ModelVariant::WireCborSchema => Model::WireCborSchema(self.cbor_wire_schema()),
@@ -261,6 +263,8 @@ impl Arbitrary<'_> {
             ModelVariant::Emitter => Model::Emitter(self.create_emitter()),
             ModelVariant::Placement => Model::Placement(self.create_placement()),
             ModelVariant::Udf => Model::Udf(self.create_udf()),
-        }
+        };
+        *model.labels_mut() = self.entity_labels();
+        model
     }
 }

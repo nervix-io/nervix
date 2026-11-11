@@ -667,7 +667,7 @@ fn retained_references_keep_the_frame_until_the_last_one_is_released() {
     succeeded(unsafe { nx_event_frame(event.0, &mut frame, &mut frame_len) });
     // SAFETY: the frame is borrowed from the live event.
     let copied = unsafe { slice::from_raw_parts(frame, frame_len) }.to_vec();
-    assert_eq!(&copied[4..8], b"NXSM");
+    assert_eq!(&copied[4..8], b"NXEL");
     // SAFETY: the event is live; the second reference is released on another thread while the
     // first is still read here.
     let second = unsafe { nx_event_retain(event.0) };
@@ -953,6 +953,7 @@ fn command_outcome(disposition: CommandDisposition, subscription: bool) -> Comma
         schema: schema(),
     };
     CommandOutcome {
+        entity_labels: None,
         execution_reference: Some(
             CommandExecutionReference::parse("reference-1").assured("a valid reference"),
         ),

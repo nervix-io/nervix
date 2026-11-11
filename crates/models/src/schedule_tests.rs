@@ -174,6 +174,7 @@ fn cluster_schedule_returns_matching_domain() {
 fn scheduled_node_assignment_checks_exact_node_id() {
     let node = ScheduledNode::new(
         Model::Schema(CreateSchema {
+            labels: Default::default(),
             name: named("orders"),
             fields: vec![SchemaField {
                 name: named("tenant"),
@@ -204,6 +205,7 @@ fn scheduled_node_assignment_checks_exact_node_id() {
 fn scheduled_node_single_assignment_only_when_exactly_one_node_is_present() {
     let node = ScheduledNode::new(
         Model::Schema(CreateSchema {
+            labels: Default::default(),
             name: named("orders"),
             fields: vec![SchemaField {
                 name: named("tenant"),
@@ -243,6 +245,7 @@ fn scheduled_node_single_assignment_only_when_exactly_one_node_is_present() {
 fn scheduled_node_exposes_primary_and_replicas() {
     let node = ScheduledNode::new(
         Model::Schema(CreateSchema {
+            labels: Default::default(),
             name: named("orders"),
             fields: vec![SchemaField {
                 name: named("tenant"),
@@ -275,6 +278,7 @@ fn scheduled_node_exposes_primary_and_replicas() {
 fn scheduled_node_execution_uses_primary_except_for_server_listener_ingestors() {
     let replicated_junction = ScheduledNode::new(
         Model::Junction(CreateJunction {
+            labels: Default::default(),
             name: named("orders_merge"),
             from: ProcessorInputs::new(
                 vec![named("orders_in_a"), named("orders_in_b")],
@@ -303,6 +307,7 @@ fn scheduled_node_execution_uses_primary_except_for_server_listener_ingestors() 
     );
     let endpoint_ingestor = ScheduledNode::new(
         Model::Ingestor(CreateIngestor {
+            labels: Default::default(),
             name: named("orders_http"),
             output_routes: ProcessorOutputs::new(vec![ProcessorOutput::with_flush_policy(
                 named("orders_out"),
@@ -337,6 +342,7 @@ fn scheduled_node_execution_uses_primary_except_for_server_listener_ingestors() 
     );
     let syslog_ingestor = ScheduledNode::new(
         Model::Ingestor(CreateIngestor {
+            labels: Default::default(),
             name: named("orders_syslog"),
             output_routes: ProcessorOutputs::new(vec![ProcessorOutput::with_flush_policy(
                 named("orders_out"),
@@ -416,6 +422,7 @@ fn placed_schema(raw: &str, primary: &str, assigned: &[&str]) -> ScheduledNode {
         .collect();
     ScheduledNode::new(
         Model::Schema(CreateSchema {
+            labels: Default::default(),
             name: named(raw),
             fields: Vec::new(),
         }),
@@ -468,6 +475,7 @@ fn a_relay_scheduled_as_partitions_takes_no_guest_state_lifetime_or_reset() {
     let owner = named::<ClusterNodeName>("node-a");
     let mut relay = ScheduledNode::new(
         Model::Relay(CreateRelay {
+            labels: Default::default(),
             name: named("tenant_events"),
             schema: named("event"),
             buffer: nonzero!(1usize),

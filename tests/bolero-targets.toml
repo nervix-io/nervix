@@ -238,7 +238,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/models/src/cluster_parameters/__fuzz__/cluster_parameters__tests__bolero_cluster_parameter_records_preserve_every_value/corpus"
-domain_version = 8
+domain_version = 10
 features = []
 id = "cluster-parameters"
 invariant = "Every class-typed cluster parameter, including resolved TLS preferences, all duration nanoseconds, byte limits and counts, survives complete validated archive and JSON round trips without defaulting or losing a field."
@@ -433,7 +433,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/client-wire/src/tests/__fuzz__/tests__consumers__bolero_native_emitter_frames_round_trip/corpus"
-domain_version = 1
+domain_version = 2
 features = []
 id = "client-emitter-wire"
 invariant = "Every valid native emitter request and reply variant decodes from its frame to the complete original value."
@@ -463,7 +463,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/plexus/src/__fuzz__/canonical_round_trip_tests__bolero_model_roundtrip_canonical_plexus/corpus"
-domain_version = 64
+domain_version = 65
 features = []
 id = "plexus-model"
 invariant = "Canonical Plexus of a generated Model of every family reparses through the client and server grammars to the complete CREATE statement."
@@ -478,7 +478,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/plexus/src/backup/__fuzz__/backup__tests__bolero_models_exported_through_an_archive_reparse_to_themselves/corpus"
-domain_version = 67
+domain_version = 68
 features = []
 id = "plexus-archive-model"
 invariant = "Complete cluster/domain archives preserve every ordered canonical Model document through export, production restore reads, semantic reparse and byte-exact re-export."
@@ -493,7 +493,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/backup/src/__fuzz__/tests__bolero_domain_records_and_manifests_round_trip/corpus"
-domain_version = 20
+domain_version = 21
 features = []
 id = "backup-record-manifest"
 invariant = "All current archive records and manifests preserve complete users, lifecycle, catalog, cut metadata, ordered section identities and native-width values through their owning codecs."
@@ -748,7 +748,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/plexus/src/__fuzz__/canonical_round_trip_tests__bolero_statement_roundtrip_canonical_plexus/corpus"
-domain_version = 73
+domain_version = 74
 features = []
 id = "plexus-statement"
 invariant = "Canonical Plexus of every generated current statement form, session-only forms included, reparses through the client and server grammars to the complete statement."
@@ -778,7 +778,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/plexus/src/__fuzz__/canonical_round_trip_tests__bolero_statement_text_is_canonical_or_rejected/corpus"
-domain_version = 72
+domain_version = 73
 features = []
 id = "plexus-statement-text"
 invariant = "Edited canonical text is either rejected with located diagnostics or read as statements whose canonical Plexus reparses to them."
@@ -793,7 +793,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/plexus-format/src/__fuzz__/format_round_trip_tests__bolero_formatted_documents_keep_their_statements/corpus"
-domain_version = 72
+domain_version = 73
 features = []
 id = "plexus-format-document"
 invariant = "Formatting a generated document with gaps, comments and either line ending keeps its statements and comments and is idempotent."
@@ -808,7 +808,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/plexus-format/src/__fuzz__/format_round_trip_tests__bolero_formatter_text_is_formatted_or_rejected/corpus"
-domain_version = 71
+domain_version = 72
 features = []
 id = "plexus-format-text"
 invariant = "Edited documents are either refused as unparseable or formatted without changing their statements, idempotently."
@@ -823,7 +823,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/models/tests/representations/__fuzz__/names__bolero_names_round_trip_through_every_representation/corpus"
-domain_version = 13
+domain_version = 14
 features = []
 id = "models-names"
 invariant = "Every name type keeps valid text through parsing, display, conversions, JSON, the archive and model-name widening."
@@ -838,7 +838,7 @@ test_target = "test:representations"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/models/tests/representations/__fuzz__/names__bolero_name_text_is_validated_or_rejected/corpus"
-domain_version = 13
+domain_version = 14
 features = []
 id = "models-name-validation"
 invariant = "Name parsing matches the name rule on arbitrary text, and the JSON and archive decoders accept only canonical name text."
@@ -1168,7 +1168,7 @@ test_target = "test:representations"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/models/src/__fuzz__/schedule__tests__bolero_scheduled_units_round_trip_through_current_storage_shape/corpus"
-domain_version = 13
+domain_version = 16
 features = []
 id = "scheduled-units"
 invariant = "A current domain schedule whose units match each Model declaration, with the partition epochs of its branches, keeps every independent unit placement, state lifetime, identity, epoch number, count and transition through archive encoding."
@@ -1198,7 +1198,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/models/tests/representations/__fuzz__/models__bolero_models_and_statements_round_trip_through_their_archives/corpus"
-domain_version = 71
+domain_version = 72
 features = []
 id = "models-archived-models"
 invariant = "Every generated Model family and statement form keeps every field through its archive, and a stored Model widens to requested versions and pins back to itself."
@@ -1648,7 +1648,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/models/tests/representations/__fuzz__/models__bolero_archived_counts_round_trip/corpus"
-domain_version = 5
+domain_version = 6
 features = []
 id = "models-archived-counts"
 invariant = "Every vocabulary count preserves its complete native value in its owning Model, statement, transaction identity, plan header and WASM unit inspection and page archives, including entry, checkpoint-stage and recovery-outcome counts."
@@ -1663,7 +1663,7 @@ test_target = "test:representations"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/consensus/src/__fuzz__/archive_count_tests__bolero_consensus_counts_round_trip/corpus"
-domain_version = 13
+domain_version = 14
 features = []
 id = "consensus-archived-counts"
 invariant = "Every native count in current consensus commands, outcomes, limits, progress, report headers and topology headers survives the production bounded storage codec with complete record equality."
@@ -1692,8 +1692,8 @@ test_target = "lib"
 
 [[target]]
 case_timeout_seconds = 10
-corpus = "src/registry/__fuzz__/registry__storage__tests__bolero_registry_archived_models_round_trip/corpus"
-domain_version = 58
+corpus = "src/registry/storage/__fuzz__/registry__storage__tests__bolero_registry_archived_models_round_trip/corpus"
+domain_version = 59
 features = []
 id = "registry-archived-models"
 invariant = "The registry's current tagged Model archive restores the complete generated vocabulary Model, including full-width counts and pinned resource bindings."
@@ -1701,7 +1701,7 @@ manifest = "Cargo.toml"
 max_input_bytes = 4096
 package = "nervix-server"
 random_iterations = 256
-source = "src/registry/storage.rs"
+source = "src/registry/storage/tests.rs"
 test = "registry::storage::tests::bolero_registry_archived_models_round_trip"
 test_target = "lib"
 
@@ -1858,7 +1858,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/client-wire/src/tests/properties/__fuzz__/tests__properties__replies__bolero_replies_keep_complete_values/corpus"
-domain_version = 16
+domain_version = 17
 features = []
 id = "client-replies"
 invariant = "Every current reply family decodes to the complete original typed value, including dispositions, typed subscribe and clock attach refusals, diagnostics, metadata, the WASM state envelope tables with every checkpoint stage, reset scope, phase, reason and readiness, recovery outcome and rejection, entry counts and pinned binding, and client I/O."
@@ -1873,7 +1873,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/client-wire/src/tests/properties/__fuzz__/tests__properties__events__bolero_events_keep_complete_values_and_owned_views/corpus"
-domain_version = 11
+domain_version = 12
 features = []
 id = "client-events"
 invariant = "Every unsolicited event preserves complete values; borrowed graph views retain exact bytes after their original frame is dropped."
@@ -1903,7 +1903,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/client-wire/src/tests/properties/__fuzz__/tests__properties__streams__bolero_reply_transfers_keep_exact_bytes_and_reject_without_effects/corpus"
-domain_version = 7
+domain_version = 8
 features = []
 id = "client-reply-transfer"
 invariant = "Reply segmentation preserves exact encoded bytes and the complete reply; wrong identities and duplicate parts leave assembly progress unchanged."
@@ -1918,7 +1918,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/client-wire/src/tests/properties/__fuzz__/tests__properties__rows__bolero_row_views_keep_complete_cells_and_buffer_ownership/corpus"
-domain_version = 9
+domain_version = 10
 features = []
 id = "client-row-views"
 invariant = "Production Row views preserve exact cells, nested lists, nulls, redaction, schema, branch, identity and float bits after original owners drop."
@@ -1933,7 +1933,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/client-wire/src/tests/properties/__fuzz__/tests__properties__malformed__bolero_arbitrary_frames_verify_and_decode_within_limits/corpus"
-domain_version = 2
+domain_version = 3
 features = []
 id = "client-arbitrary-frames"
 invariant = "Arbitrary bounded bytes reach all eight frame roots and either decode deterministically or return a typed bounded failure."
@@ -1948,7 +1948,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/client-wire/src/tests/properties/__fuzz__/tests__properties__malformed__bolero_current_frame_corruption_is_bounded/corpus"
-domain_version = 2
+domain_version = 3
 features = []
 id = "client-frame-corruption"
 invariant = "Truncation, offset, length, bit and size mutations of current valid frames decode deterministically or fail within verification and collection budgets."
@@ -1963,7 +1963,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/client-wire/src/tests/properties/__fuzz__/tests__properties__malformed__bolero_discriminators_are_validated_before_use/corpus"
-domain_version = 2
+domain_version = 3
 features = []
 id = "client-discriminators"
 invariant = "Client request discriminators are structurally verified and unsupported tags fail with the owning typed union error before use."
@@ -2533,7 +2533,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/backup/src/__fuzz__/archive_properties__bolero_complete_archives_preserve_every_record_section_and_payload/corpus"
-domain_version = 20
+domain_version = 21
 features = []
 id = "backup-complete-archives"
 invariant = "Every promised current record, ordered section, length, digest and raw payload, including deduplicator key and window row and argument groups, survives export, extraction, restore reads and deterministic re-export under cluster/domain and resource/state options."
@@ -2548,7 +2548,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/backup/src/__fuzz__/malformed_properties__bolero_malformed_current_records_return_safe_typed_errors/corpus"
-domain_version = 20
+domain_version = 21
 features = []
 id = "backup-malformed-records"
 invariant = "Bounded current malformed records and headers return safe typed owning errors and free every decoding allocation; accepted records preserve their complete value through re-encoding."
@@ -2563,7 +2563,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/backup/src/__fuzz__/malformed_properties__bolero_corrupt_archives_fail_before_restore_contents_are_returned/corpus"
-domain_version = 21
+domain_version = 22
 features = []
 id = "backup-corrupt-archives"
 invariant = "Changed current section lengths, digests, kinds, order, membership and record bytes, missing or misplaced deduplicator and window groups, or truncated sections fail before verified archive contents reach restore installation."
@@ -2608,7 +2608,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/consensus/src/storage/__fuzz__/storage__properties__bolero_consensus_state_records_recover_every_stored_value/corpus"
-domain_version = 69
+domain_version = 71
 features = []
 id = "consensus-state-records"
 invariant = "A generated replicated state holding records of every family, including unit-keyed schedules with their branch partition epochs, stored by the consensus state writer into a real keyspace, and a second revision stored as the changes from it each recover with complete equality of every record, index and metadata field."
@@ -2623,7 +2623,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/consensus/src/storage/__fuzz__/storage__properties__bolero_corrupt_consensus_state_records_fail_typed_or_recover_canonically/corpus"
-domain_version = 69
+domain_version = 71
 features = []
 id = "consensus-state-corruption"
 invariant = "Flipped, truncated, extended, rekeyed, copied, unknown and missing consensus state records free every decoding allocation and either fail recovery with the typed invalid-state failure or recover a state stored under its own canonical keys whose readers' invariants hold and which recovers again unchanged."
@@ -2638,7 +2638,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/consensus/src/storage/__fuzz__/storage__raft_properties__bolero_consensus_raft_records_round_trip_through_the_storage_codec/corpus"
-domain_version = 68
+domain_version = 70
 features = []
 id = "consensus-raft-records"
 invariant = "Votes, log positions, log entries of every consensus command, current state metadata, snapshot manifests and sections restore with complete equality through the storage codec, and every log and section key names exactly the position or section it was built for."
@@ -2653,7 +2653,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/consensus/src/storage/__fuzz__/storage__raft_properties__bolero_malformed_consensus_raft_records_fail_typed/corpus"
-domain_version = 54
+domain_version = 56
 features = []
 id = "consensus-raft-records-malformed"
 invariant = "Arbitrary bytes read as any Raft record, log key or section key free every decoding allocation and fail with the typed storage failure or name a value that stores back to the same record."
@@ -2668,7 +2668,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "src/registry/storage/__fuzz__/registry__storage__properties__bolero_registry_stored_models_list_back_from_memory_and_tables/corpus"
-domain_version = 51
+domain_version = 52
 features = []
 id = "registry-stored-models"
 invariant = "Committed Models named across the whole name rule list back complete and in key order, and read back by their own keys, from a reopened registry serving them from its journal or from the on-disk table a flush moved them into."
@@ -2683,7 +2683,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "src/registry/storage/__fuzz__/registry__storage__properties__bolero_corrupt_registry_records_fail_typed_or_list_canonically/corpus"
-domain_version = 51
+domain_version = 52
 features = []
 id = "registry-stored-models-corruption"
 invariant = "Damaged registry records free every decoding allocation, and damaged records and keys either fail the listing with the registry's typed storage failure or list Models whose own keys are exactly the stored keys."
@@ -4755,7 +4755,7 @@ test_target = "test:fields"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/client-wire/src/state_inspection/__fuzz__/state_inspection__tests__bolero_state_inspection_envelope_round_trips/corpus"
-domain_version = 8
+domain_version = 9
 features = []
 id = "client-state-inspection"
 invariant = "Every field of the current bounded inspection envelope, including exact typed Row cells, owner origins, source fingerprints, counts, omitted rows, continuation and typed refusal, survives the production session codec unchanged."
@@ -5130,7 +5130,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/client-wire/src/state_inspection/__fuzz__/state_inspection__tests__published__bolero_published_processor_sections_round_trip/corpus"
-domain_version = 1
+domain_version = 2
 features = []
 id = "client-published-processor-sections"
 invariant = "Every typed deduplicator key and window header or accumulator section, including nullable lifetime/sequence/deadline facts, redacted keys, exact U64 counts and timestamp extremes, survives the production session codec with its complete schema and cells unchanged."
@@ -5140,6 +5140,66 @@ package = "nervix-client-wire"
 random_iterations = 128
 source = "crates/client-wire/src/state_inspection/published_tests.rs"
 test = "state_inspection::tests::published::bolero_published_processor_sections_round_trip"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "crates/models/src/entity_labels/__fuzz__/entity_labels__tests__bolero_label_maps_preserve_every_key_and_exact_value/corpus"
+domain_version = 1
+features = []
+id = "entity-label-maps"
+invariant = "Every complete bounded label map preserves every exact key and UTF-8 value, including absent versus empty, Unicode, NUL and quoting characters, through production JSON and current archive encoding."
+manifest = "Cargo.toml"
+max_input_bytes = 128
+package = "nervix-models"
+random_iterations = 256
+source = "crates/models/src/entity_labels/tests.rs"
+test = "entity_labels::tests::bolero_label_maps_preserve_every_key_and_exact_value"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "crates/models/src/entity_labels/__fuzz__/entity_labels__tests__bolero_label_mutations_match_an_independent_map_after_every_operation/corpus"
+domain_version = 1
+features = []
+id = "entity-label-mutations"
+invariant = "After each of 32 bounded SET or DROP operations the production label map equals the complete independently updated string map, preserving replacement, idempotent removal, branch-free ownership and exact values."
+manifest = "Cargo.toml"
+max_input_bytes = 128
+package = "nervix-models"
+random_iterations = 256
+source = "crates/models/src/entity_labels/tests.rs"
+test = "entity_labels::tests::bolero_label_mutations_match_an_independent_map_after_every_operation"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "crates/models/src/entity_labels/__fuzz__/entity_labels__tests__bolero_label_decoders_reject_invalid_current_keys_and_duplicate_assignments/corpus"
+domain_version = 1
+features = []
+id = "entity-label-decoding"
+invariant = "Production decoders refuse an invalid key in the current archived map and invalid or repeated keys in current JSON, while the complete unmodified current archive still decodes exactly."
+manifest = "Cargo.toml"
+max_input_bytes = 32
+package = "nervix-models"
+random_iterations = 256
+source = "crates/models/src/entity_labels/tests.rs"
+test = "entity_labels::tests::bolero_label_decoders_reject_invalid_current_keys_and_duplicate_assignments"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "crates/client-wire/src/entity_labels/__fuzz__/entity_labels__tests__bolero_entity_label_views_preserve_the_complete_map_identity_revision_and_policy/corpus"
+domain_version = 1
+features = []
+id = "client-wire-entity-labels"
+invariant = "Current committed and staged label inspections preserve complete typed identity, exact ordered map, every revision bit and captured committed policy through command outcomes; malformed current maps are refused."
+manifest = "Cargo.toml"
+max_input_bytes = 128
+package = "nervix-client-wire"
+random_iterations = 256
+source = "crates/client-wire/src/entity_labels/tests.rs"
+test = "entity_labels::tests::bolero_entity_label_views_preserve_the_complete_map_identity_revision_and_policy"
 test_target = "lib"
 
 [[target]]

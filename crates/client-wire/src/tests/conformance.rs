@@ -448,6 +448,49 @@ fn corpus_frames() -> Vec<(&'static str, Bytes)> {
             command(1, CommandDisposition::Failed),
         ),
         (
+            "server_command_labels_committed_max.nxsm",
+            reply(
+                23,
+                ReplyBody::Command(Box::new({
+                    let mut outcome = command_outcome(CommandDisposition::Completed {
+                        already_existed: false,
+                    });
+                    outcome.entity_labels = Some(Box::new(
+                        crate::entity_labels::tests::inspection(false, u64::MAX),
+                    ));
+                    outcome
+                })),
+            ),
+        ),
+        (
+            "server_command_labels_committed_zero.nxsm",
+            reply(
+                22,
+                ReplyBody::Command(Box::new({
+                    let mut outcome = command_outcome(CommandDisposition::Completed {
+                        already_existed: false,
+                    });
+                    outcome.entity_labels =
+                        Some(Box::new(crate::entity_labels::tests::inspection(false, 0)));
+                    outcome
+                })),
+            ),
+        ),
+        (
+            "server_command_labels_staged.nxsm",
+            reply(
+                24,
+                ReplyBody::Command(Box::new({
+                    let mut outcome = command_outcome(CommandDisposition::Completed {
+                        already_existed: false,
+                    });
+                    outcome.entity_labels =
+                        Some(Box::new(crate::entity_labels::tests::inspection(true, 0)));
+                    outcome
+                })),
+            ),
+        ),
+        (
             "server_command_leader_unknown.nxsm",
             command(
                 3,
@@ -1737,6 +1780,9 @@ fn render_command(head: &str, outcome: &CommandOutcome, lines: &mut Vec<String>)
     if let Some(state) = &outcome.state {
         render_state_inspection(state, lines);
     }
+    if let Some(labels) = &outcome.entity_labels {
+        render_entity_labels(labels, lines);
+    }
 }
 
 fn render_restore_report(report: &RestoreReport, lines: &mut Vec<String>) {
@@ -2129,6 +2175,40 @@ fn render_state_inspection(state: &crate::StateInspection, lines: &mut Vec<Strin
                 }
             }
         }
+    }
+}
+
+fn render_entity_labels(value: &nervix_models::EntityLabelsInspection, lines: &mut Vec<String>) {
+    let entity = value.entity();
+    let policy = value.policy();
+    lines.push(format!(
+        "ENTITY_LABELS domain={} kind={} name={} policy={} limits={}/{}/{}/{}",
+        entity.domain,
+        entity.node.kind.as_str().replace('_', ""),
+        entity.node.identifier,
+        policy.revision,
+        policy.limits.count,
+        policy.limits.key_bytes,
+        policy.limits.value_bytes,
+        policy.limits.bytes
+    ));
+    match value.view() {
+        nervix_models::EntityLabelView::Committed { revision } => {
+            lines.push(format!("LABEL_VIEW committed revision={revision}"))
+        }
+        nervix_models::EntityLabelView::Staged { preview } => lines.push(format!(
+            "LABEL_VIEW staged transaction={} position={} basis={}",
+            text(&preview.transaction_id),
+            preview.position.accepted_operations(),
+            hex(preview.planning_basis.fingerprint())
+        )),
+    }
+    for (key, value) in value.labels().iter() {
+        lines.push(format!(
+            "LABEL key={} value={}",
+            text(key.as_str()),
+            text(value)
+        ));
     }
 }
 

@@ -10,6 +10,7 @@
     nervix::layer(harness, reason = "owns the test harness boundary declared above")
 )]
 
+use meticulous::ResultExt as _;
 use nervix_models::{
     ArchiveDigest, BackupArchiveSummary, BackupCut, BackupCutKind, BackupDomainSummary,
     BackupQuiesceCounters, BackupResources, ModelKind, NodeRef, ResourceDescription,
@@ -149,6 +150,22 @@ impl WireValues<'_> {
     }
 
     pub(super) fn command_metadata(&mut self, command: &mut CommandOutcome) {
+        if self.arbitrary.entropy().flag() {
+            let base = crate::entity_labels::tests::inspection(
+                self.arbitrary.entropy().flag(),
+                self.arbitrary.entropy().any_u64(),
+            );
+            let labels = self.arbitrary.entity_labels();
+            command.entity_labels = Some(Box::new(
+                nervix_models::EntityLabelsInspection::new(
+                    base.entity().clone(),
+                    labels,
+                    base.view().clone(),
+                    base.policy(),
+                )
+                .assured("bounded generated labels fit the captured declared policy"),
+            ));
+        }
         if self.arbitrary.entropy().flag() {
             command.inspection = Some(Box::new(TransactionInspection {
                 transaction: transaction(TransactionLifecycle::Committed),

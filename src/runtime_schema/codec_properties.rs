@@ -141,9 +141,9 @@ impl GeneratedWireSchema {
     /// The wire format a codec resolves when it names this wire schema.
     pub(crate) fn resolved(&self) -> ResolvedCodecWireFormat<'_> {
         match self {
-            Self::Json(schema) => ResolvedCodecWireFormat::Json(schema),
-            Self::Cbor(schema) => ResolvedCodecWireFormat::Cbor(schema),
-            Self::Avro(schema) => ResolvedCodecWireFormat::Avro(schema),
+            Self::Json(schema) => ResolvedCodecWireFormat::Json(schema.into()),
+            Self::Cbor(schema) => ResolvedCodecWireFormat::Cbor(schema.into()),
+            Self::Avro(schema) => ResolvedCodecWireFormat::Avro(schema.into()),
         }
     }
 }
@@ -210,6 +210,7 @@ impl CodecCase {
                     });
                 }
                 GeneratedWireSchema::Json(CreateJsonWireSchema {
+                    labels: Default::default(),
                     name: wire_name.clone(),
                     strictness,
                     fields,
@@ -233,6 +234,7 @@ impl CodecCase {
                     });
                 }
                 let definition = CreateCborWireSchema {
+                    labels: Default::default(),
                     name: wire_name.clone(),
                     strictness,
                     fields,
@@ -266,6 +268,7 @@ impl CodecCase {
                     });
                 }
                 GeneratedWireSchema::Avro(CreateAvroWireSchema {
+                    labels: Default::default(),
                     name: wire_name.clone(),
                     strictness,
                     fields,
@@ -284,6 +287,7 @@ impl CodecCase {
             },
         };
         let model = CreateCodec {
+            labels: Default::default(),
             name: CodecName::parse("generated_codec").assured("the codec name is a literal"),
             wire_format,
             schema: schema.model.name.clone(),
@@ -1024,6 +1028,7 @@ fn a_payload_refused_inside_a_nested_list_leaves_the_next_row_exact() {
             }),
         };
         let schema = GeneratedSchema::new(CreateSchema {
+            labels: Default::default(),
             name: SchemaName::parse("nested").assured("a literal schema name"),
             fields: vec![
                 field("tenant", ParseAsType::String),
@@ -1066,6 +1071,7 @@ fn a_number_reads_as_the_f32_whose_shortest_decimal_it_is() {
     let format = SchemafulFormat::Json;
     {
         let schema = GeneratedSchema::new(CreateSchema {
+            labels: Default::default(),
             name: SchemaName::parse("single").assured("a literal schema name"),
             fields: vec![SchemaField {
                 name: FieldName::parse("value").assured("a literal field name"),
@@ -1187,6 +1193,7 @@ fn a_number_beyond_the_f32_range_reads_as_an_infinity() {
 
     for format in [SchemafulFormat::Json, SchemafulFormat::Cbor] {
         let schema = GeneratedSchema::new(CreateSchema {
+            labels: Default::default(),
             name: SchemaName::parse("single").assured("a literal schema name"),
             fields: vec![SchemaField {
                 name: FieldName::parse("value").assured("a literal field name"),

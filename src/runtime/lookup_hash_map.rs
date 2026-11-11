@@ -661,6 +661,7 @@ mod tests {
         });
         let lookups = HashMap::from_iter([(named("titles_by_normalized"), lookup)]);
         let output_schema = Arc::new(compile_schema(&CreateSchema {
+            labels: Default::default(),
             name: named("lookup_output"),
             fields: vec![
                 nervix_models::SchemaField {

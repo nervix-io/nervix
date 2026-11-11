@@ -243,13 +243,13 @@ module Probe
     end
     retained.each_with_index do |event, index|
       raise 'a retained frame changed while it was retained' if event.frame.get_string != frames[index]
-      raise 'a retained frame is not a ServerMessage frame' if event.frame.get_string(4, 4) != 'NXSM'
+      raise 'a retained frame is not a ServerMessage frame' if event.frame.get_string(4, 4) != 'NXEL'
       raise 'a retained event reads differently than it did' if event.row_lines(fields, key_fields) != reported[index]
     end
     views = retained.map { |event| event.frame.slice(4, 4) }
     Thread.new { retained.each(&:release) }.join
     GC.start(full_mark: true, immediate_sweep: true)
-    raise 'a frame slice lost its owner' unless views.all? { |view| view.get_string == 'NXSM' }
+    raise 'a frame slice lost its owner' unless views.all? { |view| view.get_string == 'NXEL' }
   end
 
   def self.check_cancellation(session)
@@ -1088,6 +1088,9 @@ module Probe
       event.release
     end
 
+    captured_labels = session.execute("SHOW LABELS ON RELAY #{relay} FORMAT TEXT;").entity_labels
+    raise 'typed entity labels lost exact metadata' unless captured_labels && captured_labels.labels['probe'] == ' retained Δ '
+    raise 'typed entity labels lost identity or revision' unless captured_labels.entity_name == relay && !captured_labels.revision.nil?
     check_retention(retained, reported, fields, key_fields)
     check_cancellation(session)
     report('CHECKS ok')

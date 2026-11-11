@@ -32,8 +32,8 @@ use crate::{
 /// Its default resolves every definition's own default; nothing else writes one.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct NodeSettings {
-    /// Explicit first-bootstrap seeds, retained separately from resolved local defaults.
     pub listeners: super::listener_settings::ListenerSettings,
+    /// Explicit first-bootstrap seeds, retained separately from resolved local defaults.
     pub parameter_seeds: nervix_models::ClusterParameterSeedValues,
     pub raft: RaftTimings,
     pub raft_retention: RaftRetentionSettings,

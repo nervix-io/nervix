@@ -131,6 +131,7 @@ mod tests {
 
     fn schedule_declaring(name: &str, count: u16) -> DomainSchedule {
         let declaration = CreateBranch {
+            labels: Default::default(),
             name: branch(name),
             schema: nervix_models::SchemaName::parse("tenant_key")
                 .assured("test schema names are valid"),

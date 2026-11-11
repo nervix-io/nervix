@@ -29,8 +29,8 @@ use meticulous::OptionExt as _;
 use nervix_backup::{DescribedRuntimeState, DescribedSection, StateField};
 use nervix_execution::{Cancellation, CpuClass, MemoryClass};
 use nervix_models::{
-    BranchName, CreateSchema, DomainName, DomainSchedule, Model, ModelKind, ModelName, NodeRef,
-    NodeUnitRef, ProcessorOutput, ResolvedBranching, ScheduledNode,
+    BranchName, DomainName, DomainSchedule, Model, ModelKind, ModelName, NodeRef, NodeUnitRef,
+    ProcessorOutput, ResolvedBranching, ScheduledNode, SchemaDefinition,
 };
 use nervix_primitives::sync::Arc;
 use thiserror::Error;
@@ -53,7 +53,7 @@ pub(in crate::application) struct RestoredBranchDeclarations {
     /// writes an unbranched relay.
     unbranched: bool,
     /// Every branch a concrete archived key may belong to, with the schema of its keys.
-    branches: BTreeMap<BranchName, CreateSchema>,
+    branches: BTreeMap<BranchName, SchemaDefinition>,
 }
 
 /// Why the restored schedule gives an entity no branching its archived keys could belong to.
@@ -468,8 +468,8 @@ mod tests {
         FieldName::parse(name).assured("the test field is a valid literal name")
     }
 
-    fn key_schema(name: &str, fields: &[(&str, ParseAsType)]) -> CreateSchema {
-        CreateSchema {
+    fn key_schema(name: &str, fields: &[(&str, ParseAsType)]) -> SchemaDefinition {
+        SchemaDefinition {
             name: nervix_models::SchemaName::parse(name)
                 .assured("the test schema is a valid literal name"),
             fields: fields

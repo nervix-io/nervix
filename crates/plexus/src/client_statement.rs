@@ -1,3 +1,15 @@
+//! The composed client grammar, source diagnostics and completion context.
+//!
+//! Layer: language.
+//! - **Owns.** Session-local statement Models and their composition with server statements.
+//! - **Depends on.** Shared lexer tokens, vocabulary and the top-level server grammar.
+//! - **Must not know.** Registry state, session transport or runtime execution.
+
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(language, reason = "owns composed client statement parsing")
+)]
+
 mod expression_completion;
 
 use std::ops::Range;
@@ -131,10 +143,14 @@ impl ClientStatement {
         matches!(self, Self::Server(Statement::DescribeTransaction(_)))
     }
 
-    /// Transaction catalog reads run beside an attached transaction without taking a queue
-    /// position or changing its binding.
+    /// Transaction catalog and candidate metadata reads run beside an attached transaction
+    /// without taking a queue position or changing its binding.
     pub fn reads_transaction_state(&self) -> bool {
-        self.inspects_transaction() || matches!(self, Self::Server(Statement::ShowTransactions(_)))
+        self.inspects_transaction()
+            || matches!(
+                self,
+                Self::Server(Statement::ShowTransactions(_) | Statement::ShowLabels(_))
+            )
     }
 }
 
@@ -609,9 +625,14 @@ impl ClientStatementGrammar {
     fn completion(&self, input: &str, cursor: usize) -> (Vec<String>, Vec<Token>) {
         let (source, prefix) = completion_context(input, cursor);
 
-        let Some(tokens) = completion_tokens(&source) else {
+        let Some(mut tokens) = completion_tokens(&source) else {
             return (Vec::new(), Vec::new());
         };
+
+        let probed = crate::statement::completion_probe(&tokens, &source);
+        if probed {
+            tokens.push(Token::RParen);
+        }
 
         let out = self.parser.get().parse(tokens.as_slice());
         let labels = if out.has_errors() {
@@ -633,6 +654,9 @@ impl ClientStatementGrammar {
                 _ => Vec::new(),
             }
         };
+        if probed {
+            let _ = tokens.pop();
+        }
         (labels, tokens)
     }
 

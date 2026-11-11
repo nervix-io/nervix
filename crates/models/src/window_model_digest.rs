@@ -40,7 +40,7 @@ impl CreateWindowProcessor {
     /// inputs, bounds, state limit, branch, routes or aggregates.
     /// Non-security BLAKE3: identifies admitted window configuration for state matching.
     pub fn model_digest(&self) -> error_stack::Result<WindowModelDigest, CanonicalPlexusError> {
-        let text = self.to_canonical_plexus()?;
+        let text = self.configuration_to_canonical_plexus()?;
         let mut hasher = blake3::Hasher::new();
         hasher.update(b"nervix/window-processor-model");
         hasher.update(text.as_bytes());
@@ -85,6 +85,7 @@ mod tests {
 
     fn window() -> CreateWindowProcessor {
         CreateWindowProcessor {
+            labels: Default::default(),
             name: named("latency_window"),
             from: ProcessorInputs::single(named("metrics")),
             output_routes: ProcessorOutputs::new(vec![ProcessorOutput::with_flush_policy(

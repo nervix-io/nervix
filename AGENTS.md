@@ -184,6 +184,12 @@ violates instead of softening the contract to match today's imports.
   replication mechanisms.
 - The registry validates domains, references, schemas, branches, capabilities and execution
   contracts before a graph becomes active.
+- Entity labels are bounded control-plane metadata owned and committed with their domain Model.
+  Metadata-only edits preserve execution and state identities, tasks, allowances, resource
+  bindings, connections, buffers and acknowledgement outcomes, with no pause, flush, rebuild or
+  relocation. Stored schedules and captured archives retain the complete metadata; execution
+  plans and recurring record paths consume none of it. [Entity Labels](docs/src/entity-labels.md)
+  owns validation, transactions, inspection and durability.
 - Gossip carries only membership-scoped state: identities and endpoints, prerequisites, admission
   verdicts, cluster parameters, termination and subscription interest. Application progress stays
   in one incarnation-bound local record and travels by typed interconnect reports and queries;
@@ -519,6 +525,8 @@ keeps the chapter current in the same change. Where areas meet, each chapter kee
   drain and force flush, terminal teardown, startup recovery.
 - [Typed States And Validation Boundaries](docs/src/typed-states.md): how a missing value, state
   variant, required identity, conversion failure or boundary representation is modeled or validated.
+- [Entity Labels](docs/src/entity-labels.md): domain Model metadata, bounded key/value sets,
+  label statements and inspection, transaction effects, execution identity and archive fidelity.
 - [Node Settings](docs/src/node-settings.md): setting declarations, defaults, derivations,
   fixed-value contracts, validation, carriers, change procedures, capability sizing, settings
   enforcement.

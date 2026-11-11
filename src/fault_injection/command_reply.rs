@@ -265,6 +265,7 @@ impl CommandReplyScript {
     /// command's own outcome carried is gone with it.
     fn foreign_failure(foreign: CommandExecutionReference) -> CommandOutcome {
         CommandOutcome {
+            entity_labels: None,
             execution_reference: foreign,
             origin: OutcomeOrigin::Executed,
             disposition: CommandDisposition::Failed,

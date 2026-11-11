@@ -250,6 +250,7 @@ impl IngestorDraft {
             .clone()
             .ok_or_else(|| Report::new(IngestorDraftError::GeneralError))?;
         Ok(CreateIngestor {
+            labels: Default::default(),
             name,
             output_routes: ProcessorOutputs::new(routes),
             input: IngestorInput::Transport(TransportIngestorInput {

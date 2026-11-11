@@ -7,7 +7,7 @@ use crate::{
     parser_support::{
         LexedInput, ParseError, ParseFromSourceError, codec_ref, field_ref, if_not_exists_clause,
         into_parse_error, kw, kw_phrase2, lex_input, lookup_name, resource_ref,
-        resource_version_clause, string_lit, suggest_from, tok,
+        resource_version_clause, string_lit, suggest_from,
     },
 };
 
@@ -17,40 +17,42 @@ pub fn create_lookup_parser<'src>() -> impl Parser<
     CreateStatement<CreateLookup<RequestedResourceVersion>>,
     extra::Err<ParseError<'src>>,
 > + Clone {
-    kw(Identifier::Create)
-        .ignore_then(if_not_exists_clause())
-        .then_ignore(kw_phrase2(Identifier::Hash, Identifier::Map))
-        .then(lookup_name())
-        .then_ignore(kw(Identifier::Key))
-        .then(field_ref())
-        .then_ignore(kw(Identifier::From))
-        .then_ignore(kw(Identifier::Resource))
-        .then(resource_ref())
-        .then(resource_version_clause())
-        .then_ignore(kw(Identifier::Path))
-        .then(string_lit())
-        .then_ignore(kw(Identifier::Decode))
-        .then_ignore(kw(Identifier::Using))
-        .then(codec_ref())
-        .map(
-            |(
-                (((((if_not_exists, name), key_field), resource), resource_version), path),
-                decode_using_codec,
-            )| {
-                CreateStatement::new(
-                    CreateLookup {
-                        name,
-                        key_field,
-                        resource,
-                        resource_version,
-                        path,
-                        decode_using_codec,
-                    },
-                    if_not_exists,
-                )
-            },
-        )
-        .then_ignore(tok(Token::Semicolon).or_not())
+    crate::labels::finish_creation({
+        kw(Identifier::Create)
+            .ignore_then(if_not_exists_clause())
+            .then_ignore(kw_phrase2(Identifier::Hash, Identifier::Map))
+            .then(lookup_name())
+            .then_ignore(kw(Identifier::Key))
+            .then(field_ref())
+            .then_ignore(kw(Identifier::From))
+            .then_ignore(kw(Identifier::Resource))
+            .then(resource_ref())
+            .then(resource_version_clause())
+            .then_ignore(kw(Identifier::Path))
+            .then(string_lit())
+            .then_ignore(kw(Identifier::Decode))
+            .then_ignore(kw(Identifier::Using))
+            .then(codec_ref())
+            .map(
+                |(
+                    (((((if_not_exists, name), key_field), resource), resource_version), path),
+                    decode_using_codec,
+                )| {
+                    CreateStatement::new(
+                        CreateLookup {
+                            labels: Default::default(),
+                            name,
+                            key_field,
+                            resource,
+                            resource_version,
+                            path,
+                            decode_using_codec,
+                        },
+                        if_not_exists,
+                    )
+                },
+            )
+    })
 }
 
 pub fn parse_create_lookup_tokens(

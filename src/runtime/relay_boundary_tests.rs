@@ -34,34 +34,9 @@ use crate::{
     runtime_schema::{RuntimeValue, test_runtime_row},
 };
 
-/// The branch presence of a relay that is not divided into partitions: its single unit's.
-fn single_presence(services: &RelayBoundaryServices) -> RelayBranchPresence {
-    services
-        .branch_presences
-        .of(Unit::SINGLE)
-        .cloned()
-        .expect("a whole relay has its single unit's presence")
-}
-
-/// Whether the ingress channel a producer of `branch` binds now, on a relay that is not divided
-/// into partitions, is cancelled from the start.
-fn single_ingress_cancelled(services: &RelayBoundaryServices, branch: &Option<BranchKey>) -> bool {
-    services
-        .ingress_slot(branch, Unit::SINGLE)
-        .cancellation()
-        .is_cancelled()
-}
-
-fn relay_metrics(runtime: &Runtime, domain: &DomainName, relay: &RelayName) -> RelayMetricsHandle {
-    runtime.inner.metrics.resolve_relay_metrics(
-        domain,
-        relay,
-        Unit::SINGLE,
-        None,
-        RELAY_BUFFER_DIRECTION_CONCRETE,
-        None,
-    )
-}
+#[path = "relay_boundary_tests/fixtures.rs"]
+mod fixtures;
+use fixtures::{relay_metrics, single_ingress_cancelled, single_presence};
 
 #[nervix_primitives::test(start_paused = true)]
 async fn runtime_report_chain_detached_relay_delivery_log() {
@@ -667,6 +642,7 @@ async fn execution_builder_uses_direct_fanout_for_unbranched_relay() {
                 domain.clone(),
                 vec![
                     scheduled_model(nervix_models::Model::Schema(CreateSchema {
+                        labels: Default::default(),
                         name: schema.clone(),
                         fields: vec![nervix_models::SchemaField {
                             name: named("user_id"),
@@ -676,6 +652,7 @@ async fn execution_builder_uses_direct_fanout_for_unbranched_relay() {
                         }],
                     })),
                     scheduled_model(nervix_models::Model::Relay(CreateRelay {
+                        labels: Default::default(),
                         name: relay.clone(),
                         schema,
                         buffer: STUPID_CHANNEL_CAPACITY_REMOVE_ME,
@@ -721,6 +698,7 @@ async fn inbound_subscription_wait_does_not_hold_domain_execution() {
                 domain.clone(),
                 vec![
                     scheduled_model(nervix_models::Model::Schema(CreateSchema {
+                        labels: Default::default(),
                         name: schema_name.clone(),
                         fields: vec![nervix_models::SchemaField {
                             name: named("user_id"),
@@ -730,6 +708,7 @@ async fn inbound_subscription_wait_does_not_hold_domain_execution() {
                         }],
                     })),
                     scheduled_model(nervix_models::Model::Relay(CreateRelay {
+                        labels: Default::default(),
                         name: relay.clone(),
                         schema: schema_name,
                         buffer: nonzero!(2usize),
@@ -2532,6 +2511,7 @@ async fn a_decoded_body_is_bounded_by_the_payload_it_carries() {
 async fn a_three_destination_fanout_shares_one_encoded_body() {
     let executor = Executor::default();
     let schema = Arc::new(compile_schema(&CreateSchema {
+        labels: Default::default(),
         name: named::<SchemaName>("orders"),
         fields: vec![
             nervix_models::SchemaField {
@@ -2662,6 +2642,7 @@ fn notification_schedule(domain: &DomainName, relay: Option<bool>) -> DomainSche
     if let Some(sensitive) = relay {
         nodes.push(scheduled_model(nervix_models::Model::Schema(
             CreateSchema {
+                labels: Default::default(),
                 name: schema.clone(),
                 fields: vec![nervix_models::SchemaField {
                     name: named("user_id"),
@@ -2672,6 +2653,7 @@ fn notification_schedule(domain: &DomainName, relay: Option<bool>) -> DomainSche
             },
         )));
         nodes.push(scheduled_model(nervix_models::Model::Relay(CreateRelay {
+            labels: Default::default(),
             name: named("notifications"),
             schema,
             buffer: nonzero!(2usize),
@@ -2684,6 +2666,7 @@ fn notification_schedule(domain: &DomainName, relay: Option<bool>) -> DomainSche
 
 fn notification_definition(sensitive: bool) -> RelaySubscriptionDefinition {
     let schema = compile_schema(&CreateSchema {
+        labels: Default::default(),
         name: named("notification"),
         fields: vec![nervix_models::SchemaField {
             name: named("user_id"),

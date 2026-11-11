@@ -40,6 +40,7 @@ mod emitter;
 mod emitter_batch;
 mod emitter_envelope;
 mod emitter_instances;
+mod entity_labels;
 mod execution_unit;
 mod expression;
 mod http_request;
@@ -71,7 +72,9 @@ mod resource_binding;
 mod restore;
 mod schedule;
 mod schema;
+mod schema_definition;
 mod schema_fingerprint;
+pub use schema_definition::{SchemaDefinition, SchemaRef};
 mod settings;
 mod show_wasm_state;
 mod state_branch_selection;
@@ -83,7 +86,7 @@ mod udf;
 mod wasm_state_generation;
 mod wasm_state_inspection;
 mod window_model_digest;
-
+mod wire_schema_definition;
 pub use admission::{AdmissionVerdict, AdmissionVerdicts, AdmissionVerdictsTextError};
 pub use archived_count::{ArchivedCountError, CountAsU64};
 pub use backup::{
@@ -272,6 +275,7 @@ pub use emitter_envelope::{
 pub use emitter_instances::{
     EmitterInstances, EmitterInstancingCapability, SingleEmitterReason, SingleInstanceRefusal,
 };
+pub use entity_labels::*;
 pub use execution_unit::{Unit, UnitIndexError, UnitKind};
 pub use expression::{
     Assignment, AssignmentTarget, AssignmentTargetScope, BinaryOperator, CaseBranch, Expression,
@@ -446,6 +450,7 @@ pub use wasm_state_inspection::{
     WasmUnitStateInspection, WasmUnitStatePage, WasmUnitStateSelection,
 };
 pub use window_model_digest::WindowModelDigest;
+pub use wire_schema_definition::{WireSchemaDefinition, WireSchemaRef};
 
 mod licensing;
 pub use licensing::{

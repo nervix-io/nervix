@@ -44,6 +44,7 @@ pub(crate) fn receiver_schema() -> GeneratedSchema {
 /// A schema of one field named `value`.
 fn single_field_schema(ty: ParseAsType, optional: bool) -> GeneratedSchema {
     GeneratedSchema::new(CreateSchema {
+        labels: Default::default(),
         name: SchemaName::parse("single").assured("a literal schema name"),
         fields: vec![SchemaField {
             name: FieldName::parse("value").assured("a literal field name"),

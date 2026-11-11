@@ -46,7 +46,7 @@ module RubySuite
       frame = event.frame
       assert_instance_of IO::Buffer, frame
       assert frame.readonly?
-      assert_equal 'NXSM', frame.get_string(4, 4)
+      assert_equal 'NXEL', frame.get_string(4, 4)
       # ANCHOR_END: row_buffers
       # ANCHOR: event_lifetime
       slice = frame.slice(4, 4)
@@ -56,7 +56,7 @@ module RubySuite
       GC.start(full_mark: true, immediate_sweep: true)
       GC.compact
       assert weak.weakref_alive?
-      assert_equal 'NXSM', slice.get_string
+      assert_equal 'NXEL', slice.get_string
       slice = nil
       assert_collected weak
       # ANCHOR_END: event_lifetime

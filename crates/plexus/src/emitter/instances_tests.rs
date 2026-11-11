@@ -78,6 +78,35 @@ fn an_instances_clause_follows_the_inputs_and_reads_back_canonically() {
 }
 
 #[test]
+fn instanced_emitters_keep_exact_labels_through_the_composed_creation_grammar() {
+    for (clause, expected) in [
+        (
+            "INSTANCES 3",
+            EmitterInstances::Count(std::num::NonZeroU64::new(3).assured("three is positive")),
+        ),
+        ("INSTANCES PER PARTITION", EmitterInstances::PerPartition),
+    ] {
+        let definition = instanced_kafka_emitter(clause);
+        let definition = definition
+            .strip_suffix(';')
+            .assured("the fixture ends its statement");
+        let source =
+            format!("{definition} LABELS {{ 'owner' = '  Platform / Δ  ', 'empty' = '' }};");
+        let parsed = parse_create_emitter(&source).assured("instances and labels compose");
+        assert_eq!(parsed.body.instances, expected);
+        assert_eq!(parsed.body.labels.get("owner"), Some("  Platform / Δ  "));
+        assert_eq!(parsed.body.labels.get("empty"), Some(""));
+        let canonical = parsed
+            .to_canonical_plexus()
+            .assured("the complete emitter renders");
+        assert_eq!(
+            parse_create_emitter(&canonical).assured("the complete canonical emitter reparses"),
+            parsed,
+        );
+    }
+}
+
+#[test]
 fn completion_offers_instances_only_where_the_entity_runs_several() {
     let prefix = "CREATE KAFKA TOPIC EMITTER spread FROM orders ";
     let suggestions = suggest_create_emitter(prefix, prefix.len());

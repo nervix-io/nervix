@@ -97,6 +97,7 @@ fn model_kind_completion_labels_roundtrip() {
 #[test]
 fn relay_alter_applies_operations_in_order_and_is_atomic() {
     let mut relay = CreateRelay {
+        labels: Default::default(),
         name: named("events"),
         schema: named("event_v1"),
         buffer: nonzero!(1usize),
@@ -150,6 +151,7 @@ fn relay_alter_applies_operations_in_order_and_is_atomic() {
 #[test]
 fn relay_alter_reports_each_typed_error() {
     let relay = CreateRelay {
+        labels: Default::default(),
         name: named("events"),
         schema: named("event"),
         buffer: nonzero!(1usize),
@@ -246,6 +248,7 @@ fn ingestor_alter_applies_operations_in_order_and_is_atomic() {
         branch: Some(crate::OutputBranch::Unbranched),
     };
     let mut ingestor = CreateIngestor {
+        labels: Default::default(),
         name: named("event_source"),
         output_routes: ProcessorOutputs::new(vec![route.clone()]),
         input: crate::IngestorInput::Transport(crate::TransportIngestorInput {
@@ -340,6 +343,7 @@ fn ingestor_alter_applies_operations_in_order_and_is_atomic() {
 fn ingestor_alter_reports_name_ambiguity_and_last_route_errors() {
     let route = ProcessorOutput::new(named("events"));
     let base = CreateIngestor {
+        labels: Default::default(),
         name: named("event_source"),
         output_routes: ProcessorOutputs::new(vec![route.clone()]),
         input: crate::IngestorInput::Transport(crate::TransportIngestorInput {
@@ -411,6 +415,7 @@ fn ingestor_alter_reports_name_ambiguity_and_last_route_errors() {
 #[test]
 fn ingestor_alter_applies_only_under_the_head_of_the_stored_pair() {
     let base = CreateIngestor {
+        labels: Default::default(),
         name: named("event_source"),
         output_routes: ProcessorOutputs::new(vec![ProcessorOutput::new(named("events"))]),
         input: crate::IngestorInput::Transport(crate::TransportIngestorInput {
@@ -500,6 +505,7 @@ fn client_producer_alter_sets_its_source_and_honors_only_suspension() {
         },
     };
     let base = CreateIngestor {
+        labels: Default::default(),
         name: named("orders_in"),
         output_routes: ProcessorOutputs::new(vec![ProcessorOutput::new(named("orders"))]),
         input: crate::IngestorInput::Client(ClientProducerIngestor {
@@ -559,6 +565,7 @@ fn client_producer_alter_sets_its_source_and_honors_only_suspension() {
 fn generator_alter_is_ordered_atomic_and_reports_route_errors() {
     let route = ProcessorOutput::new(named("outgoing"));
     let mut generator = CreateGenerator {
+        labels: Default::default(),
         name: named("synth"),
         materialized_relay: named("state"),
         branched_by: BranchSelection::unbranched(),

@@ -113,7 +113,7 @@ fn upload_chunk_bytes() -> Bytes {
 fn each_root_carries_its_own_identifier() {
     let client = client_bytes(&marked_command());
     assert_eq!(&client[4..8], b"NXCM");
-    assert_eq!(&command_reply_bytes()[4..8], b"NXSM");
+    assert_eq!(&command_reply_bytes()[4..8], b"NXEL");
     let start = UploadStart {
         request_id: request(1),
         domain: name("tenant"),
@@ -694,7 +694,7 @@ fn finish_rows<'fbb>(
             body: Some(message.as_union_value()),
         },
     );
-    super::fixtures::finish_raw(builder, root, "NXSM")
+    super::fixtures::finish_raw(builder, root, "NXEL")
 }
 
 #[test]

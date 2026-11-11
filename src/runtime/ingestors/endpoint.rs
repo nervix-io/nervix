@@ -413,6 +413,7 @@ pub(super) mod tests {
         let endpoint = named::<EndpointName>("event_ingress");
         let mut models = vec![
             scheduled_model(Model::Schema(CreateSchema {
+                labels: Default::default(),
                 name: schema.clone(),
                 fields: vec![SchemaField {
                     name: named("user_id"),
@@ -422,6 +423,7 @@ pub(super) mod tests {
                 }],
             })),
             scheduled_model(Model::WireJsonSchema(CreateJsonWireSchema {
+                labels: Default::default(),
                 name: wire_schema,
                 strictness: Default::default(),
                 fields: vec![WireSchemaField {
@@ -431,12 +433,14 @@ pub(super) mod tests {
                 }],
             })),
             scheduled_model(Model::Codec(CreateCodec {
+                labels: Default::default(),
                 name: codec.clone(),
                 wire_format,
                 schema: schema.clone(),
                 encoding_rules: Vec::new(),
             })),
             scheduled_model(Model::Relay(CreateRelay {
+                labels: Default::default(),
                 name: relay.clone(),
                 schema,
                 buffer: nonzero!(2usize),
@@ -444,11 +448,13 @@ pub(super) mod tests {
                 materialized_state: None,
             })),
             scheduled_model(Model::Vhost(CreateVhost {
+                labels: Default::default(),
                 name: vhost.clone(),
                 hostnames: vec!["edge.example.com".to_string()],
                 tls: None,
             })),
             scheduled_model(Model::Endpoint(CreateEndpoint {
+                labels: Default::default(),
                 name: endpoint.clone(),
                 on_vhost: vhost,
                 path: "/events".to_string(),
@@ -457,6 +463,7 @@ pub(super) mod tests {
         ];
         for fixture in ingestors {
             models.push(scheduled_model(Model::Ingestor(CreateIngestor {
+                labels: Default::default(),
                 name: fixture.name.clone(),
                 output_routes: with_inherit_all(ProcessorOutputs::single(relay.clone()))
                     .with_flush_policy(FlushPolicy::Immediate)
@@ -1377,6 +1384,7 @@ pub(super) mod tests {
             start_endpoint_ingestor(runtime, &domain, &ingestor, unfolding_wire_format()).await;
         let subscriber = RelaySubscriptionDefinition::new(
             Arc::new(compile_schema(&CreateSchema {
+                labels: Default::default(),
                 name: named("event"),
                 fields: vec![SchemaField {
                     name: named("user_id"),
