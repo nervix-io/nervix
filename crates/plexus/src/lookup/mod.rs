@@ -1,11 +1,11 @@
 use chumsky::prelude::*;
 use meticulous::OptionExt as _;
-use nervix_models::{CreateLookup, CreateStatement, RequestedResourceVersion};
+use nervix_models::{CodecDirection, CreateLookup, CreateStatement, RequestedResourceVersion};
 
 use crate::{
     lexer::{Identifier, Token},
     parser_support::{
-        LexedInput, ParseError, ParseFromSourceError, codec_ref, field_ref, if_not_exists_clause,
+        LexedInput, ParseError, ParseFromSourceError, codec_for, field_ref, if_not_exists_clause,
         into_parse_error, kw, kw_phrase2, lex_input, lookup_name, resource_ref,
         resource_version_clause, string_lit, suggest_from, tok,
     },
@@ -31,7 +31,7 @@ pub fn create_lookup_parser<'src>() -> impl Parser<
         .then(string_lit())
         .then_ignore(kw(Identifier::Decode))
         .then_ignore(kw(Identifier::Using))
-        .then(codec_ref())
+        .then(codec_for(CodecDirection::Decoding))
         .map(
             |(
                 (((((if_not_exists, name), key_field), resource), resource_version), path),

@@ -1501,8 +1501,8 @@ pub(in crate::application) fn placement_rule_coverage_status(
 
 /// The placement members whose names start with `prefix`, as the placement owner offers them to
 /// the console's member choices: eligible runtime nodes with unambiguous names.
-pub(in crate::application) fn placement_runtime_node_ref_suggestions(
-    models: &[Model<RequestedResourceVersion>],
+pub(in crate::application) fn placement_runtime_node_ref_suggestions<'a>(
+    models: impl IntoIterator<Item = &'a Model<RequestedResourceVersion>>,
     prefix: &str,
 ) -> Vec<String> {
     let prefix = prefix.to_ascii_lowercase();

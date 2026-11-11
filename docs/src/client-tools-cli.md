@@ -256,6 +256,14 @@ and constructions inside `ALTER`. After `metadata.`, an ingestor offers its decl
 fields. Suggestions come from the grammar at the cursor, so a duration or mode position does
 not offer expression functions.
 
+Codec and relay names follow what the statement can accept, by the same rules the web console's
+forms apply to their choices. After `DECODE USING` only codecs that decode are offered, and after
+`ENCODE USING` only codecs that encode. A relay is offered where it agrees with the relays the
+statement has already named: after `CREATE JUNCTION copy FROM readings,` only relays with the
+schema and branch of `readings` are suggested, and a junction's `TO` and `ON MESSAGE ERROR SEND TO`
+offer only relays on that branch. The first relay of a `FROM` list offers every relay, since the
+clauses that would narrow it come after it.
+
 Scripts can request the same candidates with `--suggest 'DROP SCHEMA ord' --cursor 15`.
 The cursor is a UTF-8 byte offset; omitting it selects the end of the input. The CLI prints JSON
 containing a status and each candidate's display value, kind, and exact text edit.

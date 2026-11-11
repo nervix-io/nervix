@@ -211,6 +211,7 @@ use crate::common::{
 mod backup;
 mod branch_repartition;
 mod cli_outcomes;
+mod cli_reference_completion;
 mod cli_repl;
 mod clickhouse_connections;
 mod client_consumers;
@@ -5616,11 +5617,23 @@ async fn when_cli_suggests_for(world: &mut ScenarioWorld, input: String, node: S
         .assured("the scenario input marks its completion cursor");
     input.remove(cursor);
     let node = expand_placeholders(world, &node);
+    let output = cli_suggestions(world, &input, cursor, &node).await;
+    world.last_cli_output = Some(output);
+}
+
+/// Asks the CLI for the completions of `input` at the byte offset `cursor`, through `node` and in
+/// the scenario's domain.
+async fn cli_suggestions(
+    world: &ScenarioWorld,
+    input: &str,
+    cursor: usize,
+    node: &str,
+) -> std::process::Output {
     let grpc_uri = world
         .cluster()
-        .grpc_uri(&node)
+        .grpc_uri(node)
         .assured("the scenario names a cluster node");
-    let output = nervix_primitives::time::timeout(
+    nervix_primitives::time::timeout(
         Duration::from_secs(60),
         tokio::process::Command::new(scenario_cli_binary())
             .kill_on_drop(true)
@@ -5634,7 +5647,7 @@ async fn when_cli_suggests_for(world: &mut ScenarioWorld, input: String, node: S
                 "--password",
                 TEST_AUTH_PASSWORD,
                 "--suggest",
-                &input,
+                input,
                 "--cursor",
                 &cursor.to_string(),
             ])
@@ -5642,8 +5655,30 @@ async fn when_cli_suggests_for(world: &mut ScenarioWorld, input: String, node: S
     )
     .await
     .assured("the CLI suggestion request completes within one minute")
-    .assured("the CLI suggestion process starts");
-    world.last_cli_output = Some(output);
+    .assured("the CLI suggestion process starts")
+}
+
+/// The values of the completions a CLI suggestion request answered `Ready` with.
+fn offered_suggestion_values(output: &std::process::Output) -> BTreeSet<String> {
+    assert!(
+        output.status.success(),
+        "CLI failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let response: serde_json::Value = serde_json::from_slice(&output.stdout)
+        .assured("the successful CLI suggestion mode prints JSON");
+    assert_eq!(response["status"], "Ready");
+    let candidates = response["suggestions"]
+        .as_array()
+        .assured("the CLI suggestion response has an array");
+    let mut offered = BTreeSet::new();
+    for candidate in candidates {
+        let value = candidate["value"]
+            .as_str()
+            .assured("a CLI suggestion carries its value");
+        offered.insert(value.to_string());
+    }
+    offered
 }
 
 #[then(expr = "the CLI suggestion {string} applied to {string} yields {string}")]
@@ -5703,25 +5738,8 @@ fn then_cli_offers_exactly(world: &mut ScenarioWorld, expected: String) {
         .last_cli_output
         .as_ref()
         .verified("the preceding step ran the CLI");
-    assert!(
-        output.status.success(),
-        "CLI failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let response: serde_json::Value = serde_json::from_slice(&output.stdout)
-        .assured("the successful CLI suggestion mode prints JSON");
-    assert_eq!(response["status"], "Ready");
-    let candidates = response["suggestions"]
-        .as_array()
-        .assured("the CLI suggestion response has an array");
-    let mut offered = BTreeSet::new();
-    for candidate in candidates {
-        let value = candidate["value"]
-            .as_str()
-            .assured("a CLI suggestion carries its value");
-        offered.insert(value);
-    }
-    let expected: BTreeSet<&str> = expected.split(", ").collect();
+    let offered = offered_suggestion_values(output);
+    let expected: BTreeSet<String> = expected.split(", ").map(str::to_string).collect();
     assert_eq!(offered, expected);
 }
 

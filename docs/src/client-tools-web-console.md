@@ -290,10 +290,10 @@ attached transaction prefix. An upstream selection or domain change refreshes de
 stale selections must be chosen again before submission. A completed VHOST or endpoint is usable
 immediately by later commands through the same session.
 
-A hash map form selects a resource, a completed version or `LATEST`, a codec, and a key field from
-that codec's output schema. It also requires the file path within the resource. Codec and key
-choices read the captured domain and the attached transaction prefix; changing the codec makes an
-earlier key selection invalid until selected again. A changed resource invalidates its version,
+A hash map form selects a resource, a completed version or `LATEST`, a codec that decodes, and a
+key field from that codec's output schema. It also requires the file path within the resource.
+Codec and key choices read the captured domain and the attached transaction prefix; changing the
+codec makes an earlier key selection invalid until selected again. A changed resource invalidates its version,
 and changing the captured domain invalidates all references while leaving them visible for
 correction. `LATEST` remains unresolved in the draft and canonical command; the server pins it
 when the statement applies. The form shows **Completed** only after the resource file has decoded

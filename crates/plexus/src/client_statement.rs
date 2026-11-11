@@ -1,4 +1,5 @@
 mod expression_completion;
+mod reference_completion;
 
 use std::ops::Range;
 
@@ -512,10 +513,15 @@ impl ClientStatementGrammar {
         let schema = alter_schema_context(&tokens);
         let expression = expression_completion::ExpressionCompletion::new(&tokens);
         let source = expression.ingestor_reference();
+        let references = reference_completion::ReferenceCompletion::new(&tokens, &labels);
         let mut expectations = Vec::new();
         for label in labels {
             if let Some(offers) = expression.expectations(&label) {
                 expectations.extend(offers);
+                continue;
+            }
+            if let Some(expectation) = references.expectation(&label) {
+                expectations.push(expectation);
                 continue;
             }
             if let Some(expectation) =

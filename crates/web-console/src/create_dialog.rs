@@ -1596,8 +1596,9 @@ impl CreateSignals {
                 ChoiceTarget::Vhost,
                 "Select a domain before choosing a VHOST",
             ),
+            // A hash map decodes its resource file, so it offers the codecs that decode.
             ChoiceControl::HashCodec => self.domain_question(
-                ChoiceTarget::Codec,
+                ChoiceTarget::IngestCodec,
                 "Select a domain before choosing a codec",
             ),
             ChoiceControl::HashKey => {
