@@ -66,6 +66,7 @@ pub enum Fault {
     Refuse(ProblemKind),
     Delay(std::time::Duration),
     LoseResponse,
+    CorruptResponseSignature,
     Adopt,
     Tamper(Tamper),
 }
@@ -287,7 +288,7 @@ impl Model {
         if let Some(saved) = self.responses.get(&identity) {
             if saved.digest == digest {
                 return (
-                    response(saved.status, saved.body.clone(), "application/json"),
+                    scripted_response(saved.status, saved.body.clone(), fault.as_ref()),
                     fault,
                 );
             }
@@ -353,7 +354,7 @@ impl Model {
                 body: body.clone(),
             },
         );
-        (response(status, body, "application/json"), fault)
+        (scripted_response(status, body, fault.as_ref()), fault)
     }
 
     fn challenge(&mut self, bytes: &[u8]) -> Response {
@@ -632,20 +633,7 @@ impl Model {
             .sign(&decision, limits())
             .assured("bounded fixture decision signs");
         if matches!(fault, Some(Fault::Tamper(Tamper::Signature))) {
-            let position = compact
-                .rfind('.')
-                .verified("the maintained encoder emitted compact JWS")
-                .checked_add(1)
-                .assured("a bounded document index fits usize");
-            let replacement = if compact.as_bytes()[position] == b'A' {
-                "B"
-            } else {
-                "A"
-            };
-            compact.replace_range(
-                position..position.checked_add(1).assured("bounded signature index"),
-                replacement,
-            );
+            corrupt_signature(&mut compact);
         }
         let mut trust = self.documents.clone();
         if matches!(fault, Some(Fault::Tamper(Tamper::RevokedKey))) {
@@ -807,6 +795,33 @@ fn default_plan() -> Conditions {
         ConditionValue::Known(vec![ActivationKind::Persistent, ActivationKind::Ephemeral]),
     );
     plan
+}
+
+fn corrupt_signature(compact: &mut String) {
+    let position = compact
+        .rfind('.')
+        .verified("the maintained encoder emitted compact JWS")
+        .checked_add(1)
+        .assured("a bounded document index fits usize");
+    let replacement = if compact.as_bytes()[position] == b'A' {
+        "B"
+    } else {
+        "A"
+    };
+    compact.replace_range(
+        position..position.checked_add(1).assured("bounded signature index"),
+        replacement,
+    );
+}
+
+fn scripted_response(status: u16, mut body: Vec<u8>, fault: Option<&Fault>) -> Response {
+    if let Some(Fault::CorruptResponseSignature) = fault {
+        let mut answer: DecisionResponse =
+            serde_json::from_slice(&body).assured("saved typed decision response");
+        corrupt_signature(&mut answer.decision);
+        body = serde_json::to_vec(&answer).assured("corrupted typed decision serializes");
+    }
+    response(status, body, "application/json")
 }
 
 fn response(status: u16, body: Vec<u8>, content_type: &'static str) -> Response {

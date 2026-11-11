@@ -92,7 +92,7 @@ Feature: Cluster licensing key rotation
     And a <cluster_size> node nervix cluster is started
     When a persistent license is activated through the running quorum
     Then the committed license decision is saved as placeholder "before_rotation"
-    Given the next licensing response has "signature" tampering
+    Given the next licensing response has its signature corrupted in transit
     When these Plexus commands are executed on the leader node
       """
       ROTATE LICENSE CLUSTER KEY;

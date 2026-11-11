@@ -598,6 +598,18 @@ async fn newer_decision(world: &mut ScenarioWorld, name: String) {
     );
 }
 
+#[given("the next licensing response has its signature corrupted in transit")]
+async fn corrupt_response_signature(world: &mut ScenarioWorld) {
+    world
+        .licensing_service
+        .as_ref()
+        .verified("fixture started")
+        .configure(|model| {
+            model.script(nervix_licensing_test_service::Fault::CorruptResponseSignature)
+        })
+        .await;
+}
+
 #[given(expr = "the next licensing response has {string} tampering")]
 async fn tamper_response(world: &mut ScenarioWorld, name: String) {
     use nervix_licensing_test_service::{Fault, Tamper};
