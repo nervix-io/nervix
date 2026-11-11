@@ -47,6 +47,7 @@ pub fn statement_parser<'src>()
         crate::describe_stream::describe_stream_parser().map(Statement::DescribeRelay),
         crate::describe_window_processor::describe_window_processor_parser()
             .map(Statement::DescribeWindowProcessor),
+        crate::describe_inferencer::describe_inferencer_parser().map(Statement::DescribeInferencer),
         crate::lookup_query::lookup_query_parser().map(Statement::LookupQuery),
         crate::generator::create_generator_parser()
             .map(|create| Statement::Create(create.map_body(Model::Generator).map_body(Box::new))),
