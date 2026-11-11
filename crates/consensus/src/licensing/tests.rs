@@ -217,12 +217,12 @@ fn generated_committed_transitions(arbitrary: &mut Arbitrary<'_>) -> CommittedLi
     let mut committed = CommittedLicenseTransitions::default();
     for transition in generated_transitions(arbitrary) {
         if arbitrary.entropy().flag() {
-            committed = committed
-                .acknowledge(
-                    &[transition],
-                    nervix_licensing_protocol::test_fixture::limits(),
-                )
-                .assured("bounded generated acknowledgement");
+            committed = CommittedLicenseTransitions::acknowledge(
+                Some(committed),
+                &[transition],
+                nervix_licensing_protocol::test_fixture::limits(),
+            )
+            .assured("bounded generated acknowledgement");
         } else {
             let until = if arbitrary.entropy().flag() {
                 Some(arbitrary.timestamp())

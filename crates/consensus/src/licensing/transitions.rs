@@ -133,16 +133,17 @@ impl CommittedLicenseTransitions {
     }
 
     pub(super) fn acknowledge(
-        mut self,
+        held: Option<Self>,
         signed: &[Transition],
         limits: DocumentLimits,
     ) -> error_stack::Result<Self, LicenseDecisionError> {
+        let mut committed = held.unwrap_or_default();
         for transition in signed {
-            let replacement_nodes = self
+            let replacement_nodes = committed
                 .0
                 .get(&transition.transition_id)
                 .and_then(|entry| entry.replacement_nodes.clone());
-            self.0.insert(
+            committed.0.insert(
                 transition.transition_id,
                 CommittedTransition {
                     transition: transition.clone(),
@@ -151,7 +152,7 @@ impl CommittedLicenseTransitions {
                 },
             );
         }
-        self.bounded(limits)
+        committed.bounded(limits)
     }
 
     fn improve(

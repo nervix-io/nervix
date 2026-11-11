@@ -506,12 +506,11 @@ impl LicensingRecord {
                 return Err(Report::new(LicenseDecisionError::StaleDecision));
             }
         }
-        let held_transitions = match previous {
-            Some(activation) => activation.transitions.clone(),
-            None => super::CommittedLicenseTransitions::default(),
-        };
-        let transitions =
-            held_transitions.acknowledge(&decision.transitions, environment.limits())?;
+        let transitions = super::CommittedLicenseTransitions::acknowledge(
+            previous.map(|activation| activation.transitions.clone()),
+            &decision.transitions,
+            environment.limits(),
+        )?;
         let decision = received.stored(decision, operation)?;
         let time = self
             .licensing_time
