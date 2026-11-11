@@ -13,7 +13,7 @@
 
 use std::num::NonZeroU64;
 
-use meticulous::ResultExt as _;
+use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_client_wire::{
     BackupDownloadMessage, CommandDisposition, CommandOutcome, DomainClockAttachDisposition,
     DomainClockAttachOutcome, LeaderRedirect, Leadership, LeadershipObserved, NodeEndpoints,
