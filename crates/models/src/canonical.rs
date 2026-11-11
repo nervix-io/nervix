@@ -934,6 +934,9 @@ impl Statement {
             Self::DescribeReorderer(describe) => {
                 Ok(format!("DESCRIBE REORDERER {};", describe.name.as_str()))
             }
+            Self::DescribeInferencer(describe) => {
+                Ok(format!("DESCRIBE INFERENCER {};", describe.name.as_str()))
+            }
             Self::DescribeEmitter(describe) => {
                 Ok(format!("DESCRIBE EMITTER {};", describe.name.as_str()))
             }

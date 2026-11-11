@@ -1966,6 +1966,14 @@ impl Application {
             .change_context(AppError::RegisterInterconnectRequestHandler)?;
 
         let describe_snapshot_service = service.clone();
+        let describe_inferencer_service = service.clone();
+        interconnect
+            .register_handler::<nervix_interconnect::DescribeInferencerRequest, _, _>(move |_context, request| {
+                let service = describe_inferencer_service.clone();
+                async move { service.handle_describe_inferencer_request(request).await }
+            })
+            .change_context(AppError::RegisterInterconnectRequestHandler)?;
+
         interconnect
             .register_handler::<DescribeStateSnapshot, _, _>(move |_context, request| {
                 let service = describe_snapshot_service.clone();

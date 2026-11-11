@@ -523,7 +523,8 @@ expression-only SQS FIFO groups. The dedicated database owns exactly four curren
 reading any records. The committed cluster-parameter record stores ordered typed TLS cipher
 suites and key-exchange groups; recovery validates their complete pair before returning that
 record. This namespace identifies the current Model shape, including the statement
-layout of the transactions it keeps, with `SHOW WASM PROCESSOR ... STATE` among the reads and a
+layout of the transactions it keeps, with `DESCRIBE INFERENCER` and
+`SHOW WASM PROCESSOR ... STATE` among the reads and a
 `DESCRIBE WASM PROCESSOR` that names only its processor, the separate JSON
 and CBOR wire type enums (CBOR has six types), AVRO representation types whose arrays declare their item type, explicit `BASE64` codec encoding, a Pulsar
 subscription's required type, an owned Pulsar subscription's required start position, a Kafka
@@ -539,13 +540,13 @@ whose signaling data exists only on its WebSockets variant, the branch partition
 resolved branch declaration of the committed schedule carries, and the partition epoch the
 committed schedule records for every branch whose count changed. It identifies
 the current statement shape as well, which the statements a transaction keeps are stored in:
-`ALTER BRANCH` among those statements, an `ALTER INGESTOR` or `ALTER EMITTER` operation that
+`ALTER BRANCH` and `DESCRIBE INFERENCER` among those statements, an `ALTER INGESTOR` or `ALTER EMITTER` operation that
 changes one part of its entity's body, an envelope clause or the properties, or one part of a
 construction where it stands, including the typed `payload` expression scope and a
 `RESET WASM PROCESSOR ... STATE` that names its processor and scope and takes its domain from
 the transaction, as the step effect and commit plan step keep it too. The database also stores
 incarnation-bound node capability claims under record-family tag `C`, including transport, DNS, database, consensus, engine and connector host capacities. Its state metadata
-requires the current `ClusterState` encoding, 32, including the cluster identity reference,
+requires the current `ClusterState` encoding, 33, including the cluster identity reference,
 committed cluster parameters, the durable restore installation gate and the unit-keyed committed
 schedule in which a relay of a partitioned branch is scheduled as one unit per partition.
 The current shape also requires inferencer state bindings and their initial expressions,

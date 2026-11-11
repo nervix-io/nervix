@@ -78,7 +78,7 @@ The complete cluster-parameter record uses each declaration's validated inline s
 entity-label limits retain their full 64-bit range. The direct parameter property compares complete
 archive and JSON round trips; consensus state and log properties recover every field through their
 production storage codecs. The
-`raft_entity_policy_` namespace and `ClusterState` encoding 32 identify this current archive layout.
+`raft_entity_policy_` namespace and `ClusterState` encoding 33 identify this current archive layout.
 
 `RESET WASM PROCESSOR ... STATE` statement generators draw a processor and an unbranched,
 all-branches or concrete-branch scope; the statement takes its domain from the transaction that
@@ -167,6 +167,11 @@ boundaries. Scheduled Models, commit-plan transitions and queued statements also
 through `consensus-state-records`, `consensus-state-corruption` and `consensus-raft-records`.
 The Iceberg namespace and table Model recipe reaches those same consensus consumers through
 schedules, commit-plan transitions and queued statements; their domains advance with it too.
+The current `DESCRIBE INFERENCER` Statement variant is included in the canonical statement and
+formatter generators. Its archived discriminant layout is fenced by the current consensus
+namespace and state encoding; state, corruption and Raft-record domains advance together. The
+separate `inferencer-describe-envelope` target covers the typed observation request and complete
+success/refusal reply through the bounded interconnect codec, plus summary JSON equality.
 Their domain versions and case/input budgets are listed in the
 [target register](../docs/src/property-testing-and-fuzzing.md#target-and-representation-register).
 

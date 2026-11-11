@@ -37,14 +37,14 @@ use crate::{
     CreateClientWebsockets, CreateClientZeroMq, CreateCorrelator, CreateDeduplicator,
     CreateEmitter, CreateInferencer, CreateJsonWireSchema, CreateJunction, CreatePlacement,
     CreateReingestor, CreateReorderer, CreateSchema, CreateUdf, CreateWasmProcessor,
-    CreateWindowProcessor, DeduplicatorName, DomainClockPeriod, DomainClockSkew, DomainClockState,
-    DomainName, DomainTimeRate, EmitterName, EndpointName, FieldName, GeneratorName,
-    IngestQuiesceMode, IngestorName, JsonType, JunctionName, LookupName, ModelName, NodeRef,
-    PlacementName, ProcessorOutput, ProcessorOutputs, RebindResource, ReingestorName, RelayName,
-    ReordererName, RequestedResourceVersion, ResetWasmState, ResourceName, Restore, SchemaName,
-    ShowWasmProcessorState, SignalingProtocolName, SubscriptionName, Timestamp,
-    TransactionInspectionRequest, UdfName, Unit, UserName, VhostName, WasmProcessorName,
-    WindowProcessorName, WireSchemaName,
+    CreateWindowProcessor, DeduplicatorName, DescribeInferencer, DescribeWasmProcessor,
+    DomainClockPeriod, DomainClockSkew, DomainClockState, DomainName, DomainTimeRate, EmitterName,
+    EndpointName, FieldName, GeneratorName, IngestQuiesceMode, IngestorName, JsonType,
+    JunctionName, LookupName, ModelName, NodeRef, PlacementName, ProcessorOutput, ProcessorOutputs,
+    RebindResource, ReingestorName, RelayName, ReordererName, RequestedResourceVersion,
+    ResetWasmState, ResourceName, Restore, SchemaName, ShowWasmProcessorState,
+    SignalingProtocolName, SubscriptionName, Timestamp, TransactionInspectionRequest, UdfName,
+    Unit, UserName, VhostName, WindowProcessorName, WireSchemaName,
 };
 
 #[derive(
@@ -100,6 +100,7 @@ pub enum Statement {
     DescribeReorderer(DescribeReorderer),
     DescribeEmitter(DescribeEmitter),
     DescribeWindowProcessor(DescribeWindowProcessor),
+    DescribeInferencer(DescribeInferencer),
     DescribeWasmProcessor(DescribeWasmProcessor),
     DescribeUdf(DescribeUdf),
     DescribePlacement(DescribePlacement),
@@ -188,6 +189,7 @@ impl Statement {
             | Self::DescribeReorderer(_)
             | Self::DescribeEmitter(_)
             | Self::DescribeWindowProcessor(_)
+            | Self::DescribeInferencer(_)
             | Self::DescribeWasmProcessor(_)
             | Self::DescribeUdf(_)
             | Self::DescribePlacement(_)
@@ -1078,13 +1080,6 @@ pub struct DescribeEmitter {
 )]
 pub struct DescribeWindowProcessor {
     pub name: WindowProcessorName,
-}
-
-#[derive(
-    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
-)]
-pub struct DescribeWasmProcessor {
-    pub name: WasmProcessorName,
 }
 
 #[derive(

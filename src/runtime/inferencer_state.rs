@@ -96,9 +96,16 @@ impl ReplicatedInferencerState {
         &self,
         prepared: &PreparedStatefulInference,
         incarnation: u64,
+        metrics: crate::metrics::InferencerStateMetrics,
     ) -> StatefulInferenceSession {
-        let mut session = prepared.instantiate();
+        let mut session =
+            prepared.instantiate(metrics.track_branch(prepared.state.bytes_per_branch));
         let published = self.generations.load();
+        let restored = published
+            .value
+            .as_ref()
+            .is_some_and(|value| value.incarnation == incarnation);
+        metrics.initialized(restored);
         if let Some(value) = &published.value {
             if value.incarnation == incarnation {
                 session.restore_generation(value.generation.clone());

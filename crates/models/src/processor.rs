@@ -277,6 +277,13 @@ impl CreateReingestor {
 #[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
+pub struct DescribeInferencer {
+    pub name: InferencerName,
+}
+
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct CreateInferencer<Version = u64> {
     pub labels: crate::EntityLabels,
     pub name: InferencerName,
@@ -403,6 +410,13 @@ pub struct InferencerStateBinding {
 pub enum InferencerStateInitial {
     Zeros,
     Constant(crate::Expression),
+}
+
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
+pub struct DescribeWasmProcessor {
+    pub name: WasmProcessorName,
 }
 
 #[derive(
