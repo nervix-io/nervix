@@ -50,6 +50,99 @@ without a committed capability record receives no placements. If an advertised b
 a peer can refuse an operation with a typed answer so the sender slices it again while retaining
 the row acknowledgement accounting.
 
+## Listener Bounds
+
+Listener settings are local node capabilities. Startup logs the resolved values, and each node's
+committed `DESCRIBE CLUSTER` capability line includes the complete `listeners` record. Changing a
+flag requires restarting that node; it does not change Plexus or the cluster's graph definitions.
+Each public listener enforces its own connection ceiling, independently of placement and leadership.
+
+| Option | Default | Applies to |
+| --- | --- | --- |
+| `--listener-max-connections` | 1,024 | Each public TCP listener, including upgraded WebSockets and TLS handshakes |
+| `--listener-header-bytes` | 16 KiB | HTTP/1 request head and chunked trailers |
+| `--listener-buffer-bytes` | 408 KiB | HTTP/1 read buffer; minimum 8 KiB |
+| `--listener-header-timeout` | 30 s | Complete HTTP/1 request head |
+| `--listener-tls-timeout` | 10 s | HTTPS, console TLS and gRPC TLS handshake |
+| `--listener-idle-timeout` | 60 s | Accepted public I/O without read or write byte progress |
+| `--listener-accept-retry-delay` | 100 ms | Public and interconnect accepts after a node-local failure |
+| `--listener-http-keepalive` | true | HTTP/1 connection reuse |
+| `--http-body-bytes` | 32 MiB | Complete HTTP endpoint payload, including chunked input |
+| `--http-body-copy-bytes` | 64 KiB | Body assembly bytes between cancellation checks |
+| `--http-body-timeout` | 30 s | Complete HTTP input, including bounded assembly |
+| `--http-refusal-drain-timeout` | 5 s | Transport drain after a completed HTTP input refusal |
+| `--websocket-message-bytes` | 64 MiB | Ingest endpoint WebSocket message |
+| `--websocket-frame-bytes` | 16 MiB | Ingest endpoint WebSocket frame |
+| `--grpc-header-bytes` | 16 KiB | HTTP/2 header list |
+| `--grpc-concurrency` | 128 | Concurrent request handlers per gRPC connection |
+| `--grpc-request-timeout` | 120 s | gRPC handler response deadline; an established streaming response keeps its lifetime |
+| `--grpc-max-streams` | 256 | HTTP/2 streams per gRPC connection |
+| `--grpc-keepalive-interval` | 30 s | HTTP/2 server ping interval |
+| `--grpc-keepalive-timeout` | 20 s | HTTP/2 ping acknowledgement budget |
+| `--listener-tcp-keepalive-time` | 60 s | Kernel TCP keepalive idle time |
+| `--listener-tcp-keepalive-interval` | 10 s | Kernel keepalive probe interval |
+| `--listener-tcp-keepalive-retries` | 3 | Kernel unanswered probe count |
+
+Every option has the environment form `NERVIX_` followed by its uppercase name with underscores,
+for example `NERVIX_LISTENER_MAX_CONNECTIONS` and `NERVIX_HTTP_BODY_BYTES`. Counts and byte limits
+are positive and must fit their native protocol/admission representation. Deadlines are positive
+and representable by the monotonic clock. Kernel keepalive durations are whole seconds from 1
+through 32,767; the probe count is from 1 through 127, matching the native socket-option ranges.
+The HTTP/1 header default preserves the transport's 16 KiB trailer ceiling. Request heads also
+fit the configured read-buffer capacity.
+The startup preflight requires the intake pool to hold two body limits plus the declared initial
+read scratch and collection metadata. An explicit inconsistent pair refuses startup before stores
+or listeners open.
+
+Read and write progress both renew idle time. A WebSocket upgrade retains the accepted socket's
+lease and deadline. Connection tasks are reaped while the listener runs; shutdown retains its
+existing admission, grace and terminal-cut order. HTTP listeners keep one bounded refusal
+slot alongside accepts, in addition to admitted connections. At capacity, cleartext HTTP returns 503 with reason
+`listener_connection_capacity` through the same bounded HTTP parser. Receiving its request and
+writing the refusal share one header-timeout budget; its completed transport uses the same bounded
+refusal drain described below. While
+that slot is occupied, further excess connections close without a protocol exchange, and newly
+available admission capacity remains usable. A TLS or gRPC connection is closed before protocol
+admission.
+
+HTTP endpoint bodies use the independent `intake` executor memory class. It accounts retained
+transport backing buffers and collection metadata conservatively, as well as the copy overlap when
+several frames are concatenated. Input contention refuses immediately with 503; it never holds
+relay decode capacity while waiting for relay work. A single data frame keeps its existing shared
+byte buffer. Multi-frame assembly runs through the data CPU class with cancellation checks between
+bounded copies, and the reservation follows the worker and final body until dispatch ends.
+Size is a payload limit; highly fragmented bodies may exhaust the memory ceiling before that size.
+
+The endpoint's public input outcomes are:
+
+| Status | Reason | Meaning |
+| --- | --- | --- |
+| 413 | `http_body_capacity` | The declared length or accumulated chunked payload exceeds the cap |
+| 408 | `http_body_timeout` | The complete body did not arrive by its deadline |
+| 431 | HTTP header capacity | Hyper refuses an oversized request head and closes the connection |
+| 503 | `http_input_memory_capacity` | The intake pool cannot back retained input |
+| 503 | `http_input_worker_capacity` | Accounted body assembly cannot be admitted, expires or finishes cancelled |
+| 400 | `http_body_invalid` | Malformed or interrupted HTTP body framing, including oversized chunked trailers |
+
+The HTTP input completion budget distinguishes phases: expiry while receiving bytes returns 408;
+expiry while the server waits for or performs accounted body assembly returns 503. Assembly
+retains its reservation until the worker actually exits after cancellation.
+
+Input refusals admit no payload to the graph. Hyper completes the response and closes its write
+side before a bounded transport drain discards residual bytes, so an ongoing upload cannot reset
+the connection before its client reads the refusal. The drain reuses the declared read-buffer
+capacity, retains the connection lease, and ends at peer closure, shutdown or
+`http-refusal-drain-timeout`. It does not parse HTTP or decode payloads; this follows the staged
+transport closure in [RFC 9112 §9.6](https://www.rfc-editor.org/rfc/rfc9112.html#section-9.6).
+An unfinished request
+head is closed at its header deadline; it is distinct from the body's 408 response. Existing route,
+quiesce and acknowledgement outcomes retain their own contracts.
+
+Connection-local accept failures retry immediately. A node-local failure such as descriptor
+exhaustion reports the failure and waits the declared accept retry delay before trying again.
+Closing admission cancels that wait. The pause survives a listener future being temporarily dropped
+while its owner reaps another completed connection.
+
 ## Committed Node Capabilities
 
 `--cpu-count` (`NERVIX_CPU_COUNT`) overrides the process's cgroup-aware available parallelism.
@@ -436,7 +529,7 @@ Each refusal names the setting or directory it judged, with the values involved:
 
 | Check | Refusal |
 | --- | --- |
-| Memory budgets | `the execution memory budgets of 101.25MiB exceed node memory 32MiB` |
+| Memory budgets | `the execution memory budgets of 229.25MiB exceed node memory 32MiB` |
 | Memory watermark | `memory-high-watermark (4GiB) exceeds memory-limit (3GiB)` |
 | Directories | `the database directory <path> cannot be created`, `the temporary directory <path> is not writable` |
 | Volumes | `the capacity of the volume holding the database directory <path> cannot be read` |
@@ -494,6 +587,7 @@ Each pool has `--execution-<pool>-memory-bytes`. With known memory, defaults are
 
 | Pool | Memory fraction | Minimum working set |
 | --- | --- | --- |
+| `intake` | 1/16 | 128 MiB |
 | `management` | 1/128 | 64 KiB |
 | `commands` | 1/32 | 24 MiB |
 | `relay` | 1/16 | Enough for its two admitted operations |
@@ -505,7 +599,7 @@ Each pool has `--execution-<pool>-memory-bytes`. With known memory, defaults are
 | `credentials` | 1/256 | 19 MiB |
 
 Derived pools are capped at the 32-bit byte-permit representation. Explicit values are never
-silently reduced. With unknown memory, defaults are respectively 8, 24, 192, 192, 192, 32, 16,
+silently reduced. With unknown memory, defaults are respectively 128, 8, 24, 192, 192, 192, 32, 16,
 2,048 and 19 MiB. Credentials keeps room for mounted NATS files; PBKDF2's operation charge stays
 64 bytes and its creation policy remains the committed `PASSWORD_ITERATIONS` parameter.
 
@@ -520,8 +614,8 @@ still apply. Peer receive limits derive from these final limits before transport
 `--client-producer-node-bytes` and `--client-consumer-node-bytes` each default to 1/32 of node
 memory, holding at least the default 32 MiB session window, or 128 MiB with unknown memory.
 They reserve node admission independently; committed per-session limits keep their own policy.
-The full startup total counts both capacities as well as all nine executor pools. A 1 GiB node
-uses 427 MiB of executor ceilings plus 64 MiB of node client credit, 491 MiB in total. These are
+The full startup total counts both capacities as well as all ten executor pools. A 1 GiB node
+uses 555 MiB of executor ceilings plus 64 MiB of node client credit, 619 MiB in total. These are
 ceilings, not eagerly allocated buffers; graph state, engines and thread stacks need additional
 headroom. Explicit totals that exceed known memory refuse startup.
 
