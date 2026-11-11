@@ -101,6 +101,7 @@ impl TaskHandleBenchmark {
                 start_version: 0,
                 last_start: DomainStartPoint::Resume,
                 clock: None,
+                stop_cause: None,
             },
         )]);
         let authority = nervix_models::DomainClockAuthority::assigned(

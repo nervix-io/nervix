@@ -494,6 +494,10 @@ the same fingerprint as every other consensus and prerequisite shape.
 
 The current fingerprint also fences signed licensing activation and decision commands, retained trust documents, committed licensing time and transaction refusals projected without executable Models. These consensus request and snapshot shapes share the contract with emitter instance identities.
 
+It also fences the licensing stop gate: the stop cause a `StopDomain` command carries and a domain
+record retains, the typed `LicensingStop` refusal of a change that would run a domain, the
+transaction refusal of a `START` step under the gate, and the `stopped` admission refusal state.
+
 All nodes in a running cluster use one current wire contract. A fixed fingerprint covers the set of
 supported operations and their encoded shapes. It is one of the prerequisites every hello carries,
 so a node whose fingerprint differs is refused at join as a wire-contract mismatch, and a hello of

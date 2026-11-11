@@ -137,6 +137,7 @@ impl TransactionCommitAdmissionPlan {
                     Report::new(TransactionCommitPlanBuildError::MissingDomainState { operation })
                 })?;
                 domain.status = DomainStatus::Running;
+                domain.stop_cause = None;
                 domain.start_version = domain.start_version.checked_add(1).ok_or_else(|| {
                     Report::new(
                         TransactionCommitPlanBuildError::DomainStartGenerationOverflow {
@@ -154,8 +155,8 @@ impl TransactionCommitAdmissionPlan {
                 let mut domain = inputs.state().cloned().ok_or_else(|| {
                     Report::new(TransactionCommitPlanBuildError::MissingDomainState { operation })
                 })?;
-                domain.status = DomainStatus::Stopped;
-                domain.clock = None;
+                // A transaction's STOP step commits the operator's cause.
+                domain.record_stop(nervix_models::DomainStopCause::Operator);
                 let schedule = inputs.schedule().cloned();
                 Ok(inputs.after_domain_update(domain, schedule))
             }
@@ -555,6 +556,7 @@ pub(crate) fn assert_count_archives(count: usize) {
 
 #[cfg(test)]
 mod tests {
+    use meticulous::OptionExt as _;
     use nervix_models::{DomainName, ResourceName};
 
     use super::*;
@@ -633,6 +635,62 @@ mod tests {
         assert_eq!(
             error.current_context(),
             &TransactionCommitPlanReadError::MissingHeader
+        );
+    }
+
+    /// Each step's admitted inputs must equal what the steps before it commit, or the step is
+    /// refused at commit as changed planning inputs. A STOP step commits the operator's cause and
+    /// the START after it clears it again.
+    #[test]
+    fn planned_stop_and_start_steps_expect_the_domain_record_their_commits_leave() {
+        let domain =
+            DomainName::parse("tenant").assured("the test domain is an identifier-shaped literal");
+        let mut committed = StateMachineData::default();
+        committed
+            .domains
+            .insert(domain.clone(), crate::tests::running_domain_state("tenant"));
+        let mut decision = test_commit_plan("tx", 2);
+        let resolved = nervix_models::TransactionResolvedDomainStart {
+            start: nervix_models::DomainStartPoint::Resume,
+            clock: None,
+            authority: None,
+        };
+        decision.steps[0].kind = TransactionCommitStepKind::StopDomain;
+        decision.steps[1].kind = TransactionCommitStepKind::StartDomain {
+            resolved: resolved.clone(),
+        };
+
+        let after_stop = TransactionCommitAdmissionPlan::after_step(
+            committed.domain_planning_inputs(&domain),
+            &decision.steps[0],
+        )
+        .assured("the running test domain has a record to stop");
+        assert!(committed.commit_domain_stop(&domain, nervix_models::DomainStopCause::Operator));
+        assert_eq!(after_stop, committed.domain_planning_inputs(&domain));
+        assert_eq!(
+            after_stop
+                .state()
+                .assured("the stopped test domain keeps its record")
+                .stop_cause,
+            Some(nervix_models::DomainStopCause::Operator)
+        );
+
+        let after_start =
+            TransactionCommitAdmissionPlan::after_step(after_stop, &decision.steps[1])
+                .assured("the stopped test domain has a record to start");
+        assert!(committed.commit_domain_start(
+            &domain,
+            &resolved.start,
+            &resolved.clock,
+            &resolved.authority
+        ));
+        assert_eq!(after_start, committed.domain_planning_inputs(&domain));
+        assert_eq!(
+            after_start
+                .state()
+                .assured("the started test domain keeps its record")
+                .stop_cause,
+            None
         );
     }
 }

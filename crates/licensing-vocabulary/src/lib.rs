@@ -257,12 +257,15 @@ mod tests {
 pub enum AdmissionState {
     OverLimit,
     Lapsed,
+    /// The licensing stop gate is closed: no new usage of any quota is admitted.
+    Stopped,
 }
 impl AdmissionState {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::OverLimit => "over_limit",
             Self::Lapsed => "lapsed",
+            Self::Stopped => "stopped",
         }
     }
 }

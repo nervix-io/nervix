@@ -84,6 +84,14 @@ impl StateMachineData {
                 );
             }
         }
+        if self
+            .domains
+            .get(domain)
+            .is_some_and(|state| state.status == DomainStatus::Paused)
+            && let Some(reason) = self.licensing_stop()
+        {
+            return AppliedConsensusCommand::conflict(ConsensusConflict::LicensingStop { reason });
+        }
         let mut changes = StateMachineChanges::default();
         let recovery = if let Some(state) = self.domains.get_mut(domain)
             && let DomainStatus::Paused = state.status

@@ -23,7 +23,10 @@ async fn bytes(response: Response) -> Vec<u8> {
 }
 
 async fn common(model: &mut Model) -> RequestCommon {
-    let cluster_uid = id();
+    common_for(model, id()).await
+}
+
+async fn common_for(model: &mut Model, cluster_uid: Uuid) -> RequestCommon {
     let response = model.challenge(
         &serde_json::to_vec(&ChallengeRequest { cluster_uid })
             .assured("challenge request serializes"),
@@ -176,6 +179,111 @@ async fn a_signed_tampering_script_is_distinct_from_a_broken_signature() {
             _ => unreachable!(),
         }
     }
+}
+
+#[nervix_primitives::test]
+async fn an_expired_ephemeral_activation_releases_its_cluster_and_its_capacity() {
+    let mut model = fixture();
+    let mut plan = model.conditions();
+    plan.operating.quotas.insert(
+        EPHEMERAL_ACTIVATIONS.to_owned(),
+        ConditionValue::Known(Quota::Bounded { value: 1 }),
+    );
+    model.plan(plan);
+    let cluster = signer().assured("cluster signer");
+    let expired_cluster = id();
+    async fn create(
+        model: &mut Model,
+        cluster: &DocumentSigner,
+        cluster_uid: Uuid,
+    ) -> (u16, Vec<u8>) {
+        let request = Request::Create {
+            common: common_for(model, cluster_uid).await,
+            license_key: model.license_key.clone(),
+            kind: ActivationKind::Ephemeral,
+            cluster_key: cluster.public_key().clone(),
+        };
+        let compact = cluster.sign(&request, limits()).assured("signed creation");
+        let (response, _) = model.answer("/v1/activations", compact.as_bytes());
+        let status = response.status().as_u16();
+        (status, bytes(response).await)
+    }
+    let code = |body: &[u8]| {
+        serde_json::from_slice::<ProblemDetails>(body)
+            .assured("a typed problem")
+            .kind
+    };
+
+    let (status, body) = create(&mut model, &cluster, expired_cluster).await;
+    assert_eq!(status, 201);
+    let first: DecisionResponse = serde_json::from_slice(&body).assured("service response");
+    let first = TrustState::build(&model.bundle, &first.trust, limits())
+        .assured("real trust chain")
+        .verify_decision(&first.decision, DecisionVerification::Apply, limits())
+        .assured("real working-key signature")
+        .decision()
+        .activation
+        .clone();
+    let expires_at = first
+        .ephemeral_expires_at
+        .verified("an ephemeral activation carries its expiry");
+    let (_, body) = create(&mut model, &cluster, expired_cluster).await;
+    assert!(matches!(code(&body), ProblemKind::AlreadyActivated { .. }));
+    let (_, body) = create(&mut model, &cluster, id()).await;
+    assert_eq!(code(&body), ProblemKind::QuotaExhausted);
+    assert_eq!(model.activation_expired(first.activation_id), Some(false));
+
+    model.set_time(expires_at);
+    assert_eq!(model.activation_expired(first.activation_id), Some(true));
+    assert_eq!(model.occupied_activations(ActivationKind::Ephemeral), 0);
+    // A refresh answers status expired, and its emptied usage takes the activation's next
+    // conditions revision, so the cluster can order it after the decision it holds.
+    let mut refreshed = Vec::new();
+    for _ in 0..2 {
+        let request = Request::Refresh {
+            common: common_for(&mut model, expired_cluster).await,
+            activation_id: first.activation_id,
+            state: RefreshState::Adoption,
+            transitions: Vec::new(),
+        };
+        let compact = cluster.sign(&request, limits()).assured("signed refresh");
+        let path = format!("/v1/activations/{}/refresh", first.activation_id);
+        let (response, _) = model.answer(&path, compact.as_bytes());
+        assert_eq!(response.status().as_u16(), 200);
+        let response: DecisionResponse =
+            serde_json::from_slice(&bytes(response).await).assured("service response");
+        let decision = TrustState::build(&model.bundle, &response.trust, limits())
+            .assured("real trust chain")
+            .verify_decision(&response.decision, DecisionVerification::Apply, limits())
+            .assured("real working-key signature")
+            .decision()
+            .clone();
+        assert_eq!(decision.status, DecisionStatus::Expired);
+        assert!(decision.conditions.usage.quotas.is_empty());
+        refreshed.push(decision.conditions.conditions_revision);
+    }
+    let expired_revision = model
+        .conditions_revision
+        .checked_add(1)
+        .assured("the fixture's conditions revision is small");
+    assert_eq!(
+        refreshed,
+        vec![expired_revision, expired_revision],
+        "the expired conditions take the next revision once and keep it"
+    );
+    let (status, body) = create(&mut model, &cluster, expired_cluster).await;
+    assert_eq!(status, 201, "the expired cluster activates again");
+    let second: DecisionResponse = serde_json::from_slice(&body).assured("service response");
+    let second = TrustState::build(&model.bundle, &second.trust, limits())
+        .assured("real trust chain")
+        .verify_decision(&second.decision, DecisionVerification::Apply, limits())
+        .assured("real working-key signature")
+        .decision()
+        .activation
+        .clone();
+    assert_ne!(second.activation_id, first.activation_id);
+    assert!(second.ephemeral_expires_at > Some(expires_at));
+    assert_eq!(model.occupied_activations(ActivationKind::Ephemeral), 1);
 }
 
 #[nervix_primitives::test]

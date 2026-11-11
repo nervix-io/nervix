@@ -13,9 +13,9 @@ use nervix_models::{
     BranchKeyFingerprint, ClusterNodeIdentity, ClusterNodeIncarnation, ClusterNodeName,
     CommandExecutionReference, DomainClockAuthority, DomainClockAuthorityRevision,
     DomainClockState, DomainConfig, DomainName, DomainPace, DomainSchedule, DomainStartPoint,
-    DomainState, DomainStatus, KafkaPartitionSchedule, Model, ModelName, NodeRef,
-    OwnershipStateComponent, OwnershipStateRecoveryOutcome, OwnershipStateReset,
-    OwnershipStateResetCause, OwnershipTransition, PlacementGroupSchedule,
+    DomainState, DomainStatus, DomainStopCause, KafkaPartitionSchedule, LicensingStopReason, Model,
+    ModelName, NodeRef, OwnershipStateComponent, OwnershipStateRecoveryOutcome,
+    OwnershipStateReset, OwnershipStateResetCause, OwnershipTransition, PlacementGroupSchedule,
     RequestedResourceVersion, ResolvedBranching, ResourceId, ResourceNodeState, ResourceNodeStatus,
     ResourceReplicaKey, ResourceUpload, ResourceUploadIdentity, ResourceUploadKey,
     ResourceUploadState, ResourceVersion, RestoreStateAuthority, ScheduledNode, SchemaFingerprint,
@@ -577,6 +577,11 @@ impl Arbitrary<'_> {
         } else {
             None
         };
+        // Only a committed stop records a cause, and a start clears it.
+        let stop_cause = match status {
+            DomainStatus::Stopped => self.domain_stop_cause(),
+            DomainStatus::Running | DomainStatus::Paused => None,
+        };
         DomainState {
             id,
             config: DomainConfig { pace },
@@ -584,6 +589,33 @@ impl Arbitrary<'_> {
             start_version,
             last_start,
             clock,
+            stop_cause,
+        }
+    }
+
+    /// The cause a stopped domain may carry: none for a domain created or restored stopped, or the
+    /// cause of the stop that committed it.
+    pub fn domain_stop_cause(&mut self) -> Option<DomainStopCause> {
+        if self.entropy.flag() {
+            Some(self.stop_cause())
+        } else {
+            None
+        }
+    }
+
+    /// The cause a stop records: an operator's stop, or the licensing stop gate at any instant.
+    pub fn stop_cause(&mut self) -> DomainStopCause {
+        if self.entropy.flag() {
+            DomainStopCause::Operator
+        } else {
+            DomainStopCause::Licensing(self.licensing_stop_reason())
+        }
+    }
+
+    /// The one licensing stop reason, at any instant.
+    pub fn licensing_stop_reason(&mut self) -> LicensingStopReason {
+        LicensingStopReason::EphemeralExpired {
+            expired_at: self.timestamp(),
         }
     }
 

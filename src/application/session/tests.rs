@@ -733,6 +733,7 @@ fn clocked_domain(start_version: u64, status: DomainStatus) -> DomainState {
         start_version,
         last_start: DomainStartPoint::Resume,
         clock,
+        stop_cause: None,
     }
 }
 

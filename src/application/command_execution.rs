@@ -733,6 +733,7 @@ impl SessionServiceImpl {
                         start_version: 0,
                         last_start: DomainStartPoint::Resume,
                         clock: None,
+                        stop_cause: None,
                     },
                 };
                 CommandExecutionEffect::CreateDomain {

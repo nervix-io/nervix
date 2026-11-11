@@ -1099,6 +1099,16 @@ impl SessionServiceImpl {
                 execution: execution.clone(),
             }));
         }
+        if let Some(reason) = control.licensing_stop
+            && statements
+                .iter()
+                .any(|statement| matches!(statement, Statement::StartDomain(_)))
+        {
+            return Err(Report::new(TransactionPlanningError::LicensingStop {
+                domain: domain.clone(),
+                reason,
+            }));
+        }
         let schedule_inputs = self
             .capture_domain_schedule_planning_snapshot(&control.planning_inputs)
             .await;
