@@ -170,9 +170,18 @@ impl NotificationCursor {
 
 #[cfg(test)]
 mod tests {
-    use nervix_licensing_protocol::notifications::{
-        DecisionNotification, NotificationState, TrustNotification,
+    use meticulous::ResultExt as _;
+    use nervix_consensus::{
+        ActivationBinding, ActivationState, ClusterIdentity, LicenseDecisionError,
+        LicensingEnvironment, LicensingRecord, ReceivedLicenseDecision, StoredDecision,
+        StoredDecisionOperation, VerifiedLicenseDecision,
     };
+    use nervix_licensing_protocol::{
+        documents::DecisionResponse,
+        notifications::{DecisionNotification, NotificationState, TrustNotification},
+        test_fixture::{self, Fixture},
+    };
+    use nervix_primitives::sync::Arc;
 
     use super::*;
 
@@ -191,6 +200,143 @@ mod tests {
             conditions_revision: 3,
             trust_serial: 2,
         }
+    }
+
+    fn activated() -> ClusterLicensingState {
+        let fixture = Fixture::new();
+        let decision = fixture.decision();
+        let now = Timestamp::try_from(decision.issued_at).assured("fixture timestamp fits");
+        let received = ReceivedLicenseDecision::from_response(
+            DecisionResponse {
+                decision: fixture.sign(&decision),
+                trust: fixture.documents(),
+                server_time: decision.issued_at,
+            },
+            now,
+            decision.in_reply_to,
+            &[],
+            &LicensingEnvironment::testing(
+                decision.service.clone(),
+                fixture.embedded(),
+                test_fixture::limits().bytes,
+            ),
+        )
+        .assured("the shared fixture's trust verifies through the production owner");
+        ClusterLicensingState {
+            identity: ClusterIdentity {
+                cluster_uid: decision.activation.cluster_uid,
+                created_at: Timestamp::try_from(decision.activation.created_at)
+                    .assured("fixture creation time fits"),
+                key_generation: std::num::NonZeroU64::new(decision.activation.generation)
+                    .assured("fixture generation is nonzero"),
+                ever_activated: true,
+                kid: fixture.cluster.key_id().clone(),
+                public_jwk: fixture.cluster.public_key().clone(),
+            },
+            record: Arc::new(LicensingRecord {
+                licensing_time: now,
+                trust: received.trust,
+                mode: LicensingMode::Activated(Box::new(ActivationState {
+                    binding: ActivationBinding::from_verified(&decision, "TESTABCD".to_owned())
+                        .assured("the current fixture has a valid activation binding"),
+                    decision: StoredDecision {
+                        bytes: received.bytes,
+                        revision: decision.decision_revision,
+                        conditions_revision: decision.conditions.conditions_revision,
+                        transition_conditions_revisions: Vec::new(),
+                        operation: StoredDecisionOperation::Apply,
+                        issued_at: now,
+                        received_at: now,
+                        request_id: decision.in_reply_to,
+                    },
+                })),
+            }),
+            verification: Some(Ok(VerifiedLicenseDecision {
+                decision: Arc::new(decision),
+                signing_key_revoked: false,
+                conditions_not_understood: 0,
+            })),
+            rotation: None,
+        }
+    }
+
+    #[test]
+    fn a_satisfied_sync_does_not_suppress_explicit_refresh_or_a_current_invalidation() {
+        let state = activated();
+        let now = state.record.licensing_time;
+        let revisions = CommittedRevisions::from_state(&state).assured("fixture is activated");
+        let hint = RefreshHint {
+            activation_id: test_fixture::id(1),
+            requirement: RefreshRequirement::Revisions(revisions),
+        };
+        assert!(!RefreshTrigger::Automatic(Some(hint)).needs_refresh(&state, now));
+        assert!(!RefreshTrigger::Automatic(None).needs_refresh(&state, now));
+        assert!(RefreshTrigger::Explicit.needs_refresh(&state, now));
+        assert!(
+            RefreshTrigger::Automatic(Some(RefreshHint::invalidation(hint.activation_id)))
+                .needs_refresh(&state, now)
+        );
+        let mut announced = revisions;
+        announced.decision_revision = announced
+            .decision_revision
+            .checked_add(1)
+            .assured("the fixture revision has room for one more decision");
+        assert!(
+            RefreshTrigger::Automatic(Some(RefreshHint {
+                requirement: RefreshRequirement::Revisions(announced),
+                ..hint
+            }))
+            .needs_refresh(&state, now)
+        );
+    }
+
+    #[test]
+    fn polling_revocation_and_unverified_state_refresh_without_a_notification() {
+        let mut state = activated();
+        let now = state.record.licensing_time;
+        let deadline = Timestamp::try_from(
+            state
+                .verification
+                .as_ref()
+                .assured("fixture has verification")
+                .as_ref()
+                .assured("fixture is verified")
+                .decision
+                .timing
+                .refresh_after,
+        )
+        .assured("fixture refresh deadline fits");
+        assert!(!RefreshTrigger::Automatic(None).needs_refresh(&state, now));
+        assert!(RefreshTrigger::Automatic(None).needs_refresh(&state, deadline));
+        state
+            .verification
+            .as_mut()
+            .assured("fixture has verification")
+            .as_mut()
+            .assured("fixture is verified")
+            .signing_key_revoked = true;
+        assert!(RefreshTrigger::Automatic(None).needs_refresh(&state, now));
+        for verification in [None, Some(Err(LicenseDecisionError::Trust))] {
+            state.verification = verification;
+            assert!(RefreshTrigger::Automatic(None).needs_refresh(&state, now));
+        }
+    }
+
+    #[test]
+    fn another_activation_or_a_free_record_cannot_use_a_retained_hint() {
+        let mut state = activated();
+        let now = state.record.licensing_time;
+        assert!(
+            !RefreshTrigger::Automatic(Some(RefreshHint::invalidation(test_fixture::id(90))))
+                .needs_refresh(&state, now)
+        );
+        let hint = RefreshHint::invalidation(test_fixture::id(1));
+        Arc::make_mut(&mut state.record).mode = LicensingMode::Free {
+            last_release: Some(test_fixture::id(91)),
+        };
+        state.verification = None;
+        assert!(CommittedRevisions::from_state(&state).is_none());
+        assert!(!hint.needs_refresh(&state));
     }
 
     #[test]
