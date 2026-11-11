@@ -29,17 +29,17 @@ Nodes](./processors.md#wasm-processor) owns the Plexus statements.
 | Layer | Owner | What it owns |
 | --- | --- | --- |
 | Vocabulary | WASM state models | The guest-state generation of every branch, a reset's scope, phase, and reason, the recovery attempts refused lifetimes have spent, and the typed state inspection. The processor's entry in the committed domain schedule carries all of them. |
-| Language | Plexus | `ON REJECTED STATE`, `RESET WASM PROCESSOR ... STATE`, and `DESCRIBE WASM PROCESSOR`, lowered into Models. |
+| Language | Plexus | `ON REJECTED STATE`, `RESET WASM PROCESSOR ... STATE`, `DESCRIBE WASM PROCESSOR` and `SHOW WASM PROCESSOR ... STATE`, lowered into Models. |
 | Engines and infrastructure | The WASM host | Compiling a pinned module, instantiating a branch store, the fuel and memory limits of every guest operation, the domain snapshot each operation reads, and answering a guest's reset request. |
 | Engines and infrastructure | The guest SDK | The guest side of the ABI: the snapshot envelope, strict restore verdicts, and keeping its own execution state out of every save. |
 | Engines and infrastructure | The runtime state store | Writing a checkpoint under its placement, and the durability barrier that synchronizes the node's storage for every writer waiting on it. |
-| Engines and infrastructure | The interconnect | Replica synchronization and acknowledgements, and the coordination requests a reset and a recovery send. |
+| Engines and infrastructure | The interconnect | Replica synchronization and acknowledgements, the coordination requests a reset and a recovery send, and the bounded page a unit's owner answers a state read with. |
 | Decisions | Registry and scheduling | Planning a reset as a transaction step, deciding which schedule publication starts a new generation, and binding the pinned module and generation identity to that scheduled processor revision. |
 | Data plane | The branch task | Running guest callbacks one at a time, holding back the acknowledgements each callback decides, and checkpointing the instance the callback leaves behind. |
 | Data plane | The processor supervisor | Fencing the scope of an unfinished reset, and preparing, aborting, and committing a reset on the owner. |
 | Control plane | The reset coordinator on the leader | Validating a reset, gating its scope, preparing it, and publishing it through its `Publishing` and `Ready` phases. |
 | Control plane | The recovery coordinator on the leader | Deciding whether a refused lifetime still has its one recovery attempt, recording the decision, and driving the reset it admits. |
-| Edges | The session service and clients | Admitting a Plexus reset as a transaction step, and returning the typed state inspection beside the text of `DESCRIBE WASM PROCESSOR`. |
+| Edges | The session service and clients | Admitting a Plexus reset as a transaction step, and returning a state read's typed envelope beside its text or JSON. |
 
 During normal execution, guest bytes stay in the data plane and state store. A backup is an
 explicit control-plane export of durable checkpoints to an archive; restore installs those bytes
@@ -753,39 +753,65 @@ Effective Delivery](./emitters.md#ack-semantics-and-effective-delivery).
 
 ## Observability
 
-The typed inspection contains the shared resource binding and a `units` collection. Each entry
-names its execution unit and that unit's default generation, latest reset, readiness, recovery
-attempts and checkpoint facts. Text renders partition entries under `state partition: <index>`;
-JSON carries the same unit identities. Generation filtering uses the checkpoint's own unit.
-The 128-entry checkpoint and recovery detail budgets each cover the whole processor, with counts
-and omitted totals retained for every unit.
+`SHOW WASM PROCESSOR <name> STATE` reads a processor's guest-state facts through the typed state
+inspection envelope every `SHOW ... STATE` statement shares, with the same optional clauses:
+`FOR ALL BRANCHES`, `FOR UNBRANCHED` or `FOR BRANCH KEY { ... }` selects branches, `LIMIT n`
+bounds the branch entries of one reply and `AFTER '<continuation>'` resumes after the last entry of
+an earlier reply, and `FORMAT TEXT` (the default) or `FORMAT JSON` picks the rendering. An omitted
+selection reads every branch. The page names the pinned module (`wasm_binding`: resource, version
+and file) and lists every execution unit of the processor with its owner, replicas and read origin
+and these typed facts:
+
+| Unit fact | What it holds |
+| --- | --- |
+| Default generation | The lifetime of every branch that has not started one of its own |
+| Latest reset | Its request reference, scope, phase, reason, the generation it published for its scope, and its readiness |
+| Counts | Every selected branch entry, the selected checkpoints of the current lifetimes by stage, and the selected recorded recoveries by outcome, including entries beyond the page |
+| Branch entries | One per selected branch with a checkpoint in its current lifetime or a recorded rejected-state recovery, in branch order: the branch fingerprint (absent for the unbranched execution), the checkpoint's generation, committed and latest revision, stage and required and confirmed replica counts, and the recovery's refused generation, rejection, request reference and outcome |
+
+The envelope's counts report a WASM unit's selected branches under `branches`; a WASM processor has
+no row sections, so `rows` and `bytes` are zero. The text rendering prints, per unit, the summary
+lines `DESCRIBE WASM PROCESSOR` prints followed by one `checkpoint branch=<fingerprint>` line and one
+`rejected state recovery: branch=<fingerprint>` line per returned entry; the JSON rendering carries
+the same facts as `wasm` objects of the units, with snake-case stages, phases, reasons, readiness,
+rejections and outcomes.
 
 | Signal | What it shows |
 | --- | --- |
-| `DESCRIBE WASM PROCESSOR <name>` | The pinned `resource`, `resource version`, and `file`, the `rejected state policy`, `state default generation`, the latest reset as `state reset: <PUBLISHING or READY>, <scope>, generation <n>` with its reason and readiness, one `rejected state recovery` line per recorded attempt, the checkpoint counts, and one `checkpoint` line per branch with its fingerprint, generation, committed and latest revision, stage, and required and confirmed replica counts |
-| `DESCRIBE WASM PROCESSOR <name> FORMAT JSON` | The same typed state inspection, including each reset's request reference; `null` for a processor that is not scheduled |
-| Client outcome | `CommandOutcome::wasm_state` carries the typed inspection beside either text rendering |
+| `DESCRIBE WASM PROCESSOR <name>` | The pinned `resource`, `resource version`, and `file`, the `rejected state policy`, and per unit `state default generation`, the latest reset as `state reset: <PUBLISHING or READY>, <scope>, generation <n>` with its reason, readiness and request, a `rejected state recoveries` summary when any is recorded, and the checkpoint counts |
+| `SHOW WASM PROCESSOR <name> STATE` | The unit facts above and a bounded, resumable page of branch entries, in text or JSON |
+| Client outcome | `CommandOutcome::state` carries the typed envelope of a state read beside either rendering |
 | `DESCRIBE TRANSACTION` | The planned and actual effect of a transaction's `RESET WASM PROCESSOR` step |
 | `SHOW CLUSTER STATUS` | A forced recovery's `state_recovery` outcome and the `wasm_processor` component it reset with the cause |
 | Runtime errors | Every failure in the [diagnostic shape](./wasm-processor-guests.md#failure-diagnostics), a reset that could not replace a guest-requested lifetime, and a rejected-state recovery that failed or was refused; delivered to the sessions attached to any node |
 | Server log | At `info`: `WASM guest-state reset generation published` and `WASM guest-state reset became usable` on the leader, `wasm guest requested a new branch state lifetime` and `raised a refused WASM guest-state lifetime for recovery` on the owner, and `WASM rejected-state recovery admitted` and `WASM rejected-state recovery settled` on the leader |
 
-The inspection is read-only. It samples the owner's published checkpoint observations without taking
-a branch's execution lane, requesting synchronization, or advancing a checkpoint, and it counts only
-checkpoints of the generation the committed schedule names. Checkpoint counts cover every branch the
-owner holds state for; branch and recovery details are limited to 128 entries each, with the rest
-reported as omitted. A stage is `EMPTY` while the branch has no checkpoint in its lifetime,
-`CAPTURED` before local storage, `LOCALLY_DURABLE` before its boundary is complete,
-`REPLICA_CONFIRMED` once it is, which without replicas reads `0` of `0`, and `FAILED` when the
-latest checkpoint failed, with the previous committed revision still current. A checkpoint the owner
-restored rather than took reports `LOCALLY_DURABLE` with unknown replica counts, because its earlier
-boundary cannot be reconstructed. Reset readiness is `RESETTING` while the new lifetime's checkpoint
-is unfinished, `AWAITING_USABLE_EXECUTION` when a selected single-scope checkpoint is confirmed but
-the reset is still `Publishing`, and `READY` once `Ready` is published; an all-branches reset stays
-`RESETTING` until then, because a sample of the current branches cannot prove every selected branch
-completed. Nervix exports no WASM-specific metric.
+Both reads are read-only. The owner of each unit answers a state read from the committed schedule at
+the read's control revision and its published checkpoint observations, without taking a branch's
+execution lane, requesting synchronization, or advancing a checkpoint, and it applies the selection
+and the entry limit before anything crosses the interconnect. Only checkpoints of the generation the
+committed schedule names for their branch count, so a lagging owner or an in-flight rebind is fenced
+out of the read. A continuation names the processor, the selection and the committed control
+revision it was issued for; a resume after any later schedule change, such as a reset or a recovery
+that starts a new lifetime, is refused as `stale_continuation` rather than mixing lifetimes. Checkpoint
+progress inside the same lifetimes does not invalidate a continuation, because entries resume by
+branch fingerprint. A read over more entries than the node's `inspection-max-rows` capability, or
+than one session reply can hold, is refused as `invalid_limit`; a read without `LIMIT` returns at
+most that many entries and a continuation.
 
-Checkpoint stage totals and omitted-entry counts use the vocabulary's fixed-width 64-bit archive
+A stage is `EMPTY` while the branch has no checkpoint in its lifetime, `CAPTURED` before local
+storage, `LOCALLY_DURABLE` before its boundary is complete, `REPLICA_CONFIRMED` once it is, which
+without replicas reads `0` of `0`, and `FAILED` when the latest checkpoint failed, with the previous
+committed revision still current. A checkpoint the owner restored rather than took reports
+`LOCALLY_DURABLE` with unknown replica counts, because its earlier boundary cannot be reconstructed.
+Reset readiness is `RESETTING` while the new lifetime's checkpoint is unfinished,
+`AWAITING_USABLE_EXECUTION` when a selected single-scope checkpoint is confirmed but the reset is
+still `Publishing`, and `READY` once `Ready` is published; an all-branches reset stays `RESETTING`
+until then, because a sample of the current branches cannot prove every selected branch completed.
+Readiness is judged from every current checkpoint of the unit, whatever the read selects. Nervix
+exports no WASM-specific metric.
+
+Checkpoint stage, recovery and entry counts use the vocabulary's fixed-width 64-bit archive
 adapter, so an interconnect response preserves their complete native magnitude. Decoding refuses a
 count the receiving target cannot represent. See [Archived Counts](./typed-states.md#archived-counts).
 

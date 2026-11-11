@@ -97,8 +97,9 @@ pub(crate) fn branch_fields<'src>()
 mod tests {
     use crate::statement::{parse_statement, suggest_statement};
 
-    const HEADS: [&str; 6] = [
+    const HEADS: [&str; 7] = [
         "RESET WASM PROCESSOR counter STATE",
+        "SHOW WASM PROCESSOR counter STATE",
         "SHOW RELAY events MATERIALIZED STATE",
         "SHOW REORDERER held STATE",
         "SHOW CORRELATOR held STATE",

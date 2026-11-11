@@ -325,9 +325,10 @@ domain-wide coverage. Exact `PARTITION` and `INSTANCE` relocation selectors reta
 identity in previews and execution reports. A failed policy or selector validation is an ordinary
 failed command; the client preserves its diagnostic and does not retry invalid input.
 
-Structured WASM inspection carries a `units` collection. Clients preserve each unit identity and
-its own generation, reset, recovery and checkpoint details; a processor's partitions can have
-different generations. Checkpoint and recovery detail limits apply to the complete response.
+A WASM processor state read carries one envelope unit per execution unit. Clients preserve each
+unit identity and its own generation, reset, recovery and checkpoint details; a processor's
+partitions can have different generations. The entry limit applies to the complete response, and
+its continuation resumes after the last entry it returned, whichever unit holds it.
 
 Treat client CONFIG validation refusals as ordinary failed commands under the rules below.
 Show their client/key diagnostic without retrying invalid input automatically. A refused queued
@@ -1430,7 +1431,18 @@ reads use the same envelope: a window page with no retained inputs can still car
 `accumulators` sections. Clients preserve these metadata frames without counting them toward the
 retained-row limit or continuation offset. See [Runtime Nodes](./processors.md#inspect-retained-window-state)
 for section meanings and
-[Materialized State Inspection Envelope](./client-session-protocol.md#materialized-state-inspection-envelope).
+[State Inspection Envelope](./client-session-protocol.md#state-inspection-envelope).
+
+A `SHOW WASM PROCESSOR ... STATE` page carries typed WASM tables instead of row sections. Clients
+MUST decode the page's `WasmStateBinding` and every unit's `WasmUnitStateFacts` into typed values:
+the default generation, the latest reset with its request reference, scope union, phase, reason,
+generation and readiness, the complete entry, checkpoint-stage and recovery-outcome counts, and every
+returned branch entry in order with its optional fingerprint, checkpoint and recovery. Clients MUST
+refuse a zero generation or revision, an unordered or stateless entry, more returned entries than
+the complete count, and undeclared enum values or union members, as for every other table. An
+absent fingerprint is the unbranched execution, never an empty or zero fingerprint. Resume a WASM
+continuation with the same domain, processor and selector; a refused resume starts a new read, and
+entries of the abandoned sequence are not combined with the new one.
 
 The native Python, Ruby and JVM bindings expose this envelope through
 `Outcome.state_inspection` (Python property and Ruby method) and `Outcome.stateInspection()`

@@ -27,11 +27,12 @@ use nervix_models::{
     RelocationPreferenceOverride, RelocationPreferenceStrategy, RelocationSelection,
     ResetWasmState, Restore, RestoreLifecycle, RestoreMode, RestoreScope, RestoreState,
     ShowClusterStatus, ShowCreate, ShowEmitters, ShowIngestors, ShowPlacements, ShowProcessorState,
-    ShowRelayMaterializedState, ShowTransactions, ShowUdfs, SqsIngestorEntity, StartDomain,
-    StateBranchField, StateBranchSelection, StateInspectedProcessor, Statement, StopDomain,
-    SubscriptionBinding, SubscriptionLiteral, SyslogIngestorEntity, TransactionInspectionRequest,
-    TransactionInspectionTarget, TransactionOperationNumber, UncordonNode, UploadResource,
-    WebsocketsIngestorEntity, ZeroMqIngestorEntity,
+    ShowRelayMaterializedState, ShowTransactions, ShowUdfs, ShowWasmProcessorState,
+    SqsIngestorEntity, StartDomain, StateBranchField, StateBranchSelection,
+    StateInspectedProcessor, Statement, StopDomain, SubscriptionBinding, SubscriptionLiteral,
+    SyslogIngestorEntity, TransactionInspectionRequest, TransactionInspectionTarget,
+    TransactionOperationNumber, UncordonNode, UploadResource, WebsocketsIngestorEntity,
+    ZeroMqIngestorEntity,
 };
 use strum::IntoEnumIterator as _;
 
@@ -163,6 +164,7 @@ pub enum StatementVariant {
     ShowPlacements,
     ShowRelayMaterializedState,
     ShowProcessorState,
+    ShowWasmProcessorState,
     ShowClusterStatus,
     ShowTransactions,
     DescribeTransaction,
@@ -239,6 +241,7 @@ impl StatementVariant {
             Statement::ShowPlacements(_) => Self::ShowPlacements,
             Statement::ShowRelayMaterializedState(_) => Self::ShowRelayMaterializedState,
             Statement::ShowProcessorState(_) => Self::ShowProcessorState,
+            Statement::ShowWasmProcessorState(_) => Self::ShowWasmProcessorState,
             Statement::ShowClusterStatus(_) => Self::ShowClusterStatus,
             Statement::ShowTransactions(_) => Self::ShowTransactions,
             Statement::DescribeTransaction(_) => Self::DescribeTransaction,
@@ -723,10 +726,7 @@ impl Arbitrary<'_> {
                 Statement::DescribeWindowProcessor(DescribeWindowProcessor { name: self.name() })
             }
             StatementVariant::DescribeWasmProcessor => {
-                Statement::DescribeWasmProcessor(DescribeWasmProcessor {
-                    name: self.name(),
-                    format: self.inspection_format(),
-                })
+                Statement::DescribeWasmProcessor(DescribeWasmProcessor { name: self.name() })
             }
             StatementVariant::DescribeUdf => {
                 Statement::DescribeUdf(DescribeUdf { name: self.name() })
@@ -768,6 +768,16 @@ impl Arbitrary<'_> {
                 };
                 let clauses = self.state_inspection_clauses();
                 Statement::ShowProcessorState(ShowProcessorState {
+                    processor,
+                    selection: clauses.selection,
+                    page: clauses.page,
+                    format: clauses.format,
+                })
+            }
+            StatementVariant::ShowWasmProcessorState => {
+                let processor = self.name();
+                let clauses = self.state_inspection_clauses();
+                Statement::ShowWasmProcessorState(ShowWasmProcessorState {
                     processor,
                     selection: clauses.selection,
                     page: clauses.page,
