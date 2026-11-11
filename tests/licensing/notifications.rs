@@ -14,6 +14,117 @@ use nervix_primitives::time::{sleep, timeout};
 
 use super::{STATUS_WAIT_BUDGET, ScenarioWorld, current_license, public_license_timestamp};
 
+#[given("the next licensing response is held at the service")]
+async fn hold_response(world: &mut ScenarioWorld) {
+    world
+        .licensing_service
+        .as_ref()
+        .verified("fixture started")
+        .configure(Model::hold_next_response)
+        .await;
+}
+
+#[then("the licensing refresh response is held after its decision is issued")]
+async fn response_held(world: &mut ScenarioWorld) {
+    let service = world.licensing_service.as_ref().verified("fixture started");
+    timeout(STATUS_WAIT_BUDGET, async {
+        loop {
+            nervix_primitives::task::consume_budget().await;
+            if service.configure(|model| model.response_is_held()).await {
+                break;
+            }
+            sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .assured("the peer issued the signed decision before holding its response");
+    let requests = service.requests().await;
+    let Some(nervix_licensing_protocol::requests::Request::Refresh {
+        state: nervix_licensing_protocol::requests::RefreshState::Committed(applied),
+        ..
+    }) = requests.last()
+    else {
+        panic!("the held request must refresh an established activation");
+    };
+    let current = current_license(world).await;
+    assert_eq!(
+        current.get("decision revision"),
+        Some(&applied.applied_decision_revision.to_string()),
+        "the signed response remains uncommitted while the peer holds it"
+    );
+    assert!(
+        public_license_timestamp(
+            current
+                .get("refresh after")
+                .verified("signed refresh deadline")
+        ) > chrono::Utc::now(),
+        "normal polling is not due during the gated notification interleaving"
+    );
+    let observations = service.configure(|model| model.fault_observations()).await;
+    let held = observations.last().verified("the held request is recorded");
+    assert!(matches!(
+        held.fault,
+        nervix_licensing_test_service::Fault::Hold(_)
+    ));
+    assert_eq!(
+        held.request_id,
+        requests
+            .last()
+            .verified("a refresh arrived")
+            .common()
+            .request_id
+    );
+    world
+        .placeholders
+        .insert("held_refresh_request".into(), held.request_id.to_string());
+}
+
+#[when("the held licensing response is released")]
+async fn release_response(world: &mut ScenarioWorld) {
+    world
+        .licensing_service
+        .as_ref()
+        .verified("fixture started")
+        .configure(Model::release_response)
+        .await;
+}
+
+#[then("only the held refresh and the explicit replay reached the licensing service")]
+async fn no_redundant_refresh(world: &mut ScenarioWorld) {
+    use nervix_licensing_protocol::requests::Request;
+    use nervix_licensing_test_service::{Fault, Tamper};
+
+    let service = world.licensing_service.as_ref().verified("fixture started");
+    let requests = service.requests().await;
+    let refreshes: Vec<_> = requests
+        .iter()
+        .filter(|request| matches!(request, Request::Refresh { .. }))
+        .collect();
+    let observations = service.configure(|model| model.fault_observations()).await;
+    let fault_requests: Vec<_> = observations
+        .iter()
+        .map(|observation| (observation.request_id, &observation.fault))
+        .collect();
+    assert_eq!(
+        refreshes.len(),
+        2,
+        "a sync reporting the in-flight decision must be covered by that refresh; \
+         requests={requests:?}; faults={fault_requests:?}"
+    );
+    assert_eq!(
+        refreshes[0].common().request_id.to_string(),
+        *world
+            .placeholders
+            .get("held_refresh_request")
+            .verified("held request was observed")
+    );
+    let replay = observations
+        .last()
+        .verified("the replay fault was consumed");
+    assert!(matches!(replay.fault, Fault::Tamper(Tamper::PriorDecision)));
+    assert_eq!(replay.request_id, refreshes[1].common().request_id);
+}
+
 #[given("the next licensing rotation response is delayed")]
 async fn delay_rotation(world: &mut ScenarioWorld) {
     world

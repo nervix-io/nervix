@@ -25,6 +25,7 @@ use nervix_licensing_protocol::{
     requests::{RefreshState, Secret},
 };
 use nervix_models::{ActivateLicense, CommandExecutionReference};
+use notifications::{RefreshHint, RefreshTrigger};
 pub use test_support::ConfiguredLicensingTestSupport;
 use thiserror::Error;
 
@@ -179,17 +180,22 @@ impl SessionServiceImpl {
         &self,
     ) -> Result<(), Report<LicensingOperationError>> {
         let _turn = self.inner.licensing_requests.foreground().await;
-        self.refresh_license_once().await
+        self.refresh_license_once(RefreshTrigger::Explicit).await
     }
 
-    pub(in crate::application) async fn refresh_license_in_background(
+    async fn refresh_license_in_background(
         &self,
+        hint: Option<RefreshHint>,
     ) -> Result<(), Report<LicensingOperationError>> {
         let _turn = self.inner.licensing_requests.background().await;
-        self.refresh_license_once().await
+        self.refresh_license_once(RefreshTrigger::Automatic(hint))
+            .await
     }
 
-    async fn refresh_license_once(&self) -> Result<(), Report<LicensingOperationError>> {
+    async fn refresh_license_once(
+        &self,
+        trigger: RefreshTrigger,
+    ) -> Result<(), Report<LicensingOperationError>> {
         self.finish_cluster_key_rotation().await?;
         let state = self
             .inner
@@ -204,6 +210,11 @@ impl SessionServiceImpl {
         let nervix_consensus::LicensingMode::Activated(activation) = &state.record.mode else {
             unreachable!("refresh operation requires activation")
         };
+        if let RefreshTrigger::Automatic(_) = trigger
+            && !trigger.needs_refresh(&state, clock::observe(self.inner.runtime.fault_injection()))
+        {
+            return Ok(());
+        }
         let expected_revision = activation.decision.revision;
         let request_id = clock::request_id(self.inner.runtime.fault_injection());
         let client = client::LicensingClient::new(self)

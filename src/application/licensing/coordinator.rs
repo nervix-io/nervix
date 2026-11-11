@@ -18,7 +18,10 @@ use nervix_primitives::{
 };
 use uuid::Uuid;
 
-use super::{LicensingOperationError, clock};
+use super::{
+    LicensingOperationError, clock,
+    notifications::{RefreshHint, RefreshTrigger},
+};
 use crate::{application::session_service::SessionServiceImpl, licensing::policy::PolicyState};
 
 struct RequestAttempt {
@@ -171,7 +174,7 @@ async fn reconcile(
     retry_at: Instant,
     announced: &mut Option<PolicyState>,
     refreshed_revocations: &mut Option<Vec<u64>>,
-    notification_due: &mut Option<Uuid>,
+    notification_due: &mut Option<RefreshHint>,
 ) -> Option<Duration> {
     let policy = crate::licensing::policy::evaluate_policy(
         service.inner.consensus.observer().licensing_snapshot(),
@@ -203,13 +206,10 @@ async fn reconcile(
             ));
         }
     }
-    let due = match &initialized.verification {
-        Some(Ok(verified)) => {
-            verified.signing_key_revoked
-                || now.into_datetime() >= verified.decision.timing.refresh_after
-        }
-        Some(Err(_)) | None => true,
-    };
+    let due = RefreshTrigger::Automatic(*notification_due).needs_refresh(initialized, now);
+    if !pending && !due {
+        *notification_due = None;
+    }
     let revocations = initialized
         .record
         .trust
@@ -223,9 +223,8 @@ async fn reconcile(
         && matches!(&initialized.verification, Some(Ok(verified)) if verified.signing_key_revoked)
         && refreshed_revocations.as_ref() != Some(&revocations);
     let binding = activation_id(&initialized.record.mode);
-    let notified = notification_due.is_some() && *notification_due == binding;
     if (pending
-        || (due || notified)
+        || due
             && matches!(
                 initialized.record.mode,
                 nervix_consensus::LicensingMode::Activated(_)
@@ -236,15 +235,17 @@ async fn reconcile(
         if newly_revoked {
             *refreshed_revocations = Some(revocations);
         }
-        if !pending {
-            *notification_due = None;
-        }
+        let hint = if pending {
+            None
+        } else {
+            notification_due.take()
+        };
         let requester = service.clone();
         requests.spawn(async move {
             let result = if pending {
                 requester.resume_licensing_operations().await
             } else {
-                requester.refresh_license_in_background().await
+                requester.refresh_license_in_background(hint).await
             };
             RequestAttempt {
                 activation_id: binding,
@@ -287,17 +288,18 @@ fn activation_id(mode: &nervix_consensus::LicensingMode) -> Option<Uuid> {
 
 fn restore_failed_hint(
     completed: &Option<Result<RequestAttempt, nervix_primitives::task::JoinError>>,
-    notification_due: &mut Option<Uuid>,
+    notification_due: &mut Option<RefreshHint>,
     current_binding: impl FnOnce() -> Option<Uuid>,
 ) {
     if notification_due.is_some() {
         return;
     }
-    *notification_due = match completed {
+    let binding = match completed {
         Some(Ok(attempt)) if attempt.result.is_err() => attempt.activation_id,
         Some(Err(_)) => current_binding(),
         _ => None,
     };
+    *notification_due = binding.map(RefreshHint::invalidation);
 }
 
 #[cfg(test)]
@@ -312,16 +314,16 @@ mod hint_tests {
             activation_id: Some(previous),
             result: Err(Report::new(LicensingOperationError::Request)),
         }));
-        let mut hint = Some(current);
+        let mut hint = Some(RefreshHint::invalidation(current));
         restore_failed_hint(&completed, &mut hint, || {
             panic!("the request retained its binding")
         });
-        assert_eq!(hint, Some(current));
+        assert_eq!(hint, Some(RefreshHint::invalidation(current)));
         hint = None;
         restore_failed_hint(&completed, &mut hint, || {
             panic!("the request retained its binding")
         });
-        assert_eq!(hint, Some(previous));
+        assert_eq!(hint, Some(RefreshHint::invalidation(previous)));
     }
 
     #[test]

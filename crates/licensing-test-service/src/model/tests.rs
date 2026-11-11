@@ -130,6 +130,33 @@ async fn response_signature_corruption_preserves_the_valid_saved_replay() {
 }
 
 #[nervix_primitives::test]
+async fn a_cached_reply_records_the_fault_consumer_without_changing_its_signed_decision() {
+    let mut model = fixture();
+    let cluster = signer().assured("cluster signer");
+    let request = Request::Create {
+        common: common(&mut model).await,
+        license_key: model.license_key.clone(),
+        kind: ActivationKind::Persistent,
+        cluster_key: cluster.public_key().clone(),
+    };
+    let compact = cluster.sign(&request, limits()).assured("signed creation");
+    let (response, _) = model.answer("/v1/activations", compact.as_bytes());
+    let original = bytes(response).await;
+    model.script(Fault::Tamper(Tamper::PriorDecision));
+    let (replay, fault) = model.answer("/v1/activations", compact.as_bytes());
+    assert!(matches!(fault, Some(Fault::Tamper(Tamper::PriorDecision))));
+    assert_eq!(bytes(replay).await, original);
+    let observations = model.fault_observations();
+    assert_eq!(observations.len(), 1);
+    assert_eq!(observations[0].request_id, request.common().request_id);
+    assert!(matches!(
+        observations[0].fault,
+        Fault::Tamper(Tamper::PriorDecision)
+    ));
+    assert_eq!(model.activation_count(), 1);
+}
+
+#[nervix_primitives::test]
 async fn a_signed_tampering_script_is_distinct_from_a_broken_signature() {
     for fault in [
         Tamper::Cluster,

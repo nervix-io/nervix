@@ -262,6 +262,8 @@ jiff = { workspace = true }
 nervix-arbitrary = { workspace = true }
 nervix-client-core = { workspace = true, features = ["arrow"] }
 nervix-connector-fake = { workspace = true }
+nervix-consensus = { workspace = true, features = ["testing"] }
+nervix-licensing-protocol = { workspace = true, features = ["testing"] }
 nervix-model-harness = { workspace = true }
 # The runtime's timer tests advance a paused clock.
 nervix-primitives = { workspace = true, features = ["native", "test-util"] }
