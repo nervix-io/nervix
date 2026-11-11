@@ -143,6 +143,7 @@ mod tests {
                             nervix_arbitrary::Domain::Vocabulary,
                         )
                         .node_connector_host_capabilities(),
+                        listeners: crate::application::ListenerSettings::default().bounds(),
                         cpu_count: NonZeroU64::new(cpu),
                         memory_bytes: NonZeroU64::new(memory),
                         receive,
@@ -204,6 +205,7 @@ mod tests {
                         nervix_arbitrary::Domain::Vocabulary,
                     )
                     .node_connector_host_capabilities(),
+                    listeners: crate::application::ListenerSettings::default().bounds(),
                     cpu_count: NonZeroU64::new(1),
                     memory_bytes: NonZeroU64::new(1),
                     receive,
@@ -253,6 +255,7 @@ mod tests {
                         nervix_arbitrary::Domain::Vocabulary,
                     )
                     .node_connector_host_capabilities(),
+                    listeners: crate::application::ListenerSettings::default().bounds(),
                     cpu_count: NonZeroU64::new(u64::MAX),
                     memory_bytes: NonZeroU64::new(u64::MAX - 1),
                     receive,
@@ -313,6 +316,7 @@ mod tests {
                         nervix_arbitrary::Domain::Vocabulary,
                     )
                     .node_connector_host_capabilities(),
+                    listeners: crate::application::ListenerSettings::default().bounds(),
                     cpu_count: NonZeroU64::new(2),
                     memory_bytes: None,
                     receive,
@@ -362,6 +366,7 @@ mod tests {
                         nervix_arbitrary::Domain::Vocabulary,
                     )
                     .node_connector_host_capabilities(),
+                    listeners: crate::application::ListenerSettings::default().bounds(),
                     cpu_count: NonZeroU64::new(4),
                     memory_bytes: NonZeroU64::new(16),
                     receive,

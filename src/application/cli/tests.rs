@@ -20,7 +20,7 @@ use crate::application::{
 };
 
 /// The headings of the settings areas, in the order help lists them.
-const SETTINGS_HEADINGS: [&str; 17] = [
+const SETTINGS_HEADINGS: [&str; 18] = [
     "Databases",
     "Consensus capacities",
     "DNS",
@@ -38,10 +38,11 @@ const SETTINGS_HEADINGS: [&str; 17] = [
     "Resources",
     "Capacity",
     "Execution",
+    "Listeners",
 ];
 
 /// Every setting the settings groups declare, by the name its definition gives it.
-const SETTING_NAMES: [&str; 150] = [
+const SETTING_NAMES: [&str; 174] = [
     "runtime-delivery-capacity",
     "runtime-ingest-group-max-rows",
     "runtime-ingest-group-idle-flush",
@@ -181,6 +182,7 @@ const SETTING_NAMES: [&str; 150] = [
     "execution-bulk-memory-bytes",
     "execution-bulk-window-memory-bytes",
     "execution-restore-metadata-memory-bytes",
+    "execution-intake-memory-bytes",
     "execution-credentials-memory-bytes",
     "execution-relay-encoded-bytes",
     "execution-relay-decoded-bytes",
@@ -192,6 +194,29 @@ const SETTING_NAMES: [&str; 150] = [
     "runtime-thread-stack-size",
     "client-producer-node-bytes",
     "client-consumer-node-bytes",
+    "listener-max-connections",
+    "listener-header-bytes",
+    "listener-buffer-bytes",
+    "listener-header-timeout",
+    "listener-tls-timeout",
+    "listener-idle-timeout",
+    "listener-accept-retry-delay",
+    "listener-http-keepalive",
+    "http-body-bytes",
+    "http-body-copy-bytes",
+    "http-body-timeout",
+    "http-refusal-drain-timeout",
+    "websocket-message-bytes",
+    "websocket-frame-bytes",
+    "grpc-header-bytes",
+    "grpc-concurrency",
+    "grpc-request-timeout",
+    "grpc-max-streams",
+    "grpc-keepalive-interval",
+    "grpc-keepalive-timeout",
+    "listener-tcp-keepalive-time",
+    "listener-tcp-keepalive-interval",
+    "listener-tcp-keepalive-retries",
 ];
 
 #[test]

@@ -166,6 +166,7 @@ tokio-tungstenite = { workspace = true, features = ["__rustls-tls", "connect"] }
 tokio-util = { workspace = true, features = ["codec"] }
 toml = { workspace = true }
 tonic = { workspace = true }
+tower-service = { workspace = true }
 tracing = { workspace = true }
 ubyte = { workspace = true }
 url = { workspace = true }

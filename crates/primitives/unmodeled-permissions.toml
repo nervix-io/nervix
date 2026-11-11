@@ -301,3 +301,10 @@ limit = "Nothing a check claims: the ports carry the traffic of real containers 
 owner = "The benchmark driver."
 path = "crates/benchmark/src/main.rs"
 reason = "The driver reserves free ports from the operating system for the containers and node processes it starts, synchronously and before any of them binds."
+
+[[permission]]
+items = ["time::Instant"]
+limit = "Only the external Hyper Timer signature uses the real type; selected clock reads and sleeps determine every expiry."
+owner = "The listener's Hyper timer adapter."
+path = "src/application/listener_io.rs"
+reason = "Hyper names std::time::Instant in its Timer trait. Conversion bridges its type to the selected timer without choosing a real wakeup or reading the real clock."

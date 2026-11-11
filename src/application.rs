@@ -197,6 +197,11 @@ mod process;
 pub use process::run_cli;
 #[cfg(not(feature = "shuttle"))]
 pub use process::run_server_process;
+mod listener_capacity;
+mod listener_input;
+mod listener_io;
+mod listener_settings;
+pub use listener_settings::{ListenerOverrides, ListenerSettings, ListenerSettingsError};
 mod public_listener;
 mod relocation;
 mod resource;
@@ -242,7 +247,6 @@ pub use shutdown::{
     ShutdownPhaseOutcome, ShutdownRequest, ShutdownRequestOutcome, ShutdownSettings,
     ShutdownSettingsError, ShutdownTimeout,
 };
-use tonic::transport::Server;
 use tracing::{Instrument as _, debug, error, info, warn};
 pub use transaction::{
     TransactionBounds, TransactionIdleTimeout, TransactionLimits, TransactionMaxOpen,
@@ -642,9 +646,12 @@ impl Application {
                 join_terms: settings.join_terms(),
             },
             interconnect_tls,
-            settings
-                .interconnect
-                .options(Some(peer_receive), Some(settings.shutdown.drain_timeout())),
+            nervix_interconnect::TransportOptions {
+                accept_retry_delay: settings.listeners.accept_retry_delay,
+                ..settings
+                    .interconnect
+                    .options(Some(peer_receive), Some(settings.shutdown.drain_timeout()))
+            },
             startup.runtime.executor().clone(),
             PeerResolver::new(dns),
         )
@@ -1045,31 +1052,50 @@ impl Application {
         }
 
         let listener_shutdown = shutdown_coordinator.admission_token();
-        let grpc_listener =
-            PublicListener::new(grpc_listener, PublicListenerKind::Grpc, &fault_injection);
-        let http_listener =
-            PublicListener::new(http_listener, PublicListenerKind::Http, &fault_injection);
-        let https_listener =
-            PublicListener::new(https_listener, PublicListenerKind::Https, &fault_injection);
+        let grpc_listener = PublicListener::new(
+            grpc_listener,
+            PublicListenerKind::Grpc,
+            &fault_injection,
+            settings.listeners,
+        );
+        let http_listener = PublicListener::new(
+            http_listener,
+            PublicListenerKind::Http,
+            &fault_injection,
+            settings.listeners,
+        );
+        let https_listener = PublicListener::new(
+            https_listener,
+            PublicListenerKind::Https,
+            &fault_injection,
+            settings.listeners,
+        );
         let observability_listener = PublicListener::new(
             observability_listener,
             PublicListenerKind::Observability,
             &fault_injection,
+            settings.listeners,
         );
         let web_console_listener = PublicListener::new(
             web_console_listener,
             PublicListenerKind::Console,
             &fault_injection,
+            settings.listeners,
         );
         let web_console_https_listener = web_console_https_listener.map(|listener| {
-            PublicListener::new(listener, PublicListenerKind::ConsoleTls, &fault_injection)
+            PublicListener::new(
+                listener,
+                PublicListenerKind::ConsoleTls,
+                &fault_injection,
+                settings.listeners,
+            )
         });
 
         let grpc_service = service.clone();
         let grpc_shutdown = listener_shutdown.clone();
         let grpc_connections_cut = shutdown_coordinator.connections_cut_token();
         let api_server = async move {
-            let mut builder = Server::builder();
+            let mut builder = listener_io::grpc_builder(settings.listeners);
             if let Some(config) = grpc_tls_server_config {
                 builder = builder
                     .tls_config(config)

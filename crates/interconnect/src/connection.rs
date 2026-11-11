@@ -2089,6 +2089,12 @@ impl TransportState {
                 Ok(accepted) => accepted,
                 Err(error) => {
                     warn!(?error, "interconnect listener accept failed");
+                    if !crate::is_connection_accept_failure(&error) {
+                        nervix_primitives::select! {
+                            _ = self.admission_closed.cancelled() => break,
+                            () = sleep(*self.options.accept_retry_delay.value()) => (),
+                        }
+                    }
                     continue;
                 }
             };

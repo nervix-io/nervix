@@ -107,6 +107,66 @@ impl Arbitrary<'_> {
         }
     }
 
+    /// A complete current listener claim, with bounded positive values and durations.
+    pub fn listener_bounds(&mut self) -> nervix_models::ListenerBounds {
+        nervix_models::ListenerBounds {
+            max_connections: std::num::NonZeroU32::new(
+                u32::try_from(self.entropy.between(1..=1024)).assured(
+                    "the listener generator restricts counts to 1..=1024 or retries to 1..=127",
+                ),
+            )
+            .assured("the listener generator restricts this quantity to a positive range"),
+            buffer_bytes: std::num::NonZeroU64::new(self.entropy.between(8192..=67108864))
+                .assured("the listener generator restricts this quantity to a positive range"),
+            header_bytes: std::num::NonZeroU64::new(self.entropy.between(8192..=67108864))
+                .assured("the listener generator restricts this quantity to a positive range"),
+            header_timeout: std::time::Duration::from_secs(self.entropy.between(1..=120)),
+            tls_timeout: std::time::Duration::from_secs(self.entropy.between(1..=120)),
+            idle_timeout: std::time::Duration::from_secs(self.entropy.between(1..=120)),
+            accept_retry_delay: std::time::Duration::from_secs(self.entropy.between(1..=120)),
+            http_keepalive: self.entropy.flag(),
+            http_body_bytes: std::num::NonZeroU64::new(self.entropy.between(8192..=67108864))
+                .assured("the listener generator restricts this quantity to a positive range"),
+            http_body_copy_bytes: std::num::NonZeroU64::new(self.entropy.between(1..=67108864))
+                .assured("the listener generator restricts this quantity to a positive range"),
+            http_body_timeout: std::time::Duration::from_secs(self.entropy.between(1..=120)),
+            http_refusal_drain_timeout: std::time::Duration::from_secs(
+                self.entropy.between(1..=120),
+            ),
+            websocket_message_bytes: std::num::NonZeroU64::new(
+                self.entropy.between(8192..=67108864),
+            )
+            .assured("the listener generator restricts this quantity to a positive range"),
+            websocket_frame_bytes: std::num::NonZeroU64::new(self.entropy.between(8192..=67108864))
+                .assured("the listener generator restricts this quantity to a positive range"),
+            grpc_header_bytes: std::num::NonZeroU64::new(self.entropy.between(8192..=67108864))
+                .assured("the listener generator restricts this quantity to a positive range"),
+            grpc_concurrency: std::num::NonZeroU32::new(
+                u32::try_from(self.entropy.between(1..=1024)).assured(
+                    "the listener generator restricts counts to 1..=1024 or retries to 1..=127",
+                ),
+            )
+            .assured("the listener generator restricts this quantity to a positive range"),
+            grpc_request_timeout: std::time::Duration::from_secs(self.entropy.between(1..=120)),
+            grpc_max_streams: std::num::NonZeroU32::new(
+                u32::try_from(self.entropy.between(1..=1024)).assured(
+                    "the listener generator restricts counts to 1..=1024 or retries to 1..=127",
+                ),
+            )
+            .assured("the listener generator restricts this quantity to a positive range"),
+            grpc_keepalive_interval: std::time::Duration::from_secs(self.entropy.between(1..=120)),
+            grpc_keepalive_timeout: std::time::Duration::from_secs(self.entropy.between(1..=120)),
+            tcp_keepalive_time: std::time::Duration::from_secs(self.entropy.between(1..=120)),
+            tcp_keepalive_interval: std::time::Duration::from_secs(self.entropy.between(1..=120)),
+            tcp_keepalive_retries: std::num::NonZeroU32::new(
+                u32::try_from(self.entropy.between(1..=127)).assured(
+                    "the listener generator restricts counts to 1..=1024 or retries to 1..=127",
+                ),
+            )
+            .assured("the listener generator restricts this quantity to a positive range"),
+        }
+    }
+
     /// A current incarnation-bound capacity claim, including unknown host measurements.
     pub fn node_capability_record(&mut self) -> nervix_models::NodeCapabilityRecord {
         use std::num::NonZeroU64;
@@ -288,6 +348,7 @@ impl Arbitrary<'_> {
                 cpu_count: cpu,
                 memory_bytes: memory,
                 receive,
+                listeners: self.listener_bounds(),
             },
         }
     }

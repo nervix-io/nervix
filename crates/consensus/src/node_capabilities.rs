@@ -211,6 +211,11 @@ mod tests {
                     nervix_arbitrary::Domain::Vocabulary,
                 )
                 .node_connector_host_capabilities(),
+                listeners: nervix_arbitrary::Arbitrary::new(
+                    &[],
+                    nervix_arbitrary::Domain::Vocabulary,
+                )
+                .listener_bounds(),
                 cpu_count: NonZeroU64::new(4),
                 memory_bytes: NonZeroU64::new(8 << 30),
                 receive: nervix_interconnect::PeerReceiveSettings::default().bounds(),

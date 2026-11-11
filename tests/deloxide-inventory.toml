@@ -6912,3 +6912,8 @@ invariant = "A lost terminal ACK expires under the captured short policy and seq
 invocation = "stress-scenarios"
 scenario = "A committed silence policy expires a lost forwarded acknowledgement sooner"
 selections = ["deloxide-stress"]
+
+[[owner]]
+gap = "The diagnostic-node workload reaches successful HTTP input and its retained accounting guard. Slow bodies, capacity refusal and cancellation racing allocation observation are qualified by the ordinary listener scenarios and the production-owner Shuttle check; those interleavings are outside detector evidence. The selected accounting mutex holds no I/O, await, copy or graph dispatch."
+path = "src/application/listener_input.rs"
+workloads = ["scenario.diagnostic-nodes", "stress.diagnostic-nodes"]

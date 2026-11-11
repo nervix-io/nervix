@@ -404,7 +404,7 @@ fn capability_line(record: &NodeCapabilityRecord) -> String {
     };
     format!(
         "  capabilities: committed {} cpu-count={cpu} memory-bytes={memory} {} {} {} {} \
-         drain-timeout={} shutdown-timeout={}",
+         drain-timeout={} shutdown-timeout={} listeners={:?}",
         record.identity,
         bounds_line(capabilities.receive),
         engine_capability_line(capabilities.engines),
@@ -418,6 +418,7 @@ fn capability_line(record: &NodeCapabilityRecord) -> String {
             .join(" "),
         timing_text(capabilities.shutdown.drain_timeout),
         timing_text(capabilities.shutdown.shutdown_timeout),
+        capabilities.listeners,
     )
 }
 
@@ -621,6 +622,8 @@ mod tests {
                         nervix_arbitrary::Domain::Vocabulary,
                     )
                     .node_connector_host_capabilities(),
+                    listeners: crate::application::listener_settings::ListenerSettings::default()
+                        .bounds(),
                     cpu_count: None,
                     memory_bytes: NonZeroU64::new(8 << 30),
                     receive,

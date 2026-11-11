@@ -234,6 +234,7 @@ pub struct NodeCapabilities {
     pub node_database: crate::DatabaseCapabilities,
     pub consensus_database: crate::DatabaseCapabilities,
     pub consensus: ConsensusCapabilities,
+    pub listeners: crate::ListenerBounds,
 }
 
 impl NodeCapabilities {

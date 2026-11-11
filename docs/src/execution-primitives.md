@@ -624,3 +624,13 @@ The unmodeled native thread surface also exposes the standard library's `Thread`
 when the final runtime disappears, independently of the configured preemption interval. Its one-time
 wake-handle initialization is real because the external engine thread runs outside every model;
 native lifecycle tests qualify release, without claiming modeled epoch timing or reference-count ordering.
+
+## Native TCP Keepalive Configuration
+
+`net::configure_tcp_keepalive` borrows an already selected native `TcpStream` and configures its
+kernel idle time, probe interval and retry count. It creates no socket or wrapper and uses socket2
+only inside the primitive boundary. Its positive and listener-type rejection API examples and
+native socket conformance check exercise that contract. Simulated sockets have no kernel options,
+so Turmoil does not expose the operation; no mode substitutes a no-op. The Hyper timer adapter's
+permission for the real Instant type exists only to satisfy that external trait signature; selected
+clock reads, sleeps and resets still determine every listener deadline.
