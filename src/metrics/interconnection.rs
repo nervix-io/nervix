@@ -838,6 +838,10 @@ struct WorkerClassSample {
 fn execution_families(families: &mut Families, executor: &nervix_execution::ExecutorSnapshot) {
     let memory = [
         MemoryClassSample {
+            class: "intake",
+            budget: executor.intake_memory,
+        },
+        MemoryClassSample {
             class: "management",
             budget: executor.management_memory,
         },
