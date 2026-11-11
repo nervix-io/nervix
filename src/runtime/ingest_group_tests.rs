@@ -1614,8 +1614,12 @@ async fn accepted_work_branch_input_keeps_acknowledgements_alive_during_wait() {
     let executor = single_worker_executor();
     let filled = FilledCpuClass::fill(&executor, CpuClass::Data).await;
     let (acks, mut completion) = AckSet::root();
-    let mut input = branched_input("acme", 10);
-    input.acks = vec![acks];
+    let row = branched_input("acme", 10);
+    let mut input = RelayRecordBatch::concat(vec![row.clone(), row.clone(), row])
+        .assured("the three rows share their schema and branch");
+    // Empty sidecars surround the live root, so its retained renewal presence must include the
+    // whole input, rather than only its first or last row.
+    input.acks[1] = acks;
     let mut prepared = Box::pin(prepare_branched_entrypoint_input(
         &executor,
         input,
@@ -1638,6 +1642,7 @@ async fn accepted_work_branch_input_keeps_acknowledgements_alive_during_wait() {
         .assured("the input completes after worker room frees");
     for branch in branches {
         let branch = branch.assured("the retained branch is valid");
+        assert_eq!(branch.message_count(), 3);
         for acks in branch.acks {
             acks.ack_success();
         }

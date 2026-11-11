@@ -1229,6 +1229,45 @@ impl BranchedEntrypointBatch {
 /// acknowledgements the failure preserves.
 pub(super) type PreparedBranch = Result<RelayRecordBatch, IngestGroupFailure<Vec<AckSet>>>;
 
+/// The input's existing failure-preservation copy, with renewal presence learned while cloning.
+/// Both admission waits can then check the same obligation without scanning every row again.
+struct BranchInputAcknowledgements {
+    acks: Vec<AckSet>,
+    needs_keepalive: bool,
+}
+
+impl BranchInputAcknowledgements {
+    fn cloned(source: &[AckSet]) -> Self {
+        let mut needs_keepalive = false;
+        let acks = source
+            .iter()
+            .map(|acks| {
+                let acks = acks.clone();
+                needs_keepalive |= !acks.is_empty();
+                acks
+            })
+            .collect();
+        Self {
+            acks,
+            needs_keepalive,
+        }
+    }
+
+    fn into_vec(self) -> Vec<AckSet> {
+        self.acks
+    }
+}
+
+impl AcknowledgementKeepalive for BranchInputAcknowledgements {
+    fn needs_keepalive(&self) -> bool {
+        self.needs_keepalive
+    }
+
+    fn keep_alive(&self) {
+        self.acks.as_slice().keep_alive();
+    }
+}
+
 /// Builds one input's route batch, plans its output branches, and filters a batch for each, as one
 /// job on the node's data workers.
 ///
@@ -1243,14 +1282,13 @@ pub(super) async fn prepare_branched_entrypoint_input(
     input: BranchedEntrypointInput,
     ack_boundary: BranchInstanceAckBoundary,
 ) -> Result<Vec<PreparedBranch>, IngestGroupFailure<Vec<AckSet>>> {
-    let acks = input.acks.clone();
+    let acks = BranchInputAcknowledgements::cloned(&input.acks);
     let decoded_limit = executor.limits().relay_decoded_bytes.as_u64();
     let charge = match input.batch.estimated_bytes().checked_mul(2) {
         Some(bytes) => bytes.min(decoded_limit),
         None => decoded_limit,
     };
     let reservation = match acks
-        .as_slice()
         .keep_alive_while_pending(executor.reserve(MemoryClass::Relay, charge))
         .await
     {
@@ -1260,12 +1298,11 @@ pub(super) async fn prepare_branched_entrypoint_input(
                 error.change_context(IngestGroupError::Execution {
                     operation: IngestGroupAdmittedOperation::PrepareBranchInput,
                 }),
-                acks,
+                acks.into_vec(),
             ));
         }
     };
     let prepared = acks
-        .as_slice()
         .keep_alive_while_pending(executor.accepted_work().run_cpu(
             CpuClass::Data,
             reservation,
@@ -1297,7 +1334,7 @@ pub(super) async fn prepare_branched_entrypoint_input(
             error.change_context(IngestGroupError::Execution {
                 operation: IngestGroupAdmittedOperation::PrepareBranchInput,
             }),
-            acks,
+            acks.into_vec(),
         )),
     }
 }
