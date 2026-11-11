@@ -52,6 +52,10 @@ impl ControlPlaneCadences {
                 capabilities.leadership_sync_retry(),
             ),
             (
+                "runtime_state_retry",
+                capabilities.runtime_state_retry_interval(),
+            ),
+            (
                 "transaction_sweep",
                 capabilities.transaction_sweep_interval(),
             ),

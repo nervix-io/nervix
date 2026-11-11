@@ -129,7 +129,9 @@ mod tests {
                 schedule_rx,
                 domain_rx,
                 task_shutdown,
-                nervix_consensus::RaftTimings::default().runtime_state_retry_interval(),
+                nervix_models::NodeOperationalCapabilities::default()
+                    .control_plane
+                    .runtime_state_retry_interval(),
             )
             .run(0_u8, move |count| {
                 let attempts = attempts.clone();
@@ -148,7 +150,8 @@ mod tests {
         });
 
         assert_eq!(observed.recv().await, Some(1));
-        let before_retry = nervix_consensus::RaftTimings::default()
+        let before_retry = nervix_models::NodeOperationalCapabilities::default()
+            .control_plane
             .runtime_state_retry_interval()
             .checked_sub(Duration::from_millis(1))
             .assured("the 500 ms retry cadence exceeds the 1 ms test boundary");
@@ -180,7 +183,9 @@ mod tests {
                 schedule_rx,
                 domain_rx,
                 task_shutdown,
-                nervix_consensus::RaftTimings::default().runtime_state_retry_interval(),
+                nervix_models::NodeOperationalCapabilities::default()
+                    .control_plane
+                    .runtime_state_retry_interval(),
             )
             .run((), move |()| {
                 let inputs = (*current_schedule.borrow(), *current_domain.borrow());
@@ -227,7 +232,9 @@ mod tests {
                 schedule_rx,
                 domain_rx,
                 task_shutdown,
-                nervix_consensus::RaftTimings::default().runtime_state_retry_interval(),
+                nervix_models::NodeOperationalCapabilities::default()
+                    .control_plane
+                    .runtime_state_retry_interval(),
             )
             .run((), move |()| {
                 let inputs = (*current_schedule.borrow(), *current_domain.borrow());
@@ -280,7 +287,9 @@ mod tests {
                 schedule_rx,
                 domain_rx,
                 task_shutdown,
-                nervix_consensus::RaftTimings::default().runtime_state_retry_interval(),
+                nervix_models::NodeOperationalCapabilities::default()
+                    .control_plane
+                    .runtime_state_retry_interval(),
             )
             .run((), move |()| {
                 let attempts = attempts.clone();
@@ -314,7 +323,9 @@ mod tests {
                     schedule_rx,
                     domain_rx,
                     shutdown,
-                    nervix_consensus::RaftTimings::default().runtime_state_retry_interval(),
+                    nervix_models::NodeOperationalCapabilities::default()
+                        .control_plane
+                        .runtime_state_retry_interval(),
                 )
                 .run((), |()| async { ((), Ok(())) })
                 .await;

@@ -2,8 +2,8 @@
 //!
 //! Layer: control plane.
 //!
-//! - **Owns.** The setting definitions of the shutdown and drain timeouts, their single defaults
-//!   and the group that holds them.
+//! - **Owns.** The setting definitions of the shutdown and drain timeouts and cooperative task
+//!   grace, their single defaults and the group that holds them.
 //! - **Depends on.** The vocabulary's setting classes and the shutdown lifecycle's defaults.
 //! - **Must not know.** Command-line parsing or the services a shutdown stops.
 
@@ -18,7 +18,7 @@
 use std::{convert::Infallible, time::Duration};
 
 use error_stack::Report;
-use meticulous::{OptionExt as _, ResultExt as _};
+use meticulous::ResultExt as _;
 use nervix_models::{NodeCapabilities, Setting, SettingDefinition};
 use thiserror::Error;
 
@@ -93,11 +93,35 @@ impl SettingDefinition for DrainTimeout {
     }
 }
 
+/// How long a listener or background task has to stop cooperatively after shutdown asks it to.
+/// The remaining shutdown deadline caps the actual wait. This is independent of the drain
+/// timeout because a drain may validly consume its whole configured deadline.
+pub struct TaskGracePeriod;
+
+impl SettingDefinition for TaskGracePeriod {
+    type Class = NodeCapabilities;
+    type Value = Duration;
+    type Context = ();
+    type Error = Infallible;
+
+    const NAME: &'static str = "task-grace-period";
+    const DERIVATION: Option<&'static str> = None;
+
+    fn default_value(_: &()) -> Duration {
+        Duration::from_secs(2)
+    }
+
+    fn validate(_: &Duration, _: &()) -> Result<(), Report<Infallible>> {
+        Ok(())
+    }
+}
+
 /// The deadlines one node stops within.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ShutdownSettings {
     pub shutdown_timeout: Setting<ShutdownTimeout>,
     pub drain_timeout: Setting<DrainTimeout>,
+    pub task_grace_period: Setting<TaskGracePeriod>,
 }
 
 impl ShutdownSettings {
@@ -106,6 +130,7 @@ impl ShutdownSettings {
     pub fn resolve(
         shutdown_timeout: Option<Duration>,
         drain_timeout: Option<Duration>,
+        task_grace_period: Option<Duration>,
     ) -> Result<Self, Report<ShutdownSettingsError>> {
         let shutdown_timeout = Setting::<ShutdownTimeout>::resolve(shutdown_timeout, &())
             .assured("the shutdown timeout declares no validation of its own");
@@ -113,6 +138,8 @@ impl ShutdownSettings {
         Ok(Self {
             shutdown_timeout,
             drain_timeout,
+            task_grace_period: Setting::<TaskGracePeriod>::resolve(task_grace_period, &())
+                .assured("task grace declares no validation of its own"),
         })
     }
 
@@ -120,14 +147,9 @@ impl ShutdownSettings {
         *self.shutdown_timeout.value()
     }
 
-    /// One tenth of the post-drain reserve belongs to each task's cooperative stop.
+    /// The cooperative stop interval. A caller also caps it by the remaining shutdown deadline.
     pub fn task_grace_period(&self) -> Duration {
-        (self
-            .shutdown_timeout()
-            .checked_sub(self.drain_timeout())
-            .assured("the resolved drain is no longer than shutdown")
-            / 10)
-            .max(Duration::from_nanos(1))
+        *self.task_grace_period.value()
     }
 
     pub fn drain_timeout(&self) -> Duration {
@@ -137,7 +159,7 @@ impl ShutdownSettings {
 
 impl Default for ShutdownSettings {
     fn default() -> Self {
-        Self::resolve(None, None)
+        Self::resolve(None, None, None)
             .assured("a const assertion keeps the default drain shorter than the default shutdown")
     }
 }
@@ -151,8 +173,9 @@ mod tests {
     #[test]
     fn a_drain_within_the_shutdown_resolves_and_the_defaults_are_ordered() {
         for drain in [Duration::from_secs(4), Duration::from_secs(5)] {
-            let resolved = ShutdownSettings::resolve(Some(Duration::from_secs(5)), Some(drain))
-                .expect("a drain that does not exceed the shutdown is valid");
+            let resolved =
+                ShutdownSettings::resolve(Some(Duration::from_secs(5)), Some(drain), None)
+                    .expect("a drain that does not exceed the shutdown is valid");
             assert_eq!(resolved.shutdown_timeout(), Duration::from_secs(5));
             assert_eq!(resolved.drain_timeout(), drain);
         }
@@ -160,12 +183,32 @@ mod tests {
         let defaults = ShutdownSettings::default();
         assert_eq!(defaults.shutdown_timeout(), Duration::from_secs(50));
         assert_eq!(defaults.drain_timeout(), Duration::from_secs(30));
+        assert_eq!(defaults.task_grace_period(), Duration::from_secs(2));
+    }
+
+    #[test]
+    fn a_full_deadline_drain_preserves_the_connection_and_task_grace() {
+        let settings = ShutdownSettings::resolve(
+            Some(Duration::from_secs(30)),
+            Some(Duration::from_secs(30)),
+            None,
+        )
+        .expect("a drain may use the whole shutdown deadline");
+        assert_eq!(settings.task_grace_period(), Duration::from_secs(2));
+
+        let configured = ShutdownSettings::resolve(
+            Some(Duration::from_secs(30)),
+            Some(Duration::from_secs(30)),
+            Some(Duration::from_secs(4)),
+        )
+        .expect("a cooperative grace does not depend on a post-drain reserve");
+        assert_eq!(configured.task_grace_period(), Duration::from_secs(4));
     }
 
     #[test]
     fn a_drain_above_the_shutdown_names_both() {
         for drain in [Duration::new(50, 1), Duration::from_secs(60)] {
-            let refused = ShutdownSettings::resolve(None, Some(drain))
+            let refused = ShutdownSettings::resolve(None, Some(drain), None)
                 .expect_err("the drain exceeds the deadline that bounds it");
             assert_eq!(
                 refused.current_context(),
@@ -175,7 +218,7 @@ mod tests {
                 }
             );
         }
-        let refused = ShutdownSettings::resolve(None, Some(Duration::from_secs(60)))
+        let refused = ShutdownSettings::resolve(None, Some(Duration::from_secs(60)), None)
             .expect_err("the drain is longer than the shutdown");
         assert_eq!(
             format!("{refused:#}"),

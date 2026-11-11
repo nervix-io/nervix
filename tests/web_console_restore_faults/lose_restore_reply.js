@@ -56,7 +56,8 @@
     }));
   };
 
-  // The console reads every frame as an ArrayBuffer; a restore connection carries one reply.
+  // The console reads every frame as an ArrayBuffer; after the opening a restore connection
+  // carries one reply.
   const loseReply = (socket, data) => {
     if (socket.replyLostByFault === true) {
       state.failure = "the connection whose reply was lost received a second message";
@@ -88,10 +89,15 @@
       }
       state.restoreConnections += 1;
       const losesReply = state.restoreConnections === 1;
+      this.openingReceived = false;
       this.recordsStart = losesReply && laterFailure === "unrecorded";
       // Added before the console sets its own handler, so it runs first and keeps the message
       // from it.
       this.addEventListener("message", (event) => {
+        if (!this.openingReceived) {
+          this.openingReceived = true;
+          return;
+        }
         if (laterFailure === "unrecorded" && state.substitutedFailures > 0) return;
         event.stopImmediatePropagation();
         if (losesReply) {

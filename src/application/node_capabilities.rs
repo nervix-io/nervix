@@ -55,13 +55,13 @@ pub(super) fn spawn(
     interconnect: nervix_interconnect::Transport,
     capabilities: NodeCapabilities,
     operational: nervix_models::NodeOperationalCapabilities,
-    timings: nervix_consensus::RaftTimings,
     shutdown: nervix_primitives::sync::CancellationToken,
 ) -> nervix_primitives::task::JoinHandle<()> {
+    let retry_interval = operational.control_plane.runtime_state_retry_interval();
     let operational = StdArc::new(operational);
     nervix_primitives::task::spawn(async move {
         let mut announced = false;
-        let mut cadence = nervix_primitives::time::interval(timings.runtime_state_retry_interval());
+        let mut cadence = nervix_primitives::time::interval(retry_interval);
         loop {
             nervix_primitives::select! {
                 biased;

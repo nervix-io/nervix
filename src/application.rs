@@ -851,7 +851,10 @@ impl Application {
         let mut interconnect_rx = interconnect_rx;
         let runtime_admission = Arc::new(runtime_admission::RuntimeAdmission::new(
             cluster.local_node_identity().await,
-            settings.raft,
+            settings
+                .operational
+                .control_plane
+                .runtime_state_retry_interval(),
         ));
         runtime.attach_remote_dispatcher(cluster.clone(), interconnect.clone());
         let node_observations = NodeObservations::new(
@@ -900,7 +903,6 @@ impl Application {
             interconnect.clone(),
             capabilities,
             settings.operational,
-            settings.raft,
             shutdown.clone(),
         ));
         let scheduler_delay_shutdown = shutdown.clone();

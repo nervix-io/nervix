@@ -27,7 +27,9 @@ fn runtime_admission() -> RuntimeAdmission {
             nervix_models::ClusterNodeName::parse("node-1").expect("fixture node"),
             nervix_models::ClusterNodeIncarnation::new(1),
         ),
-        nervix_consensus::RaftTimings::default(),
+        nervix_models::NodeOperationalCapabilities::default()
+            .control_plane
+            .runtime_state_retry_interval(),
     )
 }
 

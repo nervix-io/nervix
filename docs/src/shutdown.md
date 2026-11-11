@@ -304,10 +304,10 @@ accepted to take no new call, and each connection closes once the calls it carri
 call that reaches the server even so ends at once as above. A connection can outlive its calls only
 when its client reads nothing, so that an ending or a status cannot be sent. Shutdown therefore
 gives the listeners the cooperative task-stop grace and then cuts
-every connection still open, which its client sees as a transport loss. The grace is one tenth
-of the configured shutdown reserve after the drain timeout, two seconds by default, and is always
-capped by the remaining absolute shutdown deadline. The coordinator captures it with the first
-stop request. Leader observation during the drain polls at one tenth of a Raft heartbeat. No client can hold the drain
+every connection still open, which its client sees as a transport loss. `--task-grace-period`
+sets that grace, two seconds by default, and the remaining absolute shutdown deadline caps it.
+The coordinator captures it with the first stop request. Leader observation during the drain polls
+at one tenth of a Raft heartbeat. No client can hold the drain
 or the process open for longer than that grace period. [Node Stop And Restart As A Client Observes
 Them](./client-session-protocol.md#node-stop-and-restart-as-a-client-observes-them) describes what a
 client sees at each ending and what it recovers.
@@ -994,8 +994,9 @@ expire branch state mid-handoff. Nothing about shutdown merges branches or moves
 
 Terminal teardown begins only after drain support completes or reports itself abandoned.
 
-It stops the node's background tasks, giving each at most two seconds, then waits for work that
-sessions and commands started until the shutdown deadline and cancels whatever still runs. It then
+It stops the node's background tasks, giving each at most the configured cooperative task-stop
+grace, then waits until the shutdown deadline for work that sessions and commands started and
+cancels whatever still runs. It then
 stops the runtime, consensus, cluster membership, and the interconnect in that order, and finally
 releases the node's storage.
 

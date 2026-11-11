@@ -214,6 +214,7 @@ restarts. It changes neither the cluster's accepted Models nor an existing opera
 | --- | --- |
 | Membership, scheduling, resource replication and application-health rounds | 1s |
 | Transaction/archive sweep and leadership-sync retry | 250ms |
+| Runtime-state admission, installation and capability-announcement retry | 500ms |
 | Restore-staging sweep and interconnect TLS reload | 1s |
 | Concurrent transaction recoveries / resource replications | 8 / 4 |
 | Session frame / transfer / string bytes | 4 MiB / 64 MiB / 64 MiB |
@@ -259,10 +260,15 @@ values have no independent flag.
 Local transaction-application and gate release/engagement retries, clock-progress delivery,
 backup retries and restore conversion admission have their own `--control-plane-*` capabilities.
 Their defaults remain 100ms, 200ms, 50ms, and a 30s conversion wait with 50ms retry as applicable.
+`--control-plane-runtime-state-retry-interval` keeps runtime admission, installation and node
+capability publication retries at 500ms by default, independently of the Raft heartbeat. A node
+may tune that retry without changing the cluster's consensus prerequisite.
 Startup voter observation lasts twenty gossip rounds. Completion probes use one Raft heartbeat,
 authority reassignment retries four fifths of a heartbeat, cordon release keeps four heartbeats,
-and shutdown leader observation uses one tenth of a heartbeat. Cooperative task-stop grace is
-one tenth of the configured post-drain shutdown reserve, capped by the remaining stop deadline.
+and shutdown leader observation uses one tenth of a heartbeat. `--task-grace-period` controls
+cooperative listener and background-task stop grace, two seconds by default and capped by the
+remaining stop deadline. A drain may use the full configured timeout without cutting the
+listener's normal grace to zero.
 
 The complete parameter record stays allocation-free and `Copy`. Its validated parameter projection stores
 whole seconds and subsecond nanoseconds in eight bytes; every permitted duration, through
@@ -704,7 +710,7 @@ describes, defaults included.
 | `--transaction-idle-timeout`, `--transaction-tombstone-retention`, `--transaction-max-statements`, `--transaction-max-source-bytes`, `--transaction-max-open` | cluster parameter | transaction limits |
 | `--command-retry-validity`, `--command-execution-capacity` | cluster parameter | command execution |
 | `--memory-high-watermark`, `--memory-low-watermark`, `--memory-pressure-check-interval`, `--memory-pressure-resume-jitter` | node capability | memory pressure |
-| `--drain-timeout`, `--shutdown-timeout` | node capability | shutdown |
+| `--drain-timeout`, `--shutdown-timeout`, `--task-grace-period` | node capability | shutdown |
 | `--resource-max-archive-bytes`, `--resource-max-extracted-bytes`, `--resource-max-file-count` | cluster parameter | resources |
 | `--otel-trace-sample-ratio` | node capability | trace export |
 | `--cpu-count`, `--memory-limit` | node capability | capacity |

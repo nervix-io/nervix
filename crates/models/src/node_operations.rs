@@ -202,6 +202,7 @@ capability_group! {
         resource_replication_interval: ResourceReconcileInterval => ("control-plane-resource-replication-interval", Duration, Duration::from_secs(1)),
         health_probe_interval: HealthProbeInterval => ("control-plane-health-probe-interval", Duration, Duration::from_secs(1)),
         leadership_sync_retry: LeadershipSyncRetry => ("control-plane-leadership-sync-retry", Duration, Duration::from_millis(250)),
+        runtime_state_retry_interval: RuntimeStateRetryInterval => ("control-plane-runtime-state-retry-interval", Duration, Duration::from_millis(500)),
         transaction_sweep_interval: TransactionSweepInterval => ("control-plane-transaction-sweep-interval", Duration, Duration::from_millis(250)),
         restore_staging_sweep_interval: RestoreStagingSweepInterval => ("control-plane-restore-staging-sweep-interval", Duration, Duration::from_secs(1)),
         transaction_recovery_concurrency: TransactionRecoveryConcurrency => ("control-plane-transaction-recovery-concurrency", Count, 8),

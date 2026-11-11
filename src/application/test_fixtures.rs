@@ -320,7 +320,9 @@ fn test_session_service(
                     consensus.proposer().local_node_id().clone(),
                     cluster.local_incarnation(),
                 ),
-                nervix_consensus::RaftTimings::default(),
+                nervix_models::NodeOperationalCapabilities::default()
+                    .control_plane
+                    .runtime_state_retry_interval(),
             )),
             initialization: {
                 let state = Arc::new(super::node_initialization::NodeInitialization::default());

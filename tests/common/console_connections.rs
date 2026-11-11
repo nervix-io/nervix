@@ -43,7 +43,7 @@ use meticulous::OptionExt as _;
 use nervix_client_wire::{
     BackupDownloadMessage, CommandDisposition, DomainClockAttachDisposition, LeaderRedirect,
     Leadership, NodeEndpoints, Reply, ReplyBody, RestoreDisposition, RestoreReply, ServerEvent,
-    ServerMessage, SessionEndReason, SessionLimits,
+    ServerMessage, SessionEndReason, SessionLimits, SessionOpened,
     websocket::{
         CONSOLE_BACKUP_DOWNLOAD_PATH, CONSOLE_RESTORE_PATH, CONSOLE_SESSION_PATH,
         ClientBackupDownloadWebSocketCodec, ClientRestoreWebSocketCodec, ClientWebSocketCodec,
@@ -150,12 +150,13 @@ impl ConnectionPurpose {
     fn reported_leader(
         &self,
         frame: &ReceivedFrame,
+        limits: SessionLimits,
     ) -> Result<Option<ReportedLeader>, Report<FrameReadFailure>> {
         let data = WebSocketData::Binary(Bytes::copy_from_slice(&frame.bytes));
         match self {
-            Self::Session => ReportedLeader::in_session_frame(data),
-            Self::BackupDownload => ReportedLeader::in_download_frame(data),
-            Self::Restore => ReportedLeader::in_restore_reply(data),
+            Self::Session => ReportedLeader::in_session_frame(data, limits),
+            Self::BackupDownload => ReportedLeader::in_download_frame(data, limits),
+            Self::Restore => ReportedLeader::in_restore_reply(data, limits),
             Self::Other(_) => Ok(None),
         }
     }
@@ -200,12 +201,27 @@ pub(crate) struct RecordedConnection {
 }
 
 impl RecordedConnection {
+    /// The first frame of every known call announces its bounds. The recorder keeps that first
+    /// frame even when it drops middle frames to bound its own memory.
+    fn opened_frames(
+        &self,
+    ) -> Result<Option<(SessionLimits, &[ReceivedFrame])>, Report<FrameReadFailure>> {
+        let Some((opening, rest)) = self.frames.split_first() else {
+            return Ok(None);
+        };
+        let limits = SessionOpened::verify(Bytes::copy_from_slice(&opening.bytes))
+            .map_err(|error| error.change_context(FrameReadFailure::NotOpening))?
+            .limits;
+        Ok(Some((limits, rest)))
+    }
+
     /// The console of the node `frame` reports leads, or `None` when it reports nothing about it.
     fn reported_leader(
         &self,
         frame: &ReceivedFrame,
+        limits: SessionLimits,
     ) -> Result<Option<ConsoleAddress>, Report<FrameReadFailure>> {
-        let reported = self.purpose.reported_leader(frame)?;
+        let reported = self.purpose.reported_leader(frame, limits)?;
         let Some(reported) = reported else {
             return Ok(None);
         };
@@ -306,8 +322,11 @@ impl ReportedLeader {
     }
 
     /// What a frame of a console session reports.
-    fn in_session_frame(data: WebSocketData) -> Result<Option<Self>, Report<FrameReadFailure>> {
-        let codec = ClientWebSocketCodec::new(SessionLimits::DEFAULT);
+    fn in_session_frame(
+        data: WebSocketData,
+        limits: SessionLimits,
+    ) -> Result<Option<Self>, Report<FrameReadFailure>> {
+        let codec = ClientWebSocketCodec::new(limits);
         let frame = codec
             .decode(data)
             .map_err(|error| error.change_context(FrameReadFailure::NotFrame))?;
@@ -318,8 +337,11 @@ impl ReportedLeader {
 
     /// What a frame of a backup download reports: the redirect a node that does not lead and does
     /// not retain the archive answers with.
-    fn in_download_frame(data: WebSocketData) -> Result<Option<Self>, Report<FrameReadFailure>> {
-        let codec = ClientBackupDownloadWebSocketCodec::new(SessionLimits::DEFAULT);
+    fn in_download_frame(
+        data: WebSocketData,
+        limits: SessionLimits,
+    ) -> Result<Option<Self>, Report<FrameReadFailure>> {
+        let codec = ClientBackupDownloadWebSocketCodec::new(limits);
         let frame = codec
             .decode(data)
             .map_err(|error| error.change_context(FrameReadFailure::NotFrame))?;
@@ -333,8 +355,11 @@ impl ReportedLeader {
 
     /// What the reply to a restore stream reports: the redirect of a restore the node could not run
     /// because it does not lead.
-    fn in_restore_reply(data: WebSocketData) -> Result<Option<Self>, Report<FrameReadFailure>> {
-        let codec = ClientRestoreWebSocketCodec::new(SessionLimits::DEFAULT);
+    fn in_restore_reply(
+        data: WebSocketData,
+        limits: SessionLimits,
+    ) -> Result<Option<Self>, Report<FrameReadFailure>> {
+        let codec = ClientRestoreWebSocketCodec::new(limits);
         let frame = codec
             .decode(data)
             .map_err(|error| error.change_context(FrameReadFailure::NotFrame))?;
@@ -350,6 +375,8 @@ impl ReportedLeader {
 /// Why a frame the page received does not read as a frame of its connection's call.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub(crate) enum FrameReadFailure {
+    #[error("the first frame does not announce this connection's session limits")]
+    NotOpening,
     #[error("the payload is not a frame")]
     NotFrame,
     #[error("the frame is not a message of the connection's call")]
@@ -521,14 +548,21 @@ impl ConsoleConnectionRecord {
         &self,
         domain: &DomainName,
     ) -> error_stack::Result<usize, ClockAttachmentEvidenceError> {
-        let codec = ClientWebSocketCodec::new(SessionLimits::DEFAULT);
         let mut count = 0_usize;
         for (number, connection) in self.numbered() {
             if connection.purpose != ConnectionPurpose::Session {
                 continue;
             }
+            let Some((limits, frames)) = connection.opened_frames().map_err(|error| {
+                error
+                    .change_context(ClockAttachmentEvidenceError::Unreadable { connection: number })
+            })?
+            else {
+                continue;
+            };
+            let codec = ClientWebSocketCodec::new(limits);
             let mut attached = false;
-            for frame in &connection.frames {
+            for frame in frames {
                 let data = WebSocketData::Binary(Bytes::copy_from_slice(&frame.bytes));
                 let frame = codec.decode(data).map_err(|error| {
                     error.change_context(ClockAttachmentEvidenceError::Unreadable {
@@ -579,7 +613,6 @@ impl ConsoleConnectionRecord {
     pub(crate) fn setup_observation(
         &self,
     ) -> Result<ConsoleSetupObservation, Report<FrameReadFailure>> {
-        let codec = ClientWebSocketCodec::new(SessionLimits::DEFAULT);
         let mut observation = ConsoleSetupObservation {
             connections: Vec::new(),
             domain_selections: 0,
@@ -591,7 +624,11 @@ impl ConsoleConnectionRecord {
                 continue;
             }
             observation.connections.push(connection.opened);
-            for frame in &connection.frames {
+            let Some((limits, frames)) = connection.opened_frames()? else {
+                continue;
+            };
+            let codec = ClientWebSocketCodec::new(limits);
+            for frame in frames {
                 let data = WebSocketData::Binary(Bytes::copy_from_slice(&frame.bytes));
                 let verified = codec
                     .decode(data)
@@ -626,14 +663,32 @@ impl ConsoleConnectionRecord {
             if connection.purpose != ConnectionPurpose::Session {
                 continue;
             }
-            for frame in &connection.frames {
-                let reported = connection.purpose.reported_leader(frame).map_err(|error| {
-                    error.change_context(UnreadableFrame {
-                        connection: number,
-                        purpose: connection.purpose.clone(),
-                        received: frame.received,
-                    })
-                })?;
+            let Some((limits, frames)) = connection.opened_frames().map_err(|error| {
+                error.change_context(UnreadableFrame {
+                    connection: number,
+                    purpose: connection.purpose.clone(),
+                    received: connection
+                        .frames
+                        .first()
+                        .assured("a failed opening has a first frame")
+                        .received,
+                })
+            })?
+            else {
+                continue;
+            };
+            for frame in frames {
+                let reported =
+                    connection
+                        .purpose
+                        .reported_leader(frame, limits)
+                        .map_err(|error| {
+                            error.change_context(UnreadableFrame {
+                                connection: number,
+                                purpose: connection.purpose.clone(),
+                                received: frame.received,
+                            })
+                        })?;
                 if let Some(ReportedLeader::Serving(node)) = reported {
                     return Ok(Some(node));
                 }
@@ -647,8 +702,25 @@ impl ConsoleConnectionRecord {
     pub(crate) fn reported_leaders(&self) -> Result<ReportedLeaders, Report<UnreadableFrame>> {
         let mut leaders = ReportedLeaders::default();
         for (number, connection) in self.numbered() {
-            for frame in &connection.frames {
-                let reported = connection.reported_leader(frame).map_err(|error| {
+            if matches!(&connection.purpose, ConnectionPurpose::Other(_)) {
+                continue;
+            }
+            let Some((limits, frames)) = connection.opened_frames().map_err(|error| {
+                error.change_context(UnreadableFrame {
+                    connection: number,
+                    purpose: connection.purpose.clone(),
+                    received: connection
+                        .frames
+                        .first()
+                        .assured("a failed opening has a first frame")
+                        .received,
+                })
+            })?
+            else {
+                continue;
+            };
+            for frame in frames {
+                let reported = connection.reported_leader(frame, limits).map_err(|error| {
                     error.change_context(UnreadableFrame {
                         connection: number,
                         purpose: connection.purpose.clone(),

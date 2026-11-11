@@ -31,6 +31,8 @@ pub struct OperationalArgs {
     pub control_plane_health_probe_interval: Option<HumanDuration>,
     #[arg(long = LeadershipSyncRetry::NAME, env = "NERVIX_CONTROL_PLANE_LEADERSHIP_SYNC_RETRY", help = capability_help(HumanDuration(NodeOperationalCapabilities::default().control_plane.leadership_sync_retry()).to_string(), LeadershipSyncRetry::DERIVATION))]
     pub control_plane_leadership_sync_retry: Option<HumanDuration>,
+    #[arg(long = RuntimeStateRetryInterval::NAME, env = "NERVIX_CONTROL_PLANE_RUNTIME_STATE_RETRY_INTERVAL", help = capability_help(HumanDuration(NodeOperationalCapabilities::default().control_plane.runtime_state_retry_interval()).to_string(), RuntimeStateRetryInterval::DERIVATION))]
+    pub control_plane_runtime_state_retry_interval: Option<HumanDuration>,
     #[arg(long = TransactionSweepInterval::NAME, env = "NERVIX_CONTROL_PLANE_TRANSACTION_SWEEP_INTERVAL", help = capability_help(HumanDuration(NodeOperationalCapabilities::default().control_plane.transaction_sweep_interval()).to_string(), TransactionSweepInterval::DERIVATION))]
     pub control_plane_transaction_sweep_interval: Option<HumanDuration>,
     #[arg(long = RestoreStagingSweepInterval::NAME, env = "NERVIX_CONTROL_PLANE_RESTORE_STAGING_SWEEP_INTERVAL", help = capability_help(HumanDuration(NodeOperationalCapabilities::default().control_plane.restore_staging_sweep_interval()).to_string(), RestoreStagingSweepInterval::DERIVATION))]
@@ -135,6 +137,9 @@ impl OperationalArgs {
                 leadership_sync_retry: self
                     .control_plane_leadership_sync_retry
                     .map(|value| value.0),
+                runtime_state_retry_interval: self
+                    .control_plane_runtime_state_retry_interval
+                    .map(|value| value.0),
                 transaction_sweep_interval: self
                     .control_plane_transaction_sweep_interval
                     .map(|value| value.0),
@@ -223,6 +228,9 @@ impl OperationalArgs {
             )),
             control_plane_leadership_sync_retry: Some(HumanDuration(
                 settings.control_plane.leadership_sync_retry(),
+            )),
+            control_plane_runtime_state_retry_interval: Some(HumanDuration(
+                settings.control_plane.runtime_state_retry_interval(),
             )),
             control_plane_transaction_sweep_interval: Some(HumanDuration(
                 settings.control_plane.transaction_sweep_interval(),
@@ -330,6 +338,10 @@ impl OperationalArgs {
         command_line.optional(
             LeadershipSyncRetry::NAME,
             self.control_plane_leadership_sync_retry,
+        );
+        command_line.optional(
+            RuntimeStateRetryInterval::NAME,
+            self.control_plane_runtime_state_retry_interval,
         );
         command_line.optional(
             TransactionSweepInterval::NAME,

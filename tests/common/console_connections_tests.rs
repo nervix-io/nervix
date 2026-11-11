@@ -19,7 +19,7 @@ use nervix_client_wire::{
     DomainClockAttachOutcome, LeaderRedirect, Leadership, LeadershipObserved, NodeEndpoints,
     NoticeKind, NoticeLevel, OutcomeOrigin, Reply, ReplyBody, ReplyDelivery, RequestId,
     RestoreDisposition, RestoreReply, RestoreUploadFailure, ServerNotice, SessionEndReason,
-    SessionEnding, SessionLimits,
+    SessionEnding, SessionLimits, SessionOpened,
     websocket::{
         CONSOLE_BACKUP_DOWNLOAD_PATH, CONSOLE_RESTORE_PATH, CONSOLE_SESSION_PATH,
         ServerBackupDownloadWebSocketCodec, ServerRestoreWebSocketCodec, ServerWebSocketCodec,
@@ -54,7 +54,31 @@ fn address(address: &str) -> ConsoleAddress {
 }
 
 /// A record in the shape the page's recorder reads it out.
-fn record(connections: Vec<Value>, losses: &[u64]) -> ConsoleConnectionRecord {
+fn record(mut connections: Vec<Value>, losses: &[u64]) -> ConsoleConnectionRecord {
+    let opening = SessionOpened { limits: LIMITS }
+        .encode()
+        .assured("the fixed session opening fits its frame");
+    let opening = Vec::from(ServerWebSocketCodec::new(LIMITS).encode(opening));
+    for connection in &mut connections {
+        let Some(path) = connection["path"].as_str() else {
+            continue;
+        };
+        if !matches!(
+            path,
+            CONSOLE_SESSION_PATH | CONSOLE_BACKUP_DOWNLOAD_PATH | CONSOLE_RESTORE_PATH
+        ) {
+            continue;
+        }
+        let Some(connected) = connection["connected"].as_u64() else {
+            continue;
+        };
+        // These synthetic records compress the opening into the connection event. The ordinary
+        // frame moments remain unchanged, so their leader-order assertions keep their meaning.
+        connection["frames"]
+            .as_array_mut()
+            .assured("a synthetic connection lists its recorded frames")
+            .insert(0, frame(connected, opening.clone()));
+    }
     serde_json::from_value(json!({ "connections": connections, "losses": losses }))
         .assured("the test builds every record in the recorder's shape")
 }

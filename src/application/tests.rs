@@ -41,6 +41,10 @@ fn args_default_to_the_application_shutdown_timeouts() {
         args.settings.shutdown.shutdown_timeout.0,
         shutdown::DEFAULT_SHUTDOWN_TIMEOUT
     );
+    assert_eq!(
+        args.settings.shutdown.task_grace_period.0,
+        Duration::from_secs(2)
+    );
 }
 
 #[test]
@@ -50,6 +54,42 @@ fn args_parse_shutdown_timeout() {
     assert_eq!(
         args.settings.shutdown.shutdown_timeout.0,
         Duration::from_secs(120)
+    );
+}
+
+#[test]
+fn args_parse_task_grace_period() {
+    let args = test_args(&["--task-grace-period", "4s"]);
+
+    assert_eq!(
+        args.settings.shutdown.task_grace_period.0,
+        Duration::from_secs(4)
+    );
+}
+
+#[test]
+fn runtime_retry_keeps_its_cadence_when_raft_heartbeat_changes() {
+    let args = test_args(&["--raft-heartbeat-interval", "2500ms"]);
+    assert_eq!(
+        args.settings
+            .operational
+            .control_plane
+            .runtime_state_retry_interval(),
+        Duration::from_millis(500)
+    );
+
+    let args = test_args(&[
+        "--raft-heartbeat-interval",
+        "2500ms",
+        "--control-plane-runtime-state-retry-interval",
+        "100ms",
+    ]);
+    assert_eq!(
+        args.settings
+            .operational
+            .control_plane
+            .runtime_state_retry_interval(),
+        Duration::from_millis(100)
     );
 }
 

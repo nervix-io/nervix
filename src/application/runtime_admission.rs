@@ -44,10 +44,10 @@ pub(in crate::application) struct RuntimeAdmission {
 impl RuntimeAdmission {
     pub(in crate::application) fn new(
         identity: nervix_models::ClusterNodeIdentity,
-        timings: nervix_consensus::RaftTimings,
+        retry_interval: Duration,
     ) -> Self {
         Self {
-            retry_interval: timings.runtime_state_retry_interval(),
+            retry_interval,
             identity,
             committed_log_index: OnceLock::new(),
             attempt: Mutex::new(()),
@@ -209,7 +209,9 @@ mod tests {
                 ClusterNodeName::parse("node-1").expect("fixture node"),
                 nervix_models::ClusterNodeIncarnation::new(1),
             ),
-            nervix_consensus::RaftTimings::default(),
+            nervix_models::NodeOperationalCapabilities::default()
+                .control_plane
+                .runtime_state_retry_interval(),
         );
         let runtime = Runtime::new();
         let local = ClusterNodeName::parse("node-1").assured("the fixture node name is valid");

@@ -64,6 +64,7 @@ impl Entropy<'_> {
                 resource_replication_interval: Some(self.operational_duration()),
                 health_probe_interval: Some(self.operational_duration()),
                 leadership_sync_retry: Some(self.operational_duration()),
+                runtime_state_retry_interval: Some(self.operational_duration()),
                 transaction_sweep_interval: Some(self.operational_duration()),
                 restore_staging_sweep_interval: Some(self.operational_duration()),
                 transaction_recovery_concurrency: Some(self.operational_count()),

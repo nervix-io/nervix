@@ -518,8 +518,8 @@ status, keeping the start version, start mode, clock, schedule and incremental s
 
 The current emitter Models carry explicit key expressions, source-partition routing and
 expression-only SQS FIFO groups. The dedicated database owns exactly four current keyspaces:
-`raft_node_policy_engine_host_instances_license_activation_epoch_logs`, `raft_node_policy_engine_host_instances_license_activation_epoch_meta`, `raft_node_policy_engine_host_instances_license_activation_epoch_state`, and
-`raft_node_policy_engine_host_instances_license_activation_epoch_snapshots`. Opening it validates the complete keyspace namespace before reading
+`raft_node_policy_engine_host_instances_license_activation_epoch_retry_logs`, `raft_node_policy_engine_host_instances_license_activation_epoch_retry_meta`, `raft_node_policy_engine_host_instances_license_activation_epoch_retry_state`, and
+`raft_node_policy_engine_host_instances_license_activation_epoch_retry_snapshots`. Opening it validates the complete keyspace namespace before reading
 any records. The committed cluster-parameter record stores ordered typed TLS cipher suites and
 key-exchange groups; recovery validates their complete pair before returning that record.
 This namespace identifies the current Model shape, including the separate JSON
