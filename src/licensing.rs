@@ -19,13 +19,12 @@ pub mod policy;
 use admission_metrics::AdmissionMetrics;
 use meticulous::OptionExt as _;
 use nervix_consensus::{LicensingSnapshot, Observer};
-use nervix_licensing_protocol::conditions::Capability;
 pub use nervix_licensing_vocabulary::{LicensingRefusal, Quota, QuotaConstraint, QuotaName};
 use nervix_primitives::{
     publication::{ArcSwap, Guard},
     sync::{Arc, CancellationToken, StdArc},
 };
-pub use policy::{CapabilityName, LicensingPolicy, StopReason};
+pub use policy::{CapabilityName, CapabilityVerdict, LicensingPolicy, StopReason};
 
 use crate::{ConfiguredFaultInjection, metrics::RuntimeMetrics};
 
@@ -70,6 +69,7 @@ fn for_node(snapshot: LicensingSnapshot, fault: &ConfiguredFaultInjection) -> Li
             .verified("the current free catalog contains this cluster quota") =
             nervix_licensing_protocol::conditions::ConditionValue::Known(quota);
     }
+    policy.refresh_grants();
     policy
 }
 
@@ -130,7 +130,7 @@ impl PolicyHandle {
     pub fn current(&self) -> PolicyView {
         PolicyView(self.inner.policy.load())
     }
-    pub fn capability(&self, name: CapabilityName) -> Capability {
+    pub fn capability(&self, name: CapabilityName) -> CapabilityVerdict {
         self.current().capability(name)
     }
     pub fn quota(&self, name: QuotaName) -> Quota {
@@ -150,6 +150,23 @@ impl PolicyHandle {
     ) -> error_stack::Result<QuotaConstraint, LicensingRefusal> {
         for_node(snapshot, &self.inner.fault)
             .admit(name, usage, requested, replacement)
+            .inspect_err(|report| self.record_refusal(report))
+    }
+
+    pub(crate) fn admit_node_snapshot(
+        &self,
+        snapshot: LicensingSnapshot,
+        node: &nervix_models::ClusterNodeName,
+        usage: u64,
+    ) -> error_stack::Result<QuotaConstraint, LicensingRefusal> {
+        let policy = for_node(snapshot, &self.inner.fault);
+        policy
+            .admit(
+                QuotaName::ClusterNodes,
+                usage,
+                1,
+                policy.is_node_replacement(node),
+            )
             .inspect_err(|report| self.record_refusal(report))
     }
 

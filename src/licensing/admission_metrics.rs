@@ -19,6 +19,8 @@ use crate::metrics::RuntimeMetrics;
 pub(super) struct AdmissionMetrics {
     nodes: IntCounter,
     domains: IntCounter,
+    grace_nodes: IntCounter,
+    grace_domains: IntCounter,
     lapsed_nodes: IntCounter,
     lapsed_domains: IntCounter,
 }
@@ -42,6 +44,10 @@ impl AdmissionMetrics {
             .register_collector(Box::new(family.clone()))
             .assured("licensing admission metrics are registered once per node");
         Self {
+            grace_nodes: family
+                .with_label_values(&[QuotaName::ClusterNodes.as_str(), "within_grace"]),
+            grace_domains: family
+                .with_label_values(&[QuotaName::ClusterDomains.as_str(), "within_grace"]),
             lapsed_nodes: family.with_label_values(&[QuotaName::ClusterNodes.as_str(), "lapsed"]),
             lapsed_domains: family
                 .with_label_values(&[QuotaName::ClusterDomains.as_str(), "lapsed"]),
@@ -52,6 +58,13 @@ impl AdmissionMetrics {
 
     pub(super) fn record(&self, refusal: &LicensingRefusal) {
         match (refusal.condition, refusal.state) {
+            (QuotaName::ClusterNodes, nervix_licensing_vocabulary::AdmissionState::WithinGrace) => {
+                self.grace_nodes.inc()
+            }
+            (
+                QuotaName::ClusterDomains,
+                nervix_licensing_vocabulary::AdmissionState::WithinGrace,
+            ) => self.grace_domains.inc(),
             (QuotaName::ClusterNodes, nervix_licensing_vocabulary::AdmissionState::OverLimit) => {
                 self.nodes.inc()
             }

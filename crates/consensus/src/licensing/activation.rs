@@ -95,6 +95,7 @@ pub enum StoredDecisionOperation {
 pub struct ActivationState {
     pub binding: ActivationBinding,
     pub decision: StoredDecision,
+    pub transitions: super::CommittedLicenseTransitions,
 }
 
 /// A command carries received data, never a preverified flag. Every replica verifies it again.
@@ -448,6 +449,7 @@ impl LicensingRecord {
         let mut known_revisions = BTreeSet::new();
         if let Some(previous) = previous {
             known_revisions.insert(previous.decision.conditions_revision);
+            known_revisions.extend(previous.transitions.revisions());
             known_revisions.extend(
                 previous
                     .decision
@@ -504,6 +506,11 @@ impl LicensingRecord {
                 return Err(Report::new(LicenseDecisionError::StaleDecision));
             }
         }
+        let transitions = super::CommittedLicenseTransitions::acknowledge(
+            previous.map(|activation| activation.transitions.clone()),
+            &decision.transitions,
+            environment.limits(),
+        )?;
         let decision = received.stored(decision, operation)?;
         let time = self
             .licensing_time
@@ -515,6 +522,7 @@ impl LicensingRecord {
             mode: LicensingMode::Activated(Box::new(ActivationState {
                 binding: binding.clone(),
                 decision,
+                transitions,
             })),
         })
     }

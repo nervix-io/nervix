@@ -1138,7 +1138,7 @@ test_target = "test:representations"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/models/tests/representations/__fuzz__/prerequisites__bolero_admission_verdicts_round_trip_through_their_gossip_text/corpus"
-domain_version = 11
+domain_version = 12
 features = []
 id = "models-admission-verdicts"
 invariant = "The verdicts a leader publishes keep their term and every run's accepted, prerequisite-refused or quota-refused outcome with its complete typed cause through gossip text."
@@ -2593,10 +2593,10 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/consensus/src/licensing/__fuzz__/licensing__tests__bolero_licensing_record_preserves_time_mode_and_complete_trust_documents/corpus"
-domain_version = 3
+domain_version = 4
 features = []
 id = "licensing-record-rkyv"
-invariant = "Current licensing records preserve complete time, Free, Activated and Released modes, bindings, signed decisions and referenced transition revisions, pending release signing material, exact requests, confirmation, grants and complete trust documents through production rkyv and JSON round trips; the bounded transition encoder decodes to the complete semantic values."
+invariant = "Current licensing records preserve complete time, Free, Activated and Released modes, bindings, pending and acknowledged keyed transitions with original offline bounds and protected member identities, signed decisions and referenced transition revisions, pending release signing material, exact requests, confirmation, grants and complete trust documents through production rkyv and JSON round trips; the bounded transition encoder decodes to the complete semantic values."
 manifest = "Cargo.toml"
 max_input_bytes = 512
 package = "nervix-consensus"
@@ -2638,7 +2638,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/consensus/src/storage/__fuzz__/storage__raft_properties__bolero_consensus_raft_records_round_trip_through_the_storage_codec/corpus"
-domain_version = 68
+domain_version = 69
 features = []
 id = "consensus-raft-records"
 invariant = "Votes, log positions, log entries of every consensus command, current state metadata, snapshot manifests and sections restore with complete equality through the storage codec, and every log and section key names exactly the position or section it was built for."
@@ -2653,7 +2653,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/consensus/src/storage/__fuzz__/storage__raft_properties__bolero_malformed_consensus_raft_records_fail_typed/corpus"
-domain_version = 54
+domain_version = 55
 features = []
 id = "consensus-raft-records-malformed"
 invariant = "Arbitrary bytes read as any Raft record, log key or section key free every decoding allocation and fail with the typed storage failure or name a value that stores back to the same record."
@@ -4980,10 +4980,10 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/licensing-protocol/src/__fuzz__/policy_properties__bolero_impact_assessment/corpus"
-domain_version = 1
+domain_version = 2
 features = []
 id = "licensing-impact-assessment"
-invariant = "A bounded quota reduction grants exactly the newly affected amount with a deterministic identity and deadline, preserves complete transition records, and removes the allowance exactly at that deadline."
+invariant = "Decision changes and same-revision Tick/Release reductions grant exactly the newly affected amount with a deterministic identity and deadline, preserves complete transition records, and removes the allowance exactly at that deadline."
 manifest = "Cargo.toml"
 max_input_bytes = 256
 package = "nervix-licensing-protocol"

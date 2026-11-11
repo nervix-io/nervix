@@ -13,6 +13,43 @@ use rkyv::{
     with::{ArchiveWith, DeserializeWith, SerializeWith},
 };
 
+/// Maintained serialization for the keyed committed grants and their authorization bounds.
+pub(super) struct Json;
+
+impl<T> ArchiveWith<T> for Json {
+    type Archived = ArchivedString;
+    type Resolver = TransitionsResolver;
+
+    fn resolve_with(_: &T, resolver: Self::Resolver, out: Place<Self::Archived>) {
+        ArchivedString::resolve_from_str(&resolver.value, resolver.resolver, out);
+    }
+}
+
+impl<T, S> SerializeWith<T, S> for Json
+where
+    T: serde::Serialize,
+    S: Fallible + ?Sized,
+    S::Error: Source,
+    str: SerializeUnsized<S>,
+{
+    fn serialize_with(field: &T, serializer: &mut S) -> Result<Self::Resolver, S::Error> {
+        let value = serde_json::to_string(field).map_err(S::Error::new)?;
+        let resolver = ArchivedString::serialize_from_str(&value, serializer)?;
+        Ok(TransitionsResolver { value, resolver })
+    }
+}
+
+impl<T, D> DeserializeWith<ArchivedString, T, D> for Json
+where
+    T: serde::de::DeserializeOwned,
+    D: Fallible + ?Sized,
+    D::Error: Source,
+{
+    fn deserialize_with(field: &ArchivedString, _: &mut D) -> Result<T, D::Error> {
+        serde_json::from_str(field.as_str()).map_err(D::Error::new)
+    }
+}
+
 pub(super) struct DocumentKind;
 
 /// Archive the protocol's semantic transitions as one maintained JSON value, decoded once on load.

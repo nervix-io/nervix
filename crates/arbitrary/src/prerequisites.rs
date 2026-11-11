@@ -101,10 +101,10 @@ impl Arbitrary<'_> {
                 },
                 _ => AdmissionVerdict::QuotaRefused {
                     refusal: nervix_licensing_vocabulary::LicensingRefusal {
-                        state: if self.entropy.flag() {
-                            nervix_licensing_vocabulary::AdmissionState::OverLimit
-                        } else {
-                            nervix_licensing_vocabulary::AdmissionState::Lapsed
+                        state: match self.entropy.byte() % 3 {
+                            0 => nervix_licensing_vocabulary::AdmissionState::WithinGrace,
+                            1 => nervix_licensing_vocabulary::AdmissionState::OverLimit,
+                            _ => nervix_licensing_vocabulary::AdmissionState::Lapsed,
                         },
                         condition: nervix_licensing_vocabulary::QuotaName::ClusterNodes,
                         limit: self.entropy.any_u64(),

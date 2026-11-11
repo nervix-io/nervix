@@ -4017,6 +4017,22 @@ client node-credit capacities. Receive-limit and native-runtime relationship err
 typed causes beneath the startup context; they never turn a refused allocation into a decode or
 authentication failure. A runtime stack or blocking-thread refusal happens before node listeners.
 
+## Licensing Transition Warnings
+
+Nervix emits licensing Warning notices for `transition_started`, `transition_acknowledged`,
+`transition_extended` and `over_limit`. The typed notice is rendered for native clients and the
+console with the transition identity, changed condition, previous and target quota, affected and
+current usage, and effective deadline. It explains that growth follows the target, excess usage
+is reported after grace, and remediation means reducing usage, restoring the plan or contacting
+the organization administrator. Licensing does not remove existing work at the deadline.
+
+Admission refusals retain their typed quota cause through the domain or membership context.
+`within_grace` means the target rejects growth while a temporary allowance still protects recovery;
+`over_limit` means the applicable allowance no longer covers the requested usage. An unacknowledged
+grant also ends at its original signed offline deadline, even if a later refresh renews the
+activation's offline allowance. Only a signed acknowledgement or administrator extension can move
+the committed grant deadline later.
+
 ## Public Listener Input Refusals
 
 The [Listener Bounds](node-settings.md#listener-bounds) table owns HTTP input status/reason pairs.

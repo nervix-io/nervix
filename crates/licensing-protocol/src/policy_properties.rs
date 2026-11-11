@@ -79,6 +79,19 @@ fn bolero_impact_assessment() {
                 cluster_nodes: count,
                 cluster_domains: 0,
             };
+            let trigger = match value % 3 {
+                0 => crate::documents::TransitionTrigger::Decision {
+                    decision_id: id(100),
+                },
+                1 => crate::documents::TransitionTrigger::Tick {
+                    decision_id: id(100),
+                },
+                _ => crate::documents::TransitionTrigger::Release {
+                    request_id: id(100),
+                },
+            };
+            let mut impact = context(1, if value.is_multiple_of(3) { 2 } else { 1 }, 0);
+            impact.trigger = trigger;
             let transitions = assess_impact(
                 EffectiveUsage {
                     conditions: &current,
@@ -87,7 +100,7 @@ fn bolero_impact_assessment() {
                 ImpactTarget::Usage(&target),
                 snapshot,
                 policy(),
-                context(1, 2, 0),
+                impact.clone(),
                 limits().bytes,
             )
             .assured("bounded reduction");
@@ -109,7 +122,7 @@ fn bolero_impact_assessment() {
                 ImpactTarget::Usage(&target),
                 snapshot,
                 policy(),
-                context(1, 2, 0),
+                impact.clone(),
                 limits().bytes,
             )
             .assured("same replicated inputs");

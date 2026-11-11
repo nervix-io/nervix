@@ -124,6 +124,7 @@ impl SessionServiceImpl {
                 ("refresh_after", Some(decision.timing.refresh_after)),
                 ("overdue_at", Some(decision.timing.overdue_at)),
                 ("valid_until", decision.timing.valid_until),
+                ("term_ends_at", Some(decision.timing.term_ends_at)),
             ] {
                 if let Some(at) = at {
                     columns.push((
@@ -209,6 +210,15 @@ impl SessionServiceImpl {
         for (name, value) in facts {
             columns.push((name, StdArc::new(StringArray::from(vec![value]))));
         }
+        for (name, at) in [
+            ("issued_at", activation.decision.issued_at),
+            ("received_at", activation.decision.received_at),
+        ] {
+            columns.push((
+                name,
+                StdArc::new(TimestampNanosecondArray::from(vec![at.unix_nanos()])),
+            ));
+        }
         columns.push((
             "decision_revision",
             StdArc::new(UInt64Array::from(vec![activation.decision.revision])),
@@ -270,6 +280,10 @@ impl SessionServiceImpl {
                 };
                 let mut columns: Vec<(&str, ArrayRef)> = vec![
                     ("mode", StdArc::new(StringArray::from(vec![mode]))),
+                    (
+                        "transitions_active",
+                        StdArc::new(UInt64Array::from(vec![policy.active_transition_count()])),
+                    ),
                     (
                         "policy",
                         StdArc::new(StringArray::from(vec![policy.display_state()])),
@@ -355,17 +369,27 @@ impl SessionServiceImpl {
                 ];
                 let quotas = RecordBatch::try_from_iter(columns)
                     .assured("fixed quota columns have two values each");
-                match (section("summary", &summary), section("quotas", &quotas)) {
-                    (Ok(summary), Ok(quotas)) => {
+                let transitions = transitions_batch(&policy);
+                let transition_rows =
+                    u64::try_from(transitions.num_rows()).assured("bounded transitions fit u64");
+                match (
+                    section("summary", &summary),
+                    section("quotas", &quotas),
+                    section("transitions", &transitions),
+                ) {
+                    (Ok(summary), Ok(quotas), Ok(transitions)) => {
                         let counts = StateInspectionCounts {
                             branches: 0,
-                            rows: 3,
+                            rows: 3_u64
+                                .checked_add(transition_rows)
+                                .verified("bounded licensing rows fit u64"),
                             bytes: summary
                                 .1
                                 .checked_add(quotas.1)
+                                .and_then(|bytes| bytes.checked_add(transitions.1))
                                 .verified("three fixed licensing rows fit the payload count"),
                         };
-                        let sections = vec![summary.0, quotas.0];
+                        let sections = vec![summary.0, quotas.0, transitions.0];
                         let mut fingerprint = Sha256::new();
                         fingerprint.update(&revision.to_le_bytes());
                         for section in &sections {
@@ -414,7 +438,7 @@ impl SessionServiceImpl {
                             wasm_binding: None,
                         })
                     }
-                    (Err(error), _) | (_, Err(error)) => {
+                    (Err(error), _, _) | (_, Err(error), _) | (_, _, Err(error)) => {
                         tracing::debug!(error = %format_args!("{error:#}"), "licensing inspection encoding refused");
                         StateInspectionResult::Rejected(StateInspectionRejection::ReplyTooLarge)
                     }
@@ -472,14 +496,109 @@ fn section(
     for index in 0..batch.num_rows() {
         encoder.push_row(|writer| columns.write_row(index, writer))?;
     }
+    let frames = if batch.num_rows() == 0 {
+        Vec::new()
+    } else {
+        vec![encoder.finish(&limits)?]
+    };
     Ok((
         StateInspectionSection {
             name: name.to_string(),
             schema,
-            frames: vec![encoder.finish(&limits)?],
+            frames,
             omitted_rows: 0,
             watermarks: None,
         },
         batch_payload_bytes(batch),
     ))
+}
+
+fn transitions_batch(policy: &crate::licensing::LicensingPolicy) -> RecordBatch {
+    let rows = policy
+        .transitions()
+        .into_iter()
+        .flat_map(|(transition, until, acknowledged)| {
+            transition
+                .affected
+                .iter()
+                .map(|affected| {
+                    let state = match QuotaName::ALL
+                        .into_iter()
+                        .find(|name| name.as_str() == affected.condition)
+                    {
+                        Some(name) => policy.quota_state(name),
+                        None => "unknown",
+                    };
+                    (
+                        transition.transition_id.to_string(),
+                        affected.condition.clone(),
+                        nervix_models::Timestamp::try_from(transition.started_at)
+                            .assured("committed start fits Timestamp"),
+                        nervix_models::Timestamp::try_from(transition.deadline)
+                            .assured("committed deadline fits Timestamp"),
+                        until,
+                        affected.previous,
+                        affected.target,
+                        affected.usage,
+                        acknowledged,
+                        state,
+                    )
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    let strings = |values: Vec<String>| -> ArrayRef { StdArc::new(StringArray::from(values)) };
+    let times =
+        |values: Vec<i64>| -> ArrayRef { StdArc::new(TimestampNanosecondArray::from(values)) };
+    let usages: ArrayRef = StdArc::new(UInt64Array::from(
+        rows.iter().map(|row| row.7).collect::<Vec<_>>(),
+    ));
+    RecordBatch::try_from_iter(vec![
+        (
+            "transition_id",
+            strings(rows.iter().map(|row| row.0.clone()).collect()),
+        ),
+        (
+            "condition",
+            strings(rows.iter().map(|row| row.1.clone()).collect()),
+        ),
+        (
+            "started_at",
+            times(rows.iter().map(|row| row.2.unix_nanos()).collect()),
+        ),
+        (
+            "deadline",
+            times(rows.iter().map(|row| row.3.unix_nanos()).collect()),
+        ),
+        (
+            "effective_until",
+            times(rows.iter().map(|row| row.4.unix_nanos()).collect()),
+        ),
+        (
+            "previous",
+            strings(
+                rows.iter()
+                    .map(|row| serde_json::to_string(&row.5).assured("quota serializes"))
+                    .collect(),
+            ),
+        ),
+        (
+            "target",
+            strings(
+                rows.iter()
+                    .map(|row| serde_json::to_string(&row.6).assured("quota serializes"))
+                    .collect(),
+            ),
+        ),
+        ("usage_at_start", usages),
+        (
+            "acknowledged",
+            strings(rows.iter().map(|row| row.8.to_string()).collect()),
+        ),
+        (
+            "state",
+            strings(rows.iter().map(|row| row.9.to_owned()).collect()),
+        ),
+    ])
+    .assured("every transition column projects the same bounded rows")
 }

@@ -15,6 +15,73 @@ fn fixture() -> Model {
     .assured("fixture model builds")
 }
 
+#[nervix_primitives::test]
+async fn transition_acknowledgement_clamps_both_receipt_bounds_and_preserves_an_extension() {
+    for (claimed_offset, accepted_offset) in [(-3_600, -300), (3_600, 300)] {
+        let mut model = fixture();
+        let cluster = signer().assured("cluster signer");
+        let mut common = common(&mut model).await;
+        let activation = model
+            .create(
+                &common,
+                &model.license_key.clone(),
+                &ActivationKind::Persistent,
+                cluster.public_key(),
+            )
+            .assured("fixture activation");
+        model.reduce_domain_quota_with_grace();
+        common.request_id = id();
+        model
+            .refresh(&common, &activation, &[], None)
+            .assured("signed reduction");
+        let held = model
+            .activations
+            .get_mut(&activation)
+            .verified("activation retained");
+        let mut reported = held.decision.transitions[0].clone();
+        held.decision.transitions.clear();
+        reported.started_at = model.now + TimeDelta::seconds(claimed_offset);
+        reported.deadline = reported.started_at + TimeDelta::seconds(900);
+        common.request_id = id();
+        model
+            .refresh(&common, &activation, &[reported.clone()], None)
+            .assured("acknowledgement");
+        let accepted = model
+            .activations
+            .get(&activation)
+            .verified("activation retained")
+            .decision
+            .transitions[0]
+            .clone();
+        assert_eq!(accepted.transition_id, reported.transition_id);
+        assert_eq!(
+            accepted.started_at,
+            model.now + TimeDelta::seconds(accepted_offset)
+        );
+        assert_eq!(
+            accepted.deadline,
+            accepted.started_at + TimeDelta::seconds(300)
+        );
+        model.extend_transitions(std::time::Duration::from_secs(600));
+        common.request_id = id();
+        model
+            .refresh(&common, &activation, &[reported], None)
+            .assured("refresh preserves administrator extension");
+        let extended = &model
+            .activations
+            .get(&activation)
+            .verified("activation retained")
+            .decision
+            .transitions[0];
+        assert_eq!(extended.transition_id, accepted.transition_id);
+        assert_eq!(extended.started_at, accepted.started_at);
+        assert_eq!(
+            extended.deadline,
+            accepted.deadline + TimeDelta::seconds(600)
+        );
+    }
+}
+
 async fn bytes(response: Response) -> Vec<u8> {
     axum::body::to_bytes(response.into_body(), crate::MAX_BODY_BYTES)
         .await
@@ -200,7 +267,7 @@ async fn late_release_reissues_refresh_fields_without_moving_fixed_deadlines() {
     model.reduce_domain_quota_with_grace();
     common.request_id = id();
     model
-        .refresh(&common, &activation_id, None)
+        .refresh(&common, &activation_id, &[], None)
         .assured("quota reduction issues a grant");
     let before = model
         .activations

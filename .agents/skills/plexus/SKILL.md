@@ -141,6 +141,9 @@ For activation, refresh, `ROTATE LICENSE CLUSTER KEY`, `RELEASE LICENSE`, `DESCR
 effective policy, credential handling and quota usage, read
 [Node Settings → Cluster Licensing](../../../docs/src/node-settings.md#cluster-licensing) and
 [Licensing Metrics](../../../docs/src/metrics-and-observability.md#licensing-metrics).
+For grace, replacement allowances and over-limit outcomes, also read
+[Licensing Transition Warnings](../../../docs/src/errors-and-diagnostics.md#licensing-transition-warnings).
+Distinguish the target quota from a temporary recovery allowance when advising growth or replacement.
 For notification freshness, reconnects and polling fallback, use that chapter’s event-stream contract.
 Treat notification hints as requests to obtain a verified decision, never as permissions.
 Keep licensing commands cluster-scoped and obtain credentials and trust provisioning externally;

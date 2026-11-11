@@ -103,10 +103,10 @@ mod command_execution;
 mod licensing;
 pub use licensing::{
     ActivationBinding, ActivationState, AwaitingLicenseRelease, ClusterLicensingState,
-    LICENSING_SERVICE, LicenseDecisionError, LicenseVerification, LicensingEnvironment,
-    LicensingMode, LicensingRecord, LicensingSnapshot, PreparedLicensingRequest,
-    ReceivedLicenseDecision, ReleaseConfirmation, ReleaseState, StoredDecision,
-    StoredDecisionOperation, StoredLicenseTransitions, StoredTrustDocument,
+    CommittedLicenseTransitions, CommittedTransition, LICENSING_SERVICE, LicenseDecisionError,
+    LicenseVerification, LicensingEnvironment, LicensingMode, LicensingRecord, LicensingSnapshot,
+    PreparedLicensingRequest, ReceivedLicenseDecision, ReleaseConfirmation, ReleaseState,
+    StoredDecision, StoredDecisionOperation, StoredLicenseTransitions, StoredTrustDocument,
     VerifiedLicenseDecision,
 };
 mod node_capabilities;
@@ -4629,7 +4629,11 @@ impl Administrator {
     pub async fn reconcile_nodes(
         &self,
         gossip: impl Future<Output = GossipState>,
-        admit: impl Fn(u64) -> error_stack::Result<(), nervix_licensing_vocabulary::LicensingRefusal>
+        admit: impl Fn(
+            &ClusterNodeName,
+            u64,
+        )
+            -> error_stack::Result<(), nervix_licensing_vocabulary::LicensingRefusal>
         + Send
         + Sync,
     ) -> error_stack::Result<(), ConsensusError> {
@@ -4707,7 +4711,7 @@ impl Administrator {
                                     .assured("a materialized membership fits u64"),
                             )
                         };
-                        if new_member && let Err(refusal) = admit(count) {
+                        if new_member && let Err(refusal) = admit(&node_id, count) {
                             quota_refused.insert(node_id.clone());
                             let run = gossip
                                 .latest_admission_candidates()
@@ -6319,7 +6323,7 @@ fn apply_consensus_command_at(
                 return AppliedConsensusCommand::conflict(reason.to_string());
             }
             if !state.domains.contains_key(&domain.id)
-                && let Err(refusal) = licensing::admit_domain(state, *domain_quota)
+                && let Err(refusal) = licensing::admit_domain(state, *domain_quota, false)
             {
                 return AppliedConsensusCommand::conflict(ConsensusConflict::LicensingQuota {
                     refusal: *refusal.current_context(),

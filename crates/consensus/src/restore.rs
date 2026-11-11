@@ -572,7 +572,7 @@ fn create_domain(
             domain: domain.clone(),
         }));
     }
-    crate::licensing::admit_domain(state, domain_quota).map_err(|report| {
+    crate::licensing::admit_domain(state, domain_quota, true).map_err(|report| {
         report.change_context(RestoreStepConflict::Licensing {
             domain: domain.clone(),
         })

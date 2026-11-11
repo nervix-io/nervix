@@ -367,8 +367,8 @@ expression scope and an emitter's `INSTANCES` declaration.
 Placement coverage is one semantic choice: a corridor with named endpoints or a domain-wide
 rule. Domain configuration contains its pace; named placement rules belong to the Model index.
 Relocation selects whole nodes or exact partition/instance indices using the shared node identity.
-Consensus's `raft_licensing_operations_inferencer_wasm_inspection_listener_bounds_` keyspaces and current
-`ClusterState` metadata encoding, 33, identify its stored shapes, including the partition count of every resolved
+Consensus's `raft_licensing_transitions_inferencer_wasm_inspection_listener_bounds_` keyspaces and current
+`ClusterState` metadata encoding, 34, identify its stored shapes, including the partition count of every resolved
 branch declaration in the committed schedule, the partition epoch the schedule records for each
 branch whose count changed, and the statements a transaction keeps, including per-entity
 `ALTER INGESTOR` and `ALTER EMITTER` operations and a `RESET WASM PROCESSOR ... STATE` that takes
@@ -1436,6 +1436,13 @@ bootstrap and both are present after the first identity installation. The record
 licensing time, original trust documents with their typed identities, and Free, Activated or
 Released mode. Released mode carries its independent binding, confirmation state, original signing
 capability while confirmation is pending, operation identity and unextended grant deadlines.
+Activated mode holds transitions keyed by their stable identity. Each grant carries either a pending
+acknowledgement with the introducing decision's immutable offline bound or an acknowledged signed
+copy. Its original protected member names are captured once; refresh cannot turn a newcomer into a
+replacement. Signed acknowledgements replace the corresponding copy and can extend a deadline;
+ordinary refreshes preserve pending bounds and starts. Target quota and temporary replacement
+allowance remain separate in the published policy.
+
 Pending cluster rotation belongs to the identity record and carries its target generation and
 exact retained signed request. Completion installs the key and bound decision in one atomic apply.
 The original command effect retains an atomic applied or typed refusal outcome, so later operations
