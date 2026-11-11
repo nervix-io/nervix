@@ -159,8 +159,9 @@ operator wants, so they replace the family's retained draft: **PLACE** starts a 
 under a newly generated name, `web_console_subscription_<n>`, whose number only grows. While any
 create attempt is submitting or queued until reconnect, every open action instead restores that
 attempt's form and retained draft, including **PLACE** and **SUBSCRIBE**. Another family's form can
-open after the attempt has its outcome. Closing the dialog returns focus to the control that opened
-it.
+open after the attempt has its outcome. A pending form opens with **Close** focused, since its
+editable controls are disabled. **Escape** closes the dialog, and closing returns focus to the
+control that opened it.
 
 ### Captured Domains
 

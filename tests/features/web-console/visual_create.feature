@@ -8,6 +8,7 @@ Feature: Web console visual creation
     When selector ".create-menu-button" is pressed with "Enter"
     And selector ".create-menu [data-create-kind='domain']" is pressed with "Enter"
     Then selector ".create-dialog" contains "Create domain"
+    And selector ".create-name" is focused
     And selector ".create-pace-options" contains "UNPACED"
     And selector ".create-pace-options" contains "PACED"
     When selector ".create-name" is filled with "{{domain}}"
@@ -215,8 +216,16 @@ Feature: Web console visual creation
     And selector ".create-menu-button" is pressed with "Enter"
     And selector ".create-menu [data-create-kind='user']" is pressed with "Enter"
     Then selector ".create-dialog" contains "Create domain"
+    And selector ".create-close" is focused
     And selector ".create-name" has value "{{domain}}"
     And selector ".create-status" contains "Submitting"
+    And selector ".create-submit:disabled" exists
+    When selector ".create-close" is pressed with "Escape"
+    Then selector ".create-dialog" does not exist
+    And selector "#global-create-button" is focused
+    When selector "#sidebar-create-schema" is pressed with "Enter"
+    Then selector ".create-dialog" contains "Create domain"
+    And selector ".create-close" is focused
     And selector ".create-submit:disabled" exists
     When selector ".create-submit" is clicked by script
     And the command response delivery pause is released on every node

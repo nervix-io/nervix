@@ -2378,11 +2378,18 @@ pub(crate) fn CreateDialog(
     submit: impl Fn(CreateSubmission, u64, u64) + Copy + Send + Sync + 'static,
 ) -> impl IntoView {
     let name_input = NodeRef::<leptos::html::Input>::new();
+    let close_button = NodeRef::<leptos::html::Button>::new();
     Effect::new(move |_| {
-        let open = signals.open.get();
-        if open.is_some()
-            && let Some(input) = name_input.get()
-        {
+        if signals.open.get().is_none() {
+            return;
+        }
+        if signals.progress.get_untracked().is_pending() {
+            if let Some(button) = close_button.get() {
+                button
+                    .focus()
+                    .discarded("the pending create dialog keeps its enabled Close control");
+            }
+        } else if let Some(input) = name_input.get() {
             input
                 .focus()
                 .discarded("the create name input may already hold focus");
@@ -2463,7 +2470,7 @@ pub(crate) fn CreateDialog(
                                 format!("Create {label}")
                             }}</h2>
                         </div>
-                        <button class="dialog-close create-close" type="button" title="Close" aria-label="Close create dialog" on:click=move |_| signals.close()>"×"</button>
+                        <button node_ref=close_button class="dialog-close create-close" type="button" title="Close" aria-label="Close create dialog" on:click=move |_| signals.close()>"×"</button>
                     </header>
                     <form novalidate on:submit=submit_form>
                         <div class="create-scope-row">
