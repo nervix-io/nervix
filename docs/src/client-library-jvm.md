@@ -100,6 +100,12 @@ page fields. A refusal has no counts or units; a successful empty page has zero 
 `domain()` and `entityName()` are `null`. Its summary and quota rows describe the answering node's
 committed policy. The command also works without selecting a domain.
 
+`SHOW INFERENCER <name> STATE` uses the same inspection objects. Its `header` section
+identifies each returned branch publication and its persistence/replica progress; `tensor_1`,
+`tensor_2` and subsequent sections carry input/output ports, `VEC<U64>` shape and bit-exact
+`VEC<F32>` values. The whole values cell is redacted when any input or branch-key field is sensitive.
+See [Inspect Carried Inference State](processors.md#inspect-carried-inference-state).
+
 Complete `counts()` cover the selected cut. Units carry their own counts, owner, ordered
 replicas, captured origin, `InspectionUnitKind` and `index()`. `InspectionStage` distinguishes live and stored
 state. Sections expose schemas, omitted rows and positional watermark columns. Resume the opaque

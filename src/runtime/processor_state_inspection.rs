@@ -566,17 +566,6 @@ pub(crate) struct ProcessorStatePageMemory {
     pub(super) _windows: Vec<super::window_state::AdmittedWindowSnapshot>,
 }
 
-/// Each processor kind fixes its sections. A window's retained rows, header and accumulator
-/// facts give the maximum of three.
-#[cfg_attr(
-    nervix_lint,
-    nervix::constant(
-        fixed,
-        reason = "the processor vocabulary fixes at most three sections, for a window"
-    )
-)]
-pub(super) const MAX_PROCESSOR_SECTIONS: usize = 3;
-
 /// One section of a unit page: how many rows of it the unit holds, and the returned rows as Arrow
 /// columns, payload first and then the columns the section appends.
 pub(crate) struct ProcessorStateSectionColumns {
@@ -628,6 +617,11 @@ impl Runtime {
         after: Option<(Option<BranchKeyFingerprint>, u64)>,
         bounds: ProcessorStatePageBounds,
     ) -> error_stack::Result<ProcessorStatePage, ProcessorStatePageError> {
+        if let ModelKind::Inferencer = processor.kind {
+            return self
+                .local_inferencer_state_page(domain, processor, unit, selection, after, bounds)
+                .await;
+        }
         if let ModelKind::Deduplicator | ModelKind::WindowProcessor = processor.kind {
             return self
                 .local_published_processor_state_page(
@@ -933,7 +927,7 @@ fn correlator_sections(
             }
         }
     }
-    let mut sections = Vec::with_capacity(MAX_PROCESSOR_SECTIONS);
+    let mut sections = Vec::with_capacity(ProcessorStateSection::FIXED_SECTION_COUNT);
     for (section, held_rows, rows) in [
         (ProcessorStateSection::Left, left_rows, left),
         (ProcessorStateSection::Right, right_rows, right),

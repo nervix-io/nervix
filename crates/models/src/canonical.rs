@@ -971,6 +971,9 @@ impl Statement {
             ),
             Self::ShowProcessorState(show) => {
                 let head = match &show.processor {
+                    crate::StateInspectedProcessor::Inferencer(name) => {
+                        format!("SHOW INFERENCER {} STATE", name.as_str())
+                    }
                     crate::StateInspectedProcessor::Reorderer(name) => {
                         format!("SHOW REORDERER {} STATE", name.as_str())
                     }

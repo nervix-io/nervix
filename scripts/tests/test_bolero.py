@@ -566,16 +566,16 @@ class InventoryTests(unittest.TestCase):
             "ingestor-describe-envelope": 13,
             "plexus-model": 64,
             "plexus-archive-model": 67,
-            "plexus-statement": 73,
-            "plexus-statement-text": 72,
-            "plexus-format-document": 72,
-            "plexus-format-text": 71,
+            "plexus-statement": 74,
+            "plexus-statement-text": 73,
+            "plexus-format-document": 73,
+            "plexus-format-text": 72,
             "models-archived-models": 71,
             "registry-archived-models": 58,
-            "consensus-state-records": 69,
-            "consensus-state-corruption": 69,
-            "consensus-raft-records": 68,
-            "consensus-raft-records-malformed": 54,
+            "consensus-state-records": 70,
+            "consensus-state-corruption": 70,
+            "consensus-raft-records": 69,
+            "consensus-raft-records-malformed": 55,
             "registry-stored-models": 51,
             "registry-stored-models-corruption": 51,
             "cluster-identity-record-rkyv": 3,
@@ -614,14 +614,22 @@ class InventoryTests(unittest.TestCase):
         targets = {target.id: target for target in bolero.load_inventory().targets}
         for name, version in (
             ("client-state-inspection", 8),
-            ("state-inspection-cursor", 9),
+            ("state-inspection-cursor", 10),
             ("interconnect-wasm-state-inspection", 3),
             ("wasm-state-inspection-cursor", 3),
+            ("client-published-processor-sections", 2),
         ):
             with self.subTest(target=name):
                 self.assertEqual(targets[name].domain_version, version)
                 self.assertEqual(targets[name].max_input_bytes, 512)
                 self.assertEqual(targets[name].random_iterations, 128)
+
+    def test_inference_inspection_transport_domain_has_tensor_sections(self) -> None:
+        target = next(target for target in bolero.load_inventory().targets
+                      if target.id == "interconnect-processor-state-inspection")
+        self.assertEqual(target.domain_version, 6)
+        self.assertEqual(target.max_input_bytes, 1024)
+        self.assertTrue((target.corpus / "inference-tensor-layout").is_file())
 
     def test_invalid_case_budget_and_duplicate_id_fail(self) -> None:
         text = bolero.INVENTORY.read_text()

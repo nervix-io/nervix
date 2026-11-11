@@ -448,6 +448,44 @@ fn corpus_frames() -> Vec<(&'static str, Bytes)> {
             command(1, CommandDisposition::Failed),
         ),
         (
+            "server_command_inferencer_state.nxsm",
+            reply(
+                23,
+                ReplyBody::Command(Box::new({
+                    let mut outcome = command_outcome(CommandDisposition::Completed {
+                        already_existed: false,
+                    });
+                    outcome.state = Some(Box::new(
+                        crate::state_inspection::tests::published::inference_sections(
+                            u64::MAX,
+                            [0x8000_0000, 0x7fc1_2345],
+                            false,
+                        ),
+                    ));
+                    outcome
+                })),
+            ),
+        ),
+        (
+            "server_command_inferencer_state_redacted.nxsm",
+            reply(
+                24,
+                ReplyBody::Command(Box::new({
+                    let mut outcome = command_outcome(CommandDisposition::Completed {
+                        already_existed: false,
+                    });
+                    outcome.state = Some(Box::new(
+                        crate::state_inspection::tests::published::inference_sections(
+                            u64::MAX,
+                            [0x7f80_0000, 0xff80_0000],
+                            true,
+                        ),
+                    ));
+                    outcome
+                })),
+            ),
+        ),
+        (
             "server_command_leader_unknown.nxsm",
             command(
                 3,

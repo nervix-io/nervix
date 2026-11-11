@@ -4,7 +4,7 @@
 //! Layer: test harness.
 //! - **Owns.** The descriptor contracts of a received processor page: its returned rows start at
 //!   the read's resume offset and stay within its row limit, its continuation flag and offset agree
-//!   with its complete counts, it names at most three sections and exactly the sections a
+//!   with its complete counts, it names exactly the committed kind's sections a
 //!   row-returning read expects, and its runs name sections the page carries, return at least one
 //!   row each and add up to the rows its offset advanced. The body contracts: a section returns no
 //!   more rows than it holds and names a body exactly when it returns rows, so a count-only read
@@ -107,6 +107,38 @@ fn pending_page() -> ProcessorStatePageDescriptor {
 /// The one section a reorderer read expects, with the payload fields its committed schema gives it.
 fn pending_payload() -> Vec<(ProcessorStateSection, Vec<SchemaField>)> {
     vec![(ProcessorStateSection::Pending, Vec::new())]
+}
+
+#[test]
+fn tensor_sections_use_the_declared_layout_and_bound_their_indices_without_a_scan() {
+    let mut request = read(6);
+    request.processor.kind = ModelKind::Inferencer;
+    let mut descriptor = pending_page();
+    descriptor.offset = 6;
+    descriptor.counts.rows = 6;
+    descriptor.more = false;
+    descriptor.sections = vec![section(ProcessorStateSection::Header, 1)];
+    descriptor.runs = vec![run(ProcessorStateSection::Header, 1)];
+    for index in 0..6 {
+        descriptor
+            .sections
+            .push(section(ProcessorStateSection::Tensor(index), 1));
+        descriptor
+            .runs
+            .push(run(ProcessorStateSection::Tensor(index), 1));
+    }
+    let payload = descriptor
+        .sections
+        .iter()
+        .map(|section| (section.section, Vec::new()))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        processor_page_rows(&descriptor, &request, &payload)
+            .assured("all committed tensor sections are accepted"),
+        vec![1; 7]
+    );
+    descriptor.runs[1].section = ProcessorStateSection::Tensor(u32::MAX);
+    assert!(processor_page_rows(&descriptor, &request, &payload).is_err());
 }
 
 #[track_caller]
@@ -259,7 +291,7 @@ fn a_page_that_disagrees_with_its_read_or_with_its_own_counts_is_refused() {
     beyond.more = false;
     assert_refused(&beyond, &read(10), &payload);
 
-    // It names more sections than any processor holds.
+    // It names more sections than a fixed-layout processor holds.
     let mut excessive = pending_page();
     excessive.sections = vec![
         section(ProcessorStateSection::Pending, 5),

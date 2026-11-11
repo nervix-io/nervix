@@ -116,6 +116,56 @@ REPLY 1 COMMAND failed reference=0192d4e4-7b36-7c3e-9f00-5b2d8c3a1e44 origin=Rec
 DIAGNOSTIC span=7..12 message=str:756e657870656374656420746f6b656e202752454c415927
 DIAGNOSTIC span=4294967295..4294967295 message=str:616e20656d707479207370616e206d61726b73206120706f736974696f6e
 DIAGNOSTIC span=none message=str:
+FRAME server_command_inferencer_state.nxsm
+REPLY 23 COMMAND completed reference=0192d4e4-7b36-7c3e-9f00-5b2d8c3a1e44 origin=Recovered message=str:636f6d6d6974746564207472616e73616374696f6e3b2071756965736365206c6576656c3a20454e544954595f5041555345
+DIAGNOSTIC span=7..12 message=str:756e657870656374656420746f6b656e202752454c415927
+DIAGNOSTIC span=4294967295..4294967295 message=str:616e20656d707479207370616e206d61726b73206120706f736974696f6e
+DIAGNOSTIC span=none message=str:
+STATE domain=sales kind=Inferencer name=running
+STATE_PAGE branches=0 rows=1 bytes=8 units=1 continuation=none
+STATE_PLACEMENT single
+STATE_UNIT owner=node_a replicas=node_b,node_c node=node_a incarnation=17 fingerprint=2525252525252525252525252525252525252525252525252525252525252525 generation=18446744073709551615 revision=19 stage=Live branches=0 rows=1 bytes=8
+STATE_SECTION name=header omitted=0 watermarks=none
+FIELD branch_fingerprint STRING nullable public
+FIELD incarnation U64 required public
+FIELD publication_revision U64 required public
+FIELD persisted_revision U64 required public
+FIELD state_bytes U64 required public
+FIELD confirmed_replicas U64 required public
+FIELD replica_count U64 required public
+FIELD stage STRING required public
+ROW [] branch_fingerprint=null incarnation=u64:18446744073709551615 publication_revision=u64:18446744073709551615 persisted_revision=u64:18446744073709551615 state_bytes=u64:8 confirmed_replicas=u64:1 replica_count=u64:2 stage=str:504552534953544544
+STATE_SECTION name=tensor_1 omitted=0 watermarks=none
+FIELD input STRING required public
+FIELD output STRING required public
+FIELD shape LIST<U64> required public
+FIELD values LIST<F32> required public
+ROW [] input=str:73746174655f696e output=str:73746174655f6f7574 shape=list[u64:2] values=list[f32:80000000,f32:7fc12345]
+FRAME server_command_inferencer_state_redacted.nxsm
+REPLY 24 COMMAND completed reference=0192d4e4-7b36-7c3e-9f00-5b2d8c3a1e44 origin=Recovered message=str:636f6d6d6974746564207472616e73616374696f6e3b2071756965736365206c6576656c3a20454e544954595f5041555345
+DIAGNOSTIC span=7..12 message=str:756e657870656374656420746f6b656e202752454c415927
+DIAGNOSTIC span=4294967295..4294967295 message=str:616e20656d707479207370616e206d61726b73206120706f736974696f6e
+DIAGNOSTIC span=none message=str:
+STATE domain=sales kind=Inferencer name=running
+STATE_PAGE branches=0 rows=1 bytes=8 units=1 continuation=none
+STATE_PLACEMENT single
+STATE_UNIT owner=node_a replicas=node_b,node_c node=node_a incarnation=17 fingerprint=2525252525252525252525252525252525252525252525252525252525252525 generation=18446744073709551615 revision=19 stage=Live branches=0 rows=1 bytes=8
+STATE_SECTION name=header omitted=0 watermarks=none
+FIELD branch_fingerprint STRING nullable public
+FIELD incarnation U64 required public
+FIELD publication_revision U64 required public
+FIELD persisted_revision U64 required public
+FIELD state_bytes U64 required public
+FIELD confirmed_replicas U64 required public
+FIELD replica_count U64 required public
+FIELD stage STRING required public
+ROW [] branch_fingerprint=null incarnation=u64:18446744073709551615 publication_revision=u64:18446744073709551615 persisted_revision=u64:18446744073709551615 state_bytes=u64:8 confirmed_replicas=u64:1 replica_count=u64:2 stage=str:504552534953544544
+STATE_SECTION name=tensor_1 omitted=0 watermarks=none
+FIELD input STRING required public
+FIELD output STRING required public
+FIELD shape LIST<U64> required public
+FIELD values LIST<F32> required sensitive
+ROW [] input=str:73746174655f696e output=str:73746174655f6f7574 shape=list[u64:2] values=redacted
 FRAME server_command_leader_unknown.nxsm
 REPLY 3 COMMAND not_leader reference=0192d4e4-7b36-7c3e-9f00-5b2d8c3a1e44 origin=Recovered message=str:636f6d6d6974746564207472616e73616374696f6e3b2071756965736365206c6576656c3a20454e544954595f5041555345
 DIAGNOSTIC span=7..12 message=str:756e657870656374656420746f6b656e202752454c415927

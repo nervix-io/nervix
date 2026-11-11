@@ -197,6 +197,10 @@ representation and derive no typed value from display text. A `SHOW WASM PROCESS
 uses the same page and unit views, and its units have no sections; the bindings have no typed WASM
 views, so its pinned module and each unit's guest-state facts are read from the lossless JSON.
 
+The same views carry inferencer `header` and `tensor_1` onwards sections. Shape and values keep
+their declared list and F32 types; a sensitive inference values cell remains redacted as a whole.
+No host adds an inferencer-specific inspection object or parses a tensor from display text.
+
 An inspection entity is a domain node or the cluster license. Domain and entity-name accessors
 are optional: they retain their values for a domain node and are absent for the cluster license.
 The cluster license's entity kind is `LICENSE`. Its summary and quota sections use the same

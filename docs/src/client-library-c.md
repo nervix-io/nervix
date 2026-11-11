@@ -102,6 +102,12 @@ fails with `NX_ERROR_INVALID_ARGUMENT`. [Reading Typed Materialized
 State](client-implementation-manual.md#reading-typed-materialized-state) states what a client must
 preserve.
 
+`SHOW INFERENCER <name> STATE` uses the same inspection objects. Its `header` section
+identifies each returned branch publication and its persistence/replica progress; `tensor_1`,
+`tensor_2` and subsequent sections carry input/output ports, `VEC<U64>` shape and bit-exact
+`VEC<F32>` values. The whole values cell is redacted when any input or branch-key field is sensitive.
+See [Inspect Carried Inference State](processors.md#inspect-carried-inference-state).
+
 `SHOW WASM PROCESSOR <processor> STATE` returns the same inspection handle. Its units have no
 sections; the JSON document carries the processor's pinned module as `wasm_binding` and each unit's
 lifetimes, counts and branch entries as `wasm`.

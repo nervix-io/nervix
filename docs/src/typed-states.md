@@ -367,11 +367,11 @@ expression scope and an emitter's `INSTANCES` declaration.
 Placement coverage is one semantic choice: a corridor with named endpoints or a domain-wide
 rule. Domain configuration contains its pace; named placement rules belong to the Model index.
 Relocation selects whole nodes or exact partition/instance indices using the shared node identity.
-Consensus's `raft_licensing_operations_inferencer_wasm_inspection_listener_bounds_` keyspaces and current
-`ClusterState` metadata encoding, 33, identify its stored shapes, including the partition count of every resolved
+Consensus's `raft_licensing_listener_inferencer_observation_inspection_` keyspaces and current
+`ClusterState` metadata encoding, 34, identify its stored shapes, including the partition count of every resolved
 branch declaration in the committed schedule, the partition epoch the schedule records for each
 branch whose count changed, and the statements a transaction keeps, including per-entity
-`ALTER INGESTOR` and `ALTER EMITTER` operations and a `RESET WASM PROCESSOR ... STATE` that takes
+`ALTER INGESTOR` and `ALTER EMITTER` operations, `SHOW INFERENCER ... STATE` and a `RESET WASM PROCESSOR ... STATE` that takes
 its domain from the transaction. The runtime state store's
 `ranked-intake-unit-checkpoint-segments` format identifies the checkpoints it keeps, including the
 unsigned 64-bit instance identity and the unit every branch-aggregated metric series carries.

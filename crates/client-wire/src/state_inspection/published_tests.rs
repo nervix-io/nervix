@@ -1,4 +1,4 @@
-//! Lossless published-key and window-metadata sections through the production session codec.
+//! Lossless key, window-metadata and native inference sections through the production session codec.
 //!
 //! Layer: test harness.
 //! - **Owns.** Complete typed section equality, nullable headers and exact large counts/timestamps.
@@ -96,6 +96,7 @@ fn bolero_published_processor_sections_round_trip() {
             let value = arbitrary.positive_u64().get();
             let time = i64::from_le_bytes(std::array::from_fn(|_| arbitrary.entropy().byte()));
             let absent = arbitrary.entropy().byte();
+            let inference = arbitrary.entropy().byte() % 3 == 0;
             let window = arbitrary.entropy().flag();
             let mut state = inspection(value);
             let kind = if window {
@@ -126,6 +127,12 @@ fn bolero_published_processor_sections_round_trip() {
                     absent,
                 )]
             };
+            if inference {
+                let bits = std::array::from_fn(|_| {
+                    u32::from_le_bytes(std::array::from_fn(|_| arbitrary.entropy().byte()))
+                });
+                state = inference_sections(value, bits, arbitrary.entropy().flag());
+            }
             let original = outcome(state);
             let decoded = round_trip_reply(&Reply {
                 request_id: request(1),
@@ -133,4 +140,84 @@ fn bolero_published_processor_sections_round_trip() {
             });
             assert_eq!(decoded.body, ReplyBody::Command(Box::new(original)));
         });
+}
+
+/// A current native inference page for the property and independent conformance readers.
+pub(crate) fn inference_sections(value: u64, bits: [u32; 2], sensitive: bool) -> StateInspection {
+    let limits = SessionLimits::DEFAULT;
+    let mut state = inspection(value);
+    state.entity = DomainNodeRef::node_in(
+        name("sales"),
+        ModelKind::Inferencer,
+        name::<nervix_models::InferencerName>("running"),
+    )
+    .into();
+    let mut header = StateRowsEncoder::unbranched(&limits);
+    header
+        .push_row(|row| {
+            row.push_null()?;
+            row.push_u64(value)?;
+            row.push_u64(value)?;
+            row.push_u64(value)?;
+            row.push_u64(8)?;
+            row.push_u64(1)?;
+            row.push_u64(2)?;
+            row.push_string("PERSISTED")
+        })
+        .assured("one inference header fits");
+    let mut tensor = StateRowsEncoder::unbranched(&limits);
+    tensor
+        .push_row(|row| {
+            row.push_string("state_in")?;
+            row.push_string("state_out")?;
+            row.push_list(|axes| axes.push_u64(2))?;
+            if sensitive {
+                row.push_redacted()
+            } else {
+                row.push_list(|elements| {
+                    for value in bits {
+                        elements.push_f32(f32::from_bits(value))?;
+                    }
+                    Ok(())
+                })
+            }
+        })
+        .assured("one exact F32 tensor fits");
+    let counts = StateInspectionCounts {
+        branches: 0,
+        rows: 1,
+        bytes: 8,
+    };
+    let StateInspectionResult::Page(page) = &mut state.result else {
+        panic!("fixture is a page");
+    };
+    page.counts = counts;
+    page.continuation = None;
+    page.units[0].unit = Unit::SINGLE;
+    page.units[0].replicas = vec![name("node_b"), name("node_c")];
+    page.units[0].origin.generation = value;
+    page.units[0].counts = counts;
+    let mut sections = Vec::new();
+    for (section, encoder) in [
+        (ProcessorStateSection::Header, header),
+        (ProcessorStateSection::Tensor(0), tensor),
+    ] {
+        let schema = RowSchema {
+            fields: section.inferencer_fields(sensitive),
+            branch: None,
+        };
+        let frame = encoder.finish(&limits).assured("accepted section finishes");
+        frame
+            .conform(&schema)
+            .assured("each list and F32 cell has its declared type");
+        sections.push(StateInspectionSection {
+            name: section.name(),
+            schema,
+            frames: vec![frame],
+            omitted_rows: 0,
+            watermarks: None,
+        });
+    }
+    page.units[0].sections = sections;
+    state
 }

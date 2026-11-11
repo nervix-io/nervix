@@ -729,6 +729,12 @@ carries its current-lifetime checkpoint, its recorded recovery, or both.
 and summary/quota sections, including when no domain is selected. Match `StateInspectionEntity::DomainNode`
 to access the domain and graph-node reference of a materialized-state observation.
 
+`SHOW INFERENCER <name> STATE` uses the same inspection objects. Its `header` section
+identifies each returned branch publication and its persistence/replica progress; `tensor_1`,
+`tensor_2` and subsequent sections carry input/output ports, `VEC<U64>` shape and bit-exact
+`VEC<F32>` values. The whole values cell is redacted when any input or branch-key field is sensitive.
+See [Inspect Carried Inference State](processors.md#inspect-carried-inference-state).
+
 The other libraries read the same envelope through their own typed inspection objects, which
 each guide shows with a tested example: [Python](client-library-python.md#inspect-materialized-state),
 [Ruby](client-library-ruby.md#inspect-materialized-state),

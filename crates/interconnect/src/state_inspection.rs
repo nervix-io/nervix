@@ -70,11 +70,11 @@ pub struct StatePageBody {
 pub type MaterializedStatePageReply =
     Result<MaterializedStatePageTransfer, StateInspectionRejection>;
 
-/// A read of one execution unit's reorderer or correlator state from the unit's owner process.
+/// A read of one execution unit's stateful processor state from its owner process.
 #[derive(Debug, Clone, PartialEq, Eq, Archive, Serialize, Deserialize)]
 pub struct ReadProcessorStatePage {
     pub domain: DomainName,
-    /// The inspected reorderer or correlator.
+    /// The inspected stateful processor kind and name.
     pub processor: NodeRef,
     pub unit: Unit,
     pub control_revision: u64,
@@ -201,11 +201,12 @@ mod tests {
                     arbitrary.name(),
                     ClusterNodeIncarnation::new(arbitrary.positive_u64().get()),
                 );
-                let kind = match arbitrary.entropy().byte() % 4 {
+                let kind = match arbitrary.entropy().byte() % 5 {
                     0 => ModelKind::Reorderer,
                     1 => ModelKind::Correlator,
                     2 => ModelKind::Deduplicator,
-                    _ => ModelKind::WindowProcessor,
+                    3 => ModelKind::WindowProcessor,
+                    _ => ModelKind::Inferencer,
                 };
                 let after = if arbitrary.entropy().flag() {
                     let position = arbitrary.entropy().flag().then_some(branch);
@@ -214,7 +215,8 @@ mod tests {
                     None
                 };
                 let partition_exclusions = if let ModelKind::Deduplicator
-                | ModelKind::WindowProcessor = kind
+                | ModelKind::WindowProcessor
+                | ModelKind::Inferencer = kind
                     && arbitrary.entropy().flag()
                 {
                     let mut excluded = BTreeSet::new();
@@ -265,7 +267,14 @@ mod tests {
                             ProcessorStateSection::Header,
                             ProcessorStateSection::Accumulators,
                         ],
-                        _ => unreachable!("the generated processor kind is one of the four above"),
+                        ModelKind::Inferencer => {
+                            let mut sections = vec![ProcessorStateSection::Header];
+                            for index in 0..=u32::from(arbitrary.entropy().byte() % 8) {
+                                sections.push(ProcessorStateSection::Tensor(index));
+                            }
+                            sections
+                        }
+                        _ => unreachable!("the generated kind is a state-inspected processor"),
                     };
                     let mut runs = Vec::new();
                     for _ in 0..arbitrary.entropy().byte() % 4 {

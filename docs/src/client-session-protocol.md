@@ -2624,6 +2624,13 @@ reply bytes and sections, while complete row counts, `LIMIT` and continuation of
 to retained inputs. Metadata can therefore be present when no input is retained. The
 [processor inspection sections](./processors.md#inspect-retained-window-state) define their fields.
 
+For `SHOW INFERENCER ... STATE`, `header` frames contain branch lifecycle and
+checkpoint progress, and `tensor_1` onwards contain the declared ports, `VEC<U64>` shape and
+bit-exact `VEC<F32>` values. Any sensitive input or key makes the complete values cell redacted.
+Tensor rows consume the row limit; header metadata consumes bytes and sections only. Section
+names and schemas follow [inference inspection](processors.md#inspect-carried-inference-state).
+All clients preserve these sections through the existing generic inspection surface.
+
 A `SHOW WASM PROCESSOR ... STATE` page also carries its processor's pinned module as
 `WasmStateBinding` (resource, version and file), and each of its units carries `WasmUnitStateFacts`:
 the default generation, the latest reset as `WasmResetFacts` (request reference, the `WasmStateScope`

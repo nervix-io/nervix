@@ -432,10 +432,11 @@ processor state inspections are bounded and carry an opaque continuation. See
 [Inspect Materialized State](./relay.md#inspect-materialized-state) for selector clauses, typed
 counts, row limits and stale-token handling,
 [Inspect Held Rows](./processors.md#inspect-held-rows) for reorderer and correlator rows, and
+[Inspect Carried Inference State](./processors.md#inspect-carried-inference-state) for tensor sections, and
 [WASM State And Recovery](./wasm-state.md#observability) for WASM checkpoint facts. Standalone JSON
 mode accepts `DESCRIBE TRANSACTION`, `SHOW RELAY ... MATERIALIZED STATE`,
 `SHOW REORDERER ... STATE`, `SHOW CORRELATOR ... STATE`, `SHOW DEDUPLICATOR ... STATE`,
-`SHOW WINDOW PROCESSOR ... STATE` and `SHOW WASM PROCESSOR ... STATE` with `FORMAT JSON`.
+`SHOW WINDOW PROCESSOR ... STATE`, `SHOW INFERENCER ... STATE` and `SHOW WASM PROCESSOR ... STATE` with `FORMAT JSON`.
 After a stale-preview `COMMIT` refusal, run `DESCRIBE TRANSACTION` for the
 attached transaction before retrying the commit so the client fences it to the newly reviewed
 planning basis.

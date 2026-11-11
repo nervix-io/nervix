@@ -270,6 +270,7 @@ mod inferencer_archive;
 mod inferencer_observation;
 mod inferencer_output;
 mod inferencer_state;
+mod inferencer_state_inspection;
 pub(crate) use inferencer_archive::CapturedInferencer;
 mod ingest_group;
 mod ingest_metadata;

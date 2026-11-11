@@ -3779,6 +3779,20 @@ subject to the current task execution policy.
 
 ## Processor State Inspection Requests
 
+Inferencer inspection walks one immutable state-routing publication on the Bulk executor, with
+cancellation checked for every route and memory admission before retaining each registered native
+generation. It sorts selected concrete keys once, counts the entire selected cut, and builds only
+the requested tensor rows directly into Arrow list builders. Captures charge the retained native
+payload and shape footprint because a generation can outlive the owner's next replacement. The
+handles retain their values through column construction. The published tensors, branch activity, mutation
+owner, acknowledgement path and snapshot cadence are unchanged. A bounded synchronous read of the
+existing checkpoint-replication progress owner supplies header progress; no guard crosses a wait.
+Progress may advance while tensor revisions stay fixed and does not fence a tensor continuation.
+The new public inspection outline and direct native-owner tests check branch separation, exact
+float bits, paging and bounds. These reads add no publication or wakeup protocol and make no new
+memory-ordering claim. The existing replication progress lock is tracked by Deloxide; its campaigns
+remain subject to the live task execution policy.
+
 Deduplicator and window inspections capture one immutable published generation per selected
 concrete branch. A cold Bulk job scans the installed state registries, releases each map guard
 after cloning its generation and existing catalog registration identity, then sorts branches by
