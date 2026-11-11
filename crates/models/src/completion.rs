@@ -73,7 +73,8 @@ pub enum RelayQuestion {
     /// beside the `first` input of its side: the same schema on exactly the same branching.
     ProcessorInput { first: RelayName },
     /// The output or error relay of a processor that keeps the branch of `source`, its first input
-    /// or a generator's materialized relay: exactly that branching.
+    /// or a generator's materialized relay, and a correlator's first right input, whose `source` is
+    /// its first left input because a correlator's branch covers both sides: exactly that branching.
     ProcessorBranch { source: RelayName },
     /// Materialized state a processor reads beside its `first` input: a relay with materialized
     /// state on exactly that input's branching.
@@ -88,9 +89,12 @@ pub enum RelayQuestion {
     /// A relay on exactly `branch`, or an unbranched one for `None`: the relay of an ingestor
     /// route on a chosen branch, and an ingestor's error relay, which is never branched.
     OnBranch(Option<BranchName>),
-    /// A generator's materialized relay: a relay with materialized state on exactly `branch`, or
-    /// an unbranched one for `None`.
+    /// A generator's materialized relay once the generator's branch is chosen: a relay with
+    /// materialized state on exactly `branch`, or an unbranched one for `None`.
     MaterializedOnBranch(Option<BranchName>),
+    /// A generator's materialized relay where its statement names it, before the branch clause that
+    /// the relay must then match: a relay with materialized state on any branching.
+    GeneratorState,
 }
 
 impl RelayQuestion {
@@ -121,6 +125,7 @@ impl RelayQuestion {
             },
             Self::OnBranch(branch) => RelayRule::OnBranch(branch.as_ref()),
             Self::MaterializedOnBranch(branch) => RelayRule::MaterializedOnBranch(branch.as_ref()),
+            Self::GeneratorState => RelayRule::GeneratorState,
         };
         Some(rule)
     }
@@ -158,6 +163,8 @@ pub enum RelayRule<'a> {
     OnBranch(Option<&'a BranchName>),
     /// [`RelayQuestion::MaterializedOnBranch`].
     MaterializedOnBranch(Option<&'a BranchName>),
+    /// [`RelayQuestion::GeneratorState`].
+    GeneratorState,
 }
 
 impl<'a> RelayRule<'a> {
@@ -183,6 +190,7 @@ impl<'a> RelayRule<'a> {
             Self::MaterializedOnBranch(branch) => {
                 candidate.materialized_state.is_some() && candidate.branching.branch() == *branch
             }
+            Self::GeneratorState => candidate.materialized_state.is_some(),
         }
     }
 
@@ -195,7 +203,7 @@ impl<'a> RelayRule<'a> {
             | Self::EmitterInput { first } => vec![*first],
             Self::ProcessorBranch { source } => vec![*source],
             Self::EmitterState { inputs } | Self::EmitterError { inputs } => inputs.clone(),
-            Self::OnBranch(_) | Self::MaterializedOnBranch(_) => Vec::new(),
+            Self::OnBranch(_) | Self::MaterializedOnBranch(_) | Self::GeneratorState => Vec::new(),
         }
     }
 

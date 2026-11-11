@@ -217,6 +217,26 @@ fn branch_questions_compare_a_candidate_with_the_branch_alone() {
 }
 
 #[test]
+fn a_generator_state_admits_what_its_form_offers_on_some_branch() {
+    let relays = Relays::new();
+    let mut on_some_branch = relays.admitted(&RelayQuestion::MaterializedOnBranch(None));
+    let on_by_id = relays.admitted(&RelayQuestion::MaterializedOnBranch(Some(branch_name(
+        "by_id",
+    ))));
+    on_some_branch.extend(on_by_id);
+    on_some_branch.sort_unstable();
+    assert_eq!(
+        relays.admitted(&RelayQuestion::GeneratorState),
+        ["branched_state", "state"]
+    );
+    assert_eq!(
+        relays.admitted(&RelayQuestion::GeneratorState),
+        on_some_branch,
+        "the generator's branch follows its relay, so any branch its form could choose counts"
+    );
+}
+
+#[test]
 fn a_question_naming_a_relay_that_is_not_configured_has_no_rule() {
     let relays = Relays::new();
     for question in [
@@ -287,4 +307,5 @@ fn a_rule_names_the_configured_relays_of_its_question_in_order() {
         ["same"]
     );
     assert!(named(&RelayQuestion::OnBranch(None)).is_empty());
+    assert!(named(&RelayQuestion::GeneratorState).is_empty());
 }

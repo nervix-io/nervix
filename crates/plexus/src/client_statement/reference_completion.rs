@@ -94,8 +94,8 @@ enum NamedRelays {
         left: Vec<RelayName>,
         right: Option<Vec<RelayName>>,
     },
-    /// A generator, which reads the materialized state of `state`.
-    Generator { state: RelayName },
+    /// A generator, which reads the materialized state of `state` once its statement names it.
+    Generator { state: Option<RelayName> },
     /// An emitter: the inputs written so far.
     Emitter { inputs: Vec<RelayName> },
     /// An ingestor, whose message errors are never branched.
@@ -141,7 +141,7 @@ impl NamedRelays {
                 Keyword::Materialized,
                 Keyword::State,
             ))
-            .ignore_then(relay_ref())
+            .ignore_then(relay_ref().or_not())
             .map(|state| Self::Generator { state });
         let emitter = crate::emitter::head_kind()
             .ignore_then(emitter_name())
@@ -164,13 +164,21 @@ impl NamedRelays {
             }),
             (RelayRole::Input, Self::Correlator { left, right }) => {
                 // The side being written is the right one once `RIGHT FROM` is.
-                let side = match right {
-                    Some(right) => right,
-                    None => left,
+                let Some(right) = right else {
+                    return Some(RelayQuestion::ProcessorInput {
+                        first: left.first()?.clone(),
+                    });
                 };
-                Some(RelayQuestion::ProcessorInput {
-                    first: side.first()?.clone(),
-                })
+                match right.first() {
+                    Some(first) => Some(RelayQuestion::ProcessorInput {
+                        first: first.clone(),
+                    }),
+                    // A correlator's branch covers both sides, so the first right relay keeps the
+                    // branching of the first left one.
+                    None => Some(RelayQuestion::ProcessorBranch {
+                        source: left.first()?.clone(),
+                    }),
+                }
             }
             (RelayRole::Input, Self::Emitter { inputs }) => Some(RelayQuestion::EmitterInput {
                 first: inputs.first()?.clone(),
@@ -192,9 +200,11 @@ impl NamedRelays {
             ) => Some(RelayQuestion::ProcessorBranch {
                 source: inputs.first()?.clone(),
             }),
+            // The generator's branch clause follows its relay, so any branching can still match.
+            (RelayRole::State, Self::Generator { .. }) => Some(RelayQuestion::GeneratorState),
             (RelayRole::Output | RelayRole::Error, Self::Generator { state }) => {
                 Some(RelayQuestion::ProcessorBranch {
-                    source: state.clone(),
+                    source: state.clone()?,
                 })
             }
             (RelayRole::Error, Self::Emitter { inputs }) if !inputs.is_empty() => {
@@ -366,10 +376,7 @@ mod tests {
     fn a_relay_whose_narrowing_clause_follows_it_is_any_relay() {
         let any = SemanticReference::Model(ModelKind::Relay);
         assert_expects("CREATE REINGESTOR again FROM readings TO ", any.clone());
-        assert_expects(
-            "CREATE GENERATOR synth USING MATERIALIZED STATE ",
-            any.clone(),
-        );
+        assert_expects("ALTER GENERATOR synth SET MATERIALIZED STATE ", any.clone());
         assert_expects(
             "ALTER JUNCTION copy ADD ROUTE TO more INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR \
              SEND TO ",
@@ -378,15 +385,18 @@ mod tests {
     }
 
     #[test]
-    fn a_correlator_relay_agrees_with_the_first_relay_of_its_side() {
+    fn a_correlator_relay_agrees_with_the_first_relays_its_statement_names() {
         let side = |name: &str| RelayQuestion::ProcessorInput { first: relay(name) };
         assert_relay_question(
             "CREATE CORRELATOR pairs LEFT FROM readings, ",
             side("readings"),
         );
-        assert_expects(
+        // A correlator's branch is node-wide, so its first right relay keeps the left one's.
+        assert_relay_question(
             "CREATE CORRELATOR pairs LEFT FROM readings RIGHT FROM ",
-            SemanticReference::Model(ModelKind::Relay),
+            RelayQuestion::ProcessorBranch {
+                source: relay("readings"),
+            },
         );
         assert_relay_question(
             "CREATE CORRELATOR pairs LEFT FROM readings RIGHT FROM labels, ",
@@ -399,6 +409,18 @@ mod tests {
             RelayQuestion::ProcessorBranch {
                 source: relay("readings"),
             },
+        );
+    }
+
+    #[test]
+    fn a_generator_reads_materialized_state_on_the_branching_its_branch_clause_will_match() {
+        assert_relay_question(
+            "CREATE GENERATOR synth USING MATERIALIZED STATE ",
+            RelayQuestion::GeneratorState,
+        );
+        assert_relay_question(
+            "CREATE IF NOT EXISTS GENERATOR synth USING MATERIALIZED STATE ",
+            RelayQuestion::GeneratorState,
         );
     }
 
@@ -449,10 +471,14 @@ mod tests {
         };
         assert_eq!(left_only.question(RelayRole::RightTimeout), None);
         assert_eq!(NamedRelays::Ingestor.question(RelayRole::Input), None);
-        let generator = NamedRelays::Generator {
-            state: relay("state"),
+        let unnamed_state = NamedRelays::Generator { state: None };
+        assert_eq!(unnamed_state.question(RelayRole::Output), None);
+        assert_eq!(unnamed_state.question(RelayRole::Error), None);
+        let no_left = NamedRelays::Correlator {
+            left: Vec::new(),
+            right: Some(Vec::new()),
         };
-        assert_eq!(generator.question(RelayRole::State), None);
+        assert_eq!(no_left.question(RelayRole::Input), None);
     }
 
     #[test]

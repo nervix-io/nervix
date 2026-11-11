@@ -313,22 +313,23 @@ carries the same values to the choice resolver. A relay question accepts:
 | Question | Accepts | REPL position | Choice target |
 | --- | --- | --- | --- |
 | Processor input | The first input's schema on exactly its branching | A processor's further `FROM` relay, a correlator side's further relay and that side's timeout relay | A processor's further input and timeout relays |
-| Processor branch | Exactly the branching of the source: the first input, or a generator's materialized relay | The route relay of a processor that keeps its input's branch, and a processor's `ON MESSAGE ERROR SEND TO` relay | A processor's output and error relays |
+| Processor branch | Exactly the branching of the source: the first input, the first left relay for a correlator's right side, or a generator's materialized relay | The route relay of a processor that keeps its input's branch, a processor's `ON MESSAGE ERROR SEND TO` relay, and a correlator's first `RIGHT FROM` relay | A processor's output and error relays |
 | Processor state | Materialized state on exactly the first input's branching | A processor's `USING MATERIALIZED STATE` | A processor's materialized relay |
 | Emitter input | The first input's schema on any branching | An emitter's further `FROM` relay | An emitter's further input relays |
 | Emitter state | Materialized state on the one branching every input shares | An emitter's `USING MATERIALIZED STATE` | An emitter's materialized relay |
 | Emitter error | The one branching every input shares | An emitter's `ON MESSAGE ERROR SEND TO` | An emitter's error relay |
-| On branch | Exactly one branch, or no branch | An ingestor's `ON MESSAGE ERROR SEND TO`, with no branch | An ingestor's route relays, and its error relay with no branch |
-| Materialized on branch | Materialized state on exactly one branch, or on no branch | None, because a generator's branch follows its relay | A generator's materialized relay |
+| On branch | Exactly one branch, or no branch | An ingestor's `ON MESSAGE ERROR SEND TO`, with no branch | An ingestor's route relays and its error relay with no branch, and the first relay of each input list of a processor other than a reingestor, on the branch its form chose first |
+| Generator state | Materialized state on any branching | A generator's `USING MATERIALIZED STATE`, which its branch clause follows | None, because the form chooses the generator's branch first |
+| Materialized on branch | Materialized state on exactly one branch, or on no branch | None, because a generator's branch follows its relay | A generator's materialized relay, on the branch its form chose first |
 
 The grammar labels these positions with their role: `ref:decoding_codec` and `ref:encoding_codec`,
 and for relays `ref:input_relay`, `ref:state_relay`, `ref:output_relay`, `ref:error_relay`,
 `ref:left_timeout_relay` and `ref:right_timeout_relay`. The relays a question names are read from
 the statement written before the cursor, with the grammar's own clause parsers and with statement
 heads composed from the Model kinds' keyword phrases; completion never inspects the input text. A
-relay position whose statement names no relay to agree with offers every relay of the domain.
-Diagnostics keep naming these positions `ref:relay` and `ref:codec`, so a role narrows completion
-without changing what an error says.
+relay position that asks none of these questions, such as a statement's first input, offers every
+relay of the domain. Diagnostics keep naming these positions `ref:relay` and `ref:codec`, so a role
+narrows completion without changing what an error says.
 
 ## Requests In The Console
 
@@ -479,10 +480,11 @@ It does not guarantee more than that:
 - A reingestor route whose branch action preserves the incoming branch builds a route without a
   branch clause, which the route grammar refuses, so that form's command fails when the server
   parses it. An explicit `UNBRANCHED` or `BRANCHED BY` choice builds an executable route.
-- REPL completion narrows a relay only by the relays its statement names before the cursor. A
-  statement's first input, an ingestor's or reingestor's route relay and a generator's materialized
-  relay are offered from every relay, because the clauses that narrow them follow them, and the
-  relay positions of an `ALTER` statement are not compared with the relays its stored Model reads.
+- REPL completion narrows a relay only by what its statement writes before the cursor. A
+  statement's first input and an ingestor's or reingestor's route relay are offered from every
+  relay, and a generator's materialized relay from every relay with materialized state on any
+  branching, because the clauses that narrow them further follow them. The relay positions of an
+  `ALTER` statement are not compared with the relays its stored Model reads.
 - Text completion offers only what the grammar names at the cursor, so a position that introduces a
   new name offers nothing.
 - The console uses choice lookups; among the client libraries, the Rust client exposes them, while

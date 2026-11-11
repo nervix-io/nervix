@@ -311,11 +311,14 @@ choices apply. A processor's further input shares the first input's schema and e
 declaration. Its message-error relays, and the route relays of a processor that keeps its input's
 branch, share that branch declaration, and its materialized-state relay shares it and has
 materialized state. A correlator side's further and timeout relays share that side's first relay's
-schema and branch declaration. An emitter's further input shares the first input's schema, and its
+schema and branch declaration, and its first right relay shares the first left relay's branch
+declaration, since a correlator's branch declaration covers both sides. A generator's
+materialized relay has materialized state, on any branch declaration, since the generator declares
+its own branch after it. An emitter's further input shares the first input's schema, and its
 materialized-state and message-error relays share the branch declaration every input has. An
-ingestor's message-error relay is unbranched. A position whose statement names no relay before it
-to agree with, such as a statement's first input, a reingestor's route relay or a processor's or
-emitter's relay in an `ALTER` statement, offers every relay.
+ingestor's message-error relay is unbranched. Any other relay position, such as a statement's
+first input, a reingestor's route relay or a processor's or emitter's relay in an `ALTER`
+statement, offers every relay.
 
 Each suggestion carries a display value, a kind, and a text edit with UTF-8 byte start and end
 offsets and replacement text. Clients apply that edit to the original input; they do not infer the

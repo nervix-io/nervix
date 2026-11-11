@@ -17,7 +17,7 @@
 use std::collections::BTreeSet;
 
 use nervix_client_wire::{ChoiceLookupRequest, ChoiceSelection, ChoiceTarget, ChoiceValue};
-use nervix_models::{DomainName, ModelKind, NodeRef, RelayName};
+use nervix_models::{BranchName, DomainName, ModelKind, NodeRef, RelayName};
 use nervix_recovery::Discarded as _;
 
 use super::super::{
@@ -36,7 +36,7 @@ const EMITTER: &str = "CREATE KAFKA TOPIC EMITTER sink FROM readings TO broker T
                        MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s";
 
 /// Queues, in one open transaction, schemas, a branch, relays on and off it, one with materialized
-/// state, and codecs that decode and encode, only decode, and only encode.
+/// state on each side of it, and codecs that decode and encode, only decode, and only encode.
 async fn queue_configuration(
     service: &SessionServiceImpl,
     subscriptions: &mut SessionSubscriptions,
@@ -53,6 +53,8 @@ async fn queue_configuration(
         "CREATE RELAY branched_readings SCHEMA reading BRANCHED BY by_reading;",
         "CREATE RELAY state_readings SCHEMA reading UNBRANCHED WITH MATERIALIZED STATE LAST BY \
          TIMESTAMP;",
+        "CREATE RELAY branched_state SCHEMA reading BRANCHED BY by_reading WITH MATERIALIZED \
+         STATE LAST BY TIMESTAMP;",
         "CREATE WIRE JSON SCHEMA reading_wire MODE STRICT ( id integer, value string );",
         "CREATE WIRE JSON CODEC both_ways FROM WIRE SCHEMA reading_wire TO SCHEMA reading;",
         "CREATE JAQ JSON CODEC decode_only TO SCHEMA reading WITH JAQ TRANSFORMATIONS ON \
@@ -73,6 +75,12 @@ fn domain() -> ChoiceSelection {
 fn relay(name: &str) -> ChoiceSelection {
     ChoiceSelection {
         value: ChoiceValue::Model(NodeRef::new(ModelKind::Relay, named::<RelayName>(name))),
+    }
+}
+
+fn branch(name: &str) -> ChoiceSelection {
+    ChoiceSelection {
+        value: ChoiceValue::Model(NodeRef::new(ModelKind::Branch, named::<BranchName>(name))),
     }
 }
 
@@ -125,6 +133,7 @@ async fn codec_and_relay_positions_offer_what_their_statement_can_accept() {
             "CREATE JUNCTION copy FROM ".to_string(),
             vec![
                 "branched_readings",
+                "branched_state",
                 "labels",
                 "more_readings",
                 "readings",
@@ -149,16 +158,37 @@ async fn codec_and_relay_positions_offer_what_their_statement_can_accept() {
         ),
         (
             "CREATE JUNCTION copy FROM branched_readings BRANCHED BY by_reading TO ".to_string(),
-            vec!["branched_readings"],
+            vec!["branched_readings", "branched_state"],
+        ),
+        (
+            "CREATE CORRELATOR pairs LEFT FROM readings RIGHT FROM ".to_string(),
+            vec!["labels", "more_readings", "readings", "state_readings"],
+        ),
+        (
+            "CREATE CORRELATOR pairs LEFT FROM branched_readings RIGHT FROM ".to_string(),
+            vec!["branched_readings", "branched_state"],
+        ),
+        (
+            "CREATE CORRELATOR pairs LEFT FROM readings RIGHT FROM la".to_string(),
+            vec!["labels"],
         ),
         (
             "CREATE CORRELATOR pairs LEFT FROM readings RIGHT FROM labels, ".to_string(),
             vec!["labels"],
         ),
         (
+            "CREATE GENERATOR synth USING MATERIALIZED STATE ".to_string(),
+            vec!["branched_state", "state_readings"],
+        ),
+        (
+            "CREATE GENERATOR synth USING MATERIALIZED STATE br".to_string(),
+            vec!["branched_state"],
+        ),
+        (
             "CREATE KAFKA TOPIC EMITTER sink FROM readings, ".to_string(),
             vec![
                 "branched_readings",
+                "branched_state",
                 "more_readings",
                 "readings",
                 "state_readings",
@@ -202,74 +232,114 @@ async fn each_position_offers_what_the_choice_target_of_its_form_control_offers(
     let mut subscriptions = SessionSubscriptions::new();
     queue_configuration(&service, &mut subscriptions).await;
 
+    // Each position with the questions its form control asks. A form that chooses the node's branch
+    // before a relay the statement names ahead of its branch asks one question per branch, and the
+    // position offers what any of them offers.
     let cases = [
         (
             format!("{INGESTOR} DECODE USING "),
-            ChoiceTarget::IngestCodec,
-            vec![domain()],
+            vec![(ChoiceTarget::IngestCodec, vec![domain()])],
         ),
         (
             format!("{EMITTER} ENCODE USING "),
-            ChoiceTarget::EmitterCodec,
-            vec![domain()],
+            vec![(ChoiceTarget::EmitterCodec, vec![domain()])],
         ),
         (
             "CREATE JUNCTION copy FROM readings, ".to_string(),
-            ChoiceTarget::ProcessorCompatibleInputRelay,
-            vec![domain(), relay("readings")],
+            vec![(
+                ChoiceTarget::ProcessorCompatibleInputRelay,
+                vec![domain(), relay("readings")],
+            )],
         ),
         (
             "CREATE JUNCTION copy FROM readings UNBRANCHED TO ".to_string(),
-            ChoiceTarget::ProcessorInputBranchRelay,
-            vec![domain(), relay("readings")],
+            vec![(
+                ChoiceTarget::ProcessorInputBranchRelay,
+                vec![domain(), relay("readings")],
+            )],
         ),
         (
             "CREATE JUNCTION copy FROM readings UNBRANCHED TO more_readings INHERIT ALL FLUSH \
              IMMEDIATE ON MESSAGE ERROR SEND TO "
                 .to_string(),
-            ChoiceTarget::ProcessorInputBranchRelay,
-            vec![domain(), relay("readings")],
+            vec![(
+                ChoiceTarget::ProcessorInputBranchRelay,
+                vec![domain(), relay("readings")],
+            )],
         ),
         (
             "CREATE JUNCTION copy FROM readings UNBRANCHED USING MATERIALIZED STATE ".to_string(),
-            ChoiceTarget::ProcessorMaterializedRelay,
-            vec![domain(), relay("readings")],
+            vec![(
+                ChoiceTarget::ProcessorMaterializedRelay,
+                vec![domain(), relay("readings")],
+            )],
+        ),
+        (
+            "CREATE CORRELATOR pairs LEFT FROM readings RIGHT FROM ".to_string(),
+            vec![(ChoiceTarget::IngestUnbranchedRelay, vec![domain()])],
+        ),
+        (
+            "CREATE CORRELATOR pairs LEFT FROM branched_readings RIGHT FROM ".to_string(),
+            vec![(
+                ChoiceTarget::IngestBranchedRelay,
+                vec![domain(), branch("by_reading")],
+            )],
+        ),
+        (
+            "CREATE GENERATOR synth USING MATERIALIZED STATE ".to_string(),
+            vec![
+                (ChoiceTarget::GeneratorMaterializedRelay, vec![domain()]),
+                (
+                    ChoiceTarget::GeneratorMaterializedRelay,
+                    vec![domain(), branch("by_reading")],
+                ),
+            ],
         ),
         (
             "CREATE KAFKA TOPIC EMITTER sink FROM readings, ".to_string(),
-            ChoiceTarget::EmitterCompatibleInputRelay,
-            vec![domain(), relay("readings")],
+            vec![(
+                ChoiceTarget::EmitterCompatibleInputRelay,
+                vec![domain(), relay("readings")],
+            )],
         ),
         (
             "CREATE KAFKA TOPIC EMITTER sink FROM readings USING MATERIALIZED STATE ".to_string(),
-            ChoiceTarget::EmitterMaterializedRelay,
-            vec![domain(), relay("readings")],
+            vec![(
+                ChoiceTarget::EmitterMaterializedRelay,
+                vec![domain(), relay("readings")],
+            )],
         ),
         (
             format!(
                 "{EMITTER} ENCODE USING both_ways INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR \
                  SEND TO "
             ),
-            ChoiceTarget::EmitterErrorRelay,
-            vec![domain(), relay("readings")],
+            vec![(
+                ChoiceTarget::EmitterErrorRelay,
+                vec![domain(), relay("readings")],
+            )],
         ),
         (
             format!(
                 "{INGESTOR} DECODE USING codec TO readings INHERIT ALL UNBRANCHED FLUSH IMMEDIATE \
                  ON MESSAGE ERROR SEND TO "
             ),
-            ChoiceTarget::IngestUnbranchedRelay,
-            vec![domain()],
+            vec![(ChoiceTarget::IngestUnbranchedRelay, vec![domain()])],
         ),
     ];
-    for (input, target, dependencies) in cases {
+    for (input, questions) in cases {
         let mut completed = BTreeSet::new();
         for value in suggestion_values(&service, &subscriptions, &input).await {
             completed.insert(value);
         }
-        let chosen = choice_labels(&service, &subscriptions, target, dependencies).await;
+        let mut chosen = BTreeSet::new();
+        for (target, dependencies) in &questions {
+            let labels =
+                choice_labels(&service, &subscriptions, *target, dependencies.clone()).await;
+            chosen.extend(labels);
+        }
         assert!(!completed.is_empty(), "{input}");
-        assert_eq!(completed, chosen, "{input} against {target:?}");
+        assert_eq!(completed, chosen, "{input} against {questions:?}");
     }
 
     subscriptions.stop_all().await;
