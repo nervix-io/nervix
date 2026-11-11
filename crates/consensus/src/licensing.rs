@@ -18,6 +18,9 @@ mod operation_tests;
 mod release;
 mod request;
 mod rotation;
+#[cfg(test)]
+mod transition_tests;
+mod transitions;
 pub use activation::{
     ActivationBinding, ActivationState, LicenseDecisionError, LicenseVerification,
     ReceivedLicenseDecision, StoredDecision, StoredDecisionOperation, VerifiedLicenseDecision,
@@ -27,12 +30,13 @@ pub use release::{
     AwaitingLicenseRelease, ReleaseConfirmation, ReleaseState, StoredLicenseTransitions,
 };
 pub use request::PreparedLicensingRequest;
+pub use transitions::{CommittedLicenseTransitions, CommittedTransition};
 #[cfg(test)]
 pub(crate) mod tests;
 #[cfg(test)]
 pub(crate) mod verification_tests;
 
-use error_stack::Report;
+use error_stack::{Report, ResultExt as _};
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_licensing_protocol::{document::DocumentType, impact::UsageSnapshot, keys::KeyId};
 use nervix_models::Timestamp;
@@ -121,6 +125,7 @@ impl LicensingRecord {
                 || activation.decision.bytes.is_empty()
                 || activation.decision.revision == 0
                 || activation.decision.conditions_revision == 0
+                || !activation.transitions.validate()
             {
                 return Err(Report::new(LicensingRecordError::Activation));
             }
@@ -187,26 +192,66 @@ impl Observer {
 
 pub(super) fn admit_domain(
     state: &crate::StateMachineData,
-    quota: nervix_licensing_vocabulary::Quota,
+    mut quota: nervix_licensing_vocabulary::Quota,
+    replacement: bool,
 ) -> error_stack::Result<(), nervix_licensing_vocabulary::LicensingRefusal> {
     use nervix_licensing_vocabulary::{QuotaConstraint, QuotaName};
     if let (Some(record), Some(Ok(verified))) = (&state.licensing, &state.licensing_verification)
-        && let LicensingMode::Activated(_) = &record.mode
-        && verified
-            .decision
-            .timing
-            .valid_until
-            .is_some_and(|until| record.licensing_time.into_datetime() >= until)
+        && let LicensingMode::Activated(activation) = &record.mode
     {
-        return Err(Report::new(nervix_licensing_vocabulary::LicensingRefusal {
+        let decision = &verified.decision;
+        let signed_target = decision.status
+            == nervix_licensing_protocol::documents::DecisionStatus::Active
+            && record.licensing_time.into_datetime() < decision.timing.term_ends_at;
+        let lapsed = signed_target
+            && decision
+                .timing
+                .valid_until
+                .is_some_and(|until| record.licensing_time.into_datetime() >= until);
+        let refusal = nervix_licensing_vocabulary::LicensingRefusal {
             state: nervix_licensing_vocabulary::AdmissionState::Lapsed,
             condition: QuotaName::ClusterDomains,
             limit: u64::try_from(state.domains.len()).assured("materialized domains fit u64"),
             current_usage: u64::try_from(state.domains.len())
                 .assured("materialized domains fit u64"),
             requested: 1,
-        }));
+        };
+        let recovery = if replacement {
+            domain_recovery_quota(record, activation, &verified.decision).change_context(refusal)?
+        } else {
+            None
+        };
+        if lapsed && recovery.is_none() {
+            return Err(Report::new(refusal));
+        }
+        if replacement {
+            let live = match recovery {
+                Some(recovery) => recovery,
+                None => {
+                    let free = nervix_licensing_protocol::conditions::FREE_POLICY.usage();
+                    let target = if signed_target {
+                        &decision.conditions.usage
+                    } else {
+                        &free
+                    };
+                    target
+                        .quota(QuotaName::ClusterDomains.as_str())
+                        .assured("verified conditions supply the current cluster domain quota")
+                }
+            };
+            quota = match (quota, live) {
+                (nervix_licensing_vocabulary::Quota::Unlimited, quota)
+                | (quota, nervix_licensing_vocabulary::Quota::Unlimited) => quota,
+                (
+                    nervix_licensing_vocabulary::Quota::Bounded { value: captured },
+                    nervix_licensing_vocabulary::Quota::Bounded { value: live },
+                ) => nervix_licensing_vocabulary::Quota::Bounded {
+                    value: captured.min(live),
+                },
+            };
+        }
     }
+
     QuotaConstraint {
         name: QuotaName::ClusterDomains,
         quota,
@@ -214,9 +259,46 @@ pub(super) fn admit_domain(
     .admit(
         u64::try_from(state.domains.len()).assured("a materialized domain collection fits u64"),
         1,
-        false,
+        replacement,
     )
     .map(|_| ())
+}
+
+fn domain_recovery_quota(
+    record: &LicensingRecord,
+    activation: &ActivationState,
+    decision: &nervix_licensing_protocol::documents::Decision,
+) -> error_stack::Result<
+    Option<nervix_licensing_vocabulary::Quota>,
+    nervix_licensing_protocol::impact::ImpactError,
+> {
+    let now = record.licensing_time;
+    if activation
+        .binding
+        .ephemeral_expires_at
+        .is_some_and(|expiry| now >= expiry)
+    {
+        return Ok(None);
+    }
+    if !activation.transitions.values().any(|entry| {
+        entry.until() > now
+            && entry.transition.affected.iter().any(|affected| {
+                affected.condition
+                    == nervix_licensing_vocabulary::QuotaName::ClusterDomains.as_str()
+            })
+    }) {
+        return Ok(None);
+    }
+    let transitions = activation.transitions.effective_values();
+    nervix_licensing_protocol::impact::EffectiveUsage {
+        conditions: &decision.conditions.usage,
+        transitions: &transitions,
+    }
+    .quota(
+        nervix_licensing_vocabulary::QuotaName::ClusterDomains.as_str(),
+        now.into_datetime(),
+    )
+    .map(Some)
 }
 
 pub(super) fn apply(
@@ -250,14 +332,23 @@ pub(super) fn apply(
         });
     };
     let identity = identity.public();
+    let usage = UsageSnapshot {
+        cluster_nodes: u64::try_from(state.last_membership.membership().nodes().count())
+            .assured("materialized membership fits u64"),
+        cluster_domains: u64::try_from(state.domains.len()).assured("materialized domains fit u64"),
+    };
     let result = match command {
-        ConsensusCommand::ActivateLicense { binding, decision } => record.accept(
-            &identity,
-            binding,
-            decision,
-            None,
-            &state.licensing_environment,
-        ),
+        ConsensusCommand::ActivateLicense { binding, decision } => record
+            .accept(
+                &identity,
+                binding,
+                decision,
+                None,
+                &state.licensing_environment,
+            )
+            .and_then(|accepted| {
+                accepted.assess_decision(record, &identity, usage, &state.licensing_environment)
+            }),
         ConsensusCommand::ApplyLicenseDecision {
             decision,
             expected_revision,
@@ -267,13 +358,17 @@ pub(super) fn apply(
                     reason: LicenseDecisionError::NotActivated,
                 });
             };
-            record.accept(
-                &identity,
-                &activation.binding,
-                decision,
-                Some(*expected_revision),
-                &state.licensing_environment,
-            )
+            record
+                .accept(
+                    &identity,
+                    &activation.binding,
+                    decision,
+                    Some(*expected_revision),
+                    &state.licensing_environment,
+                )
+                .and_then(|accepted| {
+                    accepted.assess_decision(record, &identity, usage, &state.licensing_environment)
+                })
         }
         ConsensusCommand::InstallTrustDocuments { documents } => {
             record.install_trust(documents, &state.licensing_environment)
@@ -281,12 +376,22 @@ pub(super) fn apply(
         ConsensusCommand::AdvanceLicensingTime { observed_at } => {
             let mut advanced = record.as_ref().clone();
             advanced.licensing_time = advanced.licensing_time.max(*observed_at);
+            if let Err(error) = advanced.assess_term_tick(
+                &identity,
+                record.licensing_time,
+                usage,
+                &state.licensing_environment,
+            ) {
+                return AppliedConsensusCommand::conflict(ConsensusConflict::LicenseDecision {
+                    reason: *error.current_context(),
+                });
+            }
             advanced.finish_release_if_unneeded();
             Ok(advanced)
         }
         _ => unreachable!("only licensing commands enter their owner"),
     };
-    let accepted = match result {
+    let mut accepted = match result {
         Ok(record) => record,
         Err(error) => {
             return AppliedConsensusCommand::conflict(ConsensusConflict::LicenseDecision {
@@ -294,6 +399,16 @@ pub(super) fn apply(
             });
         }
     };
+    if let LicensingMode::Activated(activation) = &mut accepted.mode {
+        activation.transitions.protect_nodes(
+            &state
+                .last_membership
+                .membership()
+                .nodes()
+                .map(|(name, _)| name.clone())
+                .collect(),
+        );
+    }
     state.licensing_verification = accepted.verify(&identity, &state.licensing_environment);
     state.licensing = Some(Arc::new(accepted));
     if matches!(command, ConsensusCommand::ActivateLicense { .. }) {

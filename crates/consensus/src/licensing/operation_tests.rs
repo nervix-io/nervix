@@ -479,7 +479,7 @@ fn release_does_not_keep_the_activation_offline_admission_gate() {
         },
     );
     assert!(matches!(&record(&state).mode, LicensingMode::Released(release) if release.awaiting()));
-    super::admit_domain(&state, nervix_licensing_vocabulary::Quota::Unlimited)
+    super::admit_domain(&state, nervix_licensing_vocabulary::Quota::Unlimited, false)
         .assured("the committed release admits new free-policy usage past the former deadline");
 }
 

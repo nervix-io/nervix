@@ -321,6 +321,27 @@ A degraded inspection also renders its typed decision-verification rejection.
 The command carries the same observation in a typed cluster-license state-inspection envelope
 with one unit and shared Row sections, so applications need not parse display text.
 
+A signed reduction below existing usage starts a committed grace period at receipt. The target
+quota governs new usage immediately. During grace, a replacement may restore usage up to the
+allowance held when the reduction arrived; it cannot expand that allowance. Refresh, restart and
+leader transfer preserve the transition's identity, start and deadline. The next refresh reports
+the committed transition, and a service-signed acknowledgement replaces its copy. Only that
+acknowledgement or a signed administrator extension can move a deadline later. Before acknowledgement,
+the signed offline deadline also bounds the temporary permission.
+The typed `transitions` section exposes each identity, condition, original and target values,
+usage at start, start time, signed deadline, effective deadline, acknowledgement and current quota
+state. `issued_at` and `received_at` are independent typed decision timestamps; `transitions_active`
+counts committed grants that remain active. A member replacement must have belonged to the
+membership when its grant started. A domain restore can recover slots up to the same original
+allowance. Creating another domain or introducing a new member follows the target quota.
+
+An improvement applies immediately and ends grants it makes unnecessary. At a term-end tick or
+release, Nervix targets the embedded free policy and assesses any reduction using the signed grace
+in force. The current free policy has unlimited quotas, so returning to it does not create a quota
+reduction. Expired ephemeral activations retain their firm stop and receive no grace. When a grant
+ends with usage still above its target, inspection, metrics and a Warning notice report the excess;
+licensing itself drops no domain, removes no member and tears down no existing work.
+
 Admission evaluates a coherent committed observation. Domain planning captures its quota, and
 committed creation checks current usage and lapse before adding a domain. Membership admission
 checks before adding a learner or voter. A typed refusal never removes an existing domain or

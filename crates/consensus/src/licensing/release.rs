@@ -257,23 +257,19 @@ impl LicensingRecord {
         if let Some(Ok(verified)) = self.verify(&identity.public(), environment) {
             let policy = TransitionPolicy::from_operating(&verified.decision.conditions.operating)
                 .change_context(LicenseDecisionError::Metadata)?;
-            transitions = verified
-                .decision
+            transitions = activation
                 .transitions
+                .effective_values()
                 .iter()
                 .filter(|transition| transition.deadline > released_at.into_datetime())
                 .cloned()
                 .collect();
-            let to_conditions_revision = activation
-                .decision
-                .conditions_revision
-                .checked_add(1)
-                .ok_or_else(|| Report::new(LicenseDecisionError::Metadata))?;
+            let to_conditions_revision = activation.decision.conditions_revision;
             transitions.extend(
                 assess_impact(
                     EffectiveUsage {
                         conditions: &verified.decision.conditions.usage,
-                        transitions: &verified.decision.transitions,
+                        transitions: &transitions,
                     },
                     ImpactTarget::Usage(&FREE_POLICY.usage()),
                     usage,

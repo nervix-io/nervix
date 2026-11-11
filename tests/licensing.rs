@@ -10,6 +10,8 @@
     nervix::layer(harness, reason = "owns the public licensing scenarios")
 )]
 
+mod transitions;
+
 use std::time::Duration;
 
 use cucumber::{gherkin::Step, given, then, when};
@@ -691,6 +693,8 @@ async fn pass_deadline(world: &mut ScenarioWorld, name: String) {
         "refresh_after" => "refresh after",
         "ephemeral" => "ephemeral expires at",
         "grants_until" => "grants until",
+        "term" => "term ends at",
+        "transition" => "effective until",
         _ => panic!("undeclared licensing deadline"),
     };
     let deadline =
@@ -1077,6 +1081,31 @@ async fn reduce_domain_quota(world: &mut ScenarioWorld) {
         .as_ref()
         .verified("fixture started")
         .configure(|model| model.reduce_domain_quota_with_grace())
+        .await;
+}
+
+#[when(expr = "the licensing service sets the domain quota to {int} with {int} seconds of grace")]
+async fn set_domain_quota_with_grace(world: &mut ScenarioWorld, limit: u64, seconds: u64) {
+    use nervix_licensing_protocol::conditions::{
+        CLUSTER_DOMAINS, ConditionDuration, ConditionValue, QUOTA_GRACE, Quota,
+    };
+
+    world
+        .licensing_service
+        .as_ref()
+        .verified("the fixture started its HTTPS licensing service")
+        .configure(|model| {
+            let mut plan = model.conditions();
+            plan.usage.quotas.insert(
+                CLUSTER_DOMAINS.to_owned(),
+                ConditionValue::Known(Quota::Bounded { value: limit }),
+            );
+            plan.operating.durations.insert(
+                QUOTA_GRACE.to_owned(),
+                ConditionValue::Known(ConditionDuration::Bounded { seconds }),
+            );
+            model.plan(plan);
+        })
         .await;
 }
 

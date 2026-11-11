@@ -1416,7 +1416,11 @@ from the presence of `state` or parse text to reconstruct rows.
 Clients MUST preserve the inspection entity's typed scope. `DomainNodeInspectionEntity` contains
 a domain and node reference; `ClusterLicenseInspectionEntity` contains neither. Native host
 domain/name accessors return absent values for a cluster-license observation, and its entity kind
-is `LICENSE`. The page and Row-section contract is shared by both scopes.
+is `LICENSE`. The page and Row-section contract is shared by both scopes. Licensing's `transitions`
+section uses that generic contract for committed grants; preserve its complete schema and typed
+rows, including datetime precision and all original/target values. The section's rows contribute
+to the page and unit counts. Native and console warnings render the same licensing transition
+codes and parameters supplied by the server.
 
 Embedded `NXRB` frames use the existing verified Row/Cell representation and the session transfer
 bound. A retained frame MUST keep its backing bytes alive after its containing outcome is released.

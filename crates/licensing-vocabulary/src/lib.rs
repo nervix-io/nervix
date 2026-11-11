@@ -117,6 +117,35 @@ pub struct QuotaConstraint {
 }
 
 impl QuotaConstraint {
+    /// A replacement may recover an occupied slot up to the captured allowance, never expand it.
+    pub fn admit_with_grant(
+        self,
+        current_usage: u64,
+        requested: u64,
+        replacement: bool,
+        existing_allowance: Option<u64>,
+    ) -> Result<Self, Report<LicensingRefusal>> {
+        let constraint = match (self.quota, replacement, existing_allowance) {
+            (Quota::Bounded { value }, true, Some(allowance)) => Self {
+                name: self.name,
+                quota: Quota::Bounded {
+                    value: value.max(allowance),
+                },
+            },
+            _ => self,
+        };
+        match constraint.admit(current_usage, requested, replacement) {
+            Ok(admitted) => Ok(admitted),
+            Err(report) => {
+                let mut refusal = *report.current_context();
+                if existing_allowance.is_some() {
+                    refusal.state = AdmissionState::WithinGrace;
+                }
+                Err(Report::new(refusal))
+            }
+        }
+    }
+
     /// Free policy has no replacement grants: every newly occupied slot uses the same quota.
     /// An unlimited quota admits without summing counts it does not constrain.
     pub fn admit(
@@ -201,6 +230,31 @@ mod tests {
     use super::*;
 
     #[test]
+    fn grace_admits_only_replacement_within_the_original_allowance() {
+        let target = QuotaConstraint {
+            name: QuotaName::ClusterDomains,
+            quota: Quota::Bounded { value: 1 },
+        };
+        let replacement = match target.admit_with_grant(1, 1, true, Some(2)) {
+            Ok(admitted) => admitted,
+            Err(error) => panic!("replacement must recover the original allowance: {error:#}"),
+        };
+        assert_eq!(replacement.quota, Quota::Bounded { value: 2 });
+        for (usage, replacement) in [(1, false), (2, false), (2, true), (u64::MAX, true)] {
+            let refused = match target.admit_with_grant(usage, 1, replacement, Some(2)) {
+                Err(error) => error,
+                Ok(_) => panic!("grace must refuse growth beyond the applicable allowance"),
+            };
+            assert_eq!(refused.current_context().state, AdmissionState::WithinGrace);
+        }
+        let expired = match target.admit_with_grant(1, 1, true, None) {
+            Err(error) => error,
+            Ok(_) => panic!("an expired grant cannot recover an over-limit slot"),
+        };
+        assert_eq!(expired.current_context().state, AdmissionState::OverLimit);
+    }
+
+    #[test]
     fn quota_admission_keeps_unlimited_zero_last_slot_and_overflow_distinct() {
         assert!(Quota::Unlimited.admits(u64::MAX));
         let constraint = |quota| QuotaConstraint {
@@ -255,12 +309,14 @@ mod tests {
     RkyvDeserialize,
 )]
 pub enum AdmissionState {
+    WithinGrace,
     OverLimit,
     Lapsed,
 }
 impl AdmissionState {
     pub const fn as_str(self) -> &'static str {
         match self {
+            Self::WithinGrace => "within_grace",
             Self::OverLimit => "over_limit",
             Self::Lapsed => "lapsed",
         }

@@ -27,8 +27,8 @@ fn committed_domain_admission_serializes_competing_creates_and_preserves_updates
     };
     let mut state = StateMachineData::default();
     // Both planners saw zero domains. Only the first durable effect may consume the last slot.
-    assert!(super::admit_domain(&state, quota).is_ok());
-    assert!(super::admit_domain(&state, quota).is_ok());
+    assert!(super::admit_domain(&state, quota, false).is_ok());
+    assert!(super::admit_domain(&state, quota, false).is_ok());
     assert_eq!(
         apply_consensus_command(&mut state, &command("first")).response,
         ConsensusResponse::Applied
@@ -129,6 +129,7 @@ fn bolero_licensing_record_preserves_time_mode_and_complete_trust_documents() {
                 let binding = activation_binding(&mut arbitrary);
                 record.mode = LicensingMode::Activated(Box::new(ActivationState {
                     binding,
+                    transitions: generated_committed_transitions(&mut arbitrary),
                     decision: StoredDecision {
                         bytes: arbitrary.non_empty_string(),
                         revision: arbitrary.entropy().between(1..=u64::MAX),
@@ -210,6 +211,32 @@ fn bolero_licensing_record_preserves_time_mode_and_complete_trust_documents() {
                 serde_json::from_slice(&json).assured("the complete JSON record decodes");
             assert_eq!(restored, record);
         });
+}
+
+fn generated_committed_transitions(arbitrary: &mut Arbitrary<'_>) -> CommittedLicenseTransitions {
+    let mut committed = CommittedLicenseTransitions::default();
+    for transition in generated_transitions(arbitrary) {
+        if arbitrary.entropy().flag() {
+            committed = committed
+                .acknowledge(
+                    &[transition],
+                    nervix_licensing_protocol::test_fixture::limits(),
+                )
+                .assured("bounded generated acknowledgement");
+        } else {
+            let until = if arbitrary.entropy().flag() {
+                Some(arbitrary.timestamp())
+            } else {
+                None
+            };
+            committed.insert_pending(transition, until);
+        }
+    }
+    let nodes = (0..arbitrary.entropy().count(3))
+        .map(|_| arbitrary.rule_name())
+        .collect();
+    committed.protect_nodes(&nodes);
+    committed
 }
 
 pub(crate) fn generated_transitions(

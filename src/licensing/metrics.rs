@@ -207,18 +207,18 @@ fn families(
                 &[],
                 release.activation.decision.revision.approx_into(),
             );
-            if let Some(next) = release
-                .transitions
-                .values()
-                .iter()
-                .map(|transition| transition.deadline)
-                .filter(|at| *at > initialized.record.licensing_time.into_datetime())
-                .min()
-            {
-                let seconds: f64 = next.timestamp().approx_into();
-                sample(&mut deadlines, &[("deadline", "next_grant")], seconds);
-            }
         }
+    }
+    if let Some(initialized) = &policy.snapshot.initialized
+        && let Some(next) = policy
+            .transitions()
+            .iter()
+            .map(|(_, until, _)| *until)
+            .filter(|at| *at > initialized.record.licensing_time)
+            .min()
+    {
+        let seconds: f64 = next.into_datetime().timestamp().approx_into();
+        sample(&mut deadlines, &[("deadline", "next_grant")], seconds);
     }
     output.push(revision);
     output.push(deadlines);
@@ -251,24 +251,7 @@ fn families(
         output.push(connected);
     }
     let mut transitions = family(6, MetricType::GAUGE);
-    let active_transitions = match &policy.snapshot.initialized {
-        Some(initialized) => {
-            let values = match &initialized.record.mode {
-                nervix_consensus::LicensingMode::Released(release) => release.transitions.values(),
-                _ => match &initialized.verification {
-                    Some(Ok(verified)) => verified.decision.transitions.as_slice(),
-                    _ => &[],
-                },
-            };
-            values
-                .iter()
-                .filter(|transition| {
-                    transition.deadline > initialized.record.licensing_time.into_datetime()
-                })
-                .count()
-        }
-        None => 0,
-    };
+    let active_transitions = policy.active_transition_count();
     sample(&mut transitions, &[], active_transitions.approx_into());
     output.push(transitions);
     let mut over = family(7, MetricType::GAUGE);
@@ -280,7 +263,7 @@ fn families(
         sample(
             &mut over,
             &[("condition", name.as_str())],
-            if policy.quota(name).admits(used) {
+            if policy.effective_quota(name).admits(used) {
                 0.0
             } else {
                 1.0

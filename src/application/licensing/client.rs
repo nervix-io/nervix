@@ -425,7 +425,10 @@ impl<'a> LicensingClient<'a> {
                 common,
                 activation_id: *activation_id,
                 state: state.clone(),
-                transitions: Vec::new(),
+                transitions: match &cluster.record.mode {
+                    LicensingMode::Activated(activation) => activation.transitions.reported(),
+                    _ => Vec::new(),
+                },
             }),
             Operation::Release {
                 activation_id,

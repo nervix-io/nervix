@@ -10,8 +10,10 @@ mod clock;
 mod coordinator;
 mod operations;
 mod request_turn;
+mod transition_notices;
 pub(in crate::application) use coordinator::run;
 pub(in crate::application) use request_turn::LicensingRequests;
+pub(in crate::application) use transition_notices::run as run_notices;
 pub mod test_support;
 
 use error_stack::{Report, ResultExt as _};
