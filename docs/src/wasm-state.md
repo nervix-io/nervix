@@ -300,7 +300,8 @@ it would save is the state the reset discards.
 5. **Committed.** The checkpoint becomes the committed checkpoint, and the acknowledgements the
    callback held back are released. Only then does the branch run its next callback.
 
-The whole checkpoint, from the guest's save to the last replica's confirmation, has ninety seconds.
+The whole checkpoint, from the guest's save to the last replica's confirmation, has the local
+`--runtime-wasm-checkpoint-timeout` budget, ninety seconds by default.
 While it is under way, the branch reports every input the callback holds back alive to its ingestor
 every 100 milliseconds, as a remote receiver reports an acknowledgement it holds. A checkpoint is
 progress of those inputs: an ingestor whose `ACK TIMEOUT` is shorter than the checkpoint does not time
@@ -308,7 +309,7 @@ them out and send them again while the checkpoint can still commit them, whether
 the owner's node or on another. Input the guest keeps undecided past its callback is not held for a
 checkpoint and is not reported alive.
 The replica first receives a small revision, length, and digest description, then fetches that
-revision through the bulk pool in 64 KiB chunks. It verifies the complete byte count and digest
+revision through the bulk pool in configured bulk chunks, 64 KiB by default. It verifies the complete byte count and digest
 before writing the checkpoint to its own storage. A save up to the host's 64 MiB guest buffer can
 therefore cross the 2 MiB replication-message limit. The bulk fetch has a sixty-second progress
 deadline inside the checkpoint's ninety-second completion budget.
@@ -321,9 +322,10 @@ non-security purpose is recorded in [Cryptography](cryptography.md#classificatio
 The fetch's bulk stream grants the owner a 1 MiB receive window, so the owner keeps sixteen 64 KiB
 chunks in flight. A save then crosses in one round trip per window rather than one per chunk, which
 matters on a loaded node, where every round trip waits for several scheduled tasks on both sides.
-The ninety seconds are fixed rather than derived from the save's size. A deadline that grew with
-the save would let a replica that falls behind its owner hold acknowledgements longer instead of
-failing the checkpoint, and the largest save the host allows, 64 MiB, crosses well inside it. See
+The checkpoint deadline is an independently configured capacity rather than a function of the
+save's size. A deadline that grew with the save would let a replica that falls behind its owner
+hold acknowledgements longer instead of failing the checkpoint. Provision the guest-buffer
+capacity and checkpoint deadline independently. See
 [Cluster Interconnect](./interconnect.md#wire-contract-and-payloads) for the window and the memory
 that backs it.
 
@@ -366,7 +368,7 @@ round synchronizes the owner's branch lifecycle before it installs a branch chec
 replica refuses a checkpoint only when that lifecycle does not name the branch, as for an evicted
 branch. A node without stable storage acknowledges nothing.
 
-While the checkpoint waits, it wakes on each replica report and, at least every 100 milliseconds,
+While the checkpoint waits, it wakes on each replica report and, at least every tenth of the local replication cadence (100 milliseconds by default),
 rereads the unit assignment publication the branch retains, which schedule installation replaces. A
 replica the schedule replaces is replaced in the wait. The wait fails when the
 schedule assigns fewer replicas than the checkpoint was captured for, when this node no longer
@@ -715,8 +717,8 @@ PROCESSOR` never presents a reset of the previous binding as a reset of the new 
 
 A shutdown drain waits for the acknowledgements a WASM branch holds, as it waits for any outstanding
 acknowledgement, and the checkpoint deadline bounds that wait. Runtime teardown gives each processor
-task two seconds to stop, and the processor task gives each of its branch tasks two seconds inside
-that. A branch task never outlives its processor task: one still in its checkpoint is ended with it,
+task one fifteenth of the domain drain budget to stop, and gives each branch task the same grace
+inside that; both are two seconds at the 30-second default. A branch task never outlives its processor task: one still in its checkpoint is ended with it,
 its unreleased acknowledgements are negatively acknowledged, and a restart finds whatever that
 checkpoint had already written. See [Draining Admitted Work](./shutdown.md#draining-admitted-work).
 
@@ -836,11 +838,11 @@ Nervix does not provide, and these limits apply:
 - **Exactly-once processing or delivery.** See [Replay, Duplicates, And
   Exactly-Once](#replay-duplicates-and-exactly-once).
 - **Guest state across module versions.** A binding change always starts a new lifetime.
-- **A checkpoint deadline of ninety seconds**, from the save to the last replica, and one callback per
+- **A configured checkpoint deadline, ninety seconds by default**, from the save to the last replica, and one callback per
   branch at a time, whose acknowledgements are held for at most that long.
 - **A save of at most 64 MiB**, the host's guest buffer limit.
 - **Prepared handoff memory grows with its branch inventory.** The destination retains every
-  verified branch checkpoint until activation; the 256 MiB limit applies to each transfer, not the
+  verified branch checkpoint until activation; the configured checkpoint-byte limit, 256 MiB by default, applies to each transfer, not the
   entity's aggregate state.
 - **Loss of state without replicas.** Recovering a processor without its owner resets every branch
   whose only checkpoints were on that owner.
@@ -903,3 +905,9 @@ Parallel compilation stays disabled because module compilation already occupies 
 workers. This explicit derivation prevents nested compiler fan-out from bypassing the executor.
 See [Node Settings](node-settings.md#engine-and-connector-host-capabilities) for environment
 variables and validation.
+
+Epoch tick interval, deadline ticks, invocation buffer capacity and optimization are explicit
+runtime capabilities, as are checkpoint deadlines and the recovery request queue. Their defaults
+remain 1ms, one tick, 64MiB, optimization enabled, 90 seconds and 32 requests. These do not change
+the processor's language-level linear-memory or checkpoint contract. See
+[Data-Plane Runtime Policy And Capacity](node-settings.md#data-plane-runtime-policy-and-capacity).

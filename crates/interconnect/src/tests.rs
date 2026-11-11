@@ -1515,6 +1515,7 @@ async fn relay_terminal_capacity_is_held_until_the_application_finishes() {
         )
         .expect("the response target should register");
     let payload = |ack_id, sequence, registrar| RelayPayload {
+        ack_timing: nervix_models::RemoteAckTiming::default(),
         decoded_bytes: 0,
         delivery: RelayDelivery {
             channel_incarnation: [1; 16],
@@ -1652,6 +1653,7 @@ async fn the_next_relay_on_a_channel_is_granted_before_the_outcome_of_the_one_be
         )
         .expect("the outcome target should register");
     let payload = |ack_id, sequence| RelayPayload {
+        ack_timing: nervix_models::RemoteAckTiming::default(),
         decoded_bytes: 0,
         delivery: RelayDelivery {
             channel_incarnation: [24; 16],
@@ -1762,6 +1764,7 @@ async fn a_relay_grant_that_skips_its_channels_next_position_is_refused_out_of_o
         ..
     } = connected_transports().await;
     let payload = |ack_id, sequence| RelayPayload {
+        ack_timing: nervix_models::RemoteAckTiming::default(),
         decoded_bytes: 0,
         delivery: RelayDelivery {
             channel_incarnation: [25; 16],
@@ -1830,6 +1833,7 @@ async fn a_grant_refused_for_relay_memory_is_granted_once_room_returns() {
         ..
     } = connected_transports().await;
     let payload = RelayPayload {
+        ack_timing: nervix_models::RemoteAckTiming::default(),
         decoded_bytes: 0,
         delivery: RelayDelivery {
             channel_incarnation: [3; 16],
@@ -1971,6 +1975,7 @@ async fn terminal_relay_outcome_waits_for_application_queue_capacity() {
         .send(
             &node_b,
             Envelope::RelayPayload(RelayPayload {
+                ack_timing: nervix_models::RemoteAckTiming::default(),
                 decoded_bytes: 0,
                 delivery: RelayDelivery {
                     channel_incarnation: [11; 16],
@@ -2070,6 +2075,7 @@ async fn confirmed_cancellation_fences_attempt_before_grant_arrives() {
         .send(
             &node_b,
             Envelope::RelayPayload(RelayPayload {
+                ack_timing: nervix_models::RemoteAckTiming::default(),
                 decoded_bytes: 0,
                 delivery,
                 kind: RelayPayloadKind::Routed,
@@ -2118,6 +2124,7 @@ async fn cancelled_relay_admission_can_never_reach_runtime() {
         sequence: 0,
     };
     let payload = RelayPayload {
+        ack_timing: nervix_models::RemoteAckTiming::default(),
         decoded_bytes: 0,
         delivery,
         kind: RelayPayloadKind::Routed,
@@ -2195,6 +2202,7 @@ async fn cancelled_relay_admission_can_never_reach_runtime() {
         sequence: 1,
     };
     let next_payload = RelayPayload {
+        ack_timing: nervix_models::RemoteAckTiming::default(),
         decoded_bytes: 0,
         delivery: next_delivery,
         kind: RelayPayloadKind::Routed,
@@ -2233,6 +2241,7 @@ async fn cancelled_relay_admission_can_never_reach_runtime() {
     );
 
     let retired_payload = RelayPayload {
+        ack_timing: nervix_models::RemoteAckTiming::default(),
         decoded_bytes: 0,
         delivery: RelayDelivery {
             channel_incarnation: [7; 16],
@@ -2285,6 +2294,7 @@ async fn same_epoch_retry_of_admitted_relay_does_not_enqueue_twice() {
         sequence: 0,
     };
     let payload = RelayPayload {
+        ack_timing: nervix_models::RemoteAckTiming::default(),
         decoded_bytes: 0,
         delivery,
         kind: RelayPayloadKind::Routed,
@@ -2383,6 +2393,7 @@ async fn an_outcome_addressed_to_an_earlier_registrar_run_leaves_the_current_adm
         .send(
             &node_b,
             Envelope::RelayPayload(RelayPayload {
+                ack_timing: nervix_models::RemoteAckTiming::default(),
                 decoded_bytes: 0,
                 delivery,
                 kind: RelayPayloadKind::Routed,
@@ -2478,6 +2489,7 @@ async fn receiver_process_restart_makes_unresolved_relay_indeterminate() {
         .send(
             &node_b,
             Envelope::RelayPayload(RelayPayload {
+                ack_timing: nervix_models::RemoteAckTiming::default(),
                 decoded_bytes: 0,
                 delivery,
                 kind: RelayPayloadKind::Routed,
@@ -2556,6 +2568,7 @@ async fn reserved_relay_work_reports_progress_before_runtime_admission() {
         .send(
             &node_b,
             Envelope::RelayPayload(RelayPayload {
+                ack_timing: nervix_models::RemoteAckTiming::default(),
                 decoded_bytes: 0,
                 delivery: RelayDelivery {
                     channel_incarnation: [9; 16],

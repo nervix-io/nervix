@@ -55,6 +55,7 @@ impl SettingDefinition for RestoreStagingMaxBytes {
 /// The settings one runtime is constructed with.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RuntimeSettings {
+    pub data_plane: nervix_models::DataPlaneSettings,
     pub connector_host: super::ConnectorHostSettings,
     pub vm: nervix_vm::VmSettings,
     pub wasm_engine: nervix_wasm::WasmEngineSettings,
@@ -70,6 +71,7 @@ impl RuntimeSettings {
         restore_staging_max_bytes: Option<ByteUnit>,
     ) -> Result<Self, Report<nervix_models::ClusterParameterError>> {
         Ok(Self {
+            data_plane: nervix_models::DataPlaneSettings::default(),
             connector_host: super::ConnectorHostSettings::default(),
             vm: nervix_vm::VmSettings::default(),
             wasm_engine: nervix_wasm::WasmEngineSettings::default(),

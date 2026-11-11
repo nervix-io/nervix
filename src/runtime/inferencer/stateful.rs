@@ -381,6 +381,12 @@ impl BoundSession {
                     onnx_environment().change_context(StatefulInferenceError::Load)?;
                 let session = Session::builder(environment)
                     .change_context(StatefulInferenceError::Load)?
+                    .with_intra_threads(1)
+                    .map_err(ort::Error::<()>::from)
+                    .change_context(StatefulInferenceError::Load)?
+                    .with_inter_threads(1)
+                    .map_err(ort::Error::<()>::from)
+                    .change_context(StatefulInferenceError::Load)?
                     .commit_from_file(&path)
                     .change_context(StatefulInferenceError::Load)?;
                 let mut inputs = Vec::with_capacity(session.inputs().len());

@@ -72,7 +72,7 @@ impl SettingDefinition for EntityGateDeadline {
     const DERIVATION: Option<&'static str> = None;
 
     fn default_value(_: &()) -> Duration {
-        Duration::from_secs(60)
+        DomainDrainTimeout::DEFAULT
     }
 
     fn validate(value: &Duration, _: &()) -> Result<(), Report<ClusterParameterError>> {
@@ -174,7 +174,7 @@ impl DomainDrainTimeout {
                       policy input"
         )
     )]
-    pub const DEFAULT: Duration = Duration::from_secs(60);
+    pub const DEFAULT: Duration = Duration::from_secs(30);
 }
 
 impl StateSnapshotInterval {

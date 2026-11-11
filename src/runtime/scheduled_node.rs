@@ -157,9 +157,9 @@ impl ScheduledNodeTask {
 
     pub(super) async fn handoff(
         self,
+        grace: Duration,
     ) -> error_stack::Result<Vec<ProcessorBranchHandoff>, ScheduledNodeHandoffError> {
-        self.handoff_within(PROCESSOR_BRANCH_TASK_SHUTDOWN_GRACE)
-            .await
+        self.handoff_within(grace).await
     }
 
     pub(super) async fn checkpoint_via(

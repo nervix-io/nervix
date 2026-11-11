@@ -885,6 +885,32 @@ class FamilyTests(CheckTestCase):
 
 
 class UnmodeledItemTests(CheckTestCase):
+    def test_the_real_thread_wake_surface_requires_exact_permissions(self) -> None:
+        source = (
+            "use nervix_primitives::unmodeled::thread::Thread;\n"
+            "fn wait(handle: Thread) {\n"
+            "    handle.unpark();\n"
+            "    nervix_primitives::unmodeled::thread::park_timeout(DURATION);\n"
+            "}\n"
+        )
+        files = {"crates/engine/src/epoch.rs": source}
+        status, report = self.check(files)
+        self.assertEqual(status, 1)
+        self.assertIn("unmodeled items need a permission", report)
+        status, report = self.check(
+            files,
+            permissions=PERMISSION
+            + """
+[[permission]]
+path = "crates/engine/src/epoch.rs"
+items = ["thread::Thread", "thread::park_timeout"]
+owner = "The external engine's epoch driver."
+reason = "Its real thread wakes on final owner drop."
+limit = "The external engine runs in no model."
+""",
+        )
+        self.assertEqual(status, 0, report)
+
     def test_a_permitted_unmodeled_runtime_passes(self) -> None:
         status, report = self.check(
             {

@@ -413,6 +413,7 @@ impl KafkaTopicIngestorStartPlan {
         let policy = BrokerIngestorPolicy::new(
             acknowledgement,
             connector_plan.capabilities.position_class(),
+            runtime.inner.data_plane,
         );
         let connector =
             KafkaTopicIngestor::open(&connector_plan.connector, ingestor.instance_index())

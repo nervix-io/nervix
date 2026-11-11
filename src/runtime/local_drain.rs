@@ -45,10 +45,6 @@
 use super::relay_boundary::RelayConsumerFanout;
 use super::*;
 
-/// How often a draining node re-reads its work. The read is in-process, and the interval bounds
-/// how long a drain that has already completed waits before terminal teardown starts.
-const LOCAL_DRAIN_POLL_INTERVAL: Duration = Duration::from_millis(20);
-
 /// Whether this node still admits new work into its graphs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::runtime) enum LocalIntake {
@@ -331,7 +327,7 @@ impl Runtime {
                 }
                 return LocalGraphDrainOutcome::Abandoned;
             }
-            sleep(remaining.min(LOCAL_DRAIN_POLL_INTERVAL)).await;
+            sleep(remaining.min((timeout / 1500).max(Duration::from_nanos(1)))).await;
         }
     }
 

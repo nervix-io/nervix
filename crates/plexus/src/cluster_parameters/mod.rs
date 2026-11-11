@@ -149,6 +149,48 @@ impl<'src> OfferedAssignments<'src> {
                 ClusterParameterChange::NodeUnavailabilityTimeout,
             ),
             assignment(
+                ClusterParameterKey::PayloadUnfoldLimit,
+                Identifier::PayloadUnfoldLimit,
+                u64_value("integer_literal"),
+                ClusterParameterChange::PayloadUnfoldLimit,
+            ),
+            assignment(
+                ClusterParameterKey::RemoteAckAliveInterval,
+                Identifier::RemoteAckAliveInterval,
+                duration_value(),
+                ClusterParameterChange::RemoteAckAliveInterval,
+            ),
+            assignment(
+                ClusterParameterKey::RemoteAckDispatchTimeout,
+                Identifier::RemoteAckDispatchTimeout,
+                duration_value(),
+                ClusterParameterChange::RemoteAckDispatchTimeout,
+            ),
+            assignment(
+                ClusterParameterKey::RemoteAckSilenceTimeout,
+                Identifier::RemoteAckSilenceTimeout,
+                duration_value(),
+                ClusterParameterChange::RemoteAckSilenceTimeout,
+            ),
+            assignment(
+                ClusterParameterKey::RemoteAckSweepInterval,
+                Identifier::RemoteAckSweepInterval,
+                duration_value(),
+                ClusterParameterChange::RemoteAckSweepInterval,
+            ),
+            assignment(
+                ClusterParameterKey::RemoteRelayTotalTimeout,
+                Identifier::RemoteRelayTotalTimeout,
+                duration_value(),
+                ClusterParameterChange::RemoteRelayTotalTimeout,
+            ),
+            assignment(
+                ClusterParameterKey::RemoteRelayInstantiationWait,
+                Identifier::RemoteRelayInstantiationWait,
+                duration_value(),
+                ClusterParameterChange::RemoteRelayInstantiationWait,
+            ),
+            assignment(
                 ClusterParameterKey::DomainDrainTimeout,
                 Identifier::DomainDrainTimeout,
                 duration_value(),

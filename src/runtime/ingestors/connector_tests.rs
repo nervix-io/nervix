@@ -302,7 +302,11 @@ impl PacedIngestorHostServices for FakeHost {
 }
 
 fn replayable(acknowledgement: IngestorAckPolicy) -> BrokerIngestorPolicy {
-    BrokerIngestorPolicy::new(acknowledgement, PositionClass::Replayable)
+    BrokerIngestorPolicy::new(
+        acknowledgement,
+        PositionClass::Replayable,
+        nervix_models::DataPlaneSettings::default(),
+    )
 }
 
 fn three_messages() -> VecDeque<FakeMessage> {
@@ -407,7 +411,8 @@ async fn runtime_report_chain_ingestor_lifecycle() {
             &mut host,
             &mut ready,
             &mut false,
-            &mut shutdown
+            &mut shutdown,
+            nervix_models::DataPlaneSettings::default().ingestor_error_retry(),
         )
         .await,
         PacedIngestorAction::Restart
@@ -421,6 +426,7 @@ async fn runtime_report_chain_ingestor_lifecycle() {
         },
         NonZeroUsize::MIN,
         shutdown,
+        nervix_models::DataPlaneSettings::default().ingestor_error_retry(),
     )
     .await;
 
@@ -461,7 +467,15 @@ async fn runtime_report_chain_ingestor_cadence() {
     let host = FakeHost::running(observations.clone());
     let (_shutdown_tx, shutdown) = watch::channel(false);
 
-    run_paced_ingestor(connector, host, FailedCadence, NonZeroUsize::MIN, shutdown).await;
+    run_paced_ingestor(
+        connector,
+        host,
+        FailedCadence,
+        NonZeroUsize::MIN,
+        shutdown,
+        nervix_models::DataPlaneSettings::default().ingestor_error_retry(),
+    )
+    .await;
 
     let observations = observations.lock();
     assert_eq!(
@@ -497,7 +511,8 @@ async fn runtime_report_chain_ingestor_resume() {
             &mut host,
             &mut ready,
             &mut false,
-            &mut shutdown
+            &mut shutdown,
+            nervix_models::DataPlaneSettings::default().ingestor_error_retry(),
         )
         .await,
         PacedIngestorAction::Restart
@@ -641,6 +656,7 @@ async fn paced_ingestor_preparation_suspends_a_ready_ingestor_until_quiesce_rele
         &mut ready,
         &mut false,
         &mut shutdown,
+        nervix_models::DataPlaneSettings::default().ingestor_error_retry(),
     )
     .await;
 
@@ -675,7 +691,8 @@ async fn paced_ingestor_preparation_retries_resume_until_the_ingestor_is_ready()
             &mut host,
             &mut ready,
             &mut false,
-            &mut shutdown
+            &mut shutdown,
+            nervix_models::DataPlaneSettings::default().ingestor_error_retry(),
         )
         .await,
         PacedIngestorAction::Restart
@@ -686,7 +703,8 @@ async fn paced_ingestor_preparation_retries_resume_until_the_ingestor_is_ready()
             &mut host,
             &mut ready,
             &mut false,
-            &mut shutdown
+            &mut shutdown,
+            nervix_models::DataPlaneSettings::default().ingestor_error_retry(),
         )
         .await,
         PacedIngestorAction::Restart
@@ -697,7 +715,8 @@ async fn paced_ingestor_preparation_retries_resume_until_the_ingestor_is_ready()
             &mut host,
             &mut ready,
             &mut false,
-            &mut shutdown
+            &mut shutdown,
+            nervix_models::DataPlaneSettings::default().ingestor_error_retry(),
         )
         .await,
         PacedIngestorAction::Poll
@@ -730,7 +749,8 @@ async fn paced_ingestor_preparation_stops_when_the_host_is_inactive() {
             &mut host,
             &mut ready,
             &mut false,
-            &mut shutdown
+            &mut shutdown,
+            nervix_models::DataPlaneSettings::default().ingestor_error_retry(),
         )
         .await,
         PacedIngestorAction::Stop
@@ -754,7 +774,8 @@ async fn paced_ingestor_preparation_stops_suspended_intake_after_shutdown_closes
             &mut host,
             &mut ready,
             &mut false,
-            &mut shutdown
+            &mut shutdown,
+            nervix_models::DataPlaneSettings::default().ingestor_error_retry(),
         )
         .await,
         PacedIngestorAction::Stop
@@ -1370,6 +1391,7 @@ async fn paced_reads_record_one_outcome_and_one_duration_for_each_poll_answer() 
             },
             NonZeroUsize::MIN,
             receiver,
+            nervix_models::DataPlaneSettings::default().ingestor_error_retry(),
         )
         .await;
         let events = events.lock();
@@ -1399,6 +1421,7 @@ async fn ending_an_inflight_paced_poll_records_interruption_once() {
         },
         NonZeroUsize::MIN,
         receiver,
+        nervix_models::DataPlaneSettings::default().ingestor_error_retry(),
     ));
     assert!(
         running.as_mut().now_or_never().is_none(),
@@ -1700,6 +1723,7 @@ async fn a_quiesce_suspends_only_a_ready_connector_and_is_recorded_once() {
         &mut ready,
         &mut false,
         &mut shutdown,
+        nervix_models::DataPlaneSettings::default().ingestor_error_retry(),
     )
     .await;
     assert_eq!(action, PacedIngestorAction::Restart);
@@ -1731,6 +1755,7 @@ async fn paced_preparation_records_resume_outcomes_and_a_poll_failure_that_lost_
         &mut ready,
         &mut failed_poll,
         &mut shutdown,
+        nervix_models::DataPlaneSettings::default().ingestor_error_retry(),
     )
     .await;
     assert_eq!(action, PacedIngestorAction::Restart);
@@ -1740,6 +1765,7 @@ async fn paced_preparation_records_resume_outcomes_and_a_poll_failure_that_lost_
         &mut ready,
         &mut failed_poll,
         &mut shutdown,
+        nervix_models::DataPlaneSettings::default().ingestor_error_retry(),
     )
     .await;
     assert_eq!(action, PacedIngestorAction::Poll);
@@ -1751,6 +1777,7 @@ async fn paced_preparation_records_resume_outcomes_and_a_poll_failure_that_lost_
         &mut ready,
         &mut failed_poll,
         &mut shutdown,
+        nervix_models::DataPlaneSettings::default().ingestor_error_retry(),
     )
     .await;
     assert_eq!(action, PacedIngestorAction::Poll);

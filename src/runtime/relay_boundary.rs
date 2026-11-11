@@ -252,6 +252,7 @@ pub(super) struct RelayOutboundSlot {
     )
 )]
 struct RelayOutboundSequence {
+    idle_rotation: Duration,
     /// A version 7 UUID. Every one this process creates sorts after the ones it created before,
     /// because uuid orders them through one process-wide context, and a receiver relies on that
     /// order to refuse a channel it forgot.
@@ -266,6 +267,7 @@ struct RelayOutboundSequence {
 impl RelayOutboundSequence {
     fn opened_at(now: Instant) -> Self {
         Self {
+            idle_rotation: Duration::MAX,
             channel_incarnation: uuid::Uuid::now_v7().into_bytes(),
             next_sequence: 0,
             last_active_at: now,
@@ -334,8 +336,19 @@ impl RelayOutboundSlot {
         channel.reopen(Instant::now());
     }
 
+    pub(super) fn next_delivery_with_policy(
+        &self,
+        timing: nervix_models::RemoteAckTiming,
+    ) -> RelayDelivery {
+        self.next_delivery_at_with_rotation(Instant::now(), timing.remote_relay_total_timeout)
+    }
+    #[cfg(test)]
     pub(super) fn next_delivery(&self) -> RelayDelivery {
         self.next_delivery_at(Instant::now())
+    }
+    #[cfg(test)]
+    fn next_delivery_at(&self, now: Instant) -> RelayDelivery {
+        self.next_delivery_at_with_rotation(now, nervix_models::RemoteRelayTotalTimeout::DEFAULT)
     }
 
     #[cfg_attr(
@@ -348,14 +361,15 @@ impl RelayOutboundSlot {
                      dispatch gate"
         )
     )]
-    fn next_delivery_at(&self, now: Instant) -> RelayDelivery {
+    fn next_delivery_at_with_rotation(&self, now: Instant, rotation: Duration) -> RelayDelivery {
         let mut channel = self.sequence.lock();
         // Activity recorded after `now` was read, such as a reopening, leaves no idle time.
         if let Some(idle) = now.checked_duration_since(channel.last_active_at)
-            && idle >= RELAY_CHANNEL_IDLE_ROTATION
+            && idle >= channel.idle_rotation.min(rotation)
         {
             channel.reopen(now);
         }
+        channel.idle_rotation = channel.idle_rotation.min(rotation);
         let sequence = channel.next_sequence;
         channel.next_sequence = sequence
             .checked_add(1)
@@ -1705,7 +1719,8 @@ impl RelayBoundaryServices {
         };
         // The delivery's records are stored before its body is encoded, so a delivery that waits
         // for room to store them holds no encoded body meanwhile.
-        let deadline = RemoteDispatcher::delivery_deadline();
+        let timing = dispatcher.registry.timing();
+        let deadline = dispatcher.delivery_deadline(timing);
         let forwarded = batch
             .acks
             .iter()
@@ -1716,6 +1731,7 @@ impl RelayBoundaryServices {
                 &owner_node,
                 forwarded,
                 deadline,
+                timing,
                 ingress_slot.cancellation().cancelled(),
             )
             .await;
@@ -1762,11 +1778,12 @@ impl RelayBoundaryServices {
                 return Err(Box::new(batch.clone()));
             }
         };
-        let delivery = ingress_slot.next_delivery();
+        let delivery = ingress_slot.next_delivery_with_policy(remote_acks.timing());
         let admission_result = dispatcher
             .dispatch_sliced_relay_payload(
                 &owner_node,
                 RelayPayload {
+                    ack_timing: remote_acks.timing(),
                     decoded_bytes: crate::runtime_schema::batch_payload_bytes(batch.batch.batch()),
                     delivery,
                     kind: RelayPayloadKind::Ingress,
@@ -1983,13 +2000,15 @@ impl RelayBoundaryServices {
             };
             // The records are stored before the body is encoded, so the first destination that
             // waits for room to store them holds no encoded body meanwhile.
-            let deadline = RemoteDispatcher::delivery_deadline();
+            let timing = dispatcher.registry.timing();
+            let deadline = dispatcher.delivery_deadline(timing);
             let mut registration_owner = if mode == AckMode::Attached {
                 let storage = dispatcher
                     .store_pending_acks(
                         &consumer.node_id,
                         remote_batch.acks.to_vec(),
                         deadline,
+                        timing,
                         outbound_slot.cancellation().cancelled(),
                     )
                     .await;
@@ -2057,11 +2076,12 @@ impl RelayBoundaryServices {
                 Some(owner) => owner.registrations().to_vec(),
                 None => vec![None; remote_batch.acks.len()],
             };
-            let delivery = outbound_slot.next_delivery();
+            let delivery = outbound_slot.next_delivery_with_policy(timing);
             let result = dispatcher
                 .dispatch_sliced_relay_payload(
                     &consumer.node_id,
                     routed_payload(RoutedDelivery {
+                        ack_timing: timing,
                         decoded_bytes,
                         delivery,
                         domain,

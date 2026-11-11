@@ -428,7 +428,9 @@ mod tests {
             body,
         )));
         let mut buffer = EmitterBatchBuffer::default();
-        buffer.set_flush_policy(RuntimeFlushPolicy::Immediate);
+        buffer.set_flush_policy(RuntimeFlushPolicy::Immediate {
+            minimum: nervix_models::DataPlaneSettings::default().immediate_flush_minimum(),
+        });
         buffer
             .push(&context, batch)
             .expect("the configured buffer takes the batch");

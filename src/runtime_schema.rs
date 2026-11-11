@@ -3209,6 +3209,7 @@ pub(crate) fn decode_with_codec(
     payload: &[u8],
     decoder: &mut JsonDecoder,
     builder: &mut RuntimeRecordBatchBuilder,
+    unfold_limit: usize,
 ) -> error_stack::Result<usize, CodecError> {
     let appended = match &codec.wire_schema {
         CompiledWireSchema::Json(wire_schema) => {
@@ -3218,7 +3219,8 @@ pub(crate) fn decode_with_codec(
         CompiledWireSchema::Avro(wire_schema) => decode_avro(codec, wire_schema, payload, builder),
         CompiledWireSchema::Syslog(syslog) => syslog.decode(codec, payload, builder),
         CompiledWireSchema::JaqNative(_) | CompiledWireSchema::Protobuf(_) => {
-            let unfolded = codec.unfold_on_ingestion(Bytes::copy_from_slice(payload))?;
+            let unfolded =
+                codec.unfold_on_ingestion(Bytes::copy_from_slice(payload), unfold_limit)?;
             return unfolded.append_to(codec, builder);
         }
     };
@@ -4278,7 +4280,21 @@ fn append_base64_to_binary_builder(
         })
     })?;
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::constant(
+            fixed,
+            reason = "base64 scratch decodes aligned four-byte groups within one stack block"
+        )
+    )]
     const ENCODED_CHUNK: usize = 4_096;
+    #[cfg_attr(
+        nervix_lint,
+        nervix::constant(
+            fixed,
+            reason = "each four-byte base64 group yields at most three decoded bytes"
+        )
+    )]
     const DECODED_CHUNK: usize = ENCODED_CHUNK / 4 * 3;
     let mut decoded = [0_u8; DECODED_CHUNK];
     for chunk in encoded.chunks(ENCODED_CHUNK) {
@@ -6089,7 +6105,14 @@ mod tests {
     ) -> error_stack::Result<RuntimeRecordBatch, CodecError> {
         let mut builder = codec.schema.batch_builder(1);
         let mut decoder = JsonDecoder::default();
-        decode_with_codec(codec, payload, &mut decoder, &mut builder)?;
+        decode_with_codec(
+            codec,
+            payload,
+            &mut decoder,
+            &mut builder,
+            usize::try_from(nervix_models::PayloadUnfoldLimit::DEFAULT)
+                .assured("the current default fits usize"),
+        )?;
         builder.finish().change_context_lazy(|| codec.invalid())
     }
 
@@ -7132,7 +7155,11 @@ mod tests {
         )
         .expect("codec should compile");
         let error = json
-            .unfold_on_ingestion(Bytes::new())
+            .unfold_on_ingestion(
+                Bytes::new(),
+                usize::try_from(nervix_models::PayloadUnfoldLimit::DEFAULT)
+                    .assured("the current default fits usize"),
+            )
             .expect_err("a schemaful codec has no program to unfold with");
         assert_eq!(
             format!("{error:#}"),
@@ -7358,8 +7385,15 @@ mod tests {
         let mut decoder = JsonDecoder::default();
         let payload = b"<34>1 2003-10-11T22:14:15.003Z edge-1 orders 123 ID47 - order accepted";
 
-        let error = decode_with_codec(&codec, payload, &mut decoder, &mut builder)
-            .expect_err("the builder's column is not the Arrow type the SYSLOG field appends");
+        let error = decode_with_codec(
+            &codec,
+            payload,
+            &mut decoder,
+            &mut builder,
+            usize::try_from(nervix_models::PayloadUnfoldLimit::DEFAULT)
+                .assured("the current default fits usize"),
+        )
+        .expect_err("the builder's column is not the Arrow type the SYSLOG field appends");
 
         assert!(
             matches!(
@@ -8141,6 +8175,8 @@ mod tests {
             br#"{"cpu_last_64":[1.0,2.5,3.25],"labels":["prod"]}"#,
             &mut decoder,
             &mut builder,
+            usize::try_from(nervix_models::PayloadUnfoldLimit::DEFAULT)
+                .assured("the current default fits usize"),
         )
         .expect("the first payload should decode");
         let rejected = decode_with_codec(
@@ -8148,6 +8184,8 @@ mod tests {
             br#"{"cpu_last_64":[1.0,"two",3.25],"labels":["api"]}"#,
             &mut decoder,
             &mut builder,
+            usize::try_from(nervix_models::PayloadUnfoldLimit::DEFAULT)
+                .assured("the current default fits usize"),
         )
         .expect_err("an array element of the wrong type should be rejected");
         assert!(
@@ -8159,6 +8197,8 @@ mod tests {
             br#"{"cpu_last_64":[4.0,5.0,6.0],"labels":["batch"]}"#,
             &mut decoder,
             &mut builder,
+            usize::try_from(nervix_models::PayloadUnfoldLimit::DEFAULT)
+                .assured("the current default fits usize"),
         )
         .expect("the payload after the rejected one should decode");
 
@@ -8231,8 +8271,15 @@ mod tests {
             br#"{"matrix":[[1.0,2.0,3.0],[4.0,"five",6.0]],"samples":[[1.0,2.0]]}"#.as_slice(),
             br#"{"matrix":[[1.0,2.0,3.0],[4.0,5.0,6.0]],"samples":[[7.0,"eight"]]}"#.as_slice(),
         ] {
-            let rejected = decode_with_codec(&codec, payload, &mut decoder, &mut builder)
-                .expect_err("an element of the wrong type should be rejected");
+            let rejected = decode_with_codec(
+                &codec,
+                payload,
+                &mut decoder,
+                &mut builder,
+                usize::try_from(nervix_models::PayloadUnfoldLimit::DEFAULT)
+                    .assured("the current default fits usize"),
+            )
+            .expect_err("an element of the wrong type should be rejected");
             assert!(
                 matches!(rejected.current_context(), CodecError::ParseField { .. }),
                 "the rejection must name the field that did not decode: {rejected:?}"
@@ -8244,8 +8291,15 @@ mod tests {
         }
         let expected = multidimensional_array_record();
         let payload = encode_arrow_record(&codec, &expected).expect("must encode nested arrays");
-        decode_with_codec(&codec, &payload, &mut decoder, &mut builder)
-            .expect("the payload after the rejected ones should decode");
+        decode_with_codec(
+            &codec,
+            &payload,
+            &mut decoder,
+            &mut builder,
+            usize::try_from(nervix_models::PayloadUnfoldLimit::DEFAULT)
+                .assured("the current default fits usize"),
+        )
+        .expect("the payload after the rejected ones should decode");
 
         assert_eq!(builder.rows(), 1);
         let batch = builder.finish().expect("the batch should build");
@@ -8273,8 +8327,15 @@ mod tests {
         let mut decoder = JsonDecoder::default();
         for label in ["prod", "api", "batch"] {
             let payload = format!(r#"{{"cpu_last_64":[1.0,2.5,3.25],"labels":["{label}"]}}"#);
-            decode_with_codec(&codec, payload.as_bytes(), &mut decoder, &mut builder)
-                .expect("every payload should decode");
+            decode_with_codec(
+                &codec,
+                payload.as_bytes(),
+                &mut decoder,
+                &mut builder,
+                usize::try_from(nervix_models::PayloadUnfoldLimit::DEFAULT)
+                    .assured("the current default fits usize"),
+            )
+            .expect("every payload should decode");
         }
 
         builder.abandon_rows_after(1);
@@ -8695,6 +8756,8 @@ mod tests {
             large_payload.as_bytes(),
             &mut decoder,
             &mut builder,
+            usize::try_from(nervix_models::PayloadUnfoldLimit::DEFAULT)
+                .assured("the current default fits usize"),
         )
         .expect("the first payload should decode");
         let input_allocation = decoder.input.as_ptr();
@@ -8706,7 +8769,7 @@ mod tests {
             br#"{"user_id":7,"tenant":"b","created_at":"2025-01-02T03:04:06+00:00","latency":1,"active":false}"#,
             &mut decoder,
             &mut builder,
-        )
+         usize::try_from(nervix_models::PayloadUnfoldLimit::DEFAULT).assured("the current default fits usize"))
         .expect("the second payload should decode into reused storage");
 
         assert_eq!(decoder.input.as_ptr(), input_allocation);
@@ -8746,7 +8809,7 @@ mod tests {
                 payload,
                 &mut decoder,
                 &mut builder,
-            )
+             usize::try_from(nervix_models::PayloadUnfoldLimit::DEFAULT).assured("the current default fits usize"))
             .expect_err("malformed JSON text must be rejected");
             assert!(matches!(
                 error.current_context(),
@@ -8755,8 +8818,15 @@ mod tests {
             assert_eq!(builder.rows(), 0);
         }
 
-        decode_with_codec(&compiled_codec, valid, &mut decoder, &mut builder)
-            .expect("the decoder should recover on the next payload");
+        decode_with_codec(
+            &compiled_codec,
+            valid,
+            &mut decoder,
+            &mut builder,
+            usize::try_from(nervix_models::PayloadUnfoldLimit::DEFAULT)
+                .assured("the current default fits usize"),
+        )
+        .expect("the decoder should recover on the next payload");
         assert_eq!(builder.rows(), 1);
     }
 
@@ -9134,6 +9204,8 @@ mod tests {
             &cbor_payload(&value),
             &mut JsonDecoder::default(),
             &mut builder,
+            usize::try_from(nervix_models::PayloadUnfoldLimit::DEFAULT)
+                .assured("the current default fits usize"),
         )
         .expect_err("the payload breaks the wire schema");
 
@@ -9664,8 +9736,15 @@ mod tests {
         let mut builder = compiled_codec.schema.batch_builder(2);
         let mut decoder = JsonDecoder::default();
 
-        let decoded = decode_with_codec(&compiled_codec, &payload, &mut decoder, &mut builder)
-            .expect("the message should unfold");
+        let decoded = decode_with_codec(
+            &compiled_codec,
+            &payload,
+            &mut decoder,
+            &mut builder,
+            usize::try_from(nervix_models::PayloadUnfoldLimit::DEFAULT)
+                .assured("the current default fits usize"),
+        )
+        .expect("the message should unfold");
 
         assert_eq!(decoded, 2);
         let batch = builder.finish().expect("the batch should build");

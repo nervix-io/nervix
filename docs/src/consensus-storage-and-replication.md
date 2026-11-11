@@ -518,14 +518,16 @@ status, keeping the start version, start mode, clock, schedule and incremental s
 
 The current emitter Models carry explicit key expressions, source-partition routing and
 expression-only SQS FIFO groups. The dedicated database owns exactly four current keyspaces:
-`raft_inferencer_wasm_inspection_listener_bounds_logs`, `raft_inferencer_wasm_inspection_listener_bounds_meta`, `raft_inferencer_wasm_inspection_listener_bounds_state`, and
-`raft_inferencer_wasm_inspection_listener_bounds_snapshots`. Opening it validates the complete keyspace namespace before
-reading any records. The committed cluster-parameter record stores ordered typed TLS cipher
-suites and key-exchange groups; recovery validates their complete pair before returning that
-record. This namespace identifies the current Model shape, including the statement
-layout of the transactions it keeps, with `DESCRIBE INFERENCER` and
-`SHOW WASM PROCESSOR ... STATE` among the reads and a
-`DESCRIBE WASM PROCESSOR` that names only its processor, the separate JSON
+`raft_inferencer_wasm_inspection_runtime_policy_listener_bounds_logs`, `raft_inferencer_wasm_inspection_runtime_policy_listener_bounds_meta`, `raft_inferencer_wasm_inspection_runtime_policy_listener_bounds_state`, and
+`raft_inferencer_wasm_inspection_runtime_policy_listener_bounds_snapshots`. Opening it validates the complete keyspace namespace before reading
+any records. The committed cluster-parameter record stores ordered typed TLS cipher suites and
+key-exchange groups; recovery validates their complete pair before returning that record.
+The record also carries the coherent remote acknowledgement group, payload unfold policy,
+node runtime capacities, local shutdown budgets and listener bounds. Parameter durations use validated, lossless
+seconds/nanoseconds projections so ordinary Raft records keep their inline footprint bound.
+This namespace identifies the current Model shape, including the stored transaction statement
+layout with `DESCRIBE INFERENCER`, `SHOW WASM PROCESSOR ... STATE` and a `DESCRIBE WASM PROCESSOR` that names only its
+processor, and the separate JSON
 and CBOR wire type enums (CBOR has six types), AVRO representation types whose arrays declare their item type, explicit `BASE64` codec encoding, a Pulsar
 subscription's required type, an owned Pulsar subscription's required start position, a Kafka
 consumer group's required start position, the serialized Sentry platform field, an ingestor's

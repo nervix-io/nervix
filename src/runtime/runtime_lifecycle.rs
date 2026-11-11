@@ -12,9 +12,6 @@ use futures_util::future::join_all;
 
 use super::*;
 
-/// How long a stopping task is waited for once its stop is signalled, before it is aborted.
-const TASK_STOP_GRACE: Duration = Duration::from_secs(2);
-
 /// One task of a stopping domain, with the entity it runs for.
 struct StoppingTask {
     owner: IngestorName,
@@ -22,6 +19,10 @@ struct StoppingTask {
 }
 
 impl Runtime {
+    pub(crate) fn data_plane_settings(&self) -> nervix_models::DataPlaneSettings {
+        self.inner.data_plane
+    }
+
     pub(crate) fn client_endpoint_capacities(&self) -> (u64, u64) {
         (
             self.inner.client_producer_budget.capacity(),
@@ -87,7 +88,7 @@ impl Runtime {
         } = environment;
         let state_snapshot_interval = settings.state_snapshot_interval();
         let restore_staging_max_bytes = restore_staging_max_bytes.as_u64();
-        let events = RuntimeEvents::new();
+        let events = RuntimeEvents::new(settings.data_plane.event_capacity().arch_into());
         let (domain_status_changed, _) = watch::channel(0);
         let state_store = db
             .map(|db| {
@@ -131,9 +132,7 @@ impl Runtime {
                 );
             }
         }
-        let branch_instance_expiration_scan_interval = fault_injection
-            .branch_instance_expiration_scan_interval()
-            .unwrap_or(BRANCH_INSTANCE_EXPIRATION_SCAN_INTERVAL);
+        let branch_instance_expiration_scan_interval = settings.data_plane.branch_expiration_scan();
         let domain_drain_timeout = nervix_models::DomainDrainTimeout::DEFAULT;
         let entity_gate_deadline =
             <nervix_models::EntityGateDeadline as nervix_models::SettingDefinition>::default_value(
@@ -141,6 +140,7 @@ impl Runtime {
             );
         Ok(Self {
             inner: Arc::new(RuntimeInner {
+                data_plane: settings.data_plane,
                 interconnect_request_timeout,
                 connector_host: settings.connector_host,
                 vm_settings: settings.vm,
@@ -196,7 +196,10 @@ impl Runtime {
                 fault_injection,
                 resource_store: ArcSwapOption::empty(),
                 remote_dispatcher: ArcSwapOption::empty(),
-                remote_dispatch: Arc::new(RemoteDispatchRegistry::new(executor.clone())),
+                remote_dispatch: Arc::new(RemoteDispatchRegistry::new(
+                    executor.clone(),
+                    settings.data_plane.delivery_capacity().arch_into(),
+                )),
                 remote_ack_watcher_shutdown: CancellationToken::new(),
                 remote_ack_watcher_tasks: TaskTracker::new(),
                 state_replication_tasks: Default::default(),
@@ -223,7 +226,13 @@ impl Runtime {
                 replicated_branch_aggregated_states: DashMap::default(),
                 wasm_runtime: WasmRuntime::new(WasmRuntimeConfig {
                     engine: settings.wasm_engine,
-                    ..WasmRuntimeConfig::default()
+                    optimize: settings.data_plane.wasm_optimize(),
+                    epoch_tick_interval: settings.data_plane.wasm_epoch_tick_interval(),
+                    epoch_deadline_ticks: settings.data_plane.wasm_epoch_deadline_ticks(),
+                    max_guest_buffer_bytes: settings
+                        .data_plane
+                        .wasm_guest_buffer_bytes()
+                        .arch_into(),
                 })
                 .change_context(RuntimePersistenceError::ConfigureWasmEngine)?,
                 guest_wasm_state_resets: PendingGuestWasmStateResets::default(),
@@ -232,7 +241,10 @@ impl Runtime {
                 snapshot_staging: SnapshotStaging::new(
                     temp_dir.join("snapshot-staging"),
                     executor.clone(),
-                    SnapshotStagingLimits::default(),
+                    SnapshotStagingLimits {
+                        staging_bytes: settings.data_plane.snapshot_staging_bytes(),
+                        snapshot_bytes: settings.data_plane.snapshot_bytes(),
+                    },
                 ),
                 construction_parameters: nervix_primitives::sync::blocking::OnceLock::new(),
                 outward_tls,
@@ -247,7 +259,7 @@ impl Runtime {
                     )
                     .assured("runtime bootstrap inputs have positive durations"),
                 ),
-                state_replication_poll_interval: DEFAULT_STATE_REPLICATION_POLL_INTERVAL,
+                state_replication_poll_interval: settings.data_plane.replication_poll(),
                 temp_dir,
                 executor,
                 metrics: RuntimeMetrics::default(),
@@ -321,10 +333,11 @@ impl Runtime {
     }
 
     pub(crate) fn domain_drain_timeout(&self) -> Duration {
-        self.inner
-            .fault_injection
-            .domain_drain_timeout()
-            .unwrap_or_else(|| self.cluster_parameters().domain_drain_timeout())
+        self.cluster_parameters().domain_drain_timeout()
+    }
+
+    pub(super) fn task_stop_grace(&self) -> Duration {
+        super::entity_gate::task_stop_grace(self.domain_drain_timeout())
     }
 
     /// How long a branch task is given to stop: the configured drain timeout plus the grace it
@@ -372,6 +385,9 @@ impl Runtime {
     }
 
     pub(crate) fn install_cluster_parameters(&self, values: nervix_models::ClusterParameterValues) {
+        self.inner
+            .remote_dispatch
+            .install_timing(nervix_models::RemoteAckTiming::from_parameters(&values));
         if let Some(store) = self.inner.resource_store.load_full() {
             store.install_limits(crate::resource::ResourceStoreLimits {
                 max_archive_bytes: values.resource_max_archive_bytes(),
@@ -386,10 +402,7 @@ impl Runtime {
     }
 
     pub(crate) fn entity_gate_deadline(&self) -> Duration {
-        self.inner
-            .fault_injection
-            .entity_gate_deadline()
-            .unwrap_or_else(|| self.cluster_parameters().entity_gate_deadline())
+        self.cluster_parameters().entity_gate_deadline()
     }
 
     /// The fault controls a coordinator consults with control-plane identities this runtime does
@@ -855,7 +868,7 @@ impl Runtime {
         }
         for (owned, task) in execution.relay_state_tasks {
             nervix_primitives::task::consume_budget().await;
-            if let Err(reason) = task.stop(PROCESSOR_BRANCH_TASK_SHUTDOWN_GRACE).await {
+            if let Err(reason) = task.stop(self.task_stop_grace()).await {
                 warn!(
                     domain = domain.as_str(),
                     relay = owned.relay.as_str(),
@@ -866,7 +879,7 @@ impl Runtime {
             }
         }
         for (entity, node_task) in execution.node_tasks {
-            Self::await_shutdown_task(
+            self.await_shutdown_task(
                 node_task.task,
                 domain,
                 Some(&IngestorName::from(&entity.node.identifier)),
@@ -898,7 +911,8 @@ impl Runtime {
                 task,
             });
         }
-        Self::await_shutdown_tasks_together(generators, domain, "generator").await;
+        self.await_shutdown_tasks_together(generators, domain, "generator")
+            .await;
         let mut reingestors = Vec::new();
         for (entity, tasks) in execution.reingestor_tasks {
             for task in tasks {
@@ -908,7 +922,8 @@ impl Runtime {
                 });
             }
         }
-        Self::await_shutdown_tasks_together(reingestors, domain, "reingestor").await;
+        self.await_shutdown_tasks_together(reingestors, domain, "reingestor")
+            .await;
         let mut checkpoint_writers = Vec::new();
         for (entity, tasks) in execution.placement_tasks {
             let PlacementTasks {
@@ -916,7 +931,7 @@ impl Runtime {
                 checkpoints,
             } = tasks;
             for task in replication {
-                Self::await_shutdown_task(
+                self.await_shutdown_task(
                     task,
                     domain,
                     Some(&IngestorName::from(&entity.node.identifier)),
@@ -927,7 +942,8 @@ impl Runtime {
             checkpoint_writers.extend(checkpoints);
         }
         for task in execution.tasks {
-            Self::await_shutdown_task(task, domain, None, "domain execution").await;
+            self.await_shutdown_task(task, domain, None, "domain execution")
+                .await;
         }
         // Every task of the execution has ended, in time or at a stop grace, so nothing changes
         // the state of its placements any more: each placement's checkpoint writer is told to
@@ -955,7 +971,7 @@ impl Runtime {
         }
         for (identifier, runtimes) in execution.branched_entrypoints {
             for runtime in runtimes {
-                runtime.shutdown().await;
+                runtime.shutdown(self.task_stop_grace()).await;
                 info!(
                     domain = domain.as_str(),
                     entrypoint = identifier.as_str(),
@@ -1071,13 +1087,20 @@ impl Runtime {
     }
 
     pub(in crate::runtime) async fn await_shutdown_task(
+        &self,
         task: JoinHandle<()>,
         domain: &DomainName,
         ingestor: Option<&IngestorName>,
         task_kind: &str,
     ) {
-        Self::await_shutdown_task_with_grace(task, domain, ingestor, task_kind, TASK_STOP_GRACE)
-            .await;
+        Self::await_shutdown_task_with_grace(
+            task,
+            domain,
+            ingestor,
+            task_kind,
+            self.task_stop_grace(),
+        )
+        .await;
     }
 
     /// Waits for tasks of one kind, to which their domain's stop has already been published, all
@@ -1087,12 +1110,13 @@ impl Runtime {
     /// domain that grace once. Waited for in turn, each of them adds a grace of its own, and a
     /// node whose peers stop with it holds up every task that was calling one of them.
     async fn await_shutdown_tasks_together(
+        &self,
         tasks: Vec<StoppingTask>,
         domain: &DomainName,
         task_kind: &str,
     ) {
         let stops = tasks.into_iter().map(|stopping| async move {
-            Self::await_shutdown_task(stopping.task, domain, Some(&stopping.owner), task_kind)
+            self.await_shutdown_task(stopping.task, domain, Some(&stopping.owner), task_kind)
                 .await;
         });
         join_all(stops).await;

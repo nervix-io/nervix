@@ -756,6 +756,8 @@ pub(in crate::application) async fn build_test_service_inner(
         .announce_node_capabilities(nervix_models::NodeCapabilityRecord {
             identity: cluster.local_node_identity().await,
             capabilities: nervix_models::NodeCapabilities {
+                runtime: nervix_models::DataPlaneSettings::default().capabilities(),
+                shutdown: nervix_models::ShutdownSettings::default().capabilities(),
                 interconnect: nervix_interconnect::TransportSettings::default().capabilities(),
                 dns: nervix_arbitrary::Arbitrary::new(&[], nervix_arbitrary::Domain::Vocabulary)
                     .node_capability_record()

@@ -206,10 +206,11 @@ impl ScheduledEmitterTask {
     pub(super) async fn reconfigure_via(
         commands: &mpsc::Sender<EmitterTaskCommand>,
         flush_policy: FlushPolicy,
+        grace: Duration,
     ) -> EmitterReconfigureResult<()> {
         let (response, receiver) = oneshot::channel();
         nervix_primitives::time::timeout(
-            PROCESSOR_BRANCH_TASK_SHUTDOWN_GRACE,
+            grace,
             commands.send(EmitterTaskCommand::Reconfigure {
                 flush_policy,
                 response,
@@ -218,7 +219,7 @@ impl ScheduledEmitterTask {
         .await
         .map_err(|_| Report::new(EmitterReconfigureError::AcceptTimeout))?
         .map_err(|_| Report::new(EmitterReconfigureError::Unavailable))?;
-        nervix_primitives::time::timeout(PROCESSOR_BRANCH_TASK_SHUTDOWN_GRACE, receiver)
+        nervix_primitives::time::timeout(grace, receiver)
             .await
             .map_err(|_| Report::new(EmitterReconfigureError::ResponseTimeout))?
             .map_err(|_| Report::new(EmitterReconfigureError::ResponseDropped))
@@ -229,6 +230,7 @@ impl ScheduledEmitterTask {
         drain_timeout: Duration,
     ) -> Result<(), ScheduledEmitterStopFailure> {
         let (response, receiver) = oneshot::channel();
+        let grace = super::entity_gate::task_stop_grace(drain_timeout);
         let deadline = Instant::now() + drain_timeout;
         let command = EmitterTaskCommand::Stop { deadline, response };
         match nervix_primitives::time::timeout_at(deadline, self.commands.send(command)).await {
@@ -247,7 +249,7 @@ impl ScheduledEmitterTask {
             }
         }
         self.stop_signal.send_replace(Some(deadline));
-        let response_deadline = deadline + PROCESSOR_BRANCH_TASK_SHUTDOWN_GRACE;
+        let response_deadline = deadline + grace;
         let response = match nervix_primitives::time::timeout_at(response_deadline, receiver).await
         {
             Ok(Ok(response)) => response,
@@ -273,9 +275,7 @@ impl ScheduledEmitterTask {
                 self,
             ));
         }
-        match nervix_primitives::time::timeout(PROCESSOR_BRANCH_TASK_SHUTDOWN_GRACE, &mut self.task)
-            .await
-        {
+        match nervix_primitives::time::timeout(grace, &mut self.task).await {
             Ok(Ok(())) => Ok(()),
             Ok(Err(error)) => {
                 // A successful stop response means the buffered work and transport drain already

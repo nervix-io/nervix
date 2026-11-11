@@ -21,6 +21,7 @@ pub struct ClusterParameterPlanningInputs {
     pub schedule: BTreeMap<DomainName, DomainSchedule>,
     pub domains: BTreeMap<DomainName, DomainState>,
     pub resources: Vec<nervix_models::ResourceVersion>,
+    pub capabilities: BTreeMap<ClusterNodeName, NodeCapabilityRecord>,
 }
 
 fn inputs(state: &StateMachineData) -> Option<ClusterParameterPlanningInputs> {
@@ -31,6 +32,19 @@ fn inputs(state: &StateMachineData) -> Option<ClusterParameterPlanningInputs> {
             schedule: ClusterSchedule::from(&state.schedule).domains,
             domains: (&state.domains).into(),
             resources: state.resources.versions.values().cloned().collect(),
+            capabilities: state
+                .last_membership
+                .membership()
+                .nodes()
+                .filter_map(|(node, _)| {
+                    let record = state.node_capabilities.get(node)?;
+                    let admitted = state
+                        .node_admission_fences
+                        .get(node)
+                        .is_none_or(|fence| record.identity.incarnation() > *fence);
+                    admitted.then(|| (node.clone(), record.clone()))
+                })
+                .collect(),
         })
 }
 
@@ -91,6 +105,11 @@ pub(super) fn apply(
             });
         }
     };
+    if let Err(error) = values.validate_runtime_capabilities(expected.capabilities.values()) {
+        return AppliedConsensusCommand::conflict(ConsensusConflict::InvalidClusterParameter {
+            issue: error.current_context().clone(),
+        });
+    }
     let record = ClusterParameterRecord {
         revision: expected
             .current
@@ -166,6 +185,46 @@ mod tests {
             ConsensusResponse::Applied
         );
         state
+    }
+
+    #[test]
+    fn deadline_validation_captures_only_admitted_capability_incarnations() {
+        let mut state = seeded();
+        let current = ClusterNodeName::parse("current").assured("fixture node");
+        let departed = ClusterNodeName::parse("departed").assured("fixture node");
+        let incarnation = ClusterNodeIncarnation::new(7);
+        let mut record =
+            nervix_arbitrary::Arbitrary::new(&[], nervix_arbitrary::Domain::Vocabulary)
+                .node_capability_record();
+        record.identity = nervix_models::ClusterNodeIdentity::new(current.clone(), incarnation);
+        record.capabilities.shutdown = nervix_models::ShutdownSettings::default().capabilities();
+        state
+            .node_capabilities
+            .insert(current.clone(), record.clone());
+        record.identity = nervix_models::ClusterNodeIdentity::new(departed.clone(), incarnation);
+        record.capabilities.shutdown.drain_timeout = Duration::from_secs(1);
+        state.node_capabilities.insert(departed.clone(), record);
+        let nodes = BTreeMap::from([(current.clone(), BasicNode::new("localhost:9000"))]);
+        let membership = openraft::Membership::new(vec![nodes.keys().cloned().collect()], nodes)
+            .assured("one admitted member");
+        state.last_membership = Arc::new(StoredMembership::new(None, membership));
+
+        let captured = inputs(&state).assured("the cluster is seeded");
+        assert_eq!(captured.capabilities.len(), 1);
+        assert!(captured.capabilities.contains_key(&current));
+        captured
+            .current
+            .values
+            .validate_runtime_capabilities(captured.capabilities.values())
+            .assured("the departed node's retained claim cannot refuse a live policy");
+        state.node_admission_fences.insert(current, incarnation);
+        assert!(
+            inputs(&state)
+                .assured("the cluster is seeded")
+                .capabilities
+                .is_empty()
+        );
+        assert_eq!(state.node_capabilities.len(), 2, "history remains retained");
     }
 
     fn admit(state: &mut StateMachineData, name: &str, seconds: u64) -> CommandExecutionReference {

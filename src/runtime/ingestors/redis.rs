@@ -66,7 +66,7 @@ impl RedisPubSubIngestorStartPlan {
             unacknowledged_admission: QueueAdmission::RefuseWhenFull,
             client_mounts: resolved.mounts.into_iter().collect(),
         }
-        .open::<RedisPubSubIngestor>(ingestor)
+        .open::<RedisPubSubIngestor>(runtime, ingestor)
         .await
     }
 }

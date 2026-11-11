@@ -21,17 +21,18 @@ use rkyv::{
 use serde::{Deserialize, Serialize};
 use strum::EnumIter;
 use thiserror::Error;
-use value::ParameterSetting;
 
 use crate::SettingDefinition;
+
 #[doc(hidden)]
 pub mod value;
 mod value_archive;
-
-pub(crate) mod archive;
+use value::{ParameterSetting, ParameterValue};
 mod durations;
 mod limits;
 mod publication;
+mod remote_ack;
+pub use remote_ack::*;
 #[cfg(test)]
 mod tests;
 mod tls;
@@ -90,6 +91,30 @@ pub enum ClusterParameterValueKind {
     )
 )]
 pub enum ClusterParameterError {
+    #[error(
+        "remote-ack-silence-timeout must exceed twice remote-ack-dispatch-timeout plus \
+         remote-ack-alive-interval"
+    )]
+    AckReportWindow,
+    #[error(
+        "remote-ack-sweep-interval must divide remote-ack-silence-timeout and \
+         remote-relay-total-timeout exactly"
+    )]
+    AckSweepDivisibility,
+    #[error(
+        "remote-relay-total-timeout must cover remote-ack-dispatch-timeout and \
+         remote-relay-instantiation-wait"
+    )]
+    AckAdmissionWindow,
+    #[error(
+        "{parameter} ({requested:?}) exceeds node '{node}' drain/shutdown budget ({available:?})"
+    )]
+    NodeDeadline {
+        parameter: ClusterParameterKey,
+        node: crate::ClusterNodeName,
+        requested: Duration,
+        available: Duration,
+    },
     #[error("{parameter} must be greater than zero")]
     NonPositiveDuration { parameter: ClusterParameterKey },
     #[error("{parameter} must not exceed {maximum:?}")]
@@ -159,8 +184,17 @@ macro_rules! parameter_cli_text {
     };
 }
 
+macro_rules! parameter_storage {
+    ($value:ty) => {
+        <$value as ParameterValue>::Stored
+    };
+    ($value:ty, $stored:ty) => {
+        $stored
+    };
+}
+
 macro_rules! parameter_values {
-    ($($field:ident: $definition:ident($value:ty) => $kind:ident,)+) => {
+    ($($field:ident: $definition:ident($value:ty) => $kind:ident $(<$stored:ty>)?,)+) => {
         /// The complete cluster policy. Each field has one class, default and validation owner.
         #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Archive, RkyvSerialize)]
         #[serde(deny_unknown_fields)]
@@ -168,7 +202,7 @@ macro_rules! parameter_values {
             $(
                 #[serde(with = "value_archive")]
                 #[rkyv(with = value_archive::ValidatedSetting)]
-                $field: ParameterSetting<$definition>,
+                $field: ParameterSetting<$definition, parameter_storage!($value $(, $stored)?)>,
             )+
         }
 
@@ -177,12 +211,12 @@ macro_rules! parameter_values {
                 use serde::de::Error as _;
                 #[derive(Deserialize)]
                 #[serde(deny_unknown_fields)]
-                struct Fields { $(#[serde(with = "value_archive")] $field: ParameterSetting<$definition>,)+ }
+                struct Fields { $(#[serde(with = "value_archive")] $field: ParameterSetting<$definition, parameter_storage!($value $(, $stored)?)>,)+ }
                 let fields = Fields::deserialize(deserializer)?;
                 let values = Self {
                     $($field: fields.$field,)+
                 };
-                values.validate_tls().map_err(|error| D::Error::custom(format_args!("{error:#}")))?;
+                values.validate_relationships().map_err(|error| D::Error::custom(format_args!("{error:#}")))?;
                 Ok(values)
             }
         }
@@ -195,7 +229,7 @@ macro_rules! parameter_values {
                     $($field: ParameterSetting::from_stored(self.$field.deserialize(deserializer)?)
                         .map_err(|error| D::Error::new(error.into_error()))?,)+
                 };
-                values.validate_tls().map_err(|error| D::Error::new(error.into_error()))?;
+                values.validate_relationships().map_err(|error| D::Error::new(error.into_error()))?;
                 Ok(values)
             }
         }
@@ -230,7 +264,7 @@ macro_rules! parameter_values {
         impl ClusterParameterValues {
             pub fn resolve(seed: ClusterParameterSeedValues) -> Result<Self, Report<ClusterParameterError>> {
                 let values = Self { $($field: ParameterSetting::resolve(seed.$field, &())?,)+ };
-                values.validate_tls()?;
+                values.validate_relationships()?;
                 Ok(values)
             }
 
@@ -242,7 +276,7 @@ macro_rules! parameter_values {
                 for update in updates.iter() {
                     match update { $(ClusterParameterChange::$definition(value) => { next.$field = ParameterSetting::new(*value, &())?; },)+ }
                 }
-                next.validate_tls()?;
+                next.validate_relationships()?;
                 Ok(next)
             }
 
@@ -306,6 +340,13 @@ parameter_values! {
     licensing_request_timeout: LicensingRequestTimeout(Duration) => Duration,
     licensing_retry_backoff_max: LicensingRetryBackoffMax(Duration) => Duration,
     licensing_stream_idle_timeout: LicensingStreamIdleTimeout(Duration) => Duration,
+    payload_unfold_limit: PayloadUnfoldLimit(u64) => Count<u32>,
+    remote_ack_alive_interval: RemoteAckAliveInterval(Duration) => Duration,
+    remote_ack_dispatch_timeout: RemoteAckDispatchTimeout(Duration) => Duration,
+    remote_ack_silence_timeout: RemoteAckSilenceTimeout(Duration) => Duration,
+    remote_ack_sweep_interval: RemoteAckSweepInterval(Duration) => Duration,
+    remote_relay_total_timeout: RemoteRelayTotalTimeout(Duration) => Duration,
+    remote_relay_instantiation_wait: RemoteRelayInstantiationWait(Duration) => Duration,
     node_unavailability_timeout: NodeUnavailabilityTimeout(Duration) => Duration,
     domain_drain_timeout: DomainDrainTimeout(Duration) => Duration,
     entity_gate_deadline: EntityGateDeadline(Duration) => Duration,
@@ -313,24 +354,24 @@ parameter_values! {
     transaction_tombstone_retention: TransactionTombstoneRetention(Duration) => Duration,
     command_retry_validity: CommandRetryValidity(Duration) => Duration,
     state_snapshot_interval: StateSnapshotInterval(Duration) => Duration,
-    transaction_max_statements: TransactionMaxStatements(u64) => Count,
+    transaction_max_statements: TransactionMaxStatements(u64) => Count<u32>,
     transaction_max_source_bytes: TransactionMaxSourceBytes(u64) => Bytes,
-    transaction_max_open: TransactionMaxOpen(u64) => Count,
-    command_execution_capacity: CommandExecutionCapacity(u64) => Count,
-    replica_count: ReplicaCount(u64) => Count,
+    transaction_max_open: TransactionMaxOpen(u64) => Count<u32>,
+    command_execution_capacity: CommandExecutionCapacity(u64) => Count<u32>,
+    replica_count: ReplicaCount(u64) => Count<u32>,
     resource_max_archive_bytes: ResourceMaxArchiveBytes(u64) => Bytes,
     resource_max_extracted_bytes: ResourceMaxExtractedBytes(u64) => Bytes,
     resource_max_file_count: ResourceMaxFileCount(u64) => Count,
-    max_batch_messages: MaxBatchMessages(u64) => Count,
+    max_batch_messages: MaxBatchMessages(u64) => Count<u32>,
     client_producer_session_bytes: ClientProducerSessionBytes(u64) => Bytes,
     client_consumer_session_bytes: ClientConsumerSessionBytes(u64) => Bytes,
     udf_code_bytes: UdfCodeBytes(u64) => Bytes,
     http_header_bytes: HttpHeaderBytes(u64) => Bytes,
-    http_header_fields: HttpHeaderFields(u64) => Count,
-    client_batch_rows: ClientBatchRows(u64) => Count,
+    http_header_fields: HttpHeaderFields(u64) => Count<u32>,
+    client_batch_rows: ClientBatchRows(u64) => Count<u32>,
     tls_cipher_suites: TlsCipherSuites(nervix_crypto_policy::TlsCipherSuites) => AlgorithmNames,
     tls_key_exchange_groups: TlsKeyExchangeGroups(nervix_crypto_policy::TlsKeyExchangeGroups) => AlgorithmNames,
-    password_iterations: PasswordIterations(u64) => Count,
+    password_iterations: PasswordIterations(u64) => Count<u32>,
 }
 
 impl ClusterParameterKey {
@@ -452,9 +493,56 @@ impl ClusterParameterValues {
     pub fn http_header_limits(&self) -> crate::HttpHeaderLimits {
         crate::HttpHeaderLimits::new(
             crate::Setting::new(self.http_header_bytes(), &())
-                .assured("the parameter was validated"),
+                .assured("the committed byte bound is validated"),
             crate::Setting::new(self.http_header_fields(), &())
-                .assured("the parameter was validated"),
+                .assured("the committed field bound is validated"),
         )
+    }
+}
+
+impl ClusterParameterValues {
+    fn validate_relationships(&self) -> Result<(), Report<ClusterParameterError>> {
+        self.validate_tls()?;
+        RemoteAckTiming::from_parameters(self).validate()
+    }
+
+    /// Validate the local lifecycle budgets captured in the same commit fence as the policy.
+    pub fn validate_runtime_capabilities<'a>(
+        &self,
+        records: impl IntoIterator<Item = &'a crate::NodeCapabilityRecord>,
+    ) -> Result<(), Report<ClusterParameterError>> {
+        for record in records {
+            self.validate_runtime_budget(record.identity.node_id(), record.capabilities.shutdown)?;
+        }
+        Ok(())
+    }
+
+    /// Apply the same admission contract before a node publishes its incarnation-bound claim.
+    pub fn validate_runtime_budget(
+        &self,
+        node: &crate::ClusterNodeName,
+        shutdown: crate::ShutdownCapabilities,
+    ) -> Result<(), Report<ClusterParameterError>> {
+        let available = shutdown.drain_timeout.min(shutdown.shutdown_timeout);
+        for (parameter, requested) in [
+            (
+                ClusterParameterKey::DomainDrainTimeout,
+                self.domain_drain_timeout(),
+            ),
+            (
+                ClusterParameterKey::EntityGateDeadline,
+                self.entity_gate_deadline(),
+            ),
+        ] {
+            if requested > available {
+                return Err(Report::new(ClusterParameterError::NodeDeadline {
+                    parameter,
+                    node: node.clone(),
+                    requested,
+                    available,
+                }));
+            }
+        }
+        Ok(())
     }
 }

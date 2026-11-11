@@ -584,6 +584,7 @@ impl Runtime {
             binding.output_routes.metadata.clone(),
             1,
             binding.metrics.clone(),
+            self.inner.data_plane.ingest_group_idle_flush(),
         );
         let (root, mut completion) = binding.handles.tracked_root();
         let observed_at = actual_utc_now();
@@ -593,6 +594,8 @@ impl Runtime {
                 QueueAdmission::RefuseWhenFull,
                 &binding.codec,
                 payload,
+                usize::try_from(self.cluster_parameters().payload_unfold_limit())
+                    .assured("the validated payload bound fits usize"),
             )
             .await
         {
@@ -690,6 +693,7 @@ impl Runtime {
             binding.output_routes.metadata.clone(),
             1,
             binding.metrics.clone(),
+            self.inner.data_plane.ingest_group_idle_flush(),
         );
         // The sender is answered, so a body the extension workers have no room for is refused
         // rather than held.
@@ -699,6 +703,8 @@ impl Runtime {
                 QueueAdmission::RefuseWhenFull,
                 &binding.codec,
                 payload.payload(),
+                usize::try_from(self.cluster_parameters().payload_unfold_limit())
+                    .assured("the validated payload bound fits usize"),
             )
             .await;
         match decoded {

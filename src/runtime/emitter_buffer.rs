@@ -1868,7 +1868,9 @@ mod tests {
             "a batch whose every row was refused sends nothing"
         );
         let mut buffer = EmitterBatchBuffer::default();
-        buffer.set_flush_policy(RuntimeFlushPolicy::Immediate);
+        buffer.set_flush_policy(RuntimeFlushPolicy::Immediate {
+            minimum: nervix_models::DataPlaneSettings::default().immediate_flush_minimum(),
+        });
         buffer
             .retain_without_cadence(mixed)
             .expect("the configured buffer retains the batch");
@@ -1916,7 +1918,9 @@ mod tests {
         );
 
         let mut immediate = EmitterBatchBuffer::default();
-        immediate.flush_policy = Some(RuntimeFlushPolicy::Immediate);
+        immediate.flush_policy = Some(RuntimeFlushPolicy::Immediate {
+            minimum: nervix_models::DataPlaneSettings::default().immediate_flush_minimum(),
+        });
         immediate
             .push(
                 &context,
@@ -2071,7 +2075,12 @@ mod tests {
         buffer
             .reconfigure(&context, &FlushPolicy::Immediate)
             .expect("the fixture clock stays installed");
-        assert_eq!(buffer.flush_policy, Some(RuntimeFlushPolicy::Immediate));
+        assert_eq!(
+            buffer.flush_policy,
+            Some(RuntimeFlushPolicy::Immediate {
+                minimum: nervix_models::DataPlaneSettings::default().immediate_flush_minimum()
+            })
+        );
         assert!(
             matches!(buffer.deadline(), Some(BranchBufferDeadline::Physical(_))),
             "a reconfigured Immediate cadence re-arms the retained batches physically"
@@ -2108,7 +2117,9 @@ mod tests {
         let (second_acks, second_completion) = AckSet::root();
         let context = emitter_context();
         let mut buffer = EmitterBatchBuffer::default();
-        buffer.flush_policy = Some(RuntimeFlushPolicy::Immediate);
+        buffer.flush_policy = Some(RuntimeFlushPolicy::Immediate {
+            minimum: nervix_models::DataPlaneSettings::default().immediate_flush_minimum(),
+        });
         buffer
             .push(
                 &context,
@@ -2143,7 +2154,9 @@ mod tests {
             Timestamp::from_unix_nanos(100),
         );
         let mut buffer = EmitterBatchBuffer::default();
-        buffer.flush_policy = Some(RuntimeFlushPolicy::Immediate);
+        buffer.flush_policy = Some(RuntimeFlushPolicy::Immediate {
+            minimum: nervix_models::DataPlaneSettings::default().immediate_flush_minimum(),
+        });
 
         buffer
             .push(&emitter_context(), batch.clone())
@@ -2173,7 +2186,9 @@ mod tests {
         let buffered_messages = Arc::new(EmitterBufferedMessages::new(reported_messages.clone()));
         let context = emitter_context();
         let mut buffer = EmitterBatchBuffer::default();
-        buffer.flush_policy = Some(RuntimeFlushPolicy::Immediate);
+        buffer.flush_policy = Some(RuntimeFlushPolicy::Immediate {
+            minimum: nervix_models::DataPlaneSettings::default().immediate_flush_minimum(),
+        });
         buffer.buffered_messages = buffered_messages.clone();
         buffer
             .push(

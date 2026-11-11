@@ -198,10 +198,10 @@ Each delivery generation owns its mutable rows under one short synchronous guard
 is independent of the other rows. Each side claims unused positions on demand and returns retired
 positions to its own bounded free queue, preserving admission room when delivery positions fill.
 Shutdown seals first claims before closing the queues and visits only positions that were claimed.
-The silence sweep, which runs once a second on every node, has the same bound: it reads each side's
+The silence sweep, once per retained delivery’s captured sweep cadence (one second by default), has the same bound: it reads each side's
 first-claim count and takes a guard only for the positions below it, so a node that forwards
 nothing takes none and a sweep's cost follows the positions its deliveries have used, not the
-16,384 positions a node is built with. The counts bound the scan and order nothing: a position's
+configured routing capacity (16,384 positions by default). The counts bound the scan and order nothing: a position's
 guard publishes its correlation, and nothing relies on a sweep having observed a claim. A share
 whose first claim races a sweep is counted from that sweep or from the first one after its
 registration, so it still fails between the silence timeout and one sweep interval later. Runtime
@@ -214,7 +214,7 @@ process-wide detector on each tracked acquisition and release, and the nodes of 
 one process share that detector, which is why a recurring pass takes guards in proportion to its
 live work and never to a fixed capacity.
 Record allocation and receiver batch watcher tasks reserve relay memory before creating their
-retained rows. A batch task multiplexes row progress and keepalive polls every 100 milliseconds;
+retained rows. A batch task multiplexes row progress and keepalive polls on its captured alive interval (100 milliseconds by default);
 each row and the single task have fixed charges. The cadence remains shorter than a one-second
 ingestor ACK timeout while task cardinality stays bounded by admitted batches. Before admission, the
 delivering side reports the batch's records alive from inside the delivery itself: the task that
@@ -222,7 +222,7 @@ runs the delivery races it against a 100-millisecond timer and, each time the ti
 progress on each record's own acknowledgement root. That adds no task, no shared state and no
 wait-and-notify protocol, and a delivery admitted within one interval publishes nothing. A receiver whose relay
 budget has no room for a batch's watches holds the unadmitted batch on its own channel lane and
-reads the budget again every 10 milliseconds; it registers for no release notification and never
+reads the budget again at one thirty-thousandth of its original admission budget (10 milliseconds at the five-minute default); it registers for no release notification and never
 queues in the budget's semaphore, whose released permits would otherwise go to the held charge
 ahead of the relay work that frees it. The batch task returns each watch's share as that watch
 ends, through its exclusively owned reservation, so the hold involves no shared state beyond the
@@ -462,8 +462,8 @@ Materialized capture shares row carriers under the existing assignment barrier, 
 revision, ownership fence and branch generation. Membership insertion and eviction use that same
 barrier; ordinary updates of existing branches keep their existing admission protocol. Fresh
 backup capture admits its bounded row-view metadata before allocation. Archive conversion stages
-one identity/Arrow group at a time. Native loading independently bounds typed-key and row-view
-metadata to 8 MiB, charges retained decoded columns to relay memory through installation, and
+one identity/Arrow group at a time. Native loading bounds row-view metadata by the resolved relay memory budget, admits its
+metadata through State Read, charges retained decoded columns to relay memory through installation, and
 uses bulk memory for one section's decoding scratch. A cumulative relay admission refusal ends
 loading instead of waiting while retaining earlier groups. A pinned database reader retains one
 snapshot and one stored chunk through all section reads. Replica installation checks monotonic
@@ -501,13 +501,13 @@ admitted-work guard after flushing and reacquire it before producing more output
 Native restore conversion retains the immutable verified-description owner and its preparation
 reservation while an admitted storage job streams the current checkpoint encoding into a
 quota-owned file. The job owns the disk permit until its file closes or becomes a completed
-artifact, including cancellation. Entry serialization and 64 KiB writes check cancellation
+artifact, including cancellation. Entry serialization and writes of the configured bulk chunk size check cancellation
 between bounded units. Each bounded artifact read also retains its file and quota in the storage
 job until it exits. Local and remote installation retain their exact file source and use
 the existing authority and installation barriers; conversion adds no lock to record paths.
 
 Stored branch capture also retains one immutable database selection, opens only the scheduled
-checkpoint, and streams it in cancellable 64 KiB units into a quota-owned file. Its admitted
+checkpoint, and streams it in cancellable bulk chunks into a quota-owned file. Its admitted
 read-only mapping and size index remain owned through each bounded conversion job; cancellation
 does not release their memory or disk permits before that job exits. Keyspace and window codecs
 convert only the selected archive group. This adds no lock or publication protocol. Existing
@@ -1179,13 +1179,13 @@ boundary names, a Kafka offset commit waiting for its replica quorum, and a WASM
 for the branch lifecycle that authorizes its first checkpoint. The reset wait retains its route,
 follows the current replica assignment and rejects loss of identity or primary ownership. A
 checkpoint promised to replicas never confirms with fewer replicas, using the same typed boundary
-as a guest checkpoint. A 100-millisecond recheck observes assignment changes even without a replica
+as a guest checkpoint. A recheck at one tenth of the local replication cadence (100 milliseconds by default) observes assignment changes even without a replica
 report. A report that lands between the read and the wait therefore wakes the wait instead of
 leaving it to its deadline.
 
 One announcer at a time offers a placement's revision. An offer raises the revision the running
 announcer offers or, with none running, starts one. The announcer sends the revision to the
-replicas that lag behind it, again every 100 milliseconds, and ends in the same step that finds
+replicas that lag behind it, again at one tenth of the local replication cadence, and ends in the same step that finds
 every replica the committed schedule assigns holding it, so a revision offered while it ends is
 either sent by that step or starts the next announcer. It also ends when this node stops being the
 placement's primary, when the replicated state goes away, and when the runtime stops. An announcer
@@ -1260,7 +1260,8 @@ one immutable value that each change replaces by a read-copy-update, so recordin
 waits for a reader and a reader never waits for a branch. Every change is numbered, and a replica
 asks for the changes after the cursor its previous read returned. A cursor of another catalog, a
 cursor older than the oldest removal the catalog kept, or no cursor at all restarts the listing
-from the catalog's beginning. A listing is paged, 256 changes at a time.
+from the catalog's beginning. A listing is paged within the replication frame budget, accounting for both entry layout and
+variable branch keys while preserving ordered cursor progress.
 
 A round runs when the task starts, when the owner announces a checkpoint, and once every replication
 poll interval. It synchronizes the lifecycle, reads the catalog's changes, and looks only at the
@@ -1442,7 +1443,7 @@ lifecycle and storage locks, while the assignment atomics remain outside its det
 Capture holds the assignment barrier only to select a conservative revision and immutable partition
 topology; encoding retains that topology and reads shared offset slots after the barrier returns.
 A commit included ahead of the captured revision is offered again by the following revision.
-The native encoder writes into quota-owned staging disk with a fixed 64 KiB I/O grant and separately
+The native encoder writes into quota-owned staging disk with the configured bulk-chunk I/O grant and separately
 admitted serializer scratch. Bulk transfer carries bounded chunks rather than a whole resident
 checkpoint. At EOF the receiver releases its Snapshot stream, verifies the staged file, and admits
 native decoding separately. It builds a replacement table directly from archived entries, checks
@@ -1494,11 +1495,17 @@ them when it fails. Holding them needs no lock and no shared registry.
 A share a node forwarded to another node with a relay delivery is one row of its delivery's
 correlation at a fixed routing position, kept under that position's short guard with its admission
 phase and its count of sweeps that found no report from the receiver. A report, the admission, a
-terminal outcome and the once-a-second sweep each lock only that position and check its exact
+terminal outcome and a sweep at the delivery’s captured cadence each lock only that position and check its exact
 generation. Whichever of the terminal outcome, the delivery's own failure and the sweep takes the
 row out resolves the share, so exactly one of them does; a report that reaches the row first resets
 its silence and keeps it, and a report after the removal finds no row. The sweep takes expired rows
 out under the guard and resolves them after releasing it.
+
+Registrations publish the earliest wake deadline through one inline guard in the registry. A
+registration whose deadline is no earlier does not notify the driver or scan correlation positions;
+an earlier deadline changes its selected timer. Each due scan consumes preceding announcements before visiting positions and
+merges its result with arrivals racing that scan. Deadline guards are released before position
+guards or acknowledgement resolution, and every scan and notification yields for cancellation.
 
 Brokered emitters keep each publish's pending answers in the shared `ConfirmationWindow`. When a
 publish fails, the window polls every remaining answer once without waiting and settles the
@@ -3923,6 +3930,27 @@ focused canonical runner is `just test-outward-tls-publication`; full CI retains
 inventory. The cache mutex's diagnostic applicability and unrun scope are recorded in the Deloxide
 inventory. Public one-/three-node scenarios use real native/console/HTTPS and shared HTTP connector
 handshakes, including retained traffic and dynamic certificate rebinding.
+
+## Captured Remote Acknowledgement Timing
+
+A remote delivery retains one coherent committed timing group. Its sender's correlation rows,
+the receiver's watches and admission progress reports all use that captured group. Applying a new
+parameter revision does not mix its report cadence with an earlier delivery's silence bound.
+The registry keeps policy once per delivery in its existing row allocation. The relay budget pays
+for one row-width policy header per live delivery, plus every retained row and its receiver name;
+the header is returned with the final record. Unused correlation positions contain no timing
+state, row width is checked at compile time and the allocation count stays unchanged.
+
+Each delivery schedules its next sweep from the sweep that actually ran. A late sweep increments
+its counters once, so a stalled node cannot manufacture missed reports. The sweeper registers for
+new work before scanning, yields after each scan and waits for the earliest retained deadline or a
+new registration. Admission reports stay multiplexed in the connection's retained future owner;
+a slow cohort cannot hold up a different cohort's report. Terminal delivery does not stay retained
+by an outstanding report's weak handle.
+
+[Node Settings](node-settings.md#data-plane-runtime-policy-and-capacity) owns the complete timing
+relationships. Focused owner tests and the registered Shuttle policy-cohort check cover retained
+bounds and skipped late ticks alongside the existing report/terminal/sweep races.
 
 ## HTTP Input And Connection Ownership
 

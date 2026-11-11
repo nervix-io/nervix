@@ -270,6 +270,7 @@ mod rabbitmq_envelope;
 mod rabbitmq_properties;
 mod relay_partitions;
 mod restarted_voter;
+mod runtime_settings;
 mod session_protocol;
 mod session_tls;
 mod standalone_transaction;
@@ -656,6 +657,7 @@ struct ScenarioWorld {
     placeholders: BTreeMap<String, String>,
     saved_healthy_placements: Vec<SavedHealthyPlacement>,
     health_fault_started_at: Option<Instant>,
+    runtime_ack_started_at: Option<Instant>,
     /// When the scenario last released a held application progress path: progress reports or
     /// revision replies.
     progress_hold_released_at: Option<Instant>,
@@ -4296,6 +4298,8 @@ async fn given_nervix_server_process_is_started_with_shutdown_timeouts(
     let options = [
         ServerProcessOption::DrainTimeout(drain_timeout),
         ServerProcessOption::ShutdownTimeout(shutdown_timeout),
+        ServerProcessOption::DomainDrainTimeout(drain_timeout),
+        ServerProcessOption::EntityGateDeadline(drain_timeout),
     ];
     start_ready_server_process(world, &options).await;
 }
@@ -10582,6 +10586,14 @@ async fn given_drain_timeout_is_configured(world: &mut ScenarioWorld, timeout: S
     );
     world.cluster_config.drain_timeout =
         parse_duration_text(&timeout).expect("shutdown drain timeout must be valid");
+    // This fixture intentionally exercises a short node drain. Its domains and entity gate
+    // must use a policy that the node can honor, through the same first-bootstrap path.
+    let budget = world
+        .cluster_config
+        .drain_timeout
+        .min(world.cluster_config.shutdown_timeout);
+    world.cluster_config.runtime_parameters.domain_drain_timeout = Some(budget);
+    world.cluster_config.runtime_parameters.entity_gate_deadline = Some(budget);
 }
 
 #[given(expr = "shutdown timeout is configured as {string}")]
@@ -10603,9 +10615,10 @@ async fn given_schema_change_drain_timeout_is_configured(
         world.cluster.is_none(),
         "schema change drain timeout must be configured before cluster startup"
     );
-    world.fault_injection.set_domain_drain_timeout(
-        parse_duration_text(&timeout).expect("schema drain timeout must be valid"),
-    );
+    let timeout = parse_duration_text(&timeout).expect("schema drain timeout must be valid");
+    world.cluster_config.runtime_parameters.domain_drain_timeout = Some(timeout);
+    world.cluster_config.drain_timeout = world.cluster_config.drain_timeout.max(timeout);
+    world.cluster_config.shutdown_timeout = world.cluster_config.shutdown_timeout.max(timeout);
 }
 
 #[given(expr = "entity gate deadline is configured as {string}")]
@@ -10614,9 +10627,10 @@ async fn given_entity_gate_deadline_is_configured(world: &mut ScenarioWorld, tim
         world.cluster.is_none(),
         "entity gate deadline must be configured before cluster startup"
     );
-    world.fault_injection.set_entity_gate_deadline(
-        parse_duration_text(&timeout).expect("entity gate deadline must be valid"),
-    );
+    let timeout = parse_duration_text(&timeout).expect("entity gate deadline must be valid");
+    world.cluster_config.runtime_parameters.entity_gate_deadline = Some(timeout);
+    world.cluster_config.drain_timeout = world.cluster_config.drain_timeout.max(timeout);
+    world.cluster_config.shutdown_timeout = world.cluster_config.shutdown_timeout.max(timeout);
 }
 
 #[given(expr = "the next pending entity drain in domain {string} is forced to time out")]
@@ -10847,10 +10861,10 @@ async fn given_branched_relay_expiration_scan_interval_is_configured(
         "expiration must be configured before cluster startup"
     );
     world
-        .fault_injection
-        .set_branch_instance_expiration_scan_interval(
-            parse_duration_text(&scan_interval).expect("scan interval must be a valid duration"),
-        );
+        .cluster_config
+        .runtime_capabilities
+        .branch_expiration_scan =
+        Some(parse_duration_text(&scan_interval).expect("scan interval must be a valid duration"));
 }
 
 #[given(expr = "node {string} has resource directory {string} containing")]

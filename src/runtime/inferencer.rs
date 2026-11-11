@@ -238,6 +238,13 @@ impl std::fmt::Debug for OnnxInferencerSession {
 /// What loading a model is charged. ONNX Runtime allocates a session's memory itself and keeps it
 /// for as long as the inferencer holds the session, which no transient budget can stand for, so
 /// the charge only admits the load onto the bulk workers.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "one byte is an admission token for one inference session load job"
+    )
+)]
 const SESSION_LOAD_RESERVATION_BYTES: u64 = 1;
 
 impl OnnxInferencerSession {
@@ -260,6 +267,12 @@ impl OnnxInferencerSession {
                 let environment =
                     onnx_environment().change_context(InferencerError::InitializeSession)?;
                 let mut builder = Session::builder(environment)
+                    .change_context(InferencerError::InitializeSession)?
+                    .with_intra_threads(1)
+                    .map_err(ort::Error::<()>::from)
+                    .change_context(InferencerError::InitializeSession)?
+                    .with_inter_threads(1)
+                    .map_err(ort::Error::<()>::from)
                     .change_context(InferencerError::InitializeSession)?;
                 builder
                     .commit_from_file(&path)

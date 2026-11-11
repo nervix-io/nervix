@@ -222,6 +222,8 @@ pub struct ConsensusCapabilities {
     RkyvDeserialize,
 )]
 pub struct NodeCapabilities {
+    pub runtime: crate::DataPlaneCapabilities,
+    pub shutdown: ShutdownCapabilities,
     pub engines: EngineCapabilities,
     pub connector_host: ConnectorHostCapabilities,
     pub cpu_count: Option<NonZeroU64>,
@@ -272,4 +274,22 @@ impl crate::SettingDefinition for MaxPeers {
         }
         Ok(())
     }
+}
+
+/// The lifecycle budget one node run promises before terminal teardown.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    Archive,
+    RkyvSerialize,
+    RkyvDeserialize,
+)]
+pub struct ShutdownCapabilities {
+    pub shutdown_timeout: Duration,
+    pub drain_timeout: Duration,
 }

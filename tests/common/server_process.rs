@@ -159,6 +159,10 @@ pub(crate) enum ServerProcessOption {
     TraceExport { endpoint: String, service: String },
     /// `--drain-timeout`.
     DrainTimeout(Duration),
+    /// The first bootstrap's `--domain-drain-timeout` seed.
+    DomainDrainTimeout(Duration),
+    /// The first bootstrap's `--entity-gate-deadline` seed.
+    EntityGateDeadline(Duration),
     /// The first bootstrap's `--state-snapshot-interval` seed.
     StateSnapshotInterval(Duration),
     /// `--shutdown-timeout`.
@@ -182,7 +186,9 @@ impl ServerProcessOption {
     fn is_parameter_seed(&self) -> bool {
         matches!(
             self,
-            Self::StateSnapshotInterval(_)
+            Self::DomainDrainTimeout(_)
+                | Self::EntityGateDeadline(_)
+                | Self::StateSnapshotInterval(_)
                 | Self::TransactionIdleTimeout(_)
                 | Self::TransactionTombstoneRetention(_)
         )
@@ -213,6 +219,16 @@ impl ServerProcessOption {
             Self::DrainTimeout(timeout) => {
                 command
                     .arg("--drain-timeout")
+                    .arg(humantime::format_duration(*timeout).to_string());
+            }
+            Self::DomainDrainTimeout(timeout) => {
+                command
+                    .arg("--domain-drain-timeout")
+                    .arg(humantime::format_duration(*timeout).to_string());
+            }
+            Self::EntityGateDeadline(timeout) => {
+                command
+                    .arg("--entity-gate-deadline")
                     .arg(humantime::format_duration(*timeout).to_string());
             }
             Self::StateSnapshotInterval(interval) => {

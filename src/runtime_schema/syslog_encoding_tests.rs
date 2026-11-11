@@ -418,6 +418,8 @@ impl CodecFixture {
             bytes,
             &mut JsonDecoder::default(),
             &mut builder,
+            usize::try_from(nervix_models::PayloadUnfoldLimit::DEFAULT)
+                .assured("the current default fits usize"),
         )?;
         builder.finish().change_context(CodecError::SyslogDecode {
             codec: "syslog_codec".to_string(),

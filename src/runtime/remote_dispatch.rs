@@ -35,20 +35,23 @@ use super::{
 };
 use crate::runtime_schema::batch_payload_bytes;
 
-pub(super) const REMOTE_RELAY_INSTANTIATION_WAIT: Duration = Duration::from_secs(5);
+#[cfg(test)]
+pub(super) const REMOTE_RELAY_INSTANTIATION_WAIT: Duration =
+    nervix_models::RemoteRelayInstantiationWait::DEFAULT;
 
-pub(super) const REMOTE_RELAY_INSTANTIATION_POLL: Duration = Duration::from_millis(25);
-
-pub(super) const REMOTE_ACK_ALIVE_INTERVAL: Duration = nervix_models::HOST_RELAY_ALIVE_INTERVAL;
+pub(super) const REMOTE_ACK_ALIVE_INTERVAL: Duration =
+    nervix_models::RemoteAckAliveInterval::DEFAULT;
 
 /// Silence bound for a forwarded record ACK after admission. The next report starts
 /// `REMOTE_ACK_ALIVE_INTERVAL` after delivery or giving up at `DISPATCH_TIMEOUT`; two exhausted
 /// reports fit this bound. Longer silence means a lost outcome, ended run or missing registrar.
 /// A live-view gap ends held reports only after this bound plus one sweep.
-pub(super) const REMOTE_ACK_SILENCE_TIMEOUT: Duration = Duration::from_secs(15);
+pub(super) const REMOTE_ACK_SILENCE_TIMEOUT: Duration =
+    nervix_models::RemoteAckSilenceTimeout::DEFAULT;
 
 /// How often a node looks for forwarded record acknowledgements whose receiver fell silent.
-pub(super) const REMOTE_ACK_SILENCE_SWEEP_INTERVAL: Duration = Duration::from_secs(1);
+pub(super) const REMOTE_ACK_SILENCE_SWEEP_INTERVAL: Duration =
+    nervix_models::RemoteAckSweepInterval::DEFAULT;
 
 /// The sweeps that may find a forwarded acknowledgement unreported before the next one fails it. A
 /// report can land just after a sweep, so the acknowledgement fails between
@@ -74,7 +77,9 @@ const _: () = {
     );
 };
 
-pub(super) const REMOTE_RELAY_TOTAL_TIMEOUT: Duration = nervix_models::HOST_RELAY_ADMISSION_BOUND;
+#[cfg(test)]
+pub(super) const REMOTE_RELAY_TOTAL_TIMEOUT: Duration =
+    nervix_models::RemoteRelayTotalTimeout::DEFAULT;
 
 enum FailedRelayAdmissionResolution {
     Admitted,
@@ -151,6 +156,8 @@ pub(super) enum RemoteDispatchError {
 /// that wraps a decoder keeps that decoder's own failure beneath it.
 #[derive(Debug, Error, PartialEq, Eq)]
 pub(crate) enum RemoteRelayDecodeError {
+    #[error("invalid remote acknowledgement timing policy")]
+    AckTiming,
     #[error("relay payload is missing its admission registration")]
     MissingAdmission,
     #[error("failed to decode the relay batch body")]
@@ -226,11 +233,18 @@ enum RemoteAckWatchReport {
 
 impl RemoteAckWatch {
     /// A watch that starts now, before the registrar's run has appeared in the live view.
-    fn new(completion: AckCompletion, registration: RemoteAckRegistration) -> Self {
+    fn new(
+        completion: AckCompletion,
+        registration: RemoteAckRegistration,
+        timing: nervix_models::RemoteAckTiming,
+    ) -> Self {
         Self {
             completion,
             registration,
-            registrar: RegistrarPresence::undiscovered(Instant::now()),
+            registrar: RegistrarPresence::undiscovered(
+                Instant::now(),
+                timing.remote_relay_instantiation_wait,
+            ),
             unreturned: None,
         }
     }
@@ -239,6 +253,7 @@ impl RemoteAckWatch {
     /// live view shows `live` for the registrar's node at `now`.
     fn next_report(
         &mut self,
+        timing: nervix_models::RemoteAckTiming,
         progress: Option<AckProgress>,
         live: Option<ClusterNodeIncarnation>,
         now: Instant,
@@ -247,9 +262,12 @@ impl RemoteAckWatch {
             Some(AckProgress::Complete(outcome)) => Some(outcome),
             Some(AckProgress::Alive) | None => self.unreturned.take(),
         };
-        let look = self
-            .registrar
-            .look(self.registration.registrar.incarnation(), live, now);
+        let look = self.registrar.look(
+            self.registration.registrar.incarnation(),
+            live,
+            now,
+            timing.remote_ack_silence_timeout + timing.remote_ack_sweep_interval,
+        );
         match look {
             RegistrarLook::Report => {}
             RegistrarLook::Hold => {
@@ -269,14 +287,15 @@ impl RemoteAckWatch {
 
 async fn wait_remote_ack_progress(
     mut watch: RemoteAckWatch,
+    timing: &nervix_models::RemoteAckTiming,
 ) -> (RemoteAckWatch, Option<AckProgress>) {
     if watch.unreturned.is_some() {
         // The root already delivered its outcome, so only the registrar's return is awaited.
-        sleep(REMOTE_ACK_ALIVE_INTERVAL).await;
+        sleep(timing.remote_ack_alive_interval).await;
         return (watch, None);
     }
     let progress = nervix_primitives::select! {
-        _ = sleep(REMOTE_ACK_ALIVE_INTERVAL) => None,
+        _ = sleep(timing.remote_ack_alive_interval) => None,
         progress = watch.completion.wait_for_progress() => Some(progress),
     };
     (watch, progress)
@@ -313,6 +332,7 @@ pub(super) struct PendingRemoteAckDelivery {
     registry: Arc<RemoteDispatchRegistry>,
     registrations: Vec<Option<RemoteAckRegistration>>,
     admitted_rows: usize,
+    timing: nervix_models::RemoteAckTiming,
 }
 
 /// How storing the acknowledgement records of an outbound delivery ended.
@@ -324,6 +344,9 @@ pub(super) enum RemoteAckStorage {
 }
 
 impl PendingRemoteAckDelivery {
+    pub(super) fn timing(&self) -> nervix_models::RemoteAckTiming {
+        self.timing
+    }
     pub(super) fn registrations(&self) -> &[Option<RemoteAckRegistration>] {
         &self.registrations
     }
@@ -362,8 +385,9 @@ impl std::fmt::Debug for RemoteDispatcher {
 }
 
 impl RemoteDispatcher {
+    #[cfg(test)]
     pub(super) const DISPATCH_RETRY_INTERVAL: Duration = Duration::from_millis(25);
-    pub(super) const DISPATCH_TIMEOUT: Duration = Duration::from_secs(5);
+    pub(super) const DISPATCH_TIMEOUT: Duration = nervix_models::RemoteAckDispatchTimeout::DEFAULT;
 
     /// The node's bounded execution and memory admission, which every body this dispatcher
     /// encodes or decodes is submitted through.
@@ -421,9 +445,9 @@ impl RemoteDispatcher {
 
     /// The instant a delivery starting now must be admitted by: one bound covers storing its
     /// records, holding its grant and waiting for its admission.
-    pub(super) fn delivery_deadline() -> Instant {
+    pub(super) fn delivery_deadline(&self, timing: nervix_models::RemoteAckTiming) -> Instant {
         Instant::now()
-            .checked_add(REMOTE_RELAY_TOTAL_TIMEOUT)
+            .checked_add(timing.remote_relay_total_timeout)
             .assured("the fixed relay admission bound fits the monotonic clock")
     }
 
@@ -435,6 +459,7 @@ impl RemoteDispatcher {
         receiver: &ClusterNodeName,
         acks: Vec<AckSet>,
         deadline: Instant,
+        timing: nervix_models::RemoteAckTiming,
         cancelled: impl std::future::Future<Output = ()>,
     ) -> error_stack::Result<RemoteAckStorage, RemoteDispatchError> {
         if acks.iter().any(|acks| !acks.is_empty()) {
@@ -446,9 +471,13 @@ impl RemoteDispatcher {
         }
         let storage = self
             .registry
-            .store_acks(receiver.clone(), acks, deadline, cancelled)
+            .store_acks(receiver.clone(), acks, deadline, timing, cancelled)
             .await?;
-        let RecordStorage::Stored(ids) = storage else {
+        let RecordStorage::Stored {
+            registrations: ids,
+            timing,
+        } = storage
+        else {
             return Ok(RemoteAckStorage::Cancelled);
         };
         let registrations = ids
@@ -459,6 +488,7 @@ impl RemoteDispatcher {
             registry: self.registry.clone(),
             registrations,
             admitted_rows: 0,
+            timing,
         }))
     }
 
@@ -519,6 +549,24 @@ impl RemoteDispatcher {
         self.interconnect.request_stream(node_id, message).await
     }
 
+    /// Open a bulk response under the caller's resolved, local state-transfer budget.
+    pub(super) async fn request_stream_with_timeout<M>(
+        &self,
+        node_id: &ClusterNodeName,
+        message: M,
+        deadline: Duration,
+    ) -> error_stack::Result<
+        nervix_interconnect::IncomingByteStream,
+        nervix_interconnect::RequestError,
+    >
+    where
+        M: nervix_interconnect::InterconnectStreamRequest,
+    {
+        self.interconnect
+            .request_stream_with_timeout(node_id, message, deadline)
+            .await
+    }
+
     pub(super) async fn dispatch_admitted_relay_payload(
         &self,
         node_id: &ClusterNodeName,
@@ -561,7 +609,13 @@ impl RemoteDispatcher {
                 return Err(error);
             }
             let resolution = self
-                .resolve_failed_relay_admission(node_id, delivery, error, &mut cancellation_guard)
+                .resolve_failed_relay_admission(
+                    node_id,
+                    delivery,
+                    error,
+                    &mut cancellation_guard,
+                    payload.ack_timing,
+                )
                 .await;
             return match resolution {
                 FailedRelayAdmissionResolution::Admitted => Ok(()),
@@ -572,8 +626,13 @@ impl RemoteDispatcher {
                 }
             };
         }
-        let admission =
-            Self::await_relay_admission(node_id, admission, Self::DISPATCH_TIMEOUT, deadline);
+        let admission = Self::await_relay_admission(
+            node_id,
+            admission,
+            payload.ack_timing.remote_ack_dispatch_timeout,
+            deadline,
+            payload.ack_timing.remote_relay_total_timeout,
+        );
         tokio::pin!(admission);
         let result = nervix_primitives::select! {
             biased;
@@ -588,7 +647,13 @@ impl RemoteDispatcher {
         if let Err(error) = result {
             self.clear_pending_relay_admission(&registration);
             let resolution = self
-                .resolve_failed_relay_admission(node_id, delivery, error, &mut cancellation_guard)
+                .resolve_failed_relay_admission(
+                    node_id,
+                    delivery,
+                    error,
+                    &mut cancellation_guard,
+                    payload.ack_timing,
+                )
                 .await;
             return match resolution {
                 FailedRelayAdmissionResolution::Admitted => Ok(()),
@@ -609,9 +674,10 @@ impl RemoteDispatcher {
         delivery: RelayDelivery,
         original_error: Report<RemoteDispatchError>,
         cancellation_guard: &mut RelayCancellationGuard,
+        timing: nervix_models::RemoteAckTiming,
     ) -> FailedRelayAdmissionResolution {
         let deadline = Instant::now()
-            .checked_add(Self::DISPATCH_TIMEOUT)
+            .checked_add(timing.remote_ack_dispatch_timeout)
             .assured("the fixed relay cancellation deadline fits the monotonic clock");
         let status = loop {
             nervix_primitives::task::consume_budget().await;
@@ -659,7 +725,7 @@ impl RemoteDispatcher {
                 .attach_printable(original_error);
                 return FailedRelayAdmissionResolution::Indeterminate(report);
             }
-            sleep(Self::DISPATCH_RETRY_INTERVAL).await;
+            sleep_until((Instant::now() + timing.retry_interval()).min(deadline)).await;
         };
         match status {
             RelayAdmissionStatus::Admitted => {
@@ -707,6 +773,7 @@ impl RemoteDispatcher {
         mut admission: watch::Receiver<RelayAdmissionUpdate>,
         inactivity_timeout: Duration,
         total_deadline: Instant,
+        total_timeout: Duration,
     ) -> error_stack::Result<(), RemoteDispatchError> {
         loop {
             nervix_primitives::task::consume_budget().await;
@@ -737,7 +804,7 @@ impl RemoteDispatcher {
                     if Instant::now() >= total_deadline {
                         return Err(Report::new(RemoteDispatchError::AdmissionTotalTimeout {
                             target: node_id.clone(),
-                            timeout: REMOTE_RELAY_TOTAL_TIMEOUT,
+                            timeout: total_timeout,
                         }));
                     }
                     return Err(Report::new(
@@ -824,13 +891,16 @@ impl RemoteDispatcher {
                     }
                 },
             };
-            let delivery = outbound_slot.next_delivery();
+            let timing = self.registry.timing();
+            let deadline = self.delivery_deadline(timing);
+            let delivery = outbound_slot.next_delivery_with_policy(timing);
             // A session subscription never holds the relay owner's fan-out longer than the
             // dispatch bound, so a grant refused for capacity is retried only within it.
             if let Err(error) = self
                 .dispatch_sliced_relay_payload(
                     node_id,
                     RelayPayload {
+                        ack_timing: timing,
                         decoded_bytes,
                         delivery,
                         kind: RelayPayloadKind::SubscriptionFanout,
@@ -845,7 +915,7 @@ impl RemoteDispatcher {
                     },
                     &batch.batch,
                     &outbound_slot,
-                    Self::delivery_deadline(),
+                    deadline,
                     GrantCapacityRefusals::GiveUp,
                     None,
                 )
@@ -872,7 +942,12 @@ impl RemoteDispatcher {
         deadline: Instant,
         capacity_refusals: GrantCapacityRefusals,
     ) -> error_stack::Result<(), RemoteDispatchError> {
-        let mut attempts = RelaySendAttempts::new(Instant::now(), deadline, capacity_refusals);
+        let mut attempts = RelaySendAttempts::new(
+            Instant::now(),
+            deadline,
+            capacity_refusals,
+            payload.ack_timing,
+        );
         let mut unresolved_attempt = false;
         loop {
             nervix_primitives::task::consume_budget().await;
@@ -887,7 +962,7 @@ impl RemoteDispatcher {
                 Ok(Err(error)) => error,
                 Err(_) => {
                     let end = attempts.after_attempt_deadline(Instant::now());
-                    return Err(Report::new(end.dispatch_error(node_id)));
+                    return Err(Report::new(end.dispatch_error(node_id, payload.ack_timing)));
                 }
             };
             let failure = match error.current_context() {
@@ -912,7 +987,9 @@ impl RemoteDispatcher {
             match attempts.after_failure(failure, Instant::now()) {
                 RelaySendStep::RetryAt(retry_at) => sleep_until(retry_at).await,
                 RelaySendStep::End(end) => {
-                    return Err(error.change_context(end.dispatch_error(node_id)));
+                    return Err(
+                        error.change_context(end.dispatch_error(node_id, payload.ack_timing))
+                    );
                 }
             }
         }
@@ -923,9 +1000,19 @@ impl RemoteDispatcher {
         node_id: &ClusterNodeName,
         envelope: Envelope,
     ) -> error_stack::Result<(), RemoteDispatchError> {
+        self.dispatch_with_timing(node_id, envelope, self.registry.timing())
+            .await
+    }
+
+    async fn dispatch_with_timing(
+        &self,
+        node_id: &ClusterNodeName,
+        envelope: Envelope,
+        timing: nervix_models::RemoteAckTiming,
+    ) -> error_stack::Result<(), RemoteDispatchError> {
         let deadline = Instant::now()
-            .checked_add(Self::DISPATCH_TIMEOUT)
-            .assured("the fixed remote dispatch timeout fits the monotonic clock");
+            .checked_add(timing.remote_ack_dispatch_timeout)
+            .assured("the validated remote dispatch timeout fits the monotonic clock");
         loop {
             nervix_primitives::task::consume_budget().await;
             let result = nervix_primitives::time::timeout_at(
@@ -955,7 +1042,7 @@ impl RemoteDispatcher {
                         }),
                     );
                 }
-                _ = sleep(Self::DISPATCH_RETRY_INTERVAL) => {}
+                _ = sleep(timing.retry_interval()) => {}
             }
         }
     }
@@ -1015,8 +1102,18 @@ impl Runtime {
         domain: &DomainName,
         relay: &RelayName,
     ) -> Result<SharedDomainRouting, Report<RuntimeError>> {
+        self.wait_for_domain_routing_with_timing(domain, relay, self.inner.remote_dispatch.timing())
+            .await
+    }
+
+    pub(crate) async fn wait_for_domain_routing_with_timing(
+        &self,
+        domain: &DomainName,
+        relay: &RelayName,
+        timing: nervix_models::RemoteAckTiming,
+    ) -> Result<SharedDomainRouting, Report<RuntimeError>> {
         let deadline = Instant::now()
-            .checked_add(REMOTE_RELAY_INSTANTIATION_WAIT)
+            .checked_add(timing.remote_relay_instantiation_wait)
             .assured("the fixed relay-instantiation wait fits the monotonic clock");
         loop {
             nervix_primitives::task::consume_budget().await;
@@ -1028,7 +1125,7 @@ impl Runtime {
                     domain, relay,
                 )));
             }
-            sleep(REMOTE_RELAY_INSTANTIATION_POLL).await;
+            sleep(timing.instantiation_poll()).await;
         }
     }
 
@@ -1204,9 +1301,10 @@ impl Runtime {
         routing: &mut DomainRoutingCache,
         domain: &DomainName,
         relay: &RelayName,
+        timing: nervix_models::RemoteAckTiming,
     ) -> error_stack::Result<RemoteRelayTarget, RuntimeError> {
         let deadline = Instant::now()
-            .checked_add(REMOTE_RELAY_INSTANTIATION_WAIT)
+            .checked_add(timing.remote_relay_instantiation_wait)
             .assured("the fixed relay-instantiation wait fits the monotonic clock");
         loop {
             nervix_primitives::task::consume_budget().await;
@@ -1218,7 +1316,7 @@ impl Runtime {
                     }
                 }
             }
-            sleep(REMOTE_RELAY_INSTANTIATION_POLL).await;
+            sleep(timing.instantiation_poll()).await;
         }
     }
 
@@ -1250,6 +1348,10 @@ impl Runtime {
         schema: &CompiledSchema,
         remote: &mut RelayPayload,
     ) -> error_stack::Result<DecodedRemoteRows, RemoteRelayDecodeError> {
+        remote
+            .ack_timing
+            .validate()
+            .change_context(RemoteRelayDecodeError::AckTiming)?;
         let batch = schema
             .decode_arrow_body(self.executor(), remote.batch_ipc.clone(), {
                 let dispatcher = self.inner.remote_dispatcher.load();
@@ -1309,7 +1411,12 @@ impl Runtime {
         admission: Option<RemoteRelayAdmissionContext<'_>>,
     ) -> error_stack::Result<(), RuntimeError> {
         let RemoteRelayTarget { services, schema } = self
-            .wait_for_remote_stream_target(routing, &remote.domain, &remote.relay)
+            .wait_for_remote_stream_target(
+                routing,
+                &remote.domain,
+                &remote.relay,
+                remote.ack_timing,
+            )
             .await?;
         // An owner admits ingress only for a unit it owns; a payload addressed to a unit whose
         // owner moved meanwhile is refused as one for a relay this node does not instantiate.
@@ -1328,7 +1435,14 @@ impl Runtime {
                 None => std::future::pending().await,
             }
         };
-        let watch_owner = match self.hold_remote_ack_watches(watch_count, cancelled).await {
+        let watch_owner = match self
+            .hold_remote_ack_watches(
+                watch_count,
+                cancelled,
+                remote.ack_timing.remote_relay_total_timeout,
+            )
+            .await
+        {
             Ok(RemoteAckWatchAdmission::Cancelled) => return Ok(()),
             Ok(watch_owner) => watch_owner,
             Err(report) => {
@@ -1361,11 +1475,21 @@ impl Runtime {
             };
             let (record_acks, completion) =
                 AckSet::tracked_root(services.domain_ack_tracker.clone());
-            watches.push(RemoteAckWatch::new(completion, registration));
+            watches.push(RemoteAckWatch::new(
+                completion,
+                registration,
+                remote.ack_timing,
+            ));
             acks.push(record_acks);
         }
         if let RemoteAckWatchAdmission::Charged { dispatcher, charge } = watch_owner {
-            self.spawn_remote_ack_watchers(remote.domain.clone(), dispatcher, watches, charge);
+            self.spawn_remote_ack_watchers(
+                remote.domain.clone(),
+                dispatcher,
+                watches,
+                charge,
+                remote.ack_timing,
+            );
         }
         let batch = RelayRecordBatch::from_runtime_batch(
             schema,
@@ -1573,6 +1697,7 @@ impl Runtime {
         &self,
         watches: usize,
         cancelled: impl std::future::Future<Output = ()>,
+        total_timeout: Duration,
     ) -> error_stack::Result<RemoteAckWatchAdmission, nervix_execution::AdmissionError> {
         let Some(watches) = NonZeroUsize::new(watches) else {
             return Ok(RemoteAckWatchAdmission::Unwatched);
@@ -1586,7 +1711,9 @@ impl Runtime {
                 dispatcher.local_node_id(),
                 &dispatcher.executor,
             );
-        match RemoteAckWatchCharge::hold(&dispatcher.executor, watches, cancelled).await? {
+        match RemoteAckWatchCharge::hold(&dispatcher.executor, watches, cancelled, total_timeout)
+            .await?
+        {
             RemoteAckWatchHold::Charged(charge) => {
                 Ok(RemoteAckWatchAdmission::Charged { dispatcher, charge })
             }
@@ -1604,8 +1731,9 @@ impl Runtime {
         let Some(ack) = ack else {
             return Ok(());
         };
+        let timing = self.inner.remote_dispatch.timing();
         let RemoteAckWatchAdmission::Charged { dispatcher, charge } = self
-            .hold_remote_ack_watches(1, std::future::pending())
+            .hold_remote_ack_watches(1, std::future::pending(), timing.remote_relay_total_timeout)
             .await?
         else {
             return Ok(());
@@ -1613,8 +1741,9 @@ impl Runtime {
         self.spawn_remote_ack_watchers(
             domain,
             dispatcher,
-            vec![RemoteAckWatch::new(completion, ack)],
+            vec![RemoteAckWatch::new(completion, ack, timing)],
             charge,
+            timing,
         );
         Ok(())
     }
@@ -1630,6 +1759,7 @@ impl Runtime {
         dispatcher: StdArc<RemoteDispatcher>,
         watches: Vec<RemoteAckWatch>,
         charge: RemoteAckWatchCharge,
+        timing: nervix_models::RemoteAckTiming,
     ) {
         let fault_injection = self.inner.fault_injection.clone();
         let watcher = async move {
@@ -1638,18 +1768,18 @@ impl Runtime {
             let mut charge = charge;
             let mut pending = FuturesUnordered::new();
             for watch in watches {
-                pending.push(wait_remote_ack_progress(watch));
+                pending.push(wait_remote_ack_progress(watch, &timing));
             }
             while let Some((mut watch, progress)) = pending.next().await {
                 let registrar = watch.registration.registrar.node_id();
                 let live = fault_injection
                     .registrar_live_view_override(dispatcher.local_node_id(), registrar)
                     .unwrap_or_else(|| dispatcher.cluster.live_node_incarnation(registrar));
-                let report = watch.next_report(progress, live, Instant::now());
+                let report = watch.next_report(timing, progress, live, Instant::now());
                 let outcome = match report {
                     RemoteAckWatchReport::Send(outcome) => outcome,
                     RemoteAckWatchReport::Hold => {
-                        pending.push(wait_remote_ack_progress(watch));
+                        pending.push(wait_remote_ack_progress(watch, &timing));
                         continue;
                     }
                     RemoteAckWatchReport::Release => {
@@ -1676,9 +1806,10 @@ impl Runtime {
                     continue;
                 }
                 if let Err(error) = dispatcher
-                    .dispatch(
+                    .dispatch_with_timing(
                         ack.registrar.node_id(),
                         Envelope::Ack(ack.resolution(outcome)),
+                        timing,
                     )
                     .await
                 {
@@ -1689,7 +1820,7 @@ impl Runtime {
                 if terminal {
                     charge = charge.release_watch();
                 } else {
-                    pending.push(wait_remote_ack_progress(watch));
+                    pending.push(wait_remote_ack_progress(watch, &timing));
                 }
             }
         };

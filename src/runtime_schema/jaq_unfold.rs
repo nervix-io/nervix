@@ -2,7 +2,7 @@
 //!
 //! Layer: engines and infrastructure.
 //!
-//! - **Owns.** The unfold limit, the zero-based position of every input value and output of a
+//! - **Owns.** Enforcing the supplied unfold limit, the zero-based position of every input value and output of a
 //!   payload, and appending a payload's messages to a batch as a whole or not at all.
 //! - **Depends on.** The jaq programs and payload readers, the codec's JSON decoding, and the batch
 //!   builder.
@@ -29,13 +29,6 @@ use super::{
     CodecContractError, CodecError, CompiledCodec, CompiledJaqNativeCodec, CompiledWireSchema,
     RuntimeRecordBatchBuilder, decode_json_value, decode_protobuf_payload, finish_decoded_row,
 };
-
-/// The most messages one payload may unfold into.
-///
-/// A program with an unbounded output stream, such as `repeat` or an open-ended `range`, is stopped
-/// here instead of exhausting the node. The value is the largest batch size the message histograms
-/// track, so a payload at the limit is still observable as one batch.
-pub(crate) const PAYLOAD_UNFOLD_LIMIT: usize = 65_536;
 
 /// Where in a payload an unfolding failure occurred. Both ordinals are zero-based.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -76,7 +69,7 @@ impl UnfoldedPayload {
     /// Runs `program` over every input value in payload order and collects its outputs.
     ///
     /// Reading stops at the first failure, and a program that produces more than
-    /// [`PAYLOAD_UNFOLD_LIMIT`] messages is stopped as soon as it exceeds the limit.
+    /// the committed `limit` of messages is stopped as soon as it exceeds the limit.
     #[cfg_attr(
         nervix_lint,
         nervix::dispatch(
@@ -87,6 +80,7 @@ impl UnfoldedPayload {
         codec: &CompiledCodec,
         program: &CompiledJaqProgram,
         inputs: impl Iterator<Item = error_stack::Result<JaqInput, CodecError>>,
+        limit: usize,
     ) -> error_stack::Result<Self, CodecError> {
         let mut messages = Vec::new();
         for (input_index, input) in inputs.enumerate() {
@@ -104,10 +98,10 @@ impl UnfoldedPayload {
                     Ok(output) => output,
                     Err(error) => return Err(codec.evaluation_failure(input_index, error)),
                 };
-                if messages.len() == PAYLOAD_UNFOLD_LIMIT {
+                if messages.len() == limit {
                     return Err(Report::new(CodecError::UnfoldLimit {
                         codec: codec.name.as_str().to_string(),
-                        limit: PAYLOAD_UNFOLD_LIMIT,
+                        limit,
                     }));
                 }
                 let value = match JsonValue::try_from(output) {
@@ -185,6 +179,7 @@ impl CompiledCodec {
     pub(crate) fn unfold_on_ingestion(
         &self,
         payload: Bytes,
+        limit: usize,
     ) -> error_stack::Result<UnfoldedPayload, CodecError> {
         match &self.wire_schema {
             CompiledWireSchema::JaqNative(native) => {
@@ -196,7 +191,7 @@ impl CompiledCodec {
                 let values = native.format.read_values(&payload);
                 let inputs =
                     values.map(|value| value.map_err(|error| native.read_failure(self, error)));
-                UnfoldedPayload::unfold(self, program, inputs)
+                UnfoldedPayload::unfold(self, program, inputs, limit)
             }
             CompiledWireSchema::Protobuf(protobuf) => {
                 let Some(program) = protobuf.transformations.on_ingestion.as_deref() else {
@@ -206,7 +201,7 @@ impl CompiledCodec {
                 };
                 // A protobuf payload holds exactly one message, which is its one input value.
                 let input = self.protobuf_input(&protobuf.message, &payload);
-                UnfoldedPayload::unfold(self, program, std::iter::once(input))
+                UnfoldedPayload::unfold(self, program, std::iter::once(input), limit)
             }
             CompiledWireSchema::Json(_)
             | CompiledWireSchema::Cbor(_)
@@ -278,6 +273,7 @@ impl CompiledJaqNativeCodec {
 
 #[cfg(test)]
 mod tests {
+    use meticulous::ResultExt as _;
     use nervix_models::{
         CodecJaqFormat, CodecJaqTransformations, CodecWireFormat, CreateCodec, CreateSchema,
         ParseAsType, ResolvedCodecWireFormat, SchemaField,
@@ -338,7 +334,14 @@ mod tests {
         builder: &mut RuntimeRecordBatchBuilder,
         payload: &[u8],
     ) -> error_stack::Result<usize, CodecError> {
-        decode_with_codec(codec, payload, &mut JsonDecoder::default(), builder)
+        decode_with_codec(
+            codec,
+            payload,
+            &mut JsonDecoder::default(),
+            builder,
+            usize::try_from(nervix_models::PayloadUnfoldLimit::DEFAULT)
+                .assured("the current default fits usize"),
+        )
     }
 
     fn user_ids(batch: &RuntimeRecordBatch) -> Vec<i64> {
@@ -549,13 +552,40 @@ mod tests {
     }
 
     #[test]
+    fn the_caller_supplies_the_committed_unfold_limit_for_each_payload() {
+        let codec = unfolding_codec(CodecJaqFormat::Json, "range(4) | {user_id: .}");
+        let error = codec
+            .unfold_on_ingestion(Bytes::from_static(b"{}"), 3)
+            .expect_err("four outputs exceed this policy");
+        assert!(matches!(
+            error.current_context(),
+            CodecError::UnfoldLimit { limit: 3, .. }
+        ));
+        let unfolded = codec
+            .unfold_on_ingestion(Bytes::from_static(b"{}"), 4)
+            .expect("four outputs fit the new policy");
+        let mut builder = codec.schema().batch_builder(4);
+        assert_eq!(
+            unfolded
+                .append_to(&codec, &mut builder)
+                .expect("the complete payload appends"),
+            4
+        );
+        assert_eq!(builder.rows(), 4);
+    }
+
+    #[test]
     fn unfolds_a_payload_into_exactly_the_limit() {
         let codec = unfolding_codec(CodecJaqFormat::Json, "range(65536) | {user_id: .}");
-        let mut builder = codec.schema().batch_builder(PAYLOAD_UNFOLD_LIMIT);
+        let mut builder = codec.schema().batch_builder(
+            usize::try_from(nervix_models::PayloadUnfoldLimit::DEFAULT)
+                .assured("the current default fits usize"),
+        );
 
         assert_eq!(
             decode(&codec, &mut builder, b"null").expect("a payload at the limit should unfold"),
-            PAYLOAD_UNFOLD_LIMIT
+            usize::try_from(nervix_models::PayloadUnfoldLimit::DEFAULT)
+                .assured("the current default fits usize")
         );
     }
 

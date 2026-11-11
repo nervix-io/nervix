@@ -42,8 +42,6 @@ use uuid::Uuid;
 use super::{BranchKey, DomainNodeRef, Runtime};
 use crate::metrics::ClientEmitterSeries;
 
-const RETAINED_RESULTS: usize = 2048;
-
 /// A reservation for Arrow bytes still awaiting application processing.
 #[derive(Clone)]
 pub(crate) struct ClientEmitterBudget {
@@ -1023,9 +1021,16 @@ impl<R: FnMut() -> Uuid + Send + 'static> Owner<R> {
         }
     }
 
+    fn retained_results_limit() -> usize {
+        usize::try_from(nervix_models::MAX_CLIENT_CONSUMER_BATCHES)
+            .assured("the consumer batch bound fits the native address space")
+            .checked_mul(2)
+            .assured("two consumer batch windows fit the native address space")
+    }
+
     fn remember_result(&mut self, reference: Uuid) {
         self.attempt_order.push_back(reference);
-        while self.attempt_order.len() > RETAINED_RESULTS {
+        while self.attempt_order.len() > Self::retained_results_limit() {
             if let Some(expired) = self.attempt_order.pop_front() {
                 self.attempts.remove(&expired);
             }

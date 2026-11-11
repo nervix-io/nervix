@@ -1059,7 +1059,11 @@ mod tests {
 
     #[nervix_primitives::test]
     async fn a_reported_runtime_error_reaches_every_attached_observer() {
-        let events = RuntimeEvents::new();
+        let events = RuntimeEvents::new(
+            nervix_models::DataPlaneSettings::default()
+                .event_capacity()
+                .arch_into(),
+        );
         let mut first = events.subscribe();
         let mut second = events.subscribe();
 
@@ -1079,14 +1083,22 @@ mod tests {
     fn reporting_a_runtime_error_with_no_observer_attached_still_returns() {
         // The node reports failures before its fan-out task subscribes and after shutdown drops
         // it. Neither window may take the reporting path down with it.
-        let events = RuntimeEvents::new();
+        let events = RuntimeEvents::new(
+            nervix_models::DataPlaneSettings::default()
+                .event_capacity()
+                .arch_into(),
+        );
 
         events.report_error("emitter 'ledger' failed to publish");
     }
 
     #[nervix_primitives::test]
     async fn an_observer_that_attaches_later_sees_only_what_follows_it() {
-        let events = RuntimeEvents::new();
+        let events = RuntimeEvents::new(
+            nervix_models::DataPlaneSettings::default()
+                .event_capacity()
+                .arch_into(),
+        );
         events.report_error("reported before anyone was listening");
 
         let mut observer = events.subscribe();

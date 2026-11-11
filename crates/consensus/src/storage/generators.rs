@@ -1999,6 +1999,11 @@ fn command_of(arbitrary: &mut Arbitrary<'_>, variant: CommandVariant) -> Consens
         CommandVariant::AlterClusterParameters => ConsensusCommand::AlterClusterParameters {
             reference: arbitrary.execution_reference(),
             inputs: Box::new(crate::ClusterParameterPlanningInputs {
+                capabilities: arbitrary
+                    .records(node_capability_record)
+                    .into_iter()
+                    .map(|record| (record.identity.node_id().clone(), record))
+                    .collect(),
                 current: arbitrary.cluster_parameter_record(),
                 schedule: BTreeMap::new(),
                 domains: BTreeMap::new(),

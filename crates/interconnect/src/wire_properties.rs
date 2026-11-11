@@ -242,6 +242,10 @@ impl ExactValue {
 /// Asserts that `actual` is `expected` field by field, the branch key by its exact values.
 fn assert_same_metadata(actual: &RelayMetadata, expected: &RelayMetadata) {
     assert_eq!(
+        actual.ack_timing, expected.ack_timing,
+        "the complete captured timing group is kept"
+    );
+    assert_eq!(
         actual.decoded_bytes, expected.decoded_bytes,
         "the decoded byte measure is kept"
     );
@@ -341,6 +345,9 @@ impl WireCase {
             body.push(arbitrary.entropy().byte());
         }
         let payload = RelayPayload {
+            ack_timing: nervix_models::RemoteAckTiming::from_parameters(
+                &arbitrary.cluster_parameter_values(),
+            ),
             decoded_bytes: arbitrary.entropy().any_u64(),
             delivery: delivery(arbitrary.entropy()),
             kind,
@@ -840,6 +847,7 @@ fn a_grant_request_refused_for_a_registrar_frees_the_registrations_read_before_i
         },
         body_bytes: 0,
         metadata: RelayMetadata {
+            ack_timing: nervix_models::RemoteAckTiming::default(),
             decoded_bytes: 0,
             kind: RelayPayloadKind::Routed,
             domain: DomainName::parse("orders").assured("a literal domain name"),

@@ -483,9 +483,15 @@ pub(super) fn gathering_policy(max_in_flight: usize) -> BrokerIngestorPolicy {
             .assured("the tests gather at least one message"),
         batch_timeout: Duration::from_secs(60),
         timeout: Duration::from_secs(60),
-        retry: INGESTOR_RECONNECT_POLICY,
+        retry: crate::runtime::reconnect_backoff::reconnect_policy(
+            nervix_models::DataPlaneSettings::default(),
+        ),
     };
-    BrokerIngestorPolicy::new(acknowledgement, PositionClass::Replayable)
+    BrokerIngestorPolicy::new(
+        acknowledgement,
+        PositionClass::Replayable,
+        nervix_models::DataPlaneSettings::default(),
+    )
 }
 
 /// An ingestor the tests feed and the host it reads for, before the loop takes them.
@@ -720,8 +726,12 @@ async fn a_flush_due_while_a_read_waits_happens_without_cancelling_the_read() {
     } = Fixture::new();
     host.flush_every = Some(Duration::from_millis(250));
     let unacknowledged = BrokerIngestorPolicy {
+        error_retry: nervix_models::DataPlaneSettings::default().ingestor_error_retry(),
+        unacknowledged_poll_batch: NonZeroUsize::MIN,
         acknowledgement: IngestorAckPolicy::None,
-        retry: INGESTOR_RECONNECT_POLICY,
+        retry: crate::runtime::reconnect_backoff::reconnect_policy(
+            nervix_models::DataPlaneSettings::default(),
+        ),
         position_class: PositionClass::None,
     };
     let running = RunningLoop::start(connector, host, unacknowledged);

@@ -9,6 +9,15 @@ use error_stack::{Report, ResultExt as _};
 
 use super::*;
 
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "one pending processor request applies backpressure to its relay"
+    )
+)]
+const PROCESSOR_REQUEST_CAPACITY: usize = 1;
+
 /// Every way a relay processor fails to take one input batch through its own operation before the
 /// batch reaches its output routes. The processor names itself when it reports the failure, and
 /// the acknowledgements of the input fail with it.
@@ -2206,7 +2215,7 @@ impl RelayProcessorNode {
                 };
             }
         };
-        let (request_tx, request_rx) = mpsc::channel(1);
+        let (request_tx, request_rx) = mpsc::channel(PROCESSOR_REQUEST_CAPACITY);
         let task = if let RelayProcessorOperationNode::StatefulInferencer { session, .. } =
             &self.operation
         {

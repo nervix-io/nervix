@@ -1089,7 +1089,10 @@ mod tests {
                     routes: vec![RelayProcessorOutputTemplate {
                         output_relay: output,
                         construction: nervix_models::RouteConstruction::default(),
-                        flush_policy: Some(RuntimeFlushPolicy::Immediate),
+                        flush_policy: Some(RuntimeFlushPolicy::Immediate {
+                            minimum: nervix_models::DataPlaneSettings::default()
+                                .immediate_flush_minimum(),
+                        }),
                         message_error_policy: MessageErrorPolicy::Log,
                         compiled_program: None,
                     }],
@@ -1180,7 +1183,10 @@ mod tests {
                     routes: vec![RelayProcessorOutputTemplate {
                         output_relay: named("transformed_events"),
                         construction: nervix_models::RouteConstruction::default(),
-                        flush_policy: Some(RuntimeFlushPolicy::Immediate),
+                        flush_policy: Some(RuntimeFlushPolicy::Immediate {
+                            minimum: nervix_models::DataPlaneSettings::default()
+                                .immediate_flush_minimum(),
+                        }),
                         message_error_policy: MessageErrorPolicy::Log,
                         compiled_program: None,
                     }],
@@ -1287,7 +1293,10 @@ mod tests {
                     routes: vec![RelayProcessorOutputTemplate {
                         output_relay: named("unique_events"),
                         construction: nervix_models::RouteConstruction::default(),
-                        flush_policy: Some(RuntimeFlushPolicy::Immediate),
+                        flush_policy: Some(RuntimeFlushPolicy::Immediate {
+                            minimum: nervix_models::DataPlaneSettings::default()
+                                .immediate_flush_minimum(),
+                        }),
                         message_error_policy: MessageErrorPolicy::Log,
                         compiled_program: None,
                     }],

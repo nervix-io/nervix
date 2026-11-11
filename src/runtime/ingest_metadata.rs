@@ -1481,6 +1481,8 @@ mod tests {
                     QueueAdmission::RefuseWhenFull,
                     &codec,
                     payload.as_bytes(),
+                    usize::try_from(nervix_models::PayloadUnfoldLimit::DEFAULT)
+                        .assured("the current default fits usize"),
                 )
                 .await
                 .expect("each payload must decode into the group's record builder");

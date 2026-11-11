@@ -908,7 +908,11 @@ async fn handed_over_branches_resume_only_under_the_lifecycle_they_belong_to() {
         pending_materialized: VecDeque::new(),
     };
 
-    let mut without_lifecycle = PendingProcessorBranchRestore::new(vec![handoff()]);
+    let mut without_lifecycle = PendingProcessorBranchRestore::new(
+        vec![handoff()],
+        nervix_models::DataPlaneSettings::default(),
+        nervix_connector::RetryBackoffSettings::default(),
+    );
     let unavailable = without_lifecycle
         .attempt(
             &context,
@@ -940,7 +944,11 @@ async fn handed_over_branches_resume_only_under_the_lifecycle_they_belong_to() {
             }],
         )
         .await;
-    let mut after_lifecycle = PendingProcessorBranchRestore::new(vec![handoff()]);
+    let mut after_lifecycle = PendingProcessorBranchRestore::new(
+        vec![handoff()],
+        nervix_models::DataPlaneSettings::default(),
+        nervix_connector::RetryBackoffSettings::default(),
+    );
     let after = after_lifecycle
         .attempt(
             &context,

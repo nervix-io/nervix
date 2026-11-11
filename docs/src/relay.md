@@ -485,3 +485,11 @@ Materialized state is only one example of replicated runtime state. Others inclu
 Kafka partition assignment for `OFFSET BY DOMAIN` is not runtime-local replicated state. The leader observes Kafka partition topology, computes instance assignment, and commits that assignment into the Raft-backed domain schedule. That committed schedule is then persisted through the control-plane storage path and applied by runtime nodes.
 
 This is still recovery-oriented state, not transactional exactly-once storage.
+
+## Runtime Capacity And Snapshots
+
+Nervix resolves materialized row-view metadata against the relay memory budget at both capture and
+restore. The same bound applies to branch identity metadata; streamed record sections remain
+independently charged and bounded. Temporary snapshots use the node's validated staging quotas,
+and chunk readers and writers use the executor bulk chunk bound. Configure these capacities and
+remote delivery timing through [Node Settings](node-settings.md#data-plane-runtime-policy-and-capacity).

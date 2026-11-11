@@ -87,7 +87,7 @@ fn row(value: i64, low: i64, high: i64) -> RuntimeRow {
 }
 
 fn owner(state: &Arc<ReplicatedMaterializedRelayState>) -> MaterializedRelayStateOriginator {
-    ReplicatedMaterializedRelayState::bind(state, StateReplicationRoles::owned_by(None), None)
+    ReplicatedMaterializedRelayState::bind(state, StateReplicationRoles::owned_by(None), None, 2)
         .originator
         .assured("an unassigned concrete branch originates locally")
 }
@@ -820,7 +820,7 @@ mod shuttle_checks {
 }
 
 #[test]
-fn state_inspection_capture_uses_its_row_view_budget_above_the_backup_grouping_ceiling() {
+fn inspection_and_backup_capture_share_carriers_within_the_resolved_metadata_budget() {
     let executor = nervix_execution::Executor::default();
     let record = row(1, 1, 1);
     let state = Arc::new(ReplicatedMaterializedRelayState::new(
@@ -831,7 +831,10 @@ fn state_inspection_capture_uses_its_row_view_budget_above_the_backup_grouping_c
     let mut originator = owner(&state);
     let grouping_bytes = std::mem::size_of::<MaterializedGenerationRecord>()
         + std::mem::size_of::<std::ops::Range<usize>>();
-    let count = (8 * 1024 * 1024) / grouping_bytes + 1;
+    let count = usize::try_from(executor.memory(MemoryClass::Bulk).capacity_bytes / 4)
+        .expect("the fixture fits its node")
+        / grouping_bytes
+        + 1;
     let field = FieldName::parse("tenant").assured("fixture field");
     for index in 0..count {
         let branch = Some(
@@ -859,11 +862,14 @@ fn state_inspection_capture_uses_its_row_view_budget_above_the_backup_grouping_c
             .all(|captured| { Arc::ptr_eq(captured.row.batch(), record.batch()) }),
         "the capture shares every original Arrow carrier"
     );
-    let Err(error) = read.capture_for_backup(&executor) else {
-        panic!("backup retains its existing staging bound");
-    };
-    assert!(matches!(
-        error.current_context(),
-        MaterializedSnapshotError::MetadataTooLarge
-    ));
+    let (backup, _charge) = read
+        .capture_for_backup(&executor)
+        .expect("the relay and state-read budgets admit the shared row views");
+    assert_eq!(backup.records().len(), count);
+    assert!(
+        backup
+            .records()
+            .iter()
+            .all(|captured| Arc::ptr_eq(captured.row.batch(), record.batch()))
+    );
 }

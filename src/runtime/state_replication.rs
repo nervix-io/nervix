@@ -18,8 +18,6 @@
     )
 )]
 
-use std::num::NonZeroUsize;
-
 use error_stack::ResultExt as _;
 use nervix_interconnect::{
     BranchCheckpointCursor, InterconnectStreamRequest as _, SyncKafkaOffsets,
@@ -31,12 +29,6 @@ use super::{
     *,
 };
 
-pub(super) const DEFAULT_STATE_REPLICATION_POLL_INTERVAL: Duration = Duration::from_secs(1);
-const STATE_CHECKPOINT_ANNOUNCEMENT_RETRY_INTERVAL: Duration = Duration::from_millis(100);
-/// How many changes one page of an owner's branch checkpoint catalog lists. A change is a branch key
-/// and a revision, so a page stays far below the replication class's message limit.
-pub(in crate::runtime) const BRANCH_CHECKPOINT_LISTING_PAGE: NonZeroUsize =
-    nonzero_ext::nonzero!(256_usize);
 mod error;
 pub(crate) use self::error::{AwaitedReplicas, StateReplicationError};
 
@@ -227,7 +219,12 @@ impl Runtime {
             .inner
             .replicated_branch_lifecycles
             .entry(placement.clone())
-            .or_insert_with(|| Arc::new(ReplicatedBranchLifecycle::assigned(assignment)))
+            .or_insert_with(|| {
+                Arc::new(ReplicatedBranchLifecycle::assigned(
+                    assignment,
+                    self.inner.data_plane.retained_removals().arch_into(),
+                ))
+            })
             .clone();
         self.publish_state_replication_route(
             placement,
@@ -2260,11 +2257,10 @@ impl Runtime {
         let ReplicatedState::BranchLru(lifecycle) = state.as_ref() else {
             return OwnerCheckpointListing::Absent.to_remote();
         };
-        OwnerCheckpointListing::Listed(
-            lifecycle
-                .catalog()
-                .changes_after(after, BRANCH_CHECKPOINT_LISTING_PAGE),
-        )
+        OwnerCheckpointListing::Listed(lifecycle.catalog().changes_within(
+            after,
+            self.executor().limits().replication_batch_bytes.as_u64(),
+        ))
         .to_remote()
     }
 
@@ -2279,11 +2275,10 @@ impl Runtime {
         let Some(lifecycle) = self.branch_lifecycle(placement) else {
             return OwnerCheckpointListing::Absent;
         };
-        OwnerCheckpointListing::Listed(
-            lifecycle
-                .catalog()
-                .changes_after(after, BRANCH_CHECKPOINT_LISTING_PAGE),
-        )
+        OwnerCheckpointListing::Listed(lifecycle.catalog().changes_within(
+            after,
+            self.executor().limits().replication_batch_bytes.as_u64(),
+        ))
     }
 
     #[cfg_attr(
@@ -2570,7 +2565,12 @@ impl Runtime {
             );
             state
         };
-        Ok(ReplicatedKafkaOffsetState::bind(&state, roles, local_node))
+        Ok(ReplicatedKafkaOffsetState::bind(
+            &state,
+            roles,
+            local_node,
+            self.executor().snapshot().data_cpu.workers,
+        ))
     }
 
     /// Decode whatever this placement's materialized state should start from, before the state
@@ -2721,7 +2721,12 @@ impl Runtime {
             );
             state
         };
-        ReplicatedMaterializedRelayState::bind(&state, roles, local_node)
+        ReplicatedMaterializedRelayState::bind(
+            &state,
+            roles,
+            local_node,
+            self.executor().snapshot().data_cpu.workers,
+        )
     }
 
     #[cfg_attr(

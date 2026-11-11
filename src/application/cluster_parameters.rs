@@ -148,6 +148,10 @@ impl SessionServiceImpl {
                     Ok(next) => next,
                     Err(error) => return command_error(format!("{error:#}")),
                 };
+                if let Err(error) = next.validate_runtime_capabilities(inputs.capabilities.values())
+                {
+                    return command_error(format!("{error:#}"));
+                }
                 if let Err(error) =
                     crate::registry::validate_resource_parameters(&inputs.resources, &next)
                 {

@@ -222,8 +222,9 @@ impl ReplicatedMaterializedRelayState {
         state: &Arc<Self>,
         roles: StateReplicationRoles,
         local_node: Option<&ClusterNodeName>,
+        parallelism: usize,
     ) -> MaterializedRelayStateAssignment {
-        let binding = state.assignment.rebind(roles, local_node);
+        let binding = state.assignment.rebind(roles, local_node, parallelism);
         let read = MaterializedRelayStateRead {
             state: state.clone(),
         };
@@ -404,7 +405,7 @@ impl MaterializedRelayStateRead {
                 .ok_or_else(|| Report::new(MaterializedSnapshotError::MetadataTooLarge))?;
             let bytes = u64::try_from(bytes)
                 .map_err(|_| Report::new(MaterializedSnapshotError::MetadataTooLarge))?;
-            if bytes > 8 * 1024 * 1024 {
+            if bytes > executor.memory(MemoryClass::Relay).capacity_bytes {
                 return Err(Report::new(MaterializedSnapshotError::MetadataTooLarge));
             }
             let charge = executor
@@ -916,6 +917,7 @@ mod tests {
             &owner,
             StateReplicationRoles::owned_by(None),
             None,
+            2,
         )
         .originator
         .assured("owner originates");
@@ -947,6 +949,7 @@ mod tests {
                 0,
             ),
             Some(&local),
+            2,
         )
         .installer
         .assured("replica installs");
@@ -1025,6 +1028,7 @@ mod tests {
                 0,
             ),
             Some(&local),
+            2,
         );
         let installer = assignment
             .installer
@@ -1132,6 +1136,7 @@ mod tests {
             &state,
             StateReplicationRoles::owned_by(None),
             None,
+            2,
         );
         let mut originator = assignment
             .originator
@@ -1194,6 +1199,7 @@ mod tests {
             &state,
             StateReplicationRoles::owned_by(None),
             None,
+            2,
         );
         let mut originator = assignment
             .originator
@@ -1242,6 +1248,7 @@ mod tests {
             &state,
             StateReplicationRoles::owned_by(None),
             None,
+            2,
         );
         let mut originator = assignment
             .originator
@@ -1292,6 +1299,7 @@ mod tests {
             &state,
             StateReplicationRoles::owned_by(None),
             None,
+            2,
         );
         let mut originator = assignment
             .originator
@@ -1335,6 +1343,7 @@ mod tests {
             &state,
             StateReplicationRoles::owned_by(None),
             None,
+            2,
         );
         let mut originator = owner
             .originator
@@ -1381,6 +1390,7 @@ mod tests {
                 0,
             ),
             Some(&local),
+            2,
         );
         let installer = replica
             .installer
@@ -1422,6 +1432,7 @@ mod tests {
                 &state,
                 StateReplicationRoles::owned_by(None),
                 None,
+                2,
             );
             let mut originator = assignment
                 .originator
@@ -1496,6 +1507,7 @@ mod tests {
                     &state,
                     StateReplicationRoles::owned_by(None),
                     None,
+                    2,
                 )
                 .originator
                 .assured("owner originates");

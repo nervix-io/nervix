@@ -33,6 +33,7 @@ async fn receive_bound_refusal_creates_no_attempt_and_a_revised_claim_is_adopted
     .await;
     let executor = Executor::default();
     let mut payload = RelayPayload {
+        ack_timing: nervix_models::RemoteAckTiming::default(),
         decoded_bytes: 0,
         delivery: RelayDelivery {
             channel_incarnation: [91; 16],
@@ -74,6 +75,8 @@ async fn receive_bound_refusal_creates_no_attempt_and_a_revised_claim_is_adopted
     let mut record = nervix_models::NodeCapabilityRecord {
         identity: ClusterNodeIdentity::new(pair.node_b.clone(), ClusterNodeIncarnation::new(1)),
         capabilities: nervix_models::NodeCapabilities {
+            runtime: nervix_models::DataPlaneSettings::default().capabilities(),
+            shutdown: nervix_models::ShutdownSettings::default().capabilities(),
             interconnect: crate::TransportSettings::default().capabilities(),
             dns: nervix_arbitrary::Arbitrary::new(&[], nervix_arbitrary::Domain::Vocabulary)
                 .node_capability_record()
@@ -156,6 +159,7 @@ async fn a_grant_asked_while_the_relay_budget_is_full_is_refused_for_capacity() 
         ..
     } = connected_transports().await;
     let payload = RelayPayload {
+        ack_timing: nervix_models::RemoteAckTiming::default(),
         decoded_bytes: 0,
         delivery: RelayDelivery {
             channel_incarnation: [4; 16],
@@ -226,6 +230,7 @@ async fn a_grant_request_larger_than_the_free_relay_room_is_refused_for_capacity
     let records = 4096;
     let ingested_at = Timestamp::from_unix_nanos(1_000);
     let payload = RelayPayload {
+        ack_timing: nervix_models::RemoteAckTiming::default(),
         decoded_bytes: 0,
         delivery: RelayDelivery {
             channel_incarnation: [5; 16],
@@ -316,6 +321,7 @@ async fn a_free_room_decode_reports_a_full_class_instead_of_waiting() {
         },
         body_bytes: 1,
         metadata: wire::RelayMetadata {
+            ack_timing: nervix_models::RemoteAckTiming::default(),
             decoded_bytes: 0,
             kind: RelayPayloadKind::Routed,
             domain: DomainName::parse("test").expect("test domain should be valid"),

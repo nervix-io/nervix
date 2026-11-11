@@ -31,6 +31,7 @@ pub(super) struct BoundMessageErrorRoute {
 }
 
 pub(super) struct MessageErrorRouteBindingContext<'a> {
+    pub(super) immediate_minimum: Duration,
     pub(super) vm_settings: nervix_vm::VmSettings,
     pub(super) relay_services: &'a HashMap<RelayName, Arc<RelayBoundaryServices>>,
     pub(super) materialized_stream_specs: &'a HashMap<RelayName, RuntimeMaterializedRelaySpec>,
@@ -55,9 +56,10 @@ impl BoundMessageErrorRoutes {
             })?;
             let flush_policy = match spec.flush_policy.as_ref() {
                 Some(policy) => Some(
-                    Runtime::parse_runtime_node_flush_policy(policy).change_context_lazy(|| {
-                        MessageErrorHandlingError::FlushPolicy { route: key.clone() }
-                    })?,
+                    Runtime::parse_runtime_node_flush_policy(policy, context.immediate_minimum)
+                        .change_context_lazy(|| MessageErrorHandlingError::FlushPolicy {
+                            route: key.clone(),
+                        })?,
                 ),
                 None => None,
             };
@@ -193,6 +195,8 @@ mod tests {
             BoundMessageErrorRoutes::bind(
                 MessageErrorRouteSpecs { routes: vec![spec] },
                 MessageErrorRouteBindingContext {
+                    immediate_minimum: nervix_models::DataPlaneSettings::default()
+                        .immediate_flush_minimum(),
                     vm_settings: nervix_vm::VmSettings::default(),
                     relay_services,
                     materialized_stream_specs: &materialized,
@@ -253,6 +257,8 @@ mod tests {
                 routes: vec![spec(None), spec(None)],
             },
             MessageErrorRouteBindingContext {
+                immediate_minimum: nervix_models::DataPlaneSettings::default()
+                    .immediate_flush_minimum(),
                 vm_settings: nervix_vm::VmSettings::default(),
                 relay_services: &relay_services,
                 materialized_stream_specs: &materialized,

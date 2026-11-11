@@ -597,7 +597,7 @@ impl RelayChannelWatermark {
 }
 
 enum RelayGrantRegistration {
-    Registered,
+    Registered { retention_changed: bool },
     Existing(StdArc<RelayAdmissionRecord>),
     Retired(RelayGrantDisposition),
     InvalidSequence,
@@ -641,6 +641,8 @@ struct RelayAdmissionRecord {
 }
 
 struct RelayAdmissionProtocol {
+    next_progress_at: Instant,
+    progress_reporting: bool,
     phase: RelayBodyPhase,
     rejection: Option<String>,
     capacity: Option<RelayAdmissionCapacity>,
@@ -796,12 +798,40 @@ impl RelayAdmissionRecord {
         self.choice.current() == ChosenAdmission::Pending
     }
 
-    fn progress_registration(&self) -> Option<RemoteAckRegistration> {
-        if self.is_unadmitted() {
-            self.metadata.admission.clone()
-        } else {
-            None
+    /// Reserve one progress report under this delivery's captured policy. An in-flight send
+    /// retains its own timeout and never delays another delivery's report.
+    fn take_progress_report(
+        &self,
+        now: Instant,
+    ) -> (Option<(RemoteAckRegistration, Duration)>, Option<Instant>) {
+        if !self.is_unadmitted() {
+            return (None, None);
         }
+        let Some(registration) = self.metadata.admission.as_ref() else {
+            return (None, None);
+        };
+        let mut state = self.state.lock();
+        if state.progress_reporting {
+            return (None, None);
+        }
+        if now < state.next_progress_at {
+            return (None, Some(state.next_progress_at));
+        }
+        state.progress_reporting = true;
+        (
+            Some((
+                registration.clone(),
+                self.metadata.ack_timing.remote_ack_dispatch_timeout,
+            )),
+            None,
+        )
+    }
+
+    fn finish_progress_report(&self, now: Instant) -> Option<Instant> {
+        let mut state = self.state.lock();
+        state.progress_reporting = false;
+        state.next_progress_at = now + self.metadata.ack_timing.remote_ack_alive_interval;
+        self.is_unadmitted().then_some(state.next_progress_at)
     }
 
     fn reserved_grant_id(&self) -> Option<u64> {
@@ -933,6 +963,8 @@ pub(crate) struct TransportStateInner {
     /// Immutable routing only. Connections and attempts retain their peer owner before recurring
     /// protocol work, and only peer installation and withdrawal replace this publication.
     relay_owners: ArcSwap<RelayOwnersPublication>,
+    relay_progress_changed: Notify,
+    relay_retention_changed: Notify,
     relay_items: StdArc<Semaphore>,
     terminal_outcomes: StdArc<Semaphore>,
     admission_closed: CancellationToken,
@@ -1046,6 +1078,8 @@ impl TransportState {
                 handshake_permits: StdArc::new(Semaphore::new(options.max_concurrent_handshakes)),
                 requests: super::RequestState::new(&options, Arc::clone(&observations)),
                 relay_owners: ArcSwap::from_pointee(RelayOwnersPublication::default()),
+                relay_progress_changed: Notify::new(),
+                relay_retention_changed: Notify::new(),
                 relay_items: StdArc::new(Semaphore::new(options.incoming_queue_capacity)),
                 terminal_outcomes: StdArc::new(Semaphore::new(options.incoming_queue_capacity)),
                 admission_closed: CancellationToken::new(),

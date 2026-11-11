@@ -230,7 +230,10 @@ async fn processor_branch_tasks_are_created_and_reused_per_branch_key() {
                                 inherit: Some(nervix_models::Inheritance::All),
                                 ..nervix_models::RouteConstruction::default()
                             },
-                            flush_policy: Some(RuntimeFlushPolicy::Immediate),
+                            flush_policy: Some(RuntimeFlushPolicy::Immediate {
+                                minimum: nervix_models::DataPlaneSettings::default()
+                                    .immediate_flush_minimum(),
+                            }),
                             message_error_policy: MessageErrorPolicy::Log,
                             compiled_program: None,
                         }],
@@ -745,7 +748,9 @@ async fn scheduled_processor_handoff_aborts_a_task_that_drops_its_response() {
     let scheduled = ScheduledNodeTask { commands, task };
 
     let error = scheduled
-        .handoff()
+        .handoff(crate::runtime::entity_gate::task_stop_grace(
+            nervix_models::DomainDrainTimeout::DEFAULT,
+        ))
         .await
         .expect_err("a dropped handoff response must fail");
 

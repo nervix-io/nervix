@@ -19,7 +19,7 @@ use error_stack::Report;
 use meticulous::OptionExt as _;
 use nervix_execution::ChargedBytes;
 
-use super::{READ_BLOCK_BYTES, SnapshotStaging, SnapshotStagingError, StagedArtifact};
+use super::{SnapshotStaging, SnapshotStagingError, StagedArtifact};
 
 /// The pieces of one artifact, each staged as soon as it was encoded so that its memory charge
 /// ends there. Concatenation then holds one 64 KiB chunk at a time, so the artifact never exists
@@ -120,7 +120,10 @@ impl StagedPieces {
         for piece in self.pieces {
             nervix_primitives::task::consume_budget().await;
             let mut reader = piece.open_reader().await?;
-            while let Some(chunk) = reader.next_chunk(READ_BLOCK_BYTES).await? {
+            while let Some(chunk) = reader
+                .next_chunk(self.staging.executor.limits().bulk_chunk_bytes.as_u64())
+                .await?
+            {
                 nervix_primitives::task::consume_budget().await;
                 writer.write_chunk(chunk).await?;
             }

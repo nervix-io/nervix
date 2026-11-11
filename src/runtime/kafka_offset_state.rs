@@ -405,8 +405,9 @@ impl ReplicatedKafkaOffsetState {
         state: &Arc<Self>,
         roles: StateReplicationRoles,
         local_node: Option<&ClusterNodeName>,
+        parallelism: usize,
     ) -> KafkaOffsetStateAssignment {
-        let binding = state.assignment.rebind(roles, local_node);
+        let binding = state.assignment.rebind(roles, local_node, parallelism);
         let read = KafkaOffsetStateRead {
             state: state.clone(),
         };
@@ -1561,7 +1562,7 @@ mod tests {
             ReplicatedKafkaOffsetState::new(offset_placement(), None)
                 .assured("an empty primary initializes"),
         );
-        let originator = ReplicatedKafkaOffsetState::bind(&primary, roles.clone(), Some(&owner))
+        let originator = ReplicatedKafkaOffsetState::bind(&primary, roles.clone(), Some(&owner), 2)
             .originator
             .assured("the primary may commit offsets");
         let revision = originator
@@ -1579,7 +1580,7 @@ mod tests {
             ReplicatedKafkaOffsetState::new(offset_placement(), Some(snapshot))
                 .assured("the replica already holds the checkpoint"),
         );
-        let installer = ReplicatedKafkaOffsetState::bind(&secondary, roles, Some(&replica))
+        let installer = ReplicatedKafkaOffsetState::bind(&secondary, roles, Some(&replica), 2)
             .installer
             .assured("the secondary retains replica authority");
         let first_report = installer
@@ -1624,6 +1625,7 @@ mod tests {
             &state,
             StateReplicationRoles::new(Some(owner.clone()), vec![lost], 0),
             Some(&owner),
+            2,
         )
         .originator
         .assured("the primary may commit offsets");
@@ -1636,6 +1638,7 @@ mod tests {
             &state,
             StateReplicationRoles::new(Some(owner.clone()), vec![promoted], 0),
             Some(&owner),
+            2,
         )
         .originator
         .assured("the primary still originates its offsets");
@@ -1681,6 +1684,7 @@ mod tests {
             &state,
             StateReplicationRoles::new(Some(owner), vec![replica.clone()], 1),
             Some(&replica),
+            2,
         )
         .installer
         .assured("the replica may install snapshots");
@@ -1767,6 +1771,7 @@ mod tests {
             &state,
             StateReplicationRoles::new(Some(node.clone()), Vec::new(), 0),
             Some(&node),
+            2,
         )
         .originator
         .assured("the owner can originate offsets");
@@ -1880,6 +1885,7 @@ mod tests {
             &state,
             StateReplicationRoles::new(Some(node_1), vec![node_2.clone()], 1),
             Some(&node_2),
+            2,
         );
         let installer = replica_assignment
             .installer
@@ -1920,6 +1926,7 @@ mod tests {
             &state,
             StateReplicationRoles::new(Some(node_2.clone()), Vec::new(), 0),
             Some(&node_2),
+            2,
         );
         let originator = owner_assignment
             .originator
@@ -2137,6 +2144,7 @@ mod tests {
                             &state,
                             StateReplicationRoles::owned_by(None),
                             None,
+                            2,
                         )
                         .originator
                         .assured("the local owner may originate");
@@ -2298,10 +2306,14 @@ mod tests {
             ReplicatedKafkaOffsetState::new(offset_placement(), None)
                 .assured("empty offsets initialize"),
         );
-        let originator =
-            ReplicatedKafkaOffsetState::bind(&state, StateReplicationRoles::owned_by(None), None)
-                .originator
-                .assured("the local owner originates offsets");
+        let originator = ReplicatedKafkaOffsetState::bind(
+            &state,
+            StateReplicationRoles::owned_by(None),
+            None,
+            2,
+        )
+        .originator
+        .assured("the local owner originates offsets");
         let starts = || {
             vec![KafkaOffsetPosition {
                 topic: "events".into(),
@@ -2419,6 +2431,7 @@ mod tests {
                     &state,
                     StateReplicationRoles::new(Some(node.clone()), Vec::new(), 0),
                     Some(&node),
+                    2,
                 );
                 let originator = assignment
                     .originator
@@ -2470,6 +2483,7 @@ mod tests {
                     &state,
                     StateReplicationRoles::owned_by(None),
                     None,
+                    2,
                 )
                 .originator
                 .assured("the local coordinator originates");
@@ -2588,6 +2602,7 @@ mod tests {
                     &state,
                     StateReplicationRoles::owned_by(None),
                     None,
+                    2,
                 )
                 .originator
                 .assured("the local owner originates offsets");
@@ -2651,6 +2666,7 @@ mod tests {
                 &state,
                 StateReplicationRoles::new(Some(node_1.clone()), vec![node_2], 1),
                 Some(&node_1),
+                2,
             );
             let originator = assignment
                 .originator
@@ -2741,6 +2757,7 @@ mod tests {
                     &state,
                     StateReplicationRoles::new(Some(node_1.clone()), vec![node_2.clone()], 1),
                     Some(&node_1),
+                    2,
                 );
                 let originator = assignment
                     .originator

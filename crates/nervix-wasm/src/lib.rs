@@ -36,10 +36,12 @@ use nervix_execution::{CpuClass, Executor, MemoryClass};
 use nervix_models::{ParseAsType, Timestamp, WasmProcessorLimits};
 #[cfg(test)]
 use nervix_primitives::sync::Arc;
+#[cfg(test)]
+use nervix_primitives::sync::atomic::Ordering;
 use nervix_primitives::sync::{StdArc, mpsc};
-// The epoch driver is an operating-system thread that no model runs, so the flag that stops it is a
-// real atomic in every mode.
-use nervix_primitives::unmodeled::sync::atomic::{AtomicBool, Ordering};
+// The external engine's epoch driver runs outside every model. Its wake handle is initialized
+// once by its constructor, read only when its owner drops, and never carries a modeled protocol.
+use nervix_primitives::unmodeled::{sync::OnceLock, thread::Thread, time::Instant as EpochInstant};
 use nervix_recovery::NoReceiver as _;
 use nervix_wasm_protocol as protocol;
 pub use nervix_wasm_protocol::SavedStateRejection;
@@ -56,9 +58,7 @@ const ENV_MODULE: &str = "env";
 const EXPORT_MEMORY: &str = "memory";
 const SUCCESS: i32 = 0;
 const ERR_INVALID_SIZE: i32 = -1;
-const DEFAULT_EPOCH_TICK_INTERVAL: Duration = Duration::from_millis(1);
-const DEFAULT_EPOCH_DEADLINE_TICKS: u64 = 1;
-const DEFAULT_MAX_GUEST_BUFFER_BYTES: usize = 64 * 1024 * 1024;
+
 pub const ABI_SERIALIZATION_NAME: &str = protocol::SERIALIZATION_NAME;
 
 #[cfg(test)]
@@ -532,10 +532,14 @@ impl Default for WasmRuntimeConfig {
     fn default() -> Self {
         Self {
             engine: WasmEngineSettings::default(),
-            optimize: true,
-            epoch_tick_interval: DEFAULT_EPOCH_TICK_INTERVAL,
-            epoch_deadline_ticks: DEFAULT_EPOCH_DEADLINE_TICKS,
-            max_guest_buffer_bytes: DEFAULT_MAX_GUEST_BUFFER_BYTES,
+            optimize: nervix_models::DataPlaneSettings::default().wasm_optimize(),
+            epoch_tick_interval: nervix_models::DataPlaneSettings::default()
+                .wasm_epoch_tick_interval(),
+            epoch_deadline_ticks: nervix_models::DataPlaneSettings::default()
+                .wasm_epoch_deadline_ticks(),
+            max_guest_buffer_bytes: nervix_models::DataPlaneSettings::default()
+                .wasm_guest_buffer_bytes()
+                .arch_into(),
         }
     }
 }
@@ -543,7 +547,7 @@ impl Default for WasmRuntimeConfig {
 #[derive(Clone, Debug)]
 pub struct WasmRuntime {
     engine: Engine,
-    stop: StdArc<AtomicBool>,
+    _epoch_driver: StdArc<EpochDriver>,
     epoch_deadline_ticks: u64,
     max_guest_buffer_bytes: usize,
 }
@@ -566,16 +570,11 @@ impl WasmRuntime {
         });
         let engine = Engine::new(&wasmtime_config)
             .map_err(|source| Report::new(WasmProcessorError::Configure(source)))?;
-        let stop = StdArc::new(AtomicBool::new(false));
-        spawn_epoch_driver(
-            engine.clone(),
-            StdArc::clone(&stop),
-            config.epoch_tick_interval,
-        )
-        .map_err(|source| Report::new(WasmProcessorError::SpawnEpochDriver(source)))?;
+        let epoch_driver = spawn_epoch_driver(engine.clone(), config.epoch_tick_interval)
+            .map_err(|source| Report::new(WasmProcessorError::SpawnEpochDriver(source)))?;
         Ok(Self {
             engine,
-            stop,
+            _epoch_driver: epoch_driver,
             epoch_deadline_ticks: config.epoch_deadline_ticks,
             max_guest_buffer_bytes: config.max_guest_buffer_bytes,
         })
@@ -619,37 +618,56 @@ impl WasmRuntime {
     }
 }
 
-impl Drop for WasmRuntime {
+/// One retained wake handle per runtime lifetime. The epoch thread keeps only a weak reference
+/// while parked, so the last runtime's drop can always wake it without waiting for the tick.
+#[derive(Debug, Default)]
+struct EpochDriver {
+    thread: OnceLock<Thread>,
+}
+impl Drop for EpochDriver {
     fn drop(&mut self) {
-        if StdArc::strong_count(&self.stop) == 1 {
-            self.stop.store(true, Ordering::Relaxed);
+        if let Some(thread) = self.thread.get() {
+            thread.unpark();
         }
     }
 }
 
-fn spawn_epoch_driver(
-    engine: Engine,
-    stop: StdArc<AtomicBool>,
-    interval: Duration,
-) -> std::io::Result<()> {
-    let weak_stop = StdArc::downgrade(&stop);
-    // The epoch driver is an operating-system thread no model runs, beside the runtime rather than
-    // part of any protocol a check explores.
-    nervix_primitives::unmodeled::thread::Builder::new()
+fn spawn_epoch_driver(engine: Engine, interval: Duration) -> std::io::Result<StdArc<EpochDriver>> {
+    let driver = StdArc::new(EpochDriver::default());
+    let weak_driver = StdArc::downgrade(&driver);
+    // A drop during an epoch increment may end the owner on this thread. Its unpark permit is
+    // durable too, so the next park returns immediately and the expired weak reference ends it.
+    let handle = nervix_primitives::unmodeled::thread::Builder::new()
         .name("nervix-wasm-epoch".to_string())
         .spawn(move || {
-            loop {
-                nervix_primitives::unmodeled::thread::sleep(interval);
-                let Some(stop) = weak_stop.upgrade() else {
-                    break;
-                };
-                if stop.load(Ordering::Relaxed) {
-                    break;
+            'epochs: loop {
+                let started = EpochInstant::now();
+                loop {
+                    let remaining = interval
+                        .checked_sub(started.elapsed())
+                        .unwrap_or(Duration::ZERO);
+                    nervix_primitives::unmodeled::thread::park_timeout(remaining);
+                    let Some(driver) = weak_driver.upgrade() else {
+                        break 'epochs;
+                    };
+                    // A park may wake spuriously. Only elapsed physical time advances the external
+                    // engine, so a wake handle never shortens the configured preemption quantum.
+                    let due = started.elapsed() >= interval;
+                    if due {
+                        engine.increment_epoch();
+                    }
+                    drop(driver);
+                    if due {
+                        break;
+                    }
                 }
-                engine.increment_epoch();
             }
-        })
-        .map(|_handle| ())
+        })?;
+    driver
+        .thread
+        .set(handle.thread().clone())
+        .assured("the constructor alone installs the epoch driver's wake handle");
+    Ok(driver)
 }
 
 #[derive(Debug, Clone)]
@@ -2386,6 +2404,32 @@ fn ensure_success(export: &'static str, code: i32) -> StackResult<(), WasmGuestC
 
 #[cfg(test)]
 mod tests {
+    /// A configured preemption period never becomes the lifetime of a detached engine after
+    /// the final runtime handle ends. Keep one clone first to exercise the retained owner too.
+    #[nervix_primitives::test]
+    async fn dropping_the_final_runtime_wakes_a_long_period_epoch_driver() {
+        let runtime = WasmRuntime::new(WasmRuntimeConfig {
+            epoch_tick_interval: Duration::from_secs(60),
+            ..WasmRuntimeConfig::default()
+        })
+        .expect("the long epoch interval configures");
+        let engine = runtime.engine.weak();
+        let retained = runtime.clone();
+        drop(runtime);
+        assert!(
+            engine.upgrade().is_some(),
+            "another runtime handle retains the engine"
+        );
+        drop(retained);
+        nervix_primitives::time::timeout(Duration::from_secs(10), async {
+            while engine.upgrade().is_some() {
+                nervix_primitives::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("ending the owner promptly releases its epoch thread's engine");
+    }
+
     use std::path::{Path, PathBuf};
 
     use arrow_array::{Int32Array, RecordBatch, StringArray};
@@ -5055,7 +5099,7 @@ mod tests {
             optimize: true,
             epoch_tick_interval: Duration::from_micros(100),
             epoch_deadline_ticks: 1,
-            max_guest_buffer_bytes: DEFAULT_MAX_GUEST_BUFFER_BYTES,
+            max_guest_buffer_bytes: WasmRuntimeConfig::default().max_guest_buffer_bytes,
         })
         .expect("runtime must initialize");
         let compiled = runtime

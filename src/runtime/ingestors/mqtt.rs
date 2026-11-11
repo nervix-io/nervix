@@ -115,7 +115,7 @@ impl MqttTopicIngestorStartPlan {
                 .into_iter()
                 .collect(),
         }
-        .open::<MqttTopicIngestor>(ingestor)
+        .open::<MqttTopicIngestor>(runtime, ingestor)
         .await
     }
 

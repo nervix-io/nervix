@@ -251,6 +251,7 @@ async fn ingest_group_builds_one_record_column_set_for_all_of_its_messages() {
         IngestMetadataProjection::none(),
         8,
         grouped_event_ingestor_metrics(),
+        nervix_models::DataPlaneSettings::default().ingest_group_idle_flush(),
     );
 
     RECORD_BUILDER_SETS_OPENED.with(|count| count.set(0));
@@ -264,6 +265,8 @@ async fn ingest_group_builds_one_record_column_set_for_all_of_its_messages() {
                 QueueAdmission::RefuseWhenFull,
                 &codec,
                 payload.as_bytes(),
+                usize::try_from(nervix_models::PayloadUnfoldLimit::DEFAULT)
+                    .assured("the current default fits usize"),
             )
             .await
             .expect("each payload should decode into the open group");
@@ -314,6 +317,7 @@ async fn ingest_group_accepts_its_decoded_payloads_one_at_a_time() {
         IngestMetadataProjection::none(),
         3,
         grouped_event_ingestor_metrics(),
+        nervix_models::DataPlaneSettings::default().ingest_group_idle_flush(),
     );
 
     for user_id in 0..3i64 {
@@ -324,6 +328,8 @@ async fn ingest_group_accepts_its_decoded_payloads_one_at_a_time() {
                 QueueAdmission::RefuseWhenFull,
                 &codec,
                 payload.as_bytes(),
+                usize::try_from(nervix_models::PayloadUnfoldLimit::DEFAULT)
+                    .assured("the current default fits usize"),
             )
             .await
             .expect("each payload should decode into the open group");
@@ -360,6 +366,7 @@ async fn ingest_group_keeps_its_other_messages_when_one_payload_fails_to_decode(
         IngestMetadataProjection::none(),
         8,
         grouped_event_ingestor_metrics(),
+        nervix_models::DataPlaneSettings::default().ingest_group_idle_flush(),
     );
 
     collector
@@ -368,6 +375,8 @@ async fn ingest_group_keeps_its_other_messages_when_one_payload_fails_to_decode(
             QueueAdmission::RefuseWhenFull,
             &codec,
             br#"{"user_id":1}"#,
+            usize::try_from(nervix_models::PayloadUnfoldLimit::DEFAULT)
+                .assured("the current default fits usize"),
         )
         .await
         .expect("the first payload should decode");
@@ -380,6 +389,8 @@ async fn ingest_group_keeps_its_other_messages_when_one_payload_fails_to_decode(
             QueueAdmission::RefuseWhenFull,
             &codec,
             br#"{"user_id":"two"}"#,
+            usize::try_from(nervix_models::PayloadUnfoldLimit::DEFAULT)
+                .assured("the current default fits usize"),
         )
         .await
         .expect_err("a user id of the wrong type should be rejected");
@@ -400,6 +411,8 @@ async fn ingest_group_keeps_its_other_messages_when_one_payload_fails_to_decode(
             QueueAdmission::RefuseWhenFull,
             &codec,
             br#"{"user_id":3}"#,
+            usize::try_from(nervix_models::PayloadUnfoldLimit::DEFAULT)
+                .assured("the current default fits usize"),
         )
         .await
         .expect("the payload after the rejected one should decode");
@@ -435,6 +448,7 @@ async fn a_batch_keeps_decoding_after_its_codec_refuses_a_payload() {
         IngestMetadataProjection::none(),
         8,
         grouped_event_ingestor_metrics(),
+        nervix_models::DataPlaneSettings::default().ingest_group_idle_flush(),
     );
     let batch = [
         BatchPayload {
@@ -493,6 +507,7 @@ async fn a_batch_the_node_cannot_unfold_is_refused_whole() {
         IngestMetadataProjection::none(),
         8,
         grouped_event_ingestor_metrics(),
+        nervix_models::DataPlaneSettings::default().ingest_group_idle_flush(),
     );
     let batch = [
         BatchPayload {
@@ -531,6 +546,7 @@ async fn ingest_group_gives_every_unfolded_message_its_payload_metadata_and_an_a
         IngestMetadataProjection::none(),
         1,
         grouped_event_ingestor_metrics(),
+        nervix_models::DataPlaneSettings::default().ingest_group_idle_flush(),
     );
     let tracker = Arc::new(AckRootTracker::default());
     let (payload_acks, completion) = AckSet::tracked_root(tracker.clone());
@@ -541,6 +557,8 @@ async fn ingest_group_gives_every_unfolded_message_its_payload_metadata_and_an_a
             QueueAdmission::RefuseWhenFull,
             &codec,
             br#"[{"user_id":1},{"user_id":2},{"user_id":3}]"#,
+            usize::try_from(nervix_models::PayloadUnfoldLimit::DEFAULT)
+                .assured("the current default fits usize"),
         )
         .await
         .expect("the payload should unfold into the open group");
@@ -595,6 +613,7 @@ async fn ingest_group_acknowledges_a_payload_that_unfolds_into_no_messages() {
         IngestMetadataProjection::none(),
         1,
         grouped_event_ingestor_metrics(),
+        nervix_models::DataPlaneSettings::default().ingest_group_idle_flush(),
     );
     let tracker = Arc::new(AckRootTracker::default());
     let (payload_acks, completion) = AckSet::tracked_root(tracker.clone());
@@ -605,6 +624,8 @@ async fn ingest_group_acknowledges_a_payload_that_unfolds_into_no_messages() {
             QueueAdmission::RefuseWhenFull,
             &codec,
             br#"[{"user_id":1,"keep":false}]"#,
+            usize::try_from(nervix_models::PayloadUnfoldLimit::DEFAULT)
+                .assured("the current default fits usize"),
         )
         .await
         .expect("a payload the program selects nothing from should decode");
@@ -637,6 +658,7 @@ async fn ingest_group_keeps_no_message_of_a_payload_that_fails_part_way_through_
         IngestMetadataProjection::none(),
         8,
         grouped_event_ingestor_metrics(),
+        nervix_models::DataPlaneSettings::default().ingest_group_idle_flush(),
     );
 
     collector
@@ -645,6 +667,8 @@ async fn ingest_group_keeps_no_message_of_a_payload_that_fails_part_way_through_
             QueueAdmission::RefuseWhenFull,
             &codec,
             br#"[{"user_id":1}]"#,
+            usize::try_from(nervix_models::PayloadUnfoldLimit::DEFAULT)
+                .assured("the current default fits usize"),
         )
         .await
         .expect("the first payload should unfold");
@@ -657,6 +681,8 @@ async fn ingest_group_keeps_no_message_of_a_payload_that_fails_part_way_through_
             QueueAdmission::RefuseWhenFull,
             &codec,
             br#"[{"user_id":2},{"user_id":"confidential"}]"#,
+            usize::try_from(nervix_models::PayloadUnfoldLimit::DEFAULT)
+                .assured("the current default fits usize"),
         )
         .await
         .expect_err("an element of the wrong type must reject its whole payload");
@@ -673,6 +699,8 @@ async fn ingest_group_keeps_no_message_of_a_payload_that_fails_part_way_through_
             QueueAdmission::RefuseWhenFull,
             &codec,
             br#"[{"user_id":3},{"user_id":4}]"#,
+            usize::try_from(nervix_models::PayloadUnfoldLimit::DEFAULT)
+                .assured("the current default fits usize"),
         )
         .await
         .expect("the payload after the rejected one should unfold");
@@ -702,6 +730,7 @@ async fn ingest_group_releases_the_rows_a_rejected_payload_abandoned_in_an_empty
         IngestMetadataProjection::none(),
         8,
         grouped_event_ingestor_metrics(),
+        nervix_models::DataPlaneSettings::default().ingest_group_idle_flush(),
     );
 
     let rejected = collector
@@ -710,6 +739,8 @@ async fn ingest_group_releases_the_rows_a_rejected_payload_abandoned_in_an_empty
             QueueAdmission::RefuseWhenFull,
             &codec,
             br#"[{"user_id":1},{"user_id":"two"}]"#,
+            usize::try_from(nervix_models::PayloadUnfoldLimit::DEFAULT)
+                .assured("the current default fits usize"),
         )
         .await
         .expect_err("an element of the wrong type must reject its whole payload");
@@ -931,6 +962,7 @@ async fn ingest_route_collector_reports_identity_and_unaccepted_payloads() {
         IngestMetadataProjection::none(),
         1,
         grouped_event_ingestor_metrics(),
+        nervix_models::DataPlaneSettings::default().ingest_group_idle_flush(),
     );
     undispatched
         .decode_payload(
@@ -938,6 +970,8 @@ async fn ingest_route_collector_reports_identity_and_unaccepted_payloads() {
             QueueAdmission::RefuseWhenFull,
             &codec,
             br#"{"user_id":1}"#,
+            usize::try_from(nervix_models::PayloadUnfoldLimit::DEFAULT)
+                .assured("the current default fits usize"),
         )
         .await
         .expect("the fixture payload must decode");
@@ -955,6 +989,7 @@ async fn ingest_route_collector_reports_identity_and_unaccepted_payloads() {
         IngestMetadataProjection::none(),
         2,
         grouped_event_ingestor_metrics(),
+        nervix_models::DataPlaneSettings::default().ingest_group_idle_flush(),
     );
     collector
         .decode_payload(
@@ -962,6 +997,8 @@ async fn ingest_route_collector_reports_identity_and_unaccepted_payloads() {
             QueueAdmission::RefuseWhenFull,
             &codec,
             br#"{"user_id":1}"#,
+            usize::try_from(nervix_models::PayloadUnfoldLimit::DEFAULT)
+                .assured("the current default fits usize"),
         )
         .await
         .expect("the first fixture payload must decode");
@@ -973,6 +1010,8 @@ async fn ingest_route_collector_reports_identity_and_unaccepted_payloads() {
             QueueAdmission::RefuseWhenFull,
             &codec,
             br#"{"user_id":2}"#,
+            usize::try_from(nervix_models::PayloadUnfoldLimit::DEFAULT)
+                .assured("the current default fits usize"),
         )
         .await
         .expect("the second fixture payload must decode");
@@ -1036,6 +1075,7 @@ async fn ingest_collector_flush_reports_missing_route_dependencies() {
         IngestMetadataProjection::none(),
         1,
         grouped_event_ingestor_metrics(),
+        nervix_models::DataPlaneSettings::default().ingest_group_idle_flush(),
     );
     missing_schema_collector.push(&relay, message());
     let missing_schema = expect_failure(
@@ -1070,6 +1110,7 @@ async fn ingest_collector_flush_reports_missing_route_dependencies() {
         IngestMetadataProjection::none(),
         1,
         grouped_event_ingestor_metrics(),
+        nervix_models::DataPlaneSettings::default().ingest_group_idle_flush(),
     );
     missing_entrypoint_collector.push(&relay, message());
     let missing_entrypoint = expect_failure(
@@ -1414,7 +1455,11 @@ async fn branch_entrypoint_dispatches_an_ingestor_prepared_batch_immediately() {
         .expect("runtime consumer should remain open");
     assert_eq!(batch.message_count(), 1);
 
-    branched_runtime.shutdown().await;
+    branched_runtime
+        .shutdown(crate::runtime::entity_gate::task_stop_grace(
+            nervix_models::DomainDrainTimeout::DEFAULT,
+        ))
+        .await;
     owner_task
         .stop(Duration::from_secs(1))
         .await
@@ -1567,7 +1612,11 @@ async fn ingestor_and_reingestor_routes_apply_size_boundaries_independently_per_
         assert_eq!(key_label(&beta.key), r#"{"tenant":"beta"}"#);
         assert_eq!(beta.message_count(), 2);
 
-        route_runtime.shutdown().await;
+        route_runtime
+            .shutdown(crate::runtime::entity_gate::task_stop_grace(
+                nervix_models::DomainDrainTimeout::DEFAULT,
+            ))
+            .await;
         owner_task
             .stop(Duration::from_secs(1))
             .await
@@ -1609,6 +1658,7 @@ async fn an_unfolding_payload_runs_on_the_extension_workers() {
         IngestMetadataProjection::none(),
         8,
         grouped_event_ingestor_metrics(),
+        nervix_models::DataPlaneSettings::default().ingest_group_idle_flush(),
     );
 
     collector
@@ -1617,6 +1667,8 @@ async fn an_unfolding_payload_runs_on_the_extension_workers() {
             QueueAdmission::RefuseWhenFull,
             &codec,
             br#"[{"user_id":1},{"user_id":2}]"#,
+            usize::try_from(nervix_models::PayloadUnfoldLimit::DEFAULT)
+                .assured("the current default fits usize"),
         )
         .await
         .expect("the extension workers unfold the payload");
@@ -1674,10 +1726,18 @@ async fn a_node_without_room_to_unfold_a_payload_refuses_it_without_judging_it()
         IngestMetadataProjection::none(),
         8,
         grouped_event_ingestor_metrics(),
+        nervix_models::DataPlaneSettings::default().ingest_group_idle_flush(),
     );
 
     let refused = collector
-        .decode_payload(&executor, QueueAdmission::RefuseWhenFull, &codec, payload)
+        .decode_payload(
+            &executor,
+            QueueAdmission::RefuseWhenFull,
+            &codec,
+            payload,
+            usize::try_from(nervix_models::PayloadUnfoldLimit::DEFAULT)
+                .assured("the current default fits usize"),
+        )
         .await
         .expect_err("a full extension class refuses the unfolding");
 
@@ -1688,7 +1748,14 @@ async fn a_node_without_room_to_unfold_a_payload_refuses_it_without_judging_it()
     assert_eq!(collector.pending.undispatched_payloads(), 0);
     filled.release().await;
     collector
-        .decode_payload(&executor, QueueAdmission::RefuseWhenFull, &codec, payload)
+        .decode_payload(
+            &executor,
+            QueueAdmission::RefuseWhenFull,
+            &codec,
+            payload,
+            usize::try_from(nervix_models::PayloadUnfoldLimit::DEFAULT)
+                .assured("the current default fits usize"),
+        )
         .await
         .expect("the same payload unfolds once the class has room");
     assert_eq!(collector.pending.undispatched_payloads(), 1);
@@ -1756,7 +1823,12 @@ async fn a_message_whose_read_metadata_value_its_type_cannot_hold_is_refused_bef
         filter_where: None,
     };
     let routing = DomainRoutingSnapshot::default();
-    let mut collector = IngestRouteCollector::new(projection, 2, grouped_event_ingestor_metrics());
+    let mut collector = IngestRouteCollector::new(
+        projection,
+        2,
+        grouped_event_ingestor_metrics(),
+        nervix_models::DataPlaneSettings::default().ingest_group_idle_flush(),
+    );
 
     let remaining = runtime
         .refuse_unrepresentable_metadata(

@@ -187,7 +187,8 @@ async fn a_cancelled_remote_delivery_resolves_its_records_and_returns_its_owner(
         .store_pending_acks(
             &receiving_node(),
             vec![acks],
-            RemoteDispatcher::delivery_deadline(),
+            Instant::now() + nervix_models::RemoteAckDispatchTimeout::DEFAULT,
+            nervix_models::RemoteAckTiming::default(),
             std::future::pending(),
         )
         .await
@@ -249,10 +250,18 @@ async fn wide_remote_ack_batch_owns_one_charged_task_and_releases_it_on_shutdown
     for _ in 0..count {
         let (root, completion) = AckSet::root();
         roots.push(root);
-        watches.push(RemoteAckWatch::new(completion, dispatcher.registration(1)));
+        watches.push(RemoteAckWatch::new(
+            completion,
+            dispatcher.registration(1),
+            nervix_models::RemoteAckTiming::default(),
+        ));
     }
     let RemoteAckWatchAdmission::Charged { dispatcher, charge } = runtime
-        .hold_remote_ack_watches(count, std::future::pending())
+        .hold_remote_ack_watches(
+            count,
+            std::future::pending(),
+            nervix_models::RemoteRelayTotalTimeout::DEFAULT,
+        )
         .await
         .assured("the wide batch fits its relay budget")
     else {
@@ -262,7 +271,13 @@ async fn wide_remote_ack_batch_owns_one_charged_task_and_releases_it_on_shutdown
     let expected_bytes =
         u64::try_from(count * 1024 + 4096).assured("the fixture's watcher allocation fits in u64");
     assert_eq!(charge.bytes_held(), expected_bytes);
-    runtime.spawn_remote_ack_watchers(named::<DomainName>("watcher"), dispatcher, watches, charge);
+    runtime.spawn_remote_ack_watchers(
+        named::<DomainName>("watcher"),
+        dispatcher,
+        watches,
+        charge,
+        nervix_models::RemoteAckTiming::default(),
+    );
     assert_eq!(runtime.inner.remote_ack_watcher_tasks.len(), 2);
     assert_eq!(
         executor.snapshot().relay_memory.reserved_bytes,
@@ -336,9 +351,18 @@ fn after(start: Instant, elapsed: Duration) -> Instant {
 async fn an_outcome_reached_while_the_registrar_is_missing_is_returned_once_it_is_back() {
     let run = ClusterNodeIncarnation::new(7);
     let (acks, completion) = AckSet::root();
-    let mut watch = RemoteAckWatch::new(completion, registered_by(run));
+    let mut watch = RemoteAckWatch::new(
+        completion,
+        registered_by(run),
+        nervix_models::RemoteAckTiming::default(),
+    );
     let start = Instant::now();
-    let RemoteAckWatchReport::Send(first) = watch.next_report(None, Some(run), start) else {
+    let RemoteAckWatchReport::Send(first) = watch.next_report(
+        nervix_models::RemoteAckTiming::default(),
+        None,
+        Some(run),
+        start,
+    ) else {
         panic!("a watch reports to a registrar its live view shows");
     };
     assert!(first.is_progress());
@@ -348,21 +372,37 @@ async fn an_outcome_reached_while_the_registrar_is_missing_is_returned_once_it_i
     assert_eq!(progress, AckProgress::Complete(AckOutcome::Ack));
     let missing = after(start, Duration::from_millis(100));
     assert!(matches!(
-        watch.next_report(Some(progress), None, missing),
+        watch.next_report(
+            nervix_models::RemoteAckTiming::default(),
+            Some(progress),
+            None,
+            missing
+        ),
         RemoteAckWatchReport::Hold
     ));
     // The completion delivered its outcome once; waiting again only passes time.
-    let (mut watch, progress) = wait_remote_ack_progress(watch).await;
+    let (mut watch, progress) =
+        wait_remote_ack_progress(watch, &nervix_models::RemoteAckTiming::default()).await;
     assert_eq!(progress, None);
     let still_missing = after(start, Duration::from_millis(200));
     assert!(matches!(
-        watch.next_report(progress, None, still_missing),
+        watch.next_report(
+            nervix_models::RemoteAckTiming::default(),
+            progress,
+            None,
+            still_missing
+        ),
         RemoteAckWatchReport::Hold
     ));
 
     let back = after(start, Duration::from_millis(300));
     assert!(matches!(
-        watch.next_report(None, Some(run), back),
+        watch.next_report(
+            nervix_models::RemoteAckTiming::default(),
+            None,
+            Some(run),
+            back
+        ),
         RemoteAckWatchReport::Send(RemoteAckOutcome::Ack)
     ));
 }
@@ -372,12 +412,19 @@ async fn an_outcome_reached_while_the_registrar_is_missing_is_returned_once_it_i
 async fn a_negative_outcome_is_returned_as_the_root_decided_it() {
     let run = ClusterNodeIncarnation::new(7);
     let (acks, completion) = AckSet::root();
-    let mut watch = RemoteAckWatch::new(completion, registered_by(run));
+    let mut watch = RemoteAckWatch::new(
+        completion,
+        registered_by(run),
+        nervix_models::RemoteAckTiming::default(),
+    );
     acks.no_ack("the attached emitter refused the record");
     let progress = watch.completion.wait_for_progress().await;
-    let RemoteAckWatchReport::Send(outcome) =
-        watch.next_report(Some(progress), Some(run), Instant::now())
-    else {
+    let RemoteAckWatchReport::Send(outcome) = watch.next_report(
+        nervix_models::RemoteAckTiming::default(),
+        Some(progress),
+        Some(run),
+        Instant::now(),
+    ) else {
         panic!("a watch reports to a registrar its live view shows");
     };
     assert_eq!(
@@ -393,21 +440,40 @@ async fn a_negative_outcome_is_returned_as_the_root_decided_it() {
 async fn an_outcome_whose_registrar_stays_missing_past_its_grace_is_given_up() {
     let run = ClusterNodeIncarnation::new(7);
     let (acks, completion) = AckSet::root();
-    let mut watch = RemoteAckWatch::new(completion, registered_by(run));
+    let mut watch = RemoteAckWatch::new(
+        completion,
+        registered_by(run),
+        nervix_models::RemoteAckTiming::default(),
+    );
     let start = Instant::now();
     assert!(matches!(
-        watch.next_report(None, Some(run), start),
+        watch.next_report(
+            nervix_models::RemoteAckTiming::default(),
+            None,
+            Some(run),
+            start
+        ),
         RemoteAckWatchReport::Send(_)
     ));
     acks.ack_success();
     let progress = watch.completion.wait_for_progress().await;
     assert!(matches!(
-        watch.next_report(Some(progress), None, start),
+        watch.next_report(
+            nervix_models::RemoteAckTiming::default(),
+            Some(progress),
+            None,
+            start
+        ),
         RemoteAckWatchReport::Hold
     ));
     let past_grace = after(start, RegistrarPresence::missing_grace());
     assert!(matches!(
-        watch.next_report(None, None, past_grace),
+        watch.next_report(
+            nervix_models::RemoteAckTiming::default(),
+            None,
+            None,
+            past_grace
+        ),
         RemoteAckWatchReport::Release
     ));
 }
@@ -522,7 +588,8 @@ async fn remote_relay_admission_alive_resets_dispatch_timeout() {
         &ClusterNodeName::parse("relay-owner").expect("valid name"),
         admission_rx,
         Duration::from_millis(200),
-        RemoteDispatcher::delivery_deadline(),
+        Instant::now() + nervix_models::RemoteAckDispatchTimeout::DEFAULT,
+        nervix_models::RemoteAckTiming::default().remote_relay_total_timeout,
     )
     .await
     .expect("alive progress should preserve the relay admission wait");
@@ -680,7 +747,8 @@ async fn remote_relay_admission_rejection_preserves_the_typed_reason() {
         &target,
         admission_rx,
         Duration::from_secs(1),
-        RemoteDispatcher::delivery_deadline(),
+        Instant::now() + nervix_models::RemoteAckDispatchTimeout::DEFAULT,
+        nervix_models::RemoteAckTiming::default().remote_relay_total_timeout,
     )
     .await
     .expect_err("a rejected relay admission must fail dispatch");
@@ -712,7 +780,8 @@ async fn remote_relay_admission_reports_a_closed_response_channel() {
         &target,
         admission_rx,
         Duration::from_secs(1),
-        RemoteDispatcher::delivery_deadline(),
+        Instant::now() + nervix_models::RemoteAckDispatchTimeout::DEFAULT,
+        nervix_models::RemoteAckTiming::default().remote_relay_total_timeout,
     )
     .await
     .expect_err("a closed relay admission response must fail dispatch");
@@ -734,7 +803,8 @@ async fn remote_relay_admission_bounds_the_total_wait() {
         &target,
         admission_rx,
         REMOTE_RELAY_TOTAL_TIMEOUT + Duration::from_secs(1),
-        RemoteDispatcher::delivery_deadline(),
+        Instant::now() + nervix_models::RemoteAckDispatchTimeout::DEFAULT,
+        nervix_models::RemoteAckTiming::default().remote_relay_total_timeout,
     )
     .await
     .expect_err("relay admission must stop at its total deadline");
@@ -1112,16 +1182,13 @@ async fn a_stalled_sweep_counts_once_for_the_time_it_missed() {
 /// join waits for the sweep in progress and for no other, and the acknowledgement that sweep
 /// left pending ends with the registry rather than by a later sweep.
 ///
-/// A paused clock does not advance while a synchronous sweep runs, and a current-thread runtime
-/// fires a timer only between polls, so no sweep here can make the next tick due itself. The
-/// sweeps start a thousand intervals late instead and keep every tick they missed, so each tick
-/// they reach is already due: the state an overrunning sweep leaves the node's own cadence in
-/// when the node's other workers keep its timers current.
+/// The callback returns an already due deadline, the production driver's state after an
+/// overrunning sweep. It must yield before it can scan again even when neither input blocks.
 #[nervix_primitives::test(start_paused = true)]
 async fn teardown_ends_the_silence_sweeps_after_the_overrunning_sweep_it_interrupts() {
-    use nervix_primitives::{
-        sync::atomic::{AtomicUsize, Ordering},
-        time::{MissedTickBehavior, advance, interval},
+    use nervix_primitives::sync::{
+        Notify,
+        atomic::{AtomicUsize, Ordering},
     };
 
     use crate::runtime::remote_ack_owner::SilenceSweeps;
@@ -1133,20 +1200,20 @@ async fn teardown_ends_the_silence_sweeps_after_the_overrunning_sweep_it_interru
         .register_ack(receiving_node(), acks)
         .assured("the fixture has free correlation capacity");
     registry.admit_ack(ack_id);
-    let mut ticks = interval(REMOTE_ACK_SILENCE_SWEEP_INTERVAL);
-    ticks.set_missed_tick_behavior(MissedTickBehavior::Burst);
-    advance(REMOTE_ACK_SILENCE_SWEEP_INTERVAL * 1000).await;
     let sweeps = Arc::new(AtomicUsize::new(0));
     let teardown = runtime.inner.remote_ack_watcher_shutdown.clone();
     let swept = sweeps.clone();
     let cancelling = teardown.clone();
     runtime.spawn_remote_ack_watcher_task(async move {
-        SilenceSweeps::ticking(ticks)
+        let changed = Notify::new();
+        let next_sweep = nervix_primitives::sync::blocking::Mutex::new(None);
+        SilenceSweeps::watching(&changed, &next_sweep)
             .run(|| {
                 registry.fail_silent_acks();
                 swept.fetch_add(1, Ordering::Relaxed);
                 // Teardown cancels the sweeps while this sweep runs.
                 cancelling.cancel();
+                Some(Instant::now())
             })
             .await;
     });
@@ -1175,5 +1242,6 @@ fn deloxide_remote_ack_silence_sweeps() {
         std::env::var_os("NERVIX_DEADLOCK_EVIDENCE").map(nervix_deadlock::EvidenceDirectory::new);
     nervix_deadlock::DiagnosticRun::start(directory)
         .assured("the silence sweep diagnostic process starts its detector once");
+    crate::runtime::remote_ack_owner::policy_tests::policy_epochs();
     teardown_ends_the_silence_sweeps_after_the_overrunning_sweep_it_interrupts();
 }

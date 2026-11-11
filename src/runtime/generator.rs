@@ -589,7 +589,10 @@ impl Runtime {
         let ack_tracker = self.domain_ack_root_tracker(domain);
         let mut flushed_routes = Vec::with_capacity(routes.len());
         for route in routes {
-            let flush_policy = match Self::parse_runtime_node_flush_policy(&route.flush_policy) {
+            let flush_policy = match Self::parse_runtime_node_flush_policy(
+                &route.flush_policy,
+                self.data_plane_settings().immediate_flush_minimum(),
+            ) {
                 Ok(flush_policy) => flush_policy,
                 Err(error) => {
                     return Err(error

@@ -920,8 +920,12 @@ fn forced_recovery_replay_preserves_source_offsets_and_branch_processor_state() 
         ReplicatedKafkaOffsetState::new(kafka_placement.clone(), None)
             .expect("Kafka offset state should initialize"),
     );
-    let mut kafka_assignment =
-        ReplicatedKafkaOffsetState::bind(&kafka_state, StateReplicationRoles::owned_by(None), None);
+    let mut kafka_assignment = ReplicatedKafkaOffsetState::bind(
+        &kafka_state,
+        StateReplicationRoles::owned_by(None),
+        None,
+        2,
+    );
     let kafka_originator = kafka_assignment
         .originator
         .take()
@@ -1947,7 +1951,7 @@ fn kafka_offset_state_roundtrips_partition_schedule_through_fjall() {
             .expect("kafka state should initialize"),
     );
     let mut assignment =
-        ReplicatedKafkaOffsetState::bind(&state, StateReplicationRoles::owned_by(None), None);
+        ReplicatedKafkaOffsetState::bind(&state, StateReplicationRoles::owned_by(None), None, 2);
     let originator = assignment
         .originator
         .take()

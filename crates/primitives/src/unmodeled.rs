@@ -53,7 +53,7 @@ pub mod runtime {
 pub mod thread {
     //! The operating system's threads, for a thread no model runs.
 
-    pub use std::thread::{Builder, sleep};
+    pub use std::thread::{Builder, Thread, park_timeout, sleep};
 }
 
 #[cfg(feature = "native")]

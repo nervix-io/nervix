@@ -67,6 +67,7 @@ async fn refusal(codec: &Arc<CompiledCodec>, payload: &[u8]) -> Report<CodecErro
         payload,
         &mut decoder,
         &mut records,
+        usize::try_from(nervix_models::PayloadUnfoldLimit::DEFAULT).expect("default fits usize"),
     )
     .await;
     match decoded {

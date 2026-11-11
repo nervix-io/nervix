@@ -1006,8 +1006,8 @@ is told to stop when its turn comes, then processors, emitters, generators, rein
 placement tasks that replicate state. A task that has not ended when its stop grace runs out is
 aborted. The node logs `shutdown task exceeded grace period; aborting` at `warn` with the domain,
 the task's kind, and its name, or `relay owner task did not stop cleanly` and
-`relay state task did not stop cleanly` for a relay's tasks. The grace is two seconds, except that
-a relay owner and an emitter are given the domain drain timeout first. Once the domain's tasks have
+`relay state task did not stop cleanly` for a relay's tasks. The grace is one fifteenth of the committed domain drain timeout, two seconds at its 30-second
+default; a relay owner and an emitter are given the domain drain timeout first. Once the domain's tasks have
 ended, its stop tells the checkpoint writer of each placement's state to make its last write, and
 waits for those writes and for the last write of each of its deduplicator, window and stateful
 inferencer branches, which a branch ended at its grace left to its snapshot task, before teardown
@@ -1611,3 +1611,12 @@ Live-policy discovery runs after public observation starts and is cancelled by t
 request. A node stopped before quorum-confirmed runtime admission has no admitted graph to
 drain; it still closes listeners, joins its supervised tasks and closes storage through the normal
 shutdown owner. A join refusal retains its typed cause through that cleanup.
+
+## Runtime Lifecycle Budgets
+
+`DOMAIN_DRAIN_TIMEOUT` and `ENTITY_GATE_DEADLINE` are committed cluster parameters, both 30 seconds
+by default. Each must fit the local drain and shutdown capacities of every admitted node. Invalid
+changes are refused atomically, and a returning node must provision sufficient local budgets
+before it becomes ready. Branch and processor teardown grace scales with the domain drain budget.
+[Data-Plane Runtime Policy And Capacity](node-settings.md#data-plane-runtime-policy-and-capacity)
+owns the settings and their validation relationships.

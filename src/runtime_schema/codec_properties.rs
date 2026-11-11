@@ -324,7 +324,14 @@ impl CodecCase {
         let mut decoder = JsonDecoder::default();
         let mut accepted = Vec::with_capacity(payloads.len());
         for payload in payloads {
-            match decode_with_codec(&self.codec, payload, &mut decoder, &mut builder) {
+            match decode_with_codec(
+                &self.codec,
+                payload,
+                &mut decoder,
+                &mut builder,
+                usize::try_from(nervix_models::PayloadUnfoldLimit::DEFAULT)
+                    .assured("the current default fits usize"),
+            ) {
                 Ok(messages) => {
                     assert_eq!(messages, 1, "a schemaful payload decodes into one message");
                     accepted.push(true);

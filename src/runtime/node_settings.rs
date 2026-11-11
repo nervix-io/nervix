@@ -149,13 +149,16 @@ impl Runtime {
     /// itself in the context it adds above a failure.
     pub(in crate::runtime) fn parse_runtime_node_flush_policy(
         policy: &FlushPolicy,
+        immediate_minimum: Duration,
     ) -> error_stack::Result<RuntimeFlushPolicy, NodeSettingError> {
         let FlushPolicy::Each {
             interval,
             max_batch_size,
         } = policy
         else {
-            return Ok(RuntimeFlushPolicy::Immediate);
+            return Ok(RuntimeFlushPolicy::Immediate {
+                minimum: immediate_minimum,
+            });
         };
         let interval =
             Self::parse_runtime_node_duration_setting(NodeDurationSetting::FlushEach, interval)?;
@@ -405,25 +408,36 @@ mod tests {
     #[test]
     fn node_flush_and_collection_policies_name_the_setting_that_does_not_parse() {
         assert_eq!(
-            Runtime::parse_runtime_node_flush_policy(&FlushPolicy::Immediate)
-                .expect("an immediate flush has nothing to parse"),
-            RuntimeFlushPolicy::Immediate
+            Runtime::parse_runtime_node_flush_policy(
+                &FlushPolicy::Immediate,
+                nervix_models::DataPlaneSettings::default().immediate_flush_minimum()
+            )
+            .expect("an immediate flush has nothing to parse"),
+            RuntimeFlushPolicy::Immediate {
+                minimum: nervix_models::DataPlaneSettings::default().immediate_flush_minimum()
+            }
         );
         assert_eq!(
-            Runtime::parse_runtime_node_flush_policy(&FlushPolicy::Each {
-                interval: "250ms".to_string(),
-                max_batch_size: "1KiB".to_string(),
-            })
+            Runtime::parse_runtime_node_flush_policy(
+                &FlushPolicy::Each {
+                    interval: "250ms".to_string(),
+                    max_batch_size: "1KiB".to_string(),
+                },
+                nervix_models::DataPlaneSettings::default().immediate_flush_minimum()
+            )
             .expect("a valid cadence parses"),
             RuntimeFlushPolicy::Each {
                 interval: Duration::from_millis(250),
                 max_batch_size: 1024,
             }
         );
-        let error = Runtime::parse_runtime_node_flush_policy(&FlushPolicy::Each {
-            interval: "250ms".to_string(),
-            max_batch_size: "lots".to_string(),
-        })
+        let error = Runtime::parse_runtime_node_flush_policy(
+            &FlushPolicy::Each {
+                interval: "250ms".to_string(),
+                max_batch_size: "lots".to_string(),
+            },
+            nervix_models::DataPlaneSettings::default().immediate_flush_minimum(),
+        )
         .expect_err("the batch size names no size");
         assert!(
             matches!(
