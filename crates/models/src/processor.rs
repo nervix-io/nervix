@@ -413,6 +413,13 @@ pub enum InferencerStateInitial {
 #[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
+pub struct DescribeWasmProcessor {
+    pub name: WasmProcessorName,
+}
+
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct CreateWasmProcessor<Version = u64> {
     pub name: WasmProcessorName,
     pub from: ProcessorInputs,

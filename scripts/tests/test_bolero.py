@@ -199,6 +199,8 @@ class InventoryTests(unittest.TestCase):
             "interconnect-state-inspection",
             "interconnect-processor-state-inspection",
             "state-inspection-cursor",
+            "interconnect-wasm-state-inspection",
+            "wasm-state-inspection-cursor",
             "client-requests",
             "client-replies",
             "client-events",
@@ -560,22 +562,22 @@ class InventoryTests(unittest.TestCase):
             "ingestor-describe-envelope": 12,
             "plexus-model": 63,
             "plexus-archive-model": 66,
-            "plexus-statement": 71,
-            "plexus-statement-text": 70,
-            "plexus-format-document": 70,
-            "plexus-format-text": 69,
-            "models-archived-models": 68,
+            "plexus-statement": 72,
+            "plexus-statement-text": 71,
+            "plexus-format-document": 71,
+            "plexus-format-text": 70,
+            "models-archived-models": 70,
             "registry-archived-models": 57,
-            "consensus-state-records": 66,
-            "consensus-state-corruption": 66,
-            "consensus-raft-records": 65,
+            "consensus-state-records": 67,
+            "consensus-state-corruption": 67,
+            "consensus-raft-records": 66,
             "registry-stored-models": 50,
             "registry-stored-models-corruption": 50,
             "cluster-identity-record-rkyv": 2,
             "node-capability-records": 5,
             "node-settings-command-line": 11,
             "inferencer-describe-envelope": 1,
-            "consensus-raft-records-malformed": 51,
+            "consensus-raft-records-malformed": 52,
             "inferencer-tensor-columns": 1,
             "inferencer-state-snapshots": 1,
             "backup-inferencer-values": 3,
@@ -605,7 +607,12 @@ class InventoryTests(unittest.TestCase):
 
     def test_state_inspection_representations_are_bounded_pairs(self) -> None:
         targets = {target.id: target for target in bolero.load_inventory().targets}
-        for name, version in (("client-state-inspection", 7), ("state-inspection-cursor", 8)):
+        for name, version in (
+            ("client-state-inspection", 7),
+            ("state-inspection-cursor", 8),
+            ("interconnect-wasm-state-inspection", 3),
+            ("wasm-state-inspection-cursor", 3),
+        ):
             with self.subTest(target=name):
                 self.assertEqual(targets[name].domain_version, version)
                 self.assertEqual(targets[name].max_input_bytes, 512)

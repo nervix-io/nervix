@@ -25,7 +25,7 @@ use axum::{
     body::Bytes,
     extract::{DefaultBodyLimit, State},
     http::Uri,
-    routing::post,
+    routing::{get, post},
 };
 use chrono::{DateTime, Utc};
 use error_stack::ResultExt as _;
@@ -35,7 +35,10 @@ use hyper_util::{
     service::TowerToHyperService,
 };
 use meticulous::{OptionExt as _, ResultExt as _};
-pub use model::{Fault, Model, Tamper};
+pub use model::{
+    Fault, Model, Tamper,
+    notifications::{StreamMode, StreamObservation},
+};
 use nervix_licensing_protocol::{document::DocumentLimits, documents::EmbeddedTrustBundle};
 use nervix_primitives::{
     net::TcpListener,
@@ -142,6 +145,10 @@ impl Service {
             .route("/v1/challenges", post(request))
             .route("/v1/activations", post(request))
             .route("/v1/activations/{id}/refresh", post(request))
+            .route(
+                "/v1/activations/{id}/events",
+                get(model::notifications::events),
+            )
             .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
             .with_state(ServerState {
                 model: model.clone(),
