@@ -158,6 +158,45 @@ async fn a_lost_creation_response_reuses_one_signed_decision_and_one_capacity_sl
 }
 
 #[nervix_primitives::test]
+async fn response_signature_corruption_preserves_the_valid_saved_replay() {
+    let mut model = fixture();
+    let cluster = signer().assured("cluster signer");
+    let request = Request::Create {
+        common: common(&mut model).await,
+        license_key: model.license_key.clone(),
+        kind: ActivationKind::Persistent,
+        cluster_key: cluster.public_key().clone(),
+    };
+    let compact = cluster.sign(&request, limits()).assured("signed request");
+    model.script(Fault::CorruptResponseSignature);
+    let (first, _) = model.answer("/v1/activations", compact.as_bytes());
+    let first: DecisionResponse =
+        serde_json::from_slice(&bytes(first).await).assured("typed response");
+    let trust = TrustState::build(&model.bundle, &first.trust, limits())
+        .assured("unchanged real trust chain");
+    assert!(
+        trust
+            .verify_decision(&first.decision, DecisionVerification::Apply, limits())
+            .is_err(),
+        "the first transmitted signature must be corrupt"
+    );
+    let (retry, _) = model.answer("/v1/activations", compact.as_bytes());
+    let saved = bytes(retry).await;
+    let retry: DecisionResponse = serde_json::from_slice(&saved).assured("typed replay");
+    let verified = trust
+        .verify_decision(&retry.decision, DecisionVerification::Apply, limits())
+        .assured("the saved decision remains correctly signed");
+    assert_eq!(verified.decision().in_reply_to, request.common().request_id);
+    let (repeated, _) = model.answer("/v1/activations", compact.as_bytes());
+    assert_eq!(bytes(repeated).await, saved);
+    assert_eq!(model.activation_count(), 1);
+    assert_eq!(
+        model.requests,
+        vec![request.clone(), request.clone(), request]
+    );
+}
+
+#[nervix_primitives::test]
 async fn a_signed_tampering_script_is_distinct_from_a_broken_signature() {
     for fault in [
         Tamper::Cluster,
