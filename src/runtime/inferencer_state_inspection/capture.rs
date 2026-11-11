@@ -69,10 +69,10 @@ impl Runtime {
                     .snapshot_bytes()
                     .change_context(ProcessorStatePageError::Admission)?;
                 let mut captured = Vec::new();
-                let mut catalog = match &selection.partition_exclusions {
-                    Some(_) => Some(BTreeSet::new()),
-                    None => None,
-                };
+                let mut catalog = selection
+                    .partition_exclusions
+                    .as_ref()
+                    .map(|_| BTreeSet::new());
                 runtime
                     .inner
                     .state_replication_routing
