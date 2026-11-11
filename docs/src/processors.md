@@ -652,6 +652,24 @@ execution uses the bounded extension workers; mapped input and public output con
 respect the configured relay operation limit. The state is retained once per active branch;
 use the branch's `MAX INSTANCES` to bound the number of live copies.
 
+### Inspect inference configuration and state
+
+`DESCRIBE INFERENCER <name>;` reports the pinned resource version and file, execution mode,
+`INPUTS`, `STATE` and `OUTPUT SCHEMA` declarations, branch policy and output routes. The static
+state bytes per branch count the declared native `F32` tensor elements; snapshot framing and
+ONNX session memory are outside that count. A stateless inferencer reports zero.
+
+For a running stateful inferencer, the summary reports each execution unit's owner and replicas,
+the branches in its published state and their bytes, and publication, persistence and replica
+progress. These are observations of immutable publications, not a synchronized state cut. Revisions
+are branch-local: a unit's revision at each stage is the highest branch revision observed at that
+stage, not a checkpoint covering every branch. Missing observations are shown as unavailable;
+revision zero remains a valid observed baseline. The summary reads no tensor values or branch-key
+values. Any node can serve the command by asking the scheduled unit owners for their typed facts.
+
+The [inferencer state metrics](metrics-and-observability.md#inferencer-state) measure active state
+bytes, snapshot failures and branch initialization on each execution owner.
+
 ### Inspect Carried Inference State
 
 ```plexus
