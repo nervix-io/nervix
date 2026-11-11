@@ -31,7 +31,6 @@ use hyper::{
         ACCESS_CONTROL_ALLOW_HEADERS, ACCESS_CONTROL_ALLOW_METHODS, ACCESS_CONTROL_ALLOW_ORIGIN,
         CONNECTION, LOCATION, SEC_WEBSOCKET_ACCEPT, SEC_WEBSOCKET_KEY, UPGRADE,
     },
-    server::conn::http1,
     service::service_fn,
     upgrade,
 };
@@ -363,6 +362,7 @@ pub(in crate::application) async fn serve_web_console_http(
     mut listener: PublicListener,
     shutdown: CancellationToken,
 ) {
+    let settings = listener.settings();
     let mut connection_tasks = JoinSet::new();
 
     loop {
@@ -371,13 +371,14 @@ pub(in crate::application) async fn serve_web_console_http(
             _ = shutdown.cancelled() => {
                 break;
             }
+            _ = connection_tasks.join_next(), if !connection_tasks.is_empty() => continue,
             accepted = listener.accept() => accepted,
         };
         let service = service.clone();
         connection_tasks.spawn(async move {
             let io = TokioIo::new(stream);
             let service = service.clone();
-            if let Err(error) = http1::Builder::new()
+            if let Err(error) = super::listener_io::http_builder(settings)
                 .serve_connection(
                     io,
                     service_fn(move |request| {
@@ -402,6 +403,7 @@ pub(in crate::application) async fn serve_web_console_https(
     shutdown: CancellationToken,
 ) {
     let tls_acceptor = TlsAcceptor::from(tls_server_config);
+    let settings = listener.settings();
     let mut connection_tasks = JoinSet::new();
 
     loop {
@@ -410,21 +412,31 @@ pub(in crate::application) async fn serve_web_console_https(
             _ = shutdown.cancelled() => {
                 break;
             }
+            _ = connection_tasks.join_next(), if !connection_tasks.is_empty() => continue,
             accepted = listener.accept() => accepted,
         };
         let tls_acceptor = tls_acceptor.clone();
         let service = service.clone();
         connection_tasks.spawn(async move {
-            let stream = match tls_acceptor.accept(stream).await {
-                Ok(stream) => stream,
-                Err(error) => {
+            let stream = match nervix_primitives::time::timeout(
+                settings.tls_timeout(),
+                tls_acceptor.accept(stream),
+            )
+            .await
+            {
+                Ok(Ok(stream)) => stream,
+                Ok(Err(error)) => {
                     warn!(error = %error, "web console tls handshake failed");
+                    return;
+                }
+                Err(error) => {
+                    warn!(%error, "web console TLS handshake timeout");
                     return;
                 }
             };
             let io = TokioIo::new(stream);
             let service = service.clone();
-            if let Err(error) = http1::Builder::new()
+            if let Err(error) = super::listener_io::http_builder(settings)
                 .serve_connection(
                     io,
                     service_fn(move |request| {
