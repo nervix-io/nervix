@@ -70,6 +70,36 @@ pub fn evaluate_policy(snapshot: LicensingSnapshot) -> LicensingPolicy {
             Some(Err(_)) | None => policy.state = PolicyState::Degraded,
         }
     }
+    if let Some(initialized) = &policy.snapshot.initialized
+        && let nervix_consensus::LicensingMode::Released(release) = &initialized.record.mode
+    {
+        policy.state = PolicyState::Releasing;
+        let transitions = release.transitions.values();
+        let effective = nervix_licensing_protocol::impact::EffectiveUsage {
+            conditions: &policy.conditions,
+            transitions,
+        };
+        let quotas = QuotaName::ALL
+            .into_iter()
+            .map(|name| {
+                (
+                    name,
+                    effective
+                        .quota(
+                            name.as_str(),
+                            initialized.record.licensing_time.into_datetime(),
+                        )
+                        .assured("release admission validated every transition allowance"),
+                )
+            })
+            .collect::<Vec<_>>();
+        for (name, value) in quotas {
+            policy.conditions.quotas.insert(
+                name.as_str().to_owned(),
+                nervix_licensing_protocol::conditions::ConditionValue::Known(value),
+            );
+        }
+    }
     policy
 }
 
@@ -81,16 +111,30 @@ pub enum PolicyState {
     LicensedOverdue,
     Lapsed,
     Degraded,
+    Releasing,
 }
 
 pub fn next_deadline(policy: &LicensingPolicy) -> Option<Timestamp> {
     let initialized = policy.snapshot.initialized.as_ref()?;
     let time = initialized.record.licensing_time;
+    if let nervix_consensus::LicensingMode::Released(release) = &initialized.record.mode {
+        return release
+            .transitions
+            .values()
+            .iter()
+            .map(|transition| {
+                Timestamp::try_from(transition.deadline)
+                    .assured("committed grant deadline fits Timestamp")
+            })
+            .filter(|at| *at > time)
+            .min();
+    }
     let binding_expiry = match &initialized.record.mode {
         nervix_consensus::LicensingMode::Activated(activation) => {
             activation.binding.ephemeral_expires_at
         }
-        nervix_consensus::LicensingMode::Free => None,
+        nervix_consensus::LicensingMode::Free { .. }
+        | nervix_consensus::LicensingMode::Released(_) => None,
     };
     let signed = match &initialized.verification {
         Some(Ok(verified)) => {
@@ -127,6 +171,7 @@ impl LicensingPolicy {
             PolicyState::LicensedOverdue => "licensed_overdue",
             PolicyState::Lapsed => "lapsed",
             PolicyState::Degraded => "degraded",
+            PolicyState::Releasing => "releasing",
         }
     }
 

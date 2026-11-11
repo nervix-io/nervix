@@ -1144,7 +1144,7 @@ fn command_execution_effect(
     arbitrary: &mut Arbitrary<'_>,
     reference: &CommandExecutionReference,
 ) -> CommandExecutionEffect {
-    match arbitrary.entropy().byte() % 9 {
+    match arbitrary.entropy().byte() % 11 {
         7 => CommandExecutionEffect::AlterCluster {
             changes: arbitrary.cluster_parameter_values().assignments(),
             applied: optional(arbitrary, Arbitrary::cluster_parameter_record).map(Box::new),
@@ -1176,6 +1176,14 @@ fn command_execution_effect(
         5 => CommandExecutionEffect::DropNode {
             identity: arbitrary.node_identity(),
             member_at_admission: arbitrary.entropy().flag(),
+        },
+        9 => CommandExecutionEffect::RotateLicenseClusterKey {
+            outcome: optional(arbitrary, licensing_command_outcome),
+            identity: Box::new(crate::cluster_identity::tests::identity(arbitrary).public()),
+        },
+        10 => CommandExecutionEffect::ReleaseLicense {
+            outcome: optional(arbitrary, licensing_command_outcome),
+            binding: Box::new(crate::licensing::tests::activation_binding(arbitrary)),
         },
         8 => CommandExecutionEffect::ActivateLicense {
             binding: Box::new(crate::licensing::tests::activation_binding(arbitrary)),
@@ -1358,6 +1366,8 @@ fn command_execution_result(
         CommandExecutionEffect::CreateDomain { .. }
         | CommandExecutionEffect::AlterCluster { .. }
         | CommandExecutionEffect::CreateUser { .. }
+        | CommandExecutionEffect::RotateLicenseClusterKey { .. }
+        | CommandExecutionEffect::ReleaseLicense { .. }
         | CommandExecutionEffect::ActivateLicense { .. }
         | CommandExecutionEffect::DropNode { .. } => {}
     }
@@ -1846,6 +1856,14 @@ fn complete_application_command(arbitrary: &mut Arbitrary<'_>) -> ConsensusComma
 enum CommandVariant {
     AnnounceNodeCapabilities,
     InstallClusterIdentity,
+    BeginClusterKeyRotation,
+    PrepareClusterKeyRotationRequest,
+    CompleteClusterKeyRotation,
+    AbandonClusterKeyRotation,
+    ReleaseLicense,
+    PrepareLicenseReleaseRequest,
+    ConfirmRelease,
+
     ActivateLicense,
     ApplyLicenseDecision,
     InstallTrustDocuments,
@@ -1900,6 +1918,17 @@ impl CommandVariant {
         match command {
             ConsensusCommand::AnnounceNodeCapabilities { .. } => Self::AnnounceNodeCapabilities,
             ConsensusCommand::InstallClusterIdentity { .. } => Self::InstallClusterIdentity,
+            ConsensusCommand::BeginClusterKeyRotation { .. } => Self::BeginClusterKeyRotation,
+            ConsensusCommand::PrepareClusterKeyRotationRequest { .. } => {
+                Self::PrepareClusterKeyRotationRequest
+            }
+            ConsensusCommand::CompleteClusterKeyRotation { .. } => Self::CompleteClusterKeyRotation,
+            ConsensusCommand::AbandonClusterKeyRotation { .. } => Self::AbandonClusterKeyRotation,
+            ConsensusCommand::ReleaseLicense { .. } => Self::ReleaseLicense,
+            ConsensusCommand::PrepareLicenseReleaseRequest { .. } => {
+                Self::PrepareLicenseReleaseRequest
+            }
+            ConsensusCommand::ConfirmRelease { .. } => Self::ConfirmRelease,
             ConsensusCommand::ActivateLicense { .. } => Self::ActivateLicense,
             ConsensusCommand::ApplyLicenseDecision { .. } => Self::ApplyLicenseDecision,
             ConsensusCommand::InstallTrustDocuments { .. } => Self::InstallTrustDocuments,
@@ -1989,6 +2018,49 @@ fn command_of(arbitrary: &mut Arbitrary<'_>, variant: CommandVariant) -> Consens
         },
         CommandVariant::InstallClusterIdentity => ConsensusCommand::InstallClusterIdentity {
             identity: Box::new(crate::cluster_identity::tests::identity(arbitrary)),
+        },
+        CommandVariant::BeginClusterKeyRotation => ConsensusCommand::BeginClusterKeyRotation {
+            identity: Box::new(crate::cluster_identity::tests::identity(arbitrary).public()),
+            pending_key: Box::new(crate::cluster_identity::tests::pending(arbitrary)),
+        },
+        CommandVariant::PrepareClusterKeyRotationRequest => {
+            ConsensusCommand::PrepareClusterKeyRotationRequest {
+                request_id: uuid::Uuid::from_bytes(std::array::from_fn(|_| {
+                    arbitrary.entropy().byte()
+                })),
+                request: Box::new(crate::licensing::tests::prepared_request(arbitrary)),
+            }
+        }
+        CommandVariant::CompleteClusterKeyRotation => {
+            ConsensusCommand::CompleteClusterKeyRotation {
+                request_id: uuid::Uuid::from_bytes(std::array::from_fn(|_| {
+                    arbitrary.entropy().byte()
+                })),
+                decision: Box::new(crate::licensing::tests::received_decision(arbitrary)),
+            }
+        }
+        CommandVariant::AbandonClusterKeyRotation => ConsensusCommand::AbandonClusterKeyRotation {
+            reference: arbitrary.retry_reference(),
+            code: nervix_licensing_vocabulary::ProblemCode::ProofInvalid,
+            request_id: uuid::Uuid::from_bytes(std::array::from_fn(|_| arbitrary.entropy().byte())),
+        },
+        CommandVariant::ReleaseLicense => ConsensusCommand::ReleaseLicense {
+            reference: arbitrary.retry_reference(),
+            binding: Box::new(crate::licensing::tests::activation_binding(arbitrary)),
+            request_id: uuid::Uuid::from_bytes(std::array::from_fn(|_| arbitrary.entropy().byte())),
+            released_at: arbitrary.timestamp(),
+        },
+        CommandVariant::PrepareLicenseReleaseRequest => {
+            ConsensusCommand::PrepareLicenseReleaseRequest {
+                request_id: uuid::Uuid::from_bytes(std::array::from_fn(|_| {
+                    arbitrary.entropy().byte()
+                })),
+                request: Box::new(crate::licensing::tests::prepared_request(arbitrary)),
+            }
+        }
+        CommandVariant::ConfirmRelease => ConsensusCommand::ConfirmRelease {
+            request_id: uuid::Uuid::from_bytes(std::array::from_fn(|_| arbitrary.entropy().byte())),
+            decision: optional(arbitrary, crate::licensing::tests::received_decision).map(Box::new),
         },
         CommandVariant::ActivateLicense => ConsensusCommand::ActivateLicense {
             binding: Box::new(crate::licensing::tests::activation_binding(arbitrary)),
@@ -2246,7 +2318,7 @@ fn seeded_bytes(seed: u64, length: usize) -> Vec<u8> {
 
 /// Every variant and shape of the transaction, commit plan, report and command execution records
 /// [`state_machine`] promises to reach, as [`RecordWalk`] names them.
-const EXPECTED_RECORDS: [&str; 48] = [
+const EXPECTED_RECORDS: [&str; 50] = [
     "ReplicatedTransaction::session",
     "ReplicatedTransaction::command",
     "ReplicatedTransaction::latest_preview",
@@ -2281,6 +2353,8 @@ const EXPECTED_RECORDS: [&str; 48] = [
     "CommandExecutionEffect::Statement",
     "CommandExecutionEffect::CreateUser",
     "CommandExecutionEffect::ActivateLicense",
+    "CommandExecutionEffect::RotateLicenseClusterKey",
+    "CommandExecutionEffect::ReleaseLicense",
     "CommandExecutionEffect::DropNode",
     "CommandExecutionEffect::Restore",
     "RestoreExecution::completed_steps",
@@ -2462,6 +2536,12 @@ impl RecordWalk {
             CommandExecutionEffect::ActivateLicense { .. } => {
                 self.see("CommandExecutionEffect::ActivateLicense");
             }
+            CommandExecutionEffect::RotateLicenseClusterKey { .. } => {
+                self.see("CommandExecutionEffect::RotateLicenseClusterKey")
+            }
+            CommandExecutionEffect::ReleaseLicense { .. } => {
+                self.see("CommandExecutionEffect::ReleaseLicense")
+            }
             CommandExecutionEffect::CreateUser { .. } => {
                 self.see("CommandExecutionEffect::CreateUser");
             }
@@ -2551,4 +2631,14 @@ fn every_record_variant_is_generated_across_seeds() {
         unexpected.is_empty(),
         "generated but not expected: {unexpected:?}"
     );
+}
+
+fn licensing_command_outcome(arbitrary: &mut Arbitrary<'_>) -> crate::LicensingCommandOutcome {
+    if arbitrary.entropy().flag() {
+        crate::LicensingCommandOutcome::Applied
+    } else {
+        crate::LicensingCommandOutcome::Refused {
+            code: nervix_licensing_vocabulary::ProblemCode::ProofInvalid,
+        }
+    }
 }

@@ -518,8 +518,8 @@ status, keeping the start version, start mode, clock, schedule and incremental s
 
 The current emitter Models carry explicit key expressions, source-partition routing and
 expression-only SQS FIFO groups. The dedicated database owns exactly four current keyspaces:
-`raft_entity_listener_policy_logs`, `raft_entity_listener_policy_meta`, `raft_entity_listener_policy_state`, and
-`raft_entity_listener_policy_snapshots`. Opening it validates the complete keyspace namespace before
+`raft_entity_licensing_policy_logs`, `raft_entity_licensing_policy_meta`, `raft_entity_licensing_policy_state`, and
+`raft_entity_licensing_policy_snapshots`. Opening it validates the complete keyspace namespace before
 reading any records. The committed cluster-parameter record stores ordered typed TLS cipher
 suites and key-exchange groups; recovery validates their complete pair before returning that
 record. This namespace identifies the current Model shape, including the statement
@@ -546,7 +546,7 @@ construction where it stands, including the typed `payload` expression scope and
 `RESET WASM PROCESSOR ... STATE` that names its processor and scope and takes its domain from
 the transaction, as the step effect and commit plan step keep it too. The database also stores
 incarnation-bound node capability claims under record-family tag `C`, including transport, DNS, database, consensus, engine, connector host and listener capacities. The existing boxed capability announcement keeps unrelated command variants within the inline payload-size bound. Its state metadata
-requires the current `ClusterState` encoding, 34, including the cluster identity reference,
+requires the current `ClusterState` encoding, 35, including the cluster identity reference,
 committed cluster parameters, the durable restore installation gate and the unit-keyed committed
 schedule in which a relay of a partitioned branch is scheduled as one unit per partition.
 The current shape also requires inferencer state bindings and their initial expressions,
@@ -750,6 +750,17 @@ their unused candidates are discarded. Ordinary observations expose only the pub
 The leader coordinator obtains a separate signing-only handle and owns that handle's leadership
 lifetime.
 
+Rotation admission captures the public identity. `BeginClusterKeyRotation` checks that basis and
+stores the pending key, target generation, operation UUID and native command reference. Activated rotation retains its
+signed request before transport; `CompleteClusterKeyRotation` verifies the pending key binding
+and atomically installs that key and its decision, preserving signed deadlines.
+`AbandonClusterKeyRotation` drops only its matching pending operation. Free and Released modes
+complete locally in the begin command. The retired key records the completed operation UUID and
+native command reference. Completion and definitive refusal also record their typed outcome in
+the original command execution effect in the same atomic apply. A recovered command therefore
+retains its result even if later rotations have replaced the retired key before final response
+storage. Generation overflow and stale identities conflict.
+
 The singleton lives at state key `K`. Metadata carries its expected UUID, and both are written in
 the same durable batch. Only an absent reference together with an absent record denotes an
 uninitialized cluster. A missing or disagreeing record fails as invalid consensus record storage;
@@ -777,7 +788,9 @@ and incremental-write ownership, and snapshots include it. Snapshot installation
 record validation as ordinary open.
 
 An activated record retains its independent binding and original compact JWS, decision and conditions
-revisions, signed issue time, received time and request UUID. It also retains original signed trust
+revisions, the conditions revisions referenced by its transitions, signed issue time, received time,
+request UUID and accepted operation context. Rotation context lets recovery verify a new decision
+whose unchanged refresh deadline was already due at issuance. It also retains original signed trust
 documents. The immutable store environment fixes the service, build anchors and admitted document
 capacity before open. Apply verifies each proposal under those inputs; open and snapshot install
 rebuild a derived verification view. A semantic signature, chain or binding failure keeps the record
@@ -785,13 +798,25 @@ and exposes an unverifiable view, while structural decode and identity failures 
 Revocation committed after a decision preserves its verified signature and marks its signing key
 revoked. Derived parsed decisions and verification flags are never persisted.
 
-`ActivateLicense` installs only from Free mode and sets the identity's ever-activated fact. Refresh
+`ActivateLicense` installs from Free or Released mode and sets the identity's ever-activated fact. Refresh
 proposals retain the independent binding and compare their expected revision with the committed
 revision. An exact verified replay is a no-op even with another expected revision; a lower decision
 or a higher decision from a stale expected revision conflicts. Rejection changes no committed state.
 Trust installation verifies and appends complete document identities, refusing conflicting bytes.
 Time advances retain the maximum committed observation. No apply or recovery path reads a clock or
 opens a connection. The leader's independent timer and request owner propose those facts.
+
+Release admission captures the activation binding. `ReleaseLicense` compares that binding,
+refuses expired ephemeral activation and commits Released mode before any service notification.
+The record retains its original public identity, signing capability while awaiting confirmation,
+operation UUID and native command reference, exact prepared request, transitions and latest grant deadline. Local key rotation
+cannot invalidate that outstanding notification. `ConfirmRelease` is fenced by the release UUID
+and verifies the service's released decision against the original binding. Confirmation never
+extends grants; confirmed release becomes Free once its last grant ends. Free mode retains the
+completed release UUID, and the original command effect records success atomically with release,
+so replay after a later activation cannot release that newer binding. The former activation's
+offline deadline no longer gates admission under the free policy. The current consensus namespaces identify
+these complete shapes; another stored shape requires recreation.
 
 An observer captures public identity, licensing record, applied revision and `UsageSnapshot` from
 one committed state. Node usage is the number of committed voters and learners, and domain usage
