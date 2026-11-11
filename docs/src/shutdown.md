@@ -1010,7 +1010,8 @@ is told to stop when its turn comes, then processors, emitters, generators, rein
 placement tasks that replicate state. A task that has not ended when its stop grace runs out is
 aborted. The node logs `shutdown task exceeded grace period; aborting` at `warn` with the domain,
 the task's kind, and its name, or `relay owner task did not stop cleanly` and
-`relay state task did not stop cleanly` for a relay's tasks. The grace is two seconds, except that
+`relay state task did not stop cleanly` for a relay's tasks. The grace is configured by
+`--task-grace-period`, two seconds by default, except that
 a relay owner and an emitter are given the domain drain timeout first. Once the domain's tasks have
 ended, its stop tells the checkpoint writer of each placement's state to make its last write, and
 waits for those writes and for the last write of each of its deduplicator, window and stateful

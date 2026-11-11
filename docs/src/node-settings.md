@@ -17,10 +17,9 @@ running service. A node publishes, carries and verifies its prerequisites as
 parameters have one committed Raft record, seeded at the first bootstrap and changed through
 `ALTER CLUSTER SET`. Every admitted node announces its resolved capability record through Raft.
 
-Runtime admission and failed committed-runtime installation share the existing half-second retry
-cadence owned by `RuntimeAdmission`. This remains an internal policy constant pending settings
-adoption; installation does not introduce another numeric policy or an operator option. Committed
-schedule and domain updates can wake an installation retry sooner, and success ends that cadence.
+Runtime admission and failed committed-runtime installation share the configured
+`--control-plane-runtime-state-retry-interval`, 500ms by default. Committed schedule and domain
+updates can wake an installation retry sooner, and success ends that cadence.
 
 Canonical Kafka start admission derives its deadline from the interconnect checkpoint-transfer
 contract. Selecting and durably adopting a start cut waits for that transfer, so it shares the
@@ -87,8 +86,8 @@ owns refusal, re-slicing, bootstrap transfer and flow-control behavior; the plac
 the capacity score and its precedence.
 
 `adopted peer receive bounds` lists the claims this answering node's outbound pools currently use.
-The independent capability controller refreshes them on the runtime-admission retry cadence,
-derived as two Raft heartbeat intervals, half a second by default, including when another domain's
+The independent capability controller refreshes them on the configured runtime-state retry
+cadence, 500ms by default and independent of Raft heartbeat, including when another domain's
 leader reconciliation is busy. This separates committed
 capacity from its local adoption without a second configuration authority.
 
