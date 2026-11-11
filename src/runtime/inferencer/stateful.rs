@@ -373,6 +373,7 @@ impl BoundSession {
             .await
             .change_context(StatefulInferenceError::Execution)?;
         executor
+            .accepted_work()
             .run_cpu(CpuClass::Bulk, reservation, move |_charge, cancellation| {
                 cancellation
                     .check()
@@ -573,7 +574,7 @@ impl BoundSession {
     }
 }
 impl StatefulInferenceSession {
-    /// A refusal before admission is an execution error. A native row refusal is the inner result.
+    /// A full worker class waits while this branch retains its session. A native row refusal is the inner result.
     /// The previous native generation stays installed until the whole row and every output validate.
     pub(in crate::runtime) async fn execute(
         &mut self,
@@ -602,6 +603,13 @@ impl StatefulInferenceSession {
             .reserve(MemoryClass::Relay, bytes.max(1))
             .await
             .change_context(StatefulInferenceError::Execution)?;
+        // Keep the installed native session while the full class has not granted a place.
+        // Cancelling this wait drops only its charge and FIFO registration.
+        let admitted = executor
+            .accepted_work()
+            .prepare_cpu(CpuClass::Extension, charge)
+            .await
+            .change_context(StatefulInferenceError::Execution)?;
         let mut session = self
             .session
             .take()
@@ -609,8 +617,8 @@ impl StatefulInferenceSession {
         let generation = self.generation.clone();
         let definition = definition.clone();
         let limit = executor.limits().relay_decoded_bytes.as_u64();
-        let (session, result) = executor
-            .run_cpu(CpuClass::Extension, charge, move |_charge, cancellation| {
+        let (session, result) = admitted
+            .run(move |_charge, cancellation| {
                 let result = session.run(&definition, &generation, &row, limit, cancellation);
                 (session, result)
             })

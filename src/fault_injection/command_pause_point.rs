@@ -69,6 +69,8 @@ pub(super) enum CommandPausePoint {
     },
     RestoreBranchStateConversion(DomainName),
     IngestorRoutePoll(DomainNodeRef),
+    ProcessorInputBeforePoll(DomainNodeRef),
+    ProcessorInputAfterPoll(DomainNodeRef),
     IngestorBranchBuffer(DomainNodeRef, BranchKeyFingerprint),
     OwnershipHandoffFlush(DomainName),
     ProcessorPartitionInstall(DomainNodeRef),

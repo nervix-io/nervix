@@ -1747,7 +1747,7 @@ impl RelayBoundaryServices {
             .batch
             .encode_arrow_ipc(
                 dispatcher.executor(),
-                nervix_execution::QueueAdmission::RefuseWhenFull,
+                nervix_execution::QueueAdmission::WaitForPlace,
             )
             .await
         {
@@ -2018,7 +2018,7 @@ impl RelayBoundaryServices {
                     .batch
                     .encode_arrow_ipc(
                         dispatcher.executor(),
-                        nervix_execution::QueueAdmission::RefuseWhenFull,
+                        nervix_execution::QueueAdmission::WaitForPlace,
                     )
                     .await
                 {

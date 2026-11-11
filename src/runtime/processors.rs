@@ -965,6 +965,20 @@ impl ReordererOutputBuffer {
             .flat_map(|pending| pending.batch.acks.iter())
     }
 
+    pub(super) fn has_acknowledgements(&self) -> bool {
+        self.pending
+            .iter()
+            .any(|pending| pending.batch.acks.iter().any(|acks| !acks.is_empty()))
+    }
+
+    pub(super) fn ack_alive(&self) {
+        for pending in &self.pending {
+            for acknowledgement in &pending.batch.acks {
+                acknowledgement.ack_alive();
+            }
+        }
+    }
+
     pub(super) fn clear(&mut self) {
         self.pending.clear();
         self.estimated_bytes = 0;

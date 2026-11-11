@@ -33,7 +33,7 @@ use crate::{
         branch_runtime::BranchExecutionRuntime,
         test_fixtures::{FilledCpuClass, single_worker_executor},
     },
-    runtime_ack::{AckOutcome, AckRootTracker, AckSet},
+    runtime_ack::{AckOutcome, AckProgress, AckRootTracker, AckSet},
     runtime_schema::{
         CodecContractError, RECORD_BUILDER_SETS_OPENED, RECORD_COLUMN_SETS_BUILT,
         RuntimeRecordBatch, RuntimeRecordMetadata, RuntimeValue, compile_codec, test_runtime_row,
@@ -1576,29 +1576,74 @@ async fn ingestor_and_reingestor_routes_apply_size_boundaries_independently_per_
 }
 
 #[nervix_primitives::test]
-async fn a_node_without_room_for_a_branched_input_keeps_its_acknowledgements() {
+async fn accepted_work_branched_input_waits_for_room_and_keeps_its_acknowledgements() {
     let executor = single_worker_executor();
     let filled = FilledCpuClass::fill(&executor, CpuClass::Data).await;
 
-    let prepared = prepare_branched_entrypoint_input(
+    let mut prepared = Box::pin(prepare_branched_entrypoint_input(
         &executor,
         branched_input("acme", 10),
         BranchInstanceAckBoundary::Preserve,
-    )
-    .await;
-
-    let Err(failure) = prepared else {
-        panic!("a full data class must refuse the input");
-    };
-    assert!(matches!(
-        failure.error.current_context(),
-        IngestGroupError::Execution {
-            operation: IngestGroupAdmittedOperation::PrepareBranchInput,
-        }
     ));
-    assert_eq!(failure.preserved.len(), 1);
-    assert_eq!(executor.snapshot().data_cpu.refused, 1);
+
+    assert!(
+        futures_util::poll!(prepared.as_mut()).is_pending(),
+        "accepted input must wait for a worker place without failing or losing its \
+         acknowledgements"
+    );
+    assert_eq!(executor.snapshot().data_cpu.refused, 0);
     filled.release().await;
+
+    let branches = prepared
+        .await
+        .assured("the input is valid and the data class has room again");
+    assert_eq!(branches.len(), 1);
+    let batch = branches
+        .into_iter()
+        .next()
+        .verified("the length above is one")
+        .assured("the input's only branch is valid");
+    assert_eq!(batch.message_count(), 1);
+    assert_eq!(batch.acks.len(), 1);
+    assert_eq!(executor.snapshot().data_cpu.refused, 0);
+    assert_eq!(executor.snapshot().relay_memory.reserved_bytes, 0);
+}
+
+#[nervix_primitives::test]
+async fn accepted_work_branch_input_keeps_acknowledgements_alive_during_wait() {
+    let executor = single_worker_executor();
+    let filled = FilledCpuClass::fill(&executor, CpuClass::Data).await;
+    let (acks, mut completion) = AckSet::root();
+    let mut input = branched_input("acme", 10);
+    input.acks = vec![acks];
+    let mut prepared = Box::pin(prepare_branched_entrypoint_input(
+        &executor,
+        input,
+        BranchInstanceAckBoundary::Preserve,
+    ));
+    for _ in 0..3 {
+        nervix_primitives::task::consume_budget().await;
+        let progress = nervix_primitives::select! {
+            biased;
+            _ = &mut prepared => panic!("accepted input keeps waiting while its class is full"),
+            progress = timeout(REMOTE_ACK_ALIVE_INTERVAL * 2, completion.wait_for_progress()) => {
+                progress.assured("the retained acknowledgement is renewed while admission waits")
+            }
+        };
+        assert_eq!(progress, AckProgress::Alive);
+    }
+    filled.release().await;
+    let branches = prepared
+        .await
+        .assured("the input completes after worker room frees");
+    for branch in branches {
+        let branch = branch.assured("the retained branch is valid");
+        for acks in branch.acks {
+            acks.ack_success();
+        }
+    }
+    assert_eq!(completion.wait().await, AckOutcome::Ack);
+    assert_eq!(executor.snapshot().data_cpu.refused, 0);
 }
 
 #[nervix_primitives::test]

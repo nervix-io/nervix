@@ -577,6 +577,7 @@ pub(super) fn test_named_branching(
 
 /// One compiled single-route window processor state, driven the way its branch task drives it.
 pub(super) struct TestWindow {
+    pub(super) executor: Executor,
     pub(super) plan: WindowAccumulatorPlan,
     pub(super) compiled: CompiledWindowAggregateProgram,
     pub(super) input_schema: Arc<CompiledSchema>,
@@ -600,6 +601,22 @@ impl TestWindow {
         output: &[OptionalTestField],
         window_message_width: Option<std::num::NonZeroU64>,
     ) -> Self {
+        Self::with_settings(
+            set,
+            input,
+            output,
+            window_message_width,
+            nervix_vm::VmSettings::default(),
+        )
+    }
+
+    pub(super) fn with_settings(
+        set: &str,
+        input: &[OptionalTestField],
+        output: &[OptionalTestField],
+        window_message_width: Option<std::num::NonZeroU64>,
+        settings: nervix_vm::VmSettings,
+    ) -> Self {
         let input_schema = test_optional_schema(input);
         let output_schema = test_optional_schema(output);
         let input_relay = named::<RelayName>("events");
@@ -615,6 +632,7 @@ impl TestWindow {
             &relay_schemas,
             None,
             nervix_vm::CompileOptions {
+                settings,
                 window_message_width,
                 ..nervix_vm::CompileOptions::default()
             },
@@ -633,6 +651,7 @@ impl TestWindow {
         let plan = WindowAccumulatorPlan::new([&compiled.route], sketch_layout, max_state_bytes);
         let state = WindowProcessorState::new(&plan, 1);
         Self {
+            executor: Executor::default(),
             plan,
             compiled,
             input_schema,
@@ -667,7 +686,7 @@ impl TestWindow {
                 .expect("the test batch should be a valid relay batch"),
         );
         let mut evaluated = evaluate_window_arguments(
-            &Executor::default(),
+            &self.executor,
             &self.plan,
             std::slice::from_ref(&self.compiled),
             &carrier,
@@ -717,7 +736,7 @@ impl TestWindow {
         &self,
     ) -> error_stack::Result<RuntimeRecordBatch, WindowProcessorError> {
         super::window_processor::evaluate_window_aggregate(
-            &Executor::default(),
+            &self.executor,
             &self.compiled,
             &self.state,
             &self.output_schema,
@@ -1408,6 +1427,17 @@ pub(super) fn emitter_context() -> EmitterConnectorContext {
     }
 }
 
+/// A completed owner must leave no runtime event queued. Refresh the task's cooperative budget
+/// before polling the shared asynchronous receive API, so budget exhaustion cannot hide an event.
+pub(crate) async fn assert_no_runtime_events(events: &mut broadcast::Receiver<RuntimeEvent>) {
+    nervix_primitives::task::yield_now().await;
+    let mut received = std::pin::pin!(events.recv());
+    assert!(
+        futures_util::poll!(received.as_mut()).is_pending(),
+        "accepted worker pressure emits no runtime event"
+    );
+}
+
 /// An executor with one worker and one waiting place in every class, so a test can fill a class.
 pub(crate) fn single_worker_executor() -> Executor {
     let one = NonZeroUsize::MIN;
@@ -1429,6 +1459,123 @@ pub(crate) fn single_worker_executor() -> Executor {
     .expect("the default budgets hold the default operation limits")
 }
 
+/// Exercise a program's worker contract even when its fixture has only one row.
+pub(crate) fn offloaded_vm_settings() -> nervix_vm::VmSettings {
+    nervix_vm::VmSettings::resolve(nervix_vm::VmSettingOverrides {
+        inline_row_limit: Some(0),
+        ..Default::default()
+    })
+    .assured("zero is a supported inline row limit")
+}
+
+pub(super) fn offloaded_route_program(
+    schema: &Arc<CompiledSchema>,
+    route: &str,
+) -> CompiledProgramWithMaterializedInterest {
+    compile_processor_output_filter_map_program(
+        &named("node"),
+        &[named("incoming")],
+        &named("outgoing"),
+        &construction(route),
+        RuntimeVmSchemaPair {
+            input: schema.arrow_schema(),
+            input_sensitivity: VmSchemaSensitivity::default(),
+            output: schema.arrow_schema(),
+            output_sensitivity: VmSchemaSensitivity::default(),
+        },
+        None,
+        RuntimeVmCompileContext {
+            settings: offloaded_vm_settings(),
+            available_materialized_streams: &HashMap::default(),
+            available_lookups: &HashMap::default(),
+            current_branching: &ResolvedBranching::unbranched(),
+            udfs: None,
+        },
+    )
+    .assured("the fixture route compiles")
+    .assured("the fixture route has a program")
+}
+
+/// A default-threshold offload with one independently attached ACK share per row.
+pub(crate) fn accepted_large_value_batch(acks: AckSet) -> RelayRecordBatch {
+    let schema = test_schema(&[("value", nervix_models::ParseAsType::I64)]);
+    let batch = schema
+        .batch_from_test_rows(
+            (1..=1025).map(|value| [("value".to_owned(), RuntimeValue::I64(value))]),
+        )
+        .assured("the large input matches its schema");
+    let metadata = RecordMetadataColumns::from_rows(
+        (0..1025).map(|_| crate::runtime_schema::RuntimeRecordMetadata::test()),
+    );
+    let mut shares = Vec::with_capacity(1025);
+    acks.split_into(1025, &mut shares);
+    RelayRecordBatch::from_runtime_batch(schema, None, batch, metadata, shares)
+        .assured("each accepted row has its metadata and ACK share")
+}
+
+/// Drive a production owner to charged admission with its class full, then free it and finish.
+/// Refusal is a completed failure; waiting retains the charge and its unchanged input.
+pub(crate) async fn accepted_work_after_cpu_room<F: std::future::Future>(
+    executor: &Executor,
+    class: nervix_execution::CpuClass,
+    future: F,
+) -> F::Output {
+    accepted_work_with_full_cpu_class(executor, class, future, false).await
+}
+
+/// Aggregate emission reads its accumulators through an injector rather than input columns.
+/// Its legitimate zero-byte VM charge cannot serve as the admission probe; its finite first poll
+/// is independently red on refusal and pending on the full class.
+pub(crate) async fn accepted_zero_charge_work_after_cpu_room<F: std::future::Future>(
+    executor: &Executor,
+    class: nervix_execution::CpuClass,
+    future: F,
+) -> F::Output {
+    accepted_work_with_full_cpu_class(executor, class, future, true).await
+}
+
+async fn accepted_work_with_full_cpu_class<F: std::future::Future>(
+    executor: &Executor,
+    class: nervix_execution::CpuClass,
+    future: F,
+    expect_zero_charge: bool,
+) -> F::Output {
+    let filled = FilledCpuClass::fill(executor, class).await;
+    let reserved = |snapshot: nervix_execution::ExecutorSnapshot| match class {
+        nervix_execution::CpuClass::Bulk => snapshot.bulk_memory.reserved_bytes,
+        _ => snapshot.relay_memory.reserved_bytes,
+    };
+    let baseline = reserved(executor.snapshot());
+    let mut future = std::pin::pin!(future);
+    let mut first = None;
+    // Drive finite projection/budget yields too: pending alone would not prove that a large
+    // input reached its full class. These owners retain their charge while waiting for a place.
+    for _ in 0..1024 {
+        nervix_primitives::task::consume_budget().await;
+        let polled = futures_util::poll!(future.as_mut());
+        if expect_zero_charge {
+            assert_eq!(
+                reserved(executor.snapshot()),
+                baseline,
+                "this aggregate emission has no input columns to charge"
+            );
+        }
+        if polled.is_ready() || reserved(executor.snapshot()) > baseline || expect_zero_charge {
+            first = Some(polled);
+            break;
+        }
+        nervix_primitives::task::yield_now().await;
+    }
+    filled.release().await;
+    let first = first.assured("the owner reaches CPU admission within its finite projection");
+    match first {
+        std::task::Poll::Ready(_) => {
+            panic!("accepted work completed while its worker class had no place")
+        }
+        std::task::Poll::Pending => future.await,
+    }
+}
+
 /// The only worker and the only waiting place of one CPU class of a
 /// [`single_worker_executor`], held so that the class refuses the next job submitted to it.
 pub(crate) struct FilledCpuClass {
@@ -1441,14 +1588,37 @@ impl FilledCpuClass {
     /// Fill `class` of `executor`: one job holds its worker until the fill is released, and a
     /// second waits behind it.
     pub(crate) async fn fill(executor: &Executor, class: nervix_execution::CpuClass) -> Self {
+        Self::fill_with_charge(executor, class, nervix_execution::MemoryClass::Relay, 0).await
+    }
+
+    /// The modeled semaphore requires positive acquisitions. These dummy jobs take a byte of
+    /// Bulk memory each, leaving the real branch's Relay accounting independently observable.
+    #[cfg(feature = "shuttle")]
+    pub(crate) async fn fill_with_bulk_charge(
+        executor: &Executor,
+        class: nervix_execution::CpuClass,
+    ) -> Self {
+        Self::fill_with_charge(executor, class, nervix_execution::MemoryClass::Bulk, 1).await
+    }
+
+    async fn fill_with_charge(
+        executor: &Executor,
+        class: nervix_execution::CpuClass,
+        memory: nervix_execution::MemoryClass,
+        bytes: u64,
+    ) -> Self {
         let (release, held) = nervix_primitives::sync::blocking::mpsc::channel::<()>();
+        let (started, is_started) = nervix_primitives::sync::oneshot::channel();
         let holder = executor.clone();
         nervix_primitives::task::spawn(async move {
             let reservation = holder
-                .try_reserve(nervix_execution::MemoryClass::Relay, 0)
-                .expect("a zero charge is always admitted");
+                .try_reserve(memory, bytes)
+                .expect("the fixture's bounded charge fits");
             holder
                 .run_cpu(class, reservation, move |_charge, _cancellation| {
+                    started
+                        .send(())
+                        .assured("the fixture waits for its occupied worker");
                     // Releasing the fill disconnects the channel, which is the release.
                     match held.recv() {
                         Ok(()) | Err(nervix_primitives::sync::blocking::mpsc::RecvError) => {}
@@ -1457,22 +1627,28 @@ impl FilledCpuClass {
                 .await
                 .expect("the holding job runs once the class has a worker");
         });
-        while executor.snapshot().cpu_class(class).running == 0 {
-            nervix_primitives::task::yield_now().await;
-        }
+        is_started
+            .await
+            .assured("the fixture's only worker is occupied");
+        let (queued, is_queued) = nervix_primitives::sync::oneshot::channel();
         let waiter = executor.clone();
         nervix_primitives::task::spawn(async move {
             let reservation = waiter
-                .try_reserve(nervix_execution::MemoryClass::Relay, 0)
-                .expect("a zero charge is always admitted");
-            waiter
-                .run_cpu(class, reservation, |_charge, _cancellation| ())
-                .await
+                .try_reserve(memory, bytes)
+                .expect("the fixture's bounded charge fits");
+            let mut run =
+                std::pin::pin!(waiter.run_cpu(class, reservation, |_charge, _cancellation| ()));
+            assert!(futures_util::poll!(run.as_mut()).is_pending());
+            queued
+                .send(())
+                .assured("the fixture waits for its occupied queue place");
+            run.await
                 .expect("the waiting job runs once the holder leaves");
         });
-        while executor.snapshot().cpu_class(class).pending == 0 {
-            nervix_primitives::task::yield_now().await;
-        }
+        is_queued
+            .await
+            .assured("the fixture's only queue place is occupied");
+        assert_eq!(executor.snapshot().cpu_class(class).pending, 1);
         Self {
             executor: executor.clone(),
             class,
@@ -1484,6 +1660,7 @@ impl FilledCpuClass {
     pub(crate) async fn release(self) {
         drop(self.release);
         loop {
+            nervix_primitives::task::consume_budget().await;
             let state = self.executor.snapshot().cpu_class(self.class);
             if state.running == 0 && state.pending == 0 {
                 return;

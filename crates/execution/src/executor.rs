@@ -146,6 +146,12 @@ impl Default for Executor {
 }
 
 impl Executor {
+    /// Bind execution to work the caller has already accepted and continues to own.
+    /// Its CPU jobs wait for a worker place until the owner ends the future.
+    pub fn accepted_work(&self) -> crate::AcceptedWork<'_> {
+        crate::AcceptedWork { executor: self }
+    }
+
     /// Build the executor from limits that are validated together, so a node whose budgets cannot
     /// hold the largest operation it is configured to accept fails at startup instead of stalling
     /// on the first one.
@@ -411,7 +417,7 @@ impl Executor {
         }
     }
 
-    fn cpu_pool(&self, class: CpuClass) -> &WorkerPool {
+    pub(crate) fn cpu_pool(&self, class: CpuClass) -> &WorkerPool {
         match class {
             CpuClass::Control => &self.inner.control_cpu,
             CpuClass::Credentials => &self.inner.credentials_cpu,

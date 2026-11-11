@@ -253,6 +253,7 @@ impl OnnxInferencerSession {
             .await
             .change_context(InferencerError::LoadExecution)?;
         let loaded = executor
+            .accepted_work()
             .run_cpu(CpuClass::Bulk, reservation, move |_charge, cancellation| {
                 cancellation
                     .check()
@@ -304,6 +305,7 @@ impl OnnxInferencerSession {
             .change_context(InferencerError::RunExecution)?;
         let session = Arc::clone(&self.session);
         executor
+            .accepted_work()
             .run_cpu(CpuClass::Data, reservation, move |_charge, cancellation| {
                 prepared.run(&mut session.lock(), cancellation)
             })
@@ -998,6 +1000,7 @@ impl RuntimeTensorSchema for InferencerTensorSchema {
     nervix::layer(harness, reason = "test module remains outside product execution")
 )]
 mod tests {
+    use meticulous::ResultExt as _;
     use nervix_execution::{CpuClass, Executor};
     use nervix_models::{
         InferencerExecutionMode, InferencerTensorDeclaration, InferencerTensorDimension,
@@ -1008,8 +1011,8 @@ mod tests {
     use ordered_float::OrderedFloat;
 
     use super::{
-        InferencerError, OnnxInferencerSession, PreparedExecution, PreparedInvocation,
-        RuntimeTensorSchema, RuntimeTensorSlice,
+        OnnxInferencerSession, PreparedExecution, PreparedInvocation, RuntimeTensorSchema,
+        RuntimeTensorSlice,
     };
     use crate::{
         runtime::{
@@ -1385,22 +1388,46 @@ mod tests {
     }
 
     #[nervix_primitives::test]
-    async fn a_node_without_room_refuses_to_load_or_run_a_model() {
+    async fn accepted_work_model_run_keeps_its_rows_while_waiting() {
         let session = OnnxInferencerSession::load(&Executor::default(), &identity_model())
             .await
             .expect("the identity model loads");
         let executor = single_worker_executor();
-        let filled_bulk = FilledCpuClass::fill(&executor, CpuClass::Bulk).await;
         let filled_data = FilledCpuClass::fill(&executor, CpuClass::Data).await;
 
-        let Err(load) = OnnxInferencerSession::load(&executor, &identity_model()).await else {
-            panic!("a full bulk class must refuse the load");
-        };
-        assert!(matches!(
-            load.current_context(),
-            InferencerError::LoadExecution
+        let batch = matrix_batch();
+        let inputs = [matrix_input()];
+        let outputs = [transformed_output()];
+        let mut run = Box::pin(session.execute(
+            &executor,
+            &batch,
+            &inputs,
+            &outputs,
+            InferencerExecutionMode::PerMessage,
         ));
-        let Err(run) = session
+        assert!(
+            futures_util::poll!(run.as_mut()).is_pending(),
+            "an accepted model run must wait without becoming an inference failure"
+        );
+        filled_data.release().await;
+        let output = run
+            .await
+            .assured("the accepted model run succeeds after room frees");
+        assert_eq!(output.len(), batch.batch().num_rows());
+        assert_eq!(executor.snapshot().data_cpu.refused, 0);
+    }
+    #[nervix_primitives::test]
+    async fn accepted_work_model_load_keeps_the_retained_flush_while_bulk_is_full() {
+        let executor = single_worker_executor();
+        let path = identity_model();
+        let session = crate::runtime::test_fixtures::accepted_work_after_cpu_room(
+            &executor,
+            CpuClass::Bulk,
+            OnnxInferencerSession::load(&executor, &path),
+        )
+        .await
+        .assured("the retained model flush waits for its initial session");
+        let output = session
             .execute(
                 &executor,
                 &matrix_batch(),
@@ -1409,14 +1436,8 @@ mod tests {
                 InferencerExecutionMode::PerMessage,
             )
             .await
-        else {
-            panic!("a full data class must refuse the run");
-        };
-        assert!(matches!(
-            run.current_context(),
-            InferencerError::RunExecution
-        ));
-        filled_bulk.release().await;
-        filled_data.release().await;
+            .assured("the loaded session runs the retained input");
+        assert_eq!(output, vec![vec![matrix_value()]]);
+        assert_eq!(executor.snapshot().bulk_cpu.refused, 0);
     }
 }
