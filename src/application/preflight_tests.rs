@@ -241,6 +241,7 @@ async fn the_complete_startup_total_includes_client_node_windows_and_database_ca
     let PreflightError::MemoryBelowBudgets { budgets, .. } = refused.current_context() else {
         panic!("all pools and client credit must fit together: {refused:?}");
     };
-    assert_eq!(*budgets, ByteUnit::Mebibyte(1262));
+    // The total includes the independent 128 MiB Intake pool as well as the existing pools.
+    assert_eq!(*budgets, ByteUnit::Mebibyte(1390));
     assert!(!scratch.path().join("db").exists());
 }
