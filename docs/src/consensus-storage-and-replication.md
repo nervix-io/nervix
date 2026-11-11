@@ -809,7 +809,9 @@ opens a connection. The leader's independent timer and request owner propose tho
 
 The stop gate is a predicate over the record, never a stored flag: an activated ephemeral binding
 whose `ephemeral_expires_at` committed licensing time has reached. It reads the independent binding,
-not the decision's verification view, so edited bytes cannot lift it. While it is closed, apply
+not the decision's verification view, so edited bytes cannot lift it. `ReleaseLicense` refuses an
+expired activation through the same predicate, evaluated at the licensing time the release
+establishes. While it is closed, apply
 refuses `StartDomain`, `ResumeDomain`, a model-pause recovery that would resume a domain, a
 `PutDomain` that writes a running or paused record, and a transaction's `START` step with the typed
 `LicensingStop` conflict, and admits no new domain record. A restore's final step under the gate

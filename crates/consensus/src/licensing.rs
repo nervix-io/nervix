@@ -151,15 +151,7 @@ impl LicensingRecord {
         let LicensingMode::Activated(activation) = &self.mode else {
             return None;
         };
-        let binding = &activation.binding;
-        if binding.kind != nervix_licensing_vocabulary::ActivationKind::Ephemeral {
-            return None;
-        }
-        let expired_at = binding.ephemeral_expires_at?;
-        if self.licensing_time < expired_at {
-            return None;
-        }
-        Some(nervix_models::LicensingStopReason::EphemeralExpired { expired_at })
+        activation.binding.expiry_stop(self.licensing_time)
     }
 }
 

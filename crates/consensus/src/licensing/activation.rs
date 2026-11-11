@@ -165,6 +165,21 @@ impl LicenseDecisionError {
 }
 
 impl ActivationBinding {
+    /// The licensing stop this binding imposes at licensing time `at` (specification §7.6,
+    /// §10.7): an ephemeral binding stops processing once `at` reaches its fixed expiry, and a
+    /// persistent binding never stops. It reads the independent binding alone, never a decision's
+    /// verification, and it is the one predicate the stop gate and a release's refusal share.
+    pub fn expiry_stop(&self, at: Timestamp) -> Option<nervix_models::LicensingStopReason> {
+        if self.kind != ActivationKind::Ephemeral {
+            return None;
+        }
+        let expired_at = self.ephemeral_expires_at?;
+        if at < expired_at {
+            return None;
+        }
+        Some(nervix_models::LicensingStopReason::EphemeralExpired { expired_at })
+    }
+
     fn protocol_binding(&self, identity: &ClusterIdentity) -> Activation {
         Activation {
             activation_id: self.activation_id,
