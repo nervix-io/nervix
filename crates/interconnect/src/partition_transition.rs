@@ -19,8 +19,6 @@
     )
 )]
 
-#[cfg(test)]
-use nervix_models::RemoteRuntimeField;
 use nervix_models::{
     BranchKeyFingerprint, BranchName, DomainName, NodeRef, PartitionEpochNumber,
     RemoteRuntimeRecordMetadata, Timestamp, Unit,
@@ -188,7 +186,9 @@ impl InterconnectRequest for PartitionTransitionRequest {
 mod properties {
     use meticulous::{OptionExt as _, ResultExt as _};
     use nervix_execution::Executor;
-    use nervix_models::{ModelKind, ModelName, RemoteRuntimeValue, SchemaFingerprint};
+    use nervix_models::{
+        ModelKind, ModelName, RemoteRuntimeField, RemoteRuntimeValue, SchemaFingerprint,
+    };
 
     use super::*;
     use crate::{

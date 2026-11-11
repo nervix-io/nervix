@@ -312,7 +312,7 @@ impl PlacementAnalysis {
         graph: &DiGraph<ActiveNode, EdgeKind>,
     ) -> Result<(), Report<RegistryError>> {
         let mut pairs = self.explicit_pairs.iter_mut().collect::<Vec<_>>();
-        pairs.sort_by(|(left, _), (right, _)| left.cmp(right));
+        pairs.sort_by_key(|(left, _)| *left);
         for (pair, resolved) in pairs {
             let correspondence = hop_correspondence(pair, indices, graph);
             if !correspondence.class.permits(resolved.policy) {

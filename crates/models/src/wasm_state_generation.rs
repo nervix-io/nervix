@@ -1695,7 +1695,7 @@ mod tests {
             generation(1)
         );
         let admission = node.admit_wasm_state_recovery(
-            scope.clone(),
+            scope,
             generation(1),
             WasmSavedStateRejection::ApplicationState,
             Some(held),

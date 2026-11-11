@@ -18,7 +18,7 @@ use nervix_models::{
 };
 use nervix_primitives::{sync::StdArc, time::timeout};
 
-use super::MaterializedPageBounds;
+use super::{MaterializedPageBounds, MaterializedPageQuery};
 use crate::{
     runtime::{
         BranchPresence, DomainRoutingSnapshot, RelayBoundaryFanout, RelayBoundaryServices,
@@ -111,12 +111,14 @@ async fn subscription_delivery_can_precede_the_materialized_inspection_generatio
             .capture_materialized_state_page(
                 &domain,
                 &relay,
-                Unit::SINGLE,
-                StateInspectionBranchSelection::All,
-                None,
-                bounds(),
-                false,
-                None,
+                MaterializedPageQuery {
+                    unit: Unit::SINGLE,
+                    selection: StateInspectionBranchSelection::All,
+                    after: None,
+                    bounds: bounds(),
+                    catalog_requested: false,
+                    filter: None,
+                },
             )
             .await
             .assured("the owner supplies the initial page")
@@ -152,12 +154,14 @@ async fn subscription_delivery_can_precede_the_materialized_inspection_generatio
             .capture_materialized_state_page(
                 &domain,
                 &relay,
-                Unit::SINGLE,
-                StateInspectionBranchSelection::All,
-                None,
-                bounds(),
-                false,
-                None,
+                MaterializedPageQuery {
+                    unit: Unit::SINGLE,
+                    selection: StateInspectionBranchSelection::All,
+                    after: None,
+                    bounds: bounds(),
+                    catalog_requested: false,
+                    filter: None,
+                },
             )
             .await
             .assured("the owner supplies a page while its input is queued")
@@ -197,12 +201,14 @@ async fn subscription_delivery_can_precede_the_materialized_inspection_generatio
             .capture_materialized_state_page(
                 &domain,
                 &relay,
-                Unit::SINGLE,
-                StateInspectionBranchSelection::All,
-                None,
-                bounds(),
-                false,
-                None,
+                MaterializedPageQuery {
+                    unit: Unit::SINGLE,
+                    selection: StateInspectionBranchSelection::All,
+                    after: None,
+                    bounds: bounds(),
+                    catalog_requested: false,
+                    filter: None,
+                },
             )
             .await
             .assured("the owner supplies the updated page")

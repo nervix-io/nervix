@@ -54,6 +54,17 @@ pub enum SchedulerMode {
     Random,
 }
 
+/// Captured cluster placement inputs shared by topology resolution and unit assignment.
+pub(crate) struct DomainSchedulingInputs<'a> {
+    pub domain: &'a DomainName,
+    pub cluster_nodes: &'a [ClusterNodeName],
+    pub replica_count: usize,
+    pub existing: Option<&'a DomainSchedule>,
+    #[cfg(feature = "testing")]
+    pub scheduler_mode: SchedulerMode,
+    pub capabilities: &'a BTreeMap<ClusterNodeName, NodeCapabilities>,
+}
+
 /// How well one cluster node suits the entity being placed. The field order is the order the
 /// candidates are ranked in: placement policy first, then operator preference, then the lightest
 /// load, then how far the node sits from the round-robin cursor, with the node name breaking ties.
@@ -608,13 +619,15 @@ impl ActiveGraph {
             None => &empty,
         };
         self.schedule_for_domain_with_topology(
-            domain,
-            cluster_nodes,
-            replica_count,
-            existing,
-            #[cfg(feature = "testing")]
-            scheduler_mode,
-            capabilities,
+            DomainSchedulingInputs {
+                domain,
+                cluster_nodes,
+                replica_count,
+                existing,
+                #[cfg(feature = "testing")]
+                scheduler_mode,
+                capabilities,
+            },
             topology,
             None,
         )
@@ -623,15 +636,12 @@ impl ActiveGraph {
     /// Place the graph only after its observation-dependent units and placement rules resolve.
     pub(crate) fn schedule_for_domain_with_topology(
         &self,
-        domain: &DomainName,
-        cluster_nodes: &[ClusterNodeName],
-        replica_count: usize,
-        existing: Option<&DomainSchedule>,
-        #[cfg(feature = "testing")] scheduler_mode: SchedulerMode,
-        capabilities: &BTreeMap<ClusterNodeName, NodeCapabilities>,
+        inputs: DomainSchedulingInputs<'_>,
         topology: &PartitionTopology,
         restored: Option<&nervix_models::PartitionTopologySnapshot>,
     ) -> Result<DomainSchedule, Report<RegistryError>> {
+        let domain = inputs.domain;
+        let existing = inputs.existing;
         let specs = super::partition_topology::source_specs(domain, self)?;
         let empty = PartitionTopology::default();
         let previous = match (restored, existing) {
@@ -661,7 +671,17 @@ impl ActiveGraph {
                 &graph.branches_with_keyed_state(),
             ),
         };
-        Ok(graph.schedule_resolved_for_domain(
+        Ok(graph.schedule_resolved_for_domain(inputs, topology, epochs, restored.is_some()))
+    }
+
+    fn schedule_resolved_for_domain(
+        &self,
+        inputs: DomainSchedulingInputs<'_>,
+        topology: &PartitionTopology,
+        epochs: PartitionEpochs,
+        restored: bool,
+    ) -> DomainSchedule {
+        let DomainSchedulingInputs {
             domain,
             cluster_nodes,
             replica_count,
@@ -669,24 +689,7 @@ impl ActiveGraph {
             #[cfg(feature = "testing")]
             scheduler_mode,
             capabilities,
-            topology,
-            epochs,
-            restored.is_some(),
-        ))
-    }
-
-    fn schedule_resolved_for_domain(
-        &self,
-        domain: &DomainName,
-        cluster_nodes: &[ClusterNodeName],
-        replica_count: usize,
-        existing: Option<&DomainSchedule>,
-        #[cfg(feature = "testing")] scheduler_mode: SchedulerMode,
-        capabilities: &BTreeMap<ClusterNodeName, NodeCapabilities>,
-        topology: &PartitionTopology,
-        epochs: PartitionEpochs,
-        restored: bool,
-    ) -> DomainSchedule {
+        } = inputs;
         let cluster_nodes = SortedSet::from_unsorted(
             cluster_nodes
                 .iter()

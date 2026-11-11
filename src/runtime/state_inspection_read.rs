@@ -56,6 +56,16 @@ pub(crate) struct MaterializedPageBounds {
     pub(crate) bytes: u64,
 }
 
+/// One owner's bounded row selection and the optional inherited-key census it captures with it.
+pub(crate) struct MaterializedPageQuery {
+    pub(crate) unit: Unit,
+    pub(crate) selection: StateInspectionBranchSelection,
+    pub(crate) after: Option<(Option<BranchKeyFingerprint>, u64)>,
+    pub(crate) bounds: MaterializedPageBounds,
+    pub(crate) catalog_requested: bool,
+    pub(crate) filter: Option<nervix_interconnect::MaterializedPartitionFilter>,
+}
+
 pub(crate) struct MaterializedInspectionPage {
     pub(crate) fingerprint: [u8; 32],
     pub(crate) counts: StateInspectionCounts,
@@ -89,13 +99,16 @@ impl Runtime {
         &self,
         domain: &DomainName,
         relay: &RelayName,
-        unit: Unit,
-        selection: StateInspectionBranchSelection,
-        after: Option<(Option<BranchKeyFingerprint>, u64)>,
-        bounds: MaterializedPageBounds,
-        catalog_requested: bool,
-        filter: Option<nervix_interconnect::MaterializedPartitionFilter>,
+        query: MaterializedPageQuery,
     ) -> Result<MaterializedStateCapture, Report<StatePageReadError>> {
+        let MaterializedPageQuery {
+            unit,
+            selection,
+            after,
+            bounds,
+            catalog_requested,
+            filter,
+        } = query;
         let MaterializedPageBounds {
             rows: max_rows,
             bytes: max_bytes,

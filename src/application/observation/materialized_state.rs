@@ -677,18 +677,20 @@ impl SessionServiceImpl {
             .capture_materialized_state_page(
                 &request.domain,
                 &request.relay,
-                request.unit,
-                request.selection,
-                request.after,
-                crate::runtime::MaterializedPageBounds {
-                    rows,
-                    bytes: request.max_bytes.min(
-                        u64::try_from(SessionLimits::DEFAULT.transfer_bytes())
-                            .assured("session limits fit u64"),
-                    ),
+                crate::runtime::MaterializedPageQuery {
+                    unit: request.unit,
+                    selection: request.selection,
+                    after: request.after,
+                    bounds: crate::runtime::MaterializedPageBounds {
+                        rows,
+                        bytes: request.max_bytes.min(
+                            u64::try_from(SessionLimits::DEFAULT.transfer_bytes())
+                                .assured("session limits fit u64"),
+                        ),
+                    },
+                    catalog_requested: catalog,
+                    filter,
                 },
-                catalog,
-                filter,
             )
             .await
         {

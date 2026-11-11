@@ -178,17 +178,16 @@ impl UnitCorrespondence {
             HopClass::DataDependent
         } else if declared_emission {
             HopClass::Fiber
-        } else if lhs == UnitLayout::AwaitingTopology && rhs == UnitLayout::AwaitingTopology {
-            HopClass::Identity
-        } else if matches!((lhs, rhs), (UnitLayout::Partitions(a), UnitLayout::Partitions(b)) if a == b)
-            && left
-                .resolved_branching
-                .as_ref()
-                .map(|branch| branch.fields())
-                == right
+        } else if (lhs == UnitLayout::AwaitingTopology && rhs == UnitLayout::AwaitingTopology)
+            || (matches!((lhs, rhs), (UnitLayout::Partitions(a), UnitLayout::Partitions(b)) if a == b)
+                && left
                     .resolved_branching
                     .as_ref()
                     .map(|branch| branch.fields())
+                    == right
+                        .resolved_branching
+                        .as_ref()
+                        .map(|branch| branch.fields()))
         {
             HopClass::Identity
         } else if lhs.count() == 1 || rhs.count() == 1 {

@@ -1192,7 +1192,7 @@ impl SessionServiceImpl {
                 let inputs = captured_inputs
                     .take()
                     .verified("a direct model plan carries the inputs it validated");
-                let prepared = match {
+                let prepared = {
                     let snapshot = self
                         .capture_domain_schedule_planning_snapshot(&inputs)
                         .await;
@@ -1203,7 +1203,8 @@ impl SessionServiceImpl {
                         inputs.schedule(),
                         restored_partitions,
                     )
-                } {
+                };
+                let prepared = match prepared {
                     Ok(prepared) => prepared,
                     Err(error) => {
                         return create_registry_error_response(

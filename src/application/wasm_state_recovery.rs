@@ -243,9 +243,7 @@ impl SessionServiceImpl {
             return Ok(());
         };
         let admission = self
-            .admit_wasm_state_recovery(
-                domain, processor, &entity, scope, generation, rejection, unit,
-            )
+            .admit_wasm_state_recovery(domain, &entity, scope, generation, rejection, unit)
             .await?;
         let request = match admission {
             WasmStateRecoveryAdmission::Admitted(request)
@@ -277,7 +275,7 @@ impl SessionServiceImpl {
             Err(_) => WasmStateRecoveryOutcome::Failed,
         };
         let recorded = self
-            .settle_wasm_state_recovery(domain, processor, &entity, &scope, &request, outcome, unit)
+            .settle_wasm_state_recovery(domain, &entity, &scope, &request, outcome, unit)
             .await;
 
         // A reset that failed and an attempt whose outcome was not recorded are both failures, and
@@ -393,13 +391,13 @@ impl SessionServiceImpl {
     async fn admit_wasm_state_recovery(
         &self,
         domain: &DomainName,
-        processor: &ModelName,
         entity: &NodeRef,
         scope: WasmStateResetScope,
         generation: WasmStateGeneration,
         rejection: WasmSavedStateRejection,
         unit: Option<nervix_models::Unit>,
     ) -> error_stack::Result<WasmStateRecoveryAdmission, WasmStateRecoveryError> {
+        let processor = &entity.identifier;
         let record = || WasmStateRecoveryError::Record {
             processor: processor.clone(),
         };
@@ -439,13 +437,13 @@ impl SessionServiceImpl {
     async fn settle_wasm_state_recovery(
         &self,
         domain: &DomainName,
-        processor: &ModelName,
         entity: &NodeRef,
         scope: &WasmStateResetScope,
         request: &CommandExecutionReference,
         outcome: WasmStateRecoveryOutcome,
         unit: Option<nervix_models::Unit>,
     ) -> error_stack::Result<(), WasmStateRecoveryError> {
+        let processor = &entity.identifier;
         let record = || WasmStateRecoveryError::Record {
             processor: processor.clone(),
         };

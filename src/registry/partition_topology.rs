@@ -638,13 +638,15 @@ mod tests {
         let capabilities = crate::registry::uniform_capabilities(&nodes);
         let schedule = graph
             .schedule_for_domain_with_topology(
-                &domain,
-                &nodes,
-                0,
-                None,
-                #[cfg(feature = "testing")]
-                SchedulerMode::Sticky,
-                &capabilities,
+                crate::registry::DomainSchedulingInputs {
+                    domain: &domain,
+                    cluster_nodes: &nodes,
+                    replica_count: 0,
+                    existing: None,
+                    #[cfg(feature = "testing")]
+                    scheduler_mode: SchedulerMode::Sticky,
+                    capabilities: &capabilities,
+                },
                 &topology,
                 None,
             )
@@ -687,13 +689,15 @@ mod tests {
         .topology;
         let next = graph
             .schedule_for_domain_with_topology(
-                &domain,
-                &nodes,
-                0,
-                Some(&schedule),
-                #[cfg(feature = "testing")]
-                SchedulerMode::Sticky,
-                &capabilities,
+                crate::registry::DomainSchedulingInputs {
+                    domain: &domain,
+                    cluster_nodes: &nodes,
+                    replica_count: 0,
+                    existing: Some(&schedule),
+                    #[cfg(feature = "testing")]
+                    scheduler_mode: SchedulerMode::Sticky,
+                    capabilities: &capabilities,
+                },
                 &grown,
                 None,
             )

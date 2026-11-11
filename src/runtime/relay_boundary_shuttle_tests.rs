@@ -38,6 +38,9 @@ fn shuttle_a_detached_consumer_joins_during_attached_backpressure() {
                             RelayPartitioning::Partitioned(_) => {
                                 RelayBoundaryFanout::branch_collapse_with_capacity(nonzero!(1usize))
                             }
+                            RelayPartitioning::AwaitingTopology => {
+                                panic!("the model selects whole or resolved direct partitions")
+                            }
                         };
                         let services = Arc::new(RelayBoundaryServices::new(
                             fanout,

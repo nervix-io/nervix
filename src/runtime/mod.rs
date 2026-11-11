@@ -1056,8 +1056,8 @@ pub(crate) use runtime_settings::RuntimeEnvironment;
 pub use runtime_settings::{RestoreStagingMaxBytes, RuntimeSettings, StateSnapshotInterval};
 use state_assignment::{CheckpointOwners, ScheduledStateAssignment, SharedStateAssignment};
 pub(crate) use state_inspection_read::{
-    MaterializedInspectionPage, MaterializedPageBounds, MaterializedStateCapture,
-    StatePageReadError,
+    MaterializedInspectionPage, MaterializedPageBounds, MaterializedPageQuery,
+    MaterializedStateCapture, StatePageReadError,
 };
 pub(crate) use state_replication::StateSyncAck;
 pub(crate) use state_snapshot_transfer::{DescribeStateSnapshot, FetchStateSnapshot};

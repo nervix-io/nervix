@@ -47,7 +47,7 @@ mod scheduler;
 #[cfg(test)]
 pub(crate) use scheduler::uniform_capabilities;
 mod unit_placement;
-pub(crate) use scheduler::assign_server_listener_nodes;
+pub(crate) use scheduler::{DomainSchedulingInputs, assign_server_listener_nodes};
 mod storage;
 #[cfg(test)]
 mod test_fixtures;

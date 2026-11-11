@@ -191,13 +191,15 @@ impl DomainSchedulePlanningSnapshot {
         let schedule = match graph {
             Some(graph) => {
                 let mut schedule = graph.schedule_for_domain_with_topology(
-                    domain,
-                    &self.cluster_nodes,
-                    self.replica_count,
-                    current,
-                    #[cfg(feature = "testing")]
-                    self.mode.scheduler_mode(),
-                    &self.capabilities,
+                    crate::registry::DomainSchedulingInputs {
+                        domain,
+                        cluster_nodes: &self.cluster_nodes,
+                        replica_count: self.replica_count,
+                        existing: current,
+                        #[cfg(feature = "testing")]
+                        scheduler_mode: self.mode.scheduler_mode(),
+                        capabilities: &self.capabilities,
+                    },
                     topology,
                     restored,
                 )?;

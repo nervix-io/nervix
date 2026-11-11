@@ -354,6 +354,15 @@ struct ScannedIdentities {
     seen: ahash::HashSet<BranchKeyFingerprint>,
 }
 
+/// The restored placement against which one archived group's concrete keys are selected.
+struct RestoredRowSelection<'a> {
+    declarations: &'a RestoredBranchDeclarations,
+    node: &'a ScheduledNode,
+    unit: Unit,
+    archived_unit: Unit,
+    owners: Option<&'a RestoredRowOwners>,
+}
+
 struct RestoredRowOwners {
     holders: BTreeMap<BranchKeyFingerprint, super::partitions::RestoredKeyHolder>,
     _reservations: Vec<nervix_execution::Reservation>,
@@ -516,11 +525,13 @@ pub(super) async fn prepare_regrouped_materialized_checkpoint(
                     scan.select(
                         &identities,
                         &section,
-                        &declarations,
-                        &node,
-                        unit,
-                        archived_unit,
-                        owners.as_deref(),
+                        RestoredRowSelection {
+                            declarations: &declarations,
+                            node: &node,
+                            unit,
+                            archived_unit,
+                            owners: owners.as_deref(),
+                        },
                         cancellation,
                     )
                 })
@@ -599,13 +610,16 @@ impl ScannedIdentities {
         mut self,
         identities: &ChargedBytes,
         section: &SectionPath,
-        declarations: &RestoredBranchDeclarations,
-        node: &ScheduledNode,
-        unit: Unit,
-        archived_unit: Unit,
-        owners: Option<&RestoredRowOwners>,
+        selection: RestoredRowSelection<'_>,
         cancellation: &nervix_execution::Cancellation,
     ) -> Result<Self, Report<MaterializedRestoreError>> {
+        let RestoredRowSelection {
+            declarations,
+            node,
+            unit,
+            archived_unit,
+            owners,
+        } = selection;
         cancellation
             .check()
             .change_context(MaterializedRestoreError::Cancelled)?;
