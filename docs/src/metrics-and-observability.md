@@ -538,6 +538,17 @@ Node scheduling:
   already runnable. A timer asks to be woken every 250 milliseconds; the excess it is woken by is
   the delay every other task on that worker paid
 
+Control-plane configuration:
+
+- `nervix_control_plane_cadence_seconds{operation="..."}` is a gauge of the scraped node's
+  configured reconcile cadence or failure retry delay. Its fixed `operation` values are
+  `membership`, `scheduling`, `resource_replication`, `health`, `leadership_sync_retry`,
+  `runtime_state_retry`, `transaction_sweep` and `restore_staging`. The default values are
+  respectively 1, 1, 1, 1, 0.25, 0.5, 0.25 and 1 seconds. These immutable local capabilities
+  change on restart; they do not describe the duration of a pass or its observed frequency. A post-work delay starts after the
+  pass completes. [Node Settings](node-settings.md#control-plane-and-session-capabilities)
+  lists the options and the matching incarnation claim in `DESCRIBE CLUSTER`.
+
 Consensus retention:
 
 - `nervix_consensus_log_last_index`, `nervix_consensus_log_snapshot_index`,

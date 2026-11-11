@@ -141,7 +141,7 @@ pub(super) async fn prepare_materialized_checkpoint(
     let identity_bytes = identity_bytes
         .checked_add(table_bytes)
         .ok_or_else(|| Report::new(MaterializedRestoreError::MetadataTooLarge))?;
-    if identity_bytes > 8 * 1024 * 1024 {
+    if identity_bytes > executor.limits().snapshot_section_bytes.as_u64() {
         return Err(Report::new(MaterializedRestoreError::MetadataTooLarge));
     }
     let _identity_charge = executor

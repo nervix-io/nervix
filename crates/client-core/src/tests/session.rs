@@ -42,7 +42,7 @@ use tonic::{
     Request, Response, Status, Streaming,
     body::Body,
     codegen::{BoxFuture, Service, http},
-    server::{ClientStreamingService, Grpc, NamedService, StreamingService},
+    server::{Grpc, NamedService, StreamingService},
     transport::Server,
 };
 use url::Url;
@@ -195,6 +195,8 @@ struct ReceivedUpload {
 
 #[derive(Clone)]
 struct SessionService {
+    exchange_limits: SessionLimits,
+    upload_limits: SessionLimits,
     exchanges: mpsc::Sender<ServerExchange>,
     /// The hold the next exchange the client opens waits on before the server answers it.
     exchange_hold: Arc<Mutex<Option<oneshot::Receiver<()>>>>,
@@ -232,8 +234,10 @@ impl Service<http::Request<Body>> for SessionService {
         let service = self.clone();
         match request.uri().path() {
             EXCHANGE_PATH => Box::pin(async move {
-                let mut grpc = Grpc::new(ServerExchangeCodec::new(limits()));
+                let limits = service.exchange_limits;
+                let mut grpc = Grpc::new(ServerExchangeCodec::new(limits));
                 let exchange = OpenExchange {
+                    limits,
                     exchanges: service.exchanges,
                     hold: service.exchange_hold,
                 };
@@ -245,12 +249,12 @@ impl Service<http::Request<Body>> for SessionService {
                         crate::wire::RestoreFrame,
                     >::new());
                     Ok(grpc
-                        .client_streaming(restore_reply::ReceiveRestore { restores }, request)
+                        .streaming(restore_reply::ReceiveRestore { restores }, request)
                         .await)
                 } else {
                     let mut grpc = Grpc::new(crate::wire::grpc::ServerRestoreCodec::new(limits()));
                     Ok(grpc
-                        .client_streaming(
+                        .streaming(
                             foreign_restore::RestoreWithForeignReference {
                                 gate: service.restore_reply_gate,
                             },
@@ -260,13 +264,14 @@ impl Service<http::Request<Body>> for SessionService {
                 }
             }),
             UPLOAD_RESOURCE_PATH => Box::pin(async move {
-                let mut grpc = Grpc::new(ServerUploadCodec::new(limits()));
+                let mut grpc = Grpc::new(ServerUploadCodec::new(service.upload_limits));
                 let upload = InstallUpload {
+                    limits: service.upload_limits,
                     uploads: service.uploads,
                     fail_upload_replies: service.fail_upload_replies,
                     upload_reply_mode: service.upload_reply_mode,
                 };
-                Ok(grpc.client_streaming(upload, request).await)
+                Ok(grpc.streaming(upload, request).await)
             }),
             _ => {
                 Box::pin(
@@ -280,6 +285,7 @@ impl Service<http::Request<Body>> for SessionService {
 /// Hands every exchange the client opens to the test, and answers it once the hold the test
 /// placed on it, if any, is released.
 struct OpenExchange {
+    limits: SessionLimits,
     exchanges: mpsc::Sender<ServerExchange>,
     hold: Arc<Mutex<Option<oneshot::Receiver<()>>>>,
 }
@@ -290,6 +296,7 @@ impl StreamingService<VerifiedFrame<ClientFrame>> for OpenExchange {
     type Future = BoxFuture<Response<Self::ResponseStream>, Status>;
 
     fn call(&mut self, request: Request<Streaming<VerifiedFrame<ClientFrame>>>) -> Self::Future {
+        let limits = self.limits;
         let exchanges = self.exchanges.clone();
         let hold = self.hold.clone();
         Box::pin(async move {
@@ -307,7 +314,9 @@ impl StreamingService<VerifiedFrame<ClientFrame>> for OpenExchange {
                     "a hold the test dropped without releasing it lets the server answer too",
                 );
             }
-            Ok(Response::new(ReceiverStream::new(outbound)))
+            let mut response = Response::new(ReceiverStream::new(outbound));
+            crate::wire::grpc::limits::write(response.metadata_mut(), limits);
+            Ok(response)
         })
     }
 }
@@ -326,22 +335,44 @@ impl ExchangeHold {
     }
 }
 
+/// Ordinary one-answer calls publish the current limits before reading their request body.
+type AnnouncedAnswers<T> =
+    std::pin::Pin<Box<dyn nervix_primitives::stream::Stream<Item = Result<T, Status>> + Send>>;
+
+fn announced_answer<T: Send + 'static>(
+    answer: impl Future<Output = Result<T, Status>> + Send + 'static,
+    limits: SessionLimits,
+) -> Response<AnnouncedAnswers<T>> {
+    use nervix_primitives::stream::StreamExt as _;
+    let body: AnnouncedAnswers<T> =
+        Box::pin(nervix_primitives::stream::iter([answer]).then(|answer| answer));
+    let mut response = Response::new(body);
+    crate::wire::grpc::limits::write(response.metadata_mut(), limits);
+    response
+}
+
 /// Installs an upload whose chunks add up to its declared size as version 7.
 struct InstallUpload {
+    limits: SessionLimits,
     uploads: mpsc::Sender<ReceivedUpload>,
     fail_upload_replies: Arc<AtomicU64>,
     upload_reply_mode: Arc<Mutex<Option<UploadReplyMode>>>,
 }
 
-impl ClientStreamingService<VerifiedFrame<UploadFrame>> for InstallUpload {
+impl StreamingService<VerifiedFrame<UploadFrame>> for InstallUpload {
     type Response = EncodedFrame<UploadReplyFrame>;
-    type Future = BoxFuture<Response<Self::Response>, Status>;
+    type ResponseStream = AnnouncedAnswers<Self::Response>;
+    type Future = BoxFuture<Response<Self::ResponseStream>, Status>;
 
     fn call(&mut self, request: Request<Streaming<VerifiedFrame<UploadFrame>>>) -> Self::Future {
+        let limits = self.limits;
+        if let Some(status) = crate::wire::grpc::limits::offer_refusal(request.metadata(), limits) {
+            return Box::pin(async move { Err(status) });
+        }
         let uploads = self.uploads.clone();
         let fail_upload_replies = self.fail_upload_replies.clone();
         let upload_reply_mode = self.upload_reply_mode.clone();
-        Box::pin(async move {
+        let completion = async move {
             let mut inbound = request.into_inner();
             let Some(first) = inbound.message().await? else {
                 return Err(Status::invalid_argument("an empty upload stream"));
@@ -413,7 +444,7 @@ impl ClientStreamingService<VerifiedFrame<UploadFrame>> for InstallUpload {
                 Some(UploadReplyMode::Reject | UploadReplyMode::Withheld) | None => {}
             }
             let reply = reply
-                .encode(&limits())
+                .encode(&limits)
                 .map_err(|error| Status::internal(error.to_string()))?;
             if uploads
                 .send(ReceivedUpload { start, archive })
@@ -437,7 +468,13 @@ impl ClientStreamingService<VerifiedFrame<UploadFrame>> for InstallUpload {
             {
                 return Err(Status::unavailable("the installed upload's reply was lost"));
             }
-            Ok(Response::new(reply))
+            Ok(reply)
+        };
+        // Deliberately withhold response headers until the complete input arrived. A client
+        // that waits for those headers before feeding this known-bound call would deadlock.
+        Box::pin(async move {
+            let reply = completion.await?;
+            Ok(announced_answer(std::future::ready(Ok(reply)), limits))
         })
     }
 }
@@ -508,6 +545,8 @@ impl TestServer {
 
         let (restore_sender, restores) = mpsc::channel(4);
         let service = SessionService {
+            exchange_limits: limits(),
+            upload_limits: limits(),
             exchanges: exchange_sender,
             exchange_hold: exchange_hold.clone(),
             uploads: upload_sender,
@@ -561,19 +600,29 @@ impl TestServer {
     async fn connect_with(&self, options: ConnectOptions) -> Client {
         let server = Url::parse(&format!("http://{}", self.address))
             .assured("the test server is an HTTP origin");
+        let setup_options = ConnectOptions {
+            connect_timeout: DEADLINE,
+            ..options.clone()
+        };
+        let mut setup = GrpcConnector::new(setup_options)
+            .assured("the fixture's setup uses the same valid credentials");
+        within_deadline(setup.load_dns())
+            .await
+            .assured("the fixture setup loads its DNS configuration");
+        let channel = within_deadline(setup.connect(&server))
+            .await
+            .assured("the client reaches the test server");
+        let events = SessionEvents::new(setup.capabilities());
+        let exchange = within_deadline(Exchange::open(channel, &setup, events.emitters.clone()))
+            .await
+            .assured("the test server accepts the session");
+        // Only setup uses the fixture's generous deadline. The assembled client keeps every
+        // timeout, resolver selection, credential and seed supplied by the test.
         let mut connector = GrpcConnector::new(options)
             .assured("options without credentials build no authorization metadata");
         within_deadline(connector.load_dns())
             .await
             .assured("the system DNS configuration loads");
-        let channel = within_deadline(connector.connect(&server))
-            .await
-            .assured("the client reaches the test server");
-        let events = SessionEvents::new(crate::ClientCapabilities::default());
-        let exchange =
-            within_deadline(Exchange::open(channel, &connector, events.emitters.clone()))
-                .await
-                .assured("the test server accepts the session");
         let mut servers = ServerDirectory::with_seeds(server.clone(), connector.seed_servers());
         servers.connected(&server);
         Client::assemble(exchange, events, connector, Some(domain("tenant")), servers)
@@ -1117,6 +1166,89 @@ async fn lost_begin_append_and_commit_replies_retry_the_exact_request() {
             .assured("the exact retry is answered");
         assert!(result.succeeded());
         assert_eq!(result.origin, Some(OutcomeOrigin::Recovered));
+    }
+}
+
+#[nervix_primitives::test]
+async fn a_smaller_peer_cannot_make_an_unresolved_native_command_definitively_unsent() {
+    for unknown_answer in [false, true] {
+        let mut primary = TestServer::start().await;
+        let mut seed = TestServer::start_service(
+            SocketAddr::from(([127, 0, 0, 1], 0)),
+            false,
+            |mut service| {
+                service.exchange_limits = small_frames();
+                service
+            },
+        )
+        .await;
+        let seed_url = Url::parse(&format!("http://{}", seed.address))
+            .assured("the smaller peer is an HTTP origin");
+        let client = primary
+            .connect_with(ConnectOptions {
+                seed_servers: vec![seed_url.clone()],
+                retry_timeout: Duration::from_secs(5),
+                ..ConnectOptions::default()
+            })
+            .await;
+        let mut first = primary.next_exchange().await;
+        let execution = client
+            .prepare_execution(format!("DESCRIBE /*{}*/ CLUSTER;", "x".repeat(4096)))
+            .await;
+        let reference = execution.reference().clone();
+        let command =
+            nervix_primitives::task::spawn(
+                async move { client.execute_prepared(&execution).await },
+            );
+        let sent = first.next_request().await;
+        if unknown_answer {
+            first
+                .reply(
+                    sent.request_id,
+                    command_outcome(
+                        &reference,
+                        CommandDisposition::OutcomeUnknown(
+                            crate::wire::UnknownOutcomeCause::StillApplying,
+                        ),
+                        "the admitted command is still applying",
+                    ),
+                    &limits(),
+                )
+                .await;
+            let retry = first.next_request().await;
+            first
+                .reply(
+                    retry.request_id,
+                    command_outcome(
+                        &reference,
+                        CommandDisposition::NotLeader(LeaderRedirect {
+                            leader: Some(NodeEndpoints {
+                                node: node("smaller-peer"),
+                                grpc_uri: Some(seed_url),
+                                web_console_uri: None,
+                            }),
+                        }),
+                        "follow the current leader",
+                    ),
+                    &limits(),
+                )
+                .await;
+        }
+        drop(first);
+        let _smaller = seed.next_exchange().await;
+        let error = within_deadline(command)
+            .await
+            .assured("the command task completes")
+            .expect_err("the replacement cannot carry the retained command");
+        assert!(matches!(
+            error.current_context(),
+            ClientError::UncertainCommand { reference: retained } if retained == &reference
+        ));
+        assert!(matches!(
+            error.downcast_ref::<WireEncodeError>(),
+            Some(WireEncodeError::FrameTooLarge { limit, .. })
+                if *limit == small_frames().frame_bytes()
+        ));
     }
 }
 
@@ -2394,6 +2526,49 @@ async fn an_upload_streams_its_archive_and_reports_the_installed_version() {
 }
 
 #[nervix_primitives::test]
+async fn an_upload_retries_changed_bounds_before_the_peer_reads_its_archive() {
+    let mut server = TestServer::start_service(
+        SocketAddr::from(([127, 0, 0, 1], 0)),
+        false,
+        |mut service| {
+            service.upload_limits = small_frames();
+            service
+        },
+    )
+    .await;
+    let client = server.connect().await;
+    let _exchange = server.next_exchange().await;
+    let directory = tempfile::tempdir().assured("the upload has a fixture directory");
+    write_file(&directory.path().join("payload"), &[7_u8; 16_384]);
+    let identity = ResourceUploadIdentity::parse("changed-bounds")
+        .assured("the fixture upload identity is valid");
+    let outcome = within_deadline(client.upload_resource_from_directory_with_identity(
+        "model",
+        directory.path(),
+        domain("tenant"),
+        identity.clone(),
+        |_| {},
+    ))
+    .await
+    .assured("the refused offer retries with the announced bounds");
+    assert!(outcome.succeeded());
+    let received = within_deadline(server.uploads.recv())
+        .await
+        .assured("only the matching offer reaches the archive reader");
+    assert_eq!(received.start.upload_identity, identity);
+    assert_eq!(
+        received.start.total_bytes.get(),
+        u64::try_from(received.archive.len()).assured("bounded fixture archive")
+    );
+    assert!(server.uploads.try_recv().is_err());
+    let installed = outcome
+        .resource_upload
+        .assured("the upload has its typed outcome");
+    assert_eq!(installed.identity, identity);
+    assert_eq!(installed.calls.get(), 2);
+}
+
+#[nervix_primitives::test]
 async fn a_lost_upload_reply_retries_with_the_same_identity_and_archive() {
     let mut primary = TestServer::start().await;
     let mut seed = TestServer::start().await;
@@ -3542,6 +3717,14 @@ async fn a_clock_restoration_that_reaches_no_server_is_tried_again_by_the_next_r
         ..ConnectOptions::default()
     };
     let client = primary.connect_with(options).await;
+    assert_eq!(
+        client.inner.connector.connect_timeout(),
+        Duration::from_millis(250)
+    );
+    assert_eq!(
+        client.inner.connector.retry_timeout(),
+        Duration::from_secs(1)
+    );
     let mut exchange = primary.next_exchange().await;
     let attaching = client.clone();
     let attach = nervix_primitives::task::spawn(async move {

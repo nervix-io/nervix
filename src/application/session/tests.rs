@@ -86,7 +86,10 @@ struct SessionUnderTest {
 impl SessionUnderTest {
     fn start(service: &SessionServiceImpl, limits: SessionLimits) -> Self {
         let (inbound, inbound_rx) = mpsc::unbounded_channel();
-        let (outbound_tx, outbound) = outbound::channel(CancellationToken::new());
+        let (outbound_tx, outbound) = outbound::channel(
+            CancellationToken::new(),
+            &nervix_models::SessionCapabilities::default(),
+        );
         let service = service.clone();
         let task = nervix_primitives::task::spawn(async move {
             service
@@ -435,7 +438,10 @@ async fn registration_refuses_a_duplicate_and_every_request_beyond_the_limit() {
         registry: _registry,
         path,
     } = build_test_service(true).await;
-    let (outbound, _frames) = outbound::channel(CancellationToken::new());
+    let (outbound, _frames) = outbound::channel(
+        CancellationToken::new(),
+        &nervix_models::SessionCapabilities::default(),
+    );
     let subscriptions = SessionSubscriptions::for_user(named::<UserName>("default"));
     let (selection, _) = nervix_primitives::sync::watch::channel(None);
     let shared = SessionShared {
@@ -444,6 +450,10 @@ async fn registration_refuses_a_duplicate_and_every_request_beyond_the_limit() {
         delivery: SessionDelivery {
             outbound,
             limits: SessionLimits::DEFAULT,
+            rows_per_frame: nervix_models::SessionCapabilities::default()
+                .subscription_rows_per_frame()
+                .try_into()
+                .assured("default rows fit usize"),
         },
         in_flight: nervix_primitives::sync::blocking::Mutex::new(InFlightRequests::default()),
         view: nervix_primitives::sync::blocking::RwLock::new(subscriptions.view()),

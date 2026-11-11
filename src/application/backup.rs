@@ -580,7 +580,10 @@ impl SessionServiceImpl {
                 Ok(acquired) => break acquired,
                 Err(error) if nervix_primitives::time::Instant::now() < deadline => {
                     tracing::debug!(domain = %domain, error = %format_args!("{error:#}"), "waiting for backup domain mutation lease");
-                    nervix_primitives::time::sleep(std::time::Duration::from_millis(50)).await;
+                    nervix_primitives::time::sleep(
+                        self.inner.operational.control_plane.backup_retry_interval(),
+                    )
+                    .await;
                 }
                 Err(error) => {
                     return Err(error.change_context(progress.timeout()));
@@ -639,7 +642,10 @@ impl SessionServiceImpl {
                 if nervix_primitives::time::Instant::now() >= deadline {
                     return Err(Report::new(progress.timeout()));
                 }
-                nervix_primitives::time::sleep(std::time::Duration::from_millis(50)).await;
+                nervix_primitives::time::sleep(
+                    self.inner.operational.control_plane.backup_retry_interval(),
+                )
+                .await;
             };
             #[cfg(feature = "testing")]
             self.inner
@@ -1055,7 +1061,10 @@ impl SessionServiceImpl {
                 {
                     Ok(body) => break Ok(body),
                     Err(refused) if refused.current_context().is_capacity_exhaustion() => {
-                        nervix_primitives::time::sleep(Duration::from_millis(50)).await;
+                        nervix_primitives::time::sleep(
+                            self.inner.operational.control_plane.backup_retry_interval(),
+                        )
+                        .await;
                     }
                     Err(failure) => break Err(failure),
                 }

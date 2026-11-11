@@ -271,7 +271,7 @@ fn notice_frame(
 fn malformed_events_are_refused() {
     for discriminant in [
         wire::ServerBody::NONE,
-        wire::ServerBody(17),
+        wire::ServerBody(18),
         wire::ServerBody(255),
     ] {
         let frame = raw_server(notice_frame(

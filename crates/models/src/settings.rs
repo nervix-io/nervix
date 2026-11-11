@@ -10,6 +10,8 @@
 
 use std::{fmt, marker::PhantomData};
 
+pub(crate) mod archive;
+
 mod sealed {
     pub trait Class {}
 }

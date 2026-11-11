@@ -121,7 +121,7 @@ a node given one above it refuses to start, before it opens a store, with
 its remaining drain budget and the remaining shutdown deadline, so a drain timeout equal to the
 shutdown timeout lets the drain use the whole deadline, and the deadline also bounds a drain that
 starts after the earlier phases used part of it. The one exception is the
-release of the cordon the node's own drain set, which keeps a one-second grace when moving the
+release of the cordon the node's own drain set, which keeps a grace of four Raft heartbeats, one second by default, when moving the
 node's work used the whole drain timeout; see [Releasing The Drain Cordon](#releasing-the-drain-cordon).
 
 Two bounds are deliberately outside the deadline. Terminal teardown's final stops — the runtime,
@@ -234,7 +234,7 @@ arrived, so the node still clears the cordon that request may have set.
 
 Releasing the cordon is one consensus write, made by the leader: by the node itself while it leads,
 and otherwise by the leader it asks over the cluster interconnect. The stopping node waits for that
-write for what remains of the drain timeout, and for at least one second when moving its work used
+write for what remains of the drain timeout, and for at least four Raft heartbeats, one second by default, when moving its work used
 the whole drain timeout, so a drain that timed out still clears the cordon its request may have set.
 The wait never reaches past the shutdown deadline. A consensus write that takes seconds on a loaded
 worker therefore still completes the release, and a node that handed all of its work over reports
@@ -242,7 +242,7 @@ the drain-support phase `Completed`.
 
 That wait applies while the stopping node and the voters that are live and not terminating form a
 quorum, so the release can commit without voters that are stopping too. When they do not, as when
-the whole cluster stops together, the release keeps only the one-second grace: only voters that are
+the whole cluster stops together, the release keeps only that four-heartbeat grace: only voters that are
 about to stop could commit it, and waiting longer would only delay the stop of the last node of a
 cluster that is going away. The node decides this from its own gossip view when the release begins.
 
@@ -303,8 +303,11 @@ endings to deliver. The listener's server stops accepting connections and tells 
 accepted to take no new call, and each connection closes once the calls it carries have ended; a
 call that reaches the server even so ends at once as above. A connection can outlive its calls only
 when its client reads nothing, so that an ending or a status cannot be sent. Shutdown therefore
-gives the listeners two seconds, the grace period it gives every task it asks to stop, and then cuts
-every connection still open, which its client sees as a transport loss. No client can hold the drain
+gives the listeners the cooperative task-stop grace and then cuts
+every connection still open, which its client sees as a transport loss. `--task-grace-period`
+sets that grace, two seconds by default, and the remaining absolute shutdown deadline caps it.
+The coordinator captures it with the first stop request. Leader observation during the drain polls
+at one tenth of a Raft heartbeat. No client can hold the drain
 or the process open for longer than that grace period. [Node Stop And Restart As A Client Observes
 Them](./client-session-protocol.md#node-stop-and-restart-as-a-client-observes-them) describes what a
 client sees at each ending and what it recovers.
@@ -991,8 +994,9 @@ expire branch state mid-handoff. Nothing about shutdown merges branches or moves
 
 Terminal teardown begins only after drain support completes or reports itself abandoned.
 
-It stops the node's background tasks, giving each at most two seconds, then waits for work that
-sessions and commands started until the shutdown deadline and cancels whatever still runs. It then
+It stops the node's background tasks, giving each at most the configured cooperative task-stop
+grace, then waits until the shutdown deadline for work that sessions and commands started and
+cancels whatever still runs. It then
 stops the runtime, consensus, cluster membership, and the interconnect in that order, and finally
 releases the node's storage.
 
@@ -1006,7 +1010,8 @@ is told to stop when its turn comes, then processors, emitters, generators, rein
 placement tasks that replicate state. A task that has not ended when its stop grace runs out is
 aborted. The node logs `shutdown task exceeded grace period; aborting` at `warn` with the domain,
 the task's kind, and its name, or `relay owner task did not stop cleanly` and
-`relay state task did not stop cleanly` for a relay's tasks. The grace is two seconds, except that
+`relay state task did not stop cleanly` for a relay's tasks. The grace is configured by
+`--task-grace-period`, two seconds by default, except that
 a relay owner and an emitter are given the domain drain timeout first. Once the domain's tasks have
 ended, its stop tells the checkpoint writer of each placement's state to make its last write, and
 waits for those writes and for the last write of each of its deduplicator, window and stateful

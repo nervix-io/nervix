@@ -45,6 +45,21 @@ This is the part of Nervix where Raft-backed consistency matters. It keeps clust
 
 ## Durability And Recovery
 
+Reconciliation cadences and local concurrency are node capabilities. Membership, scheduling,
+resource replication, application-health probing, transaction/archive maintenance and restore
+staging each use the immutable settings of their node incarnation. Transaction recovery retains
+its rotating cursor while bounding concurrent recoveries; lowering its concurrency does not
+favor the first transaction identities. Resource replication keeps its independent concurrency
+bound. [Node Settings](node-settings.md#control-plane-and-session-capabilities) owns the
+declarations, defaults and inspection of these capabilities.
+
+Coordination guarantees use the committed parameter record: forced-recovery budgets, handoff
+reconciliation polling, entity-gate polling, domain-drain polling and readiness propagation.
+An operation captures its applicable values at admission. A polling tick never restarts or
+extends the operation's deadline. RPC attempts remain bounded by their remaining operation
+budget and the deadline derived from the transport request timeout. Startup reconciliation waits
+derive from the gossip round and remain cancellable during shutdown.
+
 A control-plane mutation returns its semantic result only after Raft has committed it and the
 leader has durably applied it. The applied write stores the changed semantic records together with
 its final log position, membership, transaction progress, and revision. Recovery therefore finds a

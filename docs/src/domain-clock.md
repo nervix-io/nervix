@@ -875,3 +875,8 @@ libFuzzer campaigns, the preferred Bolero evidence, run in CI only for a pull re
 request deliberately skips them, and a skip supplies no evidence of its mode.
 [Property Testing And Fuzzing](./property-testing-and-fuzzing.md#commands-and-enforcement) owns
 that policy.
+
+Clock-progress retry cadence is a local control-plane capability, 200ms by default. Authority
+reassignment retries derive from four fifths of the resolved Raft heartbeat, also 200ms by default.
+These waits retain their existing cancellation, authority-fencing and progress-ordering owners;
+a cadence changes no logical deadline, attachment identity or delivery guarantee.

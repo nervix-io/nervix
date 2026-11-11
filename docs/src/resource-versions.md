@@ -707,3 +707,9 @@ and the per-node lines show which incarnations installed a version and why one f
 installation writes no log lines of its own. Descriptions are observations: an upload or a
 rebinding completes on its own completion boundary, and a caller never polls a description to
 finish one.
+
+Each node captures its configured resource-replication concurrency for maintenance, four fetches
+by default. Archive-open RPCs use the transport Snapshot class, three request budgets and thirty
+seconds by default. Replica publication resolves its RPC deadline as one half of the active
+transport request budget, five seconds by default. These bounds change neither version assignment,
+installation acknowledgement nor binding atomicity.

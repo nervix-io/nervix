@@ -38,6 +38,7 @@ mod impact;
 mod infrastructure;
 mod ingestor;
 mod model;
+mod node_operations;
 mod prerequisites;
 mod processor;
 mod remote;

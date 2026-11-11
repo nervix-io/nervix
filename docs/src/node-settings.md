@@ -17,10 +17,9 @@ running service. A node publishes, carries and verifies its prerequisites as
 parameters have one committed Raft record, seeded at the first bootstrap and changed through
 `ALTER CLUSTER SET`. Every admitted node announces its resolved capability record through Raft.
 
-Runtime admission and failed committed-runtime installation share the existing half-second retry
-cadence owned by `RuntimeAdmission`. This remains an internal policy constant pending settings
-adoption; installation does not introduce another numeric policy or an operator option. Committed
-schedule and domain updates can wake an installation retry sooner, and success ends that cadence.
+Runtime admission and failed committed-runtime installation share the configured
+`--control-plane-runtime-state-retry-interval`, 500ms by default. Committed schedule and domain
+updates can wake an installation retry sooner, and success ends that cadence.
 
 Canonical Kafka start admission derives its deadline from the interconnect checkpoint-transfer
 contract. Selecting and durably adopting a start cut waits for that transfer, so it shares the
@@ -180,8 +179,9 @@ owns refusal, re-slicing, bootstrap transfer and flow-control behavior; the plac
 the capacity score and its precedence.
 
 `adopted peer receive bounds` lists the claims this answering node's outbound pools currently use.
-The independent capability controller refreshes them on the existing half-second runtime retry
-cadence, including when another domain's leader reconciliation is busy. This separates committed
+The independent capability controller refreshes them on the configured runtime-state retry
+cadence, 500ms by default and independent of Raft heartbeat, including when another domain's
+leader reconciliation is busy. This separates committed
 capacity from its local adoption without a second configuration authority.
 
 ## Transport, Resolver And Database Capacities
@@ -293,6 +293,85 @@ replication lag is twice the snapshot entry threshold, saturating only at the in
 and remaining strictly greater than that threshold; the threshold cannot be `u64::MAX`.
 Snapshot chunks follow the executor's bulk chunk bound. The replication chapter owns durability,
 whole-transfer deadlines and the explicit maintained OpenRaft configuration.
+
+## Control-Plane And Session Capabilities
+
+Each incarnation's claim also records its resolved control-plane, session and client-link
+capabilities. `DESCRIBE CLUSTER` reports those values for live and departed nodes. Reconcile
+cadences are exported locally as `nervix_control_plane_cadence_seconds{operation="..."}`;
+`membership` and `scheduling` identify their respective passes. A cadence changes when that node
+restarts. It changes neither the cluster's accepted Models nor an existing operation's deadline.
+
+| Capability | Default |
+| --- | --- |
+| Membership, scheduling, resource replication and application-health rounds | 1s |
+| Transaction/archive sweep and leadership-sync retry | 250ms |
+| Runtime-state admission, installation and capability-announcement retry | 500ms |
+| Restore-staging sweep and interconnect TLS reload | 1s |
+| Concurrent transaction recoveries / resource replications | 8 / 4 |
+| Session frame / transfer / string bytes | 4 MiB / 64 MiB / 64 MiB |
+| Session nesting / vector entries | 64 / 262,144 |
+| Per-session outbound queue memory | 128 MiB |
+| Session notice backlog / rows per subscription frame | 256 / 256 |
+| Session leadership check / selected-domain snapshot | 250ms / 500ms |
+| Authentication attempts per second after failure | 10 |
+| Client-link heartbeat / producer open / consumer open | 2s / 20s / 20s |
+| Producer answer / consumer answer / consumer writer queues | 64 / 64 / 64 |
+
+The `--control-plane-*`, `--session-*`, `--client-link-*`,
+`--authentication-attempts-per-second` and `--interconnect-tls-reload-interval` options expose
+these capabilities; the generated server reference lists each option. Values and relationships
+are validated before I/O. In particular, the session transfer holds a frame, its string bound fits
+the transfer, and its queue memory holds at least one maximum-sized frame on each lane.
+Each lane's depth is `queue_memory_bytes / (2 * frame_bytes)`, giving 16 frames by default.
+The queue budget bounds queued frame bytes; transport buffers, executing requests, clock slots
+and retained producer/consumer deliveries keep their own bounds. A backup download's queue is `max(queue_memory_bytes / (8 * frame_bytes), 1)`,
+four frames by default. Its chunk size is one sixteenth of the session frame limit, 256 KiB
+by default. Native clients retain their configured subscription record count, retained-frame
+count and aggregate multiplier. The byte allowances use the current announced frame size plus
+the in-memory event header, installed once with each checked exchange generation. The defaults
+retain one such frame per subscription and four full subscriptions. A configured count that
+cannot be represented with the contacted peer's frame size refuses that opening before queue
+activation.
+
+An authenticated session announces its checked limits to the client. Reconnects adopt the node
+they reach, including after a capability roll. Producer and consumer links announce each
+sender's heartbeat at open; a receiver tolerates five of its peer's intervals. This permits
+different operational cadences within one cluster without a uniform-heartbeat assertion.
+[Client Session Protocol](client-session-protocol.md#session-limits) and
+[Cluster Interconnect](interconnect.md#client-producer-links) own the framing and failure rules.
+
+Forced-recovery budgets, handoff reconciliation polling, entity-gate polling, domain-drain
+polling and readiness propagation are committed cluster parameters. Their defaults are 5s,
+250ms, 25ms, 50ms and 30s respectively. First-bootstrap flags seed them; later changes use
+`ALTER CLUSTER SET`. New operations capture the current committed values at their owning
+admission boundary. RPC deadlines derive from the transport request timeout, and the initial
+membership, scheduling, health and resource pass delays derive from the gossip round. Derived
+values have no independent flag.
+
+Local transaction-application and gate release/engagement retries, clock-progress delivery,
+backup retries and restore conversion admission have their own `--control-plane-*` capabilities.
+Their defaults remain 100ms, 200ms, 50ms, and a 30s conversion wait with 50ms retry as applicable.
+`--control-plane-runtime-state-retry-interval` keeps runtime admission, installation and node
+capability publication retries at 500ms by default, independently of the Raft heartbeat. A node
+may tune that retry without changing the cluster's consensus prerequisite.
+Startup voter observation lasts twenty gossip rounds. Completion probes use one Raft heartbeat,
+authority reassignment retries four fifths of a heartbeat, cordon release keeps four heartbeats,
+and shutdown leader observation uses one tenth of a heartbeat. `--task-grace-period` controls
+cooperative listener and background-task stop grace, two seconds by default and capped by the
+remaining stop deadline. A drain may use the full configured timeout without cutting the
+listener's normal grace to zero.
+
+The complete parameter record stays allocation-free and `Copy`. Its validated parameter projection stores
+whole seconds and subsecond nanoseconds in eight bytes; every permitted duration, through
+`u32::MAX` seconds, fits.
+The public duration values and their JSON seconds/nanoseconds encoding retain full precision.
+This keeps the inline Raft command footprint bounded while carrying the complete policy.
+
+The eight count parameters whose definitions already cap them within `u32::MAX` use four-byte
+stored projections. Their public u64 values, defaults and admitted ranges remain unchanged;
+full-width count and byte parameters retain eight bytes. Storage and JSON both validate through
+the owning definition before publishing the complete policy.
 
 ## Permanent Cluster Identity
 
@@ -557,7 +636,9 @@ relay pool, capped at 32 MiB each; `--execution-relay-scratch-bytes` defaults to
 capped at 16 MiB. All are positive. Validation requires two complete operations to fit relay,
 active read and cache pools independently. `--execution-resident-replication-batches` defaults
 to at most four, retaining command-budget room for an answer. `--execution-bulk-chunk-bytes`
-defaults to one 512th of bulk memory, capped at 64 KiB. Existing operation working-set checks
+defaults to one 512th of bulk memory, capped at 64 KiB. Captured-section reads group sixteen
+bulk quanta, capped at half the immutable bulk pool so a preceding transport buffer and the next
+read can coexist; the default read remains 1 MiB. Existing operation working-set checks
 still apply. Peer receive limits derive from these final limits before transport construction.
 
 `--client-producer-node-bytes` and `--client-consumer-node-bytes` each default to 1/32 of node
@@ -734,17 +815,22 @@ describes, defaults included.
 | `--licensing-request-timeout`, `--licensing-retry-backoff-max`, `--licensing-stream-idle-timeout` | cluster parameter | licensing coordination |
 | `--state-snapshot-interval` | cluster parameter | runtime |
 | `--domain-drain-timeout`, `--entity-gate-deadline` | cluster parameter | cluster policy |
+| `--forced-recovery-budget`, `--ownership-handoff-poll-interval`, `--entity-gate-poll-interval`, `--domain-drain-poll-interval`, `--runtime-readiness-propagation-bound` | cluster parameter | coordination guarantees |
 | `--max-batch-messages`, `--client-producer-session-bytes`, `--client-consumer-session-bytes`, `--udf-code-bytes`, `--http-header-bytes`, `--http-header-fields`, `--client-batch-rows` | cluster parameter | model and session policy |
 | `--restore-staging-max-bytes` | node capability | runtime |
 | `--transaction-idle-timeout`, `--transaction-tombstone-retention`, `--transaction-max-statements`, `--transaction-max-source-bytes`, `--transaction-max-open` | cluster parameter | transaction limits |
 | `--command-retry-validity`, `--command-execution-capacity` | cluster parameter | command execution |
 | `--memory-high-watermark`, `--memory-low-watermark`, `--memory-pressure-check-interval`, `--memory-pressure-resume-jitter` | node capability | memory pressure |
-| `--drain-timeout`, `--shutdown-timeout` | node capability | shutdown |
+| `--drain-timeout`, `--shutdown-timeout`, `--task-grace-period` | node capability | shutdown |
 | `--resource-max-archive-bytes`, `--resource-max-extracted-bytes`, `--resource-max-file-count` | cluster parameter | resources |
 | `--otel-trace-sample-ratio` | node capability | trace export |
 | `--cpu-count`, `--memory-limit` | node capability | capacity |
 | `--execution-*`, `--runtime-worker-threads`, `--runtime-max-blocking-threads`, `--runtime-thread-stack-size` | node capability | execution |
 | `--client-producer-node-bytes`, `--client-consumer-node-bytes` | node capability | client admission |
+| `--control-plane-*` | node capability | local maintenance and recovery |
+| `--session-*` | node capability | session verification, queues and observations |
+| `--client-link-*` | node capability | producer and consumer forwarding |
+| `--authentication-attempts-per-second`, `--interconnect-tls-reload-interval` | node capability | authentication pacing and local TLS material refresh |
 
 Cluster-parameter options are optional seeds for the first bootstrap. An explicit command-line
 or environment value, including a value equal to the default, is refused on every later start.

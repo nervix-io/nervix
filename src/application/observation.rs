@@ -22,7 +22,7 @@ mod materialized_state;
 mod processor_descriptions;
 mod processor_state;
 
-use std::{collections::BTreeSet, num::NonZeroU64, time::Duration};
+use std::{collections::BTreeSet, num::NonZeroU64};
 
 use arch_into::ArchInto;
 use error_stack::{Report, ResultExt as _};
@@ -89,11 +89,6 @@ mod emitter_instances;
 mod ingestor_units;
 mod relay_units;
 mod wasm_state;
-
-const REMOTE_DESCRIBE_RELAY_TIMEOUT: Duration = Duration::from_secs(1);
-/// How long DESCRIBE waits for the node that runs an entity, or one of its units, to report the
-/// entity's dataflow status.
-const DATAFLOW_NODE_STATUS_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// A model as `DESCRIBE` reads it: the configuration it was created with, and the schedule entry
 /// that places it while its domain is running.
@@ -306,7 +301,9 @@ impl SessionServiceImpl {
                         relay: describe.relay.clone(),
                         bindings: describe.bindings.clone(),
                     },
-                    REMOTE_DESCRIBE_RELAY_TIMEOUT,
+                    self.inner
+                        .interconnect
+                        .request_deadline::<RemoteDescribeRelayRequest>(),
                 )
                 .await;
             match response {
@@ -955,7 +952,7 @@ impl SessionServiceImpl {
                     name: identifier.clone(),
                     unit: Unit::SINGLE,
                 },
-                DATAFLOW_NODE_STATUS_TIMEOUT,
+                self.coordination_rpc_timeout(),
             )
             .await;
         match response {

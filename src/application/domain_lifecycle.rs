@@ -452,7 +452,7 @@ impl SessionServiceImpl {
         let reach = CutReach::of(schedule.domain(domain));
         let mut nodes = self.cut_live_nodes().await;
         nodes.extend(reach.executors().cloned());
-        let mut polling = interval(Duration::from_millis(50));
+        let mut polling = interval(self.cluster_parameters().domain_drain_poll_interval());
         polling.set_missed_tick_behavior(nervix_primitives::time::MissedTickBehavior::Skip);
         let mut confirming = false;
         loop {
@@ -558,7 +558,7 @@ impl SessionServiceImpl {
         }
 
         let deadline = nervix_primitives::time::Instant::now() + timeout;
-        let mut polling = interval(Duration::from_millis(50));
+        let mut polling = interval(self.cluster_parameters().domain_drain_poll_interval());
         polling.set_missed_tick_behavior(nervix_primitives::time::MissedTickBehavior::Skip);
         let mut last_pending = None::<(ClusterNodeName, DomainDrainStatusEnvelope)>;
         let mut last_status_error = None;

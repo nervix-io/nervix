@@ -569,7 +569,12 @@ fn transaction_recovery_rotates_fairly_after_the_last_considered_identity() {
     assert_eq!(recovery.candidates(&transactions), ["a", "b", "c"]);
     assert_eq!(
         recovery.permits.available_permits(),
-        super::TRANSACTION_RECOVERY_CONCURRENCY
+        usize::try_from(
+            nervix_models::ControlPlaneCapabilities::default()
+                .transaction_recovery_concurrency()
+                .get()
+        )
+        .assured("the default capability fits usize")
     );
 }
 

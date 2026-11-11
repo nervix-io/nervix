@@ -117,16 +117,14 @@ use nervix_primitives::{
     time::sleep,
 };
 use observability_http::serve_observability_http;
-use ownership_handoff::{FORCED_OWNERSHIP_RECOVERY_BUDGET, ForcedOwnershipRecoveryCoordinator};
+use ownership_handoff::ForcedOwnershipRecoveryCoordinator;
 use public_listener::{PublicListener, PublicListenerKind};
-#[cfg(feature = "testing")]
-use scheduling::VOTER_OBSERVATION_GRACE;
 use scheduling::{StartupVoterObservations, run_kafka_partition_watchers};
 use session::grpc::SessionGrpcService;
 pub use session_service::SessionServiceImpl;
 use session_service::{
-    ApplicationBound, RuntimeStateApplication, SESSION_EVENT_CAPACITY, SessionEvents,
-    SessionServiceInner, apply_current_cluster_runtime_state,
+    ApplicationBound, RuntimeStateApplication, SessionEvents, SessionServiceInner,
+    apply_current_cluster_runtime_state,
 };
 use startup::ApplicationStartup;
 use subscription::{SubscriptionInterests, SubscriptionSampler};
@@ -296,7 +294,7 @@ pub struct Application {
     pub licensing_test_support: licensing::ConfiguredLicensingTestSupport,
     /// Bound by the shutdown timeout the settings hold, so the two can never disagree.
     #[builder(
-        default = ShutdownCoordinator::new(settings.shutdown.shutdown_timeout()),
+        default = ShutdownCoordinator::new(settings.shutdown.shutdown_timeout(), settings.shutdown.task_grace_period()),
         setter(skip)
     )]
     pub shutdown: ShutdownCoordinator,
@@ -860,6 +858,10 @@ impl Application {
         let mut interconnect_rx = interconnect_rx;
         let runtime_admission = Arc::new(runtime_admission::RuntimeAdmission::new(
             cluster.local_node_identity().await,
+            settings
+                .operational
+                .control_plane
+                .runtime_state_retry_interval(),
         ));
         runtime.attach_remote_dispatcher(cluster.clone(), interconnect.clone());
         let node_observations = NodeObservations::new(
@@ -871,6 +873,31 @@ impl Application {
         runtime
             .metrics()
             .install_node_observations(node_observations.clone());
+        let startup_delay = settings.membership.gossip_interval();
+        runtime
+            .metrics()
+            .install_control_plane_cadences(&settings.operational.control_plane);
+        let membership_interval = settings.operational.control_plane.membership_interval();
+        let scheduling_interval = settings.operational.control_plane.scheduling_interval();
+        let voter_observation_grace = settings
+            .membership
+            .gossip_interval()
+            .checked_mul(20)
+            .assured("twenty supported gossip rounds fit a duration");
+        let health_interval = settings.operational.control_plane.health_probe_interval();
+        let resource_interval = settings
+            .operational
+            .control_plane
+            .resource_replication_interval();
+        let leadership_sync_retry = settings.operational.control_plane.leadership_sync_retry();
+        let transaction_sweep_interval = settings
+            .operational
+            .control_plane
+            .transaction_sweep_interval();
+        let restore_staging_interval = settings
+            .operational
+            .control_plane
+            .restore_staging_sweep_interval();
         let mut background_tasks = Vec::new();
         background_tasks.push(nervix_primitives::task::spawn(
             licensing
@@ -882,6 +909,7 @@ impl Application {
             cluster.clone(),
             interconnect.clone(),
             capabilities,
+            settings.operational,
             shutdown.clone(),
         ));
         let scheduler_delay_shutdown = shutdown.clone();
@@ -911,6 +939,7 @@ impl Application {
         let interconnect_tls_transport = interconnect.clone();
         let interconnect_tls_shutdown = shutdown.clone();
         let interconnect_tls_cluster = cluster.clone();
+        let tls_reload_interval = settings.operational.control_plane.tls_reload_interval();
         background_tasks.push(nervix_primitives::task::spawn(async move {
             reload_interconnect_tls(
                 interconnect_tls_transport,
@@ -918,6 +947,7 @@ impl Application {
                 interconnect_tls_paths,
                 interconnect_tls_fingerprint,
                 interconnect_tls_shutdown,
+                tls_reload_interval,
             )
             .await;
         }));
@@ -965,6 +995,8 @@ impl Application {
                 proposer: proposer_for_parameter_seeding,
                 shutdown: membership_reconcile_shutdown,
                 allow_bootstrap,
+                startup_delay,
+                membership_interval,
                 parameter_seeds,
                 licensing: licensing.clone(),
                 refusals: bootstrap_refusal_sender,
@@ -981,9 +1013,18 @@ impl Application {
         certificates
             .register_installation_handler(&interconnect)
             .change_context(AppError::RegisterInterconnectRequestHandler)?;
-        let events = SessionEvents::new(SESSION_EVENT_CAPACITY);
+        let events = SessionEvents::new(
+            usize::try_from(settings.operational.session.notice_capacity().get())
+                .assured("the notice capacity fits the validated portable channel bound"),
+        );
         let service = SessionServiceImpl {
             inner: Arc::new(SessionServiceInner {
+                raft_timings,
+                gossip_interval: settings.membership.gossip_interval(),
+                operational: settings.operational,
+                session_limits: nervix_client_wire::SessionLimits::from(
+                    settings.operational.session.bounds(),
+                ),
                 cluster: cluster.clone(),
                 consensus: consensus.proposer(),
                 consensus_administrator: consensus.administrator(),
@@ -1011,19 +1052,28 @@ impl Application {
                     runtime.clone(),
                     interconnect.clone(),
                     consensus.proposer().local_node_id().clone(),
+                    settings.operational.links,
                 ),
                 client_consumers: ClientConsumerRouter::new(
                     runtime.clone(),
                     interconnect.clone(),
                     consensus.proposer().local_node_id().clone(),
+                    settings.operational.links,
                 ),
                 service_tasks: ServiceTasks::default(),
-                authentication_pacing: SessionServiceImpl::new_authentication_pacing(),
+                authentication_pacing: SessionServiceImpl::new_authentication_pacing(
+                    &settings.operational.control_plane,
+                ),
                 traffic: client_traffic::ClientTraffic::new(runtime.metrics().client_traffic()),
                 transaction_bindings: DashMap::with_hasher(RandomState::new()),
                 command_executions: Default::default(),
                 transaction_executions: DashMap::with_hasher(RandomState::new()),
-                transaction_recovery: Default::default(),
+                transaction_recovery: transaction::TransactionRecovery::new(
+                    settings
+                        .operational
+                        .control_plane
+                        .transaction_recovery_concurrency(),
+                ),
                 ownership_handoff_operations: nervix_primitives::sync::Mutex::new(()),
                 resource_upload_executions: Default::default(),
                 resource_replication_executions: DashMap::with_hasher(RandomState::new()),
@@ -1252,7 +1302,7 @@ impl Application {
             }));
         }
         background_tasks.push(nervix_primitives::task::spawn(async move {
-            sleep(Duration::from_millis(500)).await;
+            if reconcile_shutdown.run_until_cancelled(sleep(startup_delay)).await.is_none() { return; }
             #[cfg(feature = "testing")]
             {
                 let observation = fault_injection_for_reconcile
@@ -1262,7 +1312,7 @@ impl Application {
                 }
             }
             let reconcile_started = nervix_primitives::time::Instant::now();
-            let mut startup_voter_observations = StartupVoterObservations::default();
+            let mut startup_voter_observations = StartupVoterObservations::new(voter_observation_grace);
             let mut default_user_resolved = false;
             let mut missing_init_default_user_password_warned = false;
             loop {
@@ -1429,7 +1479,7 @@ impl Application {
                         let unobserved_voters = startup_voter_observations
                             .unobserved_voters(topology.voters(), observation_elapsed);
                         #[cfg(feature = "testing")]
-                        if observation_elapsed < VOTER_OBSERVATION_GRACE {
+                        if observation_elapsed < voter_observation_grace {
                             fault_injection_for_reconcile
                                 .pause_startup_voter_observation_if_armed(
                                     consensus_for_reconcile.local_node_id(),
@@ -1512,6 +1562,7 @@ impl Application {
                                 }
                             }
                             ForcedOwnershipRecoveryCoordinator {
+                                recovery_budget: automatic_schedule_input.runtime_state().parameters.verified("scheduling starts after committed policy initialization").values.forced_recovery_budget(),
                                 runtime: &runtime_for_reconcile,
                                 interconnect: &interconnect_for_reconcile,
                                 local_node_id: &local_node_for_reconcile,
@@ -1627,6 +1678,7 @@ impl Application {
                                 }
                                 if let Some(current_domain) = current_domain {
                                     ForcedOwnershipRecoveryCoordinator {
+                                recovery_budget: automatic_schedule_input.runtime_state().parameters.verified("scheduling starts after committed policy initialization").values.forced_recovery_budget(),
                                         runtime: &runtime_for_reconcile,
                                         interconnect: &interconnect_for_reconcile,
                                         local_node_id: &local_node_for_reconcile,
@@ -1686,7 +1738,7 @@ impl Application {
                     .finish_startup_voter_observation(consensus_for_reconcile.local_node_id());
                 nervix_primitives::select! {
                     _ = reconcile_shutdown.cancelled() => break,
-                    _ = sleep(Duration::from_secs(1)) => {}
+                    _ = sleep(scheduling_interval) => {}
                 }
             }
         }));
@@ -1697,7 +1749,7 @@ impl Application {
         let mut awaiting_initial_bootstrap_peer = has_bootstrap_candidates;
         let health_shutdown = shutdown.clone();
         background_tasks.push(nervix_primitives::task::spawn(async move {
-            sleep(Duration::from_millis(500)).await;
+            if health_shutdown.run_until_cancelled(sleep(startup_delay)).await.is_none() { return; }
             loop {
                 nervix_primitives::task::consume_budget().await;
                 if health_shutdown.is_cancelled() {
@@ -1829,7 +1881,7 @@ impl Application {
                             "the cluster handle retains its Chitchat state sender for the server lifetime",
                         );
                     }
-                    _ = sleep(Duration::from_secs(1)) => {}
+                    _ = sleep(health_interval) => {}
                 }
             }
         }));
@@ -1874,6 +1926,7 @@ impl Application {
                 schedule_rx,
                 domains_rx,
                 schedule_shutdown.clone(),
+                schedule_runtime_admission.retry_interval(),
             )
             .run(None, |mut announced_parameters| {
                 let events = &parameter_events;
@@ -2386,32 +2439,7 @@ impl Application {
                 move |_context, request| {
                     let service = forced_recovery_service.clone();
                     async move {
-                        let result: OwnershipHandoffResult<_> = async {
-                            if request.destination != *service.inner.consensus.local_node_id() {
-                                return Err(OwnershipHandoffError::participant(format!(
-                                    "forced ownership recovery for {} '{}' targets node '{}' but \
-                                     reached '{}'",
-                                    request.entity.kind.as_str(),
-                                    request.entity.identifier.as_str(),
-                                    request.destination,
-                                    service.inner.consensus.local_node_id()
-                                )));
-                            }
-                            SessionServiceImpl::verify_ownership_handoff_node_incarnation(
-                                &service.live_node_incarnations().await,
-                                &request.destination,
-                                request.destination_incarnation,
-                                "destination",
-                            )?;
-                            let deadline = nervix_primitives::time::Instant::now()
-                                + FORCED_OWNERSHIP_RECOVERY_BUDGET;
-                            service
-                                .inner
-                                .runtime
-                                .prepare_forced_ownership_recovery(request, deadline)
-                                .await
-                        }
-                        .await;
+                        let result = service.prepare_local_forced_ownership_recovery(request).await;
                         match result {
                             Ok(preparation) => Ok(preparation),
                             Err(error) => Err(OwnershipHandoffError::remote_rejection(&error)),
@@ -2520,7 +2548,7 @@ impl Application {
                             );
                             nervix_primitives::select! {
                                 _ = transaction_shutdown.cancelled() => break,
-                                _ = sleep(Duration::from_millis(250)) => {}
+                                _ = sleep(leadership_sync_retry) => {}
                             }
                             continue;
                         }
@@ -2535,7 +2563,7 @@ impl Application {
                 transaction_service.sweep_restore_archives();
                 nervix_primitives::select! {
                     _ = transaction_shutdown.cancelled() => break,
-                    _ = sleep(Duration::from_millis(250)) => {}
+                    _ = sleep(transaction_sweep_interval) => {}
                 }
             }
         }));
@@ -2551,7 +2579,7 @@ impl Application {
                 }
                 nervix_primitives::select! {
                     _ = restore_maintenance_shutdown.cancelled() => break,
-                    _ = sleep(Duration::from_secs(1)) => {}
+                    _ = sleep(restore_staging_interval) => {}
                 }
             }
         }));
@@ -2618,7 +2646,7 @@ impl Application {
         let resource_service = service.clone();
         let resource_shutdown = shutdown.clone();
         background_tasks.push(nervix_primitives::task::spawn(async move {
-            sleep(Duration::from_millis(500)).await;
+            if resource_shutdown.run_until_cancelled(sleep(startup_delay)).await.is_none() { return; }
             loop {
                 nervix_primitives::task::consume_budget().await;
                 if resource_shutdown.is_cancelled() {
@@ -2627,7 +2655,7 @@ impl Application {
                 resource_service.reconcile_resources_once().await;
                 nervix_primitives::select! {
                     _ = resource_shutdown.cancelled() => break,
-                    _ = sleep(Duration::from_secs(1)) => {}
+                    _ = sleep(resource_interval) => {}
                 }
             }
         }));

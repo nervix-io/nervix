@@ -35,6 +35,7 @@ fn receive(bytes: u64) -> PeerReceiveSettings {
 
 fn claim(incarnation: u64, bytes: u64) -> NodeCapabilityRecord {
     NodeCapabilityRecord {
+        operational: Default::default(),
         identity: ClusterNodeIdentity::new(
             ClusterNodeName::parse("server").assured("fixture name"),
             ClusterNodeIncarnation::new(incarnation),

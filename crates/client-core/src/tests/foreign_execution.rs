@@ -37,7 +37,12 @@ async fn a_foreign_command_reply_interrupts_every_waiter_and_leaves_its_own_refe
             .await
             .generation
             .clone();
-        let reader = ExchangeReader::new(loopback.pending.clone(), events, generation);
+        let reader = ExchangeReader::new(
+            loopback.pending.clone(),
+            events,
+            generation,
+            nervix_client_wire::SessionLimits::DEFAULT,
+        );
         let mut foreign = wire_outcome("command-1", disposition, "foreign outcome");
         foreign.transaction = Some(open_transaction("foreign", 1));
         let reply = Reply {

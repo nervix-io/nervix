@@ -1,7 +1,7 @@
 //! Compact validated storage for complete cluster parameter values.
 //!
 //! Layer: vocabulary.
-//! - **Owns.** Lossless inline duration storage under the parameter's existing validated range.
+//! - **Owns.** Lossless inline parameter storage under each definition's existing validated range.
 //! - **Depends on.** Setting definitions, semantic values and current representation codecs.
 //! - **Must not know.** Parsing, consensus commands, clocks or runtime installation.
 
@@ -14,9 +14,13 @@ use rkyv::{Archive, Deserialize, Serialize};
 use crate::SettingDefinition;
 
 pub trait ParameterValue: Copy {
-    type Stored: Copy + fmt::Debug + PartialEq + Eq;
-    fn store(self) -> Self::Stored;
-    fn read(stored: Self::Stored) -> Self;
+    type Stored: ParameterStorage<Self>;
+}
+
+/// An exact projection used only after its owning definition has validated the semantic value.
+pub trait ParameterStorage<Value>: Copy + fmt::Debug + PartialEq + Eq {
+    fn store(value: Value) -> Self;
+    fn read(self) -> Value;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Archive, Serialize)]
@@ -27,15 +31,18 @@ pub struct DurationParts {
 
 impl ParameterValue for Duration {
     type Stored = DurationParts;
-    fn store(self) -> DurationParts {
+}
+
+impl ParameterStorage<Duration> for DurationParts {
+    fn store(value: Duration) -> Self {
         DurationParts {
-            seconds: u32::try_from(self.as_secs())
+            seconds: u32::try_from(value.as_secs())
                 .assured("the definition validates the u32 seconds range"),
-            nanos: self.subsec_nanos(),
+            nanos: value.subsec_nanos(),
         }
     }
-    fn read(stored: DurationParts) -> Self {
-        Duration::new(u64::from(stored.seconds), stored.nanos)
+    fn read(self) -> Duration {
+        Duration::new(u64::from(self.seconds), self.nanos)
     }
 }
 
@@ -43,8 +50,10 @@ macro_rules! unchanged {
     ($($value:ty),+ $(,)?) => {$ (
         impl ParameterValue for $value {
             type Stored = Self;
-            fn store(self) -> Self { self }
-            fn read(stored: Self) -> Self { stored }
+        }
+        impl ParameterStorage<$value> for $value {
+            fn store(value: $value) -> Self { value }
+            fn read(self) -> $value { self }
         }
     )+};
 }
@@ -54,34 +63,63 @@ unchanged!(
     nervix_crypto_policy::TlsKeyExchangeGroups
 );
 
-pub struct ParameterSetting<T: SettingDefinition>
+impl ParameterStorage<u64> for u32 {
+    fn store(value: u64) -> Self {
+        u32::try_from(value).assured("the parameter definition validates the u32 count range")
+    }
+    fn read(self) -> u64 {
+        u64::from(self)
+    }
+}
+
+pub struct ParameterSetting<T, Stored = <<T as SettingDefinition>::Value as ParameterValue>::Stored>
 where
+    T: SettingDefinition,
     T::Value: ParameterValue,
+    Stored: ParameterStorage<T::Value>,
 {
-    stored: <T::Value as ParameterValue>::Stored,
+    stored: Stored,
     marker: PhantomData<T>,
 }
-impl<T: SettingDefinition> Copy for ParameterSetting<T> where T::Value: ParameterValue {}
-impl<T: SettingDefinition> Clone for ParameterSetting<T>
+impl<T, Stored> Copy for ParameterSetting<T, Stored>
 where
+    T: SettingDefinition,
     T::Value: ParameterValue,
+    Stored: ParameterStorage<T::Value>,
+{
+}
+impl<T, Stored> Clone for ParameterSetting<T, Stored>
+where
+    T: SettingDefinition,
+    T::Value: ParameterValue,
+    Stored: ParameterStorage<T::Value>,
 {
     fn clone(&self) -> Self {
         *self
     }
 }
-impl<T: SettingDefinition> PartialEq for ParameterSetting<T>
+impl<T, Stored> PartialEq for ParameterSetting<T, Stored>
 where
+    T: SettingDefinition,
     T::Value: ParameterValue,
+    Stored: ParameterStorage<T::Value>,
 {
     fn eq(&self, other: &Self) -> bool {
         self.stored == other.stored
     }
 }
-impl<T: SettingDefinition> Eq for ParameterSetting<T> where T::Value: ParameterValue {}
-impl<T: SettingDefinition> fmt::Debug for ParameterSetting<T>
+impl<T, Stored> Eq for ParameterSetting<T, Stored>
 where
+    T: SettingDefinition,
     T::Value: ParameterValue,
+    Stored: ParameterStorage<T::Value>,
+{
+}
+impl<T, Stored> fmt::Debug for ParameterSetting<T, Stored>
+where
+    T: SettingDefinition,
+    T::Value: ParameterValue,
+    Stored: ParameterStorage<T::Value>,
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Setting")
@@ -90,14 +128,16 @@ where
     }
 }
 
-impl<T: SettingDefinition<Context = ()>> ParameterSetting<T>
+impl<T, Stored> ParameterSetting<T, Stored>
 where
+    T: SettingDefinition<Context = ()>,
     T::Value: ParameterValue,
+    Stored: ParameterStorage<T::Value>,
 {
     pub(super) fn new(value: T::Value, context: &()) -> Result<Self, Report<T::Error>> {
         T::validate(&value, context)?;
         Ok(Self {
-            stored: value.store(),
+            stored: Stored::store(value),
             marker: PhantomData,
         })
     }
@@ -105,15 +145,13 @@ where
         Self::new(value.unwrap_or_else(|| T::default_value(context)), context)
     }
     pub(super) fn value(&self) -> T::Value {
-        T::Value::read(self.stored)
+        self.stored.read()
     }
-    pub(super) fn stored(&self) -> &<T::Value as ParameterValue>::Stored {
+    pub(super) fn stored(&self) -> &Stored {
         &self.stored
     }
-    pub(super) fn from_stored(
-        stored: <T::Value as ParameterValue>::Stored,
-    ) -> Result<Self, Report<T::Error>> {
-        Self::new(T::Value::read(stored), &())
+    pub(super) fn from_stored(stored: Stored) -> Result<Self, Report<T::Error>> {
+        Self::new(stored.read(), &())
     }
 }
 

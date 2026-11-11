@@ -22,6 +22,7 @@ use std::{collections::BTreeMap, path::Path};
 use ahash::HashMap;
 use error_stack::{Report, ResultExt};
 use futures_util::{StreamExt, stream};
+use meticulous::ResultExt as _;
 use nervix_consensus::ConsensusError;
 use nervix_interconnect::Transport;
 use nervix_models::{
@@ -46,8 +47,6 @@ use crate::{
         FetchResourceArchive, PublishResourceReplica, ResourceInterconnectError,
     },
 };
-
-const MAX_CONCURRENT_RESOURCE_REPLICATIONS: usize = 4;
 
 #[derive(Debug, Error)]
 enum ResourceFetchError {
@@ -551,7 +550,14 @@ impl SessionServiceImpl {
 
         stream::iter(missing)
             .for_each_concurrent(
-                MAX_CONCURRENT_RESOURCE_REPLICATIONS,
+                usize::try_from(
+                    self.inner
+                        .operational
+                        .control_plane
+                        .resource_replication_concurrency()
+                        .get(),
+                )
+                .assured("validated native replication concurrency"),
                 |replication| async move {
                     self.replicate_resource(replication).await;
                 },
@@ -1367,7 +1373,7 @@ impl SessionServiceImpl {
     nervix::layer(harness, reason = "test module remains outside product execution")
 )]
 mod tests {
-    use meticulous::{OptionExt as _, ResultExt as _};
+    use meticulous::OptionExt as _;
     #[cfg(feature = "testing")]
     use nervix_consensus::{ConsensusTestProbe, StorageBoundary};
     use nervix_models::{

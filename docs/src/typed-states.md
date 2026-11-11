@@ -367,8 +367,8 @@ expression scope and an emitter's `INSTANCES` declaration.
 Placement coverage is one semantic choice: a corridor with named endpoints or a domain-wide
 rule. Domain configuration contains its pace; named placement rules belong to the Model index.
 Relocation selects whole nodes or exact partition/instance indices using the shared node identity.
-Consensus's `raft_inferencer_wasm_inspection_listener_bounds_` keyspaces and current
-`ClusterState` metadata encoding, 32, identify its stored shapes, including the partition count of every resolved
+Consensus's `raft_inferencer_wasm_inspection_operational_retry_listener_bounds_` keyspaces and current
+`ClusterState` metadata encoding, 33, identify its stored shapes, including the partition count of every resolved
 branch declaration in the committed schedule, the partition epoch the schedule records for each
 branch whose count changed, and the statements a transaction keeps, including per-entity
 `ALTER INGESTOR` and `ALTER EMITTER` operations and a `RESET WASM PROCESSOR ... STATE` that takes
@@ -1450,3 +1450,28 @@ already admitted members outside the new-usage path.
 An inspection entity is `DomainNode` or `ClusterLicense`. Only the former contains a domain and
 node reference. Both use the shared page and Row-section representation; a cluster observation
 never invents a graph identity to satisfy the envelope.
+
+## Session Opening And Bounded Policy Values
+
+The native command's attempt state retains admission uncertainty independently of the latest
+attempt's failure. A replacement session's smaller bound can refuse a replay without settling
+an earlier attempt; that error keeps the original execution identity as uncertain. A fresh
+request refused before handoff has no earlier admission to preserve.
+
+A session opening carries all five checked bounds. Native metadata requires each dimension once;
+a WebSocket's first fixed-envelope frame has the same complete values. Missing or invalid bounds
+end the opening before ordinary traffic. An exchange and its reader retain one immutable value,
+and generation-scoped subscription queues install their byte budgets under their existing owner
+lock. Before an opening, no peer-derived subscription budget exists; ending or replacing a
+generation cannot publish a later generation's limits.
+
+Cluster duration definitions retain semantic `Duration` values. The complete parameter record
+uses its validated eight-byte seconds/nanoseconds projection without allocating. A captured
+recovery request carries exact u64 nanoseconds and validates its duration range at the destination.
+Their public JSON remains seconds and nanoseconds. Both stored and public decoders cross the
+definition's validation boundary; an invalid stored scalar cannot become a valid policy by defaulting.
+
+The eight count parameters whose definitions already cap them within `u32::MAX` use four-byte
+stored projections. Their public u64 values, defaults and admitted ranges remain unchanged;
+full-width count and byte parameters retain eight bytes. Storage and JSON both validate through
+the owning definition before publishing the complete policy.

@@ -65,6 +65,8 @@ checks = [
   "producer::slots::shuttle_tests::shuttle_a_release_racing_its_resolution_returns_the_credit_exactly_once",
   "producer::slots::shuttle_tests::shuttle_a_wait_racing_its_resolution_takes_the_outcome_once_and_returns_the_credit",
   "restore::shuttle_tests::shuttle_finishing_a_restore_attempt_fences_its_last_frame",
+  "session_open::shuttle_tests::shuttle_announced_bounds_precede_polling_a_queued_native_frame",
+  "session_open::shuttle_tests::shuttle_an_ended_opening_polls_no_ordinary_native_frame",
   "subscriptions::shuttle_tests::shuttle_a_reader_racing_a_reported_gap_takes_it_without_another_change",
   "subscriptions::shuttle_tests::shuttle_a_restoration_ended_for_good_racing_a_deletion_releases_the_name",
 ]
@@ -129,6 +131,7 @@ name = "nervix-connector-rabbitmq"
 
 [[package]]
 checks = [
+  "application::client_producers::link::shuttle_tests::shuttle_the_link_opening_precedes_a_heartbeat_racing_receiver_close",
   "application::listener_input::shuttle_checks::shuttle_read_allocation_racing_input_cancellation_returns_its_entire_charge",
   "application::backup::retained::shuttle_tests::shuttle_a_download_stays_bounded_and_waits_for_its_client",
   "application::backup::retained::shuttle_tests::shuttle_a_lost_client_releases_its_hold_exactly_once",

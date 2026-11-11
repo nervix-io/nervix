@@ -111,6 +111,11 @@ impl<Outbound: FrameRoot, Inbound: FrameRoot> WebSocketCodec<Outbound, Inbound> 
         }
     }
 
+    /// Immutable bounds installed for this connection.
+    pub fn limits(&self) -> SessionLimits {
+        self.limits
+    }
+
     /// The largest message the codec accepts. Configure the WebSocket library's message limit
     /// with it, so an oversized message is refused before it is buffered.
     pub fn max_message_bytes(&self) -> usize {

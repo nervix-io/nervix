@@ -353,6 +353,11 @@ For detected CPU/memory claims, capability rolls, peer receive bounds and placem
 [Node Settings](../../../docs/src/node-settings.md#committed-node-capabilities) and
 [Placement](../../../docs/src/placement.md#capacity-at-the-load-tier). Verify the committed
 incarnation with `DESCRIBE CLUSTER` before attributing a distribution to an override.
+For control-plane cadence, session-bound or client-link changes, read
+[Node Settings → Control-Plane And Session Capabilities](../../../docs/src/node-settings.md#control-plane-and-session-capabilities)
+and [Client Session Protocol → Session Limits](../../../docs/src/client-session-protocol.md#session-limits).
+Check each incarnation's committed values and reconnect clients to adopt the contacted node's
+announcement; evaluate link silence against the sender's announced heartbeat.
 Use `SHOW TRANSACTIONS;` when transaction state or a retained outcome needs
 verification. Use `DESCRIBE TRANSACTION [ '<id>' ] [ OPERATION <n> ] [ FORMAT TEXT | JSON ];` to
 explain what an open, committing, or retained transaction requires and changes before or after

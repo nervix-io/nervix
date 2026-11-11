@@ -283,11 +283,13 @@ fn test_session_service(
         runtime.clone(),
         interconnect.clone(),
         consensus.proposer().local_node_id().clone(),
+        nervix_models::ClientLinkCapabilities::default(),
     );
     let client_consumers = super::client_consumers::ClientConsumerRouter::new(
         runtime.clone(),
         interconnect.clone(),
         consensus.proposer().local_node_id().clone(),
+        nervix_models::ClientLinkCapabilities::default(),
     );
     let traffic = super::client_traffic::ClientTraffic::new(runtime.metrics().client_traffic());
     let licensing = crate::licensing::PolicyHandle::new(
@@ -298,6 +300,12 @@ fn test_session_service(
     SessionServiceImpl {
         inner: Arc::new(SessionServiceInner {
             licensing,
+            raft_timings: RaftTimings::default(),
+            gossip_interval: crate::cluster::MembershipSettings::default().gossip_interval(),
+            operational: nervix_models::NodeOperationalCapabilities::default(),
+            session_limits: nervix_client_wire::SessionLimits::from(
+                nervix_models::SessionCapabilities::default().bounds(),
+            ),
             licensing_requests: super::licensing::LicensingRequests::default(),
             licensing_test_support: super::licensing::ConfiguredLicensingTestSupport::default(),
             cluster: cluster.clone(),
@@ -312,6 +320,9 @@ fn test_session_service(
                     consensus.proposer().local_node_id().clone(),
                     cluster.local_incarnation(),
                 ),
+                nervix_models::NodeOperationalCapabilities::default()
+                    .control_plane
+                    .runtime_state_retry_interval(),
             )),
             initialization: {
                 let state = Arc::new(super::node_initialization::NodeInitialization::default());
@@ -332,7 +343,9 @@ fn test_session_service(
             .0,
             application_progress,
             service_tasks: super::service_tasks::ServiceTasks::default(),
-            authentication_pacing: SessionServiceImpl::new_authentication_pacing(),
+            authentication_pacing: SessionServiceImpl::new_authentication_pacing(
+                &nervix_models::ControlPlaneCapabilities::default(),
+            ),
             traffic,
             transaction_bindings: DashMap::with_hasher(RandomState::new()),
             command_executions: super::command_execution::CommandExecutionOwners::default(),
@@ -754,6 +767,7 @@ pub(in crate::application) async fn build_test_service_inner(
     consensus
         .proposer()
         .announce_node_capabilities(nervix_models::NodeCapabilityRecord {
+            operational: Default::default(),
             identity: cluster.local_node_identity().await,
             capabilities: nervix_models::NodeCapabilities {
                 interconnect: nervix_interconnect::TransportSettings::default().capabilities(),

@@ -48,6 +48,7 @@ enum Message {
     Capture(CaptureOwnershipHandoffStateRequest),
     CaptureResponse(OwnershipHandoffResponse<Vec<OwnershipHandoffCheckpoint>>),
     Confirm(ConfirmOwnershipHandoffStateRequest),
+    ForcedPrepare(crate::PrepareForcedOwnershipRecoveryRequest),
     KafkaStart(crate::KafkaStartRequest),
     KafkaStartResponse(Result<crate::KafkaStartResponse, RemoteOperationFailure>),
 }
@@ -60,6 +61,27 @@ impl<'a> Messages<'a> {
     fn new(bytes: &'a [u8]) -> Self {
         Self {
             arbitrary: Arbitrary::new(bytes, Domain::Vocabulary),
+        }
+    }
+
+    fn forced_preparation(
+        &mut self,
+        recovery_budget: nervix_models::ClusterParameterDuration,
+    ) -> crate::PrepareForcedOwnershipRecoveryRequest {
+        crate::PrepareForcedOwnershipRecoveryRequest {
+            recovery_budget,
+            operation_id: self.arbitrary.string(),
+            source: self.arbitrary.cluster_node(),
+            destination: self.arbitrary.cluster_node(),
+            destination_incarnation: ClusterNodeIncarnation::new(self.number()),
+            domain: self.arbitrary.rule_name(),
+            entity: NodeRef::new(
+                self.arbitrary.model_kind(),
+                self.arbitrary.rule_name::<ModelName>(),
+            ),
+            unit: self.unit(),
+            base_schedule_fingerprint: self.digest(),
+            target_schedule_fingerprint: self.digest(),
         }
     }
 
@@ -465,7 +487,7 @@ impl<'a> Messages<'a> {
                     action,
                 })
             }
-            _ => {
+            15 => {
                 let result = match self.arbitrary.entropy().byte() % 4 {
                     0 => Ok(crate::KafkaStartResponse::Unresolved),
                     1 => Ok(crate::KafkaStartResponse::Current {
@@ -478,6 +500,17 @@ impl<'a> Messages<'a> {
                     _ => Err(self.failure()),
                 };
                 Message::KafkaStartResponse(result)
+            }
+            _ => {
+                let nanos = self
+                    .arbitrary
+                    .entropy()
+                    .boundary_biased(1..=u64::from(u32::MAX) * 1_000_000_000);
+                let recovery_budget = nervix_models::ClusterParameterDuration::try_from(
+                    std::time::Duration::from_nanos(nanos),
+                )
+                .assured("the generated positive budget fits the policy domain");
+                Message::ForcedPrepare(self.forced_preparation(recovery_budget))
             }
         }
     }
@@ -608,6 +641,14 @@ impl Message {
             Self::Capture(m) => {
                 round_trip(executor, CaptureOwnershipHandoffStateRequest::CLASS, m).await;
             }
+            Self::ForcedPrepare(m) => {
+                round_trip(
+                    executor,
+                    crate::PrepareForcedOwnershipRecoveryRequest::CLASS,
+                    m,
+                )
+                .await;
+            }
             Self::Confirm(m) => {
                 round_trip(executor, ConfirmOwnershipHandoffStateRequest::CLASS, m).await;
             }
@@ -642,6 +683,9 @@ impl Message {
             Self::Available(m) => damaged!(m, PoolClass::Replication),
             Self::Prepare(m) => damaged!(m, PrepareOwnershipHandoffStateRequest::CLASS),
             Self::Capture(m) => damaged!(m, CaptureOwnershipHandoffStateRequest::CLASS),
+            Self::ForcedPrepare(m) => {
+                damaged!(m, crate::PrepareForcedOwnershipRecoveryRequest::CLASS)
+            }
             Self::Confirm(m) => damaged!(m, ConfirmOwnershipHandoffStateRequest::CLASS),
             Self::CaptureResponse(m) => damaged!(m, CaptureOwnershipHandoffStateRequest::CLASS),
         }
@@ -868,6 +912,19 @@ fn runtime_state_wire_variant_boundaries() {
             })
             .check(&executor)
             .await;
+        }
+        for duration in [
+            std::time::Duration::from_nanos(1),
+            std::time::Duration::from_secs(5),
+            std::time::Duration::new(7, 19),
+            std::time::Duration::from_secs(u64::from(u32::MAX)),
+        ] {
+            let budget = nervix_models::ClusterParameterDuration::try_from(duration)
+                .assured("the current preparation boundary budget fits the transport value");
+            let mut messages = Messages::new(b"captured-recovery-boundaries");
+            Message::ForcedPrepare(messages.forced_preparation(budget))
+                .check(&executor)
+                .await;
         }
         let page = BranchCheckpointPage {
             cursor: BranchCheckpointCursor {

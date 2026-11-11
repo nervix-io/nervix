@@ -164,6 +164,16 @@ async fn next_message(console: &mut ConsoleEnd) -> Message {
     message
 }
 
+/// Each authenticated call announces every bound before an ordinary frame or close.
+async fn announced_opening(console: &mut ConsoleEnd) {
+    let Message::Binary(payload) = next_message(console).await else {
+        panic!("an authenticated call starts with a binary opening");
+    };
+    let opening = nervix_client_wire::SessionOpened::verify(payload.into())
+        .assured("the complete opening fits the fixed envelope and validates its dimensions");
+    assert_eq!(opening.limits, limits());
+}
+
 #[nervix_primitives::test]
 async fn a_console_download_answers_its_request_and_closes_normally() {
     let TestService {
@@ -180,6 +190,7 @@ async fn a_console_download_answers_its_request_and_closes_normally() {
                 .await;
         }
     });
+    announced_opening(&mut console).await;
     let codec = ClientBackupDownloadWebSocketCodec::new(limits());
     let request = BackupDownloadRequest {
         execution_reference: reference(),
@@ -267,6 +278,7 @@ async fn a_text_message_closes_a_console_download_with_its_close_code() {
                 .await;
         }
     });
+    announced_opening(&mut console).await;
     console
         .send(Message::Text("not a frame".into()))
         .await
@@ -295,6 +307,7 @@ async fn a_console_restore_is_answered_once_its_declared_bytes_arrived() {
                 .await;
         }
     });
+    announced_opening(&mut console).await;
     let codec = ClientRestoreWebSocketCodec::new(limits());
     // The declared digest is not the bytes' digest, so the leader stages the archive and refuses
     // it once every declared byte arrived: the stream ended without a half-close.
@@ -340,6 +353,7 @@ async fn a_console_restore_whose_client_leaves_early_is_not_answered() {
                 .await;
         }
     });
+    announced_opening(&mut console).await;
     for frame in [start(DRY_RUN, declared(5)), chunk(b"abc")] {
         console
             .send(Message::Binary(frame.bytes().to_vec()))
@@ -377,6 +391,7 @@ async fn a_console_download_ends_going_away_when_the_node_stops() {
                 .await;
         }
     });
+    announced_opening(&mut console).await;
     // The client never sends its request; the node stopping ends the call all the same.
     service.inner.admission_shutdown.cancel();
     let Message::Close(Some(close)) = next_message(&mut console).await else {
@@ -403,6 +418,7 @@ async fn a_console_restore_ends_going_away_when_the_node_stops() {
                 .await;
         }
     });
+    announced_opening(&mut console).await;
     for frame in [start(DRY_RUN, declared(5)), chunk(b"abc")] {
         console
             .send(Message::Binary(frame.bytes().to_vec()))
@@ -461,6 +477,7 @@ async fn a_console_download_takes_its_request_after_a_ping() {
                 .await;
         }
     });
+    announced_opening(&mut console).await;
     console
         .send(Message::Ping(vec![7]))
         .await
@@ -501,6 +518,7 @@ async fn a_second_request_on_a_console_download_breaks_the_call() {
                 .await;
         }
     });
+    announced_opening(&mut console).await;
     for _ in 0..2 {
         console
             .send(download_request())
@@ -532,6 +550,7 @@ async fn a_message_above_the_frame_limit_closes_a_console_download_with_its_clos
                 .await;
         }
     });
+    announced_opening(&mut console).await;
     let oversized = limits()
         .frame_bytes()
         .checked_add(1)
@@ -620,6 +639,7 @@ async fn a_console_restore_whose_client_leaves_after_its_last_chunk_is_not_answe
                 .await;
         }
     });
+    announced_opening(&mut console).await;
     for frame in [start(DRY_RUN, declared(5)), chunk(b"abc"), chunk(b"de")] {
         console
             .send(Message::Binary(frame.bytes().to_vec()))
@@ -659,6 +679,7 @@ async fn a_text_message_closes_a_console_session_with_its_close_code() {
                 .await;
         }
     });
+    announced_opening(&mut console).await;
     // A control message belongs to the connection and keeps the session open.
     console
         .send(Message::Ping(vec![7]))

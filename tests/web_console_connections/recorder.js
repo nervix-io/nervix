@@ -8,12 +8,12 @@
 // on it, so a frame comes before every connection the page makes because of it.
 //
 // Of each connection it keeps the first FIRST_KEPT_FRAMES and the last LAST_KEPT_FRAMES binary
-// frames of at most MAX_KEPT_FRAME_BYTES, so a busy page keeps a bounded record. A node reports which
-// node leads at either end of a connection: the leader's report opens every session it serves and a
-// download's redirect is its first frame, while the redirect that ends a session, a restore's reply
-// and a command's redirect, after which the console lets the session go at once, come last. Such a
-// report is far smaller than the bound; the larger frames, domain snapshots and archive chunks,
-// report nothing about it.
+// frames of at most MAX_KEPT_FRAME_BYTES, so a busy page keeps a bounded record. The first frame
+// announces session limits. A node then reports which node leads at either end of a connection:
+// the leader's report starts the ordinary session and a download's redirect follows its opening,
+// while the redirect that ends a session, a restore's reply and a command's redirect, after which
+// the console lets the session go at once, come last. Such a report is far smaller than the bound;
+// the larger frames, domain snapshots and archive chunks, report nothing about it.
 //
 // It can also close the newest connection the page holds at a path, as a connection lost under the
 // console closes, and notes when it did.

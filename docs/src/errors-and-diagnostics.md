@@ -4010,6 +4010,43 @@ client node-credit capacities. Receive-limit and native-runtime relationship err
 typed causes beneath the startup context; they never turn a refused allocation into a decode or
 authentication failure. A runtime stack or blocking-thread refusal happens before node listeners.
 
+## Operational Settings And Session Opening
+
+`ClusterParameterDurationError` retains an integer-conversion cause when an external duration
+cannot fit the compact nanosecond scalar. Checked parameter definitions retain their own duration
+validation reports; every admitted duration is represented exactly.
+
+`NodeOperationalError` owns operational duration, count and dependent session-capability refusals;
+`SessionBoundsError` owns the five bound relationships for both configuration and wire conversion.
+The CLI adds its settings context while retaining the report. Current gRPC announcement failures
+retain `SessionAnnouncementError` through `SessionOpeningRejection` at tonic's foreign status
+boundary, including the complete rendered chain and a typed source. WebSocket opening verification
+uses `SessionOpeningError` above frame, semantic decode or unexpected-first-message causes.
+A transport/authentication refusal before a valid opening keeps its transport status and retry
+classification. If an HTTP fallback also lacks valid opening metadata, that report remains the
+status's typed source while its HTTP code, message and metadata are retained. No ordinary body is read under a guessed limit.
+
+A native upload or restore offer is validated before the server reads body input. A changed
+offer returns `FAILED_PRECONDITION` with a checked complete bound update and the fixed refusal
+marker, an ordinary pre-admission retry outcome. Missing or invalid request metadata is an
+`INVALID_ARGUMENT` with `SessionOpeningRejection` retaining its typed report. A malformed bound
+refusal or accepted response with different limits retains that report under an `UNKNOWN`
+status, because a companion may already have handed its archive over. Earlier upload or restore
+uncertainty survives a later refusal or encoding failure under the original logical identity.
+
+Native command attempts retain whether an earlier attempt may have been admitted. A later
+encoding refusal under a smaller announced frame bound keeps `EncodeRequest` and its
+`WireEncodeError` beneath `UncertainCommand` with the original execution reference. A first
+attempt refused locally retains its definite encoding refusal.
+
+A forced-recovery request validates its captured budget through the parameter definition and
+retains a validation report beneath its handoff context. It can wait for the execution revision
+before this node's local policy is ready.
+
+Configured native subscription counts are checked with each opening's announced frame size.
+An unrepresentable byte allowance returns `ClientError::InvalidSubscriptionRetention` before
+queue activation and retains the prior generation unchanged.
+
 ## Public Listener Input Refusals
 
 The [Listener Bounds](node-settings.md#listener-bounds) table owns HTTP input status/reason pairs.

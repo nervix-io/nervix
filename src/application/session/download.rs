@@ -43,10 +43,7 @@ use tracing::{debug, info};
 use super::outcome::{leader_redirect, node_endpoints};
 use crate::{
     application::{
-        backup::retained::{
-            ArchiveLease, DOWNLOAD_FRAME_CAPACITY, DownloadEnd, RetainedArchiveRefusal,
-            stream_archive,
-        },
+        backup::retained::{ArchiveLease, DownloadEnd, RetainedArchiveRefusal, stream_archive},
         domain_clock::current_timestamp,
         session_service::SessionServiceImpl,
     },
@@ -146,7 +143,8 @@ impl SessionServiceImpl {
                 return Ok(DownloadFrames::Answer(frame));
             }
         };
-        let (frames, archive_frames) = mpsc::channel(DOWNLOAD_FRAME_CAPACITY);
+        let (frames, archive_frames) =
+            mpsc::channel(self.inner.operational.session.download_capacity());
         #[cfg(feature = "testing")]
         let runtime = self.inner.runtime.clone();
         #[cfg(feature = "testing")]

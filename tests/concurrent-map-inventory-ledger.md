@@ -493,7 +493,7 @@ epic, but tracing them found defects:
 | --- | --- | --- |
 | `ResourceUploadExecutions::entries`, reached through `SessionServiceInner::resource_upload_executions` | One entry operation registers each installing, importing, recovering or waiting attempt; one releases it on completion, cancellation or any return. A busy recovery probe uses one entry lookup and creates no lease; a successful probe registers under that entry guard. The async guard ends before release, and the final attempt removes its entry under the same guard as admission. The map holds only active or waiting keys, independently of durable outcomes. | cold control-plane upload and restore ownership; no record, batch or acknowledgement lookup |
 | `RuntimeInner::state_identities` | Backup capture reads current scheduled identities before decoding retained checkpoints. Restore clears domain state handles only after complete publication under the consensus authority guard. | observer and stopped-domain lifecycle |
-| Session capture sections and restore uploads | Coordinator-scoped registration, bounded chunk transfer and expiration; checkpoint finish stages bytes, and publish replaces the complete set. | control-plane transfer; quota and deadline bounded |
+| Session capture sections and restore uploads | Coordinator-scoped registration, bounded chunk transfer and expiration captured as two thirds of command retry validity; the local restore-staging cadence drives its maintenance sweep. Checkpoint finish stages bytes, and publish replaces the complete set. | control-plane transfer; quota and deadline bounded |
 | Test command pauses and failed restore checkpoints | Armed by a scenario and consumed at restore publication or staging, the route polling boundary, and handoff force-flush publication. | test-only fault observation |
 
 ## Task dependency qualification
@@ -575,3 +575,12 @@ acknowledgement path reaches this state; the async mutex is untracked by Deloxid
 The node-capability rolling scenarios arm `FaultInjection::relay_before_grant_pauses` for one domain. The test-only probe records at most 32 accepted relay-piece observations under one short mutex. These lookups and the pause are compiled out of ordinary builds; neither carries product state.
 
 Stateful inferencer checkpoints retain their exact `ReplicatedInferencerState` in the existing immutable state-replication route index. Cold branch construction resolves that index once; admission retains the carrier and publishes native generations by pointer. No concurrent map is added. Assignment identity includes the typed model fingerprint; stale-schema/model purge and entity/domain teardown retire these routes. TTL/capacity eviction persists its empty final generation before retiring its exact unit and branch route.
+
+Session subscription usage/overflow maps keep the same event-queue owner and access frequency.
+A generation installs byte allowances from its authenticated peer announcement and the client's
+configured retained-frame and full-subscription counts under the existing queue lock. Defaults
+remain one frame per subscription and four full subscriptions. Unrepresentable arithmetic
+refuses the new opening before taking the lock or replacing its generation. A stale generation is
+rejected before any queue or usage access; close and replacement clear the same retained maps.
+Producer link registry ownership is unchanged; first-answer publication uses its bounded channel
+and adds no concurrent map or recurring configuration lookup.

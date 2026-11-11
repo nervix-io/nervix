@@ -1735,3 +1735,39 @@ async fn many_small_frames_do_not_exhaust_the_class_that_backs_them() {
         .try_reserve(MemoryClass::Management, 4096)
         .expect("a connection handshake still gets its reservation");
 }
+
+#[nervix_primitives::test]
+async fn bulk_read_batches_leave_admission_for_two_live_buffers() {
+    let tuned = ExecutionConfig {
+        budgets: MemoryBudgets {
+            bulk: ByteUnit::Mebibyte(8),
+            ..MemoryBudgets::default()
+        },
+        limits: OperationLimits {
+            bulk_chunk_bytes: ByteUnit::Mebibyte(4),
+            snapshot_section_bytes: ByteUnit::Mebibyte(1),
+            ..OperationLimits::default()
+        },
+        ..ExecutionConfig::default()
+    };
+    let mut odd = tuned;
+    odd.budgets.bulk = ByteUnit::Byte(ByteUnit::Mebibyte(8).as_u64() - 1);
+    for (config, expected) in [
+        (ExecutionConfig::default(), ByteUnit::Mebibyte(1).as_u64()),
+        (tuned, ByteUnit::Mebibyte(4).as_u64()),
+        (odd, ByteUnit::Mebibyte(4).as_u64() - 1),
+    ] {
+        let executor = Executor::new(config).expect("the complete tuned configuration is valid");
+        let bytes = executor.bulk_read_batch_bytes(NonZeroU32::new(16).expect("positive quanta"));
+        assert_eq!(bytes, expected);
+        let first = executor
+            .try_reserve(MemoryClass::Bulk, bytes)
+            .expect("the first actual read buffer fits");
+        let second = executor
+            .try_reserve(MemoryClass::Bulk, bytes)
+            .expect("the next read can coexist with the preceding transport buffer");
+        assert_eq!(executor.memory(MemoryClass::Bulk).reserved_bytes, 2 * bytes);
+        drop((first, second));
+        assert_eq!(executor.memory(MemoryClass::Bulk).reserved_bytes, 0);
+    }
+}

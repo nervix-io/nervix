@@ -36,9 +36,8 @@ use hyper::{
 };
 use hyper_util::rt::TokioIo;
 use meticulous::ResultExt as _;
-use nervix_client_wire::{
-    SessionLimits,
-    websocket::{CONSOLE_BACKUP_DOWNLOAD_PATH, CONSOLE_RESTORE_PATH, CONSOLE_SESSION_PATH},
+use nervix_client_wire::websocket::{
+    CONSOLE_BACKUP_DOWNLOAD_PATH, CONSOLE_RESTORE_PATH, CONSOLE_SESSION_PATH,
 };
 use nervix_consensus::ConsensusError;
 use nervix_models::{
@@ -296,7 +295,7 @@ async fn upgrade_console_websocket(
                 return;
             }
         };
-        let limits = SessionLimits::DEFAULT;
+        let limits = service.session_limits();
         let config = console_websocket_config(&limits);
         let websocket =
             WebSocketStream::from_raw_socket(TokioIo::new(upgraded), Role::Server, Some(config))

@@ -12,16 +12,19 @@
 
 use nervix_consensus::Proposer;
 use nervix_models::{NodeCapabilities, NodeCapabilityRecord};
+use nervix_primitives::sync::StdArc;
 
 pub(super) async fn announce(
     consensus: &Proposer,
     cluster: &crate::cluster::ClusterHandle,
     capabilities: NodeCapabilities,
+    operational: &StdArc<nervix_models::NodeOperationalCapabilities>,
 ) -> bool {
     let identity = cluster.local_node_identity().await;
     let record = NodeCapabilityRecord {
         identity,
         capabilities,
+        operational: operational.clone(),
     };
     if consensus
         .node_capability(record.identity.node_id())
@@ -51,13 +54,14 @@ pub(super) fn spawn(
     cluster: nervix_primitives::sync::Arc<crate::cluster::ClusterHandle>,
     interconnect: nervix_interconnect::Transport,
     capabilities: NodeCapabilities,
+    operational: nervix_models::NodeOperationalCapabilities,
     shutdown: nervix_primitives::sync::CancellationToken,
 ) -> nervix_primitives::task::JoinHandle<()> {
+    let retry_interval = operational.control_plane.runtime_state_retry_interval();
+    let operational = StdArc::new(operational);
     nervix_primitives::task::spawn(async move {
         let mut announced = false;
-        let mut cadence = nervix_primitives::time::interval(
-            super::runtime_admission::RUNTIME_STATE_RETRY_INTERVAL,
-        );
+        let mut cadence = nervix_primitives::time::interval(retry_interval);
         loop {
             nervix_primitives::select! {
                 biased;
@@ -67,7 +71,7 @@ pub(super) fn spawn(
             interconnect.publish_peer_capabilities(&consensus.node_capabilities());
             if !announced {
                 let Some(committed) = shutdown
-                    .run_until_cancelled(announce(&consensus, &cluster, capabilities))
+                    .run_until_cancelled(announce(&consensus, &cluster, capabilities, &operational))
                     .await
                 else {
                     return;

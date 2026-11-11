@@ -28,7 +28,7 @@ use super::{
             named, node_named, placement_group, placement_member, scheduled_node, scheduled_node_on,
         },
     },
-    StartupVoterObservations, VOTER_OBSERVATION_GRACE,
+    StartupVoterObservations,
 };
 
 fn voter_gossip(live: &[&str], dead: &[&str]) -> GossipState {
@@ -55,7 +55,7 @@ fn voter_gossip(live: &[&str], dead: &[&str]) -> GossipState {
 #[test]
 fn startup_voter_observations_wait_for_dead_and_unknown_voters_never_seen_live() {
     let voters = ["node-1", "node-2", "node-3", "node-4"].map(named::<ClusterNodeName>);
-    let mut observations = StartupVoterObservations::default();
+    let mut observations = StartupVoterObservations::new(voter_observation_grace());
     observations.observe(
         &voter_gossip(&["node-1", "node-2", "node-3"], &["node-3"]),
         Duration::from_secs(1),
@@ -70,7 +70,7 @@ fn startup_voter_observations_wait_for_dead_and_unknown_voters_never_seen_live()
 #[test]
 fn startup_voter_observations_retain_live_evidence_before_leadership_and_after_failure() {
     let voters = ["node-1", "node-2", "node-3"].map(named);
-    let mut observations = StartupVoterObservations::default();
+    let mut observations = StartupVoterObservations::new(voter_observation_grace());
     observations.observe(
         &voter_gossip(&["node-1", "node-2", "node-3"], &[]),
         Duration::from_secs(1),
@@ -91,8 +91,8 @@ fn startup_voter_observations_retain_live_evidence_before_leadership_and_after_f
 fn startup_voter_observations_expire_at_the_grace_boundary_for_a_missing_voter() {
     let voters = [named("node-1"), named("node-3")];
     let gossip = voter_gossip(&["node-1"], &["node-3"]);
-    let mut observations = StartupVoterObservations::default();
-    let before_expiry = VOTER_OBSERVATION_GRACE - Duration::from_nanos(1);
+    let mut observations = StartupVoterObservations::new(voter_observation_grace());
+    let before_expiry = voter_observation_grace() - Duration::from_nanos(1);
     observations.observe(&gossip, before_expiry);
     assert_eq!(
         observations.unobserved_voters(&voters, before_expiry),
@@ -101,21 +101,21 @@ fn startup_voter_observations_expire_at_the_grace_boundary_for_a_missing_voter()
 
     assert!(
         observations
-            .unobserved_voters(&voters, VOTER_OBSERVATION_GRACE)
+            .unobserved_voters(&voters, voter_observation_grace())
             .is_empty()
     );
-    observations.observe(&gossip, VOTER_OBSERVATION_GRACE);
+    observations.observe(&gossip, voter_observation_grace());
     assert!(observations.observed_live.is_empty());
     assert!(
         observations
-            .unobserved_voters(&voters, VOTER_OBSERVATION_GRACE + Duration::from_secs(1))
+            .unobserved_voters(&voters, voter_observation_grace() + Duration::from_secs(1))
             .is_empty()
     );
 }
 
 #[test]
 fn startup_voter_observations_follow_the_current_voting_membership() {
-    let mut observations = StartupVoterObservations::default();
+    let mut observations = StartupVoterObservations::new(voter_observation_grace());
     observations.observe(&voter_gossip(&["node-1", "node-2"], &[]), Duration::ZERO);
     let voters = ["node-1", "node-2", "node-3"].map(named);
     assert_eq!(
@@ -139,7 +139,7 @@ fn startup_voter_observations_follow_the_current_voting_membership() {
 #[test]
 fn startup_voter_observations_belong_to_one_reconciliation_process() {
     let voters = ["node-1", "node-2", "node-3"].map(named);
-    let mut first_process = StartupVoterObservations::default();
+    let mut first_process = StartupVoterObservations::new(voter_observation_grace());
     first_process.observe(
         &voter_gossip(&["node-1", "node-2", "node-3"], &[]),
         Duration::ZERO,
@@ -150,7 +150,7 @@ fn startup_voter_observations_belong_to_one_reconciliation_process() {
             .is_empty()
     );
 
-    let mut restarted_process = StartupVoterObservations::default();
+    let mut restarted_process = StartupVoterObservations::new(voter_observation_grace());
     restarted_process.observe(
         &voter_gossip(&["node-1"], &["node-2", "node-3"]),
         Duration::ZERO,
@@ -1388,4 +1388,8 @@ fn failover_promotes_live_replica_before_policy_target() {
             named::<ClusterNodeName>("node-1")
         ]
     );
+}
+
+fn voter_observation_grace() -> Duration {
+    crate::cluster::MembershipSettings::default().gossip_interval() * 20
 }

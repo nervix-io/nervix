@@ -518,8 +518,10 @@ status, keeping the start version, start mode, clock, schedule and incremental s
 
 The current emitter Models carry explicit key expressions, source-partition routing and
 expression-only SQS FIFO groups. The dedicated database owns exactly four current keyspaces:
-`raft_inferencer_wasm_inspection_listener_bounds_logs`, `raft_inferencer_wasm_inspection_listener_bounds_meta`, `raft_inferencer_wasm_inspection_listener_bounds_state`, and
-`raft_inferencer_wasm_inspection_listener_bounds_snapshots`. Opening it validates the complete keyspace namespace before
+`raft_inferencer_wasm_inspection_operational_retry_listener_bounds_logs`,
+`raft_inferencer_wasm_inspection_operational_retry_listener_bounds_meta`,
+`raft_inferencer_wasm_inspection_operational_retry_listener_bounds_state`, and
+`raft_inferencer_wasm_inspection_operational_retry_listener_bounds_snapshots`. Opening it validates the complete keyspace namespace before
 reading any records. The committed cluster-parameter record stores ordered typed TLS cipher
 suites and key-exchange groups; recovery validates their complete pair before returning that
 record. This namespace identifies the current Model shape, including the statement
@@ -545,8 +547,10 @@ changes one part of its entity's body, an envelope clause or the properties, or 
 construction where it stands, including the typed `payload` expression scope and a
 `RESET WASM PROCESSOR ... STATE` that names its processor and scope and takes its domain from
 the transaction, as the step effect and commit plan step keep it too. The database also stores
-incarnation-bound node capability claims under record-family tag `C`, including transport, DNS, database, consensus, engine, connector host and listener capacities. The existing boxed capability announcement keeps unrelated command variants within the inline payload-size bound. Its state metadata
-requires the current `ClusterState` encoding, 32, including the cluster identity reference,
+incarnation-bound node capability claims under record-family tag `C`, including transport, DNS,
+database, consensus, engine, connector host, operational and listener capacities. The existing
+boxed capability announcement keeps unrelated command variants within the inline payload-size
+bound. Its state metadata requires the current `ClusterState` encoding, 33, including the cluster identity reference,
 committed cluster parameters, the durable restore installation gate and the unit-keyed committed
 schedule in which a relay of a partitioned branch is scheduled as one unit per partition.
 The current shape also requires inferencer state bindings and their initial expressions,
@@ -857,5 +861,17 @@ Its larger announcement is boxed within its one command variant, keeping the exi
 inline Raft payload guard for all commands. No other Raft command gains a boxing allocation.
 The current keyspace names and interconnect fingerprint identify this representation. A database
 from another shape must be recreated; there is no alternate reader or migration path.
+
+The complete cluster policy uses exact eight-byte seconds/nanoseconds projections for its bounded
+duration settings. Public getters and JSON retain `Duration` semantics. This representation keeps normal
+Raft commands inline within the existing 256-byte payload bound, without boxing ordinary log
+entries. The current operational-policy keyspaces and interconnect fingerprint cover the complete
+parameter record and required immutable node operational claim; other stored shapes require
+recreation and have no second decoder.
+
+The eight count parameters whose definitions already cap them within `u32::MAX` use four-byte
+stored projections. Their public u64 values, defaults and admitted ranges remain unchanged;
+full-width count and byte parameters retain eight bytes. Storage and JSON both validate through
+the owning definition before publishing the complete policy.
 
 A durable transaction request records an unqueueable statement as a typed refusal carrying only its statement label. It retains preceding operations and batch shape without retaining the refused Model or its source, so a preceding `BEGIN` remains open after refusal and credentials never enter that queued effect.

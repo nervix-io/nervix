@@ -36,14 +36,16 @@ use ahash::{HashMap, RandomState};
 use bytes::Bytes;
 use error_stack::Report;
 use futures_util::StreamExt as _;
+use meticulous::ResultExt as _;
 use nervix_interconnect::{
     ChargedItem, DuplexItems, DuplexResponses, DuplexSender, HandlerRegistrationError,
     InterconnectDuplexRequest, PoolClass, RequestSubquota, StreamHandlerError, Transport,
 };
 use nervix_models::{
-    ClientProducerAdmission, ClientProducerDescription, ClientProducerEndReason,
-    ClientProducerLimits, ClientProducerRefusal, ClientSubmissionOutcome, ClientSubmissionRefusal,
-    ClusterNodeName, DomainName, IngestorName, SchemaField, UserName,
+    AnnouncedLinkHeartbeat, ClientLinkCapabilities, ClientProducerAdmission,
+    ClientProducerDescription, ClientProducerEndReason, ClientProducerLimits,
+    ClientProducerRefusal, ClientSubmissionOutcome, ClientSubmissionRefusal, ClusterNodeName,
+    DomainName, IngestorName, SchemaField, UserName,
 };
 use nervix_primitives::{
     collections::DashMap,
@@ -65,32 +67,13 @@ use crate::runtime::{
     ClientProducerRetention, ClientSubmissionId, OpenedClientProducer, Runtime,
 };
 
-/// How often an idle end of a link tells the other it is still there.
-const LINK_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(2);
-
-/// How long an end of a link waits without hearing anything from the other before it treats the
-/// link as lost.
-const LINK_SILENCE_LIMIT: Duration = Duration::from_secs(10);
-
-const _: () = assert!(
-    LINK_SILENCE_LIMIT.as_secs() >= 4 * LINK_HEARTBEAT_INTERVAL.as_secs(),
-    "a link survives several heartbeats delayed behind the frames of a busy link",
-);
-
-/// How long a serving node waits for the owning node to answer a forwarded open, including
-/// opening the link itself.
-const FORWARDED_OPEN_DEADLINE: Duration = Duration::from_secs(20);
-
-/// Answers queued for a serving node before a producer's forwarding waits for the link to take
-/// them. Heartbeats are skipped rather than queued behind a full queue.
-const OWNER_LINK_ANSWER_CAPACITY: usize = 64;
-
 /// Opens the link a serving node keeps to one owning node.
 #[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
 pub(super) struct OpenClientProducerLink {
     /// The node that opens the link, which the owning node checks against the peer it
     /// authenticated.
     serving_node: ClusterNodeName,
+    heartbeat: AnnouncedLinkHeartbeat,
 }
 
 impl InterconnectDuplexRequest for OpenClientProducerLink {
@@ -100,8 +83,8 @@ impl InterconnectDuplexRequest for OpenClientProducerLink {
     const NAME: &'static str = "client_producer_link";
     const CLASS: PoolClass = PoolClass::Relay;
     const SUBQUOTA: RequestSubquota = RequestSubquota::Shared;
-    const SETUP_DEADLINE: nervix_interconnect::RequestDeadline =
-        nervix_interconnect::RequestDeadline::Setup;
+    const SETUP_DEADLINE: nervix_interconnect::DuplexSetupDeadline =
+        nervix_interconnect::DuplexSetupDeadline::ConnectionSetup;
 }
 
 /// What a serving node sends over its link, each naming the producer it concerns by its key.
@@ -139,6 +122,9 @@ pub(super) enum ClientProducerLinkItem {
 /// What an owning node answers over a link.
 #[derive(Debug, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
 pub(super) enum ClientProducerLinkEvent {
+    LinkOpened {
+        heartbeat: AnnouncedLinkHeartbeat,
+    },
     Opened {
         key: u64,
         description: ClientProducerDescription,
@@ -183,6 +169,7 @@ pub(super) struct ProducerLinks {
 }
 
 struct LinksInner {
+    settings: ClientLinkCapabilities,
     interconnect: Transport,
     local_node: ClusterNodeName,
     links: DashMap<ClusterNodeName, LinkHandle, RandomState>,
@@ -267,9 +254,14 @@ impl Drop for ForwardedProducer {
 }
 
 impl ProducerLinks {
-    pub(super) fn new(interconnect: Transport, local_node: ClusterNodeName) -> Self {
+    pub(super) fn new(
+        interconnect: Transport,
+        local_node: ClusterNodeName,
+        settings: ClientLinkCapabilities,
+    ) -> Self {
         Self {
             inner: Arc::new(LinksInner {
+                settings,
                 interconnect,
                 local_node,
                 links: DashMap::with_hasher(RandomState::default()),
@@ -293,8 +285,11 @@ impl ProducerLinks {
             let link = self.link_to(owner);
             match link.commands.send(command) {
                 Ok(()) => {
-                    return match nervix_primitives::time::timeout(FORWARDED_OPEN_DEADLINE, answer)
-                        .await
+                    return match nervix_primitives::time::timeout(
+                        self.inner.settings.producer_open_timeout(),
+                        answer,
+                    )
+                    .await
                     {
                         Ok(Ok(opened)) => opened,
                         // The link ended before the owning node answered.
@@ -460,33 +455,51 @@ struct ServingLink {
 
 impl ServingLink {
     async fn run(mut self, mut commands: mpsc::UnboundedReceiver<LinkCommand>) {
-        let opened = self
-            .links
-            .inner
-            .interconnect
-            .open_duplex_stream(
+        let deadline = Instant::now() + self.links.inner.settings.producer_open_timeout();
+        let opened = nervix_primitives::time::timeout_at(
+            deadline,
+            self.links.inner.interconnect.open_duplex_stream(
                 &self.owner,
                 OpenClientProducerLink {
                     serving_node: self.links.inner.local_node.clone(),
+                    heartbeat: self.links.inner.settings.announced_heartbeat(),
                 },
-            )
-            .await;
+            ),
+        )
+        .await;
         let (sender, mut receiver) = match opened {
-            Ok(opened) => opened,
-            Err(error) => {
+            Ok(Ok(opened)) => opened,
+            Ok(Err(error)) => {
                 debug!(owner = %self.owner, error = %format_args!("{error:#}"), "a client producer link did not open");
                 self.end(&mut commands);
                 return;
             }
+            Err(_) => {
+                self.end(&mut commands);
+                return;
+            }
         };
+        let peer_heartbeat =
+            match nervix_primitives::time::timeout_at(deadline, receiver.next()).await {
+                Ok(Ok(Some(ClientProducerLinkEvent::LinkOpened { heartbeat }))) => heartbeat,
+                _ => {
+                    self.end(&mut commands);
+                    return;
+                }
+            };
         let (items, queued) = mpsc::unbounded_channel();
-        let mut writer = nervix_primitives::task::spawn(write_link(sender, queued));
+        let mut writer = nervix_primitives::task::spawn(write_link(
+            sender,
+            queued,
+            self.links.inner.settings.heartbeat_interval(),
+        ));
         let mut last_heard = Instant::now();
         loop {
             nervix_primitives::task::consume_budget().await;
             nervix_primitives::select! {
                 biased;
                 event = receiver.next() => match event {
+                    Ok(Some(ClientProducerLinkEvent::LinkOpened { .. })) => break,
                     Ok(Some(event)) => {
                         last_heard = Instant::now();
                         self.deliver(event, &items);
@@ -506,7 +519,7 @@ impl ServingLink {
                     };
                     self.command(command, &items);
                 }
-                () = nervix_primitives::time::sleep_until(last_heard + LINK_SILENCE_LIMIT) => {
+                () = nervix_primitives::time::sleep_until(last_heard + peer_heartbeat.silence_limit()) => {
                     debug!(owner = %self.owner, "the owning node fell silent on a client producer link");
                     break;
                 }
@@ -628,6 +641,9 @@ impl ServingLink {
         items: &mpsc::UnboundedSender<ClientProducerLinkItem>,
     ) {
         match event {
+            ClientProducerLinkEvent::LinkOpened { .. } => unreachable!(
+                "the ordered link opening is consumed once before routing producer events"
+            ),
             ClientProducerLinkEvent::Opened { key, description } => {
                 let Some(reply) = self.pending.remove(&key) else {
                     return;
@@ -727,8 +743,9 @@ impl ServingLink {
 async fn write_link(
     mut sender: DuplexSender<OpenClientProducerLink>,
     mut items: mpsc::UnboundedReceiver<ClientProducerLinkItem>,
+    heartbeat_interval: Duration,
 ) {
-    let mut heartbeat = nervix_primitives::time::interval(LINK_HEARTBEAT_INTERVAL);
+    let mut heartbeat = nervix_primitives::time::interval(heartbeat_interval);
     heartbeat.set_missed_tick_behavior(MissedTickBehavior::Delay);
     loop {
         nervix_primitives::task::consume_budget().await;
@@ -755,6 +772,7 @@ async fn write_link(
 pub(super) fn serve_owner_links(
     interconnect: &Transport,
     runtime: Runtime,
+    settings: ClientLinkCapabilities,
 ) -> error_stack::Result<(), HandlerRegistrationError> {
     interconnect.register_duplex_handler::<OpenClientProducerLink, _, _>(
         move |context, request, items| {
@@ -767,8 +785,10 @@ pub(super) fn serve_owner_links(
                         request.serving_node
                     ))));
                 }
-                let (answers, answered) = mpsc::channel(OWNER_LINK_ANSWER_CAPACITY);
+                let (answers, answered) = owner_answer_channel(settings);
                 let link = OwnerLink {
+                    settings,
+                    peer_heartbeat: request.heartbeat,
                     runtime,
                     serving_node: request.serving_node,
                     answers,
@@ -781,8 +801,29 @@ pub(super) fn serve_owner_links(
     )
 }
 
+/// The first bounded answer establishes the owner's cadence before any producer or idle event.
+fn owner_answer_channel(
+    settings: ClientLinkCapabilities,
+) -> (
+    mpsc::Sender<ClientProducerLinkEvent>,
+    mpsc::Receiver<ClientProducerLinkEvent>,
+) {
+    let (answers, answered) = mpsc::channel(
+        usize::try_from(settings.producer_answer_capacity().get())
+            .assured("the link capability validates native channel capacity"),
+    );
+    answers
+        .try_send(ClientProducerLinkEvent::LinkOpened {
+            heartbeat: settings.announced_heartbeat(),
+        })
+        .assured("the positive empty answer queue holds its one opening");
+    (answers, answered)
+}
+
 /// The owning side of one link: the producers it attached for the serving node.
 struct OwnerLink {
+    settings: ClientLinkCapabilities,
+    peer_heartbeat: AnnouncedLinkHeartbeat,
     runtime: Runtime,
     serving_node: ClusterNodeName,
     answers: mpsc::Sender<ClientProducerLinkEvent>,
@@ -791,7 +832,7 @@ struct OwnerLink {
 
 impl OwnerLink {
     async fn run(mut self, mut items: DuplexItems<ClientProducerLinkItem>) {
-        let mut heartbeat = nervix_primitives::time::interval(LINK_HEARTBEAT_INTERVAL);
+        let mut heartbeat = nervix_primitives::time::interval(self.settings.heartbeat_interval());
         heartbeat.set_missed_tick_behavior(MissedTickBehavior::Delay);
         let mut last_heard = Instant::now();
         loop {
@@ -826,7 +867,7 @@ impl OwnerLink {
                         break;
                     }
                 }
-                () = nervix_primitives::time::sleep_until(last_heard + LINK_SILENCE_LIMIT) => {
+                () = nervix_primitives::time::sleep_until(last_heard + self.peer_heartbeat.silence_limit()) => {
                     debug!(
                         serving_node = %self.serving_node,
                         "a serving node fell silent on a client producer link"
@@ -1003,3 +1044,11 @@ mod tests;
 #[cfg(test)]
 #[path = "link_properties.rs"]
 mod properties;
+
+#[cfg(all(test, feature = "shuttle"))]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "checks the production opening answer queue")
+)]
+#[path = "link_shuttle_tests.rs"]
+mod shuttle_tests;

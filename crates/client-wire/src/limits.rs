@@ -4,12 +4,16 @@
 //! decoders that allocate, and the encoders that must never produce a frame a peer rejects from
 //! the same numbers.
 
-use std::num::NonZeroUsize;
+use std::num::{NonZeroU64, NonZeroUsize};
 
 use error_stack::Report;
 use flatbuffers::VerifierOptions;
-use meticulous::OptionExt as _;
-use thiserror::Error;
+use meticulous::{OptionExt as _, ResultExt as _};
+pub use nervix_models::SessionBoundsError as LimitsError;
+use nervix_models::{
+    SessionBoundValues, SessionBounds, SessionCollectionEntries, SessionFrameBytes,
+    SessionNestingDepth, SessionStringBytes, SessionTransferBytes,
+};
 
 /// How many requests one session may have in flight, counting both of its lanes. A server refuses
 /// a request beyond it with `TooManyRequestsInFlight` rather than queue it, so a client flooding one
@@ -19,41 +23,41 @@ use thiserror::Error;
 pub const MAX_IN_FLIGHT_REQUESTS: usize = 64;
 
 /// The largest single frame by default. It matches the receive limit gRPC applies by default.
-const DEFAULT_FRAME_BYTES: usize = 4 * 1024 * 1024;
+const DEFAULT_FRAME_BYTES: usize = SessionFrameBytes::DEFAULT;
 
 /// The largest reply a transfer reassembles by default.
-const DEFAULT_TRANSFER_BYTES: usize = 64 * 1024 * 1024;
+const DEFAULT_TRANSFER_BYTES: usize = SessionTransferBytes::DEFAULT;
 
 /// The deepest nesting of tables by default. The deepest structure of the schema that does not
 /// recurse, a node coverage in an execution step's affected topology inside an inspection reply,
 /// nests 13 tables; the rest of the budget is for nested list values and list field types.
-const DEFAULT_NESTING_DEPTH: usize = 64;
+const DEFAULT_NESTING_DEPTH: usize = SessionNestingDepth::DEFAULT;
 
 /// The most entries a single vector may hold by default.
-const DEFAULT_COLLECTION_ENTRIES: usize = 1 << 18;
+const DEFAULT_COLLECTION_ENTRIES: usize = SessionCollectionEntries::DEFAULT;
 
 /// The longest string by default.
-const DEFAULT_STRING_BYTES: usize = DEFAULT_TRANSFER_BYTES;
+const DEFAULT_STRING_BYTES: usize = SessionStringBytes::DEFAULT;
 
 /// A frame must hold a transfer part with a useful chunk, and a limit below this cannot.
-pub(crate) const MIN_FRAME_BYTES: usize = 1024;
+pub(crate) const MIN_FRAME_BYTES: usize = SessionFrameBytes::MINIMUM;
 
 /// The largest frame any limit admits.
 ///
 /// FlatBuffers offsets are 32-bit, and the verifier's apparent-size budget, which is this bound
 /// times [`APPARENT_SIZE_FACTOR`], must stay representable in a 32-bit `usize` for browser builds.
-const MAX_FRAME_BYTES: usize = 256 * 1024 * 1024;
+const MAX_FRAME_BYTES: usize = SessionFrameBytes::MAXIMUM;
 
 /// The fewest nesting levels any limit admits: enough for every structure of the schema that does
 /// not recurse, which a test verifies under this limit.
-pub(crate) const MIN_NESTING_DEPTH: usize = 16;
+pub(crate) const MIN_NESTING_DEPTH: usize = SessionNestingDepth::MINIMUM;
 
 /// The most nesting levels any limit admits.
 ///
 /// The verifier and the decoders recurse once per level, so the depth bounds the stack a hostile
 /// frame can make a receiver use. A test verifies and decodes a frame nested this deep on a test
 /// thread's stack in a debug build.
-pub(crate) const MAX_NESTING_DEPTH: usize = 128;
+pub(crate) const MAX_NESTING_DEPTH: usize = SessionNestingDepth::MAXIMUM;
 
 /// The smallest table occupies its four-byte vtable offset, so a frame of `n` bytes cannot hold
 /// more than `n / MIN_TABLE_BYTES` tables.
@@ -80,37 +84,6 @@ const _: () = {
     assert!(MAX_FRAME_BYTES.checked_mul(APPARENT_SIZE_FACTOR).is_some());
 };
 
-/// Why a set of limits was refused.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
-pub enum LimitsError {
-    #[error("a frame limit of {frame_bytes} bytes is outside {minimum}..={maximum}")]
-    FrameBytesOutOfRange {
-        frame_bytes: usize,
-        minimum: usize,
-        maximum: usize,
-    },
-    #[error(
-        "a transfer limit of {transfer_bytes} bytes is outside the frame limit {frame_bytes} to \
-         {maximum}"
-    )]
-    TransferBytesOutOfRange {
-        transfer_bytes: usize,
-        frame_bytes: usize,
-        maximum: usize,
-    },
-    #[error("a nesting limit of {nesting_depth} is outside {minimum}..={maximum}")]
-    NestingDepthOutOfRange {
-        nesting_depth: usize,
-        minimum: usize,
-        maximum: usize,
-    },
-    #[error("a string limit of {string_bytes} bytes exceeds the transfer limit {transfer_bytes}")]
-    StringBytesAboveTransfer {
-        string_bytes: usize,
-        transfer_bytes: usize,
-    },
-}
-
 /// The limits a session is configured with, before they are checked against one another.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SessionLimitSettings {
@@ -133,6 +106,25 @@ pub struct SessionLimits {
 }
 
 impl SessionLimits {
+    /// The fixed envelope bound before the current session's limits are announced. It holds
+    /// the numeric opening and the download request's bounded execution reference.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::constant(
+            fixed,
+            reason = "the session opening envelope fits the protocol's minimum frame"
+        )
+    )]
+    pub const OPENING: Self = Self {
+        settings: SessionLimitSettings {
+            frame_bytes: non_zero(MIN_FRAME_BYTES),
+            transfer_bytes: non_zero(MIN_FRAME_BYTES),
+            nesting_depth: non_zero(MIN_NESTING_DEPTH),
+            collection_entries: non_zero(MIN_FRAME_BYTES),
+            string_bytes: non_zero(MIN_FRAME_BYTES),
+        },
+    };
+
     /// The limits a session uses unless its transport configures others.
     pub const DEFAULT: Self = Self {
         settings: SessionLimitSettings {
@@ -200,39 +192,40 @@ impl TryFrom<SessionLimitSettings> for SessionLimits {
     type Error = Report<LimitsError>;
 
     fn try_from(settings: SessionLimitSettings) -> Result<Self, Self::Error> {
-        let frame_bytes = settings.frame_bytes.get();
-        if !(MIN_FRAME_BYTES..=MAX_FRAME_BYTES).contains(&frame_bytes) {
-            return Err(Report::new(LimitsError::FrameBytesOutOfRange {
-                frame_bytes,
-                minimum: MIN_FRAME_BYTES,
-                maximum: MAX_FRAME_BYTES,
-            }));
-        }
-        let transfer_bytes = settings.transfer_bytes.get();
-        if !(frame_bytes..=MAX_FRAME_BYTES).contains(&transfer_bytes) {
-            return Err(Report::new(LimitsError::TransferBytesOutOfRange {
-                transfer_bytes,
-                frame_bytes,
-                maximum: MAX_FRAME_BYTES,
-            }));
-        }
-        let nesting_depth = settings.nesting_depth.get();
-        if !(MIN_NESTING_DEPTH..=MAX_NESTING_DEPTH).contains(&nesting_depth) {
-            return Err(Report::new(LimitsError::NestingDepthOutOfRange {
-                nesting_depth,
-                minimum: MIN_NESTING_DEPTH,
-                maximum: MAX_NESTING_DEPTH,
-            }));
-        }
-        let string_bytes = settings.string_bytes.get();
-        if string_bytes > transfer_bytes {
-            return Err(Report::new(LimitsError::StringBytesAboveTransfer {
-                string_bytes,
-                transfer_bytes,
-            }));
-        }
-        Ok(Self { settings })
+        let bounds = SessionBounds::resolve(SessionBoundValues {
+            frame_bytes: Some(semantic_size(settings.frame_bytes)),
+            transfer_bytes: Some(semantic_size(settings.transfer_bytes)),
+            nesting_depth: Some(semantic_size(settings.nesting_depth)),
+            collection_entries: Some(semantic_size(settings.collection_entries)),
+            string_bytes: Some(semantic_size(settings.string_bytes)),
+        })?;
+        Ok(Self::from(&bounds))
     }
+}
+
+impl From<&SessionBounds> for SessionLimits {
+    fn from(bounds: &SessionBounds) -> Self {
+        Self {
+            settings: SessionLimitSettings {
+                frame_bytes: native_size(bounds.frame_bytes()),
+                transfer_bytes: native_size(bounds.transfer_bytes()),
+                nesting_depth: native_size(bounds.nesting_depth()),
+                collection_entries: native_size(bounds.collection_entries()),
+                string_bytes: native_size(bounds.string_bytes()),
+            },
+        }
+    }
+}
+
+fn semantic_size(value: NonZeroUsize) -> NonZeroU64 {
+    let value = u64::try_from(value.get()).assured("supported native and browser sizes fit u64");
+    NonZeroU64::new(value).assured("the source size is nonzero")
+}
+
+fn native_size(value: NonZeroU64) -> NonZeroUsize {
+    let value = usize::try_from(value.get())
+        .assured("the session definition validates platform representation");
+    NonZeroUsize::new(value).assured("the validated semantic size is nonzero")
 }
 
 const fn non_zero(value: usize) -> NonZeroUsize {

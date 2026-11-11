@@ -323,7 +323,7 @@ fn answer_sample(sample: Sample, reply: ReplyBodyKind) -> ClientRequestKind {
     Owner::new().with(|| {
         let signals = subscription_signals(sample.tab());
         let state = RwSignal::new(ConsoleConnectionState::Connected);
-        let mut requests = SessionRequests::new();
+        let mut requests = SessionRequests::new(Some(nervix_client_wire::SessionLimits::DEFAULT));
         requests.confirm_leader();
         let issued = requests.issue(sample.request(signals));
         let message = sent(requests.accept(issued));
@@ -427,7 +427,7 @@ fn a_reply_of_another_kind_to_a_superseded_lookup_is_discarded_without_ending_th
     Owner::new().with(|| {
         let signals = subscription_signals(SubscriptionTabState::Pending);
         let state = RwSignal::new(ConsoleConnectionState::Connected);
-        let mut requests = SessionRequests::new();
+        let mut requests = SessionRequests::new(Some(nervix_client_wire::SessionLimits::DEFAULT));
         requests.confirm_leader();
         let earlier = requests.issue(suggest("SH"));
         let earlier = sent(requests.accept(earlier));

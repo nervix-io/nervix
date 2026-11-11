@@ -27,6 +27,7 @@ mod listeners;
 mod membership;
 mod memory_pressure;
 mod node;
+mod operational;
 #[cfg(test)]
 mod properties;
 mod resources;
@@ -48,6 +49,7 @@ pub use self::{
     membership::MembershipArgs,
     memory_pressure::MemoryPressureArgs,
     node::NodeArgs,
+    operational::OperationalArgs,
     resources::ResourceArgs,
     runtime::RuntimeArgs,
     scheduling::SchedulingArgs,
@@ -59,7 +61,7 @@ pub use self::{
 
 #[derive(Parser, Debug, Clone)]
 #[command(name = "nervix-server")]
-#[command(about = "Plexus gRPC server")]
+#[command(about = "Nervix gRPC server")]
 pub struct Args {
     /// Who the node is, where it listens and is reached, and the files and directories it uses.
     #[command(flatten)]

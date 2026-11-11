@@ -1660,7 +1660,12 @@ mod tests {
                 }
                 let (response_tx, response_rx) = mpsc::channel(4);
                 nervix_primitives::task::spawn(behavior.answer(request.into_inner(), response_tx));
-                Ok(Response::new(ReceiverStream::new(response_rx)))
+                let mut response = Response::new(ReceiverStream::new(response_rx));
+                nervix_client_wire::grpc::limits::write(
+                    response.metadata_mut(),
+                    SessionLimits::DEFAULT,
+                );
+                Ok(response)
             })
         }
     }
@@ -4102,7 +4107,10 @@ mod tests {
 
     #[nervix_primitives::test(start_paused = true)]
     async fn a_stopping_node_is_read_with_its_shutdown_phase_and_its_own_deadline() {
-        let shutdown = ShutdownCoordinator::new(STAND_IN_SHUTDOWN_TIMEOUT);
+        let shutdown = ShutdownCoordinator::new(
+            STAND_IN_SHUTDOWN_TIMEOUT,
+            nervix_server::application::ShutdownSettings::default().task_grace_period(),
+        );
 
         let serving = NodeStopProgress::observe(&shutdown);
         assert_eq!(

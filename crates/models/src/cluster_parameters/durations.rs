@@ -13,6 +13,8 @@
 use std::time::Duration;
 
 use error_stack::Report;
+use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
+use serde::{Deserialize, Serialize};
 
 use super::{ClusterParameterError, ClusterParameterKey};
 use crate::{ClusterParameters, SettingDefinition};
@@ -240,3 +242,92 @@ impl SettingDefinition for LicensingStreamIdleTimeout {
         ClusterParameterKey::LicensingStreamIdleTimeout.validate_duration(*value)
     }
 }
+
+/// Exact compact duration carried by an ownership-recovery request. The receiving boundary
+/// validates its policy range before establishing the deadline. The transport value preserves
+/// nanoseconds in eight bytes without allocating.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    Archive,
+    RkyvSerialize,
+    RkyvDeserialize,
+)]
+#[serde(try_from = "Duration", into = "Duration")]
+pub struct ClusterParameterDuration(u64);
+
+#[derive(Debug, Clone, Copy, thiserror::Error)]
+#[error("cluster duration {value:?} cannot be represented as u64 nanoseconds")]
+pub struct ClusterParameterDurationError {
+    value: Duration,
+}
+
+impl TryFrom<Duration> for ClusterParameterDuration {
+    type Error = Report<ClusterParameterDurationError>;
+    fn try_from(value: Duration) -> Result<Self, Self::Error> {
+        let nanos = u64::try_from(value.as_nanos()).map_err(|error| {
+            Report::new(error).change_context(ClusterParameterDurationError { value })
+        })?;
+        Ok(Self(nanos))
+    }
+}
+impl From<ClusterParameterDuration> for Duration {
+    fn from(value: ClusterParameterDuration) -> Self {
+        value.as_duration()
+    }
+}
+impl ClusterParameterDuration {
+    pub fn as_duration(self) -> Duration {
+        Duration::from_nanos(self.0)
+    }
+}
+
+macro_rules! coordination_duration {
+    ($definition:ident, $name:literal, $default:expr) => {
+        pub struct $definition;
+        impl SettingDefinition for $definition {
+            type Class = ClusterParameters;
+            type Value = Duration;
+            type Context = ();
+            type Error = ClusterParameterError;
+            const NAME: &'static str = $name;
+            const DERIVATION: Option<&'static str> = None;
+            fn default_value(_: &()) -> Duration {
+                $default
+            }
+            fn validate(value: &Duration, _: &()) -> Result<(), Report<ClusterParameterError>> {
+                ClusterParameterKey::$definition.validate_duration(*value)
+            }
+        }
+    };
+}
+coordination_duration!(
+    ForcedRecoveryBudget,
+    "forced-recovery-budget",
+    Duration::from_secs(5)
+);
+coordination_duration!(
+    OwnershipHandoffPollInterval,
+    "ownership-handoff-poll-interval",
+    Duration::from_millis(250)
+);
+coordination_duration!(
+    EntityGatePollInterval,
+    "entity-gate-poll-interval",
+    Duration::from_millis(25)
+);
+coordination_duration!(
+    DomainDrainPollInterval,
+    "domain-drain-poll-interval",
+    Duration::from_millis(50)
+);
+coordination_duration!(
+    RuntimeReadinessPropagationBound,
+    "runtime-readiness-propagation-bound",
+    Duration::from_secs(30)
+);

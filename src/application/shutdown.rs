@@ -27,7 +27,9 @@ use nervix_primitives::{
 use tracing::info;
 
 mod settings;
-pub use settings::{DrainTimeout, ShutdownSettings, ShutdownSettingsError, ShutdownTimeout};
+pub use settings::{
+    DrainTimeout, ShutdownSettings, ShutdownSettingsError, ShutdownTimeout, TaskGracePeriod,
+};
 
 pub(super) const DEFAULT_DRAIN_TIMEOUT: Duration = Duration::from_secs(30);
 /// How long a shutdown may take from its first stop request until the process exits. It covers
@@ -45,11 +47,15 @@ const _: () = assert!(
 /// instant, so a configured timeout of any length cannot overflow the monotonic clock.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ShutdownDeadline {
+    task_grace_period: Duration,
     requested_at: Instant,
     timeout: Duration,
 }
 
 impl ShutdownDeadline {
+    pub(in crate::application) fn task_grace_period(self) -> Duration {
+        self.task_grace_period.min(self.remaining())
+    }
     /// The time left before the deadline, which is zero once it has passed.
     pub fn remaining(self) -> Duration {
         self.timeout
@@ -215,6 +221,7 @@ impl CoordinatorState {
 }
 
 struct ShutdownCoordinatorInner {
+    task_grace_period: Duration,
     /// How long shutdown may take from its first stop request.
     timeout: Duration,
     state: watch::Sender<CoordinatorState>,
@@ -245,16 +252,20 @@ impl std::fmt::Debug for ShutdownCoordinator {
 
 impl Default for ShutdownCoordinator {
     fn default() -> Self {
-        Self::new(DEFAULT_SHUTDOWN_TIMEOUT)
+        Self::new(
+            DEFAULT_SHUTDOWN_TIMEOUT,
+            ShutdownSettings::default().task_grace_period(),
+        )
     }
 }
 
 impl ShutdownCoordinator {
     /// A coordinator whose shutdown, once requested, must finish within `timeout`.
-    pub fn new(timeout: Duration) -> Self {
+    pub fn new(timeout: Duration, task_grace_period: Duration) -> Self {
         let (state, _) = watch::channel(CoordinatorState::Serving);
         Self {
             inner: Arc::new(ShutdownCoordinatorInner {
+                task_grace_period,
                 timeout,
                 state,
                 stop_requested: CancellationToken::new(),
@@ -280,6 +291,7 @@ impl ShutdownCoordinator {
                 None => {
                     let requested = ShutdownRequest {
                         deadline: ShutdownDeadline {
+                            task_grace_period: self.inner.task_grace_period,
                             requested_at: Instant::now(),
                             timeout: self.inner.timeout,
                         },
@@ -463,7 +475,10 @@ mod tests {
 
     #[nervix_primitives::test(start_paused = true)]
     async fn repeated_stop_requests_keep_the_first_deadline() {
-        let coordinator = ShutdownCoordinator::new(Duration::from_secs(30));
+        let coordinator = ShutdownCoordinator::new(
+            Duration::from_secs(30),
+            crate::application::shutdown::ShutdownSettings::default().task_grace_period(),
+        );
         let ShutdownRequestOutcome::Accepted(first) = coordinator.request_stop() else {
             panic!("the first stop request must start shutdown");
         };
@@ -488,7 +503,10 @@ mod tests {
 
     #[nervix_primitives::test(start_paused = true)]
     async fn work_still_running_at_the_deadline_is_cut_off_there() {
-        let coordinator = ShutdownCoordinator::new(Duration::from_secs(5));
+        let coordinator = ShutdownCoordinator::new(
+            Duration::from_secs(5),
+            crate::application::shutdown::ShutdownSettings::default().task_grace_period(),
+        );
         coordinator.request_stop();
         let deadline = requested_deadline(&coordinator);
         let started = Instant::now();
@@ -501,7 +519,10 @@ mod tests {
 
     #[nervix_primitives::test(start_paused = true)]
     async fn work_that_finishes_before_the_deadline_reports_its_output() {
-        let coordinator = ShutdownCoordinator::new(Duration::from_secs(5));
+        let coordinator = ShutdownCoordinator::new(
+            Duration::from_secs(5),
+            crate::application::shutdown::ShutdownSettings::default().task_grace_period(),
+        );
         coordinator.request_stop();
         let deadline = requested_deadline(&coordinator);
 
@@ -538,7 +559,10 @@ mod tests {
 
     #[nervix_primitives::test(start_paused = true)]
     async fn a_phase_that_finishes_after_the_deadline_is_forced() {
-        let coordinator = ShutdownCoordinator::new(Duration::from_secs(5));
+        let coordinator = ShutdownCoordinator::new(
+            Duration::from_secs(5),
+            crate::application::shutdown::ShutdownSettings::default().task_grace_period(),
+        );
         coordinator.request_stop();
         let deadline = requested_deadline(&coordinator);
 
@@ -627,7 +651,10 @@ mod shuttle_tests {
 
     /// Two stop requests race each other and a task waiting for the first request.
     fn racing_stop_requests() {
-        let shutdown = ShutdownCoordinator::new(FAR_FUTURE_SHUTDOWN_TIMEOUT);
+        let shutdown = ShutdownCoordinator::new(
+            FAR_FUTURE_SHUTDOWN_TIMEOUT,
+            crate::application::shutdown::ShutdownSettings::default().task_grace_period(),
+        );
         let waiting = shutdown.clone();
         let waiter = thread::spawn(move || block_on(waiting.requested()));
         let first_requester = shutdown.clone();
@@ -675,7 +702,10 @@ mod shuttle_tests {
     /// The composition root moves shutdown through its phases while a phase observer samples them
     /// and completion waiters subscribe before and during the transitions.
     fn phases_racing_their_observers() {
-        let shutdown = ShutdownCoordinator::new(FAR_FUTURE_SHUTDOWN_TIMEOUT);
+        let shutdown = ShutdownCoordinator::new(
+            FAR_FUTURE_SHUTDOWN_TIMEOUT,
+            crate::application::shutdown::ShutdownSettings::default().task_grace_period(),
+        );
         let early_waiting = shutdown.clone();
         let early_completion = thread::spawn(move || block_on(early_waiting.completion()));
         let observing = shutdown.clone();

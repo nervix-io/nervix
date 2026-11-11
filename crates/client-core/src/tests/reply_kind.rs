@@ -119,7 +119,12 @@ async fn a_command_answered_by_a_reply_of_another_kind_interrupts_every_waiter_a
             .await
             .generation
             .clone();
-        let reader = ExchangeReader::new(loopback.pending.clone(), events, generation);
+        let reader = ExchangeReader::new(
+            loopback.pending.clone(),
+            events,
+            generation,
+            nervix_client_wire::SessionLimits::DEFAULT,
+        );
         let frames = nervix_primitives::stream::iter(vec![
             Ok(reply_frame(request.request_id, body)),
             Ok(leadership_frame()),
@@ -183,7 +188,12 @@ async fn a_read_answered_by_a_command_outcome_is_interrupted_without_adopting_it
         .await
         .generation
         .clone();
-    let reader = ExchangeReader::new(loopback.pending.clone(), events, generation);
+    let reader = ExchangeReader::new(
+        loopback.pending.clone(),
+        events,
+        generation,
+        nervix_client_wire::SessionLimits::DEFAULT,
+    );
     reader
         .run(nervix_primitives::stream::iter(vec![Ok(reply_frame(
             request.request_id,

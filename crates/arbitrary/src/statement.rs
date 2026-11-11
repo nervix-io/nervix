@@ -303,6 +303,21 @@ impl Arbitrary<'_> {
             nervix_models::ClusterParameterChange::NodeUnavailabilityTimeout(
                 std::time::Duration::from_millis(self.entropy.between(1..=1000)),
             ),
+            nervix_models::ClusterParameterChange::ForcedRecoveryBudget(
+                std::time::Duration::from_millis(self.entropy.between(1..=1000)),
+            ),
+            nervix_models::ClusterParameterChange::OwnershipHandoffPollInterval(
+                std::time::Duration::from_millis(self.entropy.between(1..=1000)),
+            ),
+            nervix_models::ClusterParameterChange::EntityGatePollInterval(
+                std::time::Duration::from_millis(self.entropy.between(1..=1000)),
+            ),
+            nervix_models::ClusterParameterChange::DomainDrainPollInterval(
+                std::time::Duration::from_millis(self.entropy.between(1..=1000)),
+            ),
+            nervix_models::ClusterParameterChange::RuntimeReadinessPropagationBound(
+                std::time::Duration::from_millis(self.entropy.between(1..=1000)),
+            ),
             nervix_models::ClusterParameterChange::DomainDrainTimeout(
                 std::time::Duration::from_millis(self.entropy.between(1..=1000)),
             ),

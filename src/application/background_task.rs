@@ -14,6 +14,7 @@
     nervix::layer(edge, reason = "owns the edges boundary declared above")
 )]
 
+#[cfg(test)]
 use std::time::Duration;
 
 use error_stack::Report;
@@ -26,11 +27,6 @@ use super::{
     shutdown::{BeforeDeadline, ShutdownCoordinator, ShutdownDeadline, ShutdownPhaseOutcome},
 };
 use crate::task_shutdown::JoinShutdown as _;
-
-/// How long a task that shutdown asked to stop may take to finish on its own before shutdown forces
-/// it: a background task is then aborted, and the public listeners have the client connections they
-/// still hold cut. It is the time a session has to deliver its ending to its client.
-const SHUTDOWN_GRACE_PERIOD: Duration = Duration::from_secs(2);
 
 /// A running background task and the token that stops it.
 pub(in crate::application) struct BackgroundTask {
@@ -95,7 +91,7 @@ pub(in crate::application) async fn join_public_listeners(
     shutdown: &ShutdownCoordinator,
     deadline: ShutdownDeadline,
 ) -> JoinedListeners {
-    let grace_period = SHUTDOWN_GRACE_PERIOD.min(deadline.remaining());
+    let grace_period = deadline.task_grace_period();
     let closed_within_grace = nervix_primitives::time::timeout(grace_period, &mut listeners).await;
     let joined = match closed_within_grace {
         Ok(joined) => BeforeDeadline::Finished(joined),
@@ -141,7 +137,7 @@ pub(in crate::application) async fn await_background_task_shutdown(
     task_kind: &'static str,
     deadline: ShutdownDeadline,
 ) -> ShutdownPhaseOutcome {
-    let grace_period = SHUTDOWN_GRACE_PERIOD.min(deadline.remaining());
+    let grace_period = deadline.task_grace_period();
     let joined = nervix_primitives::time::timeout(grace_period, &mut task).await;
     match joined {
         Ok(Ok(())) => ShutdownPhaseOutcome::Completed,
@@ -177,7 +173,10 @@ mod tests {
     use super::*;
 
     fn deadline_after(timeout: Duration) -> ShutdownDeadline {
-        let coordinator = ShutdownCoordinator::new(timeout);
+        let coordinator = ShutdownCoordinator::new(
+            timeout,
+            crate::application::shutdown::ShutdownSettings::default().task_grace_period(),
+        );
         coordinator.request_stop();
         coordinator
             .request()
@@ -187,7 +186,10 @@ mod tests {
 
     /// A coordinator whose shutdown, with `timeout`, has closed admission, and its deadline.
     fn closed_admission(timeout: Duration) -> (ShutdownCoordinator, ShutdownDeadline) {
-        let coordinator = ShutdownCoordinator::new(timeout);
+        let coordinator = ShutdownCoordinator::new(
+            timeout,
+            crate::application::shutdown::ShutdownSettings::default().task_grace_period(),
+        );
         coordinator.request_stop();
         coordinator.stop_admission();
         let deadline = coordinator
@@ -216,7 +218,10 @@ mod tests {
         let outcome = await_background_task_shutdown(task, "test task", deadline).await;
 
         assert_eq!(outcome, ShutdownPhaseOutcome::Abandoned);
-        assert_eq!(started.elapsed(), SHUTDOWN_GRACE_PERIOD);
+        assert_eq!(
+            started.elapsed(),
+            crate::application::shutdown::ShutdownSettings::default().task_grace_period()
+        );
     }
 
     #[nervix_primitives::test(start_paused = true)]
@@ -262,7 +267,10 @@ mod tests {
 
         assert_eq!(joined.outcome, ShutdownPhaseOutcome::Completed);
         assert!(joined.result.is_ok());
-        assert_eq!(started.elapsed(), SHUTDOWN_GRACE_PERIOD);
+        assert_eq!(
+            started.elapsed(),
+            crate::application::shutdown::ShutdownSettings::default().task_grace_period()
+        );
     }
 
     #[nervix_primitives::test(start_paused = true)]
