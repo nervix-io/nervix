@@ -85,7 +85,11 @@ with a diagnostic naming both. The normal runtime dependency graph contains neit
 
 ## Listener And Peer Topology
 
-Each node exposes one TCP listener for all node-to-node traffic. Every accepted connection uses
+Each node exposes one TCP listener for all node-to-node traffic. Its accept owner waits the node's
+positive `listener-accept-retry-delay` after a node-local failure such as descriptor exhaustion;
+connection-local failures retry immediately. Admission shutdown cancels the pause. The setting's
+default, validation and committed publication are shared with the public listener
+[Listener Bounds](node-settings.md#listener-bounds). Every accepted connection uses
 mutually authenticated TLS 1.3 and HTTP/2. The listener is independent of Raft leadership and graph
 placement, so every live node can receive every class of interconnect operation. TLS provides
 confidentiality and integrity as well as peer authentication.
@@ -530,8 +534,9 @@ Emitter statements exchanged through the control plane use explicit `KEY` expres
 `payload` expression scope, typed materialized relay inspection, ingestor read interactions,
 corridor/domain-wide placement coverage, pace-only domain configuration, exact partition/instance
 relocation selections, ingestor acknowledgement and connector lifecycle observations, and the current
-transaction operation and commit-step alternatives, and the engine and connector host capabilities
-in each node's incarnation-bound claim. Peers must
+transaction operation and commit-step alternatives, durable licensing rotation/release effects and
+consensus commands with their exact request and independent binding records, and the engine and
+connector host capabilities in each node's incarnation-bound claim. Peers must
 match it exactly.
 
 Execution-unit identities use an eight-byte rank with four-byte archive alignment. Single and

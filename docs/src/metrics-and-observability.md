@@ -333,7 +333,7 @@ resets its counters.
 | `licensing_time_seconds` | Gauge | The committed licensing timestamp as Unix seconds, present after first installation. |
 | `requests_total` | Counter, `operation` and `outcome` | On the leader, every operation/outcome pair starts at 0. |
 | `stream_connected` | Gauge | On the leader, 0. |
-| `transitions_active` | Gauge | 0. |
+| `transitions_active` | Gauge | Number of retained transitions whose deadline is after committed licensing time; 0 in free mode. |
 | `over_limit` | Gauge, catalog `condition` | Every cluster quota starts at 0. |
 | `admissions_refused_total` | Counter, catalog `condition` and refusal `state` | Every cluster quota/refusal-state pair starts at 0. |
 
@@ -343,8 +343,10 @@ Request operations are `activation.create`, `activation.refresh`, `activation.re
 `lapsed` and `stopped`. Connectivity and request families are leader-local. Free mode supplies no
 decision or deadline and makes no licensing request. The shipped unlimited quotas produce no
 admission refusals. An activated record supplies its committed revision and existing signed
-deadlines. Deadline ticks change the state gauge without rewriting those deadlines. A malformed or
-unverifiable response increments `rejected_by_cluster`; typed service refusals increment
+deadlines. Deadline ticks change the state gauge without rewriting those deadlines.
+Released mode keeps its decision revision, reports `releasing` and exposes `next_grant` until the
+last grant ends. Confirmation and local key rotation never extend those deadlines.
+An invalid or unverifiable response increments `rejected_by_cluster`; typed service refusals increment
 `refused_by_service`, and failed transport attempts record `unreachable` or `timeout`. A request is
 `committed` after its verified decision applies. Counters describe attempts on this process and
 supply no licensing authority.
@@ -1040,3 +1042,12 @@ they exclude the graph wait. A broker ingestor's transient failure clears once i
 confirms an acknowledgement again; a paced ingestor's clears once a poll or resume succeeds.
 Recording touches retained atomic children, with no label resolution or registry access, and
 changes no delivery, retry or error policy.
+
+## Listener Capacity Observations
+
+Startup logs and each node's committed `DESCRIBE CLUSTER` claim expose every
+[Listener Bound](node-settings.md#listener-bounds). The existing execution memory metrics include
+`class="intake"`: its capacity is independent of `relay`, reserved bytes follow retained HTTP input
+and body-assembly workers, and the reservation/rejection counters retain their direct-admission meaning. A refused oversize
+body leaves no retained intake reservation or admitted relay payload. `nervix_sessions` returns to
+its preceding value when HTTP/2 keepalive reaps an unresponsive gRPC session.

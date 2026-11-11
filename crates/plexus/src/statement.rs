@@ -116,6 +116,9 @@ pub fn statement_parser<'src>()
     let administration = boxed_choice!(
         crate::licensing::activate_license_parser().map(Statement::ActivateLicense),
         crate::licensing::refresh_license_parser().map(Statement::RefreshLicense),
+        crate::licensing::release_license_parser().map(Statement::ReleaseLicense),
+        crate::licensing::rotate_license_cluster_key_parser()
+            .map(Statement::RotateLicenseClusterKey),
         crate::cluster_parameters::alter_cluster_parser().map(Statement::AlterCluster),
         crate::placement::alter_placement_parser().map(Statement::AlterPlacement),
         crate::schema::alter_schema_parser().map(Statement::AlterSchema),

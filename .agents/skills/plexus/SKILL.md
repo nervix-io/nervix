@@ -138,7 +138,8 @@ For backend validation claims, follow that chapter's P-256 signing and backend-s
 selecting an approved algorithm does not establish a validated deployment.
 For cluster continuity and public identity inspection, read
 [Node Settings → Permanent Cluster Identity](../../../docs/src/node-settings.md#permanent-cluster-identity).
-For activation, refresh, `DESCRIBE LICENSE`, effective policy, credential handling and quota usage, read
+For activation, refresh, `ROTATE LICENSE CLUSTER KEY`, `RELEASE LICENSE`, `DESCRIBE LICENSE`,
+effective policy, credential handling and quota usage, read
 [Node Settings → Cluster Licensing](../../../docs/src/node-settings.md#cluster-licensing) and
 [Licensing Metrics](../../../docs/src/metrics-and-observability.md#licensing-metrics).
 For notification freshness, reconnects and polling fallback, use that chapter’s event-stream contract.
@@ -985,3 +986,8 @@ Use the committed cluster setting for creation cost; preserve the documented sta
 For node CPU admission, memory ceilings, native runtime threads, client byte credit and derived
 watermarks, read [Node Settings → Execution Capabilities](../../../docs/src/node-settings.md#execution-capabilities)
 before suggesting local overrides or interpreting DESCRIBE CLUSTER capacity lines.
+
+For Nervix public listener connection, HTTP body, WebSocket frame, TLS/header/idle and gRPC
+keepalive limits, read [Node Settings → Listener Bounds](../../../docs/src/node-settings.md#listener-bounds)
+and the HTTP endpoint section of Ingestors. Consult the committed per-node capability claims
+before suggesting local tuning or diagnosing a 413, 408, 431 or 503 response.

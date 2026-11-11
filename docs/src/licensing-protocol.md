@@ -162,8 +162,11 @@ caller inputs and returns `DecisionRejection` on failure:
 5. Decision revision, conditions revision and issue time cannot move backwards. An equal decision
    revision is a no-op only for the identical logical decision; equal conditions revisions cannot
    label different conditions.
-6. `issued_at <= refresh_after <= overdue_at <= valid_until` when bounded; term and ephemeral
-   timing remain internally consistent.
+6. `refresh_after <= overdue_at <= valid_until` when bounded; ordinary decisions also require
+   `issued_at <= refresh_after`. A rotation can be issued after its preserved refresh deadline;
+   its typed completion context checks the next key generation, and consensus requires the signed
+   timing to equal the committed timing. The stored decision retains that acceptance context for
+   recovery verification. Term and ephemeral timing remain internally consistent.
 7. Status and complete known conditions are valid. Acknowledged transitions have unique identities,
    known revisions, affected catalog entries and a deadline at or after their start.
 
