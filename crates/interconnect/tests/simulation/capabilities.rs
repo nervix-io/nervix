@@ -6,7 +6,7 @@
 //! - **Must not know.** Whole-node Raft application, Arrow row semantics or runtime ACK shares.
 
 use nervix_interconnect::{PeerReceiveSettings, RelaySliceCursor};
-use nervix_models::{NodeCapabilities, NodeCapabilityRecord, Unit};
+use nervix_models::{NodeCapabilities, NodeCapabilityRecord, RemoteAckOutcome, Unit};
 use ubyte::ByteUnit;
 
 use super::*;
@@ -161,6 +161,15 @@ fn capability_roll(run: ScenarioRun) -> Result<(), SimulationError> {
                                 .admit(),
                             nervix_interconnect::RelayAdmissionDecision::Admitted
                         );
+                        let registration =
+                            payload.admission.assured("the piece registers admission");
+                        server
+                            .send(
+                                &received.peer_node_id,
+                                Envelope::Ack(registration.resolution(RemoteAckOutcome::Ack)),
+                            )
+                            .await
+                            .assured("the terminal admission answer reaches the sender");
                     }
                     assert_eq!(observed, (0..8_u8).collect::<Vec<_>>());
                     wait_for(&mut done).await;
@@ -190,6 +199,7 @@ fn capability_roll(run: ScenarioRun) -> Result<(), SimulationError> {
                     let (client, mut replies) =
                         bind_with_incoming("client", credentials, client_seed).await;
                     wait_for_count(&mut phase, 1).await;
+                    trace.record("client", "initial receiver bound");
                     register_peer(&client, "server").await;
                     let peer = ClusterNodeName::parse("server").assured("fixture name");
                     client.replace_live_nodes(&BTreeSet::from([peer.clone()]));
@@ -199,6 +209,7 @@ fn capability_roll(run: ScenarioRun) -> Result<(), SimulationError> {
                     )]));
                     roll.send_replace(true);
                     wait_for_count(&mut phase, 2).await;
+                    trace.record("client", "replacement receiver bound");
                     nervix_primitives::time::timeout(HOST_DEADLINE, async {
                         loop {
                             if matches!(client.request(&peer, CurrentReceiveBound).await, Ok(4)) {
@@ -209,6 +220,7 @@ fn capability_roll(run: ScenarioRun) -> Result<(), SimulationError> {
                     })
                     .await
                     .assured("the restarted peer answers within the host bound");
+                    trace.record("client", "replacement receiver answered its bound probe");
                     let make_payload = |sequence, bytes: Vec<u8>| RelayPayload {
                         ack_timing: nervix_models::RemoteAckTiming::default(),
                         decoded_bytes: 0,
@@ -240,6 +252,7 @@ fn capability_roll(run: ScenarioRun) -> Result<(), SimulationError> {
                         panic!("typed receive-bound refusal: {refused:?}");
                     };
                     assert_eq!(bounds.relay_batch_bytes.get(), 4);
+                    trace.record("client", "stale receive claim refused");
                     let mut cursor = RelaySliceCursor::new(8);
                     cursor.refuse(*bounds);
                     client.publish_peer_capabilities(&std::collections::BTreeMap::from([(
@@ -262,15 +275,27 @@ fn capability_roll(run: ScenarioRun) -> Result<(), SimulationError> {
                             .send(&peer, Envelope::RelayPayload(make_payload(sequence, bytes)))
                             .await
                             .assured("the unused sequence admits its smaller piece");
-                        let admitted =
-                            nervix_primitives::time::timeout(HOST_DEADLINE, replies.recv())
-                                .await
-                                .assured("admission reply is bounded")
-                                .assured("client intake remains open");
-                        assert!(
-                            matches!(admitted.envelope, Envelope::Ack(_)),
-                            "confirmed admission precedes advancing the cursor"
-                        );
+                        trace.record("client", format!("piece {sequence} body sent"));
+                        nervix_primitives::time::timeout(HOST_DEADLINE, async {
+                            loop {
+                                let received =
+                                    replies.recv().await.assured("client intake remains open");
+                                let Envelope::Ack(answer) = received.envelope else {
+                                    panic!("admission answers are acknowledgement envelopes");
+                                };
+                                if answer.outcome.is_progress() {
+                                    continue;
+                                }
+                                assert_eq!(
+                                    answer.registration,
+                                    fixture_registration(sequence, &client)
+                                );
+                                assert_eq!(answer.outcome, RemoteAckOutcome::Ack);
+                                break;
+                            }
+                        })
+                        .await
+                        .assured("terminal admission is confirmed within the host bound");
                         cursor.admit();
                         sequence += 1;
                     }

@@ -193,6 +193,15 @@ impl TransportOptions {
             .verified("the request budget fits twelvefold")
             .min(self.relay_retention.retention())
     }
+    /// Progress control keeps its share of the local request budget and body-progress bound.
+    /// The delivery's captured dispatch policy may shorten that host limit.
+    pub(crate) fn relay_progress_send_timeout(&self, captured: Duration) -> Duration {
+        (self.request_timeout / 10)
+            .min(self.progress_timeout)
+            .max(Duration::from_nanos(1))
+            .min(captured)
+    }
+
     /// Jitter never increases the configured retry ceiling and consumes no entropy when disabled.
     pub(crate) fn retry_delay(&self, base: Duration) -> Duration {
         if self.reconnect_jitter_permille == 0 {

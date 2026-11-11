@@ -46,8 +46,8 @@ const STREAM_CHUNK_BYTES: usize = 16 * 1024;
 /// again left to send.
 const STREAM_BYTES: u64 = 2 * 1024 * 1024;
 /// The current serialized grant for this fixture's names, unit, decoded-size claim, empty row
-/// metadata and one registrar.
-const HELD_RELAY_METADATA_BYTES: u64 = 152;
+/// metadata, the captured acknowledgement timing group and one registrar.
+const HELD_RELAY_METADATA_BYTES: u64 = 248;
 /// How long one more shared management request waits for a stream on the saturated connection.
 const SLOT_WAIT: Duration = Duration::from_millis(250);
 /// The interval between reads inside a condition wait: one simulation tick.

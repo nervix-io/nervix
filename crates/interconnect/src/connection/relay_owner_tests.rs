@@ -1598,3 +1598,27 @@ fn independent_progress_cohorts_retain_their_send_budgets_and_channel_retention(
     assert_eq!(again.keys().next(), fast_reports.keys().next());
     fixture.owner.end();
 }
+
+#[test]
+fn relay_progress_dispatch_respects_local_and_captured_budgets() {
+    let mut options = crate::TransportOptions::default();
+    let captured = Duration::from_secs(5);
+    assert_eq!(
+        options.relay_progress_send_timeout(captured),
+        Duration::from_secs(1)
+    );
+    assert_eq!(
+        options.relay_progress_send_timeout(Duration::from_millis(100)),
+        Duration::from_millis(100)
+    );
+    options.progress_timeout = Duration::from_millis(200);
+    assert_eq!(
+        options.relay_progress_send_timeout(captured),
+        Duration::from_millis(200)
+    );
+    options.request_timeout = Duration::from_nanos(1);
+    assert_eq!(
+        options.relay_progress_send_timeout(captured),
+        Duration::from_nanos(1)
+    );
+}

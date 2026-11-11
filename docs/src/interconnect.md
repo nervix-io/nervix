@@ -2591,8 +2591,11 @@ The inspection deadline controls stream admission and setup through
 `request_stream_with_timeout`, and the request type's `DEADLINE` projects from the configured request budget, like the materialized page operation. The caller's explicit remaining inspection deadline remains authoritative.
 
 Relay metadata carries one captured acknowledgement timing group per delivery. Admission progress
-reports use its alive interval and dispatch budget, and channel retention covers the largest
-accepted total admission budget of the current peer incarnation. The current wire fingerprint
+reports use its alive interval and dispatch budget. Each send is also capped by the host's existing
+progress-control allowance: one tenth of its request budget, no longer than its body-progress
+budget. This keeps management capacity from lingering after short control work ends. The captured
+group adds 96 bytes to serialized relay metadata, included in its exact reservation. Channel
+retention covers the largest accepted total admission budget of the current peer incarnation. The current wire fingerprint
 also identifies runtime and shutdown capability claims. See
 [Node Settings](node-settings.md#data-plane-runtime-policy-and-capacity) for live updates and the
 relationship checks applied before publication and at receipt.

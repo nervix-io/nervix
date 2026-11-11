@@ -403,6 +403,7 @@ impl TransportState {
                 // Registration order is deterministic; every pending RPC is polled independently.
                 for (registration, (record, send_timeout)) in due {
                     nervix_primitives::task::consume_budget().await;
+                    let send_timeout = self.options.relay_progress_send_timeout(send_timeout);
                     let state = self.clone();
                     reports.push(async move {
                         let target = registration.registrar.node_id().clone();
