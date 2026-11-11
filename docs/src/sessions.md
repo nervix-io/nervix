@@ -310,9 +310,10 @@ agree with the relays its statement names before the cursor, by the rules the ma
 choices apply. A processor's further input shares the first input's schema and exact branch
 declaration. Its message-error relays, and the route relays of a processor that keeps its input's
 branch, share that branch declaration, and its materialized-state relay shares it and has
-materialized state. A correlator side's further and timeout relays share that side's first relay's
-schema and branch declaration, and its first right relay shares the first left relay's branch
-declaration, since a correlator's branch declaration covers both sides. A generator's
+materialized state. A correlator side's further relays share that side's first relay's schema and
+branch declaration. Its first right relay and its timeout relays share the first left relay's
+branch declaration, since a correlator's branch declaration covers both sides, and validation then
+checks that a timeout relay's schema provides the fields of the side's records. A generator's
 materialized relay has materialized state, on any branch declaration, since the generator declares
 its own branch after it. An emitter's further input shares the first input's schema, and its
 materialized-state and message-error relays share the branch declaration every input has. An

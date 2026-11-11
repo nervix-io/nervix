@@ -34,9 +34,13 @@ const INGESTOR: &str =
     "CREATE HTTP ENDPOINT INGESTOR source FROM ingress MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB";
 const EMITTER: &str = "CREATE KAFKA TOPIC EMITTER sink FROM readings TO broker TOPIC 'events' \
                        MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s";
+const CORRELATOR: &str = "CREATE CORRELATOR pairs LEFT FROM readings RIGHT FROM labels CORRELATE \
+                          WHERE left.id = right.id MATCH EARLIEST MAX TIME 5s ON CORRELATION \
+                          TIMEOUT";
 
 /// Queues, in one open transaction, schemas, a branch, relays on and off it, one with materialized
-/// state on each side of it, and codecs that decode and encode, only decode, and only encode.
+/// state on each side of it, one whose schema `reading` is compatible with but not equal to, and
+/// codecs that decode and encode, only decode, and only encode.
 async fn queue_configuration(
     service: &SessionServiceImpl,
     subscriptions: &mut SessionSubscriptions,
@@ -50,6 +54,7 @@ async fn queue_configuration(
         "CREATE RELAY readings SCHEMA reading UNBRANCHED;",
         "CREATE RELAY more_readings SCHEMA reading UNBRANCHED;",
         "CREATE RELAY labels SCHEMA label UNBRANCHED;",
+        "CREATE RELAY reading_ids SCHEMA reading_key UNBRANCHED;",
         "CREATE RELAY branched_readings SCHEMA reading BRANCHED BY by_reading;",
         "CREATE RELAY state_readings SCHEMA reading UNBRANCHED WITH MATERIALIZED STATE LAST BY \
          TIMESTAMP;",
@@ -110,6 +115,13 @@ async fn codec_and_relay_positions_offer_what_their_statement_can_accept() {
     let mut subscriptions = SessionSubscriptions::new();
     queue_configuration(&service, &mut subscriptions).await;
 
+    let unbranched = vec![
+        "labels",
+        "more_readings",
+        "reading_ids",
+        "readings",
+        "state_readings",
+    ];
     let cases = [
         (
             format!("{INGESTOR} DECODE USING "),
@@ -136,6 +148,7 @@ async fn codec_and_relay_positions_offer_what_their_statement_can_accept() {
                 "branched_state",
                 "labels",
                 "more_readings",
+                "reading_ids",
                 "readings",
                 "state_readings",
             ],
@@ -154,7 +167,7 @@ async fn codec_and_relay_positions_offer_what_their_statement_can_accept() {
         ),
         (
             "CREATE JUNCTION copy FROM readings UNBRANCHED TO ".to_string(),
-            vec!["labels", "more_readings", "readings", "state_readings"],
+            unbranched.clone(),
         ),
         (
             "CREATE JUNCTION copy FROM branched_readings BRANCHED BY by_reading TO ".to_string(),
@@ -162,7 +175,7 @@ async fn codec_and_relay_positions_offer_what_their_statement_can_accept() {
         ),
         (
             "CREATE CORRELATOR pairs LEFT FROM readings RIGHT FROM ".to_string(),
-            vec!["labels", "more_readings", "readings", "state_readings"],
+            unbranched.clone(),
         ),
         (
             "CREATE CORRELATOR pairs LEFT FROM branched_readings RIGHT FROM ".to_string(),
@@ -176,6 +189,11 @@ async fn codec_and_relay_positions_offer_what_their_statement_can_accept() {
             "CREATE CORRELATOR pairs LEFT FROM readings RIGHT FROM labels, ".to_string(),
             vec!["labels"],
         ),
+        // A timeout relay keeps the correlator's branch, and validation accepts any schema that
+        // provides the side's fields, such as `reading_ids` for `readings`, so completion leaves
+        // the schema to validation.
+        (format!("{CORRELATOR} SEND TO "), unbranched.clone()),
+        (format!("{CORRELATOR} DROP, SEND TO "), unbranched.clone()),
         (
             "CREATE GENERATOR synth USING MATERIALIZED STATE ".to_string(),
             vec!["branched_state", "state_readings"],
@@ -205,7 +223,7 @@ async fn codec_and_relay_positions_offer_what_their_statement_can_accept() {
                 "{INGESTOR} DECODE USING codec TO readings INHERIT ALL UNBRANCHED FLUSH IMMEDIATE \
                  ON MESSAGE ERROR SEND TO "
             ),
-            vec!["labels", "more_readings", "readings", "state_readings"],
+            unbranched,
         ),
         (
             "CREATE JUNCTION copy FROM missing, ".to_string(),

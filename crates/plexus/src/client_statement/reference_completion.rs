@@ -213,9 +213,11 @@ impl NamedRelays {
                 })
             }
             (RelayRole::Error, Self::Ingestor) => Some(RelayQuestion::OnBranch(None)),
+            // Validation accepts a timeout relay with any schema that provides the fields of its
+            // side's records, which no question decides, so only the correlator's branch narrows it.
             (RelayRole::LeftTimeout, Self::Correlator { left, .. }) => {
-                Some(RelayQuestion::ProcessorInput {
-                    first: left.first()?.clone(),
+                Some(RelayQuestion::ProcessorBranch {
+                    source: left.first()?.clone(),
                 })
             }
             (
@@ -223,8 +225,8 @@ impl NamedRelays {
                 Self::Correlator {
                     right: Some(right), ..
                 },
-            ) => Some(RelayQuestion::ProcessorInput {
-                first: right.first()?.clone(),
+            ) => Some(RelayQuestion::ProcessorBranch {
+                source: right.first()?.clone(),
             }),
             _ => None,
         }
@@ -402,8 +404,13 @@ mod tests {
             "CREATE CORRELATOR pairs LEFT FROM readings RIGHT FROM labels, ",
             side("labels"),
         );
-        assert_relay_question(&format!("{CORRELATOR} SEND TO "), side("readings"));
-        assert_relay_question(&format!("{CORRELATOR} DROP, SEND TO "), side("labels"));
+        // Validation accepts a timeout relay with any schema the side's records satisfy, so only
+        // the correlator's branch narrows it here.
+        let branch = |name: &str| RelayQuestion::ProcessorBranch {
+            source: relay(name),
+        };
+        assert_relay_question(&format!("{CORRELATOR} SEND TO "), branch("readings"));
+        assert_relay_question(&format!("{CORRELATOR} DROP, SEND TO "), branch("labels"));
         assert_relay_question(
             &format!("{CORRELATOR} DROP, DROP UNBRANCHED TO "),
             RelayQuestion::ProcessorBranch {

@@ -312,8 +312,8 @@ carries the same values to the choice resolver. A relay question accepts:
 
 | Question | Accepts | REPL position | Choice target |
 | --- | --- | --- | --- |
-| Processor input | The first input's schema on exactly its branching | A processor's further `FROM` relay, a correlator side's further relay and that side's timeout relay | A processor's further input and timeout relays |
-| Processor branch | Exactly the branching of the source: the first input, the first left relay for a correlator's right side, or a generator's materialized relay | The route relay of a processor that keeps its input's branch, a processor's `ON MESSAGE ERROR SEND TO` relay, and a correlator's first `RIGHT FROM` relay | A processor's output and error relays |
+| Processor input | The first input's schema on exactly its branching | A processor's further `FROM` relay and a correlator side's further relay | A processor's further input relays, and a correlator side's timeout relay |
+| Processor branch | Exactly the branching of the source: the first input, the first left relay for a correlator's right side, the side's first relay for a correlator's timeout relay, or a generator's materialized relay | The route relay of a processor that keeps its input's branch, a processor's `ON MESSAGE ERROR SEND TO` relay, a correlator's first `RIGHT FROM` relay and a correlator side's timeout relay | A processor's output and error relays |
 | Processor state | Materialized state on exactly the first input's branching | A processor's `USING MATERIALIZED STATE` | A processor's materialized relay |
 | Emitter input | The first input's schema on any branching | An emitter's further `FROM` relay | An emitter's further input relays |
 | Emitter state | Materialized state on the one branching every input shares | An emitter's `USING MATERIALIZED STATE` | An emitter's materialized relay |
@@ -485,6 +485,11 @@ It does not guarantee more than that:
   relay, and a generator's materialized relay from every relay with materialized state on any
   branching, because the clauses that narrow them further follow them. The relay positions of an
   `ALTER` statement are not compared with the relays its stored Model reads.
+- A correlator's timeout relay must be on the correlator's branch, and validation accepts any
+  schema that provides, field by field, what the side's records carry. No vocabulary question
+  decides that compatibility yet. REPL completion therefore offers every relay on the branch and
+  leaves the schema to validation, while the form's timeout picker asks the narrower *Processor
+  input* question and offers only relays with the side's own schema.
 - Text completion offers only what the grammar names at the cursor, so a position that introduces a
   new name offers nothing.
 - The console uses choice lookups; among the client libraries, the Rust client exposes them, while

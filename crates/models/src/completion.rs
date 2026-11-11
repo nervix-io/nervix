@@ -69,12 +69,16 @@ impl CodecDirection {
 /// Which relays a relay reference accepts, given the relays its statement already names.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum RelayQuestion {
-    /// A processor's further input beside its `first` input, or a correlator's timeout relay
-    /// beside the `first` input of its side: the same schema on exactly the same branching.
+    /// A processor's further input beside its `first` input: the same schema on exactly the same
+    /// branching. A correlator's form also asks it for a side's timeout relay beside that side's
+    /// `first` input, although validation accepts any timeout relay whose schema provides the
+    /// side's fields.
     ProcessorInput { first: RelayName },
     /// The output or error relay of a processor that keeps the branch of `source`, its first input
-    /// or a generator's materialized relay, and a correlator's first right input, whose `source` is
-    /// its first left input because a correlator's branch covers both sides: exactly that branching.
+    /// or a generator's materialized relay; a correlator's first right input, whose `source` is its
+    /// first left input because a correlator's branch covers both sides; and, where text completion
+    /// leaves the schema to validation, a correlator side's timeout relay beside that side's first
+    /// input: exactly that branching.
     ProcessorBranch { source: RelayName },
     /// Materialized state a processor reads beside its `first` input: a relay with materialized
     /// state on exactly that input's branching.
