@@ -526,8 +526,38 @@ async fn repeated_activation_is_recovered(world: &mut ScenarioWorld) {
 async fn unchanged_decision(world: &mut ScenarioWorld, name: String) {
     let saved = saved_license(world, &name);
     let current = current_license(world).await;
+    assert_same_decision(&current, &saved);
+}
+
+#[then(
+    expr = "the committed license decision matches placeholder {string} with a revoked signing key"
+)]
+async fn unchanged_decision_with_revoked_key(world: &mut ScenarioWorld, name: String) {
+    let mut saved = saved_license(world, &name);
+    let decision = saved
+        .get("decision")
+        .verified("the saved activation has a decision")
+        .strip_suffix(" verified")
+        .verified("the saved decision was verified before revocation");
+    saved.insert(
+        "decision".into(),
+        format!("{decision} verified (signing key revoked)"),
+    );
+    saved.insert(
+        "verification".into(),
+        "verified (signing key revoked)".into(),
+    );
+    let current = current_license(world).await;
+    assert_same_decision(&current, &saved);
+}
+
+fn assert_same_decision(
+    current: &std::collections::BTreeMap<String, String>,
+    saved: &std::collections::BTreeMap<String, String>,
+) {
     for field in [
         "decision",
+        "verification",
         "activation",
         "decision revision",
         "conditions revision",
