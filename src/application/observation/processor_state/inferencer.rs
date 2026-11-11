@@ -51,12 +51,14 @@ fn layout(
     if inferencer.config.state.is_empty() {
         return Err(StateInspectionRejection::NotMaterialized);
     }
-    let relay = inferencer
+    let relay_name = inferencer
         .config
         .from
         .relays()
         .first()
-        .and_then(|relay| schedule.configured::<CreateRelay>(relay))
+        .ok_or(StateInspectionRejection::NotReady)?;
+    let relay = schedule
+        .configured::<CreateRelay>(relay_name)
         .ok_or(StateInspectionRejection::NotReady)?;
     let input = schedule
         .configured::<CreateSchema>(&relay.schema)
@@ -116,8 +118,12 @@ fn schema_bytes(
             .map_err(|error| inspection_refusal(error, StateInspectionRejection::Deadline))?;
         let slot = std::mem::size_of::<SchemaField>()
             .checked_add(std::mem::size_of::<String>())
-            .and_then(|size| size.checked_add(std::mem::size_of::<[usize; 2]>()))
-            .and_then(|size| size.checked_add(field.name.as_str().len()))
+            .ok_or(StateInspectionRejection::ReplyTooLarge)?;
+        let slot = slot
+            .checked_add(std::mem::size_of::<[usize; 2]>())
+            .ok_or(StateInspectionRejection::ReplyTooLarge)?;
+        let slot = slot
+            .checked_add(field.name.as_str().len())
             .ok_or(StateInspectionRejection::ReplyTooLarge)?;
         bytes = bytes
             .checked_add(u64::try_from(slot).assured("resident field sizes fit u64"))
@@ -168,9 +174,15 @@ fn admitted_sections(
     // Retain the layout and cover the working schema copies made by projection and Row encoding.
     let bytes = tensor_bytes
         .checked_mul(u64::try_from(entries).assured("a resident declaration count fits u64"))
-        .and_then(|bytes| bytes.checked_add(header_bytes))
-        .and_then(|bytes| bytes.checked_add(slots))
-        .and_then(|bytes| bytes.checked_mul(4))
+        .ok_or(StateInspectionRejection::ReplyTooLarge)?;
+    let bytes = bytes
+        .checked_add(header_bytes)
+        .ok_or(StateInspectionRejection::ReplyTooLarge)?;
+    let bytes = bytes
+        .checked_add(slots)
+        .ok_or(StateInspectionRejection::ReplyTooLarge)?;
+    let bytes = bytes
+        .checked_mul(4)
         .ok_or(StateInspectionRejection::ReplyTooLarge)?;
     memory
         .grow_to(bytes)
