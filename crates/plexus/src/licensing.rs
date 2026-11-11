@@ -1,4 +1,4 @@
-//! Activation and refresh statements for the cluster licensing authority.
+//! Administrative statements for the cluster licensing authority.
 //!
 //! Layer: language.
 //! - **Owns.** Composed licensing command heads, credential syntax and completion expectations.
@@ -6,11 +6,13 @@
 //! - **Must not know.** Service addresses, cryptography, consensus or policy execution.
 
 use chumsky::prelude::*;
-use nervix_models::{ActivateLicense, ActivationKind, RefreshLicense};
+use nervix_models::{
+    ActivateLicense, ActivationKind, RefreshLicense, ReleaseLicense, RotateLicenseClusterKey,
+};
 
 use crate::{
     lexer::{Identifier, Token},
-    parser_support::{ParseError, kw, kw_phrase2, string_lit, tok},
+    parser_support::{ParseError, kw, kw_phrase, kw_phrase2, string_lit, tok},
 };
 
 pub fn activate_license_parser<'src>()
@@ -33,6 +35,25 @@ pub fn refresh_license_parser<'src>()
         .then_ignore(tok(Token::Semicolon).or_not())
 }
 
+pub fn release_license_parser<'src>()
+-> impl Parser<'src, &'src [Token], ReleaseLicense, extra::Err<ParseError<'src>>> + Clone {
+    kw_phrase2(Identifier::Release, Identifier::License)
+        .to(ReleaseLicense)
+        .then_ignore(tok(Token::Semicolon).or_not())
+}
+
+pub fn rotate_license_cluster_key_parser<'src>()
+-> impl Parser<'src, &'src [Token], RotateLicenseClusterKey, extra::Err<ParseError<'src>>> + Clone {
+    kw_phrase([
+        Identifier::Rotate,
+        Identifier::License,
+        Identifier::Cluster,
+        Identifier::Key,
+    ])
+    .to(RotateLicenseClusterKey)
+    .then_ignore(tok(Token::Semicolon).or_not())
+}
+
 #[cfg(test)]
 mod tests {
     use meticulous::ResultExt as _;
@@ -44,6 +65,8 @@ mod tests {
             "activate license persistent with key 'test-credential';",
             "ACTIVATE LICENSE EPHEMERAL WITH KEY 'test-credential';",
             "refresh license;",
+            "release license;",
+            "rotate license cluster key;",
         ] {
             let parsed =
                 crate::statement::parse_statement(source).assured("current command parses");
@@ -65,6 +88,9 @@ mod tests {
             "ACTIVATE LICENSE WITH KEY 'credential';",
             "ACTIVATE LICENSE PERSISTENT WITH KEY 123;",
             "REFRESH LICENSE WITH KEY 'credential';",
+            "RELEASE LICENSE WITH KEY 'credential';",
+            "ROTATE LICENSE KEY;",
+            "ROTATE CLUSTER KEY;",
         ] {
             assert!(
                 crate::statement::parse_statement(source).is_err(),
@@ -80,6 +106,11 @@ mod tests {
             ("ACTIVATE LICENSE ", &["PERSISTENT", "EPHEMERAL"][..]),
             ("ACTIVATE LICENSE PERSISTENT ", &["WITH KEY"][..]),
             ("ACTIVATE LICENSE EPHEMERAL ", &["WITH KEY"][..]),
+            ("RELEASE ", &["LICENSE"][..]),
+            ("R", &["ROTATE LICENSE CLUSTER KEY", "RELEASE LICENSE"][..]),
+            ("ROTATE ", &["LICENSE"][..]),
+            ("ROTATE LICENSE ", &["CLUSTER"][..]),
+            ("ROTATE LICENSE CLUSTER ", &["KEY"][..]),
         ] {
             let suggestions = suggest_client_expectations(prefix, prefix.len());
             for label in labels {

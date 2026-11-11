@@ -53,6 +53,10 @@ impl LicensingRequests {
             _ = self.notifications.notified() => {},
         }
     }
+
+    pub(super) async fn foreground_requested(&self) {
+        self.refresh.notified().await;
+    }
 }
 
 #[cfg(test)]
@@ -88,6 +92,26 @@ mod tests {
         let turn = requests.foreground().await;
         assert!(requests.refresh_requested().now_or_never().is_none());
         drop(turn);
+    }
+
+    #[nervix_primitives::test]
+    async fn a_notification_preserves_the_release_turn_until_an_operator_requests_it() {
+        let requests = LicensingRequests::default();
+        let release = requests.background().await;
+        requests.expedite();
+        assert!(requests.foreground_requested().now_or_never().is_none());
+        assert!(requests.refresh_requested().now_or_never().is_some());
+        let mut operator = std::pin::pin!(requests.foreground());
+        assert!(futures_util::poll!(&mut operator).is_pending());
+        timeout(Duration::from_secs(1), requests.foreground_requested())
+            .await
+            .assured("the waiting operator, rather than a notification, yields release's turn");
+        drop(release);
+        let operator = timeout(Duration::from_secs(1), operator)
+            .await
+            .assured("the operator takes the released turn");
+        drop(operator);
+        assert!(requests.refresh_requested().now_or_never().is_none());
     }
 
     #[nervix_primitives::test]

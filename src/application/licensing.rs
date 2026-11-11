@@ -9,6 +9,7 @@ mod client;
 mod clock;
 mod coordinator;
 mod notifications;
+mod operations;
 mod request_turn;
 mod stream;
 pub(in crate::application) use coordinator::run;
@@ -52,6 +53,7 @@ impl SessionServiceImpl {
         activate: &ActivateLicense,
     ) -> Result<CommandExecutionEffect, Report<LicensingOperationError>> {
         let _turn = self.inner.licensing_requests.background().await;
+        self.confirm_license_release().await?;
         let state = self
             .inner
             .consensus
@@ -188,6 +190,7 @@ impl SessionServiceImpl {
     }
 
     async fn refresh_license_once(&self) -> Result<(), Report<LicensingOperationError>> {
+        self.finish_cluster_key_rotation().await?;
         let state = self
             .inner
             .consensus
@@ -202,7 +205,6 @@ impl SessionServiceImpl {
             unreachable!("refresh operation requires activation")
         };
         let expected_revision = activation.decision.revision;
-        let binding = activation.binding.clone();
         let request_id = clock::request_id(self.inner.runtime.fault_injection());
         let client = client::LicensingClient::new(self)
             .await
@@ -236,16 +238,6 @@ impl SessionServiceImpl {
                         &environment,
                     )
                     .change_context(LicensingOperationError::Rejected)?;
-                    state
-                        .record
-                        .accept(
-                            &state.identity,
-                            &binding,
-                            &received,
-                            Some(expected_revision),
-                            &environment,
-                        )
-                        .change_context(LicensingOperationError::Rejected)?;
                     Ok(received)
                 },
             )
@@ -262,6 +254,7 @@ impl SessionServiceImpl {
                 return Err(error);
             }
         };
+        self.commit_licensing_trust(&received).await?;
         match self
             .inner
             .consensus
@@ -278,7 +271,15 @@ impl SessionServiceImpl {
                 Ok(())
             }
             Err(error) => {
-                let error = error.change_context(LicensingOperationError::Consensus);
+                let context = if error
+                    .downcast_ref::<nervix_consensus::LicenseDecisionError>()
+                    .is_some()
+                {
+                    LicensingOperationError::Rejected
+                } else {
+                    LicensingOperationError::Consensus
+                };
+                let error = error.change_context(context);
                 self.report_license_rejection(
                     nervix_licensing_protocol::requests::Operation::Refresh,
                     clock::observe(self.inner.runtime.fault_injection()),
