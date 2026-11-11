@@ -4844,6 +4844,66 @@ test_target = "lib"
 
 [[target]]
 case_timeout_seconds = 10
+corpus = "src/application/session_service/tests/__fuzz__/application__session_service__tests__page_continuation__bolero_completion_page_continuations_round_trip/corpus"
+domain_version = 1
+features = []
+id = "completion-page-continuations"
+invariant = "A completion page continuation keeps its revision, position, query digest and candidate digest through the production text encoding and decoding pair, re-encodes to the same text, and paging a basis's candidates with the continuations it issues returns every candidate once, in order, a page at a time."
+manifest = "Cargo.toml"
+max_input_bytes = 1024
+package = "nervix-server"
+random_iterations = 128
+source = "src/application/session_service/tests/page_continuation.rs"
+test = "application::session_service::tests::page_continuation::bolero_completion_page_continuations_round_trip"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "src/application/session_service/tests/__fuzz__/application__session_service__tests__page_continuation__bolero_completion_page_cursor_text_continues_only_its_own_page/corpus"
+domain_version = 1
+features = []
+id = "completion-page-cursors-malformed"
+invariant = "Arbitrary cursor text and issued completion continuations kept whole, truncated, extended, with a character replaced, deleted or inserted, of another revision or digest, or respelled never panic, continue the page exactly when they decode to the continuation that basis issues within its candidates, and then continue no basis of another revision, query or candidate set."
+manifest = "Cargo.toml"
+max_input_bytes = 1024
+package = "nervix-server"
+random_iterations = 256
+source = "src/application/session_service/tests/page_continuation.rs"
+test = "application::session_service::tests::page_continuation::bolero_completion_page_cursor_text_continues_only_its_own_page"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "src/application/session_service/tests/__fuzz__/application__session_service__tests__page_continuation__bolero_choice_page_continuations_round_trip/corpus"
+domain_version = 1
+features = []
+id = "choice-page-continuations"
+invariant = "A choice page continuation keeps its revision, position, query digest and candidate digest through the production text encoding and decoding pair, re-encodes to the same text, and paging a basis's choices with the continuations it issues returns every choice once, in order, a page at a time."
+manifest = "Cargo.toml"
+max_input_bytes = 1024
+package = "nervix-server"
+random_iterations = 128
+source = "src/application/session_service/tests/page_continuation.rs"
+test = "application::session_service::tests::page_continuation::bolero_choice_page_continuations_round_trip"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "src/application/session_service/tests/__fuzz__/application__session_service__tests__page_continuation__bolero_choice_page_cursor_text_continues_only_its_own_page/corpus"
+domain_version = 1
+features = []
+id = "choice-page-cursors-malformed"
+invariant = "Arbitrary cursor text and issued choice continuations kept whole, truncated, extended, with a character replaced, deleted or inserted, of another revision or digest, or respelled never panic, continue the page exactly when they decode to the continuation that basis issues within its choices, and then continue no basis of another revision, question, content or choice set."
+manifest = "Cargo.toml"
+max_input_bytes = 1024
+package = "nervix-server"
+random_iterations = 256
+source = "src/application/session_service/tests/page_continuation.rs"
+test = "application::session_service::tests::page_continuation::bolero_choice_page_cursor_text_continues_only_its_own_page"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
 corpus = "crates/benchmark/tests/__fuzz__/bolero_metrics_report_round_trip/corpus"
 domain_version = 1
 features = []
