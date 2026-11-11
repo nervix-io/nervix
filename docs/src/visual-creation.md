@@ -156,16 +156,20 @@ first asks for the format, codecs, clients, VHOSTs and endpoints; the resource g
 action; and the execution graph's **PLACE** and **SUBSCRIBE**. The graph actions name what the
 operator wants, so they replace the family's retained draft: **PLACE** starts a corridor whose first
 `FROM` member is the selected item, and **SUBSCRIBE** starts a subscription to the selected relay
-under a newly generated name, `web_console_subscription_<n>`, whose number only grows. Closing the
-dialog returns focus to the control that opened it.
+under a newly generated name, `web_console_subscription_<n>`, whose number only grows. While any
+create attempt is submitting or queued until reconnect, every open action instead restores that
+attempt's form and retained draft, including **PLACE** and **SUBSCRIBE**. Another family's form can
+open after the attempt has its outcome. Closing the dialog returns focus to the control that opened
+it.
 
 ### Captured Domains
 
 A domain-owned family captures the console's selected domain the first time it opens and keeps that
 scope for its draft. Domain and user creation are cluster scoped and capture nothing. When the
 console has since selected another domain, the dialog offers **Use current domain**, which moves the
-draft. A move invalidates every reference the draft selected in its old domain: each selection keeps
-its name on screen, is marked as needing a new choice, and fails the draft's `build` until it is
+draft once its attempt is no longer pending. The button is disabled while submitting or queued until
+reconnect. A move invalidates every reference the draft selected in its old domain: each selection
+keeps its name on screen, is marked as needing a new choice, and fails the draft's `build` until it is
 selected again, so a name chosen in one domain never silently names an entity of another. Every
 lookup a domain-owned form sends carries its captured domain as its first dependency; without a
 captured domain a control asks nothing and names the missing scope.
@@ -385,15 +389,19 @@ stateDiagram-v2
 ```
 
 Each submission is an attempt identified by its number and the draft revision it was built from.
-The form applies an outcome only to its active attempt. While that attempt is submitting or queued
-until reconnect, the form's fields and its choice controls are disabled, a choice control's search,
+The form applies an outcome only to its active attempt. Closing the dialog keeps the pending
+attempt, its progress, its family and its captured domain. Every action that opens a create form
+restores that pending form until its own outcome arrives; it cannot replace the draft or start
+another family's form in the meantime. While that attempt is submitting or queued until reconnect,
+the form's scope-change button, fields and choice controls are disabled, a choice control's search,
 choices, **Load more** and **Retry** included. A selection is an edit of the draft, and a search,
 though it is no draft content, asks again by advancing the draft revision, so neither can run until
 the attempt has its outcome. The draft therefore stays the one the attempt was built from, and the
 form reports that attempt's own outcome. Once the attempt is queued in a transaction, completed or
 failed, the controls are live again. An edit then returns the form to **Editing** and drops the
-attempt, so a late outcome of a superseded attempt changes nothing in the form while the transcript
-still reports it. Create is refused, by the disabled button and by the submit handler itself, while
+attempt. Opening a fresh editable form also retires the previous attempt, so a late outcome changes
+nothing in that form while the transcript still reports it. Create is refused, by the disabled button
+and by the submit handler itself, while
 the attempt is submitting, waiting for reconnection, queued in a transaction or completed. Within
 the open form, only an edit or a failure allows another attempt, so a repeated click cannot submit
 the same draft twice.
@@ -447,10 +455,6 @@ It does not guarantee more than that:
   parses it. An explicit `UNBRANCHED` or `BRANCHED BY` choice builds an executable route.
 - REPL completion and the forms differ where they share no rule: codec references in the REPL are
   not filtered by direction, and the forms' compatible-relay targets have no REPL counterpart.
-- Reopening the dialog while its attempt is pending returns the form to **Editing** and enables
-  **Create**, so a retained draft can be submitted again before its first attempt answers.
-- **Use current domain** stays enabled while an attempt is pending, and using it moves the draft
-  and drops the attempt.
 - Text completion offers only what the grammar names at the cursor, so a position that introduces a
   new name offers nothing.
 - The console uses choice lookups; among the client libraries, the Rust client exposes them, while

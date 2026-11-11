@@ -198,3 +198,71 @@ Feature: Web console visual creation
       | cluster_size |
       | 1            |
       | 3            |
+
+  @visual_create_pending_reopen
+  Scenario Outline: Reopening a pending create restores its own form and prevents a second submission
+    Given a <cluster_size> node nervix cluster is started
+    When the web console is opened on the leader node
+    Then selector ".topbar-status .pill.ok" contains "CONNECTED"
+    When selector ".create-menu-button" is pressed with "Enter"
+    And selector ".create-menu [data-create-kind='domain']" is pressed with "Enter"
+    And selector ".create-name" is filled with "{{domain}}"
+    Given command response delivery on every node pauses after execution
+    When selector ".create-submit" is pressed with "Enter"
+    Then the command response delivery pause on the node that executes the command is reached
+    And selector ".create-status" contains "Submitting"
+    When selector ".create-close" is pressed with "Enter"
+    And selector ".create-menu-button" is pressed with "Enter"
+    And selector ".create-menu [data-create-kind='user']" is pressed with "Enter"
+    Then selector ".create-dialog" contains "Create domain"
+    And selector ".create-name" has value "{{domain}}"
+    And selector ".create-status" contains "Submitting"
+    And selector ".create-submit:disabled" exists
+    When selector ".create-submit" is clicked by script
+    And the command response delivery pause is released on every node
+    Then selector ".create-status" contains "Completed"
+    And selector ".terminal" contains "created domain '{{domain}}'" exactly 1 times
+    And selector ".terminal" does not contain "already exists"
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
+  @visual_create_pending_reopen
+  Scenario Outline: A pending resource create keeps its captured domain when the selected domain changes
+    Given a <cluster_size> node nervix cluster is started
+    And the active domain is "{{domain}}"
+    When these Plexus commands are executed on the leader node
+      """
+      CREATE DOMAIN {{domain}};
+      CREATE DOMAIN other_{{domain}};
+      """
+    And the web console is opened on the leader node
+    Then selector ".domain-menu [data-domain='{{domain}}'].active" exists
+    When selector ".create-menu-button" is pressed with "Enter"
+    And selector ".create-menu [data-create-kind='resource']" is pressed with "Enter"
+    And selector ".create-name" is filled with "pending_bundle"
+    Given command response delivery on every node pauses after execution
+    When selector ".create-submit" is pressed with "Enter"
+    Then the command response delivery pause on the node that executes the command is reached
+    When selector ".create-close" is pressed with "Enter"
+    And selector ".domain-select" is clicked
+    And selector ".domain-menu [data-domain='other_{{domain}}']" is pressed with "Enter"
+    Then selector ".domain-menu [data-domain='other_{{domain}}'].active" exists
+    When selector ".create-menu-button" is pressed with "Enter"
+    And selector ".create-menu [data-create-kind='resource']" is pressed with "Enter"
+    Then selector ".create-scope-change:disabled" exists
+    And selector ".create-scope" contains "{{domain}}"
+    When selector ".create-scope-change" is clicked by script
+    Then selector ".create-status" contains "Submitting"
+    And selector ".create-submit:disabled" exists
+    When the command response delivery pause is released on every node
+    Then selector ".create-status" contains "Completed"
+    And selector ".terminal" contains "created resource 'pending_bundle'" exactly 1 times
+    And selector ".resource-dialog" contains "pending_bundle"
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |

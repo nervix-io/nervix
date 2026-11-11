@@ -192,8 +192,11 @@ execution reference through redirects and reconnects, uses the attached transact
 position, and reports **Editing**, **Submitting**, **Queued until reconnect**, **Queued in
 transaction**, **Completed**, or **Failed** from the correlated outcome. While the command is
 submitting or queued until reconnect, the form's fields and typed choices, their searches included,
-are disabled along with **Create**, so the draft cannot change or be sent again and the form reports
-that command's own outcome. A queued transaction operation is not presented as externally complete.
+are disabled along with **Create** and **Use current domain**, so the draft cannot change or be sent
+again and the form reports that command's own outcome. Closing and reopening keeps this pending
+form, progress and captured domain. Choosing any family in the **Create** menu, a sidebar create
+action, **PLACE** or **SUBSCRIBE** restores that same pending form; another family can open once the
+attempt has its outcome. A queued transaction operation is not presented as externally complete.
 A successful standalone resource create opens the existing resource version dialog, where upload
 identity and completion continue to be owned by the upload workflow.
 
