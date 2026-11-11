@@ -97,6 +97,8 @@ Feature: Licensing transitions and grace
     Given an HTTPS licensing test service is available
     And a <cluster_size> node nervix cluster is started
     When a persistent license is activated through the running quorum
+    Then the licensing service holds exactly one authenticated notification stream
+    When the licensing notification stream is "withholding events"
     And these Plexus commands are executed on the leader node
       """
       CREATE UNPACED DOMAIN {{domain}};
@@ -277,6 +279,8 @@ Feature: Licensing transitions and grace
       CREATE UNPACED DOMAIN {{domain}};
       CREATE UNPACED DOMAIN {{domain}}_second;
       """
+    Then the licensing service holds exactly one authenticated notification stream
+    When the licensing notification stream is "withholding events"
     And the licensing service sets the domain quota to 1 with 3600 seconds of grace
     And these Plexus commands are executed on the leader node
       """
