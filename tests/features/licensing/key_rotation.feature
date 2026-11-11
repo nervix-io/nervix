@@ -87,6 +87,24 @@ Feature: Cluster licensing key rotation
       | 1            |
       | 3            |
 
+  Scenario Outline: A rejected rotation response keeps its command recoverable on <cluster_size> nodes
+    Given an HTTPS licensing test service is available
+    And a <cluster_size> node nervix cluster is started
+    When a persistent license is activated through the running quorum
+    Then the committed license decision is saved as placeholder "before_rotation"
+    Given the next licensing response has "signature" tampering
+    When these Plexus commands are executed on the leader node
+      """
+      ROTATE LICENSE CLUSTER KEY;
+      """
+    Then the rotation preserves identity and every signed deadline from placeholder "before_rotation"
+    And the licensing service replayed one rotation request identity
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
   Scenario Outline: A definitive refusal abandons the pending key on <cluster_size> nodes
     Given an HTTPS licensing test service is available
     And a <cluster_size> node nervix cluster is started

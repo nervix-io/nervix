@@ -98,6 +98,15 @@ impl PendingClusterKey {
 }
 
 impl ClusterIdentityRecord {
+    pub(crate) fn rotation_is_pending_for(
+        &self,
+        reference: &nervix_models::CommandExecutionReference,
+    ) -> bool {
+        self.pending_key
+            .as_ref()
+            .is_some_and(|pending| &pending.reference == reference)
+    }
+
     fn check_rotation_basis(
         &self,
         basis: &ClusterIdentity,

@@ -305,6 +305,42 @@ pub enum LicensingCommandOutcome {
 }
 
 impl crate::StateMachineData {
+    /// Finalization cannot outrun a pending rotation or contradict its committed operation result.
+    /// Returning the applying record lets the existing command recovery path derive that result.
+    pub(crate) fn licensing_command_can_finish(
+        &self,
+        execution: &CommandExecution,
+        result: &CommandExecutionResult,
+    ) -> bool {
+        match execution.effect() {
+            Some(CommandExecutionEffect::RotateLicenseClusterKey { outcome: None, .. }) => self
+                .cluster_identity
+                .as_ref()
+                .is_none_or(|identity| !identity.rotation_is_pending_for(&execution.reference)),
+            Some(
+                CommandExecutionEffect::RotateLicenseClusterKey {
+                    outcome: Some(outcome),
+                    ..
+                }
+                | CommandExecutionEffect::ReleaseLicense {
+                    outcome: Some(outcome),
+                    ..
+                },
+            ) => match outcome {
+                LicensingCommandOutcome::Applied => matches!(
+                    &result.disposition,
+                    CommandExecutionDisposition::Completed {
+                        already_existed: false
+                    }
+                ),
+                LicensingCommandOutcome::Refused { .. } => {
+                    matches!(&result.disposition, CommandExecutionDisposition::Failed)
+                }
+            },
+            _ => true,
+        }
+    }
+
     pub(crate) fn licensing_command_outcome(
         &self,
         reference: &CommandExecutionReference,
