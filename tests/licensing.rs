@@ -643,10 +643,13 @@ async fn refused_refresh(world: &mut ScenarioWorld) {
         .execute("REFRESH LICENSE;")
         .await
         .assured("refresh has a terminal public outcome");
+    let peer = world.licensing_service.as_ref().verified("fixture started");
+    let requests = peer.requests().await;
+    let faults = peer.configure(|model| model.fault_observations()).await;
     assert!(
         !outcome.succeeded(),
-        "tampered decision was accepted: {}",
-        outcome.message
+        "tampered decision was accepted: {}; requests={requests:?}; fault consumers={faults:?}",
+        outcome.message,
     );
     assert!(
         outcome

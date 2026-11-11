@@ -408,7 +408,10 @@ fresh challenge and single-use signed stream ticket; credentials stay out of the
 `sync` compares notification, decision, conditions and trust revisions. A gap or a new `decision`
 or `trust` hint schedules a coalesced refresh through the ordinary verification and Raft path;
 duplicate and stale notification identifiers do not schedule another refresh. Hints grant no
-permission. Reconnects retain `Last-Event-ID` within the current activation and leader tenure;
+permission. An in-flight refresh can satisfy a sync's reported revisions before another request
+starts.
+Notification gaps and later changes still reconcile, and explicit refresh commands still run.
+Reconnects retain `Last-Event-ID` within the current activation and leader tenure;
 a new leader reconciles from its committed revisions. Leadership loss, shutdown or a changed
 activation/key binding ends the exact stream before its replacement starts.
 

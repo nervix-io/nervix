@@ -20,7 +20,7 @@ use serde::Serialize;
 use url::Url;
 use uuid::Uuid;
 
-use crate::{ServiceError, limits};
+use crate::{ResponseGate, ServiceError, limits};
 pub(crate) mod notifications;
 
 #[derive(Debug, thiserror::Error)]
@@ -63,12 +63,19 @@ const CHALLENGE_SECONDS: i64 = 300;
 
 #[derive(Clone, Debug)]
 pub enum Fault {
+    Hold(ResponseGate),
     Refuse(ProblemKind),
     Delay(std::time::Duration),
     LoseResponse,
     CorruptResponseSignature,
     Adopt,
     Tamper(Tamper),
+}
+
+#[derive(Clone, Debug)]
+pub struct FaultObservation {
+    pub request_id: Uuid,
+    pub fault: Fault,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -130,6 +137,8 @@ pub struct Model {
     activations: BTreeMap<Uuid, HeldActivation>,
     responses: BTreeMap<RequestIdentity, SavedResponse>,
     faults: VecDeque<Fault>,
+    fault_observations: Vec<FaultObservation>,
+    held_response: Option<ResponseGate>,
     refusal: Option<ProblemKind>,
     license_key: Secret,
     transition_usage: Option<nervix_licensing_protocol::impact::UsageSnapshot>,
@@ -199,6 +208,8 @@ impl Model {
             activations: BTreeMap::new(),
             responses: BTreeMap::new(),
             faults: VecDeque::new(),
+            fault_observations: Vec::new(),
+            held_response: None,
             refusal: None,
             license_key: Secret::new("NVXK-TESTABCD-fixture-secret".to_owned()),
             transition_usage: None,
@@ -208,6 +219,33 @@ impl Model {
     pub fn script(&mut self, fault: Fault) {
         assert!(self.faults.len() < MAX_ENTRIES);
         self.faults.push_back(fault);
+    }
+
+    pub fn hold_next_response(&mut self) {
+        assert!(
+            self.held_response.is_none(),
+            "release the preceding response first"
+        );
+        let gate = ResponseGate::default();
+        self.script(Fault::Hold(gate.clone()));
+        self.held_response = Some(gate);
+    }
+
+    pub fn response_is_held(&self) -> bool {
+        self.held_response
+            .as_ref()
+            .is_some_and(ResponseGate::is_held)
+    }
+
+    pub fn release_response(&mut self) {
+        self.held_response
+            .take()
+            .verified("the scenario installed a response gate")
+            .release();
+    }
+
+    pub fn fault_observations(&self) -> Vec<FaultObservation> {
+        self.fault_observations.clone()
     }
     pub fn refuse(&mut self, refusal: Option<ProblemKind>) {
         self.refusal = refusal;
@@ -272,6 +310,13 @@ impl Model {
         }
         self.requests.push(request.clone());
         let common = request.common();
+        if let Some(fault) = &fault {
+            // At most one observation per verified request, whose inventory is bounded above.
+            self.fault_observations.push(FaultObservation {
+                request_id: common.request_id,
+                fault: fault.clone(),
+            });
+        }
         if let Some(Fault::Refuse(kind)) = &fault {
             return (problem(kind.clone(), None), None);
         }
