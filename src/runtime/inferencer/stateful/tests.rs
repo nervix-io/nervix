@@ -24,6 +24,15 @@ use nervix_models::{
 use super::*;
 use crate::registry::InferencerStatePortPlan;
 
+fn state_metrics() -> crate::metrics::InferencerStateMetrics {
+    let metrics = crate::metrics::RuntimeMetrics::default();
+    let domain = "inference_tests"
+        .parse()
+        .assured("the test domain is valid");
+    let name = "scoring".parse().assured("the test inferencer is valid");
+    metrics.inferencer_state_metrics(&domain, &name, nervix_models::Unit::SINGLE, None)
+}
+
 fn schema(dimensions: &[u32]) -> InferencerTensorSchema {
     InferencerTensorSchema {
         representation: InferencerTensorRepresentation::Dense,
@@ -85,6 +94,7 @@ fn shuttle_a_forced_inferencer_publication_holds_every_row_acknowledged_before_t
             let (requests, mut cuts) = mpsc::channel::<oneshot::Sender<()>>(1);
             let (acknowledged, mut acknowledgements) = watch::channel(0u64);
             let branch_state = state.clone();
+            let metrics = state_metrics();
             let branch = nervix_primitives::task::spawn(async move {
                 let mut session = None;
                 let (mut rows_open, mut cuts_open) = (true, true);
@@ -101,7 +111,11 @@ fn shuttle_a_forced_inferencer_publication_holds_every_row_acknowledged_before_t
                         },
                         row = rows.recv(), if rows_open => match row {
                             Some((generation, answer)) => {
-                                let current = StatefulInferenceSession { session: None, generation };
+                                let current = StatefulInferenceSession {
+                                    session: None,
+                                    generation,
+                                    _state_bytes: metrics.track_branch(8),
+                                };
                                 branch_state.publish_session(&current, 17, 1024);
                                 session = Some(current);
                                 answer.send(()).assured("the source waits for its admitted row");
@@ -420,7 +434,8 @@ async fn checked_running_fixture(
 async fn accepted_work_first_stateful_row_waits_for_its_native_session() {
     let executor = crate::runtime::single_worker_executor();
     let (prepared, path) = checked_running_fixture(&executor).await;
-    let mut session = prepared.instantiate();
+    let mut session =
+        prepared.instantiate(state_metrics().track_branch(prepared.state.bytes_per_branch));
     let output = crate::runtime::test_fixtures::accepted_work_after_cpu_room(
         &executor,
         CpuClass::Bulk,
@@ -441,8 +456,10 @@ async fn accepted_work_stateful_inference_keeps_its_session_on_abandoned_waits()
     config.workers.pending_jobs = nervix_execution::PendingJobCounts::uniform(NonZeroUsize::MIN);
     let executor = Executor::new(config).expect("one extension worker with one queue place");
     let (prepared, path) = checked_running_fixture(&executor).await;
-    let mut first = prepared.instantiate();
-    let mut second = prepared.instantiate();
+    let mut first =
+        prepared.instantiate(state_metrics().track_branch(prepared.state.bytes_per_branch));
+    let mut second =
+        prepared.instantiate(state_metrics().track_branch(prepared.state.bytes_per_branch));
     let first_result = first
         .execute(&executor, &path, &prepared, row(&[1.0, 10.0]))
         .await
@@ -541,7 +558,8 @@ async fn accepted_work_stateful_inference_keeps_its_session_on_abandoned_waits()
         .expect("admitted")
         .expect("valid reshape");
     assert_eq!(score(&second_next), 202.0);
-    let mut recreated = prepared.instantiate();
+    let mut recreated =
+        prepared.instantiate(state_metrics().track_branch(prepared.state.bytes_per_branch));
     assert_eq!(
         score(
             &recreated
@@ -718,6 +736,7 @@ fn shuttle_inferencer_publication_keeps_captured_tensors_stable_through_handoff_
             let (frozen, mut freezes) = mpsc::channel::<oneshot::Sender<()>>(1);
             let (acknowledged, mut acknowledgements) = watch::channel(0_u64);
             let branch_state = state.clone();
+            let metrics = state_metrics();
             let branch = nervix_primitives::task::spawn(async move {
                 let mut revision = 0;
                 loop {
@@ -731,7 +750,11 @@ fn shuttle_inferencer_publication_keeps_captured_tensors_stable_through_handoff_
                         }
                         generation = admissions.recv() => {
                             let Some(generation) = generation else { continue; };
-                            let session = StatefulInferenceSession { session: None, generation };
+                            let session = StatefulInferenceSession {
+                                session: None,
+                                generation,
+                                _state_bytes: metrics.track_branch(8),
+                            };
                             branch_state.publish_session(&session, 17, crate::inferencer_state_snapshot::footprint([(1, 2)]).expect("bounded footprint"));
                             revision += 1;
                             acknowledged.send_replace(revision);

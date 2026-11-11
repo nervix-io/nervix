@@ -2224,8 +2224,24 @@ impl RelayProcessorNode {
             }
         };
         let (request_tx, request_rx) = mpsc::channel(1);
-        let task =
-            runtime.spawn_published_branch_state_snapshot_task(shutdown_tx, published, request_tx);
+        let task = if let RelayProcessorOperationNode::StatefulInferencer { session, .. } =
+            &self.operation
+        {
+            let metrics = session.state_metrics();
+            runtime.spawn_published_branch_state_snapshot_task(
+                shutdown_tx,
+                published,
+                request_tx,
+                metrics,
+            )
+        } else {
+            runtime.spawn_published_branch_state_snapshot_task(
+                shutdown_tx,
+                published,
+                request_tx,
+                (),
+            )
+        };
         let requests = task.is_some().then_some(request_rx);
         SpawnedSnapshotTask { task, requests }
     }
