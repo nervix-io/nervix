@@ -48,6 +48,7 @@ pub struct ExecutionOverrides {
     pub bulk_window_memory_bytes: Option<ByteUnit>,
     pub restore_metadata_memory_bytes: Option<ByteUnit>,
     pub credentials_memory_bytes: Option<ByteUnit>,
+    pub intake_memory_bytes: Option<ByteUnit>,
     pub relay_encoded_bytes: Option<ByteUnit>,
     pub relay_decoded_bytes: Option<ByteUnit>,
     pub relay_scratch_bytes: Option<ByteUnit>,
@@ -397,6 +398,13 @@ memory_setting!(
     32,
     24 * 1024 * 1024
 );
+memory_setting!(
+    IntakeMemory,
+    "execution-intake-memory-bytes",
+    128,
+    16,
+    128 * 1024 * 1024
+);
 memory_setting!(RelayMemory, "execution-relay-memory-bytes", 192, 16, 1);
 read_memory_setting!(StateReadMemory, "execution-state-read-memory-bytes");
 read_memory_setting!(
@@ -672,6 +680,7 @@ pub struct ExecutionSettings {
     pub bulk_window_memory_bytes: Setting<BulkWindowMemory>,
     pub restore_metadata_memory_bytes: Setting<RestoreMetadataMemory>,
     pub credentials_memory_bytes: Setting<CredentialsMemory>,
+    pub intake_memory_bytes: Setting<IntakeMemory>,
     pub relay_encoded_bytes: Setting<RelayEncodedBytes>,
     pub relay_decoded_bytes: Setting<RelayDecodedBytes>,
     pub relay_scratch_bytes: Setting<RelayScratchBytes>,
@@ -708,6 +717,8 @@ impl ExecutionSettings {
             overrides.restore_metadata_memory_bytes,
             &memory,
         )?;
+        let intake_memory_bytes =
+            Setting::<IntakeMemory>::resolve(overrides.intake_memory_bytes, &memory)?;
         let credentials_memory_bytes =
             Setting::<CredentialsMemory>::resolve(overrides.credentials_memory_bytes, &memory)?;
         let settings = Self {
@@ -721,6 +732,7 @@ impl ExecutionSettings {
             bulk_window_memory_bytes,
             restore_metadata_memory_bytes,
             credentials_memory_bytes,
+            intake_memory_bytes,
             relay_encoded_bytes: Setting::resolve(
                 overrides.relay_encoded_bytes,
                 relay_memory_bytes.value(),
@@ -773,6 +785,7 @@ impl ExecutionSettings {
                 bulk_window: *self.bulk_window_memory_bytes.value(),
                 restore_metadata: *self.restore_metadata_memory_bytes.value(),
                 credentials: *self.credentials_memory_bytes.value(),
+                intake: *self.intake_memory_bytes.value(),
             },
             limits: OperationLimits {
                 relay_encoded_bytes: *self.relay_encoded_bytes.value(),
@@ -858,6 +871,7 @@ impl ExecutionOverrides {
                 self.restore_metadata_memory_bytes,
             ),
             (CredentialsMemory::NAME, self.credentials_memory_bytes),
+            (IntakeMemory::NAME, self.intake_memory_bytes),
             (RelayEncodedBytes::NAME, self.relay_encoded_bytes),
             (RelayDecodedBytes::NAME, self.relay_decoded_bytes),
             (RelayScratchBytes::NAME, self.relay_scratch_bytes),

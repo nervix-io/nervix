@@ -75,8 +75,8 @@ pub use settings::{
     ConsensusStorageWorkers, ControlCpuPendingJobs, ControlCpuWorkers, CredentialsCpuPendingJobs,
     CredentialsCpuWorkers, CredentialsMemory, DataCpuPendingJobs, DataCpuWorkers,
     ExecutionOverrides, ExecutionSettings, ExtensionCpuPendingJobs, ExtensionCpuWorkers,
-    FilesystemStoragePendingJobs, FilesystemStorageWorkers, ManagementMemory, PendingJobCounts,
-    RelayDecodedBytes, RelayEncodedBytes, RelayMemory, RelayScratchBytes,
+    FilesystemStoragePendingJobs, FilesystemStorageWorkers, IntakeMemory, ManagementMemory,
+    PendingJobCounts, RelayDecodedBytes, RelayEncodedBytes, RelayMemory, RelayScratchBytes,
     ResidentReplicationBatches, RestoreMetadataMemory, StateReadCacheMemory, StateReadMemory,
     WorkerSettings,
 };

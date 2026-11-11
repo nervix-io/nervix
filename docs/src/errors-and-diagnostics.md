@@ -4018,6 +4018,30 @@ client node-credit capacities. Receive-limit and native-runtime relationship err
 typed causes beneath the startup context; they never turn a refused allocation into a decode or
 authentication failure. A runtime stack or blocking-thread refusal happens before node listeners.
 
+## Public Listener Input Refusals
+
+The [Listener Bounds](node-settings.md#listener-bounds) table owns HTTP input status/reason pairs.
+Body size and completion deadline produce 413 and 408; memory and assembly admission produce 503;
+malformed body framing produces 400. Their typed causes remain attached until the HTTP reporting
+boundary. Hyper enforces header capacity with 431 and closes incomplete headers at their deadline.
+An input-memory refusal passes its complete admission report through the foreign I/O error; the
+request ledger retains only its status classification. Idle and TLS setup expiry also carry typed
+connection-expiry reports in their I/O errors.
+After an input refusal, Hyper completes the response and half-closes writes before the node
+discards residual transport bytes within `http-refusal-drain-timeout`. This prevents an ongoing
+upload's reset from erasing the response. The drain keeps the accepted connection's lease, uses
+the declared listener read-buffer capacity, and ends at peer closure, shutdown or that deadline.
+It parses no HTTP and decodes no records.
+If renewing an idle deadline cannot fit the monotonic clock, the completed read or write keeps its
+exact byte count. The next I/O poll fails with the typed clock error before doing more I/O.
+A full cleartext connection listener returns 503 with `listener_connection_capacity`. Pre-protocol
+TLS/gRPC refusal ends that connection. None of these paths claims graph admission or record decode
+rejection, and retryable memory/worker refusal is never classified as a codec failure.
+
+The HTTP input completion budget distinguishes phases: expiry while receiving bytes returns 408;
+expiry while the server waits for or performs accounted body assembly returns 503. Assembly
+retains its reservation until the worker actually exits after cancellation.
+
 ## Licensing Notification Failures
 
 The outbound licensing stream retains typed setup, transport, idle-timeout, content-type,

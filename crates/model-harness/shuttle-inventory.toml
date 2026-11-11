@@ -130,6 +130,7 @@ name = "nervix-connector-rabbitmq"
 
 [[package]]
 checks = [
+  "application::listener_input::shuttle_checks::shuttle_read_allocation_racing_input_cancellation_returns_its_entire_charge",
   "application::backup::retained::shuttle_tests::shuttle_a_download_stays_bounded_and_waits_for_its_client",
   "application::backup::retained::shuttle_tests::shuttle_a_lost_client_releases_its_hold_exactly_once",
   "application::backup::retained::shuttle_tests::shuttle_concurrent_downloads_collect_an_archive_exactly_once",

@@ -70,6 +70,8 @@ fn claim(incarnation: u64, bytes: u64) -> NodeCapabilityRecord {
                 nervix_arbitrary::Domain::Vocabulary,
             )
             .node_connector_host_capabilities(),
+            listeners: nervix_arbitrary::Arbitrary::new(&[], nervix_arbitrary::Domain::Vocabulary)
+                .listener_bounds(),
             cpu_count: None,
             memory_bytes: None,
             receive: receive(bytes).bounds(),
