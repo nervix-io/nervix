@@ -374,8 +374,8 @@ complete unsigned 64-bit range. Duration settings preserve their declared range 
 precision in eight bytes. Decoding validates the same declaration before publishing a parameter
 value.
 
-Consensus's `raft_entity_policy_` keyspaces and current
-`ClusterState` metadata encoding, 33, identify its stored shapes, including the partition count of every resolved
+Consensus's `raft_entity_listener_policy_` keyspaces and current
+`ClusterState` metadata encoding, 34, identify its stored shapes, including the partition count of every resolved
 branch declaration in the committed schedule, the partition epoch the schedule records for each
 branch whose count changed, and the statements a transaction keeps, including per-entity
 `ALTER INGESTOR` and `ALTER EMITTER` operations and a `RESET WASM PROCESSOR ... STATE` that takes

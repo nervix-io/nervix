@@ -85,7 +85,11 @@ with a diagnostic naming both. The normal runtime dependency graph contains neit
 
 ## Listener And Peer Topology
 
-Each node exposes one TCP listener for all node-to-node traffic. Every accepted connection uses
+Each node exposes one TCP listener for all node-to-node traffic. Its accept owner waits the node's
+positive `listener-accept-retry-delay` after a node-local failure such as descriptor exhaustion;
+connection-local failures retry immediately. Admission shutdown cancels the pause. The setting's
+default, validation and committed publication are shared with the public listener
+[Listener Bounds](node-settings.md#listener-bounds). Every accepted connection uses
 mutually authenticated TLS 1.3 and HTTP/2. The listener is independent of Raft leadership and graph
 placement, so every live node can receive every class of interconnect operation. TLS provides
 confidentiality and integrity as well as peer authentication.
@@ -490,7 +494,7 @@ the same fingerprint as every other consensus and prerequisite shape.
 
 The current fingerprint also fences signed licensing activation and decision commands, retained trust documents, committed licensing time and transaction refusals projected without executable Models. These consensus request and snapshot shapes share the contract with emitter instance identities.
 
-The fingerprint also covers bounded entity labels on configuration Models and the typed label edits retained in transactions, with their committed acceptance limits. It identifies the combined label and inferencer-description contract; metadata-only edits preserve the execution and state identities those reports observe.
+The fingerprint also covers bounded entity labels on configuration Models and the typed label edits retained in transactions, with their committed acceptance limits. It identifies the combined label, inferencer-description and listener-capability contract; metadata-only edits preserve the execution and state identities those reports observe.
 
 All nodes in a running cluster use one current wire contract. A fixed fingerprint covers the set of
 supported operations and their encoded shapes. It is one of the prerequisites every hello carries,

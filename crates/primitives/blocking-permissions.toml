@@ -458,3 +458,10 @@ items = ["thread::spawn"]
 owner = "The entity-label production publication reader's Shuttle check."
 path = "crates/consensus/src/entity_labels/tests.rs"
 reason = "These finite synchronous model contenders exercise the existing applied-state lock and the production metadata capture directly, outside node executor jobs."
+
+[[permission]]
+bound = "One modeled allocation-observation participant per Shuttle execution; it performs one bounded ledger observation and joins before the execution returns. The calling participant cancels the input guard."
+items = ["thread::spawn"]
+owner = "The public HTTP input accounting cancellation check."
+path = "src/application/listener_input.rs"
+reason = "This modeled contender drives the production accounting owner under Shuttle's scheduler, rather than executing a node job through the bounded executor. It is compiled only for the Shuttle check."
