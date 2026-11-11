@@ -33,8 +33,9 @@ use crate::{
 const CONSENSUS_DATABASE_DIRECTORY: &str = "consensus";
 const CONSENSUS_KEYSPACE_PREFIX: &str = "raft_";
 /// What a storage job at startup or shutdown is charged when it holds nothing of its own: opening or
-/// closing the node's stores, whose databases allocate their own caches, and the startup
-/// preflight's reads of small kernel files and its probe files. The charge only admits the job.
+/// closing the node's stores, whose databases allocate their own caches, the startup preflight's
+/// reads of small kernel files and its probe files, and its hardware probes, whose libraries
+/// allocate their own memory. The charge only admits the job.
 pub(in crate::application) const STORAGE_JOB_RESERVATION_BYTES: u64 = 4096;
 
 #[derive(Debug, Error)]

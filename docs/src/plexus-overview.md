@@ -948,16 +948,19 @@ DESCRIBE CLUSTER;
 The answer names the leader, or `none`, and the nodes whose Raft heartbeat, gossip interval or
 clock-skew tolerance differs from the leader's: `none` when every node agrees, and
 `unknown, no leader record is published` while the node knows no leader or no record the leader
-published. Each live node's newest run follows in node name order, with its incarnation and every
-prerequisite in the order nodes compare them. A timing that differs from the leader's carries the
-leader's value beside it, and a node that has not published a record this node can read shows
-`prerequisites: not published`:
+published. Each live node's newest run follows in node name order, with its incarnation, its
+committed capacity claim and every prerequisite in the order nodes compare them. A timing that
+differs from the leader's carries the leader's value beside it, and a node that has not published
+a record this node can read shows `prerequisites: not published`. The node's committed
+[node record](node-settings.md#the-node-record) follows: the revision that committed it, its
+detected properties and its tags, or `record: not announced`:
 
 ```text
 leader: node-1
 timing drift: node-2
 node: node-1 (leader)
   incarnation: 3
+  capabilities: committed node-1#3 cpu-count=8 memory-bytes=17179869184 relay-batch-bytes=33554432 relay-decoded-bytes=33554432 bulk-chunk-bytes=65536 bulk-window-bytes=1048576
   cluster identity: production
   trust root: <64 hexadecimal digits>
   wire contract: <64 hexadecimal digits>
@@ -967,8 +970,24 @@ node: node-1 (leader)
   raft-heartbeat-interval: 250ms
   gossip-interval: 500ms
   clock-skew-tolerance: 500ms
+  record: revision 41 (incarnation 3)
+  properties:
+    architecture: x86_64
+    cpu.model: AMD EPYC 7763 64-Core Processor
+    gpu.count: 0 (undetected: the library that reports it did not load)
+    gpu.models: none
+    gpu.memory: none
+    gpu.driver: undetected (the library that reports it did not load)
+    onnx.version: 1.30.0
+    onnx.providers: CPUExecutionProvider
+    onnx.cuda: false (the loaded ONNX Runtime has no CUDA execution provider)
+    cuda.available: false
+  tags:
+    pool=cpu
+    zone=eu
 node: node-2
   incarnation: 7
+  capabilities: awaiting committed claim
   cluster identity: production
   trust root: <64 hexadecimal digits>
   wire contract: <64 hexadecimal digits>
@@ -978,6 +997,7 @@ node: node-2
   raft-heartbeat-interval: 400ms, the leader's 250ms
   gossip-interval: 500ms
   clock-skew-tolerance: 500ms
+  record: not announced
 ```
 
 Two nodes run together only while every value but the timings is equal and each timing stays

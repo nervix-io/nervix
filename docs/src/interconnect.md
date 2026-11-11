@@ -509,6 +509,8 @@ commands and snapshots. Its private key travels only over the authenticated inte
 identity observation and backup source metadata use their separate public projections.
 The current fingerprint includes the conditional orphaned model-pause recovery command, its exact
 mutation lease, typed recovery reply and typed mutation-fence and restore-installation conflicts.
+It also covers the node record announcement: the `consensus.announce_node_record` request and the
+Raft command that commit a node's capacity claim, detected properties and tags as one record.
 The subscription-interest visibility request includes the advertisement version, and its current
 wire fingerprint fences that request shape during connection setup.
 

@@ -137,7 +137,7 @@ struct PreparedTransactionCommit {
 
 #[derive(Serialize)]
 struct TransactionPlanningBasisInput<'a> {
-    capabilities: &'a BTreeMap<nervix_models::ClusterNodeName, nervix_models::NodeCapabilityRecord>,
+    records: &'a BTreeMap<nervix_models::ClusterNodeName, nervix_models::CommittedNodeRecord>,
     parameters: Option<&'a nervix_models::ClusterParameterRecord>,
     domain: &'a DomainState,
     models: Vec<&'a Model>,
@@ -183,7 +183,7 @@ fn transaction_planning_basis(
     ordered_models.sort_by_key(|model| model.node_ref());
     let resources = resources.iter().collect();
     let input = TransactionPlanningBasisInput {
-        capabilities: authoritative_inputs.topology().capabilities(),
+        records: authoritative_inputs.topology().records(),
         parameters: authoritative_inputs.parameters(),
         domain,
         models: ordered_models,

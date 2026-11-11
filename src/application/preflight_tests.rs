@@ -23,11 +23,27 @@ use ubyte::ByteUnit;
 
 use super::{Preflight, PreflightError, StagingDirectory};
 use crate::{
-    application::NodeSettings,
+    application::{NodeDetection, NodeSettings},
     capacity::{CapacitySettings, NodeMemory},
     memory_pressure::MemoryPressureSettings,
     resource::{ResourceMaxArchiveBytes, ResourceSettings},
 };
+
+/// Properties a test node reports in place of probing its host, so no test loads a native library.
+fn supplied_properties() -> NodeDetection {
+    use nervix_models::{
+        Detected, GpuInventory, NodeProperties, OnnxRuntimeDetection, PropertyText,
+        UndetectedReason,
+    };
+
+    NodeDetection::Supplied(NodeProperties {
+        architecture: PropertyText::new(std::env::consts::ARCH)
+            .assured("a target architecture's name is short printable text"),
+        cpu_model: Detected::Undetected(UndetectedReason::NotReported),
+        gpus: GpuInventory::Undetected(UndetectedReason::LibraryUnavailable),
+        onnx: OnnxRuntimeDetection::Undetected(UndetectedReason::LibraryUnavailable),
+    })
+}
 
 /// Runs the preflight of a node with `settings` over `db_path` and `temp_dir`, which must refuse it.
 async fn refusal(
@@ -36,12 +52,14 @@ async fn refusal(
     temp_dir: &Path,
 ) -> Report<PreflightError> {
     let dns = DnsConfiguration::system();
+    let detection = supplied_properties();
     let preflight = Preflight {
         settings,
         db_path,
         temp_dir,
         dns: &dns,
         cpu_detection: crate::capacity::CpuDetection::Pending,
+        detection: &detection,
     };
     let Err(refusal) = preflight.run().await else {
         panic!("the preflight must refuse this node");
@@ -57,7 +75,7 @@ fn scratch() -> TempDir {
 async fn a_high_watermark_above_the_memory_limit_refuses_the_node_naming_both() {
     let scratch = scratch();
     let settings = NodeSettings {
-        capacity: CapacitySettings::resolve(Some(ByteUnit::Gibibyte(4)), None)
+        capacity: CapacitySettings::resolve(Some(ByteUnit::Gibibyte(4)), None, None)
             .assured("four GiB is a memory limit"),
         memory_pressure: MemoryPressureSettings::resolve(
             Some(ByteUnit::Gibibyte(8)),
@@ -148,12 +166,14 @@ async fn a_quota_beyond_the_database_volume_refuses_the_node_naming_the_setting(
     };
     let db_path = scratch.path().join("db");
 
+    let detection = supplied_properties();
     let checked = Preflight {
         settings: &settings,
         db_path: &db_path,
         temp_dir: scratch.path(),
         dns: &DnsConfiguration::system(),
         cpu_detection: crate::capacity::CpuDetection::Pending,
+        detection: &detection,
     }
     .run()
     .await
@@ -195,7 +215,7 @@ async fn a_quota_beyond_the_database_volume_refuses_the_node_naming_the_setting(
 async fn the_complete_startup_total_includes_client_node_windows_and_database_caches() {
     let scratch = scratch();
     let settings = NodeSettings {
-        capacity: CapacitySettings::resolve(Some(ByteUnit::Gibibyte(1)), None)
+        capacity: CapacitySettings::resolve(Some(ByteUnit::Gibibyte(1)), None, None)
             .assured("one GiB is a memory limit"),
         client_endpoints: crate::runtime::ClientEndpointOverrides {
             producer_node_bytes: Some(ByteUnit::Mebibyte(800)),

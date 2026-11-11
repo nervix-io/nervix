@@ -1,7 +1,8 @@
 //! ONNX invocation at the data-plane boundary.
 //!
 //! Layer: data plane.
-//! Owns: native sessions, tensor invocation, branch-owned explicit state and safe diagnostics.
+//! Owns: native sessions, tensor invocation, branch-owned explicit state, safe diagnostics, and
+//! the startup probe of what the process's ONNX Runtime library reports about itself.
 //! Depends on: typed tensor plans, Arrow batches, the bounded executor and ONNX Runtime.
 //! Must not know: semantic Models, graph validation or placement decisions.
 
@@ -22,8 +23,9 @@ use error_stack::{Report, ResultExt as _};
 use meticulous::OptionExt as _;
 use nervix_execution::{Cancellation, CpuClass, Executor, MemoryClass};
 use nervix_models::{
-    InferencerExecutionMode, InferencerTensorDeclaration, InferencerTensorDimension,
-    InferencerTensorMapping, InferencerTensorSchema,
+    CudaProviderRegistration, Detected, ExecutionProviders, InferencerExecutionMode,
+    InferencerTensorDeclaration, InferencerTensorDimension, InferencerTensorMapping,
+    InferencerTensorSchema, OnnxRuntime, OnnxRuntimeDetection, PropertyText, UndetectedReason,
 };
 use nervix_primitives::{
     sync::{Arc, StdArc, blocking::Mutex},
@@ -181,6 +183,251 @@ pub(crate) fn onnx_environment() -> error_stack::Result<&'static Environment, &'
     }) {
         Ok(environment) => Ok(environment),
         Err(refusal) => Err(Report::new(refusal)),
+    }
+}
+
+/// What the ONNX Runtime library this process loads reports about itself, read once at startup on
+/// the bulk workers, where a model load runs: its version, the execution providers it reports, and
+/// whether the CUDA execution provider registers in a session builder that is dropped afterwards,
+/// which loads the provider library and the CUDA runtime the way a session would. The probe loads
+/// the library `ort` would load through `ort`'s fallible loader first, so a node without it reports
+/// that instead of panicking, then uses the process's one environment and creates no other.
+pub(crate) async fn probe_onnx_runtime(
+    executor: &Executor,
+) -> error_stack::Result<OnnxRuntimeDetection, OnnxRuntimeProbeError> {
+    let reservation = executor
+        .reserve(MemoryClass::Bulk, SESSION_LOAD_RESERVATION_BYTES)
+        .await
+        .change_context(OnnxRuntimeProbeError::Execution)?;
+    executor
+        .run_cpu(CpuClass::Bulk, reservation, |_charge, cancellation| {
+            OnnxRuntimeProbe::run(cancellation)
+        })
+        .await
+        .change_context(OnnxRuntimeProbeError::Execution)
+}
+
+/// Why the startup probe of the ONNX Runtime answered nothing.
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum OnnxRuntimeProbeError {
+    #[error("the node's bounded execution did not run the ONNX Runtime probe")]
+    Execution,
+}
+
+/// The steps of the startup probe, each reading the library this process loaded.
+struct OnnxRuntimeProbe;
+
+impl OnnxRuntimeProbe {
+    fn run(cancellation: &Cancellation) -> OnnxRuntimeDetection {
+        let library = Self::library_path(std::env::var("ORT_DYLIB_PATH"));
+        if let Err(refusal) = ort::init_from(&library) {
+            tracing::info!(
+                library = %library.display(),
+                error = %refusal,
+                "the ONNX Runtime library did not load"
+            );
+            return OnnxRuntimeDetection::Undetected(UndetectedReason::LibraryUnavailable);
+        }
+        let environment = match onnx_environment() {
+            Ok(environment) => environment,
+            Err(refusal) => {
+                tracing::info!(
+                    error = %format_args!("{refusal:#}"),
+                    "the ONNX Runtime environment was not created"
+                );
+                return OnnxRuntimeDetection::Undetected(UndetectedReason::LibraryUnavailable);
+            }
+        };
+        let version = Self::version();
+        let providers = Self::providers();
+        if cancellation.check().is_err() {
+            return OnnxRuntimeDetection::Undetected(UndetectedReason::DeadlineExpired);
+        }
+        let cuda = Self::cuda(environment);
+        OnnxRuntimeDetection::Loaded(OnnxRuntime {
+            version,
+            providers,
+            cuda,
+        })
+    }
+
+    /// The library `ort` loads when the process first uses it: the one `ORT_DYLIB_PATH` names, and
+    /// otherwise the platform's name for it, which the dynamic loader resolves. Loading it here
+    /// first leaves the same library loaded for the environment.
+    fn library_path(configured: Result<String, std::env::VarError>) -> PathBuf {
+        match configured {
+            Ok(path) if !path.is_empty() => PathBuf::from(path),
+            Ok(_) | Err(_) => PathBuf::from(format!(
+                "{}onnxruntime{}",
+                std::env::consts::DLL_PREFIX,
+                std::env::consts::DLL_SUFFIX
+            )),
+        }
+    }
+
+    /// The version the loaded library reports through `OrtGetApiBase()->GetVersionString()`. `ort`
+    /// loads the library itself and exposes only its API table, so the probe finds the image that
+    /// holds that table and reads the version from the same image.
+    #[cfg(unix)]
+    fn version() -> Detected<PropertyText> {
+        use std::ffi::{CStr, c_void};
+
+        let api: &'static ort::sys::OrtApi = ort::api();
+        let anchor = std::ptr::from_ref(api).cast::<c_void>();
+        let mut image = std::mem::MaybeUninit::<libc::Dl_info>::zeroed();
+        // SAFETY: `anchor` points into the API table of the library `ort` loaded, which stays
+        // loaded for the process's life; dladdr only fills `image` from the loader's records.
+        let found = unsafe { libc::dladdr(anchor, image.as_mut_ptr()) };
+        if found == 0 {
+            return Detected::Undetected(UndetectedReason::NotReported);
+        }
+        // SAFETY: a non-zero answer means dladdr filled `image`, which was zeroed before.
+        let image = unsafe { image.assume_init() };
+        if image.dli_fname.is_null() {
+            return Detected::Undetected(UndetectedReason::NotReported);
+        }
+        // SAFETY: RTLD_NOLOAD loads nothing: it returns a new reference to the image the process
+        // already holds, named by the path dladdr reported, or null.
+        let handle = unsafe { libc::dlopen(image.dli_fname, libc::RTLD_NOLOAD | libc::RTLD_LAZY) };
+        if handle.is_null() {
+            return Detected::Undetected(UndetectedReason::NotReported);
+        }
+        // SAFETY: the handle names the loaded library; dlsym only reads its symbol table.
+        let symbol = unsafe { libc::dlsym(handle, c"OrtGetApiBase".as_ptr()) };
+        let version = if symbol.is_null() {
+            Detected::Undetected(UndetectedReason::NotReported)
+        } else {
+            // SAFETY: `OrtGetApiBase` takes nothing and returns the library's static
+            // `OrtApiBase`, as the C API header every release ships declares it.
+            let get_api_base = unsafe {
+                std::mem::transmute::<
+                    *mut c_void,
+                    unsafe extern "system" fn() -> *const ort::sys::OrtApiBase,
+                >(symbol)
+            };
+            // SAFETY: calling the library's own entry point, which has no preconditions.
+            let base = unsafe { get_api_base() };
+            if base.is_null() {
+                Detected::Undetected(UndetectedReason::NotReported)
+            } else {
+                // SAFETY: `base` is the library's static API base; GetVersionString returns a
+                // static NUL-terminated string the caller must not free.
+                let text = unsafe { ((*base).GetVersionString)() };
+                if text.is_null() {
+                    Detected::Undetected(UndetectedReason::NotReported)
+                } else {
+                    // SAFETY: a non-null answer is a NUL-terminated static string.
+                    let text = unsafe { CStr::from_ptr(text) };
+                    match text.to_str() {
+                        Ok(text) => Self::text(text),
+                        Err(_) => Detected::Undetected(UndetectedReason::QueryFailed),
+                    }
+                }
+            }
+        };
+        // SAFETY: releases only the reference the dlopen above took; `ort` keeps its own.
+        unsafe { libc::dlclose(handle) };
+        version
+    }
+
+    #[cfg(not(unix))]
+    fn version() -> Detected<PropertyText> {
+        Detected::Undetected(UndetectedReason::NotReported)
+    }
+
+    /// The execution providers the loaded library reports, in the order it reports them.
+    fn providers() -> Detected<ExecutionProviders> {
+        use std::ffi::{CStr, c_char, c_int};
+
+        let api = ort::api();
+        let mut names: *mut *mut c_char = std::ptr::null_mut();
+        let mut count: c_int = 0;
+        // SAFETY: GetAvailableProviders writes an array of `count` NUL-terminated names it
+        // allocated, or answers a status the caller owns.
+        let status = unsafe { (api.GetAvailableProviders)(&mut names, &mut count) };
+        if !status.0.is_null() {
+            // SAFETY: a non-null status belongs to the caller, released exactly once.
+            unsafe { (api.ReleaseStatus)(status.0) };
+            return Detected::Undetected(UndetectedReason::QueryFailed);
+        }
+        if names.is_null() {
+            return Detected::Undetected(UndetectedReason::NotReported);
+        }
+        let mut refusal = None;
+        let listed = match usize::try_from(count) {
+            Ok(listed) => listed,
+            Err(_) => {
+                refusal = Some(UndetectedReason::QueryFailed);
+                0
+            }
+        };
+        let mut providers = Vec::new();
+        for index in 0..listed {
+            // SAFETY: `names` holds `count` valid NUL-terminated names until it is released below.
+            let name = unsafe { CStr::from_ptr(*names.add(index)) };
+            let Ok(name) = name.to_str() else {
+                refusal = Some(UndetectedReason::QueryFailed);
+                continue;
+            };
+            match Self::text(name) {
+                Detected::Value(name) => providers.push(name),
+                Detected::Undetected(reason) => refusal = Some(reason),
+            }
+        }
+        // SAFETY: releases exactly the array GetAvailableProviders returned, with its count.
+        let released = unsafe { (api.ReleaseAvailableProviders)(names, count) };
+        if !released.0.is_null() {
+            // SAFETY: a non-null status belongs to the caller, released exactly once.
+            unsafe { (api.ReleaseStatus)(released.0) };
+        }
+        if let Some(reason) = refusal {
+            return Detected::Undetected(reason);
+        }
+        match ExecutionProviders::try_from(providers) {
+            Ok(providers) => Detected::Value(providers),
+            Err(_) => Detected::Undetected(UndetectedReason::ExceedsRecordBound),
+        }
+    }
+
+    /// One attempt to register the CUDA execution provider in a session builder of the process's
+    /// environment. The builder is dropped without a session; what registration loaded stays
+    /// loaded, as it would for a session.
+    fn cuda(environment: &'static Environment) -> CudaProviderRegistration {
+        use ort::ep::ExecutionProvider as _;
+
+        match ort::ep::CUDA::is_available() {
+            Ok(true) => {}
+            Ok(false) => return CudaProviderRegistration::NotInLibrary,
+            Err(error) => {
+                tracing::info!(%error, "the ONNX Runtime did not list its execution providers");
+                return CudaProviderRegistration::RegistrationFailed;
+            }
+        }
+        let mut builder = match Session::builder(environment) {
+            Ok(builder) => builder,
+            Err(error) => {
+                tracing::info!(%error, "the ONNX Runtime did not create a session builder");
+                return CudaProviderRegistration::RegistrationFailed;
+            }
+        };
+        match ort::ep::CUDA::default().register(&mut builder) {
+            Ok(()) => CudaProviderRegistration::Registered,
+            Err(error) => {
+                tracing::info!(%error, "the CUDA execution provider did not register");
+                CudaProviderRegistration::RegistrationFailed
+            }
+        }
+    }
+
+    /// Detected text, nothing when the library reported none, or the bound it breaks.
+    fn text(text: &str) -> Detected<PropertyText> {
+        match PropertyText::new(text.trim()) {
+            Ok(text) => Detected::Value(text),
+            Err(nervix_models::PropertyValueError::Empty) => {
+                Detected::Undetected(UndetectedReason::NotReported)
+            }
+            Err(_) => Detected::Undetected(UndetectedReason::ExceedsRecordBound),
+        }
     }
 }
 
@@ -1008,8 +1255,8 @@ mod tests {
     use ordered_float::OrderedFloat;
 
     use super::{
-        InferencerError, OnnxInferencerSession, PreparedExecution, PreparedInvocation,
-        RuntimeTensorSchema, RuntimeTensorSlice,
+        InferencerError, OnnxInferencerSession, OnnxRuntimeProbe, PreparedExecution,
+        PreparedInvocation, RuntimeTensorSchema, RuntimeTensorSlice,
     };
     use crate::{
         runtime::{
@@ -1018,6 +1265,70 @@ mod tests {
         },
         runtime_schema::{RuntimeRecordBatch, RuntimeRow, RuntimeValue, test_runtime_row},
     };
+
+    #[test]
+    fn the_probe_loads_the_library_ort_would_load() {
+        use std::{env::VarError, ffi::OsString, path::PathBuf};
+
+        let platform_name = PathBuf::from(format!(
+            "{}onnxruntime{}",
+            std::env::consts::DLL_PREFIX,
+            std::env::consts::DLL_SUFFIX
+        ));
+        assert_eq!(
+            OnnxRuntimeProbe::library_path(Ok("/opt/ort/lib/libonnxruntime.so".to_string())),
+            PathBuf::from("/opt/ort/lib/libonnxruntime.so")
+        );
+        assert_eq!(
+            OnnxRuntimeProbe::library_path(Ok(String::new())),
+            platform_name
+        );
+        assert_eq!(
+            OnnxRuntimeProbe::library_path(Err(VarError::NotPresent)),
+            platform_name
+        );
+        assert_eq!(
+            OnnxRuntimeProbe::library_path(Err(VarError::NotUnicode(OsString::from("x")))),
+            platform_name
+        );
+    }
+
+    #[nervix_primitives::test]
+    async fn the_probe_reports_what_the_loaded_library_reports() {
+        use nervix_models::{
+            CudaProviderRegistration, Detected, OnnxRuntimeDetection, PropertyText,
+        };
+
+        let executor = Executor::default();
+        let detection = super::probe_onnx_runtime(&executor)
+            .await
+            .expect("the bulk workers run the probe");
+        let OnnxRuntimeDetection::Loaded(runtime) = &detection else {
+            panic!("the test process loads ONNX Runtime from ORT_DYLIB_PATH: {detection:?}");
+        };
+        let Detected::Value(version) = &runtime.version else {
+            panic!(
+                "the loaded library reports its version: {:?}",
+                runtime.version
+            );
+        };
+        assert!(version.as_str().starts_with("1."), "{version}");
+        let Detected::Value(providers) = &runtime.providers else {
+            panic!(
+                "the loaded library lists its providers: {:?}",
+                runtime.providers
+            );
+        };
+        let names = providers
+            .as_slice()
+            .iter()
+            .map(PropertyText::as_str)
+            .collect::<Vec<_>>();
+        assert!(names.contains(&"CPUExecutionProvider"), "{names:?}");
+        if !names.contains(&"CUDAExecutionProvider") {
+            assert_eq!(runtime.cuda, CudaProviderRegistration::NotInLibrary);
+        }
+    }
 
     #[test]
     fn multidimensional_tensor_conversion_preserves_nested_array_shape() {

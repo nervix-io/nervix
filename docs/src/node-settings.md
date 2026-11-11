@@ -13,9 +13,10 @@ adopt these declarations, and this chapter states the contract that adoption mus
 class API alone publishes no record, commits no parameter, detects no capacity and changes no
 running service. A node publishes, carries and verifies its prerequisites as
 [Prerequisites At Join](#prerequisites-at-join) describes, and its
-[startup preflight](#the-startup-preflight) detects its memory and measures its volumes. Cluster
-parameters have one committed Raft record, seeded at the first bootstrap and changed through
-`ALTER CLUSTER SET`. Every admitted node announces its resolved capability record through Raft.
+[startup preflight](#the-startup-preflight) detects its memory, measures its volumes and detects
+its properties. Cluster parameters have one committed Raft record, seeded at the first bootstrap
+and changed through `ALTER CLUSTER SET`. Every admitted node announces its
+[node record](#the-node-record), which holds its resolved capability claim, through Raft.
 
 Runtime admission and failed committed-runtime installation share the existing half-second retry
 cadence owned by `RuntimeAdmission`. This remains an internal policy constant pending settings
@@ -151,12 +152,13 @@ Both overrides must be positive. A failed host query remains `unknown`; memory p
 committed claim use the same resolved measurement. The startup log includes these resolved values
 and the receive bounds. Worker pools, budgets and watermarks retain their own setting owners.
 
-After membership admission, each node submits one incarnation-bound `NodeCapabilityRecord` to the
-current leader. Raft commits it under the node name. Repeating an identical announcement is a
-no-op; a newer incarnation replaces the record, and an earlier or differently configured identical
-incarnation is refused. Departure retains the last claim; `DROP NODE` removes it and fences that
-incarnation. A restarted node waits for its own current claim before activating stored assignments.
-Capability records are absent from the join handshake and gossip.
+After membership admission, each node submits one incarnation-bound capacity claim, a
+`NodeCapabilityRecord`, to the current leader inside its [node record](#the-node-record). Raft
+commits the record under the node name. Repeating an identical announcement is a no-op; a newer
+incarnation replaces the record, and an earlier or differently configured identical incarnation is
+refused. Departure retains the last record; `DROP NODE` removes it and fences that incarnation. A
+restarted node waits for its own current record before activating stored assignments. Node
+records are absent from the join handshake and gossip.
 
 The receiver's local capacity options are:
 
@@ -293,6 +295,99 @@ replication lag is twice the snapshot entry threshold, saturating only at the in
 and remaining strictly greater than that threshold; the threshold cannot be `u64::MAX`.
 Snapshot chunks follow the executor's bulk chunk bound. The replication chapter owns durability,
 whole-transfer deadlines and the explicit maintained OpenRaft configuration.
+
+## The Node Record
+
+The capacity claim is one of three parts of the record Raft commits for every node run:
+
+- **Capabilities**, the sizing settings above, say what the node can carry.
+- **Properties** are facts the node detected about itself at startup: what the machine is. No
+  option overrides them, and a value the node could not detect is recorded as undetected, with
+  its reason.
+- **Tags** say what the operator intends the node for. They come only from `--node-tags`.
+
+One announcement commits all three under the claim's incarnation rules: an identical announcement
+changes nothing, a newer incarnation replaces the whole record, a different record for an
+incarnation that already has one is refused, departure keeps the last record, and `DROP NODE`
+removes it. Raft records the revision, its log index, that committed each record. The records are
+schedule planning inputs beside members, voters and cordons, so a changed record invalidates a
+captured plan. A record travels in neither gossip nor the join handshake, and its change publishes
+no notice.
+
+### Detected Properties
+
+| Property | What it is | Without a detected value |
+| --- | --- | --- |
+| `architecture` | The architecture the binary was built for, such as `x86_64` or `aarch64` | Always detected |
+| `cpu.model` | The CPU model the operating system reports, read through the maintained `sysinfo` crate | `undetected` with the reason |
+| `gpu.count` | The GPUs NVML reports. Nervix loads NVML dynamically from `libnvidia-ml.so.1`; no library or no device is `0` | `0`, with the reason when NVML did not answer |
+| `gpu.models` | The model of each GPU, in device order | `none` |
+| `gpu.memory` | The memory of the smallest GPU, in bytes | `none` |
+| `gpu.driver` | The driver version NVML reports for the node's GPUs | `none` without a GPU; otherwise `undetected` with the reason |
+| `onnx.version` | The version the ONNX Runtime library this process loaded reports | `undetected` with the reason |
+| `onnx.providers` | The execution providers that library reports, in its order | `undetected` with the reason |
+| `onnx.cuda` | Whether the CUDA execution provider registers in this process: its provider library and the CUDA runtime load | `false` with the reason |
+| `cuda.available` | Exactly `gpu.count > 0 AND onnx.cuda` | Never undetected |
+
+CUDA is two facts because a GPU in the chassis says nothing about whether this process's ONNX
+Runtime can use it: the GPU and CPU images load different ONNX Runtime libraries. The CPU count and
+the memory limit are the node's capabilities, which the record already holds; the properties do
+not copy them.
+
+The node detects its properties once, in the [startup preflight](#the-startup-preflight), after
+every check that can refuse it, on its bulk workers: the CPU model, the GPUs and the ONNX Runtime
+each in their own probe, side by side. `--node-detection-timeout` (`NERVIX_NODE_DETECTION_TIMEOUT`,
+a node capability, `30s` by default) bounds how long the preflight waits for them. A probe that has
+not answered by then is recorded as `undetected (detection did not finish within the node detection
+timeout)`, and a probe that never returns keeps its bulk worker until the process exits. Detection
+never refuses the start. The ONNX Runtime probe loads the library every inferencer of the process
+loads, the one `ORT_DYLIB_PATH` names or otherwise `libonnxruntime.so` as the dynamic loader finds
+it; a library that does not load leaves the `onnx` properties undetected with that reason. It then
+uses the one ONNX Runtime environment every inferencer shares and makes one attempt to register the
+CUDA execution provider in a session builder that it then drops; what the registration loaded stays
+loaded, as it would for a session. `the startup preflight passed` logs the resolved properties at `info`.
+
+### Tags
+
+`--node-tags key=value[,key=value...]` (`NERVIX_NODE_TAGS`) gives a node its tags; the option is
+repeatable and comma-separated. A key starts with a lower-case letter or a digit and holds only
+lower-case letters, digits, `.`, `_` and `-`, up to 63 bytes. A value is 1 to 255 bytes of printable
+text without a comma, a control character or a line separator; the first `=` of a tag ends its key,
+so a value may hold another. A node carries at most 64 tags, each key once. These bounds are fixed:
+they keep the record one Raft command, far below the 1 MiB largest-command floor every node accepts.
+The edge validates the tags before any I/O, and a refusal ends the process with status `1`, naming
+the tag and the rule it broke, such as `node tag key 'Pool' must start with a lower-case letter or a
+digit and hold only lower-case letters, digits, '.', '_' and '-'`.
+
+Tags belong to the node's identity, addresses and paths, like `--node-id`, rather than to a
+settings class: they describe the node and bound no policy. No statement reads them into a Model
+or writes them. A node changes its tags by restarting with other values, which announces a new
+record, so a tag change follows the rolling-restart procedure of a capability change.
+
+### In `DESCRIBE CLUSTER`
+
+`DESCRIBE CLUSTER` prints each node's committed record after its prerequisites: the revision that
+committed it and the incarnation it belongs to, or `record: not announced`, then one line per
+property, the undetected ones with their reason, and one `key=value` line per tag in key order, or
+`tags: none`. A departed node's retained record follows its capability line.
+
+```text
+  record: revision 41 (incarnation 3)
+  properties:
+    architecture: x86_64
+    cpu.model: AMD EPYC 7763 64-Core Processor
+    gpu.count: 1
+    gpu.models: NVIDIA L4
+    gpu.memory: 24152899584
+    gpu.driver: 550.54.15
+    onnx.version: 1.30.0
+    onnx.providers: CUDAExecutionProvider, CPUExecutionProvider
+    onnx.cuda: true
+    cuda.available: true
+  tags:
+    pool=gpu
+    zone=eu
+```
 
 ## Permanent Cluster Identity
 
@@ -534,6 +629,8 @@ It refuses to start at the first check that fails, exiting with status `1` and
    its own, and nothing the volume already holds is subtracted.
 5. It loads its name resolver, as [Name Resolution](name-resolution.md#resolver-lifetime)
    describes.
+6. Once every check passed, it detects its [properties](#detected-properties), waiting at most its
+   `--node-detection-timeout`. Detection never refuses the start.
 
 Each refusal names the setting or directory it judged, with the values involved:
 
@@ -551,7 +648,7 @@ cluster parameters with fixed defaults, 4 GiB and 16 GiB. A node whose database 
 refuses to start. Provision a larger volume, seed smaller quotas on a new cluster, or change an
 existing cluster's committed quotas through `ALTER CLUSTER SET` before joining it. A node that passes logs
 `the startup preflight passed` at `info` with its memory limit, its memory budgets, the size of both
-volumes and the restore-staging quota it resolved.
+volumes, the restore-staging quota it resolved and the properties it detected.
 [Capacity Planning](capacity-planning.md#what-a-node-needs-to-start) sizes them.
 
 Clock skew is the one environmental check that needs a peer, so a node makes it as it joins, as
@@ -762,8 +859,8 @@ on defaults too. Typed reports retain the definition owner's cause without flatt
 
 `nervix-server` reads its command line as one options group per area, each in its own file at the
 server's command-line edge and printed under its own heading by `--help`. One group holds the
-node's identity, listen and advertised addresses, TLS files, name resolution files and storage
-paths. Those are what a node is provisioned with, not settings. Every other group is the
+node's identity, its tags, listen and advertised addresses, TLS files, name resolution files and
+storage paths. Those are what a node is provisioned with, not settings. Every other group is the
 command-line form of one owner's class-typed group: each option is named by its definition's
 `NAME`, has the environment variable `NERVIX_` followed by that name with underscores, and shows
 the default its definition returns. Cluster-parameter help identifies it as a bootstrap default. Durations and byte quantities print in the edge's forms, such as `250ms`,
@@ -803,7 +900,7 @@ describes, defaults included.
 | `--drain-timeout`, `--shutdown-timeout` | node capability | shutdown |
 | `--resource-max-archive-bytes`, `--resource-max-extracted-bytes`, `--resource-max-file-count` | cluster parameter | resources |
 | `--otel-trace-sample-ratio` | node capability | trace export |
-| `--cpu-count`, `--memory-limit` | node capability | capacity |
+| `--cpu-count`, `--memory-limit`, `--node-detection-timeout` | node capability | capacity |
 | `--execution-*`, `--runtime-worker-threads`, `--runtime-max-blocking-threads`, `--runtime-thread-stack-size` | node capability | execution |
 | `--client-producer-node-bytes`, `--client-consumer-node-bytes` | node capability | client admission |
 
@@ -866,7 +963,8 @@ store, binds a listener or starts a task:
   at, and twelve of it, the longest election timeout, fit the milliseconds consensus counts it in.
 - The gossip interval and the clock-skew tolerance are each at least one millisecond, and twenty
   gossip intervals fit a duration.
-- A memory limit, when one is given, is above zero.
+- A memory limit, when one is given, is above zero, and so is the node detection timeout.
+- The node's tags follow the [tag rules](#tags): at most 64, each key once.
 - The drain timeout does not exceed the shutdown timeout, which bounds every drain step. A drain
   timeout equal to it lets the drain use the whole deadline; the defaults leave time for terminal
   teardown after the drain.

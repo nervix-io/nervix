@@ -41,7 +41,7 @@ const SETTINGS_HEADINGS: [&str; 17] = [
 ];
 
 /// Every setting the settings groups declare, by the name its definition gives it.
-const SETTING_NAMES: [&str; 149] = [
+const SETTING_NAMES: [&str; 150] = [
     "connector-retry-multiplier",
     "connector-retry-jitter-percent",
     "kafka-domain-assignment-retry",
@@ -132,6 +132,7 @@ const SETTING_NAMES: [&str; 149] = [
     "interconnect-bulk-receive-window",
     "cpu-count",
     "memory-limit",
+    "node-detection-timeout",
     "execution-control-cpu-workers",
     "execution-control-cpu-pending-jobs",
     "execution-credentials-cpu-workers",

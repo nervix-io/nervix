@@ -57,7 +57,7 @@ use nervix_interconnect::{
     BootstrapExpectation, ControlEnvelope, Envelope, PeerResolver, PeerTarget, RuntimeErrorEvent,
     TlsConfigBundle, Transport, TransportClock, TransportIdentity, TransportOptions,
 };
-use nervix_models::{ClusterNodeName, NodeEndpoint, TrustRootFingerprint};
+use nervix_models::{ClusterNodeName, NodeEndpoint, NodeTags, TrustRootFingerprint};
 use nervix_plexus::client_statement::ClientStatement;
 use nervix_primitives::{
     runtime::Handle,
@@ -85,9 +85,10 @@ use nervix_primitives::{
 use nervix_server::{
     FaultInjection, SchedulerMode,
     application::{
-        Application, CommandExecutionPolicy, GrpcTransport, InternalTransportMode, NodeIdentity,
-        NodeSettings, SchedulingSettings, SettingOverride, ShutdownCoordinator, ShutdownOutcome,
-        ShutdownSettings, TransactionBounds, TransactionLimits, init_tracing_to_file,
+        Application, CommandExecutionPolicy, GrpcTransport, InternalTransportMode, NodeDetection,
+        NodeIdentity, NodeSettings, SchedulingSettings, SettingOverride, ShutdownCoordinator,
+        ShutdownOutcome, ShutdownSettings, TransactionBounds, TransactionLimits,
+        init_tracing_to_file,
     },
     cluster::{MembershipSettings, MembershipValues},
     memory_pressure::{MemoryPressureConfig, MemoryPressureSettings},
@@ -818,6 +819,10 @@ struct PendingMember {
     additional_trust_anchor: bool,
     /// The settings it starts with over the cluster's own.
     setting_overrides: Vec<SettingOverride>,
+    /// The tags it is provisioned with, written as `--node-tags` takes them.
+    tags: Option<String>,
+    /// The properties its detection double reports, by name.
+    reports: BTreeMap<String, String>,
 }
 
 /// How a node's attempt to join a running cluster ended.
@@ -1107,6 +1112,12 @@ pub(crate) struct TestClusterConfig {
     /// Settings a scenario names for one node, applied over the cluster's own when that node
     /// next starts.
     pub node_setting_overrides: BTreeMap<String, Vec<SettingOverride>>,
+    /// The tags a scenario provisions one node with, written as `--node-tags` takes them, read
+    /// when that node next starts.
+    pub node_tags: BTreeMap<String, String>,
+    /// The properties a scenario has one node's detection double report, by name, from that
+    /// node's next start.
+    pub node_reports: BTreeMap<String, BTreeMap<String, String>>,
     pub dependencies: DependencyEndpoints,
     pub peer_addressing: PeerAddressing,
     /// What every node's name begins with: the n-th node is `<prefix>-<n>`. A scenario that runs a
@@ -1141,6 +1152,8 @@ impl Default for TestClusterConfig {
             raft_retention: RaftRetentionSettings::default(),
             temp_dir: None,
             node_setting_overrides: BTreeMap::new(),
+            node_tags: BTreeMap::new(),
+            node_reports: BTreeMap::new(),
             dependencies: DependencyEndpoints::default(),
             peer_addressing: PeerAddressing::default(),
             node_name_prefix: "node".to_string(),
@@ -1196,6 +1209,24 @@ impl TestClusterConfig {
         settings
             .with_overrides(overrides)
             .map_err(|report| io::Error::other(format!("{report:#}")))
+    }
+
+    /// The tags `node_id` starts with, read exactly as the server's command line reads them.
+    fn node_tags(&self, node_id: &str) -> io::Result<NodeTags> {
+        let Some(tags) = self.node_tags.get(node_id) else {
+            return Ok(NodeTags::default());
+        };
+        tags.parse::<NodeTags>()
+            .map_err(|report| io::Error::other(format!("{report:#}")))
+    }
+
+    /// The detection double `node_id` starts with: a CPU-only host unless a scenario named what
+    /// it reports.
+    fn node_detection(&self, node_id: &str) -> io::Result<NodeDetection> {
+        match self.node_reports.get(node_id) {
+            Some(reports) => super::node_detection::detection_double(reports),
+            None => super::node_detection::detection_double(&BTreeMap::new()),
+        }
     }
 
     fn memory_pressure_settings(&self) -> io::Result<MemoryPressureSettings> {
@@ -1457,6 +1488,32 @@ impl Cluster {
             .entry(node_id.to_string())
             .or_default()
             .push(setting);
+    }
+
+    /// Provisions `node_id` with `tags`, written as `--node-tags` takes them, from its next launch
+    /// on, replacing the tags it had. A node that is not a member yet starts with them when it is
+    /// registered.
+    pub(crate) fn provision_node_tags(&mut self, node_id: &str, tags: String) {
+        let Some(handle) = self.nodes.get_mut(node_id) else {
+            self.pending_member(node_id).tags = Some(tags);
+            return;
+        };
+        handle.config.node_tags.insert(node_id.to_string(), tags);
+    }
+
+    /// Makes the detection double of `node_id` report `value` for `property` from its next launch
+    /// on. A node that is not a member yet reports it when it is registered.
+    pub(crate) fn report_node_property(&mut self, node_id: &str, property: String, value: String) {
+        let Some(handle) = self.nodes.get_mut(node_id) else {
+            self.pending_member(node_id).reports.insert(property, value);
+            return;
+        };
+        handle
+            .config
+            .node_reports
+            .entry(node_id.to_string())
+            .or_default()
+            .insert(property, value);
     }
 
     /// Makes `node_id`, which is not a member yet, claim `cluster_id` in its configuration and in
@@ -1739,6 +1796,16 @@ impl Cluster {
                 .entry(node_id.to_string())
                 .or_default()
                 .extend(pending.setting_overrides);
+        }
+        if let Some(tags) = pending.tags {
+            config.node_tags.insert(node_id.to_string(), tags);
+        }
+        if !pending.reports.is_empty() {
+            config
+                .node_reports
+                .entry(node_id.to_string())
+                .or_default()
+                .extend(pending.reports);
         }
         let mut spec = NodeSpec::new(
             &self.roots.storage,
@@ -4714,6 +4781,7 @@ impl NodeHandle {
             .web_console_tls_key(console_private_key)
             .cluster_id(self.spec.cluster_id.clone())
             .node_id(node_name(&self.spec.node_id))
+            .tags(self.config.node_tags(&self.spec.node_id)?)
             .grpc_advertise_addr(parse_addr(&self.spec.grpc_addr())?.into())
             .interconnect_listen_addr(self.spec.interconnect_listen_addr())
             .interconnect_advertise_addr(
@@ -4750,6 +4818,7 @@ impl NodeHandle {
         let application = Application::builder()
             .identity(identity)
             .settings(settings)
+            .detection(self.config.node_detection(&self.spec.node_id)?)
             .fault_injection(self.fault_injection.clone())
             .licensing_test_support(self.config.licensing_test_support.clone())
             .graceful_shutdown_drain(self.config.graceful_shutdown_drain)

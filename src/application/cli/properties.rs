@@ -15,16 +15,17 @@
 
 use std::time::Duration;
 
-use nervix_arbitrary::Entropy;
+use nervix_arbitrary::{Arbitrary, Domain, Entropy};
 use nervix_consensus::{RaftRetentionBounds, RaftRetentionSettings, RaftTimings};
 use ubyte::ByteUnit;
 
 use super::*;
 use crate::{
     application::{
-        CommandExecutionPolicy, NodeSettings, SchedulingSettings, ShutdownSettings,
+        CommandExecutionPolicy, NodeIdentity, NodeSettings, SchedulingSettings, ShutdownSettings,
         TransactionBounds, TransactionLimits,
         cli_values::{HumanBytes, HumanDuration},
+        test_fixtures::test_args,
     },
     capacity::CapacitySettings,
     cluster::{MembershipSettings, MembershipValues},
@@ -390,8 +391,10 @@ impl<'bytes> GeneratedSettings<'bytes> {
         } else {
             None
         };
-        CapacitySettings::resolve(memory_limit, cpu_count)
-            .assured("a memory limit, when given, is at least one byte")
+        let detection_timeout = self.positive_duration();
+        CapacitySettings::resolve(memory_limit, cpu_count, Some(detection_timeout)).assured(
+            "a memory limit, when given, is at least one byte, and the timeout is positive",
+        )
     }
 
     fn memory_pressure(&mut self) -> MemoryPressureSettings {
@@ -778,8 +781,8 @@ fn bolero_node_settings_survive_their_command_line() {
     bolero::check!()
         .with_iterations(256)
         .with_max_len(CASE_BYTES)
-        .for_each(|bytes: &[u8]| {
-            let mut generated = GeneratedSettings::new(bytes);
+        .for_each(|input: &[u8]| {
+            let mut generated = GeneratedSettings::new(input);
             let settings = generated.node_settings();
             let read = settings
                 .with_overrides(&[])
@@ -802,5 +805,20 @@ fn bolero_node_settings_survive_their_command_line() {
                 .parse::<HumanBytes>()
                 .assured("a rendered byte quantity is byte text");
             assert_eq!(read_bytes, HumanBytes(bytes));
+
+            let tags = Arbitrary::new(input, Domain::Vocabulary).node_tags();
+            let rendered = tags.to_string();
+            let mut options = Vec::new();
+            if !tags.is_empty() {
+                options.push(format!("--{}", super::NODE_TAGS_OPTION));
+                options.push(rendered);
+            }
+            let options = options.iter().map(String::as_str).collect::<Vec<_>>();
+            let identity = NodeIdentity::try_from(test_args(&options).node)
+                .assured("generated tags are valid on the command line");
+            assert_eq!(
+                identity.tags, tags,
+                "the node's tags survive their command line"
+            );
         });
 }

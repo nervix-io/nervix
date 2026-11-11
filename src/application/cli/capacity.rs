@@ -17,8 +17,10 @@ use nervix_models::SettingDefinition;
 
 use super::settings::CommandLine;
 use crate::{
-    application::cli_values::HumanBytes,
-    capacity::{CapacitySettings, CapacitySettingsError, CpuCount, MemoryLimit},
+    application::cli_values::{HumanBytes, HumanDuration},
+    capacity::{
+        CapacitySettings, CapacitySettingsError, CpuCount, MemoryLimit, NodeDetectionTimeout,
+    },
 };
 
 #[derive(clap::Args, Debug, Clone, PartialEq)]
@@ -41,11 +43,23 @@ pub struct CapacityArgs {
                 memory limit, or its physical memory when no limit is smaller"
     )]
     pub memory_limit: Option<HumanBytes>,
+    #[arg(
+        long = NodeDetectionTimeout::NAME,
+        env = "NERVIX_NODE_DETECTION_TIMEOUT",
+        default_value_t = HumanDuration(NodeDetectionTimeout::default_value(&())),
+        help = "How long startup waits for the node to detect its CPU model, GPUs and ONNX \
+                Runtime; a probe still running then leaves its properties undetected"
+    )]
+    pub node_detection_timeout: HumanDuration,
 }
 
 impl CapacityArgs {
     pub(super) fn settings(&self) -> Result<CapacitySettings, Report<CapacitySettingsError>> {
-        CapacitySettings::resolve(self.memory_limit.map(|limit| limit.0), self.cpu_count)
+        CapacitySettings::resolve(
+            self.memory_limit.map(|limit| limit.0),
+            self.cpu_count,
+            Some(self.node_detection_timeout.0),
+        )
     }
 
     pub(super) fn peer_receive(
@@ -75,6 +89,7 @@ impl CapacityArgs {
             bulk_window_bytes: receive.bulk_window_bytes.map(HumanBytes),
             cpu_count: *settings.cpu_count.value(),
             memory_limit: settings.memory_limit().map(HumanBytes),
+            node_detection_timeout: HumanDuration(settings.detection_timeout()),
         }
     }
 
@@ -101,5 +116,6 @@ impl CapacityArgs {
         if let Some(limit) = self.memory_limit {
             command_line.option(MemoryLimit::NAME, limit);
         }
+        command_line.option(NodeDetectionTimeout::NAME, self.node_detection_timeout);
     }
 }
