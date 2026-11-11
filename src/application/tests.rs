@@ -70,8 +70,9 @@ fn args_parse_task_grace_period() {
 #[test]
 fn runtime_retry_keeps_its_cadence_when_raft_heartbeat_changes() {
     let args = test_args(&["--raft-heartbeat-interval", "2500ms"]);
+    let app = Application::try_from(args).expect("args should parse");
     assert_eq!(
-        args.settings
+        app.settings
             .operational
             .control_plane
             .runtime_state_retry_interval(),
@@ -84,8 +85,9 @@ fn runtime_retry_keeps_its_cadence_when_raft_heartbeat_changes() {
         "--control-plane-runtime-state-retry-interval",
         "100ms",
     ]);
+    let app = Application::try_from(args).expect("args should parse");
     assert_eq!(
-        args.settings
+        app.settings
             .operational
             .control_plane
             .runtime_state_retry_interval(),
