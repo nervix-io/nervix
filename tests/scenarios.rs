@@ -4297,6 +4297,8 @@ async fn given_nervix_server_process_is_started_with_shutdown_timeouts(
     let options = [
         ServerProcessOption::DrainTimeout(drain_timeout),
         ServerProcessOption::ShutdownTimeout(shutdown_timeout),
+        ServerProcessOption::DomainDrainTimeout(drain_timeout),
+        ServerProcessOption::EntityGateDeadline(drain_timeout),
     ];
     start_ready_server_process(world, &options).await;
 }
