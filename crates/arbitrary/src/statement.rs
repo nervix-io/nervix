@@ -153,6 +153,7 @@ pub enum StatementVariant {
     DescribeReorderer,
     DescribeEmitter,
     DescribeWindowProcessor,
+    DescribeInferencer,
     DescribeWasmProcessor,
     DescribeUdf,
     DescribePlacement,
@@ -232,6 +233,7 @@ impl StatementVariant {
             Statement::DescribeReorderer(_) => Self::DescribeReorderer,
             Statement::DescribeEmitter(_) => Self::DescribeEmitter,
             Statement::DescribeWindowProcessor(_) => Self::DescribeWindowProcessor,
+            Statement::DescribeInferencer(_) => Self::DescribeInferencer,
             Statement::DescribeWasmProcessor(_) => Self::DescribeWasmProcessor,
             Statement::DescribeUdf(_) => Self::DescribeUdf,
             Statement::DescribePlacement(_) => Self::DescribePlacement,
@@ -717,6 +719,11 @@ impl Arbitrary<'_> {
             }
             StatementVariant::DescribeWindowProcessor => {
                 Statement::DescribeWindowProcessor(DescribeWindowProcessor { name: self.name() })
+            }
+            StatementVariant::DescribeInferencer => {
+                Statement::DescribeInferencer(nervix_models::DescribeInferencer {
+                    name: self.name(),
+                })
             }
             StatementVariant::DescribeWasmProcessor => {
                 Statement::DescribeWasmProcessor(DescribeWasmProcessor { name: self.name() })

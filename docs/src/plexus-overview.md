@@ -886,6 +886,7 @@ DESCRIBE JUNCTION <junction>;
 DESCRIBE DEDUPLICATOR <deduplicator>;
 DESCRIBE REORDERER <reorderer>;
 DESCRIBE WINDOW PROCESSOR <window_processor>;
+DESCRIBE INFERENCER <inferencer>;
 DESCRIBE HASH MAP <hash_map>;
 DESCRIBE PLACEMENT <placement>;
 DESCRIBE RELOCATION <selection> ONTO NODE <node_id>
