@@ -90,7 +90,7 @@ fn bolero_impact_assessment() {
                     request_id: id(100),
                 },
             };
-            let mut impact = context(1, if value % 3 == 0 { 2 } else { 1 }, 0);
+            let mut impact = context(1, if value.is_multiple_of(3) { 2 } else { 1 }, 0);
             impact.trigger = trigger;
             let transitions = assess_impact(
                 EffectiveUsage {
