@@ -369,7 +369,8 @@ record, so a tag change follows the rolling-restart procedure of a capability ch
 `DESCRIBE CLUSTER` prints each node's committed record after its prerequisites: the revision that
 committed it and the incarnation it belongs to, or `record: not announced`, then one line per
 property, the undetected ones with their reason, and one `key=value` line per tag in key order, or
-`tags: none`. A departed node's retained record follows its capability line.
+`tags: none`. A departed node's retained record follows its committed capacity claim: the
+capability line and its interconnect, DNS, database and consensus lines.
 
 ```text
   record: revision 41 (incarnation 3)
