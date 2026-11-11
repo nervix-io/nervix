@@ -847,8 +847,8 @@ mod backup_state_warning_tests {
 
         use meticulous::{OptionExt as _, ResultExt as _};
         use nervix_models::{
-            BranchName, BranchPartitions, CreateRelay, CreateSchema, Model, RelayBranching,
-            RelayName, ResolvedBranching, SchemaName,
+            BranchName, CreateRelay, CreateSchema, Model, RelayBranching, RelayName,
+            ResolvedBranching, SchemaName,
         };
 
         let branch = BranchName::parse("by_tenant").assured("the test branch name is valid");
@@ -867,7 +867,7 @@ mod backup_state_warning_tests {
             name: SchemaName::parse("tenant_key").assured("the test schema name is valid"),
             fields: Vec::new(),
         };
-        let count = BranchPartitions::Direct(
+        let count = nervix_models::ResolvedBranchPartitions::Direct(
             NonZeroU16::new(count).assured("the test partition count is positive"),
         );
         node.with_resolved_branching(Some(ResolvedBranching::branched(branch, key_schema, count)))

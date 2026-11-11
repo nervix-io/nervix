@@ -282,6 +282,9 @@ current connection, retry and deadline limits.
   running domain and moves each key's state to its new partition; confirm with `DESCRIBE BRANCH`
   that no previous count is still moving before changing it again; read `Streams And State` →
   `Changing the partition count`.
+  For automatic or grouped external partition inheritance, source agreement and Kafka/Pulsar
+  reader placement, read `Inherited Partitions` before choosing a declaration. Do not invent a
+  count while discovery is pending or choose an external partition with a branch expression.
   On native 64-bit targets, its positive integer range ends at `18446744073709551615`, and stored,
   replicated, and restarted definitions retain the exact accepted capacity.
 - Every ordinary processor input/output uses the same named branch, or all are unbranched.

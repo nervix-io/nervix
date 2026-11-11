@@ -151,19 +151,10 @@ pub(super) trait IngestorInstance: Send + 'static {
     ) -> BoxFuture<'static, ()>;
 }
 
-/// A task an ingestor unit runs beside its connector for that unit's lifetime.
-pub(super) trait IngestorCompanion: Send + 'static {
-    /// Returns the task, which ends at shutdown.
-    fn start(self: Box<Self>, shutdown: watch::Receiver<bool>) -> BoxFuture<'static, ()>;
-}
-
 /// One ingestor unit composed from its plan: its opened connector and how the host runs it.
 pub(super) struct IngestorStart {
     /// The exact instance selected by this unit plan.
     pub(super) instance: Box<dyn IngestorInstance>,
-    /// Tasks the unit runs beside its connector, such as the watch that tells domain-offset
-    /// Kafka instances their topic's partitions changed.
-    pub(super) companions: Vec<Box<dyn IngestorCompanion>>,
     /// Whether what the ingestor reads while quiesced passes through the quiesce control, which may
     /// buffer or drop it.
     pub(super) buffered_intake: bool,
@@ -239,7 +230,6 @@ impl<P> BrokerIngestorStart<'_, P> {
         });
         Ok(IngestorStart {
             instance,
-            companions: Vec::new(),
             buffered_intake,
             flush_each_intake,
             unacknowledged_admission,
@@ -356,7 +346,6 @@ impl<P> PacedIngestorStart<P> {
         });
         Ok(IngestorStart {
             instance,
-            companions: Vec::new(),
             buffered_intake: false,
             flush_each_intake: false,
             // The ingestor has already moved past the poll it hands over, and holding its loop only
@@ -402,7 +391,7 @@ where
 
 impl Runtime {
     /// Registers a composed ingestor and starts it: the branch runtimes its routes feed, its
-    /// readiness, its companion tasks and its ingestor task, and the running unit that
+    /// readiness and its ingestor task, and the running unit that
     /// stopping it removes.
     ///
     /// Nothing here can fail, so an ingestor is registered only once everything that could stop it
@@ -417,7 +406,6 @@ impl Runtime {
     ) {
         let IngestorStart {
             instance,
-            companions,
             buffered_intake,
             flush_each_intake,
             unacknowledged_admission,
@@ -441,12 +429,7 @@ impl Runtime {
         let instance_index = ingestor.instance_index();
         let readiness = self.prepare_ingestor_readiness(domain, &ingestor.name, ingestor.unit);
         let (shutdown_tx, _) = watch::channel(false);
-        let mut tasks = companions
-            .into_iter()
-            .map(|companion| {
-                nervix_primitives::task::spawn(companion.start(shutdown_tx.subscribe()))
-            })
-            .collect::<Vec<_>>();
+        let mut tasks = Vec::new();
         let host = RuntimeIngestorHost::new(RuntimeIngestorHostSpec {
             kind: ingestor.declared_input.entity_kind(),
             handles: handles.clone(),

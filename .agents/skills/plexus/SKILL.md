@@ -195,8 +195,9 @@ the graph; otherwise use conspicuous placeholders and state the assumptions.
   ordering, and offsets.
 - Isolation: unbranched or a concrete branch key, branch TTL, optional instance limit, and the
   branch's partition count when one relay owner per branch would funnel too much traffic (see
-  [Relay Partitions](https://docs.nervix.io/relay.html#relay-partitions)); the count changes only
-  while the domain is stopped. When one emitter would funnel a partitioned branch back into one
+  [Relay Partitions](https://docs.nervix.io/relay.html#relay-partitions)). For external partition
+  inheritance and producer eligibility, read [Inherited Partitions](../../../docs/src/partitioning.md).
+  Check `DESCRIBE BRANCH` before another recount. When one emitter would funnel a partitioned branch back into one
   node, decide its `INSTANCES` (a count or `PER PARTITION`); read
   [Emitters → Emitter instances](../../../docs/src/emitters.md#emitter-instances) for the per-key
   ordering it keeps, the entities that run one instance, and placement.

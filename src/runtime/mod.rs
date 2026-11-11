@@ -64,7 +64,7 @@ use nervix_interconnect::{
     Transport, WasmStateResetTarget,
 };
 use nervix_models::{
-    AckMode, BranchKeyFingerprint, BranchName, BranchPartitions, ClientConfigEntry, ClientName,
+    AckMode, BranchKeyFingerprint, BranchName, ClientConfigEntry, ClientName,
     ClientProducerEndReason, ClientResourceMount, ClusterNodeIdentity, ClusterNodeIncarnation,
     ClusterNodeName, CodecName, CommandExecutionReference, CoordinationIdentity,
     CorrelationTimeoutAction, CorrelatorMatchPolicy, DomainClockAuthority, DomainConfig,
@@ -72,14 +72,14 @@ use nervix_models::{
     EndpointType, EntityGateTargets, ErrorPolicies, FieldName, FieldPath, FlushPolicy,
     GeneralErrorPolicy, GeneratorName, InferencerExecutionMode, InferencerTensorDeclaration,
     IngestQuiesceMode, IngestQuiesceOverflow, IngestTimestampSource, IngestorName,
-    KafkaPartitionSchedule, Literal as ModelLiteral, LookupName, MaterializedStatePolicy,
-    MessageErrorCode, MessageErrorOperation, MessageErrorPolicy, ModelKind, ModelName, NodeRef,
-    NodeUnitRef, OwnershipStateComponent, OwnershipStateRecoveryOutcome, OwnershipStateReset,
+    Literal as ModelLiteral, LookupName, MaterializedStatePolicy, MessageErrorCode,
+    MessageErrorOperation, MessageErrorPolicy, ModelKind, ModelName, NodeRef, NodeUnitRef,
+    OwnershipStateComponent, OwnershipStateRecoveryOutcome, OwnershipStateReset,
     OwnershipStateResetCause, ParseAsType, PartitionSeed, RelayName, RemoteAckOutcome,
-    RemoteAckRegistration, RemoteAckResolution, RemoteRuntimeField, ResolvedBranching, ResourceId,
-    ResourceName, RetryPolicy, RouteConstruction, SchemaFingerprint, SignalingProtocolName,
-    SignalingWireFormat, StructuredMessageError, SubscriptionName, Timestamp, Unit,
-    WasmCheckpointInspection, WasmRejectedStatePolicy, WasmSavedStateRejection,
+    RemoteAckRegistration, RemoteAckResolution, RemoteRuntimeField, ResolvedBranchPartitions,
+    ResolvedBranching, ResourceId, ResourceName, RetryPolicy, RouteConstruction, SchemaFingerprint,
+    SignalingProtocolName, SignalingWireFormat, StructuredMessageError, SubscriptionName,
+    Timestamp, Unit, WasmCheckpointInspection, WasmRejectedStatePolicy, WasmSavedStateRejection,
     WasmStateGeneration, WasmStateResetScope,
 };
 #[cfg(test)]
@@ -358,7 +358,7 @@ mod runtime_lifecycle;
 mod runtime_settings;
 pub use connector_host_settings::{
     ConnectorHostSettingOverrides, ConnectorHostSettings, ConnectorHostSettingsError,
-    KafkaPartitionWatchInterval,
+    KafkaPartitionWatchInterval, PartitionTopologyPollInterval,
 };
 mod schedule_apply;
 mod snapshot_staging;
@@ -1056,7 +1056,8 @@ pub(crate) use runtime_settings::RuntimeEnvironment;
 pub use runtime_settings::{RestoreStagingMaxBytes, RuntimeSettings, StateSnapshotInterval};
 use state_assignment::{CheckpointOwners, ScheduledStateAssignment, SharedStateAssignment};
 pub(crate) use state_inspection_read::{
-    MaterializedInspectionPage, MaterializedPageBounds, StatePageReadError,
+    MaterializedInspectionPage, MaterializedPageBounds, MaterializedPageQuery,
+    MaterializedStateCapture, StatePageReadError,
 };
 pub(crate) use state_replication::StateSyncAck;
 pub(crate) use state_snapshot_transfer::{DescribeStateSnapshot, FetchStateSnapshot};

@@ -116,13 +116,15 @@ fn an_emitter_without_instances_and_one_over_a_single_partition_run_as_their_sin
         .expect("the emitter is active");
     assert_eq!(node.emitter_units, Some(EmitterUnits::Single));
     let nodes = [named::<ClusterNodeName>("node-1")];
-    let schedule = one_partition.schedule_for_domain(
-        &domain(),
-        &nodes,
-        0,
-        None,
-        &crate::registry::uniform_capabilities(&nodes),
-    );
+    let schedule = one_partition
+        .schedule_for_domain(
+            &domain(),
+            &nodes,
+            0,
+            None,
+            &crate::registry::uniform_capabilities(&nodes),
+        )
+        .assured("the fixture topology resolves");
     assert_eq!(
         schedule.nodes[&emitter_ref()]
             .units
@@ -196,13 +198,15 @@ fn a_counted_emitter_over_an_unpartitioned_input_serves_it_from_its_first_instan
     );
     assert_eq!(correspondence.partners(false, instance(1)).count(), 0);
     let nodes = [named::<ClusterNodeName>("node-1"), named("node-2")];
-    let schedule = graph.schedule_for_domain(
-        &domain(),
-        &nodes,
-        0,
-        None,
-        &crate::registry::uniform_capabilities(&nodes),
-    );
+    let schedule = graph
+        .schedule_for_domain(
+            &domain(),
+            &nodes,
+            0,
+            None,
+            &crate::registry::uniform_capabilities(&nodes),
+        )
+        .assured("the fixture topology resolves");
     assert_eq!(
         schedule.nodes[&emitter_ref()]
             .units
@@ -224,13 +228,15 @@ fn counted_instances_prefer_the_owner_of_a_partition_they_serve() {
         named("node-2"),
         named("node-3"),
     ];
-    let schedule = graph.schedule_for_domain(
-        &domain(),
-        &nodes,
-        0,
-        None,
-        &crate::registry::uniform_capabilities(&nodes),
-    );
+    let schedule = graph
+        .schedule_for_domain(
+            &domain(),
+            &nodes,
+            0,
+            None,
+            &crate::registry::uniform_capabilities(&nodes),
+        )
+        .assured("the fixture topology resolves");
     let relay = &schedule.nodes[&relay_ref("events")];
     let emitter = &schedule.nodes[&emitter_ref()];
     assert_eq!(emitter.units.len(), 2);
@@ -275,7 +281,8 @@ fn per_partition_groups_bind_each_instance_to_its_partition_of_every_input() {
     assert_eq!(
         emitter.emitter_units,
         Some(EmitterUnits::PerPartition {
-            count: nonzero!(4u16),
+            count: Some(nonzero!(4u16)),
+            branch: branch_name_for_relay("events"),
             relays: vec![named("events"), named("more_events")],
         })
     );
@@ -311,13 +318,15 @@ fn per_partition_groups_bind_each_instance_to_its_partition_of_every_input() {
         named("node-2"),
         named("node-3"),
     ];
-    let schedule = graph.schedule_for_domain(
-        &domain(),
-        &nodes,
-        1,
-        None,
-        &crate::registry::uniform_capabilities(&nodes),
-    );
+    let schedule = graph
+        .schedule_for_domain(
+            &domain(),
+            &nodes,
+            1,
+            None,
+            &crate::registry::uniform_capabilities(&nodes),
+        )
+        .assured("the fixture topology resolves");
     for index in 0..4 {
         let owner = &schedule.nodes[&emitter_ref()]
             .unit(instance(index))

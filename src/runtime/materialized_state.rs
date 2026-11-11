@@ -570,10 +570,10 @@ impl MaterializedRelayStateRead {
     )]
     pub(super) fn record(&self, key: &Option<BranchKey>) -> Option<MaterializedGenerationRecord> {
         let entries = self.state.entries.load();
-        let published = entries.get(key)?;
+        let (stored, published) = entries.get_key_value(key)?;
         let row = published.load_full()?;
         Some(MaterializedGenerationRecord {
-            branch: key.clone(),
+            branch: stored.clone(),
             row: (*row).clone(),
         })
     }
@@ -601,6 +601,29 @@ struct UsableSealedSnapshot {
 }
 
 impl MaterializedRelayStateOriginator {
+    /// Replaces only the immutable origin of an established key. Captured generations keep their
+    /// original key handle, while the current membership publication advances as one generation.
+    pub(super) fn rebind_key(
+        &mut self,
+        key: &Option<BranchKey>,
+    ) -> Result<(), Report<super::StateAuthorityError>> {
+        let state = &self.read.state;
+        state
+            .assignment
+            .authorize_exclusive(self.assignment, StateCapability::Originate, || {
+                let Some((previous, branch)) = self.branches.remove_entry(key) else {
+                    return;
+                };
+                let mut entries = (**state.entries.load()).clone();
+                entries.remove(&previous);
+                entries.insert(key.clone(), branch.published.clone());
+                self.branches.insert(key.clone(), branch);
+                state.advance_branch_generation();
+                state.entries.store(StdArc::new(entries));
+                state.advance_revision();
+            })
+    }
+
     #[cfg_attr(
         nervix_lint,
         nervix::context(

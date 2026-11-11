@@ -446,13 +446,15 @@ impl SessionServiceImpl {
             .map(|(member, _)| member.runtime_unit.clone())
             .collect::<Vec<_>>();
 
-        let desired = self.desired_domain_schedule(
-            domain,
-            &graph,
-            &schedulable_nodes,
-            current,
-            planning.capabilities(),
-        );
+        let desired = self
+            .desired_domain_schedule(
+                domain,
+                &graph,
+                &schedulable_nodes,
+                current,
+                planning.capabilities(),
+            )
+            .change_context(RelocationError::Graph)?;
         let planned = (!moved.is_empty()).then(|| {
             planned_relocation_schedule(
                 current,
@@ -588,7 +590,7 @@ impl SessionServiceImpl {
         schedulable_nodes: &BTreeSet<ClusterNodeName>,
         current: &DomainSchedule,
         capabilities: &std::collections::BTreeMap<ClusterNodeName, nervix_models::NodeCapabilities>,
-    ) -> DomainSchedule {
+    ) -> error_stack::Result<DomainSchedule, crate::registry::RegistryError> {
         let cluster_nodes = schedulable_nodes.iter().cloned().collect::<Vec<_>>();
         #[cfg(feature = "testing")]
         {
@@ -989,8 +991,8 @@ mod tests {
     #[test]
     fn relocating_one_partition_preserves_its_sibling_and_the_siblings_group() {
         use nervix_models::{
-            BranchPartitions, BranchSelection, CreateSchema, ParseAsType, PlacementGroupSchedule,
-            ResolvedBranching, SchemaField,
+            BranchSelection, CreateSchema, ParseAsType, PlacementGroupSchedule, ResolvedBranching,
+            SchemaField,
         };
         let mut node = junction_node("route", "node-1", &["node-3"]);
         let Model::Junction(model) = node.config.as_mut() else {
@@ -1010,7 +1012,7 @@ mod tests {
                     sensitive: false,
                 }],
             },
-            BranchPartitions::Direct(nonzero_ext::nonzero!(2u16)),
+            nervix_models::ResolvedBranchPartitions::Direct(nonzero_ext::nonzero!(2u16)),
         )));
         assert!(node.place_unit(
             Unit::partition(0),

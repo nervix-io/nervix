@@ -462,14 +462,17 @@ fn processor_page_rows(
 ) -> Result<Vec<u64>, Report<StatePageExchangeError>> {
     let framing = || Report::new(StatePageExchangeError::Framing);
     match (&request.partition_exclusions, &descriptor.partition_catalog) {
-        (None, None) => {}
-        (Some(excluded), Some(catalog)) => {
-            let selected = catalog.difference(excluded).count();
+        (None, nervix_models::StateInspectionKeyCatalog::Unrequested) => {}
+        (Some(excluded), catalog) if catalog.is_requested() => {
+            let selected = catalog
+                .fingerprints()
+                .filter(|key| !excluded.contains(*key))
+                .count();
             let selected = u64::try_from(selected).map_err(|_| framing())?;
             if selected != descriptor.counts.branches {
                 return Err(framing());
             }
-            for key in catalog {
+            for key in catalog.fingerprints() {
                 match request.selection {
                     nervix_models::StateInspectionBranchSelection::All => {}
                     nervix_models::StateInspectionBranchSelection::Branch(wanted)

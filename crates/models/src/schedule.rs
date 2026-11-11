@@ -3,7 +3,7 @@
 //! Layer: vocabulary.
 //!
 //! - **Owns.** The cluster and domain schedules, the placement and state lifetime of each unit of
-//!   a scheduled node, Kafka partition assignments, and recorded ownership transitions and resets.
+//!   a scheduled node, external partition topology, and recorded ownership transitions and resets.
 //! - **Depends on.** The Models a scheduled node configures, node and cluster names, and the WASM
 //!   state generations a transition carries.
 //! - **Must not know.** How a placement is decided, how a schedule is applied to a node, or how
@@ -17,10 +17,7 @@
     nervix::layer(vocabulary, reason = "owns the vocabulary boundary declared above")
 )]
 
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    num::NonZeroU64,
-};
+use std::collections::{BTreeMap, BTreeSet};
 
 use indexmap::IndexMap;
 use meticulous::{OptionExt as _, ResultExt as _};
@@ -175,6 +172,7 @@ pub struct DomainSchedule {
     /// The partition epoch of every branch whose partition count changed since it was created. A
     /// branch without an entry keeps the count it was created with, in epoch one.
     pub partition_epochs: BTreeMap<BranchName, BranchPartitionEpoch>,
+    pub partition_topology: crate::PartitionTopology,
 }
 
 impl DomainSchedule {
@@ -193,6 +191,7 @@ impl DomainSchedule {
                 .collect(),
             placement_groups,
             partition_epochs: BTreeMap::new(),
+            partition_topology: crate::PartitionTopology::default(),
         }
     }
 
@@ -203,6 +202,13 @@ impl DomainSchedule {
         epochs: BTreeMap<BranchName, BranchPartitionEpoch>,
     ) -> Self {
         self.partition_epochs = epochs;
+        self
+    }
+
+    /// Installs the source observations and shared grouping this schedule commits.
+    #[must_use]
+    pub fn with_partition_topology(mut self, topology: crate::PartitionTopology) -> Self {
+        self.partition_topology = topology;
         self
     }
 
@@ -229,15 +235,13 @@ impl DomainSchedule {
         let Some(epoch) = retired.partition_epochs.get_mut(branch) else {
             return retired;
         };
-        let holding = epoch.holding_units();
+        let partitions = epoch.partitions;
         *epoch = epoch.retired();
         for node in retired.nodes.values_mut() {
             if node.partition_branch() != Some(branch) || !node.keeps_state_per_key() {
                 continue;
             }
-            for unit in &holding {
-                node.units.shift_remove(unit);
-            }
+            node.units.retain(|unit, _| partitions.schedules(*unit));
         }
         retired
     }
@@ -252,7 +256,13 @@ impl DomainSchedule {
             return Vec::new();
         };
         match self.partition_epochs.get(branch) {
-            Some(epoch) => epoch.holding_units(),
+            Some(epoch) if epoch.transition.is_some() => node
+                .units
+                .keys()
+                .copied()
+                .filter(|unit| !epoch.partitions.schedules(*unit))
+                .collect(),
+            Some(_) => Vec::new(),
             None => Vec::new(),
         }
     }
@@ -312,15 +322,6 @@ pub struct ScheduledModel<'a, M> {
 pub struct PlacementGroupSchedule {
     pub members: Vec<NodeUnitRef>,
     pub primary_node: Option<ClusterNodeName>,
-}
-
-#[derive(
-    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
-)]
-pub struct KafkaPartitionSchedule {
-    pub observed_partitions: Vec<i32>,
-    pub rebalance_epoch: u64,
-    pub instance_assignments: Vec<Vec<i32>>,
 }
 
 #[derive(
@@ -428,26 +429,6 @@ pub struct OwnershipTransition {
     pub resets: Vec<OwnershipStateReset>,
 }
 
-impl KafkaPartitionSchedule {
-    pub fn new(instances: NonZeroU64, observed_partitions: Vec<i32>, rebalance_epoch: u64) -> Self {
-        let shard_count = usize::try_from(instances.get()).unwrap_or(usize::MAX);
-        let mut observed_partitions = observed_partitions;
-        observed_partitions.sort_unstable();
-        let mut instance_assignments = vec![Vec::new(); shard_count];
-        for (ordinal, partition) in observed_partitions.iter().copied().enumerate() {
-            let instance_idx = ordinal % shard_count;
-            if let Some(assigned) = instance_assignments.get_mut(instance_idx) {
-                assigned.push(partition);
-            }
-        }
-        Self {
-            observed_partitions,
-            rebalance_epoch,
-            instance_assignments,
-        }
-    }
-}
-
 /// Placement, ownership transition and guest-state lifetime of one execution unit.
 #[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
@@ -526,8 +507,6 @@ pub struct ScheduledNode {
     /// it. Every scheduled node carries one; the runtime keys each of the node's schema-bound states
     /// by it.
     pub schema_fingerprint: SchemaFingerprint,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub kafka_partition_schedule: Option<KafkaPartitionSchedule>,
     pub units: IndexMap<Unit, ScheduledUnit>,
 }
 
@@ -544,7 +523,6 @@ impl ScheduledNode {
             config: Box::new(config),
             resolved_branching: None,
             schema_fingerprint,
-            kafka_partition_schedule: None,
             units,
         }
     }
@@ -587,8 +565,8 @@ impl ScheduledNode {
 
     /// The units a node configured by `config` is scheduled as under `branching`.
     fn units_for(config: &Model, branching: Option<&ResolvedBranching>) -> Vec<Unit> {
-        if let Some(partitions) = Self::branch_partitions_for(config, branching) {
-            return partitions.units();
+        if let Some(units) = Self::branch_units_for(config, branching) {
+            return units;
         }
         match config {
             Model::Ingestor(ingestor) => match ingestor.input.instances() {
@@ -619,21 +597,29 @@ impl ScheduledNode {
             .collect()
     }
 
-    fn branch_partitions_for(
+    fn uses_branch_units(config: &Model) -> bool {
+        matches!(
+            config,
+            Model::Relay(_)
+                | Model::Junction(_)
+                | Model::Deduplicator(_)
+                | Model::Reorderer(_)
+                | Model::WindowProcessor(_)
+                | Model::Correlator(_)
+                | Model::Inferencer(_)
+                | Model::WasmProcessor(_)
+                | Model::Generator(_)
+        )
+    }
+
+    fn branch_units_for(
         config: &Model,
         branching: Option<&ResolvedBranching>,
-    ) -> Option<crate::BranchPartitions> {
-        match config {
-            Model::Relay(_)
-            | Model::Junction(_)
-            | Model::Deduplicator(_)
-            | Model::Reorderer(_)
-            | Model::WindowProcessor(_)
-            | Model::Correlator(_)
-            | Model::Inferencer(_)
-            | Model::WasmProcessor(_)
-            | Model::Generator(_) => branching.and_then(ResolvedBranching::partitions),
-            _ => None,
+    ) -> Option<Vec<Unit>> {
+        if Self::uses_branch_units(config) {
+            branching.map(ResolvedBranching::units)
+        } else {
+            None
         }
     }
 
@@ -648,13 +634,11 @@ impl ScheduledNode {
             Model::Emitter(emitter) if !emitter.instances.is_one() => return true,
             _ => {}
         }
-        let declared = match Self::branch_partitions_for(
-            self.config.as_ref(),
-            self.resolved_branching.as_ref(),
-        ) {
-            Some(partitions) => partitions.units(),
-            None => vec![Unit::SINGLE],
-        };
+        let declared =
+            match Self::branch_units_for(self.config.as_ref(), self.resolved_branching.as_ref()) {
+                Some(units) => units,
+                None => vec![Unit::SINGLE],
+            };
         let Some(expected) = declared.len().checked_add(holding.len()) else {
             return false;
         };
@@ -679,7 +663,9 @@ impl ScheduledNode {
     /// The branch whose partition count decides this node's units: none for a node a branch's
     /// partitions do not divide.
     pub fn partition_branch(&self) -> Option<&BranchName> {
-        Self::branch_partitions_for(self.config.as_ref(), self.resolved_branching.as_ref())?;
+        if !Self::uses_branch_units(self.config.as_ref()) {
+            return None;
+        }
         self.resolved_branching.as_ref()?.branch()
     }
 
@@ -729,13 +715,6 @@ impl ScheduledNode {
         scheduled.primary_node = primary;
         scheduled.assigned_nodes = assigned;
         true
-    }
-
-    /// The Kafka partitions the leader observed for this node, and how they are shared out.
-    #[must_use]
-    pub fn with_kafka_partitions(mut self, partitions: KafkaPartitionSchedule) -> Self {
-        self.kafka_partition_schedule = Some(partitions);
-        self
     }
 
     /// The cluster nodes every unit of this entry is placed on, with `primary` owning its state.
@@ -847,11 +826,50 @@ impl ScheduledNode {
 
     /// The execution unit of a concrete branch, using the same fingerprint seed as data routing.
     pub fn unit_of_branch(&self, branch: Option<&BranchKeyFingerprint>) -> Option<Unit> {
+        self.unit_of_key(branch, None)
+    }
+
+    /// Whether current execution or a retained transition needs the actual external unit.
+    pub fn has_inherited_partition_state(&self, epoch: Option<&BranchPartitionEpoch>) -> bool {
+        if let Some(branching) = &self.resolved_branching
+            && let Some(partitions) = branching.partitions()
+            && partitions.is_inherited()
+        {
+            return true;
+        }
+        let Some(epoch) = epoch else {
+            return false;
+        };
+        epoch
+            .transition
+            .as_ref()
+            .is_some_and(|transition| transition.previous.is_inherited())
+    }
+
+    /// The execution unit selected by a key's actual partition provenance. An inherited key
+    /// without provenance has to be located through its owners; its field fingerprint is no hash
+    /// contract with the external publisher.
+    pub fn unit_of_key(
+        &self,
+        branch: Option<&BranchKeyFingerprint>,
+        origin: Option<crate::InheritedPartitionOrigin>,
+    ) -> Option<Unit> {
+        if self
+            .resolved_branching
+            .as_ref()
+            .is_some_and(|branching| branching.is_awaiting_topology())
+        {
+            return None;
+        }
         let unit = match self
             .resolved_branching
             .as_ref()
             .and_then(|branching| branching.partitions())
         {
+            Some(partitions) if partitions.is_inherited() => {
+                branch?;
+                partitions.unit_of(origin?.partition.seed())
+            }
             Some(partitions) if partitions.is_partitioned() => {
                 partitions.unit_of(branch?.partition_seed())
             }
@@ -860,14 +878,16 @@ impl ScheduledNode {
         self.units.contains_key(&unit).then_some(unit)
     }
 
-    pub fn wasm_state_generations_of_branch(
+    pub fn wasm_state_generations_of_key(
         &self,
         branch: Option<&BranchKeyFingerprint>,
+        unit: Option<Unit>,
     ) -> Option<&WasmStateGenerations> {
-        self.units
-            .get(&self.unit_of_branch(branch)?)?
-            .wasm_state_generations
-            .as_ref()
+        let unit = match unit {
+            Some(unit) => unit,
+            None => self.unit_of_branch(branch)?,
+        };
+        self.units.get(&unit)?.wasm_state_generations.as_ref()
     }
 
     /// The concrete units selected by one reset, in unit order.
@@ -889,11 +909,18 @@ impl ScheduledNode {
         scope: WasmStateResetScope,
         generation: WasmStateGeneration,
         rejection: WasmSavedStateRejection,
+        unit: Option<Unit>,
     ) -> Option<WasmStateRecoveryAdmission> {
-        let identity = match &scope {
-            WasmStateResetScope::Branch(branch) => self.unit_of_branch(Some(branch))?,
-            WasmStateResetScope::Unbranched => self.unit_of_branch(None)?,
-            WasmStateResetScope::AllBranches => return None,
+        let identity = match unit {
+            Some(unit) => unit,
+            None => {
+                let branch = match &scope {
+                    WasmStateResetScope::Branch(branch) => Some(branch),
+                    WasmStateResetScope::Unbranched => None,
+                    WasmStateResetScope::AllBranches => return None,
+                };
+                self.unit_of_branch(branch)?
+            }
         };
         let recoveries = self
             .units
@@ -912,8 +939,12 @@ impl ScheduledNode {
         scope: &WasmStateResetScope,
         request: &CommandExecutionReference,
         outcome: WasmStateRecoveryOutcome,
+        unit: Option<Unit>,
     ) -> bool {
-        let units = self.units_for_wasm_state_scope(scope);
+        let units = match unit {
+            Some(unit) => vec![unit],
+            None => self.units_for_wasm_state_scope(scope),
+        };
         let [identity] = units.as_slice() else {
             return false;
         };
@@ -991,14 +1022,12 @@ impl ScheduledNode {
     /// Start a new guest-state lifetime for one concrete branch of this WASM processor, leaving every
     /// other branch in the lifetime it has.
     pub fn begin_wasm_branch_state_generation(&mut self, branch: BranchKeyFingerprint) {
-        let Some(identity) = self.unit_of_branch(Some(&branch)) else {
-            return;
-        };
-        let Some(unit) = self.units.get_mut(&identity) else {
-            return;
-        };
-        if let Some(generations) = unit.wasm_state_generations.as_mut() {
-            generations.begin_branch(branch);
+        for identity in self.units_for_wasm_state_scope(&WasmStateResetScope::Branch(branch)) {
+            if let Some(unit) = self.units.get_mut(&identity)
+                && let Some(generations) = unit.wasm_state_generations.as_mut()
+            {
+                generations.begin_branch(branch);
+            }
         }
     }
 

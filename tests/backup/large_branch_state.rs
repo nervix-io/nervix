@@ -447,7 +447,7 @@ async fn then_large_summaries_are_reported(
 }
 
 /// The tenant a deduplicator or window descriptor's branch key names.
-fn branch_tenant(branch: Option<&Vec<nervix_backup::StateField>>) -> String {
+fn branch_tenant(branch: Option<&[nervix_backup::StateField]>) -> String {
     let fields = branch.assured("the workload's branch state is branched");
     let field = fields
         .iter()
@@ -485,7 +485,7 @@ async fn then_large_branch_state_archive_is_complete(
             DescribedRuntimeState::Deduplicator {
                 descriptor, groups, ..
             } => {
-                let branch = branch_tenant(descriptor.branch.as_ref());
+                let branch = branch_tenant(descriptor.branch.fields());
                 if branch == tenant {
                     let mut bytes = 0_u64;
                     for group in groups {
@@ -503,7 +503,7 @@ async fn then_large_branch_state_archive_is_complete(
             DescribedRuntimeState::Window {
                 descriptor, groups, ..
             } => {
-                let branch = branch_tenant(descriptor.branch.as_ref());
+                let branch = branch_tenant(descriptor.branch.fields());
                 let rows = u64::try_from(descriptor.rows.len()).assured("rows fit 64 bits");
                 if branch == tenant {
                     let mut bytes = 0_u64;

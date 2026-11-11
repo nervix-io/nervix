@@ -72,7 +72,7 @@ fn section(section: ProcessorStateSection, rows: u64) -> ProcessorStateSectionTr
 fn run(section: ProcessorStateSection, rows: u64) -> ProcessorStateRunTransfer {
     ProcessorStateRunTransfer {
         section,
-        branch: None,
+        branch: nervix_models::RemoteBranchKey::Unbranched,
         rows,
     }
 }
@@ -80,7 +80,7 @@ fn run(section: ProcessorStateSection, rows: u64) -> ProcessorStateRunTransfer {
 /// A page of a reorderer holding five rows that returns the first three of them in two runs.
 fn pending_page() -> ProcessorStatePageDescriptor {
     ProcessorStatePageDescriptor {
-        partition_catalog: None,
+        partition_catalog: nervix_models::StateInspectionKeyCatalog::Unrequested,
         origin: StateInspectionOrigin {
             node: owner(),
             fingerprint: [1; 32],
@@ -179,15 +179,21 @@ fn a_partition_catalog_agrees_with_its_request_and_filtered_branch_count() {
     request.partition_exclusions = Some(std::collections::BTreeSet::from([moved]));
     let mut page = pending_page();
     page.counts.branches = 1;
-    page.partition_catalog = Some(std::collections::BTreeSet::from([moved, retained]));
+    page.partition_catalog =
+        nervix_models::StateInspectionKeyCatalog::Direct(std::collections::BTreeSet::from([
+            moved, retained,
+        ]));
     processor_page_rows(&page, &request, &pending_payload())
         .assured("the complete catalog accounts for the omitted copy");
     page.counts.branches = 2;
     assert!(processor_page_rows(&page, &request, &pending_payload()).is_err());
     page.counts.branches = 1;
-    page.partition_catalog = None;
+    page.partition_catalog = nervix_models::StateInspectionKeyCatalog::Unrequested;
     assert!(processor_page_rows(&page, &request, &pending_payload()).is_err());
-    page.partition_catalog = Some(std::collections::BTreeSet::from([moved, retained]));
+    page.partition_catalog =
+        nervix_models::StateInspectionKeyCatalog::Direct(std::collections::BTreeSet::from([
+            moved, retained,
+        ]));
     request.selection = StateInspectionBranchSelection::Branch(retained);
     assert!(
         processor_page_rows(&page, &request, &pending_payload()).is_err(),

@@ -239,6 +239,7 @@ mod inferencer_describe;
 mod ingestion_time;
 mod ingestor_instances;
 mod ingestor_payload;
+mod inherited_partitions;
 mod kafka_metadata;
 mod licensing;
 mod listener_bounds;
@@ -20299,6 +20300,15 @@ async fn then_current_leader_node_is_saved_as_placeholder(
     world.placeholders.insert(placeholder, leader);
 }
 
+#[then(expr = "the leader of the running nodes is saved as placeholder {string}")]
+async fn then_running_leader_node_is_saved_as_placeholder(
+    world: &mut ScenarioWorld,
+    placeholder: String,
+) {
+    let leader = running_leader_node(world).await;
+    world.placeholders.insert(placeholder, leader);
+}
+
 #[then(expr = "the only transaction id is saved as placeholder {string}")]
 async fn then_only_transaction_id_is_saved_as_placeholder(
     world: &mut ScenarioWorld,
@@ -27410,8 +27420,11 @@ async fn then_cluster_observability_metric_eventually_totals(
     expected: i64,
     #[step] step: &Step,
 ) {
-    let labels = docstring(step)
+    let expanded = expand_placeholders(world, docstring(step));
+    let labels = expanded
         .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
         .map(str::to_owned)
         .collect::<Vec<_>>();
     let expected: f64 = expected.approx_into();
@@ -27426,7 +27439,7 @@ async fn then_cluster_observability_metric_eventually_totals(
                     nervix_primitives::task::consume_budget().await;
                     let value = match world
                         .cluster()
-                        .read_observability_metric(&node, &metric_name, &labels)
+                        .sum_observability_metric(&node, &metric_name, &labels)
                         .await
                     {
                         Ok(value) => value,

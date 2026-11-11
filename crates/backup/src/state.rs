@@ -20,7 +20,7 @@ use crate::{
     },
 };
 
-const STATE_RECORD_VERSION: u16 = 4;
+const STATE_RECORD_VERSION: u16 = 5;
 
 /// One branch's committed WASM guest save. The raw blob is a separate section at the descriptor's
 /// corresponding guest-blob path.
@@ -31,7 +31,7 @@ pub struct WasmStateDescriptor {
     pub unit: Unit,
     pub schema: SchemaFingerprint,
     pub branch_fingerprint: Option<BranchKeyFingerprint>,
-    pub branch: Option<Vec<StateField>>,
+    pub branch: nervix_models::BranchKeyFields<StateField>,
     pub generation: WasmStateGeneration,
     pub revision: u64,
 }
@@ -60,7 +60,7 @@ pub struct KafkaOffsetsRecord {
 /// One branch, in the LRU order the owner checkpointed it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BranchLifecycleEntry {
-    pub key: Option<Vec<StateField>>,
+    pub key: nervix_models::BranchKeyFields<StateField>,
     pub last_ingestion: Timestamp,
     pub incarnation: u64,
 }
@@ -104,7 +104,7 @@ impl ArchiveRecord for WasmStateDescriptor {
     fn decode(path: &str, bytes: &[u8]) -> Result<Self, Report<ArchiveReadError>> {
         let wire: WasmStateDescriptorWire = decode_record(path, Self::KIND, Self::VERSION, bytes)?;
         validate_branch(path, &wire.branch)?;
-        if wire.branch.is_some() != wire.branch_fingerprint.is_some() {
+        if wire.branch.is_branched() != wire.branch_fingerprint.is_some() {
             return Err(invalid(path, "WASM branch fingerprint"));
         }
         let generation = WasmStateGeneration::try_from(wire.generation)
@@ -240,9 +240,9 @@ pub(crate) fn parse_entity(path: &str, raw: &str) -> Result<ModelName, Report<Ar
 
 pub(crate) fn validate_branch(
     path: &str,
-    key: &Option<Vec<StateField>>,
+    key: &nervix_models::BranchKeyFields<StateField>,
 ) -> Result<(), Report<ArchiveReadError>> {
-    let Some(fields) = key else {
+    let Some(fields) = key.fields() else {
         return Ok(());
     };
     if fields.is_empty() {
@@ -414,7 +414,7 @@ mod tests {
             branch_fingerprint: Some(BranchKeyFingerprint::of_canonical_text(
                 "{\"tenant\":\"north\"}",
             )),
-            branch: Some(branch.clone()),
+            branch: nervix_models::BranchKeyFields::Direct((branch.clone()).into()),
             generation: WasmStateGeneration::FIRST,
             revision: 19,
         };
@@ -459,7 +459,7 @@ mod tests {
             schema: SchemaFingerprint::from_digest([3; 32]),
             revision: 19,
             branches: vec![BranchLifecycleEntry {
-                key: Some(branch),
+                key: nervix_models::BranchKeyFields::Direct((branch).into()),
                 last_ingestion: Timestamp::from_unix_nanos(123),
                 incarnation: 2,
             }],
@@ -505,7 +505,7 @@ mod tests {
             schema: SchemaFingerprint::from_digest([3; 32]),
             revision: 1,
             branches: vec![BranchLifecycleEntry {
-                key: None,
+                key: nervix_models::BranchKeyFields::Unbranched,
                 last_ingestion: Timestamp::from_unix_nanos(0),
                 incarnation: 0,
             }],

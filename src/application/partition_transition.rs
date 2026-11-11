@@ -195,7 +195,29 @@ impl SessionServiceImpl {
         if let Some(nervix_models::BranchEviction::Lru { max_instances }) = &declaration.eviction {
             lines.push(format!("max instances: {max_instances}"));
         }
-        lines.push(format!("partitions: {}", declaration.partitions.count()));
+        if declaration.partitions.is_inherited() {
+            lines.push(format!("partition declaration: {}", declaration.partitions));
+            if let Some(layout) = domain_schedule
+                .and_then(|schedule| schedule.partition_topology.branches.get(&describe.branch))
+            {
+                lines.push(format!("partitions: {}", layout.partitions().count()));
+                lines.push(format!("external partitions: {}", layout.source_count()));
+                let idle = layout
+                    .idle_partitions()
+                    .map(|index| index.to_string())
+                    .collect::<Vec<_>>();
+                let idle = if idle.is_empty() {
+                    "none".to_owned()
+                } else {
+                    idle.join(", ")
+                };
+                lines.push(format!("idle partitions: {idle}"));
+            } else {
+                lines.push("partitions: awaiting topology".to_owned());
+            }
+        } else {
+            lines.push(format!("partitions: {}", declaration.partitions));
+        }
         let Some(domain_schedule) = domain_schedule else {
             lines.push(format!("partition epoch: {}", PartitionEpochNumber::FIRST));
             return command_ok(lines.join("\n"));

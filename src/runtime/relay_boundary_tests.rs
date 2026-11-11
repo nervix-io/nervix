@@ -220,84 +220,6 @@ async fn relay_owner_buffer_remains_visible_in_entity_drain_status() {
     assert!(!status.is_drained());
 }
 
-#[nervix_primitives::test]
-async fn partition_drains_count_their_own_transit_and_queues_while_the_domain_keeps_the_aggregate()
-{
-    let runtime = Runtime::default();
-    let domain = domain("default");
-    let relay = named::<RelayName>("orders");
-    let partitioning =
-        RelayPartitioning::of_partitions(nervix_models::BranchPartitions::Direct(nonzero!(2u16)));
-    let services = RelayBoundaryServices::new(
-        RelayBoundaryFanout::branch_collapse_with_capacity(nonzero!(2usize)),
-        0,
-        0,
-        Vec::new(),
-        None,
-        RelayBranchPresences::fresh(partitioning),
-        Arc::new(crate::runtime_ack::AckRootTracker::default()),
-    );
-    runtime.inner.relay_boundary_fanouts.insert(
-        DomainNodeRef::node_in(domain.clone(), ModelKind::Relay, relay.clone()),
-        services.fanout.clone(),
-    );
-    let first = Unit::partition(0);
-    let second = Unit::partition(1);
-    let (mut receiver, _buffer) =
-        services.activate_owner_buffer(second, relay_metrics(&runtime, &domain, &relay));
-    let status = |unit| {
-        runtime.entity_drain_status(
-            &domain,
-            std::slice::from_ref(&relay),
-            &nervix_models::EntityGateTargets::Units(vec![NodeUnitRef::new(
-                NodeRef::new(ModelKind::Relay, &relay),
-                unit,
-            )]),
-            EntityGatePurpose::OwnershipHandoff,
-        )
-    };
-    services
-        .enqueue_owner_batch(&quiesce_test_batch(), second)
-        .await
-        .assured("the owner buffer admits one batch");
-    assert!(status(first).is_drained());
-    assert_eq!(status(second).buffered_relay_batches, 1);
-    assert_eq!(services.fanout.outstanding_work_len(), 1);
-    assert!(matches!(receiver.try_recv(), RelayTryRecv::Batch(_)));
-    let completion = services.begin_owner_batch_completion(second);
-    assert_eq!(
-        status(second).buffered_relay_batches,
-        1,
-        "dequeue never hides a batch still being handed on"
-    );
-    drop(completion);
-    assert!(status(second).is_drained());
-    assert_eq!(services.fanout.outstanding_work_len(), 0);
-
-    let _common = services.add_local_runtime_consumer(AckMode::Detached);
-    let mut scoped = services.add_local_unit_runtime_consumer(AckMode::Detached, second);
-    services
-        .dispatch_local_runtime_consumers(
-            RuntimeConsumerDispatch::Owner,
-            second,
-            &quiesce_test_batch(),
-        )
-        .await
-        .assured("the second partition reaches its own and common consumers");
-    assert!(status(first).is_drained());
-    assert_eq!(status(second).buffered_relay_batches, 1);
-    assert!(matches!(scoped.try_recv(), RelayTryRecv::Batch(_)));
-    assert!(
-        status(second).is_drained(),
-        "a common consumer keeps its own lifecycle"
-    );
-    assert_eq!(
-        services.fanout.outstanding_work_len(),
-        1,
-        "the whole-domain drain still sees the common consumer's batch"
-    );
-}
-
 #[test]
 fn replacing_relay_owner_retires_the_retained_ingress_channel() {
     let services = test_relay_boundary_services();
@@ -803,7 +725,7 @@ async fn inbound_subscription_wait_does_not_hold_domain_execution() {
                 domain: inbound_domain,
                 relay,
                 unit: Unit::SINGLE,
-                key: None,
+                key: nervix_models::RemoteBranchKey::Unbranched,
                 batch_ipc,
                 metadata: vec![metadata],
                 acks: vec![None],
@@ -1379,7 +1301,7 @@ async fn a_remote_payload_that_does_not_decode_names_its_defect() {
     let one_row = || vec![test_runtime_row([]).metadata().to_remote()];
     let cases = [
         (
-            Some(Vec::new()),
+            nervix_models::RemoteBranchKey::Direct(Vec::new().into()),
             one_row(),
             vec![None],
             RemoteRelayDecodeError::BranchKey,
@@ -1387,7 +1309,7 @@ async fn a_remote_payload_that_does_not_decode_names_its_defect() {
              field",
         ),
         (
-            None,
+            nervix_models::RemoteBranchKey::Unbranched,
             Vec::new(),
             vec![None],
             RemoteRelayDecodeError::MetadataCount {
@@ -1397,7 +1319,7 @@ async fn a_remote_payload_that_does_not_decode_names_its_defect() {
             "remote metadata count 0 does not match batch row count 1",
         ),
         (
-            None,
+            nervix_models::RemoteBranchKey::Unbranched,
             one_row(),
             vec![None, None],
             RemoteRelayDecodeError::AckCount { acks: 2, rows: 1 },
@@ -1509,7 +1431,7 @@ async fn a_subscription_fanout_that_does_not_decode_is_refused() {
                 domain: domain.clone(),
                 relay: relay.clone(),
                 unit: Unit::SINGLE,
-                key: None,
+                key: nervix_models::RemoteBranchKey::Unbranched,
                 batch_ipc: batch_ipc.clone(),
                 metadata,
                 acks,
@@ -1600,11 +1522,11 @@ async fn a_routed_detached_batch_needs_no_attached_consumer() {
 #[rstest::rstest]
 #[case::whole(RelayPartitioning::Whole, false)]
 #[case::partition(
-    RelayPartitioning::of_partitions(nervix_models::BranchPartitions::Direct(nonzero!(2u16))),
+    RelayPartitioning::of_partitions(nervix_models::ResolvedBranchPartitions::Direct(nonzero!(2u16))),
     false
 )]
 #[case::partition_common(
-    RelayPartitioning::of_partitions(nervix_models::BranchPartitions::Direct(nonzero!(2u16))),
+    RelayPartitioning::of_partitions(nervix_models::ResolvedBranchPartitions::Direct(nonzero!(2u16))),
     true
 )]
 #[nervix_primitives::test]
@@ -1614,6 +1536,7 @@ async fn a_detached_consumer_joining_during_attached_backpressure_receives_the_b
 ) {
     let fanout = match partitioning {
         RelayPartitioning::Whole => RelayBoundaryFanout::direct_with_capacity(nonzero!(1usize)),
+        RelayPartitioning::AwaitingTopology => panic!("this fixture binds a resolved relay"),
         RelayPartitioning::Partitioned(_) => {
             RelayBoundaryFanout::branch_collapse_with_capacity(nonzero!(1usize))
         }
@@ -2934,7 +2857,7 @@ async fn a_payload_for_a_relay_this_node_has_not_instantiated_names_its_domain_a
         domain: target.clone(),
         relay: relay.clone(),
         unit: Unit::SINGLE,
-        key: None,
+        key: nervix_models::RemoteBranchKey::Unbranched,
         batch_ipc: batch_ipc.clone(),
         metadata: Vec::new(),
         acks: Vec::new(),

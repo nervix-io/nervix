@@ -25,8 +25,8 @@ use nervix_interconnect::{
     DataflowNodeStatusResponse as RemoteDataflowNodeStatusResponse, RemoteOperationFailure,
 };
 use nervix_models::{
-    BranchPartitions, ClusterNodeName, CreateEmitter, DomainName, DomainSchedule, EmitterName,
-    ModelKind, ModelName, NodeRef, ScheduledNode, Unit, UnitKind,
+    ClusterNodeName, CreateEmitter, DomainName, DomainSchedule, EmitterName, ModelKind, ModelName,
+    NodeRef, ResolvedBranchPartitions, ScheduledNode, Unit, UnitKind,
 };
 
 use super::super::{
@@ -65,7 +65,10 @@ impl SessionServiceImpl {
                 continue;
             };
             let owner = node.unit_execution_node(*unit).cloned();
-            let served = partitions.units_served_by(index, count);
+            let served = match partitions {
+                Some(partitions) => partitions.units_served_by(index, count),
+                None => Vec::new(),
+            };
             summaries.push(self.emitter_instance_summary(
                 domain,
                 &emitter.name,
@@ -82,22 +85,27 @@ impl SessionServiceImpl {
     fn emitter_input_partitions(
         emitter: &CreateEmitter,
         scheduled_domain: &DomainSchedule,
-    ) -> BranchPartitions {
+    ) -> Option<ResolvedBranchPartitions> {
         let Some(relay) = emitter.from.relays().first() else {
-            return BranchPartitions::ONE;
+            return Some(ResolvedBranchPartitions::ONE);
         };
         let Some(relay) = scheduled_domain
             .nodes
             .get(&NodeRef::new(ModelKind::Relay, relay))
         else {
-            return BranchPartitions::ONE;
+            return Some(ResolvedBranchPartitions::ONE);
         };
         let Some(branching) = &relay.resolved_branching else {
-            return BranchPartitions::ONE;
+            return Some(ResolvedBranchPartitions::ONE);
         };
-        match branching.partitions() {
-            Some(partitions) => partitions,
-            None => BranchPartitions::ONE,
+        if branching.is_awaiting_topology() {
+            None
+        } else {
+            Some(
+                branching
+                    .partitions()
+                    .unwrap_or(ResolvedBranchPartitions::ONE),
+            )
         }
     }
 

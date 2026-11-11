@@ -505,6 +505,8 @@ pub enum RuntimeCapability {
     },
     /// An ingestor's programs reading one typed metadata field.
     Metadata { field: &'static str },
+    /// An enumerable ingestor constructing keys with their native external partition.
+    InheritedPartitions,
     /// An ingestor's programs reading one required payload fact.
     Payload { field: &'static str },
     /// An emitter publishing in batches.
@@ -564,6 +566,7 @@ impl Display for RuntimeCapability {
             Self::Option { keywords } => f.write_str(keywords),
             Self::OptionChoice { keywords, choice } => write!(f, "{keywords} {choice}"),
             Self::Metadata { field } => write!(f, "metadata.{field}"),
+            Self::InheritedPartitions => f.write_str("PARTITIONS INHERITED"),
             Self::Payload { field } => write!(f, "payload.{field}"),
             Self::Batch => f.write_str("BATCH"),
             Self::Envelope(kind) => f.write_str(kind.keywords()),

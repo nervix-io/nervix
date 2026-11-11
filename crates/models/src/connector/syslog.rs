@@ -289,6 +289,7 @@ const SYSLOG_LISTENER_METADATA: IngestorMetadataDeclaration = IngestorMetadataDe
 
 impl IngestorDeclaration for SyslogListenerIngestor {
     const CAPABILITIES: IngestorEntityCapabilities = IngestorEntityCapabilities {
+        external_partitions: crate::IngestorExternalPartitions::None,
         events: crate::DeclaredEvents::NONE,
         instancing: crate::IngestorInstancingCapability::Single,
         headers: None,

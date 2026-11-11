@@ -315,6 +315,7 @@ name = "nervix-server"
 
 [[package]]
 checks = [
+  "planning_parameter_fence_tests::shuttle_partition_observation_and_instance_assignment_publish_one_epoch",
   "restore::tests::shuttle_restore_publication_and_handle_clear_precede_resume_and_fence_delayed_publishers",
   "domain_pause_recovery::tests::shuttle_checks::shuttle_transaction_adoption_and_reconcile_fence_delayed_recovery",
   "domain_pause_recovery::tests::shuttle_checks::shuttle_a_new_lease_fences_a_delayed_recovery",

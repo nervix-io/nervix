@@ -10,6 +10,7 @@
     nervix::layer(harness, reason = "owns the test harness boundary declared above")
 )]
 
+use ahash::HashMap;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::{
     AckMode, ModelKind, RelayName, ResolvedBranching, SchemaFingerprint,
@@ -17,7 +18,7 @@ use nervix_models::{
 };
 use nervix_primitives::{sync::StdArc, time::timeout};
 
-use super::MaterializedPageBounds;
+use super::{MaterializedPageBounds, MaterializedPageQuery};
 use crate::{
     runtime::{
         BranchPresence, DomainRoutingSnapshot, RelayBoundaryFanout, RelayBoundaryServices,
@@ -88,7 +89,11 @@ async fn subscription_delivery_can_precede_the_materialized_inspection_generatio
         .into_iter()
         .collect();
         let routing = DomainRoutingSnapshot {
-            materialized_stream_reads: runtime.materialized_relay_publications(&domain, &specs),
+            materialized_stream_reads: runtime.materialized_relay_publications(
+                &domain,
+                &specs,
+                &HashMap::default(),
+            ),
             materialized_stream_specs: specs,
             ..DomainRoutingSnapshot::default()
         };
@@ -103,16 +108,21 @@ async fn subscription_delivery_can_precede_the_materialized_inspection_generatio
             bytes: 1024,
         };
         let before = runtime
-            .local_materialized_state_page(
+            .capture_materialized_state_page(
                 &domain,
                 &relay,
-                Unit::SINGLE,
-                StateInspectionBranchSelection::All,
-                None,
-                bounds(),
+                MaterializedPageQuery {
+                    unit: Unit::SINGLE,
+                    selection: StateInspectionBranchSelection::All,
+                    after: None,
+                    bounds: bounds(),
+                    catalog_requested: false,
+                    filter: None,
+                },
             )
             .await
-            .assured("the owner supplies the initial page");
+            .assured("the owner supplies the initial page")
+            .page;
         let mut subscription = services.subscription_receiver();
         let materializer = services
             .fanout
@@ -141,16 +151,21 @@ async fn subscription_delivery_can_precede_the_materialized_inspection_generatio
             Some(RuntimeValue::I64(5))
         );
         let after_subscription = runtime
-            .local_materialized_state_page(
+            .capture_materialized_state_page(
                 &domain,
                 &relay,
-                Unit::SINGLE,
-                StateInspectionBranchSelection::All,
-                None,
-                bounds(),
+                MaterializedPageQuery {
+                    unit: Unit::SINGLE,
+                    selection: StateInspectionBranchSelection::All,
+                    after: None,
+                    bounds: bounds(),
+                    catalog_requested: false,
+                    filter: None,
+                },
             )
             .await
-            .assured("the owner supplies a page while its input is queued");
+            .assured("the owner supplies a page while its input is queued")
+            .page;
         assert_eq!(
             before.fingerprint, after_subscription.fingerprint,
             "subscription receipt does not publish the materialized consumer's queued row"
@@ -183,16 +198,21 @@ async fn subscription_delivery_can_precede_the_materialized_inspection_generatio
             .await
             .assured("the actual materialized task drains and publishes its queued update");
         let after_application = runtime
-            .local_materialized_state_page(
+            .capture_materialized_state_page(
                 &domain,
                 &relay,
-                Unit::SINGLE,
-                StateInspectionBranchSelection::All,
-                None,
-                bounds(),
+                MaterializedPageQuery {
+                    unit: Unit::SINGLE,
+                    selection: StateInspectionBranchSelection::All,
+                    after: None,
+                    bounds: bounds(),
+                    catalog_requested: false,
+                    filter: None,
+                },
             )
             .await
-            .assured("the owner supplies the updated page");
+            .assured("the owner supplies the updated page")
+            .page;
         assert_ne!(before.fingerprint, after_application.fingerprint);
         assert!(after_application.generation.revision() > before.generation.revision());
         assert_eq!(

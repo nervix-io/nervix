@@ -215,7 +215,6 @@ impl EndpointIntakeStartPlan {
         let instance: Box<dyn IngestorInstance> = Box::new(connector);
         Ok(IngestorStart {
             instance,
-            companions: Vec::new(),
             // Requests never pass through the ingestor loop's intake: the request path admits
             // them. What the endpoint buffer retained replays one request per ingest group.
             buffered_intake: false,

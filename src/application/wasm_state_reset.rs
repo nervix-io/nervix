@@ -32,9 +32,8 @@ use nervix_interconnect::{
 };
 use nervix_models::{
     ClusterNodeName, CommandExecutionReference, DomainName, DomainSchedule, DomainStatus,
-    ModelKind, ModelName, NodeRef, RelayName, RemoteRuntimeField, ResetWasmState,
-    ResolvedBranching, ResolvedStateBranchSelection, WasmStateResetPhase, WasmStateResetReason,
-    WasmStateResetScope,
+    ModelKind, ModelName, NodeRef, RelayName, ResetWasmState, ResolvedBranching,
+    ResolvedStateBranchSelection, WasmStateResetPhase, WasmStateResetReason, WasmStateResetScope,
 };
 #[cfg(feature = "testing")]
 use nervix_recovery::NoReceiver as _;
@@ -97,7 +96,7 @@ struct WasmStateResetPlan {
     entity: NodeRef,
     scope: WasmStateResetScope,
     reason: WasmStateResetReason,
-    branch_key: Option<Vec<RemoteRuntimeField>>,
+    branch_key: nervix_models::RemoteBranchKey,
     published: bool,
     ready: bool,
 }
@@ -141,7 +140,7 @@ impl SessionServiceImpl {
             ResolvedStateBranchSelection::Unbranched => WasmStateResetTarget::Unbranched,
             ResolvedStateBranchSelection::AllBranches => WasmStateResetTarget::AllBranches,
             ResolvedStateBranchSelection::Branch { fields, .. } => {
-                WasmStateResetTarget::Branch(fields)
+                WasmStateResetTarget::Branch(nervix_models::RemoteBranchKey::Direct(fields.into()))
             }
         };
         self.reset_wasm_processor_state(
@@ -261,7 +260,7 @@ impl SessionServiceImpl {
                 WasmStateResetTarget::Unbranched
             }
             crate::fault_injection::WasmStateResetRequestTarget::Branch(branch) => {
-                WasmStateResetTarget::Branch(branch)
+                WasmStateResetTarget::Branch(nervix_models::RemoteBranchKey::Direct(branch.into()))
             }
             crate::fault_injection::WasmStateResetRequestTarget::AllBranches => {
                 WasmStateResetTarget::AllBranches
@@ -402,7 +401,8 @@ impl SessionServiceImpl {
         let Some(node) = schedule.nodes.get(&entity) else {
             return true;
         };
-        let Some(generations) = node.wasm_state_generations_of_branch(request.branch_fingerprint())
+        let Some(generations) =
+            node.wasm_state_generations_of_key(request.branch_fingerprint(), request.unit())
         else {
             return true;
         };
@@ -599,26 +599,37 @@ impl SessionServiceImpl {
         branching: Option<&ResolvedBranching>,
         target: WasmStateResetTarget,
     ) -> error_stack::Result<
-        (WasmStateResetScope, Option<Vec<RemoteRuntimeField>>),
+        (WasmStateResetScope, nervix_models::RemoteBranchKey),
         WasmStateResetError,
     > {
         let invalid = || WasmStateResetError::InvalidTarget {
             domain: domain.clone(),
             processor: processor.clone(),
         };
+        let target = match target {
+            WasmStateResetTarget::BranchInUnit { key, .. } => WasmStateResetTarget::Branch(*key),
+            target => target,
+        };
         match (branching, target) {
-            (Some(ResolvedBranching::Unbranched), WasmStateResetTarget::Unbranched) => {
-                Ok((WasmStateResetScope::Unbranched, None))
-            }
+            (Some(ResolvedBranching::Unbranched), WasmStateResetTarget::Unbranched) => Ok((
+                WasmStateResetScope::Unbranched,
+                nervix_models::RemoteBranchKey::Unbranched,
+            )),
             (
                 Some(ResolvedBranching::Branched { schema, .. }),
                 WasmStateResetTarget::AllBranches,
-            ) if !schema.fields.is_empty() => Ok((WasmStateResetScope::AllBranches, None)),
+            ) if !schema.fields.is_empty() => Ok((
+                WasmStateResetScope::AllBranches,
+                nervix_models::RemoteBranchKey::Unbranched,
+            )),
             (
                 Some(ResolvedBranching::Branched { schema, .. }),
                 WasmStateResetTarget::Branch(fields),
             ) if !schema.fields.is_empty() => {
-                let supplied = fields
+                let Some(key_fields) = fields.fields() else {
+                    return Err(Report::new(invalid()));
+                };
+                let supplied = key_fields
                     .iter()
                     .map(|field| field.name.as_str())
                     .collect::<BTreeSet<_>>();
@@ -627,12 +638,12 @@ impl SessionServiceImpl {
                     .iter()
                     .map(|field| field.name.as_str())
                     .collect::<BTreeSet<_>>();
-                if supplied.len() != fields.len() || supplied != expected {
+                if supplied.len() != key_fields.len() || supplied != expected {
                     return Err(Report::new(invalid()));
                 }
                 let scope = Runtime::wasm_state_reset_branch_scope(processor, fields.clone())
                     .change_context_lazy(invalid)?;
-                Ok((scope, Some(fields)))
+                Ok((scope, fields))
             }
             _ => Err(Report::new(invalid())),
         }

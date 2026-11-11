@@ -52,11 +52,11 @@ use nervix_connector::{
 };
 use nervix_execution::Executor;
 use nervix_models::{
-    ClientConfigEntry, ConnectorKind, IngestStartPosition, IngestorMetadataType,
-    KafkaPartitionSchedule, KafkaTopicName, Timestamp,
+    ClientConfigEntry, ConnectorKind, ExternalPartitionAssignment, IngestStartPosition,
+    IngestorMetadataType, KafkaTopicName, Timestamp,
 };
 use nervix_primitives::{
-    sync::{Arc, watch},
+    sync::Arc,
     time::{Instant, sleep_until, timeout},
 };
 use nervix_recovery::{Discarded as _, Reported as _};
@@ -102,7 +102,7 @@ pub enum KafkaDomainOffsetStart {
 pub struct KafkaDomainOffsetInitialization {
     pub generation: u64,
     pub start: KafkaDomainOffsetStart,
-    pub schedule: Option<KafkaPartitionSchedule>,
+    pub assignment: Option<ExternalPartitionAssignment>,
 }
 
 /// Why host-owned Kafka offset state could not serve the ingestor connector.
@@ -226,11 +226,12 @@ pub enum KafkaTopicIngestorOffsetMode {
         commit: KafkaGroupCommit,
         /// Where a partition without a usable committed offset starts.
         start_at: IngestStartPosition,
+        /// The source topology committed by the host before this reader opens.
+        committed_partitions: Option<Box<KafkaGroupPartitionRead>>,
     },
     Domain {
         group_id: String,
         offsets: KafkaDomainOffsetHost,
-        rebalance: watch::Receiver<u64>,
     },
 }
 
@@ -268,7 +269,137 @@ impl KafkaTopicIngestorOffsetMode {
         };
         let mut config = consumer_config(entries, group_id, self.driver_commits());
         config.set("auto.offset.reset", self.offset_reset());
+        if matches!(
+            self,
+            Self::ConsumerGroup {
+                committed_partitions: Some(_),
+                ..
+            }
+        ) {
+            config.set("enable.auto.offset.store", "false");
+        }
         config
+    }
+}
+
+/// An inherited group reader's fixed observation and at most one unadmitted native position.
+/// Its broker offset remains unstored while pause and rewind run through the bounded executor.
+#[derive(Clone)]
+pub struct KafkaGroupPartitionRead {
+    partitions: nervix_models::ExternalPartitionSet,
+    pending: Option<KafkaOffsetPosition>,
+}
+
+impl KafkaGroupPartitionRead {
+    pub fn new(partitions: nervix_models::ExternalPartitionSet) -> Self {
+        Self {
+            partitions,
+            pending: None,
+        }
+    }
+
+    /// Keep the first unadmitted record as the broker's next unread offset before a reader
+    /// lifetime ends. No commit passes that record, even when the next join starts at LATEST.
+    async fn finish_pending(
+        &mut self,
+        consumer: &KafkaConsumerHandle,
+        control: &KafkaControl,
+        commits: &mut GroupCommits,
+        group_id: &str,
+    ) -> Result<(), Report<KafkaTopicIngestorError>> {
+        if let Some(position) = self.pending.clone() {
+            control
+                .run(consumer, {
+                    let position = position.clone();
+                    move |consumer, budget| {
+                        let mut paused = TopicPartitionList::new();
+                        paused.add_partition(&position.topic, position.partition);
+                        budget.remaining()?;
+                        consumer.pause(&paused).change_context(
+                            KafkaTopicIngestorError::PausePartition {
+                                topic: position.topic.clone(),
+                                partition: position.partition,
+                            },
+                        )?;
+                        for partition in paused.elements() {
+                            partition.error().change_context(
+                                KafkaTopicIngestorError::PausePartition {
+                                    topic: position.topic.clone(),
+                                    partition: position.partition,
+                                },
+                            )?;
+                        }
+                        consumer
+                            .seek(
+                                &position.topic,
+                                position.partition,
+                                Offset::Offset(position.offset),
+                                budget.remaining()?,
+                            )
+                            .change_context(KafkaTopicIngestorError::Seek {
+                                topic: position.topic.clone(),
+                                partition: position.partition,
+                            })?;
+                        paused
+                            .set_partition_offset(
+                                &position.topic,
+                                position.partition,
+                                Offset::Offset(position.offset),
+                            )
+                            .change_context(KafkaTopicIngestorError::BuildOffsetCommit {
+                                topic: position.topic,
+                                partition: position.partition,
+                            })?;
+                        consumer
+                            .store_offsets(&paused)
+                            .change_context(KafkaTopicIngestorError::StoreGroupOffset)
+                    }
+                })
+                .await?;
+            let request = GroupCommitRequest::starting(&position)?;
+            commits.commit(control, consumer, group_id, request).await?;
+            self.pending = None;
+        }
+        Ok(())
+    }
+
+    async fn receive<'a>(
+        &mut self,
+        consumer: &'a KafkaConsumerHandle,
+        control: &KafkaControl,
+        topic: &KafkaTopicName,
+        commits: &mut GroupCommits,
+        group_id: &str,
+    ) -> Result<rdkafka::message::BorrowedMessage<'a>, Report<KafkaTopicIngestorError>> {
+        loop {
+            self.finish_pending(consumer, control, commits, group_id)
+                .await?;
+            let message = consumer
+                .recv()
+                .await
+                .map_err(|source| KafkaTopicIngestor::receive_failure(topic, source))?;
+            if u32::try_from(message.partition()).is_ok_and(|index| {
+                self.partitions
+                    .contains(nervix_models::ExternalPartition::new(index))
+            }) {
+                if message.offset().checked_add(1).is_none() {
+                    return Err(Report::new(KafkaTopicIngestorError::OffsetOverflow {
+                        topic: message.topic().to_owned(),
+                        partition: message.partition(),
+                    }));
+                }
+                consumer
+                    .store_offset_from_message(&message)
+                    .change_context(KafkaTopicIngestorError::StoreGroupOffset)?;
+                return Ok(message);
+            }
+            self.pending = Some(KafkaOffsetPosition {
+                topic: message.topic().to_owned(),
+                partition: message.partition(),
+                offset: message.offset(),
+            });
+            drop(message);
+        }
     }
 }
 
@@ -309,6 +440,15 @@ pub struct KafkaTopicIngestorPlan {
 
 #[derive(Debug, Error)]
 pub enum KafkaTopicIngestorError {
+    #[error(
+        "failed to pause {connector} topic '{topic}' partition {partition} until its topology is \
+         committed", connector = ConnectorKind::Kafka
+    )]
+    PausePartition { topic: String, partition: i32 },
+    #[error("failed to store a {connector} group's next unread offset", connector = ConnectorKind::Kafka)]
+    StoreGroupOffset,
+    #[error("scheduled {connector} partition {partition} exceeds the transport's signed coordinate", connector = ConnectorKind::Kafka)]
+    PartitionCoordinate { partition: u32 },
     #[error("the {connector} ingestor cannot admit its control call", connector = ConnectorKind::Kafka)]
     ControlAdmission,
     #[error("the {connector} ingestor control call could not run", connector = ConnectorKind::Kafka)]
@@ -680,18 +820,16 @@ impl IngestorConnector for KafkaTopicIngestor {
     }
 
     fn needs_resume(&mut self) -> bool {
-        let KafkaTopicIngestorOffsetMode::Domain {
-            offsets, rebalance, ..
-        } = &mut self.offset_mode
-        else {
+        let KafkaTopicIngestorOffsetMode::Domain { offsets, .. } = &self.offset_mode else {
             return false;
         };
-        let generation_changed = offsets.generation() != self.observed_generation;
-        let rebalance_changed = rebalance.has_changed().unwrap_or(false);
-        generation_changed || rebalance_changed
+        offsets.generation() != self.observed_generation
     }
 
     async fn suspend(&mut self) -> IngestorResult<()> {
+        self.finish_unadmitted_partition()
+            .await
+            .change_context(IngestorError::Suspend { connector: KAFKA })?;
         match &self.offset_mode {
             KafkaTopicIngestorOffsetMode::ConsumerGroup {
                 group_id, commit, ..
@@ -722,12 +860,7 @@ impl IngestorConnector for KafkaTopicIngestor {
         }
 
         let offsets = match &mut self.offset_mode {
-            KafkaTopicIngestorOffsetMode::Domain {
-                offsets, rebalance, ..
-            } => {
-                rebalance.borrow_and_update();
-                offsets.clone()
-            }
+            KafkaTopicIngestorOffsetMode::Domain { offsets, .. } => offsets.clone(),
             KafkaTopicIngestorOffsetMode::ConsumerGroup { .. } => {
                 return Ok(IngestorResume::Ready);
             }
@@ -746,6 +879,9 @@ impl IngestorConnector for KafkaTopicIngestor {
     }
 
     async fn close(&mut self) -> IngestorResult<()> {
+        self.finish_unadmitted_partition()
+            .await
+            .change_context(IngestorError::Close { connector: KAFKA })?;
         match &self.offset_mode {
             KafkaTopicIngestorOffsetMode::ConsumerGroup {
                 group_id, commit, ..
@@ -781,16 +917,9 @@ impl BrokerIngestorConnector for KafkaTopicIngestor {
             return Err(error.change_context(IngestorError::Read { connector: KAFKA }));
         }
         let first = match &mut self.offset_mode {
-            KafkaTopicIngestorOffsetMode::Domain { rebalance, .. } => {
+            KafkaTopicIngestorOffsetMode::Domain { .. } => {
                 nervix_primitives::select! {
-                    changed = rebalance.changed() => {
-                        return if changed.is_ok() {
-                            Ok(IngestorBatch::ResumeRequired)
-                        } else {
-                            Ok(IngestorBatch::Closed)
-                        };
-                    }
-                    message = self.consumer.recv() => message,
+                    message = self.consumer.recv() => message.map_err(|source| Self::receive_failure(&self.topic, source)),
                     () = cancellation.cancelled() => {
                         return Ok(IngestorBatch::Interrupted {
                             gathered: Vec::new(),
@@ -798,9 +927,20 @@ impl BrokerIngestorConnector for KafkaTopicIngestor {
                     }
                 }
             }
-            KafkaTopicIngestorOffsetMode::ConsumerGroup { .. } => {
-                let Some(message) = cancellation.unless_cancelled(self.consumer.recv()).await
-                else {
+            KafkaTopicIngestorOffsetMode::ConsumerGroup {
+                committed_partitions,
+                group_id,
+                ..
+            } => {
+                let read = Self::receive_group(
+                    &self.consumer,
+                    &self.control,
+                    &self.topic,
+                    committed_partitions.as_deref_mut(),
+                    &mut self.commits,
+                    group_id,
+                );
+                let Some(message) = cancellation.unless_cancelled(read).await else {
                     return Ok(IngestorBatch::Interrupted {
                         gathered: Vec::new(),
                     });
@@ -809,7 +949,6 @@ impl BrokerIngestorConnector for KafkaTopicIngestor {
             }
         };
         let first = first
-            .map_err(|source| self.receive_failure(source))
             .change_context(IngestorError::Read { connector: KAFKA })?
             .detach();
         let first = KafkaTopicIngestorMessage::from_message(first)
@@ -830,7 +969,7 @@ impl BrokerIngestorConnector for KafkaTopicIngestor {
             nervix_primitives::task::consume_budget().await;
             nervix_primitives::select! {
                 _ = sleep_until(deadline) => break,
-                next = self.consumer.recv() => {
+                next = Self::receive_next(&self.consumer, &self.control, &self.topic, &mut self.offset_mode, &mut self.commits) => {
                     match next {
                         Ok(message) => {
                             match KafkaTopicIngestorMessage::from_message(message.detach()) {
@@ -842,7 +981,11 @@ impl BrokerIngestorConnector for KafkaTopicIngestor {
                             }
                         }
                         Err(error) => {
-                            warn!(error = %error, "failed to receive another Kafka batch message");
+                            if matches!(self.offset_mode, KafkaTopicIngestorOffsetMode::ConsumerGroup { committed_partitions: Some(_), .. }) {
+                                self.pending_read_error = Some(error);
+                                break;
+                            }
+                            warn!(error = %format_args!("{error:#}"), "failed to receive another Kafka batch message");
                         }
                     }
                 }
@@ -868,7 +1011,7 @@ impl BrokerIngestorConnector for KafkaTopicIngestor {
                 commit: KafkaGroupCommit::EachAcknowledgedBatch,
                 ..
             } => {
-                let request = GroupCommitRequest::acknowledged(&positions)
+                let request = GroupCommitRequest::positions(&positions)
                     .change_context(IngestorError::Acknowledge { connector: KAFKA })?;
                 self.commits
                     .commit(&self.control, &self.consumer, group_id, request)
@@ -949,14 +1092,82 @@ impl BrokerIngestorConnector for KafkaTopicIngestor {
 }
 
 impl KafkaTopicIngestor {
+    async fn finish_unadmitted_partition(&mut self) -> Result<(), Report<KafkaTopicIngestorError>> {
+        if let KafkaTopicIngestorOffsetMode::ConsumerGroup {
+            committed_partitions: Some(partitions),
+            group_id,
+            ..
+        } = &mut self.offset_mode
+        {
+            partitions
+                .finish_pending(&self.consumer, &self.control, &mut self.commits, group_id)
+                .await?;
+        }
+        Ok(())
+    }
+
+    async fn receive_group<'a>(
+        consumer: &'a KafkaConsumerHandle,
+        control: &KafkaControl,
+        topic: &KafkaTopicName,
+        partitions: Option<&mut KafkaGroupPartitionRead>,
+        commits: &mut GroupCommits,
+        group_id: &str,
+    ) -> Result<rdkafka::message::BorrowedMessage<'a>, Report<KafkaTopicIngestorError>> {
+        match partitions {
+            Some(partitions) => {
+                partitions
+                    .receive(consumer, control, topic, commits, group_id)
+                    .await
+            }
+            None => consumer
+                .recv()
+                .await
+                .map_err(|source| Self::receive_failure(topic, source)),
+        }
+    }
+
+    async fn receive_next<'a>(
+        consumer: &'a KafkaConsumerHandle,
+        control: &KafkaControl,
+        topic: &KafkaTopicName,
+        mode: &mut KafkaTopicIngestorOffsetMode,
+        commits: &mut GroupCommits,
+    ) -> Result<rdkafka::message::BorrowedMessage<'a>, Report<KafkaTopicIngestorError>> {
+        match mode {
+            KafkaTopicIngestorOffsetMode::ConsumerGroup {
+                committed_partitions,
+                group_id,
+                ..
+            } => {
+                Self::receive_group(
+                    consumer,
+                    control,
+                    topic,
+                    committed_partitions.as_deref_mut(),
+                    commits,
+                    group_id,
+                )
+                .await
+            }
+            KafkaTopicIngestorOffsetMode::Domain { .. } => consumer
+                .recv()
+                .await
+                .map_err(|source| Self::receive_failure(topic, source)),
+        }
+    }
+
     /// The failure a receive reports. A topic the broker does not have is reported by name, since
     /// the consumer never lets the broker create it.
-    fn receive_failure(&self, source: KafkaError) -> Report<KafkaTopicIngestorError> {
+    fn receive_failure(
+        topic: &KafkaTopicName,
+        source: KafkaError,
+    ) -> Report<KafkaTopicIngestorError> {
         if let KafkaError::MessageConsumption(code) = &source
             && names_missing_topic(*code)
         {
             return Report::new(KafkaTopicIngestorError::MissingTopic {
-                topic: self.topic.as_str().to_string(),
+                topic: topic.as_str().to_string(),
             })
             .attach(source);
         }
@@ -1016,14 +1227,14 @@ impl KafkaTopicIngestor {
             let initialized = self
                 .control
                 .run(&self.consumer, move |consumer, budget| {
-                    let ready = initialization.schedule.is_some() && !partitions.is_empty();
+                    let ready = initialization.assignment.is_some() && !partitions.is_empty();
                     let scheduled = ScheduledPartitions {
                         topic: &topic,
                         partitions: &partitions,
                         assigned: scheduled_partitions(
-                            initialization.schedule.as_ref(),
+                            initialization.assignment.as_ref(),
                             instance_index,
-                        ),
+                        )?,
                     };
                     let start =
                         DomainStart::resolve(consumer, &scheduled, initialization.start, budget)?;
@@ -1273,15 +1484,15 @@ impl DomainOffsetRecord {
 
 /// What one consumer-group commit commits.
 enum GroupCommitRequest {
-    /// The latest acknowledged offset of each partition of an acknowledged batch.
-    Acknowledged(TopicPartitionList),
+    /// A fixed next-offset cut: acknowledged records, or an unadmitted partition's starting cut.
+    Positions(TopicPartitionList),
     /// The positions the driver delivered since its last commit.
     Delivered,
 }
 
 impl GroupCommitRequest {
-    /// The commit of an acknowledged batch's `positions`, each the next offset of its partition.
-    fn acknowledged(
+    /// The exact next unread `positions` to retain in the broker's group cursor.
+    fn positions(
         positions: &[KafkaOffsetPosition],
     ) -> Result<Self, Report<KafkaTopicIngestorError>> {
         let mut offsets = TopicPartitionList::new();
@@ -1299,7 +1510,12 @@ impl GroupCommitRequest {
                     })
                 })?;
         }
-        Ok(Self::Acknowledged(offsets))
+        Ok(Self::Positions(offsets))
+    }
+
+    /// An unadmitted partition's exact next unread offset, which a replacement must not skip.
+    fn starting(position: &KafkaOffsetPosition) -> Result<Self, Report<KafkaTopicIngestorError>> {
+        Self::positions(std::slice::from_ref(position))
     }
 
     /// Commits through `consumer` and returns the coordinator's answer.
@@ -1307,7 +1523,7 @@ impl GroupCommitRequest {
     /// librdkafka's synchronous commit parks the calling thread until the coordinator answers.
     fn commit(self, consumer: &KafkaConsumer) -> KafkaResult<()> {
         match self {
-            Self::Acknowledged(offsets) => consumer.commit(&offsets, CommitMode::Sync),
+            Self::Positions(offsets) => consumer.commit(&offsets, CommitMode::Sync),
             Self::Delivered => {
                 let committed = consumer.commit_consumer_state(CommitMode::Sync);
                 match committed {
@@ -1655,19 +1871,24 @@ fn offsets_at(
 
 /// The partitions the domain's schedule assigns instance `instance_index`, none without a schedule.
 fn scheduled_partitions(
-    schedule: Option<&KafkaPartitionSchedule>,
+    assignment: Option<&ExternalPartitionAssignment>,
     instance_index: u64,
-) -> BTreeSet<i32> {
-    let Some(schedule) = schedule else {
-        return BTreeSet::new();
+) -> Result<BTreeSet<i32>, Report<KafkaTopicIngestorError>> {
+    let Some(assignment) = assignment else {
+        return Ok(BTreeSet::new());
     };
-    let Ok(instance_index) = usize::try_from(instance_index) else {
-        return BTreeSet::new();
-    };
-    let Some(assignments) = schedule.instance_assignments.get(instance_index) else {
-        return BTreeSet::new();
-    };
-    assignments.iter().copied().collect()
+    let mut partitions = BTreeSet::new();
+    for index in 0..assignment.partitions.count().get() {
+        if !assignment.contains(instance_index, nervix_models::ExternalPartition::new(index)) {
+            continue;
+        }
+        let partition = i32::try_from(index).map_err(|cause| {
+            Report::new(cause)
+                .change_context(KafkaTopicIngestorError::PartitionCoordinate { partition: index })
+        })?;
+        partitions.insert(partition);
+    }
+    Ok(partitions)
 }
 
 /// Assigns the consumer each partition `scheduled` gives the instance, at its offset in `offsets`.

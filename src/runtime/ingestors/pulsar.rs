@@ -135,6 +135,7 @@ impl PulsarTopicIngestorStartPlan {
             subscription: self.subscription.clone(),
             consumer_name: format!("{}~{}", ingestor.domain.as_str(), ingestor.name.as_str()),
             ack_receipts,
+            assignment: self.assignment,
         }
     }
 }

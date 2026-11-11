@@ -430,7 +430,7 @@ impl EmitterConnectorContext {
 mod tests {
     use std::num::NonZeroU16;
 
-    use nervix_models::BranchPartitions;
+    use nervix_models::ResolvedBranchPartitions;
 
     use super::*;
     use crate::{
@@ -438,7 +438,7 @@ mod tests {
         runtime::test_fixtures::{named, string_branch_key},
     };
 
-    fn input(relay: &str, partitions: Option<BranchPartitions>) -> EmitterInputPlan {
+    fn input(relay: &str, partitions: Option<ResolvedBranchPartitions>) -> EmitterInputPlan {
         EmitterInputPlan {
             relay: named(relay),
             from_where: None,
@@ -452,7 +452,8 @@ mod tests {
 
     #[test]
     fn capacity_is_local_to_each_source_and_partition_and_reuse_starts_fresh() {
-        let partitions = BranchPartitions::Direct(NonZeroU16::new(2).assured("two is positive"));
+        let partitions =
+            ResolvedBranchPartitions::Direct(NonZeroU16::new(2).assured("two is positive"));
         let first = named("first");
         let second = named("second");
         let mut retention = EmitterBranchRetention::new(
@@ -518,7 +519,7 @@ mod tests {
         let source = named("events");
         let key = string_branch_key("tenant", "acme");
         let mut retention = EmitterBranchRetention::new(
-            &[input("events", Some(BranchPartitions::ONE))],
+            &[input("events", Some(ResolvedBranchPartitions::ONE))],
             Duration::from_secs(30),
         );
         assert!(!retention.has_work());
@@ -570,7 +571,7 @@ mod tests {
         assert!(retention.next_scan.is_none());
 
         let mut branched = EmitterBranchRetention::new(
-            &[input("events", Some(BranchPartitions::ONE))],
+            &[input("events", Some(ResolvedBranchPartitions::ONE))],
             Duration::from_secs(30),
         );
         let error = branched
@@ -600,7 +601,7 @@ mod tests {
         let source = named("events");
         let key = string_branch_key("tenant", "acme");
         let mut retention = EmitterBranchRetention::new(
-            &[input("events", Some(BranchPartitions::ONE))],
+            &[input("events", Some(ResolvedBranchPartitions::ONE))],
             Duration::from_secs(30),
         );
         retention

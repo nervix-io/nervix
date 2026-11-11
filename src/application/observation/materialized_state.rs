@@ -37,7 +37,8 @@ use crate::{
     application::{command_result::CommandResult, session_service::SessionServiceImpl},
     client_row::{ArrowRowBatch, write_runtime_value},
     runtime::{
-        MaterializedGenerationRecord, MaterializedInspectionPage, StatePageReadError,
+        MaterializedGenerationRecord, MaterializedInspectionPage, MaterializedStateCapture,
+        StatePageReadError,
         state_inspection_exchange::{receive_materialized_page, stream_materialized_page},
     },
     state_inspection_cursor::StateInspectionCursor,
@@ -61,6 +62,12 @@ struct InspectionPlan {
     sections: usize,
     cursor: Option<StateInspectionCursor>,
     limits: SessionLimits,
+    moving_partitions: Option<nervix_models::ResolvedBranchPartitions>,
+}
+
+struct NativeMaterializedCapture {
+    descriptor: MaterializedStatePageDescriptor,
+    state: MaterializedStateCapture,
 }
 
 /// The remaining capacity belongs to the entire reply, across all execution units.
@@ -106,6 +113,77 @@ impl InspectionUnitRows {
 }
 
 impl SessionServiceImpl {
+    async fn capture_materialized_partition_inspection(
+        &self,
+        plan: &InspectionPlan,
+        incarnations: &std::collections::BTreeMap<
+            nervix_models::ClusterNodeName,
+            nervix_models::ClusterNodeIncarnation,
+        >,
+    ) -> Result<
+        Option<super::processor_state::partition::PartitionInspection>,
+        StateInspectionRejection,
+    > {
+        let Some(partitions) = plan.moving_partitions else {
+            return Ok(None);
+        };
+        let executor = self.inner.runtime.inspection_executor();
+        let maximum =
+            u64::try_from(plan.limits.transfer_bytes()).assured("session byte limits fit u64");
+        let mut inspection = super::processor_state::partition::PartitionInspection::new(
+            partitions, executor, maximum,
+        )?;
+        for unit in plan.node.units.keys() {
+            let owner = inspection_owner(&plan.node, *unit, self.inner.consensus.local_node_id())?;
+            let incarnation = incarnations
+                .get(&owner)
+                .copied()
+                .ok_or(StateInspectionRejection::OwnerUnavailable)?;
+            let request = nervix_interconnect::ReadMaterializedKeyCatalog {
+                read: ReadMaterializedStatePage {
+                    domain: plan.domain.clone(),
+                    relay: plan.relay.clone(),
+                    unit: *unit,
+                    control_revision: plan.control_revision,
+                    schema: plan.node.schema_fingerprint,
+                    selection: plan.selection,
+                    after: None,
+                    max_rows: 0,
+                    max_bytes: maximum,
+                    target: ClusterNodeIdentity::new(owner.clone(), incarnation),
+                },
+            };
+            let response = if &owner == self.inner.consensus.local_node_id() {
+                self.handle_materialized_key_catalog(request).await
+            } else {
+                self.inner
+                    .interconnect
+                    .request(&owner, request)
+                    .await
+                    .map_err(|error| {
+                        inspection_refusal(error, StateInspectionRejection::OwnerUnavailable)
+                    })?
+            };
+            let catalog = response.result?;
+            let admission = executor
+                .try_reserve(nervix_execution::MemoryClass::Bulk, 1)
+                .map_err(|error| inspection_refusal(error, StateInspectionRejection::NotReady))?;
+            let unit = *unit;
+            inspection = executor
+                .run_cpu(
+                    nervix_execution::CpuClass::Bulk,
+                    admission,
+                    move |_charge, cancellation| {
+                        inspection.record(unit, catalog, cancellation)?;
+                        Ok::<_, StateInspectionRejection>(inspection)
+                    },
+                )
+                .await
+                .map_err(|error| inspection_refusal(error, StateInspectionRejection::NotReady))??;
+        }
+        Ok(Some(inspection))
+    }
+
     pub(in crate::application) async fn show_stream_materialized_state(
         &self,
         domain: &DomainName,
@@ -169,7 +247,8 @@ impl SessionServiceImpl {
         };
         let branch = match branching {
             ResolvedBranching::Unbranched => None,
-            ResolvedBranching::Branched { branch, schema, .. } => Some(
+            ResolvedBranching::Branched { branch, schema, .. }
+            | ResolvedBranching::AwaitingTopology { branch, schema } => Some(
                 RowBranch::new(branch.clone(), schema.fields.clone()).map_err(|error| {
                     inspection_refusal(error, StateInspectionRejection::NotReady)
                 })?,
@@ -216,6 +295,14 @@ impl SessionServiceImpl {
         }) {
             return Err(StateInspectionRejection::StaleContinuation);
         }
+        let moving_partitions = if let Some(branch) = relay.node.partition_branch()
+            && let Some(epoch) = domain_schedule.partition_epochs.get(branch)
+            && epoch.transition.is_some()
+        {
+            Some(epoch.partitions)
+        } else {
+            None
+        };
         Ok(InspectionPlan {
             domain: domain.clone(),
             relay: show.relay.clone(),
@@ -234,6 +321,7 @@ impl SessionServiceImpl {
                 .min(limits.collection_entries()),
             cursor,
             limits,
+            moving_partitions,
         })
     }
 
@@ -244,6 +332,9 @@ impl SessionServiceImpl {
     ) -> Result<StateInspectionPage, StateInspectionRejection> {
         let plan = self.inspection_plan(domain, show).await?;
         let incarnations = self.live_node_incarnations().await;
+        let partition_inspection = self
+            .capture_materialized_partition_inspection(&plan, &incarnations)
+            .await?;
         let local = self.inner.consensus.local_node_id();
         let mut units = plan.node.units.iter().collect::<Vec<_>>();
         units.sort_by_key(|(unit, _)| **unit);
@@ -281,7 +372,11 @@ impl SessionServiceImpl {
                 max_bytes: u64::try_from(budget.bytes).assured("the session byte limit fits u64"),
                 target,
             };
-            let (descriptor, records) = self.inspection_unit_page(&request, &plan).await?;
+            let filter = partition_inspection
+                .as_ref()
+                .map(|inspection| inspection.filter(**unit))
+                .transpose()?;
+            let (descriptor, records) = self.inspection_unit_page(&request, &plan, filter).await?;
             let replicas = if plan.node.config.executes_on_every_cluster_node() {
                 Vec::new()
             } else {
@@ -442,12 +537,22 @@ impl SessionServiceImpl {
         &self,
         request: &ReadMaterializedStatePage,
         plan: &InspectionPlan,
+        filter: Option<nervix_interconnect::MaterializedPartitionFilter>,
     ) -> Result<(MaterializedStatePageDescriptor, InspectionUnitRows), StateInspectionRejection>
     {
         if request.target.node_id() == self.inner.consensus.local_node_id() {
-            let (descriptor, page) = self
-                .native_materialized_inspection_page(request.clone())
-                .await?;
+            let (descriptor, page) = match filter {
+                Some(filter) => {
+                    let capture = self
+                        .native_materialized_capture(request.clone(), true, Some(filter))
+                        .await?;
+                    (capture.descriptor, capture.state.page)
+                }
+                None => {
+                    self.native_materialized_inspection_page(request.clone())
+                        .await?
+                }
+            };
             return Ok((descriptor, InspectionUnitRows::Local(page)));
         }
         let deadline = *self
@@ -456,12 +561,31 @@ impl SessionServiceImpl {
             .state_inspection_settings()
             .read_timeout
             .value();
-        let stream = match self
-            .inner
-            .interconnect
-            .request_stream_with_timeout(request.target.node_id(), request.clone(), deadline)
-            .await
-        {
+        let stream = match match filter {
+            Some(filter) => {
+                self.inner
+                    .interconnect
+                    .request_stream_with_timeout(
+                        request.target.node_id(),
+                        nervix_interconnect::ReadPartitionedMaterializedStatePage {
+                            read: request.clone(),
+                            filter,
+                        },
+                        deadline,
+                    )
+                    .await
+            }
+            None => {
+                self.inner
+                    .interconnect
+                    .request_stream_with_timeout(
+                        request.target.node_id(),
+                        request.clone(),
+                        deadline,
+                    )
+                    .await
+            }
+        } {
             Ok(stream) => stream,
             Err(error) => {
                 return Err(inspection_refusal(
@@ -505,6 +629,17 @@ impl SessionServiceImpl {
         (MaterializedStatePageDescriptor, MaterializedInspectionPage),
         StateInspectionRejection,
     > {
+        self.native_materialized_capture(request, false, None)
+            .await
+            .map(|capture| (capture.descriptor, capture.state.page))
+    }
+
+    async fn native_materialized_capture(
+        &self,
+        request: ReadMaterializedStatePage,
+        catalog: bool,
+        filter: Option<nervix_interconnect::MaterializedPartitionFilter>,
+    ) -> Result<NativeMaterializedCapture, StateInspectionRejection> {
         let local = ClusterNodeIdentity::new(
             self.inner.consensus.local_node_id().clone(),
             self.inner.cluster.local_incarnation(),
@@ -536,21 +671,25 @@ impl SessionServiceImpl {
         let rows = usize::try_from(request.max_rows)
             .map_err(|error| inspection_refusal(error, StateInspectionRejection::InvalidLimit))?
             .min(settings.max_rows.value().get());
-        let page = match self
+        let captured = match self
             .inner
             .runtime
-            .local_materialized_state_page(
+            .capture_materialized_state_page(
                 &request.domain,
                 &request.relay,
-                request.unit,
-                request.selection,
-                request.after,
-                crate::runtime::MaterializedPageBounds {
-                    rows,
-                    bytes: request.max_bytes.min(
-                        u64::try_from(SessionLimits::DEFAULT.transfer_bytes())
-                            .assured("session limits fit u64"),
-                    ),
+                crate::runtime::MaterializedPageQuery {
+                    unit: request.unit,
+                    selection: request.selection,
+                    after: request.after,
+                    bounds: crate::runtime::MaterializedPageBounds {
+                        rows,
+                        bytes: request.max_bytes.min(
+                            u64::try_from(SessionLimits::DEFAULT.transfer_bytes())
+                                .assured("session limits fit u64"),
+                        ),
+                    },
+                    catalog_requested: catalog,
+                    filter,
                 },
             )
             .await
@@ -565,6 +704,7 @@ impl SessionServiceImpl {
                 return Err(inspection_refusal(error, reason));
             }
         };
+        let page = &captured.page;
         let descriptor = MaterializedStatePageDescriptor {
             origin: StateInspectionOrigin {
                 node: local,
@@ -579,12 +719,43 @@ impl SessionServiceImpl {
             last_branch: page.last_branch,
             more: page.more,
         };
-        Ok((descriptor, page))
+        Ok(NativeMaterializedCapture {
+            descriptor,
+            state: captured,
+        })
+    }
+
+    pub(in crate::application) async fn handle_materialized_key_catalog(
+        &self,
+        request: nervix_interconnect::ReadMaterializedKeyCatalog,
+    ) -> nervix_interconnect::MaterializedKeyCatalogResponse {
+        let result = self
+            .native_materialized_capture(request.read, true, None)
+            .await
+            .map(|capture| capture.state.catalog);
+        nervix_interconnect::MaterializedKeyCatalogResponse { result }
+    }
+
+    pub(in crate::application) async fn stream_partitioned_materialized_inspection_page(
+        &self,
+        request: nervix_interconnect::ReadPartitionedMaterializedStatePage,
+    ) -> Result<StreamingResponse, Report<StreamHandlerError>> {
+        self.stream_materialized_inspection_capture(request.read, Some(request.filter))
+            .await
     }
 
     pub(in crate::application) async fn stream_materialized_inspection_page(
         &self,
         request: ReadMaterializedStatePage,
+    ) -> Result<StreamingResponse, Report<StreamHandlerError>> {
+        self.stream_materialized_inspection_capture(request, None)
+            .await
+    }
+
+    async fn stream_materialized_inspection_capture(
+        &self,
+        request: ReadMaterializedStatePage,
+        filter: Option<nervix_interconnect::MaterializedPartitionFilter>,
     ) -> Result<StreamingResponse, Report<StreamHandlerError>> {
         let max_bytes = request.max_bytes.min(
             u64::try_from(SessionLimits::DEFAULT.transfer_bytes())
@@ -598,7 +769,13 @@ impl SessionServiceImpl {
             .value();
         let executor = self.inner.runtime.inspection_executor();
         match timeout(deadline, async {
-            let result = self.native_materialized_inspection_page(request).await;
+            let result = match filter {
+                Some(filter) => self
+                    .native_materialized_capture(request, true, Some(filter))
+                    .await
+                    .map(|capture| (capture.descriptor, capture.state.page)),
+                None => self.native_materialized_inspection_page(request).await,
+            };
             stream_materialized_page(executor, result, max_bytes).await
         })
         .await

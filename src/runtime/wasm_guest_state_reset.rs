@@ -61,6 +61,7 @@ pub(crate) struct GuestWasmStateResetBranch {
     domain: DomainName,
     processor: ModelName,
     branch: Option<BranchKeyFingerprint>,
+    unit: Option<Unit>,
 }
 
 /// One branch's guest asking for the state lifetime it ran in to be replaced.
@@ -77,11 +78,13 @@ impl GuestWasmStateResetRequest {
         processor: ModelName,
         key: Option<BranchKey>,
         generation: WasmStateGeneration,
+        unit: Option<Unit>,
     ) -> Self {
         let branch = GuestWasmStateResetBranch {
             domain,
             processor,
             branch: key.as_ref().map(BranchKey::fingerprint),
+            unit,
         };
         Self {
             branch,
@@ -102,6 +105,10 @@ impl GuestWasmStateResetRequest {
         self.branch.branch.as_ref()
     }
 
+    pub(crate) fn unit(&self) -> Option<Unit> {
+        self.branch.unit
+    }
+
     /// The generation the guest asked from. A reset that already replaced it has answered this
     /// request, so a coordinator that observes a later generation has nothing left to do.
     pub(crate) fn generation(&self) -> WasmStateGeneration {
@@ -111,9 +118,17 @@ impl GuestWasmStateResetRequest {
     /// The exact scope this request selects: the one branch whose guest asked, and never another
     /// processor, domain, or branch.
     pub(crate) fn target(&self) -> WasmStateResetTarget {
-        match BranchKey::to_remote_key(&self.key) {
-            Some(fields) => WasmStateResetTarget::Branch(fields),
-            None => WasmStateResetTarget::Unbranched,
+        let key = BranchKey::to_remote_key(&self.key);
+        if key.is_branched() {
+            match self.branch.unit {
+                Some(unit) => WasmStateResetTarget::BranchInUnit {
+                    unit,
+                    key: Box::new(key),
+                },
+                None => WasmStateResetTarget::Branch(key),
+            }
+        } else {
+            WasmStateResetTarget::Unbranched
         }
     }
 
@@ -135,6 +150,21 @@ impl GuestWasmStateResetRequest {
             Some(fingerprint) => hasher.update(fingerprint.fingerprint()),
             None => hasher.update(&[0]),
         };
+        if let Some(unit) = self.branch.unit {
+            match unit.kind() {
+                nervix_models::UnitKind::Single => {
+                    hasher.update(&[0]);
+                }
+                nervix_models::UnitKind::Partition(partition) => {
+                    hasher.update(&[1]);
+                    hasher.update(&partition.to_be_bytes());
+                }
+                nervix_models::UnitKind::Instance(instance) => {
+                    hasher.update(&[2]);
+                    hasher.update(&instance.to_be_bytes());
+                }
+            }
+        }
         hasher.update(&u64::from(self.generation).to_be_bytes());
         let digest = hasher.finalize().to_hex();
         CommandExecutionReference::parse(format!("wasm-guest-reset.{digest}"))
@@ -161,6 +191,11 @@ impl WasmGuestStateResetContext<'_> {
                 self.processor.clone(),
                 self.branch.key.clone(),
                 generation,
+                self.branch.runtime.wasm_lifetime_unit(
+                    &self.branch.domain,
+                    self.processor,
+                    self.branch.owner.unit,
+                ),
             ));
         generation
     }
@@ -334,7 +369,30 @@ mod tests {
             ModelName::try_from("counting_guest").expect("the processor name must be valid"),
             tenant_key,
             generation,
+            None,
         )
+    }
+
+    #[test]
+    fn a_retained_inherited_guests_request_keeps_its_unit_without_fabricating_partition_provenance()
+    {
+        let make = |unit| {
+            GuestWasmStateResetRequest::new(
+                DomainName::try_from("events").assured("valid domain"),
+                ModelName::try_from("guest").assured("valid processor"),
+                tenant("alpha"),
+                WasmStateGeneration::FIRST,
+                Some(unit),
+            )
+        };
+        let first = make(Unit::partition(3));
+        let second = make(Unit::partition(1));
+        assert_ne!(first.reference(), second.reference());
+        let WasmStateResetTarget::BranchInUnit { unit, key } = first.target() else {
+            panic!("the target names its actual unit");
+        };
+        assert_eq!(unit, Unit::partition(3));
+        assert!(key.inherited_origin().is_none());
     }
 
     /// Every request a branch's guests make from one state lifetime coordinates as one reset.
@@ -379,7 +437,7 @@ mod tests {
             panic!("a branched request must select its own concrete branch");
         };
         assert_eq!(
-            BranchKey::from_remote_key(Some(fields)).expect("the selected key must decode"),
+            BranchKey::from_remote_key(fields).expect("the selected key must decode"),
             tenant("alpha")
         );
         assert_eq!(

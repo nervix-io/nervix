@@ -772,10 +772,11 @@ not alter a graph's stored execution contract. Each flag has an environment twin
 | `--connector-retry-jitter-percent` | 0 | 0 through 100 percent added to the next multiplied delay, within the declared cap |
 | `--kafka-domain-assignment-retry` | 100 ms | positive retry cadence while a domain-offset assignment is unavailable |
 | `--kafka-partition-watch-interval` | 1 s | positive topology inspection cadence |
+| `--partition-topology-poll-interval` | 1 s | positive Pulsar partition inspection and topology observer reconciliation cadence; Kafka inspection keeps its own interval |
 | `--syslog-intake-queue-capacity` | 64 frames | positive, within the native channel permit bound; stream intake backpressures when full |
 | `--syslog-read-chunk-bytes` | 8 KiB | positive, addressable bytes per stream read, further limited by the frame bound |
 
-The two Kafka durations accept at most `u32::MAX` whole seconds. VM programs carry the compiling
+The Kafka durations and topology polling interval accept at most `u32::MAX` whole seconds. VM programs carry the compiling
 node's resolved settings into prepared regex calls and execution. Extension calls still use
 Extension workers regardless of the inline threshold. Deterministic row-defect limits, including
 compiled regex size and `contains_any` input limits, remain fixed across nodes.

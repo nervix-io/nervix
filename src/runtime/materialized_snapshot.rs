@@ -41,7 +41,7 @@ use meticulous::OptionExt as _;
 use nervix_execution::{
     AdmissionError, BudgetedBuffer, ChargedBytes, CpuClass, Executor, MemoryClass, StorageClass,
 };
-use nervix_models::{RemoteRuntimeField, RemoteRuntimeRecordMetadata};
+use nervix_models::RemoteRuntimeRecordMetadata;
 use nervix_primitives::sync::{Arc, StdArc};
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use thiserror::Error;
@@ -273,7 +273,7 @@ struct SealedRecordIdentities {
 /// absent branch is the unbranched record, never every branch.
 #[derive(Debug, Clone, PartialEq, Archive, RkyvSerialize, RkyvDeserialize)]
 struct SealedRecordIdentity {
-    branch: Option<Vec<RemoteRuntimeField>>,
+    branch: nervix_models::RemoteBranchKey,
     watermarks: RemoteRuntimeRecordMetadata,
 }
 
@@ -1010,7 +1010,7 @@ pub(crate) fn materialized_container_header(
 
 /// Convert bounded typed identities into their native record frame, without any payload rows.
 pub(crate) fn materialized_identity_section(
-    identities: Vec<(Option<Vec<RemoteRuntimeField>>, RemoteRuntimeRecordMetadata)>,
+    identities: Vec<(nervix_models::RemoteBranchKey, RemoteRuntimeRecordMetadata)>,
 ) -> Result<Vec<u8>, Report<MaterializedSnapshotError>> {
     let identities = identities
         .into_iter()
@@ -2088,9 +2088,8 @@ mod tests {
                         .records()
                         .iter()
                         .map(|record| MaterializedRecordIdentity {
-                            branch: BranchKey::to_remote_key(&record.branch).map(|fields| {
-                                fields.into_iter().map(StateField::from_remote).collect()
-                            }),
+                            branch: BranchKey::to_remote_key(&record.branch)
+                                .map_fields(StateField::from_remote),
                             watermarks: record.row.metadata().to_remote(),
                         })
                         .collect(),
@@ -2134,9 +2133,7 @@ mod tests {
                         .into_iter()
                         .map(|identity| {
                             (
-                                identity.branch.map(|fields| {
-                                    fields.into_iter().map(StateField::into_remote).collect()
-                                }),
+                                identity.branch.map_fields(StateField::into_remote),
                                 identity.watermarks,
                             )
                         })

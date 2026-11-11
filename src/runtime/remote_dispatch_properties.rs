@@ -62,13 +62,32 @@ impl RoutedCase {
         // What shapes the case is read before its batch: an ordinary run's few bytes run out while
         // a batch is generated, and a choice read after that takes its first option, which would
         // leave nearly every case unbranched, attached and without a registration.
-        let key = BranchKey::generated_scope(arbitrary);
+        let mut key = BranchKey::generated_scope(arbitrary);
         // A branched batch belongs to a relay of one through a few partitions; an unbranched one to
         // a relay with one owner.
-        let partitioning = match key.as_ref() {
-            Some(_) => RelayPartitioning::of_partitions(arbitrary.scheduled_branch_partitions()),
+        let layout = key
+            .as_ref()
+            .map(|_| arbitrary.scheduled_branch_partitions());
+        let partitioning = match layout {
+            Some(partitions) => RelayPartitioning::of_partitions(partitions),
             None => RelayPartitioning::Whole,
         };
+        if let Some(partitions) = layout.filter(|partitions| partitions.is_inherited()) {
+            let (fields, _) = BranchKey::to_remote_key(&key)
+                .into_parts()
+                .assured("a generated concrete key has fields");
+            let partition =
+                nervix_models::ExternalPartition::new(u32::from(arbitrary.entropy().byte()));
+            key = BranchKey::from_remote_key(nervix_models::RemoteBranchKey::branched(
+                fields,
+                Some(nervix_models::InheritedPartitionOrigin {
+                    partition,
+                    epoch: nervix_models::PartitionEpochNumber::new(arbitrary.positive_u64()),
+                    unit: partitions.unit_of(partition.seed()),
+                }),
+            ))
+            .assured("the inherited wrapper preserves the generated valid fields");
+        }
         let unit = partitioning
             .unit_of(&key)
             .assured("a branched batch has a partition and an unbranched one the single unit");
@@ -157,14 +176,11 @@ impl RoutedCase {
 }
 
 /// A branch key's remote form compared exactly: field names, and floats by their bits.
-fn exact_key(key: &Option<Vec<RemoteRuntimeField>>) -> Option<Vec<(String, String)>> {
-    let fields = key.as_ref()?;
-    Some(
-        fields
-            .iter()
-            .map(|field| (field.name.clone(), exact_value(&field.value)))
-            .collect(),
-    )
+fn exact_key(
+    key: &nervix_models::RemoteBranchKey,
+) -> nervix_models::BranchKeyFields<(String, String)> {
+    key.clone()
+        .map_fields(|field| (field.name, exact_value(&field.value)))
 }
 
 /// A remote value rendered with every float as its bits, which is how two values that compare
@@ -425,24 +441,35 @@ fn bolero_routed_payloads_whose_parts_disagree_are_refused_with_their_defect() {
                             payload.acks.pop();
                         }
                     }
-                    PayloadDefect::EmptyKey => payload.key = Some(Vec::new()),
+                    PayloadDefect::EmptyKey => {
+                        payload.key = nervix_models::RemoteBranchKey::Direct((Vec::new()).into())
+                    }
                     PayloadDefect::KeyFieldName => {
-                        payload.key = Some(vec![RemoteRuntimeField {
-                            name: "not a field name".to_string(),
-                            value: RemoteRuntimeValue::Bool(true),
-                        }]);
+                        payload.key = nervix_models::RemoteBranchKey::Direct(
+                            (vec![RemoteRuntimeField {
+                                name: "not a field name".to_string(),
+                                value: RemoteRuntimeValue::Bool(true),
+                            }])
+                            .into(),
+                        );
                     }
                     PayloadDefect::KeyDatetime => {
-                        payload.key = Some(vec![RemoteRuntimeField {
-                            name: "at".to_string(),
-                            value: RemoteRuntimeValue::Datetime("yesterday".to_string()),
-                        }]);
+                        payload.key = nervix_models::RemoteBranchKey::Direct(
+                            (vec![RemoteRuntimeField {
+                                name: "at".to_string(),
+                                value: RemoteRuntimeValue::Datetime("yesterday".to_string()),
+                            }])
+                            .into(),
+                        );
                     }
                     PayloadDefect::KeyFloat => {
-                        payload.key = Some(vec![RemoteRuntimeField {
-                            name: "ratio".to_string(),
-                            value: RemoteRuntimeValue::F64(f64::NAN),
-                        }]);
+                        payload.key = nervix_models::RemoteBranchKey::Direct(
+                            (vec![RemoteRuntimeField {
+                                name: "ratio".to_string(),
+                                value: RemoteRuntimeValue::F64(f64::NAN),
+                            }])
+                            .into(),
+                        );
                     }
                 }
                 check_refusal(&receiver, &case, payload, defect, rows).await;

@@ -33,11 +33,11 @@ use std::io::{Read, Write};
 
 use arch_into::ArchInto as _;
 use error_stack::{Report, ResultExt as _};
+use meticulous::OptionExt as _;
 use nervix_execution::{Cancellation, MemoryClass};
 use nervix_interconnect::StatePlacementEnvelope;
 use nervix_models::{
-    BranchKeyFingerprint, DomainName, DomainStatus, ModelName, NodeRef, NodeUnitRef,
-    RemoteRuntimeField, Timestamp,
+    BranchKeyFingerprint, DomainName, DomainStatus, ModelName, NodeRef, NodeUnitRef, Timestamp,
 };
 use thiserror::Error;
 
@@ -349,7 +349,7 @@ pub(crate) use super::state_store::generation::{
 
 #[derive(Debug, Clone)]
 pub struct BackupBranchLifecycleEntry {
-    pub key: Option<Vec<RemoteRuntimeField>>,
+    pub key: nervix_models::RemoteBranchKey,
     pub last_ingestion: Timestamp,
     pub incarnation: u64,
 }
@@ -1032,7 +1032,7 @@ impl Runtime {
         let mut captured = Vec::with_capacity(deduplicators.len() + windows.len());
         for state in deduplicators {
             captured.push(CapturedBranchState {
-                placement: state.placement.to_remote(),
+                placement: self.captured_branch_placement(domain, &state.placement, keys),
                 branch_fingerprint: state
                     .placement
                     .branch_key
@@ -1049,7 +1049,7 @@ impl Runtime {
                 continue;
             };
             captured.push(CapturedBranchState {
-                placement: state.placement.to_remote(),
+                placement: self.captured_branch_placement(domain, &state.placement, keys),
                 branch_fingerprint: state
                     .placement
                     .branch_key
@@ -1066,7 +1066,7 @@ impl Runtime {
                 continue;
             };
             captured.push(CapturedBranchState {
-                placement: state.placement.to_remote(),
+                placement: self.captured_branch_placement(domain, &state.placement, keys),
                 branch_fingerprint: state
                     .placement
                     .branch_key
@@ -1076,6 +1076,28 @@ impl Runtime {
             });
         }
         captured
+    }
+
+    fn captured_branch_placement(
+        &self,
+        domain: &DomainName,
+        placement: &RuntimeStatePlacement,
+        keys: &ahash::HashMap<BranchStateIdentity, Option<BranchKey>>,
+    ) -> nervix_interconnect::StatePlacementEnvelope {
+        let identity = BranchStateIdentity {
+            node: NodeUnitRef::new(
+                NodeRef::new(placement.kind, placement.identifier.clone()),
+                placement.unit,
+            ),
+            branch: placement.branch_key.as_ref().map(BranchKey::fingerprint),
+        };
+        let key = keys
+            .get(&identity)
+            .verified("only published states held by the captured lifecycle reach this projection");
+        let mut envelope = placement.to_remote();
+        envelope.branch_key = BranchKey::to_remote_key(key);
+        envelope.domain = domain.clone();
+        envelope
     }
 
     /// Whether a published branch state belongs to this cut: it is this node's state of `domain`
@@ -1237,7 +1259,7 @@ mod branch_state_shuttle_tests;
     nervix::layer(harness, reason = "test module remains outside product execution")
 )]
 mod tests {
-    use meticulous::{OptionExt as _, ResultExt as _};
+    use meticulous::ResultExt as _;
     use nervix_execution::StorageClass;
     use nervix_interconnect::RuntimeState;
     use nervix_models::{ModelKind, SchemaFingerprint, WasmStateGeneration};

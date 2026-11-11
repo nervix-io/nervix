@@ -130,9 +130,7 @@ impl SessionServiceImpl {
                                 },
                             )?;
                             identities.push(MaterializedRecordIdentity {
-                                branch: branch.map(|fields| {
-                                    fields.into_iter().map(StateField::from_remote).collect()
-                                }),
+                                branch: branch.map_fields(StateField::from_remote),
                                 watermarks,
                             });
                         }

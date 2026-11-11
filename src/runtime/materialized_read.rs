@@ -166,6 +166,14 @@ impl CachedMaterializedGeneration {
 
 #[derive(Debug, Error)]
 pub(crate) enum MaterializedReadError {
+    #[error(
+        "materialized relay '{relay}' in domain '{domain}' holds indistinguishable copies of one \
+         key"
+    )]
+    AmbiguousCopies {
+        domain: DomainName,
+        relay: RelayName,
+    },
     #[error("failed to open stored {placement}")]
     StoredSnapshot { placement: RuntimeStatePlacement },
     #[error("failed to fetch {placement} from node '{target}'")]
@@ -258,35 +266,24 @@ impl MaterializedReadError {
 /// owns the key.
 #[derive(Clone)]
 pub(super) struct MaterializedRelayReads {
-    partitioning: RelayPartitioning,
     by_unit: BTreeMap<Unit, state_replication::routing::MaterializedRelayPublication>,
 }
 
 impl MaterializedRelayReads {
-    fn of_key(
+    fn record_in_unit(
         &self,
-        branch: &Option<BranchKey>,
-    ) -> Option<&state_replication::routing::MaterializedRelayPublication> {
-        let Ok(unit) = self.partitioning.unit_of(branch) else {
-            return None;
-        };
-        self.by_unit.get(&unit)
-    }
-
-    pub(in crate::runtime) fn record(
-        &self,
+        unit: Unit,
         branch: &Option<BranchKey>,
     ) -> Option<MaterializedGenerationRecord> {
-        self.of_key(branch)?.record(branch)
+        self.by_unit.get(&unit)?.record(branch)
     }
 
-    pub(in crate::runtime) fn has_state_for(&self, branch: &Option<BranchKey>) -> bool {
-        match self.of_key(branch) {
+    fn has_state_in_unit(&self, unit: Unit, branch: &Option<BranchKey>) -> bool {
+        match self.by_unit.get(&unit) {
             Some(published) => published.has_state_for(branch),
             None => false,
         }
     }
-
     pub(in crate::runtime) fn visit_unit_states<E>(
         &self,
         unit: Unit,
@@ -349,12 +346,13 @@ impl Runtime {
         &self,
         domain: &DomainName,
         specs: &HashMap<RelayName, RuntimeMaterializedRelaySpec>,
+        owners: &HashMap<RelayName, RelayOwnerRoutes>,
     ) -> HashMap<RelayName, MaterializedRelayReads> {
         let mut publications = HashMap::default();
         for (relay, spec) in specs {
             publications.insert(
                 relay.clone(),
-                self.materialized_relay_publication(domain, relay, spec),
+                self.materialized_relay_publication(domain, relay, spec, owners.get(relay)),
             );
         }
         publications
@@ -372,11 +370,16 @@ impl Runtime {
         domain: &DomainName,
         relay: &RelayName,
         spec: &RuntimeMaterializedRelaySpec,
+        owners: Option<&RelayOwnerRoutes>,
     ) -> MaterializedRelayReads {
         let entity = DomainNodeRef::node_in(domain.clone(), ModelKind::Relay, relay);
         let partitioning = RelayPartitioning::of(Some(&spec.branching));
         let mut by_unit = BTreeMap::new();
-        for unit in partitioning.units() {
+        let units = match owners {
+            Some(owners) if owners.is_placed() => owners.units().collect(),
+            _ => partitioning.units(),
+        };
+        for unit in units {
             let published = self
                 .inner
                 .state_replication_routing
@@ -387,10 +390,7 @@ impl Runtime {
                 );
             by_unit.insert(unit, published);
         }
-        MaterializedRelayReads {
-            partitioning,
-            by_unit,
-        }
+        MaterializedRelayReads { by_unit }
     }
 
     /// Find the branch's record wherever this node keeps it.
@@ -408,6 +408,18 @@ impl Runtime {
         let Ok(unit) = routing.relay_partitioning(relay).unit_of(branch_key) else {
             return Ok(None);
         };
+        self.local_materialized_unit_record(routing, domain, relay, unit, branch_key)
+            .await
+    }
+
+    async fn local_materialized_unit_record(
+        &self,
+        routing: &DomainRoutingSnapshot,
+        domain: &DomainName,
+        relay: &RelayName,
+        unit: Unit,
+        branch_key: &Option<BranchKey>,
+    ) -> error_stack::Result<Option<MaterializedGenerationRecord>, MaterializedReadError> {
         let placements = self.materialized_record_placements(domain, relay, unit, branch_key)?;
         let root = placements
             .last()
@@ -416,11 +428,11 @@ impl Runtime {
             return Ok(None);
         }
         if let Some(published) = routing.materialized_stream_reads.get(relay) {
-            if let Some(record) = published.record(branch_key) {
+            if let Some(record) = published.record_in_unit(unit, branch_key) {
                 return Ok(Some(record));
             }
             // Live state owns absence too. Storage may still hold its pre-eviction checkpoint.
-            if published.has_state_for(branch_key) {
+            if published.has_state_in_unit(unit, branch_key) {
                 return Ok(None);
             }
         }
@@ -645,6 +657,42 @@ impl Runtime {
             }
             MaterializedLookupKeyMode::Root => None,
         };
+        let partitioning = routing.relay_partitioning(relay);
+        let previous = routing.relay_previous_partitioning(relay);
+        let unknown_origin = placement_branch_key
+            .as_ref()
+            .is_some_and(|key| key.inherited_origin().is_none());
+        if (partitioning.is_inherited() && (unknown_origin || previous.is_some()))
+            || previous.is_some_and(|previous| previous.is_inherited())
+        {
+            let Some(record) = self
+                .materialized_record_by_origin(
+                    routing,
+                    domain,
+                    relay,
+                    &placement_branch_key,
+                    schema,
+                )
+                .await?
+            else {
+                return Ok(None);
+            };
+            let mut values = Vec::with_capacity(fields.len());
+            for field in fields {
+                values.push(
+                    record
+                        .row
+                        .value_at(field.column_index)
+                        .change_context_lazy(|| MaterializedReadError::Field {
+                            domain: domain.clone(),
+                            relay: relay.clone(),
+                            branch: placement_branch_key.clone(),
+                            field: field.name.clone(),
+                        })?,
+                );
+            }
+            return Ok(Some(values));
+        }
         let Ok(unit) = routing
             .relay_partitioning(relay)
             .unit_of(&placement_branch_key)
@@ -695,6 +743,98 @@ impl Runtime {
         self.materialized_unit_values(&read, unit, unit).await
     }
 
+    /// An external publisher supplies no field-hash contract. Cold lookups and transition reads
+    /// inspect the already bound unit publications and select the newest admitted origin.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(
+            reason = "the retained owner map's unit iterator reads only its immutable keys"
+        )
+    )]
+    async fn materialized_record_by_origin(
+        &self,
+        routing: &DomainRoutingSnapshot,
+        domain: &DomainName,
+        relay: &RelayName,
+        key: &Option<BranchKey>,
+        schema: &StdArc<arrow_schema::Schema>,
+    ) -> error_stack::Result<Option<MaterializedGenerationRecord>, MaterializedReadError> {
+        struct Candidate {
+            record: MaterializedGenerationRecord,
+            epoch: Option<nervix_models::PartitionEpochNumber>,
+            own_unit: bool,
+        }
+        let partitioning = routing.relay_partitioning(relay);
+        let current = partitioning.unit_of(key).ok();
+        let units = match routing.materialized_stream_owner_nodes.get(relay) {
+            Some(owners) if owners.is_placed() => owners.units().collect::<Vec<_>>(),
+            _ => match routing.materialized_stream_reads.get(relay) {
+                Some(reads) => reads.by_unit.keys().copied().collect(),
+                None => Vec::new(),
+            },
+        };
+        let mut selected = None::<Candidate>;
+        let mut ambiguous = false;
+        for unit in units {
+            nervix_primitives::task::consume_budget().await;
+            if routing
+                .relay_services
+                .get(relay)
+                .is_some_and(|services| services.dispatch_is_fenced(unit))
+            {
+                return Ok(None);
+            }
+            let owner = routing.materialized_stream_owner_of(relay, unit);
+            let record = match owner {
+                Some(owner) if !self.is_local_node(&owner) => {
+                    self.remote_materialized_record(&RemoteBranchRead {
+                        owner: &owner,
+                        unit,
+                        domain,
+                        relay,
+                        branch_key: key,
+                        schema,
+                    })
+                    .await?
+                }
+                _ => {
+                    self.local_materialized_unit_record(routing, domain, relay, unit, key)
+                        .await?
+                }
+            };
+            let Some(record) = record else {
+                continue;
+            };
+            if !partitioning.is_inherited() && current == Some(unit) {
+                return Ok(Some(record));
+            }
+            let origin = record.branch.as_ref().and_then(BranchKey::inherited_origin);
+            let epoch = origin.map(|origin| origin.epoch);
+            let own_unit = partitioning.unit_of(&record.branch).ok() == Some(unit);
+            match &selected {
+                Some(previous) if (previous.epoch, previous.own_unit) > (epoch, own_unit) => {}
+                Some(previous) if (previous.epoch, previous.own_unit) == (epoch, own_unit) => {
+                    ambiguous = true;
+                }
+                _ => {
+                    selected = Some(Candidate {
+                        record,
+                        epoch,
+                        own_unit,
+                    });
+                    ambiguous = false;
+                }
+            }
+        }
+        if ambiguous {
+            return Err(Report::new(MaterializedReadError::AmbiguousCopies {
+                domain: domain.clone(),
+                relay: relay.clone(),
+            }));
+        }
+        Ok(selected.map(|candidate| candidate.record))
+    }
+
     /// The values `read` asks for, from the row `unit` of the relay holds for its key: locally,
     /// or from the node that owns the unit. `current` is the unit the current partition count
     /// places the key in.
@@ -740,15 +880,10 @@ impl Runtime {
         read: &MaterializedUnitRead<'_>,
         unit: Unit,
     ) -> error_stack::Result<Option<Vec<Option<RuntimeValue>>>, MaterializedReadError> {
-        let entity = DomainNodeRef::node_in(read.domain.clone(), ModelKind::Relay, read.relay);
-        let Some(published) = self
-            .inner
-            .state_replication_routing
-            .materialized_unit(&DomainNodeUnitRef::new(entity, unit))
-        else {
+        let Some(published) = read.routing.materialized_stream_reads.get(read.relay) else {
             return Ok(None);
         };
-        let Some(record) = published.record(read.branch_key) else {
+        let Some(record) = published.record_in_unit(unit, read.branch_key) else {
             return Ok(None);
         };
         let mut values = Vec::with_capacity(read.fields.len());

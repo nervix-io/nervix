@@ -352,10 +352,10 @@ transport offset conversion. The SDK's indexed authoring and typed-inspection vi
 empty JSON value arrays. These driver representations never enter semantic Models or plans.
 
 A NATS ingestor or emitter Model distinguishes `NATS SUBJECT` and `NATS STREAM` entities in its archived union.
-The registry's `NERVIX EMIT INST` archive signature identifies the current Model layout, including
+The registry's `NERVIX PARTITION` archive signature identifies the current Model layout, including
 that union, the endpoint kind, the separate JSON and CBOR wire type enums (CBOR has six types), AVRO representation types whose arrays declare their item type, explicit `BASE64` codec
 encoding, a Pulsar subscription's required type and an owned subscription's required start position,
-a Kafka consumer group's required start position, the required 16-bit branch partition count,
+a Kafka consumer group's required start position, the direct, automatic inherited or grouped inherited branch declaration,
 typed ingestor instancing, Sentry platform, an ingestor's `TIMESTAMP AT metadata.<field>` source,
 an SQS QUEUE emitter's `SEND` request shape,
 the receive count an SQS QUEUE ingestor's `ACK PARALLEL MAX` declares, the session and quality of
@@ -367,14 +367,17 @@ expression scope and an emitter's `INSTANCES` declaration.
 Placement coverage is one semantic choice: a corridor with named endpoints or a domain-wide
 rule. Domain configuration contains its pace; named placement rules belong to the Model index.
 Relocation selects whole nodes or exact partition/instance indices using the shared node identity.
-Consensus's `raft_inferencer_wasm_inspection_listener_bounds_` keyspaces and current
-`ClusterState` metadata encoding, 32, identify its stored shapes, including the partition count of every resolved
+Consensus's `raft_inherited_topology_listener_bounds_` keyspaces and current
+`ClusterState` metadata encoding, 33, identify its stored shapes, including the partition count of every resolved
 branch declaration in the committed schedule, the partition epoch the schedule records for each
 branch whose count changed, and the statements a transaction keeps, including per-entity
 `ALTER INGESTOR` and `ALTER EMITTER` operations and a `RESET WASM PROCESSOR ... STATE` that takes
 its domain from the transaction. The runtime state store's
-`ranked-intake-unit-checkpoint-segments` format identifies the checkpoints it keeps, including the
+`inherited-partition-origin-checkpoint-index` format identifies the checkpoints it keeps, including the
 unsigned 64-bit instance identity and the unit every branch-aggregated metric series carries.
+Inherited schedules also retain configuration-fenced source sets, common grouping and suspended
+producers. Inherited keys carry the external coordinate, admitting epoch and actual unit through
+native checkpoints and archive records.
 Fixed intake counts remain `NonZeroU64`; branch partition counts remain `NonZeroU16`. The
 registry's instancing boundary checks native count conversion and the layout of the scheduled
 unit entries before materialization. An unaddressable declaration is a typed validation failure;

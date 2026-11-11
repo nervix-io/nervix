@@ -9,9 +9,9 @@ use std::os::unix::fs::PermissionsExt as _;
 
 use nervix_backup::{
     ArchiveRecord, BranchLifecycleRecord, DeduplicatorStateDescriptor, DomainRecord,
-    KafkaOffsetsRecord, MaterializedIdentitiesRecord, MaterializedRelayDescriptor, RecordKind,
-    ResourceVersionRecord, SectionPath, WasmStateDescriptor, WindowStateDescriptor,
-    read_archive_contents,
+    KafkaOffsetsRecord, MaterializedIdentitiesRecord, MaterializedRelayDescriptor,
+    PartitionTopologyRecord, RecordKind, ResourceVersionRecord, SectionPath, WasmStateDescriptor,
+    WindowStateDescriptor, read_archive_contents,
 };
 use nervix_models::{DomainStatus, WasmStateGeneration};
 
@@ -353,6 +353,17 @@ impl ArchiveValues {
                         record
                             .encode()
                             .assured("the restored window expectation encodes"),
+                    )
+                }
+                RecordKind::PartitionTopology => {
+                    let mut record = PartitionTopologyRecord::decode(path.as_str(), &section.bytes)
+                        .assured("the captured partition topology validates");
+                    record.domain = target.clone();
+                    (
+                        SectionPath::domain_partitions(target),
+                        record
+                            .encode()
+                            .assured("the restored partition topology encodes"),
                     )
                 }
                 RecordKind::Manifest | RecordKind::Users => {

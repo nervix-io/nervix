@@ -78,6 +78,7 @@ enum WasmStateRecoveryPlan {
         entity: NodeRef,
         scope: WasmStateResetScope,
         generation: WasmStateGeneration,
+        unit: Option<nervix_models::Unit>,
     },
     /// The branch has already left the lifetime that was refused, so there is nothing to discard.
     /// A report that raced a transition lands here rather than discarding the lifetime that
@@ -236,12 +237,13 @@ impl SessionServiceImpl {
             entity,
             scope,
             generation,
+            unit,
         } = plan
         else {
             return Ok(());
         };
         let admission = self
-            .admit_wasm_state_recovery(domain, processor, &entity, scope, generation, rejection)
+            .admit_wasm_state_recovery(domain, &entity, scope, generation, rejection, unit)
             .await?;
         let request = match admission {
             WasmStateRecoveryAdmission::Admitted(request)
@@ -273,7 +275,7 @@ impl SessionServiceImpl {
             Err(_) => WasmStateRecoveryOutcome::Failed,
         };
         let recorded = self
-            .settle_wasm_state_recovery(domain, processor, &entity, &scope, &request, outcome)
+            .settle_wasm_state_recovery(domain, &entity, &scope, &request, outcome, unit)
             .await;
 
         // A reset that failed and an attempt whose outcome was not recorded are both failures, and
@@ -323,12 +325,20 @@ impl SessionServiceImpl {
                 processor: processor.clone(),
             }));
         }
+        let unit = match &target {
+            WasmStateResetTarget::Branch(key) => key.inherited_origin().map(|origin| origin.unit),
+            WasmStateResetTarget::BranchInUnit { unit, .. } => Some(*unit),
+            _ => None,
+        };
         let scope = Self::resolve_wasm_state_recovery_scope(processor, target)?;
         let generations = node
-            .wasm_state_generations_of_branch(match &scope {
-                WasmStateResetScope::Branch(branch) => Some(branch),
-                _ => None,
-            })
+            .wasm_state_generations_of_key(
+                match &scope {
+                    WasmStateResetScope::Branch(branch) => Some(branch),
+                    _ => None,
+                },
+                unit,
+            )
             .ok_or_else(|| Report::new(unavailable()))?;
         let generation = match &scope {
             WasmStateResetScope::Unbranched => generations.of_branch(None),
@@ -346,6 +356,7 @@ impl SessionServiceImpl {
             entity,
             scope,
             generation,
+            unit,
         })
     }
 
@@ -355,20 +366,21 @@ impl SessionServiceImpl {
         processor: &ModelName,
         target: WasmStateResetTarget,
     ) -> error_stack::Result<WasmStateResetScope, WasmStateRecoveryError> {
-        match target {
-            WasmStateResetTarget::Unbranched => Ok(WasmStateResetScope::Unbranched),
-            WasmStateResetTarget::Branch(fields) => Runtime::wasm_state_reset_branch_scope(
-                processor, fields,
-            )
-            .change_context_lazy(|| WasmStateRecoveryError::InvalidTarget {
-                processor: processor.clone(),
-            }),
+        let fields = match target {
+            WasmStateResetTarget::Unbranched => return Ok(WasmStateResetScope::Unbranched),
+            WasmStateResetTarget::Branch(fields) => fields,
+            WasmStateResetTarget::BranchInUnit { key, .. } => *key,
             WasmStateResetTarget::AllBranches => {
-                Err(Report::new(WasmStateRecoveryError::InvalidTarget {
+                return Err(Report::new(WasmStateRecoveryError::InvalidTarget {
                     processor: processor.clone(),
-                }))
+                }));
             }
-        }
+        };
+        Runtime::wasm_state_reset_branch_scope(processor, fields).change_context_lazy(|| {
+            WasmStateRecoveryError::InvalidTarget {
+                processor: processor.clone(),
+            }
+        })
     }
 
     /// Record that this refused lifetime is spending its attempt, before anything is reset.
@@ -379,12 +391,13 @@ impl SessionServiceImpl {
     async fn admit_wasm_state_recovery(
         &self,
         domain: &DomainName,
-        processor: &ModelName,
         entity: &NodeRef,
         scope: WasmStateResetScope,
         generation: WasmStateGeneration,
         rejection: WasmSavedStateRejection,
+        unit: Option<nervix_models::Unit>,
     ) -> error_stack::Result<WasmStateRecoveryAdmission, WasmStateRecoveryError> {
+        let processor = &entity.identifier;
         let record = || WasmStateRecoveryError::Record {
             processor: processor.clone(),
         };
@@ -398,7 +411,7 @@ impl SessionServiceImpl {
             .get_mut(entity)
             .ok_or_else(|| Report::new(record()))?;
         let admission = node
-            .admit_wasm_state_recovery(scope, generation, rejection)
+            .admit_wasm_state_recovery(scope, generation, rejection, unit)
             .ok_or_else(|| Report::new(record()))?;
         let WasmStateRecoveryAdmission::Admitted(_) = &admission else {
             return Ok(admission);
@@ -424,12 +437,13 @@ impl SessionServiceImpl {
     async fn settle_wasm_state_recovery(
         &self,
         domain: &DomainName,
-        processor: &ModelName,
         entity: &NodeRef,
         scope: &WasmStateResetScope,
         request: &CommandExecutionReference,
         outcome: WasmStateRecoveryOutcome,
+        unit: Option<nervix_models::Unit>,
     ) -> error_stack::Result<(), WasmStateRecoveryError> {
+        let processor = &entity.identifier;
         let record = || WasmStateRecoveryError::Record {
             processor: processor.clone(),
         };
@@ -442,7 +456,7 @@ impl SessionServiceImpl {
             .nodes
             .get_mut(entity)
             .ok_or_else(|| Report::new(record()))?;
-        if !node.settle_wasm_state_recovery(scope, request, outcome) {
+        if !node.settle_wasm_state_recovery(scope, request, outcome, unit) {
             // Another coordinator settled the same attempt first, and it settled it with the same
             // reset's outcome. There is nothing left to publish.
             return Ok(());

@@ -423,7 +423,7 @@ async fn convert_window(
     schemas: &WindowStateSchemas,
 ) -> Result<StagedArtifact, Report<BranchStateRestoreError>> {
     let accumulators = window_accumulators(descriptor, schemas)?;
-    let branch = super::steps::remote_branch_key(descriptor.branch.as_ref());
+    let branch = super::steps::remote_branch_key(&descriptor.branch);
     let branch =
         BranchKey::from_remote_key(branch).change_context(BranchStateRestoreError::BranchKey)?;
     let mut checkpoint = runtime.restored_window_checkpoint(ArchivedWindow {

@@ -61,6 +61,7 @@ impl fmt::Display for HopClass {
 /// A compact projection of a validated node, without allocating its units for every hop.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::registry) enum UnitLayout {
+    AwaitingTopology,
     Single,
     Partitions(NonZeroU16),
     Instances(NonZeroU64),
@@ -91,6 +92,14 @@ impl UnitLayout {
             return instancing.unit_layout();
         }
         if Self::divides_by_partitions(node.kind)
+            && node
+                .resolved_branching
+                .as_ref()
+                .is_some_and(|branch| branch.is_awaiting_topology())
+        {
+            return Self::AwaitingTopology;
+        }
+        if Self::divides_by_partitions(node.kind)
             && let Some(partitions) = node
                 .resolved_branching
                 .as_ref()
@@ -104,6 +113,7 @@ impl UnitLayout {
 
     fn count(self) -> u64 {
         match self {
+            Self::AwaitingTopology => 0,
             Self::Single => 1,
             Self::Partitions(count) => u64::from(count.get()),
             Self::Instances(count) => count.get(),
@@ -111,6 +121,7 @@ impl UnitLayout {
     }
     fn unit(self, index: u64) -> Unit {
         match self {
+            Self::AwaitingTopology => unreachable!("an awaiting layout has no unit ordinals"),
             Self::Single => Unit::SINGLE,
             Self::Partitions(_) => Unit::partition(
                 u32::try_from(index).verified("a partition ordinal is below its u16 count"),
@@ -162,20 +173,21 @@ impl UnitCorrespondence {
         let class = if singleton_pair || partition_intake || partition_emission {
             HopClass::Identity
         } else if (left.kind == ModelKind::Ingestor || left.kind == ModelKind::Reingestor)
-            && rhs.count() > 1
+            && (rhs.count() > 1 || rhs == UnitLayout::AwaitingTopology)
         {
             HopClass::DataDependent
         } else if declared_emission {
             HopClass::Fiber
-        } else if matches!((lhs, rhs), (UnitLayout::Partitions(a), UnitLayout::Partitions(b)) if a == b)
-            && left
-                .resolved_branching
-                .as_ref()
-                .map(|branch| branch.fields())
-                == right
+        } else if (lhs == UnitLayout::AwaitingTopology && rhs == UnitLayout::AwaitingTopology)
+            || (matches!((lhs, rhs), (UnitLayout::Partitions(a), UnitLayout::Partitions(b)) if a == b)
+                && left
                     .resolved_branching
                     .as_ref()
                     .map(|branch| branch.fields())
+                    == right
+                        .resolved_branching
+                        .as_ref()
+                        .map(|branch| branch.fields()))
         {
             HopClass::Identity
         } else if lhs.count() == 1 || rhs.count() == 1 {

@@ -293,6 +293,8 @@ impl fmt::Display for OtelMappingIssue {
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub(crate) enum RegistryError {
+    #[error("external partition topology is invalid in domain '{domain}'")]
+    PartitionTopology { domain: DomainName },
     #[error("inferencer '{node}' has invalid tensor schemas in domain '{domain}'")]
     InferencerTensorSchemas { domain: DomainName, node: ModelName },
     #[error("inferencer '{node}' tensor port '{port}' is invalid in domain '{domain}'")]

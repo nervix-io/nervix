@@ -23,6 +23,8 @@ Branching is defined by a schema name on a named branch:
 - `CREATE BRANCH by_tenant_user SCHEMA tenant_user_branch TTL 5m` isolates each tenant/user pair
 - `PARTITIONS <n>` divides the branch's concrete keys into partitions that each have their own
   relay owners; see [Relay Partitions](#relay-partitions)
+- `PARTITIONS INHERITED` and `PARTITIONS <n> INHERITED` follow enumerable external partitions;
+  see [Inherited Partitions](partitioning.md)
 - `MAX INSTANCES <n> EVICT LRU` can cap active concrete branch instances for that branch
 
 The web console's **Create** menu also has a branch form. Its schema picker searches internal
@@ -58,11 +60,16 @@ The count is a whole number from 1 through 65535. A declaration that writes no c
 partition, and `SHOW CREATE BRANCH` omits `PARTITIONS 1`. `PARTITIONS` follows `TTL` and precedes
 `MAX INSTANCES`.
 
-A concrete key lands in partition `seed mod n`. Its seed is the first eight bytes, read
+A concrete key in a direct branch lands in partition `seed mod n`. Its seed is the first eight bytes, read
 little-endian, of the key's fingerprint, the same fingerprint that names the branch in metrics and
 diagnostics. The seed depends on the key's fields alone, never on the branch, relay or domain the key
 appears in, so every node places a key in the same partition of every relay its branch branches, and
 it stays there for as long as the count stays the same.
+
+An inherited branch takes its external coordinate from a Kafka or Pulsar record's native position.
+It follows the observed count or folds coordinates into a declared number of groups. Discovery,
+co-producing topics, idle groups and reader placement are described in
+[Inherited Partitions](partitioning.md).
 
 Every relay branched by a branch of several partitions is scheduled as one unit per partition,
 partition `0` through `n - 1`. Each partition has its own owner, its own state replicas and its own
@@ -116,13 +123,17 @@ A key whose partition changes keeps its state. The partition the new count place
 it the first time it receives one of the key's records: that record and the key's later records
 wait while the partition that held the key drains the key's pending work, checkpoints its state and
 hands it over, and then the key continues with its deduplicator keys, its window, its WASM guest
-state, its inferencer's declared state and its materialized row. A materialized relay's partition does not wait for a record: it
+state, its inferencer's declared state and its materialized row. A direct materialized relay's partition does not wait for a record: it
 claims every row the partitions of the previous count hold for it as soon as it starts, since a row
 is read far more often than it is written. A record that a `REQUIRED WAIT` dependency held in the old partition
 when the key moved is refused, and its source sends it again to the key's new partition. A key that
 never reappears expires by the branch's TTL in the partition that held it. A materialized read of a
 key that may still lie in its old partition reads the old partition when the new one has no row, so
 `REQUIRED SKIP` and defaults apply only to a row that exists in neither.
+
+Inherited transitions locate retained keys and materialized rows on demand by their admitted
+origins and epochs. They retain holding units across subsequent topology changes and select the
+newest installed copy before reading or resuming a key.
 
 `SHOW DEDUPLICATOR ... STATE` and `SHOW WINDOW PROCESSOR ... STATE` list a moving key under
 exactly one partition: its holder until the claimant installs the key, and the claimant from then

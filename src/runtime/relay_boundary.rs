@@ -142,6 +142,10 @@ impl RelayOwnerRoutes {
         self.by_unit.get(&unit)
     }
 
+    pub(super) fn units(&self) -> impl Iterator<Item = Unit> + '_ {
+        self.by_unit.keys().copied()
+    }
+
     /// The owner table of a relay that is not divided into partitions, owned on `owner`.
     #[cfg(test)]
     pub(super) fn single(owner: ClusterNodeName) -> Self {
@@ -2335,6 +2339,22 @@ impl ConcreteRelayRuntime {
             unit,
             channels,
         }
+    }
+
+    pub(super) fn rebind_key(&mut self, key: Option<BranchKey>) {
+        let unit = self
+            .services
+            .partitioning
+            .unit_of(&key)
+            .map_err(|error| error.current_context().clone());
+        if self.unit != unit {
+            self.channels = match &unit {
+                Ok(unit) => RelayProducerChannels::Bound(self.services.channels.bind(&key, *unit)),
+                Err(_) => RelayProducerChannels::Ended,
+            };
+            self.unit = unit;
+        }
+        self.key = key;
     }
 
     pub(super) fn retire(&mut self) {

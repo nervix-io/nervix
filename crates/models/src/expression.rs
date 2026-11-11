@@ -756,6 +756,17 @@ pub enum OutputBranch {
 }
 
 impl OutputBranch {
+    /// The branch this route constructs from fields. Empty assignments preserve its input key.
+    pub fn constructed_branch(&self) -> Option<&BranchName> {
+        match self {
+            Self::BranchedBy {
+                branch,
+                assignments,
+            } if !assignments.is_empty() => Some(branch),
+            Self::BranchedBy { .. } | Self::Unbranched => None,
+        }
+    }
+
     pub fn branch(&self) -> Option<&BranchName> {
         match self {
             Self::BranchedBy { branch, .. } => Some(branch),

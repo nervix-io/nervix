@@ -543,6 +543,13 @@ partition relay grants retain that bounded footprint when other entities declare
 instances. Grant admission charges the exact encoded metadata size, body, decoded batch and
 scratch; the unit representation does not add alignment padding to unrelated relay traffic.
 
+Inherited branch keys carry their immutable external coordinate, partition epoch and actual unit
+alongside their fields. Direct keys carry their fields without an origin. Fingerprints identify
+the fields in either case; claim censuses carry origin witnesses to select the authoritative copy
+across retained units. Materialized page requests and WASM checkpoint inspection and reset targets
+retain the concrete unit because hashing inherited key fields cannot locate its state. These shapes
+and the atomic partition-topology consensus update share the current wire fingerprint.
+
 Control records use bounded `rkyv` archives. The receiver validates an archive, including its shape
 and nesting depth, before exposing it to an operation handler. Encoded and decoded memory is charged
 to the traffic class before decoding begins. Unknown operations, a pool mismatch, malformed

@@ -19,7 +19,7 @@
 
 use std::collections::BTreeMap;
 
-use ahash::{HashSet, HashSetExt as _};
+use ahash::{HashMap, HashMapExt as _};
 use error_stack::{Report, ResultExt as _};
 use indexmap::IndexMap;
 use nervix_backup::{BranchLifecycleRecord, DescribedRuntimeState};
@@ -48,6 +48,8 @@ pub(in crate::application) enum RestoredPartitionError {
     LifecycleUnit { entity: nervix_models::ModelName },
     #[error("the regrouped branch lifecycle of '{entity}' could not be staged")]
     Staging { entity: nervix_models::ModelName },
+    #[error("archived state for '{entity}' has conflicting holders in one inherited epoch")]
+    Ambiguous { entity: nervix_models::ModelName },
 }
 
 /// One key of one entity: what two archived copies of the same key's state share.
@@ -62,6 +64,7 @@ struct PerKeySection<'a> {
     entity: NodeRef,
     unit: Unit,
     key: Option<&'a BranchKeyFingerprint>,
+    origin: Option<nervix_models::InheritedPartitionOrigin>,
 }
 
 impl<'a> PerKeySection<'a> {
@@ -71,21 +74,25 @@ impl<'a> PerKeySection<'a> {
                 entity: NodeRef::new(ModelKind::WasmProcessor, descriptor.entity.clone()),
                 unit: descriptor.unit,
                 key: descriptor.branch_fingerprint.as_ref(),
+                origin: descriptor.branch.inherited_origin(),
             }),
             DescribedRuntimeState::Deduplicator { descriptor, .. } => Some(Self {
                 entity: NodeRef::new(ModelKind::Deduplicator, descriptor.entity.clone()),
                 unit: descriptor.unit,
                 key: descriptor.branch_fingerprint.as_ref(),
+                origin: descriptor.branch.inherited_origin(),
             }),
             DescribedRuntimeState::Window { descriptor, .. } => Some(Self {
                 entity: NodeRef::new(ModelKind::WindowProcessor, descriptor.entity.clone()),
                 unit: descriptor.unit,
                 key: descriptor.branch_fingerprint.as_ref(),
+                origin: descriptor.branch.inherited_origin(),
             }),
             DescribedRuntimeState::Inferencer { descriptor, .. } => Some(Self {
                 entity: NodeRef::new(ModelKind::Inferencer, descriptor.entity.clone()),
                 unit: descriptor.unit,
                 key: descriptor.branch_fingerprint.as_ref(),
+                origin: descriptor.branch.inherited_origin(),
             }),
             DescribedRuntimeState::KafkaOffsets { .. }
             | DescribedRuntimeState::BranchLifecycle { .. }
@@ -104,7 +111,41 @@ impl<'a> PerKeySection<'a> {
 pub(in crate::application) struct RestoredPartitions<'a> {
     schedule: &'a DomainSchedule,
     /// Every key whose state the archive holds in the unit the restored count places it in.
-    placed: HashSet<EntityKey>,
+    placed: HashMap<EntityKey, RestoredKeyHolder>,
+}
+
+#[derive(Clone, Copy)]
+pub(super) struct RestoredKeyHolder {
+    pub(super) unit: Unit,
+    pub(super) origin: Option<nervix_models::InheritedPartitionOrigin>,
+    pub(super) rank: RestoredHolderRank,
+    pub(super) ambiguous: bool,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(super) struct RestoredHolderRank {
+    direct_owner: bool,
+    origin_epoch: Option<nervix_models::PartitionEpochNumber>,
+    own_unit: bool,
+}
+
+pub(super) fn holder_rank(
+    node: &ScheduledNode,
+    unit: Unit,
+    key: &BranchKeyFingerprint,
+    origin: Option<nervix_models::InheritedPartitionOrigin>,
+) -> RestoredHolderRank {
+    let own = node.unit_of_key(Some(key), origin) == Some(unit);
+    let direct = node
+        .resolved_branching
+        .as_ref()
+        .and_then(|branching| branching.partitions())
+        .is_none_or(|partitions| !partitions.is_inherited());
+    RestoredHolderRank {
+        direct_owner: direct && own,
+        origin_epoch: origin.map(|origin| origin.epoch),
+        own_unit: own,
+    }
 }
 
 impl<'a> RestoredPartitions<'a> {
@@ -112,8 +153,8 @@ impl<'a> RestoredPartitions<'a> {
     pub(in crate::application) fn of(
         schedule: &'a DomainSchedule,
         states: &[DescribedRuntimeState],
-    ) -> Self {
-        let mut placed = HashSet::new();
+    ) -> Result<Self, Report<RestoredPartitionError>> {
+        let mut placed = HashMap::<EntityKey, RestoredKeyHolder>::new();
         for state in states {
             let Some(section) = PerKeySection::of(state) else {
                 continue;
@@ -127,14 +168,35 @@ impl<'a> RestoredPartitions<'a> {
             if node.partition_branch().is_none() {
                 continue;
             }
-            if node.unit_of_branch(Some(key)) == Some(section.unit) {
-                placed.insert(EntityKey {
-                    entity: section.entity,
-                    key: *key,
-                });
+            let identity = EntityKey {
+                entity: section.entity,
+                key: *key,
+            };
+            let rank = holder_rank(node, section.unit, key, section.origin);
+            match placed.get_mut(&identity) {
+                Some(holder) if holder.rank > rank => {}
+                Some(holder) if holder.rank == rank => {
+                    holder.ambiguous |= holder.unit != section.unit && section.origin.is_some();
+                }
+                _ => {
+                    placed.insert(
+                        identity,
+                        RestoredKeyHolder {
+                            unit: section.unit,
+                            origin: section.origin,
+                            rank,
+                            ambiguous: false,
+                        },
+                    );
+                }
             }
         }
-        Self { schedule, placed }
+        if let Some((key, _)) = placed.iter().find(|(_, holder)| holder.ambiguous) {
+            return Err(Report::new(RestoredPartitionError::Ambiguous {
+                entity: key.entity.identifier.clone(),
+            }));
+        }
+        Ok(Self { schedule, placed })
     }
 
     /// The restored node of `entity` when a branch's partitions divide it, so the units its state
@@ -153,22 +215,28 @@ impl<'a> RestoredPartitions<'a> {
         entity: &NodeRef,
         archived: Unit,
         key: Option<&BranchKeyFingerprint>,
+        origin: Option<nervix_models::InheritedPartitionOrigin>,
     ) -> Option<Unit> {
         let Some(node) = self.divided(entity) else {
             return Some(archived);
         };
-        let unit = node.unit_of_branch(key)?;
-        if unit == archived {
-            return Some(unit);
+        if let Some(key) = key
+            && self
+                .placed
+                .get(&EntityKey {
+                    entity: entity.clone(),
+                    key: *key,
+                })
+                .is_some_and(|holder| holder.unit != archived || holder.origin != origin)
+        {
+            return None;
         }
-        let Some(key) = key else {
-            return Some(unit);
-        };
-        let superseded = self.placed.contains(&EntityKey {
-            entity: entity.clone(),
-            key: *key,
-        });
-        if superseded { None } else { Some(unit) }
+        node.unit_of_key(key, origin).or_else(|| {
+            // An inherited epoch may still hold a direct key which has not reappeared yet.
+            // Its captured unit is authoritative until demand supplies its external coordinate.
+            (key.is_some() && origin.is_none() && node.units.contains_key(&archived))
+                .then_some(archived)
+        })
     }
 }
 
@@ -189,6 +257,8 @@ struct PlacedEntry {
     entry: BackupBranchLifecycleEntry,
     /// Whether the entry was archived in the unit the restored count places its key in.
     in_own_unit: bool,
+    unit: Unit,
+    origin_rank: RestoredHolderRank,
 }
 
 impl RegroupedLifecycle {
@@ -245,15 +315,14 @@ impl RegroupedLifecycle {
         executor
             .run_cpu(CpuClass::Bulk, charge, move |_charge, cancellation| {
                 let mut revision = 0_u64;
-                let mut units =
-                    BTreeMap::<Unit, IndexMap<BranchKeyFingerprint, PlacedEntry>>::new();
+                let mut selected = IndexMap::<BranchKeyFingerprint, PlacedEntry>::new();
                 for lifecycle in &lifecycles {
                     revision = revision.max(lifecycle.revision);
                     for archived in &lifecycle.branches {
                         cancellation
                             .check()
                             .change_context(RestoredPartitionError::Admission)?;
-                        let remote = remote_branch_key(archived.key.as_ref());
+                        let remote = remote_branch_key(&archived.key);
                         let key = BranchKey::from_remote_key(remote.clone()).change_context_lazy(
                             || RestoredPartitionError::LifecycleKey {
                                 entity: entity.clone(),
@@ -266,7 +335,14 @@ impl RegroupedLifecycle {
                             }));
                         };
                         let fingerprint = key.fingerprint();
-                        let Some(unit) = node.unit_of_branch(Some(&fingerprint)) else {
+                        let Some(unit) = node
+                            .unit_of_key(Some(&fingerprint), key.inherited_origin())
+                            .or_else(|| {
+                                (key.inherited_origin().is_none()
+                                    && node.units.contains_key(&lifecycle.unit))
+                                .then_some(lifecycle.unit)
+                            })
+                        else {
                             return Err(Report::new(RestoredPartitionError::LifecycleUnit {
                                 entity: entity.clone(),
                             }));
@@ -278,18 +354,31 @@ impl RegroupedLifecycle {
                                 incarnation: archived.incarnation,
                             },
                             in_own_unit: unit == lifecycle.unit,
+                            unit,
+                            origin_rank: holder_rank(
+                                &node,
+                                lifecycle.unit,
+                                &fingerprint,
+                                key.inherited_origin(),
+                            ),
                         };
-                        let entries = units.entry(unit).or_default();
-                        if let Some(present) = entries.get(&fingerprint) {
-                            let present_wins = present.in_own_unit
-                                || (!placed.in_own_unit
-                                    && present.entry.last_ingestion >= placed.entry.last_ingestion);
+                        if let Some(present) = selected.get(&fingerprint) {
+                            let present_wins = present.origin_rank > placed.origin_rank
+                                || (present.origin_rank == placed.origin_rank
+                                    && (present.in_own_unit
+                                        || (!placed.in_own_unit
+                                            && present.entry.last_ingestion
+                                                >= placed.entry.last_ingestion)));
                             if present_wins {
                                 continue;
                             }
                         }
-                        entries.insert(fingerprint, placed);
+                        selected.insert(fingerprint, placed);
                     }
+                }
+                let mut units = BTreeMap::<Unit, Vec<BackupBranchLifecycleEntry>>::new();
+                for placed in selected.into_values() {
+                    units.entry(placed.unit).or_default().push(placed.entry);
                 }
                 let mut regrouped = Vec::with_capacity(units.len());
                 for (unit, entries) in units {
@@ -297,7 +386,7 @@ impl RegroupedLifecycle {
                         unit,
                         schema,
                         revision,
-                        entries: entries.into_values().map(|placed| placed.entry).collect(),
+                        entries,
                     });
                 }
                 Ok::<_, Report<RestoredPartitionError>>(regrouped)
@@ -318,8 +407,8 @@ mod tests {
     use meticulous::{OptionExt as _, ResultExt as _};
     use nervix_backup::{BranchLifecycleEntry, StateField, StateValue};
     use nervix_models::{
-        BranchName, BranchPartitions, CreateRelay, CreateSchema, DomainName, Model, ModelName,
-        RelayBranching, RelayName, ResolvedBranching, SchemaName, Timestamp,
+        BranchName, CreateRelay, CreateSchema, DomainName, Model, ModelName, RelayBranching,
+        RelayName, ResolvedBranching, SchemaName, Timestamp,
     };
 
     use super::*;
@@ -341,8 +430,9 @@ mod tests {
             name: SchemaName::parse("tenant_key").assured("the test schema name is valid"),
             fields: Vec::new(),
         };
-        let partitions =
-            BranchPartitions::Direct(NonZeroU16::new(count).assured("test counts are positive"));
+        let partitions = nervix_models::ResolvedBranchPartitions::Direct(
+            NonZeroU16::new(count).assured("test counts are positive"),
+        );
         ScheduledNode::new(Model::Relay(relay), SchemaFingerprint::from_digest([3; 32]))
             .with_resolved_branching(Some(ResolvedBranching::branched(
                 branch(),
@@ -376,7 +466,7 @@ mod tests {
     fn placement(schedule: &DomainSchedule) -> RestoredPartitions<'_> {
         RestoredPartitions {
             schedule,
-            placed: HashSet::default(),
+            placed: HashMap::default(),
         }
     }
 
@@ -385,7 +475,7 @@ mod tests {
         let schedule = schedule(8);
         let partitions = placement(&schedule);
         assert_eq!(
-            partitions.section_unit(&events(), Unit::partition(5), Some(&key(13))),
+            partitions.section_unit(&events(), Unit::partition(5), Some(&key(13)), None),
             Some(Unit::partition(5))
         );
     }
@@ -397,7 +487,7 @@ mod tests {
         let partitions = placement(&schedule);
         // Seed 13 lands in partition 1 of four and in partition 5 of eight.
         assert_eq!(
-            partitions.section_unit(&events(), Unit::partition(1), Some(&key(13))),
+            partitions.section_unit(&events(), Unit::partition(1), Some(&key(13)), None),
             Some(Unit::partition(5))
         );
     }
@@ -406,16 +496,28 @@ mod tests {
     fn a_released_copy_gives_way_to_the_copy_its_claim_installed_in_the_key_s_own_unit() {
         let schedule = schedule(8);
         let mut partitions = placement(&schedule);
-        partitions.placed.insert(EntityKey {
-            entity: events(),
-            key: key(13),
-        });
+        partitions.placed.insert(
+            EntityKey {
+                entity: events(),
+                key: key(13),
+            },
+            RestoredKeyHolder {
+                unit: Unit::partition(5),
+                origin: None,
+                rank: RestoredHolderRank {
+                    direct_owner: true,
+                    origin_epoch: None,
+                    own_unit: true,
+                },
+                ambiguous: false,
+            },
+        );
         assert_eq!(
-            partitions.section_unit(&events(), Unit::partition(1), Some(&key(13))),
+            partitions.section_unit(&events(), Unit::partition(1), Some(&key(13)), None),
             None
         );
         assert_eq!(
-            partitions.section_unit(&events(), Unit::partition(5), Some(&key(13))),
+            partitions.section_unit(&events(), Unit::partition(5), Some(&key(13)), None),
             Some(Unit::partition(5))
         );
     }
@@ -430,7 +532,7 @@ mod tests {
         );
         assert!(partitions.divided(&absent).is_none());
         assert_eq!(
-            partitions.section_unit(&absent, Unit::partition(2), Some(&key(13))),
+            partitions.section_unit(&absent, Unit::partition(2), Some(&key(13)), None),
             Some(Unit::partition(2))
         );
     }
@@ -440,16 +542,19 @@ mod tests {
         let schedule = schedule(1);
         let partitions = placement(&schedule);
         assert_eq!(
-            partitions.section_unit(&events(), Unit::partition(3), Some(&key(13))),
+            partitions.section_unit(&events(), Unit::partition(3), Some(&key(13)), None),
             Some(Unit::SINGLE)
         );
     }
 
-    fn tenant(name: &str) -> Option<Vec<StateField>> {
-        Some(vec![StateField {
-            name: "tenant".to_string(),
-            value: StateValue::String(name.to_string()),
-        }])
+    fn tenant(name: &str) -> nervix_models::BranchKeyFields<StateField> {
+        nervix_models::BranchKeyFields::Direct(
+            vec![StateField {
+                name: "tenant".to_string(),
+                value: StateValue::String(name.to_string()),
+            }]
+            .into(),
+        )
     }
 
     fn lifecycle(
@@ -477,7 +582,7 @@ mod tests {
     }
 
     fn unit_of(node: &ScheduledNode, name: &str) -> Unit {
-        let key = BranchKey::from_remote_key(remote_branch_key(tenant(name).as_ref()))
+        let key = BranchKey::from_remote_key(remote_branch_key(&tenant(name)))
             .assured("the test key is a valid branch key")
             .assured("the test key is concrete");
         node.unit_of_branch(Some(&key.fingerprint()))
@@ -515,7 +620,7 @@ mod tests {
                 "the newest archived revision covers every entry"
             );
             for restored_entry in &lifecycle.entries {
-                let Some(fields) = restored_entry.key.as_ref() else {
+                let Some(fields) = restored_entry.key.fields() else {
                     panic!("every restored entry is keyed");
                 };
                 let Some(field) = fields.first() else {

@@ -1847,7 +1847,7 @@ enum CommandVariant {
     FinishCommandExecution,
     ReclaimCommandExecutions,
     ReplaceDomainSchedule,
-    UpdateKafkaPartitionSchedule,
+    UpdatePartitionTopology,
     ApplyAutomaticDomainSchedule,
     ReconcileOwnershipHandoffPreparations,
     PutDomain,
@@ -1905,9 +1905,7 @@ impl CommandVariant {
             ConsensusCommand::FinishCommandExecution { .. } => Self::FinishCommandExecution,
             ConsensusCommand::ReclaimCommandExecutions { .. } => Self::ReclaimCommandExecutions,
             ConsensusCommand::ReplaceDomainSchedule { .. } => Self::ReplaceDomainSchedule,
-            ConsensusCommand::UpdateKafkaPartitionSchedule { .. } => {
-                Self::UpdateKafkaPartitionSchedule
-            }
+            ConsensusCommand::UpdatePartitionTopology { .. } => Self::UpdatePartitionTopology,
             ConsensusCommand::ApplyAutomaticDomainSchedule { .. } => {
                 Self::ApplyAutomaticDomainSchedule
             }
@@ -2037,11 +2035,12 @@ fn command_of(arbitrary: &mut Arbitrary<'_>, variant: CommandVariant) -> Consens
                 mutation: optional_lease(arbitrary),
             }
         }
-        CommandVariant::UpdateKafkaPartitionSchedule => {
+        CommandVariant::UpdatePartitionTopology => {
             let domain = arbitrary.rule_name::<DomainName>();
             let inputs = domain_planning_inputs(arbitrary, domain.clone());
             let schedule = arbitrary.domain_schedule_of(domain);
-            ConsensusCommand::UpdateKafkaPartitionSchedule {
+            ConsensusCommand::UpdatePartitionTopology {
+                tenure: leader_tenure(arbitrary),
                 inputs: Box::new(inputs),
                 schedule: Box::new(schedule),
             }

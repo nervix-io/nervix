@@ -26,8 +26,8 @@ use nervix_models::{
     DomainClockProgress, DomainName, EmitterName, FieldName, IngestorName, LookupName, ModelKind,
     ModelName, NodeEndpoint, NodePrerequisites, NodeRef, OwnershipStateRecoveryOutcome,
     OwnershipStateReset, PrerequisiteMismatch, RelayName, RemoteAckRegistration,
-    RemoteAckResolution, RemoteRuntimeField, RemoteRuntimeRecordMetadata, ResourceName,
-    SubscriptionBinding, Timestamp, Unit, WasmStateResetScope,
+    RemoteAckResolution, RemoteRuntimeRecordMetadata, ResourceName, SubscriptionBinding, Timestamp,
+    Unit, WasmStateResetScope,
 };
 use nervix_primitives::sync::{mpsc, watch};
 use rkyv::{Archive, Deserialize, Serialize};
@@ -82,9 +82,9 @@ pub use observation::{
 pub use operation::{RemoteOperationFailure, RemoteOperationSubject};
 pub use partition_transition::{
     PartitionCatalogKey, PartitionCatalogShard, PartitionClaimOutcome, PartitionClaimStep,
-    PartitionClaimSubject, PartitionTransitionAnswer, PartitionTransitionRequest,
-    PartitionTransitionResponse, ReleasedBranch, ReleasedCheckpoint, ReleasedKey, ReleasedRow,
-    UnitPartitionHoldings,
+    PartitionClaimSubject, PartitionKeyLocation, PartitionTransitionAnswer,
+    PartitionTransitionRequest, PartitionTransitionResponse, ReleasedBranch, ReleasedCheckpoint,
+    ReleasedKey, ReleasedRow, UnitPartitionHoldings,
 };
 pub use peer_resolver::PeerResolver;
 pub use peer_target::PeerTarget;
@@ -123,6 +123,7 @@ pub use settings::{
 };
 pub use wasm_state::{
     CoordinateWasmStateResetRequest, CoordinateWasmStateResetResponse,
+    DescribeInheritedWasmStateRequest, DescribeInheritedWasmStateResponse,
     RecoverWasmProcessorStateRequest, RecoverWasmProcessorStateResponse,
     WasmStateResetRuntimeAction, WasmStateResetRuntimeRequest, WasmStateResetRuntimeResponse,
     WasmStateResetTarget,
@@ -327,7 +328,7 @@ pub struct RelayPayload {
     /// of a partitioned branch, and the relay's one `Single` unit otherwise. An owner admits an
     /// ingress payload only for a unit it owns whose key lands there.
     pub unit: Unit,
-    pub key: Option<Vec<RemoteRuntimeField>>,
+    pub key: nervix_models::RemoteBranchKey,
     /// The batch's Arrow IPC body, encoded once and shared. Every destination in a fanout and
     /// every retry of one delivery carries this same allocation, charged once, and writes a slice
     /// of it to its socket.
@@ -1587,10 +1588,11 @@ mod tests;
 
 mod state_inspection;
 pub use state_inspection::{
-    MaterializedStatePageDescriptor, MaterializedStatePageReply, MaterializedStatePageTransfer,
-    ProcessorStatePageDescriptor, ProcessorStatePageReply, ProcessorStateRunTransfer,
-    ProcessorStateSectionTransfer, ReadMaterializedStatePage, ReadProcessorStatePage,
-    StatePageBody,
+    MaterializedKeyCatalogResponse, MaterializedPartitionFilter, MaterializedStatePageDescriptor,
+    MaterializedStatePageReply, MaterializedStatePageTransfer, ProcessorStatePageDescriptor,
+    ProcessorStatePageReply, ProcessorStateRunTransfer, ProcessorStateSectionTransfer,
+    ReadMaterializedKeyCatalog, ReadMaterializedStatePage, ReadPartitionedMaterializedStatePage,
+    ReadProcessorStatePage, StatePageBody,
 };
 
 mod wasm_state_inspection;

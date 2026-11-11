@@ -604,6 +604,13 @@ test-partition-placement feature="tests/features/cluster/partition_placement.fea
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
     cargo test --package nervix-scenarios --test scenarios -- --input {{ quote(feature) }} {{ quote(args) }}
 
+# Exercise inherited branch topology through native nodes and Kafka and Pulsar brokers.
+test-inherited-partitions *args: build-deps build-plexus-format build-test-cli build-deadlock-report
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    cargo test --package nervix-scenarios --test scenarios -- --input {{ quote(justfile_directory() / "tests/features/runtime/inherited_partitions*.feature") }} {{ quote(args) }}
+
 # Exercise local engine admission and CLI settings through public node and REPL interfaces.
 test-engine-settings *args: build-deps build-plexus-format build-test-cli build-deadlock-report
     #!/usr/bin/env bash
@@ -1304,6 +1311,13 @@ test-environment *args:
 # Measure native consensus transport regressions through the configured compiler cache.
 coverage-consensus output *args:
     cargo llvm-cov --no-clean --package nervix-consensus --features testing --lib --no-default-ignore-filename-regex --lcov --output-path {{ quote(output) }} -- {{ args }}
+
+# Measure focused partition decisions, immutable origins and current snapshot/wire owners.
+coverage-partitioning output *args: download-onnxruntime
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    cargo llvm-cov --no-clean --package nervix-server --package nervix-models --package nervix-interconnect --package nervix-backup --package nervix-branch-instances --features nervix-server/testing --lib --no-default-ignore-filename-regex --lcov --output-path {{ quote(output) }} -- {{ quote(args) }}
 
 # Measure the Rust client library's unit tests, for a patch confined to it, through the configured
 # compiler cache.

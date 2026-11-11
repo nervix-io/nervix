@@ -219,7 +219,7 @@ fn capability_roll(run: ScenarioRun) -> Result<(), SimulationError> {
                         domain: DomainName::parse("simulated").assured("fixture domain"),
                         relay: RelayName::parse("records").assured("fixture relay"),
                         unit: Unit::SINGLE,
-                        key: None,
+                        key: nervix_models::RemoteBranchKey::Unbranched,
                         batch_ipc: Executor::default()
                             .try_charge_owned(MemoryClass::Relay, bytes)
                             .assured("bounded fixture body"),

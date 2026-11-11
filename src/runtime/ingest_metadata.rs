@@ -132,6 +132,11 @@ pub(super) enum IngestMetadataError {
     )]
     UndeclaredField { field: String },
     #[error(
+        "external partition metadata '{field}' is absent, not I32, or outside its native \
+         coordinate range at row {row}"
+    )]
+    ExternalPartition { field: &'static str, row: usize },
+    #[error(
         "the ingestor's programs read payload field '{field}', which its entity does not declare"
     )]
     UndeclaredPayloadField { field: String },
@@ -931,6 +936,46 @@ impl IngestFilterMapMetadata {
         };
         self.selected_array(self.columns.integration_fields.column(index))
             .map(Some)
+    }
+
+    /// Read immutable native coordinates from the declared, payload-aligned metadata column.
+    pub(super) fn external_partitions(
+        &self,
+        field: IngestorMetadataField,
+        rows: &[usize],
+        source: nervix_models::ExternalPartitionSet,
+    ) -> IngestMetadataResult<Vec<nervix_models::ExternalPartition>> {
+        let invalid = |row| {
+            Report::new(IngestMetadataError::ExternalPartition {
+                field: field.name(),
+                row,
+            })
+        };
+        let column = self.field_column(field.name())?.ok_or_else(|| invalid(0))?;
+        let values = column
+            .as_any()
+            .downcast_ref::<arrow_array::Int32Array>()
+            .ok_or_else(|| invalid(0))?;
+        rows.iter()
+            .map(|row| {
+                if *row >= values.len() || values.is_null(*row) {
+                    return Err(invalid(*row));
+                }
+                // A known unpartitioned source has its single coordinate zero. A partitioned
+                // source must supply a native coordinate inside the committed observation.
+                let index = match source {
+                    nervix_models::ExternalPartitionSet::Unpartitioned => 0,
+                    nervix_models::ExternalPartitionSet::Partitioned(_) => {
+                        u32::try_from(values.value(*row)).map_err(|_| invalid(*row))?
+                    }
+                };
+                let partition = nervix_models::ExternalPartition::new(index);
+                if !source.contains(partition) {
+                    return Err(invalid(*row));
+                }
+                Ok(partition)
+            })
+            .collect()
     }
 
     pub(super) fn first_header(&self, row: usize, name: &str) -> Option<&str> {

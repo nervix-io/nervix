@@ -952,6 +952,7 @@ pub(super) async fn evaluate_output_branch_program(
     output: &RuntimeRecordBatch,
     keys: &[Option<BranchKey>],
     side_inputs: &HashMap<String, RuntimeValue>,
+    external_partitions: Option<&[nervix_models::InheritedPartitionOrigin]>,
 ) -> PlannedGeneralResult<Vec<Result<BranchKey, BranchRowError>>> {
     let operation = MessageErrorOperation::BranchSet;
     let row_count = output.batch().num_rows();
@@ -970,6 +971,16 @@ pub(super) async fn evaluate_output_branch_program(
             sidecar: PlannedSidecar::BranchKeys,
             expected: row_count,
             found: keys.len(),
+        }));
+    }
+    if let Some(partitions) = external_partitions
+        && partitions.len() != row_count
+    {
+        return Err(Report::new(PlannedGeneralError::SidecarRowCount {
+            operation,
+            sidecar: PlannedSidecar::BranchKeys,
+            expected: row_count,
+            found: partitions.len(),
         }));
     }
     let namespace_batches = [("input", input), ("output", output), ("message", output)];
@@ -1041,7 +1052,10 @@ pub(super) async fn evaluate_output_branch_program(
             *outcome = Err(BranchRowError::Set(error.clone()));
             continue;
         }
-        *outcome = Ok(columns.key(output_row)?);
+        *outcome = Ok(columns.key(
+            output_row,
+            external_partitions.map(|partitions| partitions[input_row]),
+        )?);
     }
     Ok(outcomes)
 }
@@ -1096,7 +1110,11 @@ impl BranchKeyColumns {
     }
 
     /// The concrete branch key output row `row` wrote.
-    fn key(&self, row: usize) -> PlannedGeneralResult<BranchKey> {
+    fn key(
+        &self,
+        row: usize,
+        partition: Option<nervix_models::InheritedPartitionOrigin>,
+    ) -> PlannedGeneralResult<BranchKey> {
         let mut values = Vec::with_capacity(self.fields.len());
         for field in &self.fields {
             let value = runtime_value_from_arrow_array(
@@ -1119,7 +1137,11 @@ impl BranchKeyColumns {
         // A branch program writes every field of its branch's schema, and a schema declares at
         // least one, so a key without fields is a defect of the whole program rather than of
         // this row.
-        BranchKey::from_fields(values).change_context(PlannedGeneralError::BranchKey)
+        match partition {
+            Some(partition) => BranchKey::from_inherited_fields(values, partition),
+            None => BranchKey::from_fields(values),
+        }
+        .change_context(PlannedGeneralError::BranchKey)
     }
 }
 

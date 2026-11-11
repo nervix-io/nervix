@@ -797,3 +797,42 @@ fn a_placement_without_members_on_either_side_is_refused() {
     assert_eq!(error.current_context(), &AlterPlacementError::EmptyTo);
     assert_eq!(placement, before, "failed ALTER must not partially apply");
 }
+
+#[test]
+fn inherited_topology_retains_the_key_contract_without_inventing_execution_units() {
+    let schema = crate::CreateSchema {
+        name: named("tenant_key"),
+        fields: vec![crate::SchemaField {
+            name: named("tenant"),
+            ty: crate::ParseAsType::String,
+            optional: false,
+            sensitive: false,
+        }],
+    };
+    let waiting = crate::ResolvedBranching::awaiting_topology(named("by_tenant"), schema.clone());
+    assert!(!waiting.is_unbranched());
+    assert!(waiting.is_awaiting_topology());
+    assert_eq!(waiting.fields(), schema.fields.as_slice());
+    assert_eq!(waiting.partitions(), None);
+    assert!(waiting.units().is_empty());
+    let resolved = waiting
+        .clone()
+        .with_partitions(crate::ResolvedBranchPartitions::Inherited(nonzero!(12u16)));
+    assert!(waiting.same_key_as(&resolved));
+    assert_eq!(
+        resolved.units(),
+        (0..12).map(crate::Unit::partition).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn inherited_declarations_keep_discovered_and_declared_counts_distinct() {
+    assert_eq!(crate::BranchPartitions::Inherited.declared_count(), None);
+    let grouped = crate::BranchPartitions::InheritedGrouped(nonzero!(16u16));
+    assert_eq!(grouped.declared_count(), Some(nonzero!(16u16)));
+    assert_eq!(grouped.direct_layout(), None);
+    assert_eq!(
+        crate::BranchPartitions::ONE.direct_layout(),
+        Some(crate::ResolvedBranchPartitions::ONE)
+    );
+}

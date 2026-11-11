@@ -35,6 +35,7 @@ mod message_error_plan;
 mod mutation;
 mod node_capacity;
 mod partition_epochs;
+mod partition_topology;
 mod placement;
 mod processor_plan;
 mod reingestor_plan;
@@ -46,7 +47,7 @@ mod scheduler;
 #[cfg(test)]
 pub(crate) use scheduler::uniform_capabilities;
 mod unit_placement;
-pub(crate) use scheduler::assign_server_listener_nodes;
+pub(crate) use scheduler::{DomainSchedulingInputs, assign_server_listener_nodes};
 mod storage;
 #[cfg(test)]
 mod test_fixtures;
@@ -69,8 +70,8 @@ pub(crate) use entity_gate::{
 #[cfg(test)]
 pub(crate) use entrypoint_plan::EntrypointPlanError;
 pub(crate) use entrypoint_plan::{
-    BranchInstanceAckBoundary, EntrypointPlans, LoweredConstruction, LoweredFilter,
-    PlannedEntryRoute, PlannedRouteBranch,
+    BranchInstanceAckBoundary, EntrypointPlans, InheritedBranchProjection, LoweredConstruction,
+    LoweredFilter, PlannedEntryRoute, PlannedRouteBranch,
 };
 /// What the decisions layer exposes. Everything else this module and its submodules declare is
 /// `pub(in crate::registry)` or narrower, so the control plane reaches the registry only through
@@ -103,6 +104,10 @@ pub(crate) use message_error_plan::{
     MessageErrorCompileSchemas, MessageErrorRouteKey, MessageErrorRouteSpecs,
 };
 pub(crate) use mutation::{PlannedMutations, RegistryMutation};
+pub(crate) use partition_topology::{
+    KafkaPartitionSourcePlan, PartitionSourcePlan, PartitionSourceSpec, PulsarPartitionSourcePlan,
+    decide as decide_partition_topology, source_specs as partition_source_specs,
+};
 pub(crate) use placement::{
     PlacementEndpointPairPlan, PlacementPlan, PlacementRequireGroupPlan, PlacementRulePlan,
     placement_members,

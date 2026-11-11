@@ -1395,7 +1395,8 @@ impl SessionServiceImpl {
         let branch_fields = branching.field_names().cloned().collect::<Vec<_>>();
         let branch = match &branching {
             nervix_models::ResolvedBranching::Unbranched => None,
-            nervix_models::ResolvedBranching::Branched { branch, schema, .. } => {
+            nervix_models::ResolvedBranching::Branched { branch, schema, .. }
+            | nervix_models::ResolvedBranching::AwaitingTopology { branch, schema } => {
                 Some(SubscriptionBranchSchema {
                     name: branch,
                     schema,
@@ -2066,7 +2067,7 @@ mod tests {
                     sensitive: false,
                 }],
             },
-            nervix_models::BranchPartitions::ONE,
+            nervix_models::ResolvedBranchPartitions::ONE,
         );
         let binding = SubscriptionBinding {
             field: field.clone(),

@@ -54,9 +54,11 @@ mod name_spelling;
 mod names;
 mod node_capabilities;
 pub use database_settings::*;
+mod branch_partitions;
 mod node_endpoint;
 mod node_ref;
 mod partition_epoch;
+mod partition_topology;
 mod password_credential;
 mod placement;
 mod prerequisites;
@@ -65,6 +67,7 @@ mod processor;
 mod quiesce;
 mod rebind_resource;
 mod remote;
+mod remote_branch_key;
 mod reset_wasm_state;
 mod resource;
 mod resource_binding;
@@ -76,6 +79,7 @@ mod settings;
 mod show_wasm_state;
 mod state_branch_selection;
 mod state_inspection;
+mod state_inspection_catalog;
 mod state_inspection_settings;
 mod statement;
 mod timestamp;
@@ -90,6 +94,7 @@ pub use backup::{
     ArchiveDigest, Backup, BackupArchiveSummary, BackupCapture, BackupCut, BackupCutKind,
     BackupDomainSummary, BackupQuiesceCounters, BackupResources, BackupScope, DescribeBackup,
 };
+pub use branch_partitions::{BranchPartitions, ResolvedBranchPartitions};
 pub use canonical::{
     CanonicalPlexusError, EmitterPayloadContainer, EmitterPayloadPresentation, EntityPresentation,
     PLEXUS_LANGUAGE_VERSION, alter_avro_wire_schema_to_canonical_plexus,
@@ -159,24 +164,24 @@ pub use connector::{
     IngestAcknowledgement, IngestDeliveryKind, IngestQuiesceKind, IngestQuiesceMode,
     IngestQuiesceOverflow, IngestStartPosition, IngestorAlteration, IngestorDeclaration,
     IngestorEntity, IngestorEntityBody, IngestorEntityCapabilities, IngestorEntityChange,
-    IngestorEntityKind, IngestorEntityMetadata, IngestorEntityModel, IngestorInstances,
-    IngestorInstancingCapability, IngestorMetadataDeclaration, IngestorMetadataField,
-    IngestorMetadataType, IngestorPayloadDeclaration, IngestorPayloadField, IngestorReference,
-    IngestorReferenceKind, KafkaConfigEntry, KafkaConsumerGroupName, KafkaEmitter,
-    KafkaEmitterChange, KafkaEmitterEntity, KafkaIngestMode, KafkaIngestor, KafkaIngestorEntity,
-    KafkaOffsetMode, KafkaTopicEmitter, KafkaTopicEmitterChange, KafkaTopicEmitterMode,
-    KafkaTopicIngestor, KafkaTopicIngestorAlteration, KafkaTopicIngestorChange, KafkaTopicName,
-    KafkaTopicPublishingMode, LiteralHeaderWrite, LocatorDeclaration, LocatorName,
-    MONGODB_MAX_DOCUMENT_BYTES, MONGODB_NAMESPACE_MAX_BYTES, MQTT_MAXIMUM_PACKET_BYTES,
-    MQTT_SHARED_SUBSCRIPTION_LEVEL, MQTT_SOURCE_READ_AHEAD_HEADROOM, MYSQL_MAX_PLACEHOLDERS,
-    MappedValueField, MappedValueSection, MappedValueType, MappedValueTypes,
-    MongoDbCollectionEmitter, MongoDbCollectionEmitterChange, MongoDbCollectionEmitterMode,
-    MongoDbCollectionName, MongoDbCollectionPublishingMode, MongoDbConfigEntry,
-    MongoDbConflictAction, MongoDbConflictError, MongoDbEmitter, MongoDbEmitterChange,
-    MongoDbEmitterEntity, MongoDbValueMapping, MqttBroker, MqttClientConfig, MqttClientConfigError,
-    MqttConfigEntry, MqttEmitter, MqttEmitterChange, MqttEmitterEntity, MqttIngestMode,
-    MqttIngestor, MqttIngestorEntity, MqttPassword, MqttQos, MqttSession, MqttTlsFiles,
-    MqttTlsIdentity, MqttTopicEmitter, MqttTopicEmitterChange, MqttTopicEmitterMode,
+    IngestorEntityKind, IngestorEntityMetadata, IngestorEntityModel, IngestorExternalPartitions,
+    IngestorInstances, IngestorInstancingCapability, IngestorMetadataDeclaration,
+    IngestorMetadataField, IngestorMetadataType, IngestorPayloadDeclaration, IngestorPayloadField,
+    IngestorReference, IngestorReferenceKind, KafkaConfigEntry, KafkaConsumerGroupName,
+    KafkaEmitter, KafkaEmitterChange, KafkaEmitterEntity, KafkaIngestMode, KafkaIngestor,
+    KafkaIngestorEntity, KafkaOffsetMode, KafkaTopicEmitter, KafkaTopicEmitterChange,
+    KafkaTopicEmitterMode, KafkaTopicIngestor, KafkaTopicIngestorAlteration,
+    KafkaTopicIngestorChange, KafkaTopicName, KafkaTopicPublishingMode, LiteralHeaderWrite,
+    LocatorDeclaration, LocatorName, MONGODB_MAX_DOCUMENT_BYTES, MONGODB_NAMESPACE_MAX_BYTES,
+    MQTT_MAXIMUM_PACKET_BYTES, MQTT_SHARED_SUBSCRIPTION_LEVEL, MQTT_SOURCE_READ_AHEAD_HEADROOM,
+    MYSQL_MAX_PLACEHOLDERS, MappedValueField, MappedValueSection, MappedValueType,
+    MappedValueTypes, MongoDbCollectionEmitter, MongoDbCollectionEmitterChange,
+    MongoDbCollectionEmitterMode, MongoDbCollectionName, MongoDbCollectionPublishingMode,
+    MongoDbConfigEntry, MongoDbConflictAction, MongoDbConflictError, MongoDbEmitter,
+    MongoDbEmitterChange, MongoDbEmitterEntity, MongoDbValueMapping, MqttBroker, MqttClientConfig,
+    MqttClientConfigError, MqttConfigEntry, MqttEmitter, MqttEmitterChange, MqttEmitterEntity,
+    MqttIngestMode, MqttIngestor, MqttIngestorEntity, MqttPassword, MqttQos, MqttSession,
+    MqttTlsFiles, MqttTlsIdentity, MqttTopicEmitter, MqttTopicEmitterChange, MqttTopicEmitterMode,
     MqttTopicFilter, MqttTopicIngestor, MqttTopicIngestorAlteration, MqttTopicIngestorChange,
     MqttTopicName, MqttTopicPublishingMode, MqttTransport, MySqlConfigEntry, MySqlConflictAction,
     MySqlEmitter, MySqlEmitterChange, MySqlEmitterEntity, MySqlTableEmitter,
@@ -312,6 +317,11 @@ pub use node_endpoint::{
 };
 pub use node_ref::{DomainNodeRef, NodeRef};
 pub use partition_epoch::{BranchPartitionEpoch, PartitionEpochNumber, PartitionTransition};
+pub use partition_topology::{
+    ExternalPartition, ExternalPartitionAssignment, ExternalPartitionRead, ExternalPartitionSet,
+    InheritedPartitionLayout, InheritedPartitionOrigin, PartitionSourceFingerprint,
+    PartitionTopology, PartitionTopologySnapshot, SourcePartitionObservation,
+};
 pub use placement::{
     AlterPlacement, AlterPlacementError, AlterPlacementOperation, CreatePlacement, PlacementPolicy,
     PlacementScope,
@@ -362,6 +372,9 @@ pub use remote::{
     RemoteAckOutcome, RemoteAckRegistration, RemoteAckResolution, RemoteRuntimeElementValue,
     RemoteRuntimeField, RemoteRuntimeRecordMetadata, RemoteRuntimeValue,
 };
+pub use remote_branch_key::{
+    BranchKeyFields, InheritedBranchKeyFields, InheritedRemoteBranchKey, RemoteBranchKey,
+};
 pub use reset_wasm_state::ResetWasmState;
 pub use resource::{
     RequestedResourceVersion, ResourceDescription, ResourceEntryContent, ResourceId,
@@ -379,8 +392,8 @@ pub use restore::{
     RestoreStepReport, RestoredDomain, RestoredUsers,
 };
 pub use schedule::{
-    ClusterSchedule, DomainNodeUnitRef, DomainSchedule, EntityGateTargets, KafkaPartitionSchedule,
-    NodeUnitRef, OwnershipStateComponent, OwnershipStateRecoveryOutcome, OwnershipStateReset,
+    ClusterSchedule, DomainNodeUnitRef, DomainSchedule, EntityGateTargets, NodeUnitRef,
+    OwnershipStateComponent, OwnershipStateRecoveryOutcome, OwnershipStateReset,
     OwnershipStateResetCause, OwnershipTransition, PlacementGroupSchedule, ScheduledModel,
     ScheduledNode, ScheduledNodes, ScheduledUnit,
 };
@@ -401,6 +414,7 @@ pub use state_inspection::{
     StateInspectionEntity, StateInspectionOrigin, StateInspectionPosition,
     StateInspectionRejection, StateInspectionStage,
 };
+pub use state_inspection_catalog::{StateInspectionFingerprints, StateInspectionKeyCatalog};
 pub use state_inspection_settings::{
     StateInspectionMaxRows, StateInspectionMaxSections, StateInspectionReadTimeout,
     StateInspectionSettings, StateInspectionSettingsError,
@@ -409,10 +423,10 @@ pub use statement::{
     AckWindow, ActivateLicense, AlterBranch, AlterBranchError, AlterBranchOperation,
     AlterGenerator, AlterGeneratorError, AlterGeneratorOperation, AlterIngestor,
     AlterIngestorError, AlterIngestorOperation, AlterRelay, AlterRelayError, AlterRelayOperation,
-    AlterTransportIngestorOperation, BranchEviction, BranchPartitions, BranchSelection,
-    CodecBatchContainer, CodecEncoding, CodecEncodingRule, CodecJaqFormat, CodecJaqTransformations,
-    CodecProtobufConfig, CodecWireFormat, CordonNode, CreateBranch, CreateCodec, CreateDomain,
-    CreateEndpoint, CreateGenerator, CreateIngestor, CreateLookup, CreateRelay, CreateResource,
+    AlterTransportIngestorOperation, BranchEviction, BranchSelection, CodecBatchContainer,
+    CodecEncoding, CodecEncodingRule, CodecJaqFormat, CodecJaqTransformations, CodecProtobufConfig,
+    CodecWireFormat, CordonNode, CreateBranch, CreateCodec, CreateDomain, CreateEndpoint,
+    CreateGenerator, CreateIngestor, CreateLookup, CreateRelay, CreateResource,
     CreateSignalingProtocol, CreateStatement, CreateSubscription, CreateUser, CreateVhost,
     DeleteSubscription, DescribeBranch, DescribeClient, DescribeCluster, DescribeCorrelator,
     DescribeDeduplicator, DescribeDomain, DescribeEmitter, DescribeEndpoint, DescribeIngestor,

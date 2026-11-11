@@ -16,8 +16,8 @@ use std::num::{NonZeroU16, NonZeroU64};
 use error_stack::{Report, ResultExt as _};
 use meticulous::OptionExt as _;
 use nervix_models::{
-    CreateEmitter, DomainName, EmitterInstances, Model, ModelIndex, ModelKind, ModelName, NodeRef,
-    RelayName, ResolvedBranching, SingleInstanceRefusal, Unit,
+    BranchName, CreateEmitter, DomainName, EmitterInstances, Model, ModelIndex, ModelKind,
+    ModelName, NodeRef, RelayName, ResolvedBranching, SingleInstanceRefusal, Unit,
 };
 use thiserror::Error;
 
@@ -49,8 +49,9 @@ pub(in crate::registry) enum EmitterUnits {
     /// `INSTANCES PER PARTITION`: instance `p` serves partition `p` of every input relay, which
     /// share one branch of `count` partitions.
     PerPartition {
-        count: NonZeroU16,
+        count: Option<NonZeroU16>,
         relays: Vec<RelayName>,
+        branch: BranchName,
     },
 }
 
@@ -91,16 +92,17 @@ impl EmitterUnits {
                 Ok(Self::Instances(count))
             }
             EmitterInstances::PerPartition => {
-                let Some(partitions) = branching.partitions() else {
+                let Some(branch) = branching.branch() else {
                     return Err(refusal(EmitterInstancingError::MissingPartitions));
                 };
-                let count = partitions.count();
-                if count.get() == 1 {
+                let count = branching.partitions().map(|partitions| partitions.count());
+                if count.is_some_and(|count| count.get() == 1) {
                     return Ok(Self::Single);
                 }
                 Ok(Self::PerPartition {
                     count,
                     relays: emitter.from.relays().to_vec(),
+                    branch: branch.clone(),
                 })
             }
         }
@@ -143,12 +145,29 @@ impl EmitterUnits {
         Ok(shared.unwrap_or_else(ResolvedBranching::unbranched))
     }
 
+    pub(in crate::registry) fn resolve_topology(
+        &mut self,
+        topology: &nervix_models::PartitionTopology,
+    ) {
+        if let Self::PerPartition { count, branch, .. } = self
+            && let Some(layout) = topology.branches.get(branch)
+        {
+            *count = Some(layout.partitions().count());
+        }
+    }
+
     pub(in crate::registry) fn unit_layout(&self) -> super::unit_placement::UnitLayout {
         use super::unit_placement::UnitLayout;
         match self {
             Self::Single => UnitLayout::Single,
             Self::Instances(count) => UnitLayout::Instances(*count),
-            Self::PerPartition { count, .. } => UnitLayout::Instances(NonZeroU64::from(*count)),
+            Self::PerPartition {
+                count: Some(count), ..
+            } if count.get() == 1 => UnitLayout::Single,
+            Self::PerPartition {
+                count: Some(count), ..
+            } => UnitLayout::Instances(NonZeroU64::from(*count)),
+            Self::PerPartition { count: None, .. } => UnitLayout::AwaitingTopology,
         }
     }
 }

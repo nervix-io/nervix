@@ -510,7 +510,7 @@ async fn a_retired_transition_runs_the_input_its_processor_unit_parked() {
     let mut fixture = OpenWindowFixture::new();
     let unit = Unit::partition(5);
     let partitions = |count: u16| {
-        nervix_models::BranchPartitions::Direct(
+        nervix_models::ResolvedBranchPartitions::Direct(
             std::num::NonZeroU16::new(count).expect("the test counts are positive"),
         )
     };

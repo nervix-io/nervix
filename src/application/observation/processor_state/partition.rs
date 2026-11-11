@@ -14,19 +14,57 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use nervix_execution::{Cancellation, CpuClass, MemoryClass, Reservation};
-use nervix_models::{BranchPartitions, ClusterNodeIncarnation, ClusterNodeName};
+use nervix_models::{ClusterNodeIncarnation, ClusterNodeName, ResolvedBranchPartitions};
 
 use super::*;
 
-pub(super) struct PartitionInspection {
-    partitions: BranchPartitions,
-    catalogs: BTreeMap<Unit, BTreeSet<BranchKeyFingerprint>>,
-    owners: BTreeMap<BranchKeyFingerprint, Unit>,
+pub(in crate::application::observation) struct PartitionInspection {
+    partitions: ResolvedBranchPartitions,
+    catalogs: BTreeMap<Unit, nervix_models::StateInspectionKeyCatalog>,
+    owners: BTreeMap<BranchKeyFingerprint, InspectionKeyOwner>,
     memory: Reservation,
     max_bytes: u64,
 }
 
+struct InspectionKeyOwner {
+    unit: Unit,
+    origin: Option<nervix_models::InheritedPartitionOrigin>,
+    ambiguous: bool,
+}
+
 impl PartitionInspection {
+    pub(in crate::application::observation) fn new(
+        partitions: ResolvedBranchPartitions,
+        executor: &nervix_execution::Executor,
+        max_bytes: u64,
+    ) -> Result<Self, StateInspectionRejection> {
+        Ok(Self {
+            partitions,
+            catalogs: BTreeMap::new(),
+            owners: BTreeMap::new(),
+            memory: executor
+                .try_reserve(MemoryClass::Bulk, 1)
+                .map_err(|error| inspection_refusal(error, StateInspectionRejection::NotReady))?,
+            max_bytes,
+        })
+    }
+
+    pub(in crate::application::observation) fn filter(
+        &self,
+        unit: Unit,
+    ) -> Result<nervix_interconnect::MaterializedPartitionFilter, StateInspectionRejection> {
+        if self.owners.values().any(|owner| owner.ambiguous) {
+            return Err(StateInspectionRejection::NotReady);
+        }
+        Ok(nervix_interconnect::MaterializedPartitionFilter {
+            catalog: self
+                .catalogs
+                .get(&unit)
+                .ok_or(StateInspectionRejection::NotReady)?
+                .clone(),
+            excluded: self.exclusions(unit)?,
+        })
+    }
     fn reserve(&mut self, keys: usize) -> Result<(), StateInspectionRejection> {
         // Charge catalog storage, the keyed owner index, the request's exclusion copy and tree
         // allocation overhead before retaining a catalog. Sparse trees can allocate a whole node
@@ -59,28 +97,56 @@ impl PartitionInspection {
             .map_err(|error| inspection_refusal(error, StateInspectionRejection::NotReady))
     }
 
-    fn record(
+    pub(in crate::application::observation) fn record(
         &mut self,
         unit: Unit,
-        catalog: BTreeSet<BranchKeyFingerprint>,
+        catalog: nervix_models::StateInspectionKeyCatalog,
         cancellation: &Cancellation,
     ) -> Result<(), StateInspectionRejection> {
         self.reserve(catalog.len())?;
-        for key in &catalog {
+        for key in catalog.fingerprints() {
             cancellation
                 .check()
                 .map_err(|error| inspection_refusal(error, StateInspectionRejection::Deadline))?;
-            let current = self.partitions.unit_of(key.partition_seed());
+            let origin = catalog.origin(key);
+            let current = if self.partitions.is_inherited() {
+                origin.map(|origin| self.partitions.unit_of(origin.partition.seed()))
+            } else {
+                Some(self.partitions.unit_of(key.partition_seed()))
+            };
             match self.owners.entry(*key) {
                 std::collections::btree_map::Entry::Vacant(entry) => {
-                    entry.insert(unit);
+                    entry.insert(InspectionKeyOwner {
+                        unit,
+                        origin,
+                        ambiguous: false,
+                    });
                 }
                 std::collections::btree_map::Entry::Occupied(mut entry) => {
-                    if unit == current {
-                        entry.insert(unit);
-                    } else if *entry.get() != current {
+                    let previous = entry.get();
+                    let epoch = origin.map(|origin| origin.epoch);
+                    let previous_epoch = previous.origin.map(|origin| origin.epoch);
+                    if self.partitions.is_inherited() && epoch > previous_epoch {
+                        entry.insert(InspectionKeyOwner {
+                            unit,
+                            origin,
+                            ambiguous: false,
+                        });
+                    } else if self.partitions.is_inherited() && epoch < previous_epoch {
+                        continue;
+                    } else if Some(unit) == current {
+                        entry.insert(InspectionKeyOwner {
+                            unit,
+                            origin,
+                            ambiguous: false,
+                        });
+                    } else if Some(previous.unit) != current {
                         // Two holders without an installed claimant do not identify one source.
-                        return Err(StateInspectionRejection::NotReady);
+                        if self.partitions.is_inherited() {
+                            entry.get_mut().ambiguous = true;
+                        } else {
+                            return Err(StateInspectionRejection::NotReady);
+                        }
                     }
                 }
             }
@@ -98,8 +164,8 @@ impl PartitionInspection {
             .get(&unit)
             .ok_or(StateInspectionRejection::NotReady)?;
         let mut excluded = BTreeSet::new();
-        for key in catalog {
-            if self.owners.get(key) != Some(&unit) {
+        for key in catalog.fingerprints() {
+            if self.owners.get(key).is_none_or(|owner| owner.unit != unit) {
                 excluded.insert(*key);
             }
         }
@@ -109,9 +175,9 @@ impl PartitionInspection {
     pub(super) fn validate(
         &self,
         unit: Unit,
-        catalog: Option<&BTreeSet<BranchKeyFingerprint>>,
+        catalog: &nervix_models::StateInspectionKeyCatalog,
     ) -> Result<(), StateInspectionRejection> {
-        if catalog != self.catalogs.get(&unit) {
+        if Some(catalog) != self.catalogs.get(&unit) {
             return Err(StateInspectionRejection::NotReady);
         }
         Ok(())
@@ -168,10 +234,10 @@ impl SessionServiceImpl {
                     plan,
                 )
                 .await?;
-            let catalog = page
-                .descriptor
-                .partition_catalog
-                .ok_or(StateInspectionRejection::NotReady)?;
+            let catalog = page.descriptor.partition_catalog;
+            if !catalog.is_requested() {
+                return Err(StateInspectionRejection::NotReady);
+            }
             let count = u64::try_from(catalog.len()).assured("an admitted catalog fits u64");
             if count != page.descriptor.counts.branches {
                 return Err(StateInspectionRejection::NotReady);
@@ -187,6 +253,9 @@ impl SessionServiceImpl {
                 })
                 .await
                 .map_err(|error| inspection_refusal(error, StateInspectionRejection::NotReady))??;
+        }
+        if inspection.owners.values().any(|owner| owner.ambiguous) {
+            return Err(StateInspectionRejection::NotReady);
         }
         Ok(Some(inspection))
     }
@@ -208,7 +277,7 @@ mod tests {
 
     fn fixture(executor: &Executor, count: u16, max_bytes: u64) -> PartitionInspection {
         PartitionInspection {
-            partitions: BranchPartitions::Direct(
+            partitions: ResolvedBranchPartitions::Direct(
                 NonZeroU16::new(count).assured("fixture counts are positive"),
             ),
             catalogs: BTreeMap::new(),
@@ -250,11 +319,12 @@ mod tests {
                 for installed in [false, true] {
                     nervix_primitives::task::consume_budget().await;
                     let moving = key(5);
-                    let held = BTreeSet::from([moving]);
+                    let held =
+                        nervix_models::StateInspectionKeyCatalog::Direct(BTreeSet::from([moving]));
                     let claimed = if installed {
                         held.clone()
                     } else {
-                        BTreeSet::new()
+                        nervix_models::StateInspectionKeyCatalog::Direct(BTreeSet::new())
                     };
                     let mut inspection = fixture(&executor, case.count, 1_048_576);
                     let admission = executor
@@ -287,33 +357,115 @@ mod tests {
                             .is_empty()
                     );
                     let selected = if installed { claimant } else { holder };
-                    assert_eq!(inspection.owners.get(&moving), Some(&selected));
+                    assert_eq!(
+                        inspection.owners.get(&moving).map(|holder| holder.unit),
+                        Some(selected)
+                    );
                     let catalog = inspection
                         .catalogs
                         .get(&claimant)
                         .assured("the claimant was sampled");
                     inspection
-                        .validate(claimant, Some(catalog))
+                        .validate(claimant, catalog)
                         .assured("an unchanged catalog remains valid");
                     assert_eq!(
-                        inspection.validate(claimant, None),
+                        inspection.validate(
+                            claimant,
+                            &nervix_models::StateInspectionKeyCatalog::Unrequested
+                        ),
                         Err(StateInspectionRejection::NotReady)
                     );
                     if !installed {
                         assert_eq!(
-                            inspection.validate(claimant, Some(&BTreeSet::from([moving]))),
+                            inspection.validate(
+                                claimant,
+                                &nervix_models::StateInspectionKeyCatalog::Direct(BTreeSet::from(
+                                    [moving]
+                                ))
+                            ),
                             Err(StateInspectionRejection::NotReady),
                             "installation racing the census refuses the page"
                         );
                     } else {
                         assert_eq!(
-                            inspection.validate(holder, Some(&BTreeSet::new())),
+                            inspection.validate(
+                                holder,
+                                &nervix_models::StateInspectionKeyCatalog::Direct(BTreeSet::new())
+                            ),
                             Err(StateInspectionRejection::NotReady),
                             "forget racing the census refuses the page"
                         );
                     }
                 }
             }
+        }
+    }
+
+    #[nervix_primitives::test]
+    async fn inherited_censuses_select_the_newest_origin_and_fence_witness_changes() {
+        let executor = Executor::default();
+        let key = key(5);
+        for order in [[0usize, 1, 2], [2, 1, 0], [1, 0, 2]] {
+            let mut inspection = PartitionInspection::new(
+                ResolvedBranchPartitions::Inherited(NonZeroU16::new(4).assured("four is positive")),
+                &executor,
+                1_048_576,
+            )
+            .assured("the bounded census is admitted");
+            let origins = [(7, 1, 3), (13, 2, 1), (10, 3, 2)].map(|(partition, epoch, unit)| {
+                nervix_models::InheritedPartitionOrigin {
+                    partition: nervix_models::ExternalPartition::new(partition),
+                    epoch: nervix_models::PartitionEpochNumber::new(
+                        std::num::NonZeroU64::new(epoch).assured("the epoch is positive"),
+                    ),
+                    unit: Unit::partition(unit),
+                }
+            });
+            let charge = executor
+                .try_reserve(MemoryClass::Bulk, 1)
+                .assured("bounded job admission");
+            let inspection = executor
+                .run_cpu(CpuClass::Bulk, charge, move |_charge, cancellation| {
+                    for index in order {
+                        let origin = origins[index];
+                        let mut catalog = nervix_models::StateInspectionKeyCatalog::requested();
+                        catalog.insert(key, Some(origin));
+                        inspection.record(origin.unit, catalog, cancellation)?;
+                    }
+                    Ok::<_, StateInspectionRejection>(inspection)
+                })
+                .await
+                .assured("the bounded census job runs")
+                .assured("the catalogs are coherent");
+            for (unit, excluded) in [(3, true), (1, true), (2, false)] {
+                assert_eq!(
+                    inspection
+                        .filter(Unit::partition(unit))
+                        .assured("the unit was sampled")
+                        .excluded
+                        .contains(&key),
+                    excluded
+                );
+            }
+            let selected = Unit::partition(2);
+            let mut changed = inspection
+                .filter(selected)
+                .assured("the newest copy is selected")
+                .catalog;
+            changed.insert(
+                key,
+                Some(nervix_models::InheritedPartitionOrigin {
+                    epoch: nervix_models::PartitionEpochNumber::new(
+                        std::num::NonZeroU64::new(4).assured("four is positive"),
+                    ),
+                    ..origins[2]
+                }),
+            );
+            assert_eq!(
+                inspection.validate(selected, &changed),
+                Err(StateInspectionRejection::NotReady),
+                "the same fingerprints with a new origin cannot reuse a captured census"
+            );
         }
     }
 
@@ -326,8 +478,11 @@ mod tests {
             .assured("bounded job admission");
         executor
             .run_cpu(CpuClass::Bulk, admission, move |_charge, cancellation| {
-                let result =
-                    inspection.record(Unit::partition(1), BTreeSet::from([key(5)]), cancellation);
+                let result = inspection.record(
+                    Unit::partition(1),
+                    nervix_models::StateInspectionKeyCatalog::Direct(BTreeSet::from([key(5)])),
+                    cancellation,
+                );
                 assert_eq!(result, Err(StateInspectionRejection::ReplyTooLarge));
                 assert!(inspection.catalogs.is_empty());
                 assert!(inspection.owners.is_empty());

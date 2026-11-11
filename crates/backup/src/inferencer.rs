@@ -29,7 +29,7 @@ pub struct InferencerStateDescriptor {
     pub schema: SchemaFingerprint,
     pub model: InferencerModelFingerprint,
     pub branch_fingerprint: Option<BranchKeyFingerprint>,
-    pub branch: Option<Vec<StateField>>,
+    pub branch: nervix_models::BranchKeyFields<StateField>,
     pub incarnation: u64,
     pub revision: u64,
     pub shapes: Vec<Vec<u64>>,
@@ -45,7 +45,7 @@ struct DescriptorWire {
     schema: [u8; 32],
     model: [u8; 32],
     branch_fingerprint: Option<[u8; 32]>,
-    branch: Option<Vec<StateField>>,
+    branch: nervix_models::BranchKeyFields<StateField>,
     incarnation: u64,
     revision: u64,
     shapes: Vec<Vec<u64>>,
@@ -62,7 +62,7 @@ impl ArchiveRecord for InferencerStateDescriptor {
             reason = "the header fences the one supported inferencer descriptor shape"
         )
     )]
-    const VERSION: u16 = 1;
+    const VERSION: u16 = 2;
 
     fn encode(&self) -> Result<Vec<u8>, Report<ArchiveWriteError>> {
         encode_record(
@@ -110,7 +110,7 @@ impl InferencerStateDescriptor {
     /// Validates metadata and derives the exact raw length without allocating any tensor values.
     pub fn validate(&self, path: &str) -> Result<(), Report<ArchiveReadError>> {
         validate_branch(path, &self.branch)?;
-        if self.branch.is_some() != self.branch_fingerprint.is_some() {
+        if self.branch.is_branched() != self.branch_fingerprint.is_some() {
             return Err(invalid(path, "inferencer branch identity"));
         }
         if self.incarnation == 0 {

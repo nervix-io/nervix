@@ -17,10 +17,9 @@ use indexmap::IndexMap;
 use meticulous::ResultExt as _;
 use nervix_models::{
     BranchName, BranchPartitionEpoch, ClusterNodeName, ClusterSchedule, DomainName, DomainSchedule,
-    DynamicModelUpdate, FlushPolicy, KafkaPartitionSchedule, ModelKind, ModelName, NodeRef,
-    NodeUnitRef, OwnershipStateComponent, OwnershipStateRecoveryOutcome, OwnershipTransition,
-    ResolvedBranching, ScheduledNode, SchemaFingerprint, StatePurge, Unit, WasmStateGenerations,
-    WasmStateReset,
+    DynamicModelUpdate, FlushPolicy, ModelKind, ModelName, NodeRef, NodeUnitRef,
+    OwnershipStateComponent, OwnershipStateRecoveryOutcome, OwnershipTransition, ResolvedBranching,
+    ScheduledNode, SchemaFingerprint, StatePurge, Unit, WasmStateGenerations, WasmStateReset,
 };
 use nervix_primitives::sync::Arc;
 use thiserror::Error;
@@ -105,7 +104,6 @@ pub(crate) struct ExecutionNode {
     pub(crate) resolved_branching: Option<ResolvedBranching>,
     pub(crate) schema_fingerprint: SchemaFingerprint,
     pub(crate) inferencer_model: Option<nervix_models::InferencerModelFingerprint>,
-    pub(crate) kafka_partition_schedule: Option<KafkaPartitionSchedule>,
     pub(crate) units: IndexMap<Unit, ExecutionUnit>,
     pub(crate) materialized_relay: bool,
     pub(crate) ownership_state_components: Vec<OwnershipStateComponent>,
@@ -122,7 +120,7 @@ pub(crate) struct NodePartitionTransition {
     pub(crate) branch: BranchName,
     pub(crate) epoch: nervix_models::PartitionEpochNumber,
     /// The count the epoch's previous count placed keys by.
-    pub(crate) previous: nervix_models::BranchPartitions,
+    pub(crate) previous: nervix_models::ResolvedBranchPartitions,
     /// The units beyond the current count's this node stays scheduled as for the keys the
     /// previous count placed there.
     pub(crate) holding: Vec<Unit>,
@@ -140,7 +138,7 @@ impl NodePartitionTransition {
             branch: branch.clone(),
             epoch: epoch.number,
             previous: transition.previous,
-            holding: epoch.holding_units(),
+            holding: schedule.holding_units_of(node),
         })
     }
 
@@ -186,7 +184,6 @@ impl ExecutionNode {
             resolved_branching: node.resolved_branching.clone(),
             schema_fingerprint: node.schema_fingerprint,
             inferencer_model: inferencer_model_fingerprint(node),
-            kafka_partition_schedule: node.kafka_partition_schedule.clone(),
             units: node
                 .units
                 .iter()
@@ -341,6 +338,7 @@ pub(crate) struct ExecutionRevision {
     /// The partition epoch of every branch whose count changed since it was created; a branch
     /// absent here is in its first epoch, with every key in its partition.
     pub(crate) partition_epochs: BTreeMap<BranchName, BranchPartitionEpoch>,
+    pub(crate) partition_topology: nervix_models::PartitionTopology,
 }
 
 impl ExecutionRevision {
@@ -375,11 +373,16 @@ impl ExecutionRevision {
                 .change_context_lazy(|| ExecutionRevisionError::Resources {
                     domain: domain.clone(),
                 })?;
-        let entrypoints =
-            EntrypointPlans::from_scheduled_nodes(domain, &schedule.nodes, &activation)
-                .change_context_lazy(|| ExecutionRevisionError::Entrypoints {
-                    domain: domain.clone(),
-                })?;
+        let entrypoints = EntrypointPlans::from_scheduled_nodes(
+            domain,
+            &schedule.nodes,
+            &activation,
+            &schedule.partition_topology,
+            &schedule.partition_epochs,
+        )
+        .change_context_lazy(|| ExecutionRevisionError::Entrypoints {
+            domain: domain.clone(),
+        })?;
         let emitters = EmitterExecutionPlans::from_scheduled_nodes(&schedule.nodes, &activation)
             .change_context_lazy(|| ExecutionRevisionError::Emitters {
                 domain: domain.clone(),
@@ -414,6 +417,7 @@ impl ExecutionRevision {
             message_errors,
             ownership_handoff_fingerprint,
             partition_epochs: schedule.partition_epochs.clone(),
+            partition_topology: schedule.partition_topology.clone(),
         }))
     }
 
@@ -437,7 +441,6 @@ impl ExecutionRevision {
             config: &'a nervix_models::Model,
             resolved_branching: &'a Option<ResolvedBranching>,
             schema_fingerprint: SchemaFingerprint,
-            kafka_partition_schedule: &'a Option<KafkaPartitionSchedule>,
             units: Vec<ScheduledUnitFingerprint<'a>>,
         }
 
@@ -446,6 +449,7 @@ impl ExecutionRevision {
             domain: &'a DomainName,
             nodes: Vec<ScheduledNodeFingerprint<'a>>,
             placement_groups: &'a [nervix_models::PlacementGroupSchedule],
+            partition_topology: &'a nervix_models::PartitionTopology,
         }
 
         let nodes = schedule
@@ -456,7 +460,6 @@ impl ExecutionRevision {
                 config: node.config.as_ref(),
                 resolved_branching: &node.resolved_branching,
                 schema_fingerprint: node.schema_fingerprint,
-                kafka_partition_schedule: &node.kafka_partition_schedule,
                 units: node
                     .units
                     .iter()
@@ -474,6 +477,7 @@ impl ExecutionRevision {
             domain: &schedule.domain,
             nodes,
             placement_groups: &schedule.placement_groups,
+            partition_topology: &schedule.partition_topology,
         };
         let encoded = serde_json::to_vec(&fingerprint).map_err(|error| {
             Report::new(ExecutionRevisionError::Fingerprint {
@@ -500,7 +504,6 @@ impl ExecutionRevision {
             config: &'a nervix_models::Model,
             resolved_branching: &'a Option<ResolvedBranching>,
             schema_fingerprint: SchemaFingerprint,
-            kafka_partition_schedule: &'a Option<KafkaPartitionSchedule>,
             units: Vec<(&'a Unit, &'a nervix_models::ScheduledUnit)>,
         }
         let nodes = schedule
@@ -512,21 +515,25 @@ impl ExecutionRevision {
                 config: node.config.as_ref(),
                 resolved_branching: &node.resolved_branching,
                 schema_fingerprint: node.schema_fingerprint,
-                kafka_partition_schedule: &node.kafka_partition_schedule,
                 units: node.units.iter().collect(),
             })
             .collect::<Vec<_>>();
         // Partition epochs are part of the source: a retirement may end a transition without
         // changing any node's units.
         let epochs = schedule.partition_epochs.iter().collect::<Vec<_>>();
-        let encoded =
-            serde_json::to_vec(&(&schedule.domain, nodes, &schedule.placement_groups, epochs))
-                .map_err(|error| {
-                    Report::new(ExecutionRevisionError::RevisionIdentity {
-                        domain: schedule.domain.clone(),
-                    })
-                    .attach_printable(error)
-                })?;
+        let encoded = serde_json::to_vec(&(
+            &schedule.domain,
+            nodes,
+            &schedule.placement_groups,
+            epochs,
+            &schedule.partition_topology,
+        ))
+        .map_err(|error| {
+            Report::new(ExecutionRevisionError::RevisionIdentity {
+                domain: schedule.domain.clone(),
+            })
+            .attach_printable(error)
+        })?;
         let mut hasher = blake3::Hasher::new();
         hasher.update(b"nervix/execution-revision/source-schedule");
         hasher.update(&encoded);
@@ -906,7 +913,7 @@ mod tests {
                 let mut arbitrary = Arbitrary::new(bytes, Domain::Vocabulary);
                 let relay = NodeRef::new(ModelKind::Relay, named::<ModelName>("events"));
                 let partition_count = u16::from(2 + arbitrary.entropy().byte() % 7);
-                let partitions = nervix_models::BranchPartitions::Direct(
+                let partitions = nervix_models::ResolvedBranchPartitions::Direct(
                     std::num::NonZeroU16::new(partition_count)
                         .assured("the property declares between two and eight partitions"),
                 );
@@ -925,7 +932,7 @@ mod tests {
                 else {
                     unreachable!("the branch fixture constructs a branch");
                 };
-                branch.partitions = partitions;
+                branch.partitions = nervix_models::BranchPartitions::Direct(partitions.count());
                 let branching =
                     ResolvedBranching::branched(branch.name.clone(), key_schema, partitions);
                 let branch = ScheduledNode::new(

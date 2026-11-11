@@ -818,6 +818,7 @@ arrives.
 | `manifest.rkyv` | The manifest record | Always |
 | `users.rkyv` | The users record | Cluster archives |
 | `domains/<domain>/domain.rkyv` | The domain record | Every domain |
+| `domains/<domain>/partitions.rkyv` | Captured external sets, branch epochs, grouping, retained holding units and installed intake counts | Domains with inherited partitions or a retained inherited transition |
 | `domains/<domain>/models.plexus` | The domain's models as Plexus | Every domain |
 | `domains/<domain>/resources/<resource>/<version>/version.rkyv` | One resource version record | Every resource version |
 | `domains/<domain>/resources/<resource>/<version>/archive.tar` | The version's original upload | Published versions, unless `WITHOUT RESOURCES` |
@@ -844,7 +845,16 @@ execution or numeric normalization. Restore refuses a different model/schema fin
 branch key or incarnation before installing state. `WITHOUT STATE` on either side omits restored
 tensors, so new branches use `INITIAL`; both `RESUME` and a normal `START` preserve installed tensors.
 
-The `<unit>` path portion is `single`, `partition/<number>`, or `instance/<number>`. The record descriptor carries the same typed unit; sections of separate units of one entity have distinct paths and restore destinations. A restore places the deduplicator, window, WASM, inferencer, branch lifecycle and materialized relay state of an entity its branch's partitions divide in the partition the restored count places each key in, whichever partition archived it, so an archive cut while a branch changed its partition count restores every key into its partition and the restored branch begins its first partition epoch. Every other section restores into its archived unit.
+The `<unit>` path portion is `single`, `partition/<number>`, or `instance/<number>`. The record
+descriptor carries the same typed unit; sections of separate units of one entity have distinct
+paths and restore destinations. For a direct branch, restore places each key's deduplicator,
+window, WASM, inferencer, lifecycle and materialized state in the partition its field fingerprint
+selects under the restored count, and starts the branch's first partition epoch. An inherited
+branch restores its captured topology and epochs; each key's immutable external origin places its
+state, while a retained key that has no inherited origin stays in its captured holding unit.
+Captured intake counts keep Kafka next offsets addressable before a fresh broker observation.
+See [Inherited Partitions](partitioning.md#topology-changes-and-state). Every other section restores
+into its archived unit.
 
 Materialized group coordinates are zero-based decimal numbers padded to ten digits. A descriptor
 with zero rows has zero groups. A record comes before the sections it owns: a resource version
