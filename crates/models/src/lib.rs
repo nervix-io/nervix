@@ -73,6 +73,7 @@ mod schedule;
 mod schema;
 mod schema_fingerprint;
 mod settings;
+mod show_wasm_state;
 mod state_branch_selection;
 mod state_inspection;
 mod state_inspection_settings;
@@ -388,6 +389,7 @@ pub use schema::{
 };
 pub use schema_fingerprint::SchemaFingerprint;
 pub use settings::{ClusterParameters, Prerequisites, Setting, SettingClass, SettingDefinition};
+pub use show_wasm_state::ShowWasmProcessorState;
 pub use state_branch_selection::{
     ResolvedStateBranchSelection, StateBranchField, StateBranchSelection, StateBranchSelectionError,
 };
@@ -435,9 +437,10 @@ pub use wasm_state_generation::{
     WasmStateReset, WasmStateResetPhase, WasmStateResetReason, WasmStateResetScope,
 };
 pub use wasm_state_inspection::{
-    WasmCheckpointCounts, WasmCheckpointInspection, WasmCheckpointStage, WasmRecoveryInspection,
-    WasmStateInspection, WasmStateResetInspection, WasmStateResetReadiness,
-    WasmUnitStateInspection,
+    WasmBranchStateInspection, WasmCheckpointCounts, WasmCheckpointInspection, WasmCheckpointStage,
+    WasmCheckpointState, WasmRecoveryCounts, WasmRecoveryInspection, WasmStateBinding,
+    WasmStateEntryKey, WasmStateInspectionError, WasmStateResetInspection, WasmStateResetReadiness,
+    WasmUnitStateInspection, WasmUnitStatePage, WasmUnitStateSelection,
 };
 pub use window_model_digest::WindowModelDigest;
 

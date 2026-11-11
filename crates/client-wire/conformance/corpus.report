@@ -178,6 +178,21 @@ DIAGNOSTIC span=7..12 message=str:756e657870656374656420746f6b656e202752454c4159
 DIAGNOSTIC span=4294967295..4294967295 message=str:616e20656d707479207370616e206d61726b73206120706f736974696f6e
 DIAGNOSTIC span=none message=str:
 UNKNOWN cause=StillApplying
+FRAME server_command_wasm_state.nxsm
+REPLY 27 COMMAND completed reference=0192d4e4-7b36-7c3e-9f00-5b2d8c3a1e44 origin=Recovered message=str:636f6d6d6974746564207472616e73616374696f6e3b2071756965736365206c6576656c3a20454e544954595f5041555345
+DIAGNOSTIC span=7..12 message=str:756e657870656374656420746f6b656e202752454c415927
+DIAGNOSTIC span=4294967295..4294967295 message=str:616e20656d707479207370616e206d61726b73206120706f736974696f6e
+DIAGNOSTIC span=none message=str:
+STATE domain=sales kind=WasmProcessor name=counting_guest
+STATE_PAGE branches=3 rows=0 bytes=0 units=1 continuation=next-wasm-position
+STATE_WASM_BINDING resource=wasm_reset_guest version=1 file=processors/filter_even.wasm
+STATE_PLACEMENT partition:1
+STATE_UNIT owner=node_a replicas=node_b node=node_a incarnation=17 fingerprint=2929292929292929292929292929292929292929292929292929292929292929 generation=2 revision=4 stage=Live branches=3 rows=0 bytes=0
+STATE_WASM_UNIT default_generation=1 entries=3 total=2 empty=0 captured=0 locally_durable=1 awaiting_replicas=1 replica_confirmed=1 failed=0 attempted=0 recovered=1 recovery_failed=0
+STATE_WASM_RESET request=0192d4e4-7b36-7c3e-9f00-5b2d8c3a1e44 scope=branch:0101010101010101010101010101010101010101010101010101010101010101 phase=Ready reason=Transaction generation=2 readiness=Ready
+STATE_WASM_CHECKPOINT branch=0101010101010101010101010101010101010101010101010101010101010101 generation=2 committed=4 latest=4 stage=ReplicaConfirmed required=1 confirmed=1
+STATE_WASM_CHECKPOINT branch=0202020202020202020202020202020202020202020202020202020202020202 generation=1 committed=3 latest=4 stage=LocallyDurable required=2 confirmed=1
+STATE_WASM_RECOVERY branch=0202020202020202020202020202020202020202020202020202020202020202 generation=1 rejection=ApplicationState request=recovery-0001 outcome=Recovered
 FRAME server_domain_clock_already_attached.nxsm
 REPLY 11 DOMAIN_CLOCK_ATTACH already_attached domain=tenant message=str:746869732073657373696f6e20616c726561647920666f6c6c6f77732074686520636c6f636b206f6620646f6d61696e202774656e616e7427
 FRAME server_domain_clock_attach_refused.nxsm

@@ -21,6 +21,9 @@ resolve through it keep their own facts, and this chapter links to them rather t
 - [Connector Crates And The Connector Contract](./connector-contract.md#dns-for-http-and-iceberg)
   owns how each integration installs the resolver, dials, completes TLS, and reports a connection
   it could not open.
+- [Cluster Licensing](./node-settings.md#cluster-licensing) owns the leader's outbound HTTPS
+  requests and SSE stream. Both use the node resolver through the shared HTTP client and the
+  committed request budget; a notification connection introduces no separate resolver.
 - [Client Session Protocol](./client-session-protocol.md#leader-discovery-redirect-and-reconnect)
   owns native session connections, their seeds, redirects and reconnection.
 - [Errors And Diagnostics](./errors-and-diagnostics.md) owns the error types that carry a failed

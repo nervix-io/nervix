@@ -22,7 +22,8 @@ use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_checkpoint_replication::CheckpointReplication;
 use nervix_interconnect::RuntimeState;
 use nervix_models::{
-    ClusterNodeName, WasmCheckpointInspection, WasmCheckpointStage, WasmStateGeneration,
+    ClusterNodeName, WasmCheckpointInspection, WasmCheckpointStage, WasmCheckpointState,
+    WasmStateGeneration,
 };
 use nervix_primitives::{
     publication::{ArcSwap, ArcSwapOption},
@@ -425,12 +426,14 @@ impl ReplicatedWasmProcessorState {
                 .branch_key
                 .as_ref()
                 .map(|key| key.fingerprint()),
-            generation: self.generation(),
-            committed_revision,
-            latest_revision,
-            stage,
-            required_replicas,
-            confirmed_replicas,
+            state: WasmCheckpointState {
+                generation: self.generation(),
+                committed_revision,
+                latest_revision,
+                stage,
+                required_replicas,
+                confirmed_replicas,
+            },
         }
     }
 
@@ -676,10 +679,10 @@ mod tests {
     fn only_a_completed_checkpoint_becomes_the_committed_checkpoint() {
         let state =
             ReplicatedWasmProcessorState::new(placement(), None, Arc::new(ArcSwapOption::empty()));
-        assert_eq!(state.inspection().stage, WasmCheckpointStage::Empty);
+        assert_eq!(state.inspection().state.stage, WasmCheckpointStage::Empty);
         let first = state.capture(vec![1], WasmCheckpointBoundary::LocalStorage);
         assert_eq!(state.progress(), WasmCheckpointProgress::Captured);
-        let captured = state.inspection();
+        let captured = state.inspection().state;
         assert_eq!(captured.stage, WasmCheckpointStage::Captured);
         assert_eq!(captured.committed_revision, None);
         assert_eq!(captured.required_replicas, Some(0));
@@ -687,27 +690,27 @@ mod tests {
         let first = state.record_locally_durable(first);
         assert_eq!(state.progress(), WasmCheckpointProgress::LocallyDurable);
         assert_eq!(
-            state.inspection().stage,
+            state.inspection().state.stage,
             WasmCheckpointStage::LocallyDurable
         );
         state.commit(first.completed());
         assert_eq!(state.progress(), WasmCheckpointProgress::Committed);
         assert_eq!(
-            state.inspection().stage,
+            state.inspection().state.stage,
             WasmCheckpointStage::ReplicaConfirmed
         );
         assert_eq!(state.committed_revision(), 1);
 
         let failed = state.capture(vec![2], replicas(&["node-2"]));
         let failed = state.record_locally_durable(failed);
-        let awaiting = state.inspection();
+        let awaiting = state.inspection().state;
         assert_eq!(awaiting.stage, WasmCheckpointStage::LocallyDurable);
         assert_eq!(awaiting.required_replicas, Some(1));
         assert_eq!(awaiting.confirmed_replicas, Some(0));
         assert_eq!(failed.revision(), 2);
         state.record_failed();
         assert_eq!(state.progress(), WasmCheckpointProgress::Failed);
-        let failed_inspection = state.inspection();
+        let failed_inspection = state.inspection().state;
         assert_eq!(failed_inspection.stage, WasmCheckpointStage::Failed);
         assert_eq!(failed_inspection.committed_revision, NonZeroU64::new(1));
         assert_eq!(state.committed_revision(), 1);
@@ -728,7 +731,7 @@ mod tests {
         let state =
             ReplicatedWasmProcessorState::new(placement(), None, Arc::new(ArcSwapOption::empty()));
         state.record_failed();
-        let failed = state.inspection();
+        let failed = state.inspection().state;
         assert_eq!(failed.stage, WasmCheckpointStage::Failed);
         assert_eq!(failed.committed_revision, None);
         assert_eq!(failed.latest_revision, None);
@@ -738,14 +741,14 @@ mod tests {
         let durable = state.record_locally_durable(captured);
         state.commit(durable.completed());
         state.record_failed();
-        let failed = state.inspection();
+        let failed = state.inspection().state;
         assert_eq!(failed.stage, WasmCheckpointStage::Failed);
         assert_eq!(failed.committed_revision, NonZeroU64::new(1));
         assert_eq!(failed.latest_revision, None);
 
         state.capture(vec![2], WasmCheckpointBoundary::LocalStorage);
         state.record_failed();
-        let failed_capture = state.inspection();
+        let failed_capture = state.inspection().state;
         assert_eq!(failed_capture.stage, WasmCheckpointStage::Failed);
         assert_eq!(failed_capture.committed_revision, NonZeroU64::new(1));
         assert_eq!(failed_capture.latest_revision, NonZeroU64::new(2));
@@ -758,21 +761,24 @@ mod tests {
         let captured = state.capture(vec![1], replicas(&["node-2", "node-3"]));
         let durable = state.record_locally_durable(captured);
         state.replication().record(&node("node-2"), 1);
-        let inspection = state.inspection();
+        let inspection = state.inspection().state;
         assert_eq!(inspection.required_replicas, Some(2));
         assert_eq!(inspection.confirmed_replicas, Some(1));
         state.replication().record(&node("node-3"), 1);
-        assert_eq!(state.inspection().confirmed_replicas, Some(2));
+        assert_eq!(state.inspection().state.confirmed_replicas, Some(2));
         state.commit(durable.completed());
         assert_eq!(
-            state.inspection().stage,
+            state.inspection().state.stage,
             WasmCheckpointStage::ReplicaConfirmed
         );
 
         let next = state.capture(vec![2], replicas(&["node-2", "node-3"]));
-        assert_eq!(state.inspection().confirmed_replicas, Some(0));
+        assert_eq!(state.inspection().state.confirmed_replicas, Some(0));
         state.record_locally_durable(next);
-        assert_eq!(state.inspection().committed_revision, NonZeroU64::new(1));
+        assert_eq!(
+            state.inspection().state.committed_revision,
+            NonZeroU64::new(1)
+        );
     }
 
     #[test]

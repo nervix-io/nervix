@@ -1214,6 +1214,7 @@ fn bounded_state_inspection_reply_preserves_its_typed_refusal_and_requested_form
                 unit_count: 0,
                 units: Vec::new(),
                 continuation: None,
+                wasm_binding: None,
             }),
         };
         let mut result = command_ok("x".repeat(8192));

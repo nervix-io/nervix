@@ -4046,3 +4046,12 @@ before this node's local policy is ready.
 Configured native subscription counts are checked with each opening's announced frame size.
 An unrepresentable byte allowance returns `ClientError::InvalidSubscriptionRetention` before
 queue activation and retains the prior generation unchanged.
+
+## Licensing Notification Failures
+
+The outbound licensing stream retains typed setup, transport, idle-timeout, content-type,
+notification-payload and identifier failures. Each interruption ends that response and reconnects
+under the declared backoff; polling and signed deadlines remain independent. Parser failures keep
+their concrete cause in a sanitized context whose rendering contains no untrusted event data.
+Tickets use sensitive authorization headers and never enter URLs or logs. An invalidation hint
+cannot become a permission or a record-rejection outcome.

@@ -34,6 +34,9 @@ Use it for:
 - [client host bindings: the shared runtime, threads, cancellation, host lifetimes, failures,
   Arrow exchange, packaging, qualification, and the host suites and guides](./client-host-bindings.md)
 - [transaction impact planning, scoped quiescence, inspection, and retained outcomes](./transaction-quiescence.md)
+- [visual creation and shared completion: browser drafts and canonical submission, text completion
+  and typed choices, the console's request ownership and fencing, recovery, and the evidence behind
+  them](./visual-creation.md)
 - [consensus durability, replication pacing, log retention, and snapshot recovery](./consensus-storage-and-replication.md)
 - [resource versions, pinned bindings, `LATEST` resolution, rebinding, and the HTTPS listener refresh](./resource-versions.md)
 - [WASM guest state: checkpoints, generations, resets, rejected-state recovery, and replay](./wasm-state.md)

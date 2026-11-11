@@ -140,6 +140,8 @@ For cluster continuity and public identity inspection, read
 For activation, refresh, `DESCRIBE LICENSE`, effective policy, credential handling and quota usage, read
 [Node Settings → Cluster Licensing](../../../docs/src/node-settings.md#cluster-licensing) and
 [Licensing Metrics](../../../docs/src/metrics-and-observability.md#licensing-metrics).
+For notification freshness, reconnects and polling fallback, use that chapter’s event-stream contract.
+Treat notification hints as requests to obtain a verified decision, never as permissions.
 Keep licensing commands cluster-scoped and obtain credentials and trust provisioning externally;
 Plexus supplies no service-address or trust-anchor override.
 For source UUID inspection and restore behavior, read
@@ -920,10 +922,12 @@ literal HTTP polling headers, at model creation and when a later cap is lowered.
   Keep that reference when publication loses leadership while the reset is applying;
   `Command Completion` defines recovery and retained failures.
   See the reset section in `Runtime Nodes` and `Command Completion` before suggesting it.
-- To inspect WASM guest-state progress, use `DESCRIBE WASM PROCESSOR <processor> [FORMAT TEXT|JSON];`.
-  Read its reset phase and generation beside the checkpoint revision and replica counts; both
-  formats use the same typed state inspection. See `Runtime Nodes` and `WASM Processor Guests` for
-  the meaning of each stage and the bounded branch details.
+- To inspect WASM guest-state progress, use
+  `SHOW WASM PROCESSOR <processor> STATE [FOR ...] [LIMIT <n> [AFTER '<continuation>']] [FORMAT TEXT|JSON];`.
+  Read each unit's reset phase, generation and readiness beside every selected branch's checkpoint
+  revision, stage and replica counts; follow a returned continuation with `AFTER` to page the rest.
+  `DESCRIBE WASM PROCESSOR <processor>;` prints only the binding and per-unit summary counts. See
+  `Runtime Nodes` and `WASM Processor Guests` for the meaning of each stage.
 - On a flush-based route, treat `ON MESSAGE ERROR SEND TO` as a separately buffered error output
   governed by that route's same interval and maximum batch-size boundaries. General/global errors
   are node-wide and do not inherit route-local `FLUSH`.
