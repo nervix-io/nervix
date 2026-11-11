@@ -211,7 +211,7 @@ impl WireValues<'_> {
             }));
         }
         if self.arbitrary.entropy().flag() {
-            command.wasm_state = Some(Box::new(self.wasm_state()));
+            command.state = Some(Box::new(self.wasm_state()));
         }
     }
 }

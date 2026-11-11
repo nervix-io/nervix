@@ -89,7 +89,7 @@ Feature: Bounded typed inferencer state inspection
     When inspection client "reader" connects away from the last relay owner when possible
     And client "reader" executes these Plexus commands
       """
-      SHOW INFERENCER running STATE FOR BRANCH VALUES { tenant = 'beta' } LIMIT 1 FORMAT JSON;
+      SHOW INFERENCER running STATE FOR BRANCH KEY { tenant = 'beta' } LIMIT 1 FORMAT JSON;
       """
     Then the last processor state counts 1 rows in 1 branches
     And the typed inspection used its unit owner and a remote page when the cluster permits it

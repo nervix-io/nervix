@@ -193,7 +193,9 @@ introduces row-map payloads, implicit numeric conversions or per-cell callbacks 
 verified `StateInspection`, and its cached JSON is that envelope's lossless serialization.
 Bindings retain this owner for page/refusal, entity, complete counts, unit identity, ordered
 replicas, captured origin, section and opaque continuation access. They add no second inspection
-representation and derive no typed value from display text.
+representation and derive no typed value from display text. A `SHOW WASM PROCESSOR ... STATE` page
+uses the same page and unit views, and its units have no sections; the bindings have no typed WASM
+views, so its pinned module and each unit's guest-state facts are read from the lossless JSON.
 
 The same views carry inferencer `header` and `tensor_1` onwards sections. Shape and values keep
 their declared list and F32 types; a sensitive inference values cell remains redacted as a whole.

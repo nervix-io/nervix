@@ -108,6 +108,10 @@ identifies each returned branch publication and its persistence/replica progress
 `VEC<F32>` values. The whole values cell is redacted when any input or branch-key field is sensitive.
 See [Inspect Carried Inference State](processors.md#inspect-carried-inference-state).
 
+`SHOW WASM PROCESSOR <processor> STATE` returns the same inspection handle. Its units have no
+sections; the JSON document carries the processor's pinned module as `wasm_binding` and each unit's
+lifetimes, counts and branch entries as `wasm`.
+
 ```c
 {{#include ../../tests/client_conformance/c/suite/contract.h:inspection}}
 ```

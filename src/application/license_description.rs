@@ -37,25 +37,218 @@ use crate::{
 };
 
 impl SessionServiceImpl {
+    fn append_activated_license(
+        &self,
+        columns: &mut Vec<(&'static str, ArrayRef)>,
+        initialized: &nervix_consensus::ClusterLicensingState,
+        policy: &crate::licensing::LicensingPolicy,
+        observation: nervix_models::LicensingConnectivity,
+        reported: &str,
+    ) {
+        let nervix_consensus::LicensingMode::Activated(activation) = &initialized.record.mode
+        else {
+            return;
+        };
+
+        let environment = self.inner.licensing_test_support.environment(
+            self.inner
+                .runtime
+                .executor()
+                .limits()
+                .management_event_bytes
+                .as_u64(),
+        );
+        let verification = match &initialized.verification {
+            Some(Ok(verified)) if verified.signing_key_revoked => "verified (signing key revoked)",
+            Some(Ok(_)) => "verified",
+            Some(Err(_)) | None => "unverifiable",
+        };
+        let kind = match activation.binding.kind {
+            nervix_models::ActivationKind::Persistent => "persistent",
+            nervix_models::ActivationKind::Ephemeral => "ephemeral",
+        };
+        let binding = &activation.binding;
+        let mut activation_text = format!(
+            "{} {kind} created {}",
+            binding.activation_id, binding.created_at
+        );
+        if let Some(expiry) = binding.ephemeral_expires_at {
+            columns.push((
+                "ephemeral_expires_at",
+                StdArc::new(TimestampNanosecondArray::from(vec![expiry.unix_nanos()])),
+            ));
+            activation_text.push_str(&format!(" expires {expiry}"));
+        }
+        let mut facts = vec![
+            ("service", environment.service().to_string()),
+            ("activation", activation_text),
+            ("license_key", binding.license_key_id.clone()),
+            (
+                "decision",
+                format!(
+                    "revision {} conditions {} issued {} received {} {verification}",
+                    activation.decision.revision,
+                    activation.decision.conditions_revision,
+                    activation.decision.issued_at,
+                    activation.decision.received_at
+                ),
+            ),
+            ("verification", verification.to_owned()),
+        ];
+        if let Some(Ok(verified)) = &initialized.verification {
+            let decision = &verified.decision;
+            for (name, at) in [
+                ("refresh_after", Some(decision.timing.refresh_after)),
+                ("overdue_at", Some(decision.timing.overdue_at)),
+                ("valid_until", decision.timing.valid_until),
+            ] {
+                if let Some(at) = at {
+                    columns.push((
+                        name,
+                        StdArc::new(TimestampNanosecondArray::from(vec![
+                            nervix_models::Timestamp::try_from(at)
+                                .assured("verified timing fits Timestamp")
+                                .unix_nanos(),
+                        ])),
+                    ));
+                }
+            }
+
+            facts.push((
+                "license",
+                format!(
+                    "{} organization {} plan {} v{} term {} .. {}",
+                    decision.license.license_id,
+                    decision.license.organization_id,
+                    decision.license.plan.plan_code,
+                    decision.license.plan.version,
+                    decision.license.term_starts_at,
+                    decision.license.term_ends_at
+                ),
+            ));
+            facts.push((
+                "status",
+                serde_json::to_value(decision.status)
+                    .assured("known status serializes")
+                    .as_str()
+                    .verified("status is a string")
+                    .to_owned(),
+            ));
+            facts.push((
+                "refresh",
+                format!(
+                    "{} (after {}, overdue {}, valid until {})",
+                    policy.display_state(),
+                    decision.timing.refresh_after,
+                    decision.timing.overdue_at,
+                    match decision.timing.valid_until {
+                        Some(until) => until.to_string(),
+                        None => "unbounded".to_owned(),
+                    }
+                ),
+            ));
+        } else {
+            facts.push(("warning", "decision_unverifiable".to_owned()));
+            if let Some(Err(reason)) = &initialized.verification {
+                facts.push(("rejection", reason.to_string()));
+            }
+        }
+        facts.push((
+            "connectivity",
+            format!(
+                "{} (last success {}, last failure {}){reported}",
+                match observation.state {
+                    nervix_models::LicensingConnectionState::Unknown => "unknown".to_owned(),
+                    nervix_models::LicensingConnectionState::Reachable => "reachable".to_owned(),
+                    nervix_models::LicensingConnectionState::Unreachable {
+                        since,
+                        last_failure,
+                    } => {
+                        format!("unreachable since {since} ({last_failure:?})")
+                    }
+                    nervix_models::LicensingConnectionState::Refusing {
+                        since,
+                        last_refusal,
+                    } => {
+                        format!("refusing {} since {since}", last_refusal.as_str())
+                    }
+                },
+                match observation.last_success {
+                    Some(at) => at.to_string(),
+                    None => "unknown".to_owned(),
+                },
+                match observation.last_failure {
+                    Some(at) => at.to_string(),
+                    None => "unknown".to_owned(),
+                },
+            ),
+        ));
+        for (name, value) in facts {
+            columns.push((name, StdArc::new(StringArray::from(vec![value]))));
+        }
+        columns.push((
+            "decision_revision",
+            StdArc::new(UInt64Array::from(vec![activation.decision.revision])),
+        ));
+        columns.push((
+            "conditions_revision",
+            StdArc::new(UInt64Array::from(vec![
+                activation.decision.conditions_revision,
+            ])),
+        ));
+    }
+
     pub(in crate::application) async fn describe_license(&self) -> CommandResult {
         let origin = self.inner.cluster.local_node_identity().await;
+        let leader = self.inner.consensus.current_leader_tenure();
+        let connectivity = match &leader {
+            Some(leader) if leader.leader_id() != self.inner.consensus.local_node_id() => {
+                self.inner
+                    .cluster
+                    .licensing_connectivity(leader.leader_id(), leader.term())
+                    .await
+            }
+            _ => None,
+        };
+        let local_leader = leader
+            .as_ref()
+            .is_some_and(|tenure| tenure.leader_id() == self.inner.consensus.local_node_id());
+        let connectivity =
+            connectivity.filter(|_| self.inner.consensus.current_leader_tenure() == leader);
+        let observation = match &connectivity {
+            Some(publication) => publication.observation,
+            None if local_leader && self.inner.consensus.current_leader_tenure() == leader => {
+                self.inner.licensing.connectivity()
+            }
+            None => nervix_models::LicensingConnectivity::default(),
+        };
+        let reported = match connectivity.as_ref() {
+            Some(publication) => format!(" (reported by {})", publication.leader.node_id()),
+            None => String::new(),
+        };
         let policy = self.inner.licensing.current();
         let inspected = match (&policy.snapshot.initialized, policy.snapshot.revision) {
             (Some(initialized), Some(revision)) => {
                 let identity = &initialized.identity;
                 let uid = identity.cluster_uid.to_string();
-                let mode = match initialized.record.mode {
+                let mode = match &initialized.record.mode {
                     nervix_consensus::LicensingMode::Free => "free",
+                    nervix_consensus::LicensingMode::Activated(_) => "activated",
                 };
                 let processing = match policy.processing_stop() {
                     None => "running",
                     Some(reason) => match reason {},
                 };
-                let columns: Vec<(&str, ArrayRef)> = vec![
+                let conditions_not_understood = match &initialized.verification {
+                    Some(Ok(verified)) => u64::try_from(verified.conditions_not_understood)
+                        .assured("bounded condition count fits u64"),
+                    Some(Err(_)) | None => 0,
+                };
+                let mut columns: Vec<(&str, ArrayRef)> = vec![
                     ("mode", StdArc::new(StringArray::from(vec![mode]))),
                     (
                         "policy",
-                        StdArc::new(StringArray::from(vec![policy.state_name()])),
+                        StdArc::new(StringArray::from(vec![policy.display_state()])),
                     ),
                     (
                         "cluster_uid",
@@ -81,9 +274,16 @@ impl SessionServiceImpl {
                     ),
                     (
                         "conditions_not_understood",
-                        StdArc::new(UInt64Array::from(vec![0])),
+                        StdArc::new(UInt64Array::from(vec![conditions_not_understood])),
                     ),
                 ];
+                self.append_activated_license(
+                    &mut columns,
+                    initialized,
+                    &policy,
+                    observation,
+                    &reported,
+                );
                 let summary = RecordBatch::try_from_iter(columns)
                     .assured("fixed licensing columns have one value each");
                 let quotas: Vec<_> = QuotaName::ALL
@@ -184,8 +384,10 @@ impl SessionServiceImpl {
                                 },
                                 counts,
                                 sections,
+                                wasm: None,
                             }],
                             continuation: None,
+                            wasm_binding: None,
                         })
                     }
                     (Err(error), _) | (_, Err(error)) => {

@@ -265,7 +265,9 @@ archive; see [Restore Streams](#restore-streams).
   relay and branch-field targets. A generator's materialized-relay target carries a domain alone
   for an unbranched generator, or a domain followed by its branch `Model` reference, and returns
   only relays with materialized state on exactly that branch declaration; the generator's routes
-  then use the input-branch target with that relay as the first input. An emitter-reference
+  then use the input-branch target with that relay as the first input. A placement-member
+  target carries a domain and returns exactly the runtime nodes a placement rule accepts as
+  `FROM` or `TO` members. An emitter-reference
   target carries a domain and offers only the client connectors its entity declares; a client
   consumer instead uses the schema target.
   The Iceberg catalog target uses its declared catalog-client option. An emitter encoding-codec
@@ -323,9 +325,10 @@ domain-wide coverage. Exact `PARTITION` and `INSTANCE` relocation selectors reta
 identity in previews and execution reports. A failed policy or selector validation is an ordinary
 failed command; the client preserves its diagnostic and does not retry invalid input.
 
-Structured WASM inspection carries a `units` collection. Clients preserve each unit identity and
-its own generation, reset, recovery and checkpoint details; a processor's partitions can have
-different generations. Checkpoint and recovery detail limits apply to the complete response.
+A WASM processor state read carries one envelope unit per execution unit. Clients preserve each
+unit identity and its own generation, reset, recovery and checkpoint details; a processor's
+partitions can have different generations. The entry limit applies to the complete response, and
+its continuation resumes after the last entry it returned, whichever unit holds it.
 
 Treat client CONFIG validation refusals as ordinary failed commands under the rules below.
 Show their client/key diagnostic without retrying invalid input automatically. A refused queued
@@ -1428,7 +1431,18 @@ reads use the same envelope: a window page with no retained inputs can still car
 `accumulators` sections. Clients preserve these metadata frames without counting them toward the
 retained-row limit or continuation offset. See [Runtime Nodes](./processors.md#inspect-retained-window-state)
 for section meanings and
-[Materialized State Inspection Envelope](./client-session-protocol.md#materialized-state-inspection-envelope).
+[State Inspection Envelope](./client-session-protocol.md#state-inspection-envelope).
+
+A `SHOW WASM PROCESSOR ... STATE` page carries typed WASM tables instead of row sections. Clients
+MUST decode the page's `WasmStateBinding` and every unit's `WasmUnitStateFacts` into typed values:
+the default generation, the latest reset with its request reference, scope union, phase, reason,
+generation and readiness, the complete entry, checkpoint-stage and recovery-outcome counts, and every
+returned branch entry in order with its optional fingerprint, checkpoint and recovery. Clients MUST
+refuse a zero generation or revision, an unordered or stateless entry, more returned entries than
+the complete count, and undeclared enum values or union members, as for every other table. An
+absent fingerprint is the unbranched execution, never an empty or zero fingerprint. Resume a WASM
+continuation with the same domain, processor and selector; a refused resume starts a new read, and
+entries of the abandoned sequence are not combined with the new one.
 
 Inferencer inspections use that same contract. Clients preserve `header` metadata and each
 `tensor_1` onwards section, including the exact port names, `VEC<U64>` shape and `VEC<F32>`

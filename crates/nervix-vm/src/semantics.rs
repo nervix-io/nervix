@@ -28,9 +28,11 @@ use nervix_primitives::sync::StdArc;
 
 use crate::{
     CompileError, CompileErrorCode, RegisterType,
+    cast::CastTarget,
     extremum::Extremum,
     ip_address::NetworkSource,
     json::JsonOutput,
+    list_statistics::ListStatistic,
     membership::MembershipSet,
     program::{BinaryOp, CastFailure, DatetimeFunction, Expr, FunctionName, SpannedExpr, UnaryOp},
     regexp::{RegexpCall, RegexpFunction},
@@ -308,6 +310,12 @@ impl CaseMapping {
     }
 }
 
+mod catalog;
+mod list_arithmetic;
+mod list_statistics;
+pub use catalog::builtin_descriptor;
+pub use list_arithmetic::ListArithmetic;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BuiltinLowering {
     Now,
@@ -348,6 +356,7 @@ pub enum BuiltinLowering {
     ListMin,
     ListMax,
     Mean,
+    ListArithmetic(ListArithmetic),
     Dot,
     Distance,
     Sum,
@@ -355,6 +364,7 @@ pub enum BuiltinLowering {
     First,
     Count,
     Nth,
+    ListShape(crate::program::ListShapeFunction),
     Contains,
     Cos,
     StartsWith,
@@ -434,6 +444,7 @@ pub enum BuiltinLowering {
     /// An `IN` test, with the set of constants it was compiled with.
     Membership(MembershipSet),
     Datetime(DatetimeFunction),
+    ListStatistic(ListStatistic),
 }
 
 impl RegisterType {
@@ -628,34 +639,21 @@ pub struct CastDescriptor {
 }
 
 impl CastDescriptor {
+    /// Accepts a cast of a value of `input_type` to `target_type` when some value of that type
+    /// can convert, and refuses with the reason [`CastTarget::between`] gives when none ever can.
     pub fn validate(
         self,
         input_type: &DataType,
         target_type: &DataType,
         span: impl Into<std::ops::Range<usize>>,
     ) -> error_stack::Result<(), CompileError> {
-        if (input_type == &DataType::Binary || target_type == &DataType::Binary)
-            && input_type != target_type
-        {
-            return Err(Report::new(CompileError {
+        match CastTarget::between(input_type, target_type) {
+            Ok(_) => Ok(()),
+            Err(refusal) => Err(Report::new(CompileError {
                 code: CompileErrorCode::UnsupportedCast,
-                message: "BYTES conversions require bytes_from_utf8, bytes_to_utf8, base64 or hex \
-                          functions"
-                    .to_string(),
+                message: refusal.to_string(),
                 span: span.into().into(),
-            }));
-        }
-        if is_supported_type(input_type) && is_supported_type(target_type) {
-            Ok(())
-        } else {
-            Err(Report::new(CompileError {
-                code: CompileErrorCode::UnsupportedCast,
-                message: format!(
-                    "casts are only implemented for supported nervix VM types, found {:?} AS {:?}",
-                    input_type, target_type
-                ),
-                span: span.into().into(),
-            }))
+            })),
         }
     }
 }
@@ -893,6 +891,7 @@ pub const fn builtin_arm_execution(lowering: &BuiltinLowering) -> ArmExecution {
         | BuiltinLowering::ListMin
         | BuiltinLowering::ListMax
         | BuiltinLowering::Mean
+        | BuiltinLowering::ListArithmetic(_)
         | BuiltinLowering::Dot
         | BuiltinLowering::Distance
         | BuiltinLowering::Sum
@@ -900,6 +899,7 @@ pub const fn builtin_arm_execution(lowering: &BuiltinLowering) -> ArmExecution {
         | BuiltinLowering::First
         | BuiltinLowering::Count
         | BuiltinLowering::Nth
+        | BuiltinLowering::ListShape(_)
         | BuiltinLowering::Contains
         | BuiltinLowering::StartsWith
         | BuiltinLowering::EndsWith
@@ -990,155 +990,8 @@ pub const fn builtin_arm_execution(lowering: &BuiltinLowering) -> ArmExecution {
         | BuiltinLowering::UrlQueryValues
         | BuiltinLowering::UrlDecode => ArmExecution::SelectedRows,
         BuiltinLowering::Datetime(function) => function.arm_execution(),
+        BuiltinLowering::ListStatistic(statistic) => statistic.arm_execution(),
     }
-}
-
-pub fn builtin_descriptor(function: &FunctionName) -> Option<BuiltinDescriptor> {
-    let lowering = match function {
-        FunctionName::Now => BuiltinLowering::Now,
-        FunctionName::UuidV4 => BuiltinLowering::UuidV4,
-        FunctionName::UuidV7 => BuiltinLowering::UuidV7,
-        FunctionName::Lower => BuiltinLowering::Lower,
-        FunctionName::Upper => BuiltinLowering::Upper,
-        FunctionName::Trim => BuiltinLowering::Trim,
-        FunctionName::Btrim => BuiltinLowering::Btrim,
-        FunctionName::Ltrim => BuiltinLowering::Ltrim,
-        FunctionName::Rtrim => BuiltinLowering::Rtrim,
-        FunctionName::Length => BuiltinLowering::Length,
-        FunctionName::CharLength => BuiltinLowering::CharLength,
-        FunctionName::BitLength => BuiltinLowering::BitLength,
-        FunctionName::OctetLength => BuiltinLowering::OctetLength,
-        FunctionName::Ascii => BuiltinLowering::Ascii,
-        FunctionName::Coalesce => BuiltinLowering::Coalesce,
-        FunctionName::IsNull => BuiltinLowering::IsNull,
-        FunctionName::NullIf => BuiltinLowering::NullIf,
-        FunctionName::Abs => BuiltinLowering::Abs,
-        FunctionName::Acos => BuiltinLowering::Acos,
-        FunctionName::Asin => BuiltinLowering::Asin,
-        FunctionName::Atan => BuiltinLowering::Atan,
-        FunctionName::Ceil => BuiltinLowering::Ceil,
-        FunctionName::Concat => BuiltinLowering::Concat,
-        FunctionName::ConcatWs => BuiltinLowering::ConcatWs,
-        FunctionName::Split => BuiltinLowering::Split,
-        FunctionName::Join => BuiltinLowering::Join,
-        FunctionName::Like => BuiltinLowering::Like,
-        FunctionName::ILike => BuiltinLowering::ILike,
-        FunctionName::ContainsAny => BuiltinLowering::ContainsAny(ContainsAnyCall::Dynamic {
-            capacity: crate::VmSettings::default().pattern_sets_per_batch(),
-        }),
-        FunctionName::NormalizeNfc => BuiltinLowering::NormalizeNfc,
-        FunctionName::Array => BuiltinLowering::ArrayConstruct,
-        FunctionName::Vec => BuiltinLowering::VecConstruct,
-        FunctionName::Overlap => BuiltinLowering::Overlap,
-        FunctionName::Slice => BuiltinLowering::Slice,
-        FunctionName::Min => BuiltinLowering::ListMin,
-        FunctionName::Max => BuiltinLowering::ListMax,
-        FunctionName::Mean => BuiltinLowering::Mean,
-        FunctionName::Dot => BuiltinLowering::Dot,
-        FunctionName::Distance => BuiltinLowering::Distance,
-        FunctionName::Sum => BuiltinLowering::Sum,
-        FunctionName::Last => BuiltinLowering::Last,
-        FunctionName::First => BuiltinLowering::First,
-        FunctionName::Count => BuiltinLowering::Count,
-        FunctionName::Nth => BuiltinLowering::Nth,
-        FunctionName::Contains => BuiltinLowering::Contains,
-        FunctionName::Cos => BuiltinLowering::Cos,
-        FunctionName::StartsWith => BuiltinLowering::StartsWith,
-        FunctionName::EndsWith => BuiltinLowering::EndsWith,
-        FunctionName::Exp => BuiltinLowering::Exp,
-        FunctionName::Floor => BuiltinLowering::Floor,
-        FunctionName::Initcap => BuiltinLowering::Initcap,
-        FunctionName::Left => BuiltinLowering::Left,
-        FunctionName::Ln => BuiltinLowering::Ln,
-        FunctionName::Log => BuiltinLowering::Log,
-        FunctionName::Lpad => BuiltinLowering::Lpad,
-        FunctionName::Md5 => BuiltinLowering::Md5,
-        FunctionName::BytesFromUtf8 => BuiltinLowering::BytesFromUtf8,
-        FunctionName::BytesToUtf8 => BuiltinLowering::BytesToUtf8,
-        FunctionName::Base64Encode => BuiltinLowering::Base64Encode,
-        FunctionName::Base64Decode => BuiltinLowering::Base64Decode,
-        FunctionName::HexEncode => BuiltinLowering::HexEncode,
-        FunctionName::HexDecode => BuiltinLowering::HexDecode,
-        FunctionName::Sha256 => BuiltinLowering::Sha256,
-        FunctionName::Xxh3_64 => BuiltinLowering::Xxh3_64,
-        FunctionName::IpFromString => BuiltinLowering::IpFromString,
-        FunctionName::IsIpAddress => BuiltinLowering::IsIpAddress,
-        FunctionName::IpToString => BuiltinLowering::IpToString,
-        FunctionName::IpFamily => BuiltinLowering::IpFamily,
-        FunctionName::IpTrunc => BuiltinLowering::IpTrunc,
-        FunctionName::IpInNetwork => BuiltinLowering::IpInNetwork(NetworkSource::Argument),
-        FunctionName::IpUnmap => BuiltinLowering::IpUnmap,
-        FunctionName::UrlScheme => BuiltinLowering::UrlScheme,
-        FunctionName::UrlHost => BuiltinLowering::UrlHost,
-        FunctionName::UrlPort => BuiltinLowering::UrlPort,
-        FunctionName::UrlPath => BuiltinLowering::UrlPath,
-        FunctionName::UrlQuery => BuiltinLowering::UrlQuery,
-        FunctionName::UrlFragment => BuiltinLowering::UrlFragment,
-        FunctionName::UrlQueryValue => BuiltinLowering::UrlQueryValue,
-        FunctionName::UrlQueryValues => BuiltinLowering::UrlQueryValues,
-        FunctionName::UrlDecode => BuiltinLowering::UrlDecode,
-        FunctionName::IsUrl => BuiltinLowering::IsUrl,
-        FunctionName::Pow => BuiltinLowering::Pow,
-        FunctionName::RegexpLike => {
-            BuiltinLowering::Regexp(RegexpCall::reading_pattern_argument(RegexpFunction::Like))
-        }
-        FunctionName::RegexpReplace => BuiltinLowering::Regexp(
-            RegexpCall::reading_pattern_argument(RegexpFunction::Replace),
-        ),
-        FunctionName::RegexpSubstr => {
-            BuiltinLowering::Regexp(RegexpCall::reading_pattern_argument(RegexpFunction::Substr))
-        }
-        FunctionName::RegexpExtract => BuiltinLowering::Regexp(
-            RegexpCall::reading_pattern_argument(RegexpFunction::Extract),
-        ),
-        FunctionName::Repeat => BuiltinLowering::Repeat,
-        FunctionName::Replace => BuiltinLowering::Replace,
-        FunctionName::Reverse => BuiltinLowering::Reverse,
-        FunctionName::Right => BuiltinLowering::Right,
-        FunctionName::Round => BuiltinLowering::Round,
-        FunctionName::Rpad => BuiltinLowering::Rpad,
-        FunctionName::SplitPart => BuiltinLowering::SplitPart,
-        FunctionName::Sqrt => BuiltinLowering::Sqrt,
-        FunctionName::Strpos => BuiltinLowering::Strpos,
-        FunctionName::Substr => BuiltinLowering::Substr,
-        FunctionName::Tan => BuiltinLowering::Tan,
-        FunctionName::ToHex => BuiltinLowering::ToHex,
-        FunctionName::Translate => BuiltinLowering::Translate,
-        FunctionName::Sin => BuiltinLowering::Sin,
-        FunctionName::Atan2 => BuiltinLowering::Atan2,
-        FunctionName::Log2 => BuiltinLowering::Log2,
-        FunctionName::Radians => BuiltinLowering::Radians,
-        FunctionName::Degrees => BuiltinLowering::Degrees,
-        FunctionName::Sign => BuiltinLowering::Sign,
-        FunctionName::Trunc => BuiltinLowering::Trunc,
-        FunctionName::IsNan => BuiltinLowering::IsNan,
-        FunctionName::IsFinite => BuiltinLowering::IsFinite,
-        FunctionName::IsInfinite => BuiltinLowering::IsInfinite,
-        FunctionName::BitwiseAnd => BuiltinLowering::BitwiseAnd,
-        FunctionName::BitwiseOr => BuiltinLowering::BitwiseOr,
-        FunctionName::BitwiseXor => BuiltinLowering::BitwiseXor,
-        FunctionName::BitwiseNot => BuiltinLowering::BitwiseNot,
-        FunctionName::ShiftLeft => BuiltinLowering::ShiftLeft,
-        FunctionName::ShiftRight => BuiltinLowering::ShiftRight,
-        FunctionName::BitCount => BuiltinLowering::BitCount,
-        FunctionName::Greatest => BuiltinLowering::Extremum(Extremum::Greatest),
-        FunctionName::Least => BuiltinLowering::Extremum(Extremum::Least),
-        FunctionName::Clamp => BuiltinLowering::Clamp,
-        FunctionName::Datetime(function) => BuiltinLowering::Datetime(function.clone()),
-        FunctionName::LeakSensitive
-        | FunctionName::LookupHashMap
-        | FunctionName::ReadHeader
-        | FunctionName::ReadHeaders
-        | FunctionName::WriteHeader
-        | FunctionName::WindowAggregate(_)
-        | FunctionName::Udf(_)
-        | FunctionName::Unknown(_) => return None,
-    };
-    let semantics = builtin_semantics_for_lowering(&lowering);
-    Some(BuiltinDescriptor {
-        lowering,
-        semantics,
-    })
 }
 
 pub const fn builtin_semantics_for_lowering(lowering: &BuiltinLowering) -> OperationSemantics {
@@ -1203,6 +1056,7 @@ pub const fn builtin_semantics_for_lowering(lowering: &BuiltinLowering) -> Opera
         | BuiltinLowering::First
         | BuiltinLowering::Last
         | BuiltinLowering::Nth
+        | BuiltinLowering::ListShape(_)
         | BuiltinLowering::IsNan
         | BuiltinLowering::IsFinite
         | BuiltinLowering::IsInfinite
@@ -1219,6 +1073,7 @@ pub const fn builtin_semantics_for_lowering(lowering: &BuiltinLowering) -> Opera
             can_error: false,
             null_propagation: NullPropagation::Strict,
         },
+        BuiltinLowering::ListStatistic(statistic) => statistic.semantics(),
         BuiltinLowering::Datetime(function) => OperationSemantics {
             volatility: Volatility::Immutable,
             dependency_scope: DependencyScope::Constant,
@@ -1274,6 +1129,7 @@ pub const fn builtin_semantics_for_lowering(lowering: &BuiltinLowering) -> Opera
         | BuiltinLowering::Sqrt
         | BuiltinLowering::Sum
         | BuiltinLowering::Mean
+        | BuiltinLowering::ListArithmetic(_)
         | BuiltinLowering::Dot
         | BuiltinLowering::Distance
         | BuiltinLowering::Tan
@@ -1836,6 +1692,9 @@ fn builtin_output_type(
             require_builtin_arity_exact(function, arg_types, 0, span)?;
             Ok(data_type.clone())
         }
+        BuiltinLowering::ListArithmetic(operation) => {
+            operation.output_type(function, arg_types, span)
+        }
         BuiltinLowering::Overlap | BuiltinLowering::Dot | BuiltinLowering::Distance => {
             require_builtin_arity_exact(function, arg_types, 2, span.clone())?;
             let element =
@@ -1885,18 +1744,9 @@ fn builtin_output_type(
             if let BuiltinLowering::Mean = lowering {
                 require_numeric_arg(function, input, span)?;
                 Ok(DataType::Float64)
-            } else if input.is_ordered() || input == RegisterType::Boolean {
-                Ok(element)
             } else {
-                Err(Report::new(CompileError {
-                    code: CompileErrorCode::UnsupportedFunction,
-                    message: format!(
-                        "function '{}' requires ordered scalar elements, found {:?}",
-                        function.as_str(),
-                        element
-                    ),
-                    span: span.into(),
-                }))
+                list_statistics::require_ordered_elements(function, &element, input, span)?;
+                Ok(element)
             }
         }
         BuiltinLowering::Count => {
@@ -1906,14 +1756,15 @@ fn builtin_output_type(
         }
         BuiltinLowering::First | BuiltinLowering::Last => {
             require_builtin_arity_exact(function, arg_types, 1, span.clone())?;
-            list_element_type(function, &arg_types[0], ListElements::Scalar, span)
+            list_element_type(function, &arg_types[0], ListElements::Any, span)
         }
         BuiltinLowering::Nth => {
             require_builtin_arity_exact(function, arg_types, 2, span.clone())?;
             let index = require_supported_register_type(function, &arg_types[1], span.clone())?;
             require_integral_arg(function, index, span.clone())?;
-            list_element_type(function, &arg_types[0], ListElements::Scalar, span)
+            list_element_type(function, &arg_types[0], ListElements::Any, span)
         }
+        BuiltinLowering::ListShape(function) => function.output_type(arg_types, span.into()),
         BuiltinLowering::Sum => {
             require_builtin_arity_exact(function, arg_types, 1, span.clone())?;
             let element =
@@ -2057,6 +1908,9 @@ fn builtin_output_type(
             let input = require_supported_register_type(function, &arg_types[0], span.clone())?;
             require_integral_arg(function, input, span)?;
             Ok(DataType::Utf8)
+        }
+        BuiltinLowering::ListStatistic(statistic) => {
+            statistic.output_type(function, arg_types, span)
         }
         BuiltinLowering::Datetime(datetime) => {
             let operands = datetime.operands();
@@ -2253,9 +2107,7 @@ fn require_matching_operand_types(
 enum ListElements {
     /// Every supported element, including a nested `ARRAY` or `VEC` value.
     Any,
-    /// Scalar and datetime elements only. `first`, `last` and `nth` select one element out of the
-    /// list's value column, which execution supports only for these elements, so a nested element
-    /// is rejected when the statement is applied instead of failing every batch it meets.
+    /// Ordered scalar and datetime elements only, for comparisons and extrema.
     Scalar,
 }
 

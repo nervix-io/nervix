@@ -122,6 +122,10 @@ impl SessionEvents {
         self.publish(NoticeLevel::Info, kind, message);
     }
 
+    pub(in crate::application) fn relay_warning(&self, kind: NoticeKind, message: String) {
+        self.publish(NoticeLevel::Warning, kind, message);
+    }
+
     fn publish(&self, level: NoticeLevel, kind: NoticeKind, message: String) {
         let notice = ServerNotice {
             level,
@@ -151,6 +155,9 @@ pub struct SessionServiceImpl {
 /// keep an `Arc` of their own have a second owner outside the service, and each names it.
 pub(in crate::application) struct SessionServiceInner {
     pub(in crate::application) licensing: crate::licensing::PolicyHandle,
+    pub(in crate::application) licensing_requests: super::licensing::LicensingRequests,
+    pub(in crate::application) licensing_test_support:
+        super::licensing::ConfiguredLicensingTestSupport,
     /// Started and shut down by the application, which outlives the service handle.
     pub(in crate::application) cluster: Arc<cluster::ClusterHandle>,
     /// Proposal authority and local observation; leadership is checked for each operation.
@@ -861,6 +868,7 @@ fn choices_for(request: &ChoiceLookupRequest) -> Result<Vec<Choice>, ChoiceStatu
         | ChoiceTarget::ProcessorInputBranchRelay
         | ChoiceTarget::ProcessorMaterializedRelay
         | ChoiceTarget::GeneratorMaterializedRelay
+        | ChoiceTarget::PlacementMember
         | ChoiceTarget::EmitterHttpRequestReference
         | ChoiceTarget::EmitterKafkaTopicReference
         | ChoiceTarget::EmitterPulsarTopicReference
@@ -1151,6 +1159,7 @@ impl SessionServiceImpl {
             | ChoiceTarget::ProcessorInputBranchRelay
             | ChoiceTarget::ProcessorMaterializedRelay
             | ChoiceTarget::GeneratorMaterializedRelay
+            | ChoiceTarget::PlacementMember
             | ChoiceTarget::EmitterHttpRequestReference
             | ChoiceTarget::EmitterKafkaTopicReference
             | ChoiceTarget::EmitterPulsarTopicReference

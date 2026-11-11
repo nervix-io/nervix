@@ -2460,6 +2460,12 @@ impl SessionServiceImpl {
                     .verified("this statement requires a request domain, which was resolved above");
                 self.show_processor_state(domain, show).await
             }
+            Statement::ShowWasmProcessorState(show) => {
+                let domain = domain
+                    .as_ref()
+                    .verified("this statement requires a request domain, which was resolved above");
+                self.show_wasm_processor_state(domain, show).await
+            }
             Statement::ShowUdfs(_) => {
                 let domain = domain
                     .as_ref()
@@ -2493,6 +2499,13 @@ impl SessionServiceImpl {
                     "initializing"
                 };
                 command_ok(format!("{status}\nnode.initialization={initialization}"))
+            }
+            Statement::RefreshLicense(_) => match self.refresh_license().await {
+                Ok(()) => command_ok("License refreshed".to_owned()),
+                Err(error) => command_error(format!("{error:#}")),
+            },
+            Statement::ActivateLicense(_) => {
+                command_error("ACTIVATE LICENSE requires durable command admission".to_owned())
             }
             Statement::AlterCluster(_) => {
                 command_error("ALTER CLUSTER SET requires durable command admission".to_string())

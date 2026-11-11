@@ -199,6 +199,8 @@ class InventoryTests(unittest.TestCase):
             "interconnect-state-inspection",
             "interconnect-processor-state-inspection",
             "state-inspection-cursor",
+            "interconnect-wasm-state-inspection",
+            "wasm-state-inspection-cursor",
             "client-requests",
             "client-replies",
             "client-events",
@@ -411,6 +413,11 @@ class InventoryTests(unittest.TestCase):
             "rate-limit-utc-generations",
             "vm-decimal-rounding-floats",
             "vm-decimal-rounding-integers",
+            "vm-list-conversions",
+            "vm-list-conversion-lengths",
+            "vm-list-shapes",
+            "vm-list-arithmetic",
+            "vm-list-statistics",
             "approx-into-rounding",
             "approx-into-exact",
             "simd-json-escapes",
@@ -462,6 +469,7 @@ class InventoryTests(unittest.TestCase):
             "console-endpoint-drafts",
             "console-emitter-drafts",
             "console-processor-drafts",
+            "console-placement-drafts",
             "runtime-window-sketch-panes",
             "kafka-partition-offsets",
             "kafka-destination-partitions",
@@ -550,54 +558,59 @@ class InventoryTests(unittest.TestCase):
         }
         for target, version in {
             "benchmark-metrics-report": 1,
-            "ingestor-describe-envelope": 11,
-            "plexus-model": 61,
-            "plexus-archive-model": 64,
-            "plexus-statement": 68,
-            "plexus-statement-text": 67,
-            "plexus-format-document": 67,
-            "plexus-format-text": 66,
-            "models-archived-models": 66,
-            "registry-archived-models": 56,
-            "consensus-state-records": 64,
-            "consensus-state-corruption": 64,
-            "consensus-raft-records": 63,
-            "registry-stored-models": 49,
-            "registry-stored-models-corruption": 49,
-            "cluster-identity-record-rkyv": 1,
-            "node-capability-records": 4,
-            "node-settings-command-line": 10,
+            "ingestor-describe-envelope": 12,
+            "plexus-model": 63,
+            "plexus-archive-model": 66,
+            "plexus-statement": 72,
+            "plexus-statement-text": 71,
+            "plexus-format-document": 71,
+            "plexus-format-text": 70,
+            "models-archived-models": 69,
+            "registry-archived-models": 57,
+            "consensus-state-records": 67,
+            "consensus-state-corruption": 67,
+            "consensus-raft-records": 65,
+            "registry-stored-models": 50,
+            "registry-stored-models-corruption": 50,
+            "cluster-identity-record-rkyv": 2,
+            "node-capability-records": 5,
+            "node-settings-command-line": 11,
             "inferencer-tensor-columns": 1,
             "inferencer-state-snapshots": 1,
-            "backup-inferencer-values": 2,
-            "backup-inferencer-malformed": 2,
-            "backup-record-manifest": 18,
-            "backup-complete-archives": 18,
-            "backup-malformed-records": 18,
-            "backup-corrupt-archives": 19,
+            "backup-inferencer-values": 3,
+            "backup-inferencer-malformed": 3,
+            "backup-record-manifest": 19,
+            "backup-complete-archives": 19,
+            "backup-malformed-records": 19,
+            "backup-corrupt-archives": 20,
             "backup-capture-wire": 3,
             "backup-capture-wire-malformed": 3,
             "backup-section-mapping": 4,
-            "runtime-window-collection": 1,
+            "runtime-window-collection": 2,
             "runtime-window-snapshots": 5,
             "runtime-window-sealed-checkpoints": 5,
             "backup-window-groups": 5,
 
             "inferencer-state-snapshots-malformed": 1,
             "inferencer-native-snapshot-projection": 1,
-            "console-emitter-drafts": 6,
-            "console-processor-drafts": 6,
-            "client-requests": 12,
-            "client-producer-link-frames": 10,
-            "client-producer-link-frames-malformed": 10,
+            "console-emitter-drafts": 8,
+            "console-processor-drafts": 8,
+            "client-requests": 14,
+            "client-producer-link-frames": 11,
+            "client-producer-link-frames-malformed": 11,
         }.items():
             with self.subTest(target=target):
                 self.assertEqual(versions[target], version)
 
     def test_state_inspection_representations_are_bounded_pairs(self) -> None:
         targets = {target.id: target for target in bolero.load_inventory().targets}
-        for name, version in (("client-state-inspection", 6), ("state-inspection-cursor", 8),
-                              ("client-published-processor-sections", 2)):
+        for name, version in (
+            ("client-state-inspection", 7),
+            ("state-inspection-cursor", 9),
+            ("interconnect-wasm-state-inspection", 3),
+            ("wasm-state-inspection-cursor", 3),
+            ("client-published-processor-sections", 2),
+        ):
             with self.subTest(target=name):
                 self.assertEqual(targets[name].domain_version, version)
                 self.assertEqual(targets[name].max_input_bytes, 512)
@@ -606,7 +619,7 @@ class InventoryTests(unittest.TestCase):
     def test_inference_inspection_transport_domain_has_tensor_sections(self) -> None:
         target = next(target for target in bolero.load_inventory().targets
                       if target.id == "interconnect-processor-state-inspection")
-        self.assertEqual(target.domain_version, 4)
+        self.assertEqual(target.domain_version, 5)
         self.assertEqual(target.max_input_bytes, 1024)
         self.assertTrue((target.corpus / "inference-tensor-layout").is_file())
 

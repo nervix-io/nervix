@@ -19,7 +19,7 @@ async fn published(
     let duration = parse_duration_text(&duration).assured("the scenario names a valid bound");
     let name = expand_placeholders(world, &name);
     let statement = format!(
-        "SHOW INFERENCER {name} STATE FOR BRANCH VALUES {{ tenant = '{tenant}' }} FORMAT JSON;"
+        "SHOW INFERENCER {name} STATE FOR BRANCH KEY {{ tenant = '{tenant}' }} FORMAT JSON;"
     );
     let deadline = Instant::now() + duration;
     loop {

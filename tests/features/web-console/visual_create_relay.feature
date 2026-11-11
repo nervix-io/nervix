@@ -471,18 +471,45 @@ Feature: Web console visual relay and subscription creation
   @visual_choice_states
   Scenario: A stale choice page offers a neutral retry that loads current choices
     Given a 1 node nervix cluster is started
-    When the web console is opened on the leader node
-    Then selector ".topbar-status .pill.ok" contains "CONNECTED"
-    When selector ".create-menu-button" is clicked
-    And selector ".create-menu [data-create-kind='placement']" is clicked
-    Then selector ".create-placement-options .create-choice-more" exists
+    And the active domain is "{{domain}}"
     When these Plexus commands are executed on the leader node
       """
-      CREATE DOMAIN visual_choice_revision;
+      CREATE DOMAIN {{domain}};
+      CREATE SCHEMA visual_page_01 (value I64);
+      CREATE SCHEMA visual_page_02 (value I64);
+      CREATE SCHEMA visual_page_03 (value I64);
+      CREATE SCHEMA visual_page_04 (value I64);
+      CREATE SCHEMA visual_page_05 (value I64);
+      CREATE SCHEMA visual_page_06 (value I64);
+      CREATE SCHEMA visual_page_07 (value I64);
+      CREATE SCHEMA visual_page_08 (value I64);
+      CREATE SCHEMA visual_page_09 (value I64);
+      CREATE SCHEMA visual_page_10 (value I64);
+      CREATE SCHEMA visual_page_11 (value I64);
+      CREATE SCHEMA visual_page_12 (value I64);
+      CREATE SCHEMA visual_page_13 (value I64);
+      CREATE SCHEMA visual_page_14 (value I64);
+      CREATE SCHEMA visual_page_15 (value I64);
+      CREATE SCHEMA visual_page_16 (value I64);
+      CREATE SCHEMA visual_page_17 (value I64);
+      CREATE SCHEMA visual_page_18 (value I64);
+      CREATE SCHEMA visual_page_19 (value I64);
+      CREATE SCHEMA visual_page_20 (value I64);
+      CREATE SCHEMA visual_page_21 (value I64);
       """
-    And selector ".create-placement-options .create-choice-more" is clicked
-    Then selector ".create-placement-options .create-choice-state.create-choice-stale" contains "The form context changed"
-    And selector ".create-placement-options .create-choice-retry" exists
-    When selector ".create-placement-options .create-choice-retry" is clicked
-    Then selector ".create-placement-options [data-value='PREFER COLOCATION']" exists
-    And selector ".create-placement-options .create-choice-more" exists
+    And the web console is opened on the leader node
+    Then selector ".domain-menu [data-domain='{{domain}}'].active" exists
+    And selector ".topbar-status .pill.ok" contains "CONNECTED"
+    When selector ".create-menu-button" is clicked
+    And selector ".create-menu [data-create-kind='relay']" is clicked
+    Then selector ".create-schema-ref .create-choice-more" exists
+    When these Plexus commands are executed on the leader node
+      """
+      CREATE SCHEMA visual_page_22 (value I64);
+      """
+    And selector ".create-schema-ref .create-choice-more" is clicked
+    Then selector ".create-schema-ref .create-choice-state.create-choice-stale" contains "The form context changed"
+    And selector ".create-schema-ref .create-choice-retry" exists
+    When selector ".create-schema-ref .create-choice-retry" is clicked
+    Then selector ".create-schema-ref [data-value='visual_page_01']" exists
+    And selector ".create-schema-ref .create-choice-more" exists

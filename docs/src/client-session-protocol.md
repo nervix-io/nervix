@@ -220,12 +220,6 @@ extreme values, nested lists, and every refusal of a domain clock attachment, to
 `just test-client-wire` checks that the checked-in bytes are exactly what the encoder writes, and
 `just update-client-wire-corpus` regenerates them for review.
 
-A WASM description's typed `wasm_state` contains its shared resource binding and a `units`
-collection. Each unit carries its identity, guest generations, reset readiness, recovery attempts
-and checkpoint observations. Checkpoint and recovery detail each retain a whole-processor limit
-of 128 entries; every unit reports complete counts and omitted totals. Text and JSON descriptions
-render those same facts.
-
 The registered client representation properties also compare complete generated current values
 through the production codecs. Separate targets verify malformed bytes under fixed limits; Arrow
 properties compare selected logical values and validity with decoded Row cells, using float bits
@@ -508,7 +502,10 @@ as text edits; [CLI Completion](./client-tools-cli.md#completion) describes thei
 
 Semantic completion of placement members offers only placement-eligible runtime nodes. HTTP
 endpoint, WebSocket endpoint and Syslog listener ingestors execute on every cluster node, so their
-declared execution policy excludes them from these suggestions.
+declared execution policy excludes them from these suggestions. A name that more than one eligible
+entity shares is ambiguous in a rule and is not suggested either. The placement-member choice target
+answers from the same rule, so the REPL, a visual form and the rule's validation agree on every
+member.
 
 Choice lookups on the concurrent lane return typed values for structured client controls. A domain
 dependency selects internal schemas, branches, relays, codecs, VHOSTs, signaling protocols,
@@ -516,7 +513,7 @@ JSON/CBOR/AVRO wire schemas, or resource catalogs; a domain and relay reference 
 fields; a domain and codec reference select that codec's output schema fields; a domain and resource
 reference select completed resource versions. Wire-schema targets have separate discriminants, so
 a codec cannot mistake a JSON wire schema for a CBOR or AVRO schema with the same name. A
-visual ingestor uses a distinct ingestor-reference target for each of the 14 connector and entity
+visual ingestor uses a distinct ingestor-reference target for each of the 15 connector and entity
 pairs that read an external system; a client producer ingestor selects its schema through the
 schema target instead. Each ingestor-reference target requires a domain and offers clients of its
 pair's connector, except the HTTP endpoint and WebSocket endpoint targets, which offer endpoints of
@@ -530,7 +527,10 @@ The same dependencies with the output-relay target select the input branch, and 
 materialized-relay target select only relays with materialized state in that branch. A generator
 reads no input, so its materialized relay uses the generator-materialized-relay target: with a
 domain alone it offers unbranched relays with materialized state, and with a domain and a branch
-reference the relays with materialized state branched by exactly that branch. Route
+reference the relays with materialized state branched by exactly that branch. A placement form
+asks the placement-member target with a domain for each `FROM` and `TO` member; it offers the
+placement-eligible runtime nodes, with the attached transaction prefix applied, and its page digest
+includes each candidate's definition. Route
 construction of an unbranched or named branch uses the ingestor relay targets, while branch keys
 and record fields use the branch-field and relay-field targets. These processor targets resolve
 against the attached transaction prefix, and their page digests include the selected input
@@ -1117,6 +1117,7 @@ reports, so a client routes notices by kind and never by their text:
 | `ClusterParameters` | A committed cluster-parameter revision the serving node installed | `Info` |
 | `Runtime` | A failure the runtime of the serving node, or of another node, recovered from | `Error` |
 | `ControlPlane` | A control-plane failure the serving node recovered from | `Error` |
+| `Licensing` | A licensing lifecycle observation or a refresh/policy warning | `Info`, `Warning` |
 
 A membership notice reports only a change of the live set. Model changes, subscriptions opening or
 closing and domain starts change what members publish through gossip, not which members are live,
@@ -1146,7 +1147,8 @@ subscriptions, domain clock attachments, producers, and the reads its locally ap
 answer: `SHOW CLUSTER STATUS`, `DESCRIBE CLUSTER`, `SHOW TRANSACTIONS`, `SHOW CREATE`, `SHOW UDFS`,
 `SHOW INGESTORS`, `SHOW EMITTERS`, `SHOW PLACEMENTS`,
 `SHOW RELAY MATERIALIZED STATE`, `SHOW REORDERER STATE`, `SHOW CORRELATOR STATE`,
-`SHOW DEDUPLICATOR STATE`, `SHOW WINDOW PROCESSOR STATE`, `LOOKUP`, and
+`SHOW DEDUPLICATOR STATE`, `SHOW WINDOW PROCESSOR STATE`, `SHOW WASM PROCESSOR STATE`,
+`LOOKUP`, and
 the `DESCRIBE` statements of domains, resources, endpoints, lookups, placements, UDFs, relocations,
 relays, ingestors, junctions, deduplicators, reingestors, correlators, reorderers, window
 processors, WASM processors, and emitters. Every other
@@ -1391,7 +1393,8 @@ into the FlatBuffers builder; no JSON object, map of fields, or intermediate row
 Plexus type has exactly one cell type, `DATETIME` travels as signed nanoseconds, floats keep their
 exact bits, and `BYTES` travels as raw octets. A sensitive field is written as `RedactedCell` in
 every row, whether or not it held a value, so the frame reveals neither the value nor its nullness.
-A null in a nullable field is `NullCell`; a list element is never null or redacted.
+A null in a nullable field is `NullCell`; a list element is never null or redacted. A null fixed
+array has no visible elements: physical child nulls masked by its Arrow validity are not encoded.
 
 A frame holds rows of one concrete branch. Its branch key is written once per frame, with sensitive
 key fields redacted, and is absent exactly when the relay is unbranched. The encoder groups the
@@ -2599,7 +2602,7 @@ Placement-policy choices use `ChoiceTarget::PlacementPolicy` with no dependencie
 policies for named placement rules; the rule's scope and the candidate graph determine which
 policies are applicable. Domain pace is a separate domain-creation choice.
 
-## Materialized State Inspection Envelope
+## State Inspection Envelope
 
 `CommandOutcome.state` carries `StateInspection`, independently of the display message. Its result
 is exactly one `Page` or `Rejected` value. A page contains complete counts, unit count, ordered unit
@@ -2620,14 +2623,30 @@ reply bytes and sections, while complete row counts, `LIMIT` and continuation of
 to retained inputs. Metadata can therefore be present when no input is retained. The
 [processor inspection sections](./processors.md#inspect-retained-window-state) define their fields.
 
-The shared host runtime keeps this envelope in `Inspection`, including for `SHOW INFERENCER ... STATE`: `header` frames contain branch lifecycle and
+For `SHOW INFERENCER ... STATE`, `header` frames contain branch lifecycle and
 checkpoint progress, and `tensor_1` onwards contain the declared ports, `VEC<U64>` shape and
 bit-exact `VEC<F32>` values. Any sensitive input or key makes the complete values cell redacted.
 Tensor rows consume the row limit; header metadata consumes bytes and sections only. Section
 names and schemas follow [inference inspection](processors.md#inspect-carried-inference-state).
 All clients preserve these sections through the existing generic inspection surface.
 
-Python, Ruby and JVM applications read its typed metadata and lossless JSON through their native binding, using the host guides'
+A `SHOW WASM PROCESSOR ... STATE` page also carries its processor's pinned module as
+`WasmStateBinding` (resource, version and file), and each of its units carries `WasmUnitStateFacts`:
+the default generation, the latest reset as `WasmResetFacts` (request reference, the `WasmStateScope`
+union of `WasmUnbranchedScope`, `WasmBranchScope` with its 32-byte `Fingerprint` and
+`WasmAllBranchesScope`, phase, reason, published generation and readiness), the complete entry
+count, `WasmCheckpointCounts` and `WasmRecoveryCounts`, and the returned `WasmBranchStateFacts` in
+strictly increasing branch order. An entry's absent `branch` is the unbranched execution; it carries
+a `WasmCheckpointFacts` (generation, optional committed and latest revisions, stage and optional
+required and confirmed replica counts), a `WasmRecoveryFacts` (refused generation, rejection,
+request reference and outcome) or both, never neither. Generations and revisions are positive; a
+decoder refuses a zero, an unordered or stateless entry, more returned entries than the complete
+count, and every undeclared enum value or union member. Other kinds carry neither table. A WASM
+page has no row sections, so its `rows` and `bytes` counts are zero and `branches` counts the
+selected branches.
+
+The shared host runtime keeps this envelope in `Inspection`. Python, Ruby and JVM applications
+read its typed metadata and lossless JSON through their native binding, using the host guides'
 `Inspect Materialized State` sections. Metadata views retain the inspection independently; each
 frame view retains its exact verified bytes and schema. Host buffer lifetimes do not depend on
 the outcome or session, and no binding parses the display message to recover inspection data.
@@ -2642,6 +2661,8 @@ single-terminal reply gate still govern that outcome. Other typed reasons are `U
 
 The JSON projection preserves cell types: integer values, float bits, datetime nanoseconds, base64
 bytes, nested typed lists, null and redacted cells. Counts and origin fields remain structural
-metadata. See [Inspect Materialized State](./relay.md#inspect-materialized-state) for token fencing
-and query semantics. This operator page protocol does not change subscription batches or the
+metadata; WASM stages, phases, reasons, readiness, rejections and outcomes render as snake-case
+strings and reset scopes as `{"kind": ..., "branch": ...}`. See
+[Inspect Materialized State](./relay.md#inspect-materialized-state) and
+[WASM State And Recovery](./wasm-state.md#observability) for token fencing and query semantics. This operator page protocol does not change subscription batches or the
 internal dependency/generator full-snapshot protocol.

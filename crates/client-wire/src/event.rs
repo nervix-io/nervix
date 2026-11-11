@@ -35,6 +35,8 @@ pub enum NoticeKind {
     Runtime,
     /// A control-plane failure the serving node recovered from.
     ControlPlane,
+    /// A licensing lifecycle observation or policy warning.
+    Licensing,
 }
 
 wire_enum!(ALL_NOTICE_KINDS: NoticeKind => wire::NoticeKind {
@@ -43,6 +45,7 @@ wire_enum!(ALL_NOTICE_KINDS: NoticeKind => wire::NoticeKind {
     ClusterParameters,
     Runtime,
     ControlPlane,
+    Licensing,
 });
 
 /// A server condition worth an operator's attention that belongs to no request: display text, with

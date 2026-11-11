@@ -71,6 +71,7 @@ mod schedule;
 mod schema;
 mod schema_fingerprint;
 mod settings;
+mod show_wasm_state;
 mod state_branch_selection;
 mod state_inspection;
 mod state_inspection_settings;
@@ -296,6 +297,7 @@ pub use names::{
     SubscriptionName, UdfName, UserName, VhostName, WasmProcessorName, WindowProcessorName,
     WireSchemaName,
 };
+pub use nervix_licensing_vocabulary::ActivationKind;
 pub use node_capabilities::{
     ConnectorHostCapabilities, ConsensusCapabilities, DnsAddressFamilies, DnsCapabilities,
     EngineCapabilities, InterconnectCapabilities, InvalidPeerCapacity, MaxPeers, NodeCapabilities,
@@ -385,6 +387,7 @@ pub use schema::{
 };
 pub use schema_fingerprint::SchemaFingerprint;
 pub use settings::{ClusterParameters, Prerequisites, Setting, SettingClass, SettingDefinition};
+pub use show_wasm_state::ShowWasmProcessorState;
 pub use state_branch_selection::{
     ResolvedStateBranchSelection, StateBranchField, StateBranchSelection, StateBranchSelectionError,
 };
@@ -398,9 +401,9 @@ pub use state_inspection_settings::{
     StateInspectionSettings, StateInspectionSettingsError,
 };
 pub use statement::{
-    AckWindow, AlterBranch, AlterBranchError, AlterBranchOperation, AlterGenerator,
-    AlterGeneratorError, AlterGeneratorOperation, AlterIngestor, AlterIngestorError,
-    AlterIngestorOperation, AlterRelay, AlterRelayError, AlterRelayOperation,
+    AckWindow, ActivateLicense, AlterBranch, AlterBranchError, AlterBranchOperation,
+    AlterGenerator, AlterGeneratorError, AlterGeneratorOperation, AlterIngestor,
+    AlterIngestorError, AlterIngestorOperation, AlterRelay, AlterRelayError, AlterRelayOperation,
     AlterTransportIngestorOperation, BranchEviction, BranchPartitions, BranchSelection,
     CodecBatchContainer, CodecEncoding, CodecEncodingRule, CodecJaqFormat, CodecJaqTransformations,
     CodecProtobufConfig, CodecWireFormat, CordonNode, CreateBranch, CreateCodec, CreateDomain,
@@ -414,7 +417,7 @@ pub use statement::{
     DomainState, DomainStatus, DomainTick, DrainNode, DropModel, DropNode, EndpointKind,
     EndpointType, ErrorPolicies, GeneralErrorPolicy, IngestTimestampSource, InspectionFormat,
     LookupQuery, MaterializedRelayState, MessageErrorPolicy, Model, ModelKind, PartitionSeed,
-    RelayBranching, Relocation, RelocationMember, RelocationPreferenceOverride,
+    RefreshLicense, RelayBranching, Relocation, RelocationMember, RelocationPreferenceOverride,
     RelocationPreferenceStrategy, RelocationSelection, RelocationUnitSelection, ResolvedBranching,
     ResolvedCodecWireFormat, RetryPolicy, ShowClusterStatus, ShowCreate, ShowEmitters,
     ShowIngestors, ShowPlacements, ShowProcessorState, ShowRelayMaterializedState,
@@ -432,11 +435,18 @@ pub use wasm_state_generation::{
     WasmStateReset, WasmStateResetPhase, WasmStateResetReason, WasmStateResetScope,
 };
 pub use wasm_state_inspection::{
-    WasmCheckpointCounts, WasmCheckpointInspection, WasmCheckpointStage, WasmRecoveryInspection,
-    WasmStateInspection, WasmStateResetInspection, WasmStateResetReadiness,
-    WasmUnitStateInspection,
+    WasmBranchStateInspection, WasmCheckpointCounts, WasmCheckpointInspection, WasmCheckpointStage,
+    WasmCheckpointState, WasmRecoveryCounts, WasmRecoveryInspection, WasmStateBinding,
+    WasmStateEntryKey, WasmStateInspectionError, WasmStateResetInspection, WasmStateResetReadiness,
+    WasmUnitStateInspection, WasmUnitStatePage, WasmUnitStateSelection,
 };
 pub use window_model_digest::WindowModelDigest;
+
+mod licensing;
+pub use licensing::{
+    LicensingConnectionState, LicensingConnectivity, LicensingConnectivityPublication,
+    LicensingTransportFailure,
+};
 
 /// The existing host's single relay admission budget. The runtime settings owner adopts this
 /// policy input; transport retention consumes it rather than choosing another timeout.

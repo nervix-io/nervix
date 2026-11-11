@@ -165,7 +165,7 @@ pub(super) fn ProcessorAssignmentRows(
 #[cfg(test)]
 mod tests {
     use meticulous::{OptionExt as _, ResultExt as _};
-    use nervix_models::FieldName;
+    use nervix_models::{FieldName, ModelKind};
 
     use super::*;
     use crate::create_dialog::{CreateKind, ingestor_route_draft::RouteBranchDraft};
@@ -174,7 +174,11 @@ mod tests {
     fn assignment_areas_keep_state_output_branch_and_error_rows_independent() {
         Owner::new().with(|| {
             let signals = CreateSignals::new();
-            signals.open(CreateKind::Reingestor, None, "global-create-button");
+            signals.open(
+                CreateKind::Model(ModelKind::Reingestor),
+                None,
+                "global-create-button",
+            );
             signals.reingestor.update(|draft| {
                 draft.add_state();
                 draft.active_state_mut().assured("state exists").policy =

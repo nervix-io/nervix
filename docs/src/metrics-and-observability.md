@@ -335,10 +335,22 @@ Request operations are `activation.create`, `activation.refresh`, `activation.re
 `refused_by_service`, `unreachable` and `timeout`. Refusal states are `within_grace`, `over_limit`,
 `lapsed` and `stopped`. Connectivity and request families are leader-local. Free mode supplies no
 decision or deadline and makes no licensing request. The shipped unlimited quotas produce no
-admission refusals.
+admission refusals. An activated record supplies its committed revision and existing signed
+deadlines. Deadline ticks change the state gauge without rewriting those deadlines. A malformed or
+unverifiable response increments `rejected_by_cluster`; typed service refusals increment
+`refused_by_service`, and failed transport attempts record `unreachable` or `timeout`. A request is
+`committed` after its verified decision applies. Counters describe attempts on this process and
+supply no licensing authority.
 
 See [Cluster Licensing](node-settings.md#cluster-licensing) for `DESCRIBE LICENSE` and the
 committed node/domain usage definitions.
+
+For an activated leader, `stream_connected` is 1 while an admitted licensing SSE response is held
+and returns to 0 when that exact response ends or is cancelled. Followers expose no leader-local
+stream sample. A healthy stream grants nothing and does not alter any signed deadline. Setup
+refusals and transport failures use the existing `events.subscribe` outcome counters; successful
+stream admission is observed by the gauge, without claiming a decision was committed.
+
 
 ## Client Ingestors
 

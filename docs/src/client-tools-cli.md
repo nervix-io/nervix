@@ -295,7 +295,8 @@ A server notice prints as `[events] <kind> <level>: <message>`, labelled by the 
 sent with it: `membership` when the connected node sees a node join, leave or restart as a new
 incarnation, `leadership` for that node's Raft transitions and the membership operations it
 proposes, `cluster parameters` when it installs a committed parameter revision, `runtime` for a
-runtime failure of any node and `control plane` for a control-plane failure of the connected node.
+runtime failure of any node, `control plane` for a control-plane failure of the connected node,
+and `licensing` for a licensing lifecycle observation or policy warning.
 The level is `INFO`, `WARN` or `ERROR`.
 
 The carried kind selects this label; the message is display text. A configuration mutation or a
@@ -420,21 +421,21 @@ nervix-cli --domain production --command \
 
 For a standalone `--command` inspection with `FORMAT JSON`, stdout contains exactly one JSON
 document serialized from the typed report, without terminal decoration or unrelated events.
-A materialized-state refusal prints its typed envelope with `rejection` and exits nonzero.
+A state-read refusal prints its typed envelope with `rejection` and exits nonzero.
 Other failures print one JSON object with `error.code` and `error.message` on stdout and exit
 nonzero; a configuration, connection or request failure's message is the whole chain of causes,
 such as `invalid server URL: relative URL without a base`.
 Diagnostic details and unrelated events go to stderr. `FORMAT TEXT` uses normal readable terminal
-output. Transaction inspection is complete; materialized relay and stateful processor state
-inspections are bounded and carry an opaque continuation. See
+output. Transaction inspection is complete; materialized relay, stateful processor and WASM
+processor state inspections are bounded and carry an opaque continuation. See
 [Inspect Materialized State](./relay.md#inspect-materialized-state) for selector clauses, typed
-counts, row limits and stale-token handling, and
+counts, row limits and stale-token handling,
 [Inspect Held Rows](./processors.md#inspect-held-rows) for reorderer and correlator rows, and
-[Inspect Carried Inference State](./processors.md#inspect-carried-inference-state) for tensor sections.
-Standalone JSON mode accepts `DESCRIBE TRANSACTION`, `DESCRIBE WASM PROCESSOR`,
-`SHOW RELAY ... MATERIALIZED STATE`, `SHOW REORDERER ... STATE`, `SHOW CORRELATOR ... STATE`
-and `SHOW INFERENCER ... STATE`
-with `FORMAT JSON`.
+[Inspect Carried Inference State](./processors.md#inspect-carried-inference-state) for tensor sections, and
+[WASM State And Recovery](./wasm-state.md#observability) for WASM checkpoint facts. Standalone JSON
+mode accepts `DESCRIBE TRANSACTION`, `SHOW RELAY ... MATERIALIZED STATE`,
+`SHOW REORDERER ... STATE`, `SHOW CORRELATOR ... STATE`, `SHOW DEDUPLICATOR ... STATE`,
+`SHOW WINDOW PROCESSOR ... STATE`, `SHOW INFERENCER ... STATE` and `SHOW WASM PROCESSOR ... STATE` with `FORMAT JSON`.
 After a stale-preview `COMMIT` refusal, run `DESCRIBE TRANSACTION` for the
 attached transaction before retrying the commit so the client fences it to the newly reviewed
 planning basis.

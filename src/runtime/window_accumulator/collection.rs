@@ -16,7 +16,7 @@ use std::{
     ops::Range,
 };
 
-use arrow_array::{Array, ArrayRef, ListArray, cast::AsArray as _, make_array};
+use arrow_array::{Array, ArrayRef, FixedSizeListArray, ListArray, cast::AsArray as _, make_array};
 use arrow_buffer::{Buffer, OffsetBuffer};
 use arrow_data::{
     ArrayData,
@@ -42,9 +42,69 @@ struct SelectedRow {
 pub(in crate::runtime) struct CollectedSequence {
     columns: Vec<ArrayRef>,
     rows: Vec<SelectedRow>,
-    element: FieldRef,
-    length: i32,
+    container: CollectionContainer,
     capacities: Capacities,
+}
+
+/// The outer list representation, with its validated count and exact argument type.
+enum CollectionContainer {
+    Vector { element: FieldRef, length: i32 },
+    Array { element: FieldRef, length: i32 },
+}
+
+impl CollectionContainer {
+    fn for_output(output: &DataType, rows: i32) -> error_stack::Result<Self, WindowProcessorError> {
+        match output {
+            DataType::List(element) => Ok(Self::Vector {
+                element: StdArc::clone(element),
+                length: rows,
+            }),
+            DataType::FixedSizeList(element, length) => {
+                if *length != rows {
+                    return Err(Report::new(WindowProcessorError::CollectionLength {
+                        expected: *length,
+                        rows,
+                    }));
+                }
+                Ok(Self::Array {
+                    element: StdArc::clone(element),
+                    length: *length,
+                })
+            }
+            _ => Err(Report::new(WindowProcessorError::CollectionOutputType {
+                data_type: output.clone(),
+            })),
+        }
+    }
+
+    fn offset_bytes(&self) -> u64 {
+        match self {
+            Self::Vector { .. } => {
+                u64::try_from(size_of::<[i32; 2]>()).assured("two list offsets fit u64")
+            }
+            Self::Array { .. } => 0,
+        }
+    }
+
+    fn build(self, values: ArrayRef) -> error_stack::Result<ArrayRef, WindowProcessorError> {
+        match self {
+            Self::Vector { element, length } => {
+                let list = ListArray::try_new(
+                    element,
+                    OffsetBuffer::new(vec![0, length].into()),
+                    values,
+                    None,
+                )
+                .change_context(WindowProcessorError::BuildCollection)?;
+                Ok(StdArc::new(list))
+            }
+            Self::Array { element, length } => {
+                let list = FixedSizeListArray::try_new(element, length, values, None)
+                    .change_context(WindowProcessorError::BuildCollection)?;
+                Ok(StdArc::new(list))
+            }
+        }
+    }
 }
 
 impl CollectedSequence {
@@ -67,11 +127,7 @@ impl CollectedSequence {
         }
         let length = i32::try_from(count)
             .change_context(WindowProcessorError::CollectionRows { rows: count })?;
-        let DataType::List(element) = output_type else {
-            return Err(Report::new(WindowProcessorError::CollectionOutputType {
-                data_type: output_type.clone(),
-            }));
-        };
+        let container = CollectionContainer::for_output(output_type, length)?;
         let first = rows
             .retained_row(0)
             .arguments
@@ -99,9 +155,8 @@ impl CollectedSequence {
             .bytes
             .checked_add(metadata)
             .ok_or_else(|| Report::new(WindowProcessorError::CollectionSizeOverflow))?;
-        let offsets = u64::try_from(size_of::<[i32; 2]>()).assured("two list offsets fit u64");
         let working = working
-            .checked_add(offsets)
+            .checked_add(container.offset_bytes())
             .ok_or_else(|| Report::new(WindowProcessorError::CollectionSizeOverflow))?;
         // Reserve the complete operation together: queued gathers never hold a partial grant
         // while waiting for the rest of their own working set.
@@ -112,8 +167,7 @@ impl CollectedSequence {
         let mut selected = Self {
             columns: Vec::new(),
             rows: Vec::with_capacity(count),
-            element: StdArc::clone(element),
-            length,
+            container,
             capacities: shape.capacities(first.data_type(), 0),
         };
         for run in retained_runs(rows, 0..count) {
@@ -189,14 +243,7 @@ impl CollectedSequence {
             .check()
             .change_context(WindowProcessorError::CollectionExecution)?;
         let values = make_array(gathered.freeze());
-        let list = ListArray::try_new(
-            self.element,
-            OffsetBuffer::new(vec![0, self.length].into()),
-            values,
-            None,
-        )
-        .change_context(WindowProcessorError::BuildCollection)?;
-        Ok(StdArc::new(list))
+        self.container.build(values)
     }
 }
 

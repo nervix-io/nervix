@@ -40,8 +40,9 @@ use crate::{
     InferencerName, IngestQuiesceMode, IngestorName, JsonType, JunctionName, LookupName, ModelName,
     NodeRef, PlacementName, ProcessorOutput, ProcessorOutputs, RebindResource, ReingestorName,
     RelayName, ReordererName, RequestedResourceVersion, ResetWasmState, ResourceName, Restore,
-    SchemaName, SignalingProtocolName, SubscriptionName, Timestamp, TransactionInspectionRequest,
-    UdfName, Unit, UserName, VhostName, WasmProcessorName, WindowProcessorName, WireSchemaName,
+    SchemaName, ShowWasmProcessorState, SignalingProtocolName, SubscriptionName, Timestamp,
+    TransactionInspectionRequest, UdfName, Unit, UserName, VhostName, WasmProcessorName,
+    WindowProcessorName, WireSchemaName,
 };
 
 #[derive(
@@ -49,6 +50,8 @@ use crate::{
 )]
 pub enum Statement {
     AlterCluster(crate::AlterCluster),
+    ActivateLicense(ActivateLicense),
+    RefreshLicense(RefreshLicense),
     CreateDomain(CreateStatement<CreateDomain>),
     CreateUser(CreateStatement<CreateUser>),
     CreateResource(CreateStatement<CreateResource>),
@@ -104,6 +107,7 @@ pub enum Statement {
     ShowPlacements(ShowPlacements),
     ShowRelayMaterializedState(ShowRelayMaterializedState),
     ShowProcessorState(ShowProcessorState),
+    ShowWasmProcessorState(ShowWasmProcessorState),
     ShowClusterStatus(ShowClusterStatus),
     ShowTransactions(ShowTransactions),
     DescribeTransaction(DescribeTransaction),
@@ -148,6 +152,8 @@ impl Statement {
             | Self::RebindResource(_)
             | Self::Drop(_) => true,
             Self::AlterCluster(_)
+            | Self::ActivateLicense(_)
+            | Self::RefreshLicense(_)
             | Self::CreateDomain(_)
             | Self::CreateUser(_)
             | Self::CreateResource(_)
@@ -187,6 +193,7 @@ impl Statement {
             | Self::ShowPlacements(_)
             | Self::ShowRelayMaterializedState(_)
             | Self::ShowProcessorState(_)
+            | Self::ShowWasmProcessorState(_)
             | Self::ShowClusterStatus(_)
             | Self::ShowTransactions(_)
             | Self::DescribeTransaction(_)
@@ -1073,7 +1080,6 @@ pub struct DescribeWindowProcessor {
 )]
 pub struct DescribeWasmProcessor {
     pub name: WasmProcessorName,
-    pub format: InspectionFormat,
 }
 
 #[derive(
@@ -2965,3 +2971,30 @@ pub struct CreateLookup<Version = u64> {
 #[cfg(test)]
 #[path = "statement_tests.rs"]
 mod tests;
+
+/// An activation credential is transient input; durable execution retains only verified output.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize)]
+pub struct ActivateLicense {
+    pub kind: nervix_licensing_vocabulary::ActivationKind,
+    pub license_key: String,
+}
+
+impl std::fmt::Debug for ActivateLicense {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ActivateLicense")
+            .field("kind", &self.kind)
+            .finish_non_exhaustive()
+    }
+}
+
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
+pub struct RefreshLicense;
+
+impl Drop for ActivateLicense {
+    fn drop(&mut self) {
+        zeroize::Zeroize::zeroize(&mut self.license_key);
+    }
+}

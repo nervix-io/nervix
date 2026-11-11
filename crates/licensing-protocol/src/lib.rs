@@ -15,6 +15,7 @@ pub mod document;
 pub mod documents;
 pub mod impact;
 pub mod keys;
+pub mod notifications;
 pub mod problems;
 pub mod requests;
 pub mod trust;
@@ -24,8 +25,9 @@ pub mod validation;
 mod probe_tests;
 #[cfg(test)]
 mod signature_vector_tests;
-#[cfg(test)]
-mod test_fixture;
+#[cfg(any(test, feature = "testing"))]
+#[doc(hidden)]
+pub mod test_fixture;
 #[cfg(test)]
 mod verification_tests;
 

@@ -4,6 +4,7 @@ use arrow_schema::{DataType, Schema, TimeUnit};
 use nervix_primitives::sync::StdArc;
 
 use crate::{
+    cast::CastTarget,
     json::JsonScanOutput,
     program::{BinaryOp, CastFailure, FunctionName, Span, UnaryOp},
     semantics::BuiltinLowering,
@@ -178,7 +179,7 @@ pub enum InstructionKind {
     Cast {
         dst: RegisterRef,
         input: RegisterRef,
-        target: RegisterType,
+        target: CastTarget,
         on_failure: CastFailure,
     },
     Builtin {

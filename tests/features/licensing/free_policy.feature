@@ -15,7 +15,8 @@ Feature: Embedded free licensing policy
     And the last license inspection has typed cluster scope
 
   Scenario Outline: The free policy is published without a selected domain on <cluster_size> nodes
-    Given a <cluster_size> node nervix cluster is started
+    Given an HTTPS licensing test service is available
+    And a <cluster_size> node nervix cluster is started
     Then node "node-1" eventually describes this license without a selected domain
       """
       mode: free
@@ -41,6 +42,7 @@ Feature: Embedded free licensing policy
       mode: free
       quota cluster.domains: 2 of unlimited
       """
+    And the licensing service has received no requests
 
     Examples:
       | cluster_size |

@@ -2,10 +2,12 @@
 //!
 //! Layer: engines and infrastructure.
 //! - **Owns.** The active transport, immutable response headers, optional ping cadence, the
-//!   inbound activity deadline and bounded missed-ping response window retained across cancellation,
-//!   and the going-away Close a connection that deadline ends offers its peer.
-//! - **Depends on.** Connector outcomes, execution primitives, recovery classes and WebSocket
-//!   transport.
+//!   inbound activity deadline and bounded missed-ping response window retained across
+//!   cancellation, and the Close a connection this client ends offers its peer: going away when
+//!   that deadline ends it, the status of a frame the peer sent that failed the read, or the
+//!   status of the failure that ended its signaling handshake.
+//! - **Depends on.** Connector outcomes, signaling outcomes, execution primitives, recovery
+//!   classes and WebSocket transport.
 //! - **Must not know.** Configuration Models, Plexus, domains, relays, registry or host admission.
 
 #![cfg_attr(
@@ -37,12 +39,14 @@ use nervix_recovery::Reported as _;
 use tokio_tungstenite::{
     MaybeTlsStream, WebSocketStream,
     tungstenite::{
-        Message,
+        Error as WebsocketError, Message,
+        error::{CapacityError, ProtocolError},
         protocol::{CloseFrame, frame::coding::CloseCode},
     },
 };
 
 use super::{WEBSOCKETS, WebsocketsConnectionIngestorFailure, pings::WebsocketPings};
+use crate::WebsocketSignalingError;
 
 /// An explicit client deadline retains its key; a derived keep-alive/default keeps its bound.
 #[derive(Debug, Clone, Copy)]
@@ -102,6 +106,140 @@ pub(super) struct WebsocketConnection {
 pub(super) enum WebsocketRead {
     Frame(Option<Message>),
     Ping,
+}
+
+/// How this client ends an established connection it gives up. An endpoint that fails an
+/// established connection tells its peer why with a Close frame, unless the peer is unlikely to
+/// receive it (RFC 6455 section 7.1.7).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ConnectionEnding {
+    /// The Close names why this client ends the connection.
+    Close(CloseCode),
+    /// The transport broke, already ended or is already closing, so no frame reaches the peer.
+    Release,
+}
+
+impl ConnectionEnding {
+    /// Offers the peer this ending's Close, waiting neither for the write nor for a reply. The
+    /// frame gets one poll outside the cooperative budget, so only a transport that cannot take it
+    /// at once holds it back, and the caller releases the connection either way. A write the
+    /// transport refuses is reported under `operation`. A release offers nothing.
+    pub(super) fn offer(
+        self,
+        relay: &mut WebSocketStream<MaybeTlsStream<TcpStream>>,
+        operation: &str,
+    ) {
+        match self {
+            Self::Close(status) => {
+                let close = Message::Close(Some(CloseFrame {
+                    code: status,
+                    reason: "".into(),
+                }));
+                let offered = unconstrained(relay.send(close)).now_or_never();
+                if let Some(written) = offered {
+                    written.reported(operation);
+                }
+            }
+            Self::Release => {}
+        }
+    }
+}
+
+/// How a connection ends when its transport fails a read: a frame the peer sent and this client
+/// refuses earns a Close naming why.
+impl From<&WebsocketError> for ConnectionEnding {
+    fn from(failure: &WebsocketError) -> Self {
+        match failure {
+            // A frame beyond max_frame_size, or a message beyond max_message_size.
+            WebsocketError::Capacity(CapacityError::MessageTooLong { .. }) => {
+                Self::Close(CloseCode::Size)
+            }
+            // Message text, or the reason of a Close, that is not UTF-8.
+            WebsocketError::Utf8 => Self::Close(CloseCode::Invalid),
+            WebsocketError::Protocol(violation) => Self::from(violation),
+            WebsocketError::ConnectionClosed
+            | WebsocketError::AlreadyClosed
+            | WebsocketError::Io(_)
+            | WebsocketError::Tls(_)
+            | WebsocketError::WriteBufferFull(_) => Self::Release,
+            // Only the opening upgrade fails with these, never an established connection's read.
+            WebsocketError::Capacity(CapacityError::TooManyHeaders)
+            | WebsocketError::AttackAttempt
+            | WebsocketError::Url(_)
+            | WebsocketError::Http(_)
+            | WebsocketError::HttpFormat(_) => Self::Release,
+        }
+    }
+}
+
+impl From<&ProtocolError> for ConnectionEnding {
+    fn from(violation: &ProtocolError) -> Self {
+        match violation {
+            // Frames RFC 6455 section 5 forbids the peer to send.
+            ProtocolError::NonZeroReservedBits
+            | ProtocolError::MaskedFrameFromServer
+            | ProtocolError::UnmaskedFrameFromClient
+            | ProtocolError::FragmentedControlFrame
+            | ProtocolError::ControlFrameTooBig
+            | ProtocolError::UnknownControlFrameType(_)
+            | ProtocolError::UnknownDataFrameType(_)
+            | ProtocolError::UnexpectedContinueFrame
+            | ProtocolError::ExpectedFragment(_)
+            | ProtocolError::InvalidOpcode(_)
+            | ProtocolError::InvalidCloseSequence => Self::Close(CloseCode::Protocol),
+            // TCP ended without the closing handshake, or that handshake is already under way.
+            ProtocolError::ResetWithoutClosingHandshake
+            | ProtocolError::ReceivedAfterClosing
+            | ProtocolError::SendAfterClosing => Self::Release,
+            // Only the opening upgrade fails with these, never an established connection's read.
+            ProtocolError::WrongHttpMethod
+            | ProtocolError::WrongHttpVersion
+            | ProtocolError::MissingConnectionUpgradeHeader
+            | ProtocolError::MissingUpgradeWebSocketHeader
+            | ProtocolError::MissingSecWebSocketVersionHeader
+            | ProtocolError::MissingSecWebSocketKey
+            | ProtocolError::SecWebSocketAcceptKeyMismatch
+            | ProtocolError::SecWebSocketSubProtocolError(_)
+            | ProtocolError::JunkAfterRequest
+            | ProtocolError::CustomResponseSuccessful
+            | ProtocolError::InvalidHeader(_)
+            | ProtocolError::HandshakeIncomplete
+            | ProtocolError::HttparseError(_) => Self::Release,
+        }
+    }
+}
+
+/// How a connection ends when its signaling handshake fails, before it reaches its first read: the
+/// Close names what the peer sent, what the peer left undone or which of this client's own
+/// programs failed.
+impl From<&WebsocketSignalingError> for ConnectionEnding {
+    fn from(failure: &WebsocketSignalingError) -> Self {
+        match failure {
+            // A read failed while the handshake ran, on what the peer sent or on the transport.
+            WebsocketSignalingError::Receive(read) => {
+                let read: &WebsocketError = read;
+                Self::from(read)
+            }
+            // A frame the peer sent matched a FAIL JAQ guard: it violates the protocol's policy.
+            WebsocketSignalingError::Rejected { .. } => Self::Close(CloseCode::Policy),
+            // The peer left the handshake unfinished within its TIMEOUT, and this client leaves
+            // for another connection, as the idle verdict does.
+            WebsocketSignalingError::Timeout { .. } => Self::Close(CloseCode::Away),
+            // This client's own programs failed the handshake: a SEND JAQ program did not produce
+            // exactly one value, the format could not encode it, or a CAPTURE program failed or
+            // produced no object. RFC 6455 erratum 3227 extends this status to clients.
+            WebsocketSignalingError::SendProgram { .. }
+            | WebsocketSignalingError::SendEncode { .. }
+            | WebsocketSignalingError::Capture { .. } => Self::Close(CloseCode::Error),
+            // This client's own write failed, so the transport takes no Close either.
+            WebsocketSignalingError::Send(_) => Self::Release,
+            // A peer Close already queued a reply, which resume flushes before releasing it.
+            // An ended stream has nothing left to answer.
+            WebsocketSignalingError::PeerClosed { .. }
+            | WebsocketSignalingError::PeerClosedWithoutStatus
+            | WebsocketSignalingError::Ended => Self::Release,
+        }
+    }
 }
 
 impl WebsocketConnection {
@@ -197,9 +335,7 @@ impl WebsocketConnection {
                 }
                 Ok(WebsocketRead::Frame(Some(frame)))
             }
-            Some(Err(error)) => Err(Report::new(error).change_context(IngestorError::Read {
-                connector: WEBSOCKETS.keyword(),
-            })),
+            Some(Err(failure)) => Err(self.end_failed(failure)),
             None => Ok(WebsocketRead::Frame(None)),
         }
     }
@@ -215,16 +351,29 @@ impl WebsocketConnection {
     /// frame. A transport that cannot take the frame now belongs to a peer that has stopped
     /// reading, which could not read the frame either; that connection is released all the same.
     fn end_silent(&mut self, elapsed: Elapsed) -> Report<IngestorError> {
-        let going_away = Message::Close(Some(CloseFrame {
-            code: CloseCode::Away,
-            reason: "".into(),
-        }));
-        // One poll outside the cooperative budget, so only a full transport holds the frame back.
-        let offered = unconstrained(self.relay.send(going_away)).now_or_never();
-        if let Some(written) = offered {
-            written.reported("offering a silent WebSocket peer a going-away Close");
-        }
+        ConnectionEnding::Close(CloseCode::Away).offer(
+            &mut self.relay,
+            "offering a silent WebSocket peer a going-away Close",
+        );
         self.idle_deadline.elapsed(elapsed)
+    }
+
+    /// Ends a connection whose transport failed a read, returning that failure, with the driver's
+    /// typed cause beneath it, for the host to reconnect after.
+    ///
+    /// A frame the peer sent and this client refuses earns the peer a Close naming why, offered
+    /// like the idle verdict's: 1009 for a frame or message beyond its limit, 1007 for text that is
+    /// not UTF-8 and 1002 for any other violation of the framing rules. A transport that broke or
+    /// already ended can carry no frame, and is released without one.
+    fn end_failed(&mut self, failure: WebsocketError) -> Report<IngestorError> {
+        let ending = ConnectionEnding::from(&failure);
+        ending.offer(
+            &mut self.relay,
+            "offering a WebSocket peer whose frame failed the read a Close",
+        );
+        Report::new(failure).change_context(IngestorError::Read {
+            connector: WEBSOCKETS.keyword(),
+        })
     }
 }
 

@@ -781,6 +781,7 @@ mod tests {
             step(&mut state, &reference, create.clone(), effect.clone()),
             ConsensusResponse::Conflict(crate::ConsensusConflict::LicensingQuota {
                 refusal: LicensingRefusal {
+                    state: nervix_licensing_vocabulary::AdmissionState::OverLimit,
                     condition: QuotaName::ClusterDomains,
                     limit: 1,
                     current_usage: 1,

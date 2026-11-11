@@ -11,6 +11,7 @@ use crate::{
     ip_address::{IpFamily, NetworkDefect},
     ir::{RegisterRef, RegisterType},
     json::JsonDefect,
+    list_statistics::FloatListStatistic,
     program::Span,
 };
 
@@ -64,8 +65,18 @@ pub enum SideErrorReason {
     NegativeShiftCount(ShiftOperation),
     #[error("{0} produced a non-finite result")]
     NonFiniteResult(FloatOperation),
+    /// A statistic over one list whose list holds a value that is not finite.
+    #[error("{0} input contains a non-finite element")]
+    NonFiniteListElement(FloatListStatistic),
     #[error("cannot cast value to {target}")]
     CastFailed { target: RegisterType },
+    /// A list element that the conversion of its type cannot convert, which fails its whole list,
+    /// since a list holds no null element.
+    #[error("cannot cast list element to {target}")]
+    ListElementCastFailed { target: RegisterType },
+    /// A `VEC` converted to an `ARRAY` whose length it does not hold.
+    #[error("cannot cast a list of length {found} to an ARRAY of length {expected}")]
+    ListCastLengthMismatch { expected: usize, found: usize },
     #[error("invalid regular expression: {0}")]
     InvalidRegularExpression(regex::Error),
     /// A datetime builtin whose result lies outside the signed Unix-nanosecond range.
@@ -157,6 +168,7 @@ impl SideErrorReason {
             Self::DivisionByZero(_) => ErrorCode::DivisionByZero,
             Self::NegativeShiftCount(_)
             | Self::NonFiniteResult(_)
+            | Self::NonFiniteListElement(_)
             | Self::InvalidRegularExpression(_)
             | Self::PatternSetTooLarge
             | Self::LikePatternTooLong
@@ -170,6 +182,8 @@ impl SideErrorReason {
             Self::InvalidBytesEncoding(_)
             | Self::InvalidUtf8Bytes
             | Self::CastFailed { .. }
+            | Self::ListElementCastFailed { .. }
+            | Self::ListCastLengthMismatch { .. }
             | Self::UnreadableDatetime(_)
             | Self::UnreadableIpAddress
             | Self::InvalidUrl { .. }
@@ -388,6 +402,9 @@ pub enum FloatOperation {
     Sqrt,
     #[strum(to_string = "tan")]
     Tan,
+    /// A statistic over one list read in floating point.
+    #[strum(to_string = "{0}")]
+    ListStatistic(FloatListStatistic),
 }
 
 /// Row-aligned side errors recorded while a program executes.
@@ -672,6 +689,11 @@ pub enum RuntimeError {
     CollectionMissingArguments { operation: &'static str },
     #[error("collection input must be ARRAY or VEC, found {actual:?}")]
     CollectionExpectedList { actual: DataType },
+    #[error("{operation} requires fixed ARRAY input, found {actual:?}")]
+    CollectionExpectedFixed {
+        operation: &'static str,
+        actual: DataType,
+    },
     #[error("collection {data_type:?} has the wrong Arrow backing array")]
     CollectionBackingMismatch { data_type: DataType },
     #[error("{operation} requires element type {expected:?}, found {actual:?}")]
@@ -688,6 +710,11 @@ pub enum RuntimeError {
     },
     #[error("{operation} requires numeric collection elements, found {actual:?}")]
     CollectionNonNumericElement {
+        operation: &'static str,
+        actual: DataType,
+    },
+    #[error("{operation} requires ordered collection elements, found {actual:?}")]
+    CollectionUnorderedElement {
         operation: &'static str,
         actual: DataType,
     },
@@ -978,6 +1005,22 @@ mod tests {
         };
         assert_eq!(cast.to_string(), "cannot cast value to Int64");
         assert_eq!(cast.code(), ErrorCode::CastFailed);
+
+        let element = SideErrorReason::ListElementCastFailed {
+            target: RegisterType::Float32,
+        };
+        assert_eq!(element.to_string(), "cannot cast list element to Float32");
+        assert_eq!(element.code(), ErrorCode::CastFailed);
+
+        let length = SideErrorReason::ListCastLengthMismatch {
+            expected: 64,
+            found: 3,
+        };
+        assert_eq!(
+            length.to_string(),
+            "cannot cast a list of length 3 to an ARRAY of length 64"
+        );
+        assert_eq!(length.code(), ErrorCode::CastFailed);
 
         let pattern_error = regex::Error::CompiledTooBig(1024);
         let expected = format!("invalid regular expression: {pattern_error}");
