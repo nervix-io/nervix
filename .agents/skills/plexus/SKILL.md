@@ -211,6 +211,9 @@ the graph; otherwise use conspicuous placeholders and state the assumptions.
   and `Shutdown And Recovery` → `What Survives` before choosing port bindings, initialization,
   branch isolation or recovery guarantees. Check the snapshot-section bound and branch retention;
   distinguish a completed graceful stop from recovery of the last periodic snapshot.
+  Use `DESCRIBE INFERENCER <name>;` to check the pinned model, tensor declarations, static bytes
+  per branch and per-unit state progress. Read `Metrics And Observability` → `Inferencer state`
+  before interpreting state bytes, initialization counters or branch-local revision summaries.
 - Placement: latency-critical or heavy corridors, colocation enforcement, rule precedence, and
   whether ordinary scheduler heuristics should remain neutral.
 - Operations: batching/flush, error routes, credentials/TLS resources, observability, session

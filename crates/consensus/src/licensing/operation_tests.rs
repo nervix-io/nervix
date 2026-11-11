@@ -72,6 +72,95 @@ fn admit_licensing_effect(
     );
 }
 
+fn finish_licensing_command(
+    state: &mut StateMachineData,
+    reference: &nervix_models::CommandExecutionReference,
+    disposition: crate::CommandExecutionDisposition,
+) {
+    applied(
+        state,
+        ConsensusCommand::FinishCommandExecution {
+            reference: reference.clone(),
+            owner: nervix_models::UserName::parse("operator").assured("fixture user"),
+            request_digest: [3; 32],
+            at: nervix_models::Timestamp::from_unix_nanos(2),
+            result: Box::new(crate::CommandExecutionResult {
+                disposition,
+                message: "fixture terminal result".into(),
+                diagnostics: Vec::new(),
+                statements: Vec::new(),
+                transaction: None,
+                transaction_admission: None,
+                backup: None,
+                restore: None,
+            }),
+        },
+    );
+}
+
+#[test]
+fn pending_rotation_keeps_its_execution_applying_until_a_terminal_operation_outcome() {
+    let fixture = SignedFixture::new();
+    let mut state = activated(&fixture);
+    let identity = state
+        .cluster_identity
+        .as_ref()
+        .verified("identity")
+        .as_ref()
+        .clone();
+    let request_id = test_fixture::id(721);
+    let reference = crate::cluster_identity::tests::reference(request_id);
+    admit_licensing_effect(
+        &mut state,
+        reference.clone(),
+        crate::CommandExecutionEffect::RotateLicenseClusterKey {
+            identity: Box::new(identity.public()),
+            outcome: None,
+        },
+    );
+    applied(
+        &mut state,
+        ConsensusCommand::BeginClusterKeyRotation {
+            identity: Box::new(identity.public()),
+            pending_key: Box::new(rotation_candidate(&identity, request_id)),
+        },
+    );
+    for disposition in [
+        crate::CommandExecutionDisposition::Failed,
+        crate::CommandExecutionDisposition::Completed {
+            already_existed: false,
+        },
+    ] {
+        finish_licensing_command(&mut state, &reference, disposition);
+        assert!(
+            state
+                .command_executions
+                .get(&reference)
+                .verified("admitted execution")
+                .is_applying(),
+            "a pending rotation has no definitive command outcome"
+        );
+    }
+    applied(
+        &mut state,
+        ConsensusCommand::AbandonClusterKeyRotation {
+            reference: reference.clone(),
+            request_id,
+            code: nervix_licensing_vocabulary::ProblemCode::ProofInvalid,
+        },
+    );
+    finish_licensing_command(
+        &mut state,
+        &reference,
+        crate::CommandExecutionDisposition::Failed,
+    );
+    assert!(matches!(
+        &state.command_executions.get(&reference).verified("retained outcome").state,
+        crate::CommandExecutionState::Finished { result, .. }
+            if result.disposition == crate::CommandExecutionDisposition::Failed
+    ));
+}
+
 #[test]
 fn committed_rotation_outcomes_survive_later_keys_before_response_storage() {
     let fixture = SignedFixture::new();
@@ -129,6 +218,189 @@ fn committed_rotation_outcomes_survive_later_keys_before_response_storage() {
     let restored: crate::CommandExecution =
         crate::storage_decode(&bytes).assured("complete command progress decodes");
     assert_eq!(&restored, execution);
+}
+
+#[test]
+fn committed_rotation_defers_a_stale_failure_until_its_success_is_recovered() {
+    let fixture = SignedFixture::new();
+    let mut state = fixture.state();
+    let identity = state
+        .cluster_identity
+        .as_ref()
+        .verified("identity")
+        .as_ref()
+        .clone();
+    let request_id = test_fixture::id(722);
+    let reference = crate::cluster_identity::tests::reference(request_id);
+    admit_licensing_effect(
+        &mut state,
+        reference.clone(),
+        crate::CommandExecutionEffect::RotateLicenseClusterKey {
+            identity: Box::new(identity.public()),
+            outcome: None,
+        },
+    );
+    applied(
+        &mut state,
+        ConsensusCommand::BeginClusterKeyRotation {
+            identity: Box::new(identity.public()),
+            pending_key: Box::new(rotation_candidate(&identity, request_id)),
+        },
+    );
+    let before = state.command_executions.get(&reference).cloned();
+    finish_licensing_command(
+        &mut state,
+        &reference,
+        crate::CommandExecutionDisposition::Failed,
+    );
+    assert_eq!(
+        state.command_executions.get(&reference),
+        before.as_ref(),
+        "a stale failure cannot overwrite the committed rotation"
+    );
+    finish_licensing_command(
+        &mut state,
+        &reference,
+        crate::CommandExecutionDisposition::Completed {
+            already_existed: false,
+        },
+    );
+    assert!(matches!(
+        &state.command_executions.get(&reference).verified("retained outcome").state,
+        crate::CommandExecutionState::Finished { result, .. }
+            if result.disposition == crate::CommandExecutionDisposition::Completed { already_existed: false }
+    ));
+    assert_eq!(
+        state
+            .cluster_identity
+            .as_ref()
+            .verified("identity")
+            .public()
+            .key_generation
+            .get(),
+        2
+    );
+}
+
+#[test]
+fn abandoned_rotation_defers_a_stale_success_until_its_refusal_is_recovered() {
+    let fixture = SignedFixture::new();
+    let mut state = activated(&fixture);
+    let identity = state
+        .cluster_identity
+        .as_ref()
+        .verified("identity")
+        .as_ref()
+        .clone();
+    let request_id = test_fixture::id(723);
+    let reference = crate::cluster_identity::tests::reference(request_id);
+    admit_licensing_effect(
+        &mut state,
+        reference.clone(),
+        crate::CommandExecutionEffect::RotateLicenseClusterKey {
+            identity: Box::new(identity.public()),
+            outcome: None,
+        },
+    );
+    applied(
+        &mut state,
+        ConsensusCommand::BeginClusterKeyRotation {
+            identity: Box::new(identity.public()),
+            pending_key: Box::new(rotation_candidate(&identity, request_id)),
+        },
+    );
+    applied(
+        &mut state,
+        ConsensusCommand::AbandonClusterKeyRotation {
+            reference: reference.clone(),
+            request_id,
+            code: nervix_licensing_vocabulary::ProblemCode::ProofInvalid,
+        },
+    );
+    let before = state.command_executions.get(&reference).cloned();
+    finish_licensing_command(
+        &mut state,
+        &reference,
+        crate::CommandExecutionDisposition::Completed {
+            already_existed: false,
+        },
+    );
+    assert_eq!(
+        state.command_executions.get(&reference),
+        before.as_ref(),
+        "a stale success cannot overwrite the committed refusal"
+    );
+    finish_licensing_command(
+        &mut state,
+        &reference,
+        crate::CommandExecutionDisposition::Failed,
+    );
+    assert!(
+        !state
+            .command_executions
+            .get(&reference)
+            .verified("retained outcome")
+            .is_applying()
+    );
+}
+
+#[test]
+fn committed_release_defers_a_stale_failure_until_its_success_is_recovered() {
+    let fixture = SignedFixture::new();
+    let mut state = activated(&fixture);
+    let binding = binding(&state);
+    let request_id = test_fixture::id(724);
+    let reference = crate::cluster_identity::tests::reference(request_id);
+    admit_licensing_effect(
+        &mut state,
+        reference.clone(),
+        crate::CommandExecutionEffect::ReleaseLicense {
+            binding: Box::new(binding.clone()),
+            outcome: None,
+        },
+    );
+    let released_at = record(&state).licensing_time;
+    applied(
+        &mut state,
+        ConsensusCommand::ReleaseLicense {
+            reference: reference.clone(),
+            binding: Box::new(binding),
+            request_id,
+            released_at,
+        },
+    );
+    let before = state.command_executions.get(&reference).cloned();
+    finish_licensing_command(
+        &mut state,
+        &reference,
+        crate::CommandExecutionDisposition::Failed,
+    );
+    assert_eq!(
+        state.command_executions.get(&reference),
+        before.as_ref(),
+        "a stale failure cannot overwrite the committed release"
+    );
+    finish_licensing_command(
+        &mut state,
+        &reference,
+        crate::CommandExecutionDisposition::Completed {
+            already_existed: false,
+        },
+    );
+    assert!(
+        !state
+            .command_executions
+            .get(&reference)
+            .verified("retained outcome")
+            .is_applying()
+    );
+    let LicensingMode::Released(release) = &record(&state).mode else {
+        panic!("release remains committed")
+    };
+    assert!(
+        release.awaiting(),
+        "command completion does not await remote capacity confirmation"
+    );
 }
 
 #[test]

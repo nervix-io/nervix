@@ -6222,6 +6222,9 @@ fn apply_consensus_command_at(
                      request"
                 ));
             }
+            if !state.licensing_command_can_finish(&execution, result) {
+                return AppliedConsensusCommand::applied(StateMachineChanges::default());
+            }
             match &execution.state {
                 CommandExecutionState::Applying { .. } => {
                     for (domain, lease) in execution.domain_mutations() {
