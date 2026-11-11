@@ -43,6 +43,7 @@ pub use relay_slicing::RelaySliceCursor;
 mod connection;
 mod entropy;
 mod identity;
+mod inferencer_description;
 mod kafka_start;
 mod listener;
 mod node_drain;
@@ -68,6 +69,7 @@ pub use connection::{
 };
 pub use entropy::TransportEntropy;
 pub use identity::{JoinTerms, TlsConfigBundle, TransportIdentity};
+pub use inferencer_description::DescribeInferencerRequest;
 pub use kafka_start::{KafkaStartAction, KafkaStartRequest, KafkaStartResponse};
 pub use listener::{AcceptRetryDelay, AcceptRetryDelayError, is_connection_accept_failure};
 pub use node_drain::{

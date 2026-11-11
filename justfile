@@ -640,6 +640,16 @@ test-inferencer-backup *args: build-deps build-test-cli
     export NERVIX_TEST_CLI_PATH={{ quote(cargo_target_dir + "/debug/nervix-cli") }}
     cargo test --package nervix-scenarios --test scenarios -- --input {{ quote(justfile_directory() / "tests/features/cluster/inferencer_backup*.feature") }} {{ quote(args) }}
 
+# Inspect inference configuration and state summaries through the public session.
+check-inferencer-describe:
+    cargo check --package nervix-server --features testing --lib
+
+test-inferencer-describe *args: build-deps
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    cargo test --package nervix-scenarios --test scenarios -- --input {{ quote(justfile_directory() / "tests/features/runtime/inferencer_describe*.feature") }} {{ quote(args) }}
+
 # Verify inference resource replacement without traversing unrelated features or build artifacts.
 test-inferencer-rebinding *args: build-deps
     #!/usr/bin/env bash
