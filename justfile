@@ -1180,6 +1180,18 @@ test-list-conversions *args: build-deps
     cargo test --package nervix-scenarios --test scenarios -- \
         --input tests/features/runtime/list_conversions.feature "$@"
 
+# Create domains, users and resources through the web console's popup forms on in-process one- and
+# three-node clusters, with rejected, queued, recovered and pending submissions, and with only the
+# in-process server's prerequisites. The input is an absolute glob, so Cucumber reads the feature
+# file instead of walking the checkout; a literal path is no glob and selects nothing.
+[positional-arguments]
+test-visual-create *args: build-web-console wasm-processor-guests download-onnxruntime
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    cargo test --package nervix-scenarios --test scenarios -- \
+        --input "$PWD/tests/features/web-console/visual_create{,}.feature" "$@"
+
 # Create window processors and correlators through the web console's visual forms on in-process
 # one- and three-node clusters, with only the in-process server's prerequisites.
 [positional-arguments]
