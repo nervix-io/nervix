@@ -31,7 +31,7 @@ from scripts.tests.test_native_coverage import job_section, step_section
 ROOT = coverage_full.ROOT
 RUN = "77"
 CI_ROOT = "/ci/runner/nervix"
-TOOLCHAIN = {"rustc": "rustc 1.99.1 (58cf8f9c3 2026-09-01)", "commit": "58cf8f9c3", "host": "x86_64-unknown-linux-gnu", "llvm": "23.1.0"}
+TOOLCHAIN = {"rustc": "rustc 1.100.1 (58cf8f9c3 2026-09-01)", "commit": "58cf8f9c3", "host": "x86_64-unknown-linux-gnu", "llvm": "23.1.0"}
 INVENTORY = '[tool]\nnightly = "nightly-2026-09-17"\n\n[[target]]\nid = "alpha-values"\n\n[[target]]\nid = "beta-values"\n'
 TARGETS = ["alpha-values", "beta-values"]
 FILES = {
@@ -157,7 +157,7 @@ class Run:
         reports = [{"report": "coverage-inputs/tests/lcov-workspace.info", "records": 3, "kept": 3, "dropped": {}}]
         for producer, attempt in merged.items():
             reports.append({
-                "report": f"coverage-inputs/native-extras/native-coverage/{producer}/ordinary/rust-1.99.1/{attempt}/lcov.info",
+                "report": f"coverage-inputs/native-extras/native-coverage/{producer}/ordinary/rust-1.100.1/{attempt}/lcov.info",
                 "producer": producer, "mode": "ordinary", "attempt": attempt,
                 "revision": {"commit": self.revision, "modified": False},
                 "run": {"provider": "github", "run": run, "attempt": "1", "job": "extra-tests"},
@@ -188,7 +188,7 @@ class Run:
         """One native collection in an artifact: its completion record, report and evidence."""
         mode = native_coverage_mode(producer)
         name = f"github-{run}-{attempt}"
-        directory = self.inputs / artifact / prefix / producer / mode / "rust-1.99.1" / name
+        directory = self.inputs / artifact / prefix / producer / mode / "rust-1.100.1" / name
         directory.mkdir(parents=True)
         content: dict[str, object] = {
             "producer": producer, "mode": mode, "verdict": verdict, "rerun": f"just coverage-native-extras {producer}",
@@ -700,7 +700,7 @@ class ValidationTests(unittest.TestCase):
 
     def test_a_collection_kept_by_another_source_policy_is_refused(self) -> None:
         def change_policy(run: Run) -> None:
-            completion = next((run.inputs / "diagnostic-evidence").rglob("test-deadlock-report")) / "ordinary/rust-1.99.1" / f"github-{RUN}-1" / "completion.json"
+            completion = next((run.inputs / "diagnostic-evidence").rglob("test-deadlock-report")) / "ordinary/rust-1.100.1" / f"github-{RUN}-1" / "completion.json"
             content = json.loads(completion.read_text())
             content["sources"]["policy"] = {"included": "every file"}
             completion.write_text(json.dumps(content))
@@ -727,7 +727,7 @@ class ValidationTests(unittest.TestCase):
 
     def test_records_below_none_of_the_recorded_roots_are_refused(self) -> None:
         def move_root(run: Run) -> None:
-            completion = next((run.inputs / "coverage-native-extras").rglob("test-primitives-shuttle")) / "shuttle/rust-1.99.1" / f"github-{RUN}-1" / "completion.json"
+            completion = next((run.inputs / "coverage-native-extras").rglob("test-primitives-shuttle")) / "shuttle/rust-1.100.1" / f"github-{RUN}-1" / "completion.json"
             content = json.loads(completion.read_text())
             content["sources"]["root"] = "/elsewhere/nervix"
             completion.write_text(json.dumps(content))
@@ -771,7 +771,7 @@ class ValidationTests(unittest.TestCase):
 
     def test_an_unknown_producer_is_refused(self) -> None:
         def unknown(run: Run) -> None:
-            directory = run.inputs / "coverage-loom-qualification/test-loom-qualification/loom/rust-1.99.1/github-77-1"
+            directory = run.inputs / "coverage-loom-qualification/test-loom-qualification/loom/rust-1.100.1/github-77-1"
             directory.mkdir(parents=True)
             (directory / "completion.json").write_text(json.dumps({"producer": "test-loom-qualification", "mode": "loom", "verdict": "complete"}))
 

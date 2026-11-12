@@ -331,9 +331,9 @@ class ScriptedProcesses(Processes):
         if arguments[:2] == ["git", "status"]:
             return 0, "", ""
         if arguments == ["rustc", "-vV"]:
-            return 0, "rustc 1.99.0\nhost: x86_64-unknown-linux-gnu\n", ""
+            return 0, "rustc 1.100.0\nhost: x86_64-unknown-linux-gnu\n", ""
         if arguments == ["cargo", "-V"]:
-            return 0, "cargo 1.99.0\n", ""
+            return 0, "cargo 1.100.0\n", ""
         if arguments[:2] == ["bash", "scripts/download_onnxruntime.sh"]:
             return 0, "/opt/onnxruntime/libonnxruntime.so\n", ""
         if arguments[1:2] == ["--list"]:

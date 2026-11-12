@@ -2726,7 +2726,7 @@ impl RuntimeMetricsSnapshot {
     /// Keep complete series, including their original instance and physical-node identities.
     /// A retired instance's history has one checkpoint owner until that instance is declared again.
     pub(crate) fn select_instances(mut self, index: u64, count: NonZeroU64) -> Self {
-        let selected = |unit: Unit| matches!(unit.kind(), nervix_models::UnitKind::Instance(origin) if origin % count.get() == index);
+        let selected = |unit: Unit| matches!(unit.kind(), nervix_models::UnitKind::Instance(origin) if origin % count == index);
         self.counters.retain(|series| selected(series.key.unit));
         self.histograms.retain(|series| selected(series.key.unit));
         self

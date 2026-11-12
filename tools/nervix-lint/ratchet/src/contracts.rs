@@ -461,7 +461,7 @@ impl ContractCompiler {
             &[
                 "which".into(),
                 "--toolchain".into(),
-                "1.99".into(),
+                "1.100".into(),
                 "rustc".into(),
             ],
             &self.runner.root,

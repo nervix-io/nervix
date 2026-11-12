@@ -54,7 +54,7 @@ class ModelCoverageTests(unittest.TestCase):
             self.assertEqual(len({ordinary.build(), shuttle.build(), loom.build()}), 3)
             for mode, workspace in (("shuttle", shuttle), ("loom", loom)):
                 producer = native_coverage.Producer("check", mode, (), "check", ())
-                attempt = workspace.new_attempt(producer, "rust-1.99.0", "run")
+                attempt = workspace.new_attempt(producer, "rust-1.100.0", "run")
                 (attempt / "lcov.info").write_text(mode)
                 with workspace.build_lock():
                     with ordinary.build_lock():

@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1.7
 
-ARG RUST_VERSION=1.99
+ARG RUST_VERSION=1.100
 ARG KACHE_VERSION=2.0.0
 # The checksums of the pinned version's release archive for each build architecture.
 ARG KACHE_SHA256_AMD64=6c59665faf1b14d0944391e6f2a1b510195e6be92c63060a9d1770ed00676824

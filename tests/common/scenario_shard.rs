@@ -145,7 +145,7 @@ impl ScenarioShard {
 
     /// Whether the run numbered `number`, counted from zero, belongs to this shard.
     fn owns(self, number: usize) -> bool {
-        let remainder = number % self.count.get();
+        let remainder = number % self.count;
         let own_remainder = self
             .index
             .get()
