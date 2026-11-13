@@ -19,11 +19,23 @@ from unittest import mock
 
 from scripts import scenario_shards as shards
 
-# Workspace package and target names, as `cargo metadata --no-deps` lists some of them.
-TARGETS = {"scenarios", "nervix-cli", "nervix-client-ffi", "nervix_client_ffi"}
+# Workspace package and target names, as `cargo metadata --no-deps` lists some of them: a package
+# with a build script lists it as its `build-script-build` target.
+TARGETS = {"scenarios", "nervix-cli", "nervix-client-ffi", "nervix_client_ffi", "build-script-build"}
 ONNX_LIBRARY = Path(".nervix-deps/onnxruntime/onnxruntime-linux-x64-1.30.0/lib/libonnxruntime.so.1.30.0")
 ONNX_LINK = ONNX_LIBRARY.parent / "libonnxruntime.so"
 PYTHON_WHEEL = Path("target/paced-simulation/wheels/nervix_client-0.1.0-cp312-abi3-linux_x86_64.whl")
+# Build units below the coverage build's profile directory, as Cargo keeps them: `build/<package>/<hash>`.
+CLI_UNIT = shards.COVERAGE_DEBUG / "build" / "nervix-cli" / "0f92e8a94feb2377"
+CLI_SCRIPT_UNIT = shards.COVERAGE_DEBUG / "build" / "nervix-cli" / "9e8d7c6b5a4f3e2d"
+CLI_SCRIPT_RUN_UNIT = shards.COVERAGE_DEBUG / "build" / "nervix-cli" / "1f2e3d4c5b6a7980"
+UNFINGERPRINTED_UNIT = shards.COVERAGE_DEBUG / "build" / "nervix-cli" / "2b3c4d5e6f7a8091"
+SCENARIOS_UNIT = shards.COVERAGE_DEBUG / "build" / "nervix-scenarios" / "4d0e03c611a711f3"
+FFI_UNIT = shards.COVERAGE_DEBUG / "build" / "nervix-client-ffi" / "7c1d2e3f4a5b6c7d"
+SERDE_UNIT = shards.COVERAGE_DEBUG / "build" / "serde_derive" / "1a2b3c4d5e6f7a8b"
+PLAYWRIGHT_RUN_UNIT = shards.COVERAGE_DEBUG / "build" / "playwright-rs" / "5e6f7a8b9c0d1e2f"
+SCENARIO_EXECUTABLE = SCENARIOS_UNIT / "out" / "scenarios-4d0e03c611a711f3"
+PLAYWRIGHT_DRIVER = PLAYWRIGHT_RUN_UNIT / "out" / "playwright-driver" / "playwright-1.62.1-linux"
 
 
 # What a stand-in object's debug information holds, which no stripped copy of it may.
@@ -53,6 +65,17 @@ def elf(path: Path, content: bytes) -> None:
     path.chmod(0o755)
 
 
+def unit(root: Path, directory: Path, ran_build_script: bool = False) -> Path:
+    """A build unit at `directory` below `root` with its fingerprint, and its `run` directory when
+    it ran a build script; returns its output directory."""
+    write(root / directory / "fingerprint" / "invoked.timestamp", b"stamp")
+    if ran_build_script:
+        (root / directory / "run").mkdir()
+    output = root / directory / "out"
+    output.mkdir()
+    return output
+
+
 class Checkout:
     """A git checkout holding a stand-in coverage build and the inputs its scenarios read."""
 
@@ -60,21 +83,29 @@ class Checkout:
         self.root = root
         root.mkdir(parents=True)
         debug = root / shards.COVERAGE_DEBUG
-        elf(debug / "nervix-cli", b"cli")
-        (debug / "deps").mkdir(parents=True)
-        os.link(debug / "nervix-cli", debug / "deps" / "nervix_cli-0f92e8a94feb2377")
-        driver = debug / "build" / "playwright-rs-5e6f" / "out" / "playwright-driver" / "playwright-1.62.1-linux"
+        cli = unit(root, CLI_UNIT)
+        elf(cli / "nervix-cli", b"cli")
+        # Cargo links each binary from its unit's output into the profile directory.
+        os.link(cli / "nervix-cli", debug / "nervix-cli")
+        driver = root / PLAYWRIGHT_DRIVER
         # The scenario executable holds the driver's path from compile time.
         executable = b"scenarios " + str(driver / "node").encode() + b" " + str(driver / "package/cli.js").encode()
-        elf(debug / "deps" / "scenarios-4d0e03c611a711f3", executable)
-        write(debug / "deps" / "scenarios-4d0e03c611a711f3.d", b"dependencies")
-        elf(debug / "deps" / "libnervix_client_ffi.so", b"binding")
-        write(debug / "deps" / "libnervix_client_ffi.rlib", b"rlib", executable=True)
-        write(debug / "deps" / "libserde_derive-1a2b3c.so", b"\x7fELF macro", executable=True)
+        scenarios = unit(root, SCENARIOS_UNIT)
+        elf(root / SCENARIO_EXECUTABLE, executable)
+        write(scenarios / "scenarios-4d0e03c611a711f3.d", b"dependencies")
+        ffi = unit(root, FFI_UNIT)
+        elf(ffi / "libnervix_client_ffi.so", b"binding")
+        write(ffi / "libnervix_client_ffi.rlib", b"rlib", executable=True)
+        write(unit(root, SERDE_UNIT) / "libserde_derive-1a2b3c4d5e6f7a8b.so", b"\x7fELF macro", executable=True)
         write(debug / "nervix-cli.d", b"dependencies")
         write(debug / "incremental" / "nervix_cli-1" / "nervix-cli", b"\x7fELF stale", executable=True)
-        write(debug / ".fingerprint" / "nervix-cli-1" / "nervix-cli", b"stamp", executable=True)
-        write(debug / "build" / "nervix-cli-1" / "build-script-build", b"\x7fELF script", executable=True)
+        write(root / CLI_UNIT / "fingerprint" / "nervix-cli", b"stamp", executable=True)
+        write(unit(root, CLI_SCRIPT_UNIT) / "build_script_build", b"\x7fELF script", executable=True)
+        # What a build script writes into its output is no workspace object, whatever its name, and
+        # neither is the output of a directory that keeps no fingerprint.
+        write(unit(root, CLI_SCRIPT_RUN_UNIT, ran_build_script=True) / "nervix-cli", b"\x7fELF output", executable=True)
+        write(root / UNFINGERPRINTED_UNIT / "out" / "nervix-cli", b"\x7fELF unknown", executable=True)
+        unit(root, PLAYWRIGHT_RUN_UNIT, ran_build_script=True)
         write(driver / "node", b"\x7fELF node", executable=True)
         write(driver / "package" / "cli.js", b"cli")
         write(root / shards.ONNX_FIXTURES / "simple_score.onnx", b"model")
@@ -152,25 +183,33 @@ class ObjectTests(unittest.TestCase):
         self.assertEqual(shards.full_stem("a.tar.gz"), "a")
         self.assertEqual(shards.full_stem("nervix-cli"), "nervix-cli")
 
-    def test_objects_are_the_workspace_executables_outside_incremental_fingerprint_and_build(self) -> None:
+    def test_objects_are_the_workspace_executables_cargo_llvm_cov_searches(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             checkout = Checkout(Path(directory) / "checkout")
             objects = shards.coverage_objects(checkout.root, shards.object_pattern(TARGETS))
-        debug = shards.COVERAGE_DEBUG
         self.assertEqual(
             sorted(objects),
             sorted([
-                debug / "nervix-cli",
-                debug / "deps" / "libnervix_client_ffi.so",
-                debug / "deps" / "nervix_cli-0f92e8a94feb2377",
-                debug / "deps" / "scenarios-4d0e03c611a711f3",
+                shards.COVERAGE_DEBUG / "nervix-cli",
+                CLI_UNIT / "out" / "nervix-cli",
+                FFI_UNIT / "out" / "libnervix_client_ffi.so",
+                SCENARIO_EXECUTABLE,
             ]),
         )
 
+    def test_build_scripts_are_never_objects(self) -> None:
+        for name in ("build-script-build", "build_script_build", "build_script_build-1a2b", "build_script_build.exe"):
+            self.assertTrue(shards.is_build_script(name), name)
+        for name in ("nervix-cli", "build_script", "scenarios-4d0e"):
+            self.assertFalse(shards.is_build_script(name), name)
+
     def test_the_build_must_leave_exactly_one_scenario_executable(self) -> None:
-        deps = shards.COVERAGE_DEBUG / "deps"
-        self.assertEqual(shards.scenario_executable([deps / "scenarios-ab12"]), deps / "scenarios-ab12")
-        for objects in ([], [deps / "scenarios-ab12", deps / "scenarios-cd34"]):
+        other = SCENARIOS_UNIT.parent / "cd34" / "out" / "scenarios-cd34"
+        self.assertEqual(shards.scenario_executable([SCENARIO_EXECUTABLE]), SCENARIO_EXECUTABLE)
+        self.assertEqual(
+            shards.scenario_executable([CLI_UNIT / "out" / "nervix-cli", SCENARIO_EXECUTABLE]), SCENARIO_EXECUTABLE
+        )
+        for objects in ([], [SCENARIO_EXECUTABLE, other]):
             with self.assertRaises(shards.ShardError):
                 shards.scenario_executable(objects)
 
@@ -224,18 +263,20 @@ class ArchiveTests(unittest.TestCase):
         debug = root / shards.COVERAGE_DEBUG
         self.assertEqual(
             (debug / "nervix-cli").stat().st_ino,
-            (debug / "deps" / "nervix_cli-0f92e8a94feb2377").stat().st_ino,
+            (root / CLI_UNIT / "out" / "nervix-cli").stat().st_ino,
             "a hard link stays one file",
         )
-        self.assertTrue(os.access(root / shards.COVERAGE_DEBUG / "deps" / "scenarios-4d0e03c611a711f3", os.X_OK))
+        self.assertTrue(os.access(root / SCENARIO_EXECUTABLE, os.X_OK))
         packed_paths = {file.path for file in packed.files}
-        driver = "target/llvm-cov-target/debug/build/playwright-rs-5e6f/out/playwright-driver/playwright-1.62.1-linux"
+        driver = PLAYWRIGHT_DRIVER.as_posix()
         self.assertIn(f"{driver}/node", packed_paths)
         self.assertIn(f"{driver}/package/cli.js", packed_paths)
         self.assertIn(ONNX_LINK.as_posix(), packed_paths)
         self.assertIn(ONNX_LIBRARY.as_posix(), packed_paths)
-        self.assertNotIn("target/llvm-cov-target/debug/deps/libserde_derive-1a2b3c.so", packed_paths)
-        self.assertFalse((debug / "build" / "nervix-cli-1" / "build-script-build").exists())
+        self.assertNotIn((SERDE_UNIT / "out" / "libserde_derive-1a2b3c4d5e6f7a8b.so").as_posix(), packed_paths)
+        self.assertFalse((root / CLI_SCRIPT_UNIT / "out" / "build_script_build").exists())
+        self.assertFalse((root / CLI_SCRIPT_RUN_UNIT / "out" / "nervix-cli").exists())
+        self.assertFalse((root / UNFINGERPRINTED_UNIT / "out" / "nervix-cli").exists())
 
     def test_objects_are_packed_without_their_debug_information_and_the_build_keeps_its_own(self) -> None:
         build, packed = self.build()
@@ -251,15 +292,15 @@ class ArchiveTests(unittest.TestCase):
             self.assertEqual(sizes[path.as_posix()], len(restored), "the manifest holds the stripped size")
             self.assertTrue(os.access(root / path, os.X_OK), path)
         # What the scenario executable names stays in it.
-        executable = (root / shards.COVERAGE_DEBUG / "deps" / "scenarios-4d0e03c611a711f3").read_bytes()
+        executable = (root / SCENARIO_EXECUTABLE).read_bytes()
         self.assertIn(b"/out/playwright-driver/playwright-1.62.1-linux/node", executable)
         self.assertFalse((source / shards.STRIPPED).exists(), "the stripped copies are gone once packed")
 
     def test_an_object_objcopy_cannot_read_fails_the_pack(self) -> None:
         checkout = Checkout(self.base / "build")
-        unreadable = checkout.root / shards.COVERAGE_DEBUG / "deps" / "libnervix_client_ffi.so"
-        write(unreadable, b"\x7fELF but not an object", executable=True)
-        with self.assertRaisesRegex(shards.ShardError, r"stripping target/llvm-cov-target/debug/deps/libnervix_client_ffi\.so failed"):
+        unreadable = FFI_UNIT / "out" / "libnervix_client_ffi.so"
+        write(checkout.root / unreadable, b"\x7fELF but not an object", executable=True)
+        with self.assertRaisesRegex(shards.ShardError, rf"stripping {re.escape(unreadable.as_posix())} failed"):
             checkout.pack(self.archive)
         self.assertFalse((checkout.root / shards.STRIPPED).exists())
 
@@ -284,27 +325,21 @@ class ArchiveTests(unittest.TestCase):
 
     def test_the_pack_holds_only_the_drivers_the_executable_names(self) -> None:
         checkout = Checkout(self.base / "build")
-        debug = checkout.root / shards.COVERAGE_DEBUG
-        stale = debug / "build" / "playwright-rs-0000" / "out" / "playwright-driver" / "playwright-1.61.0-linux"
+        stale_unit = PLAYWRIGHT_RUN_UNIT.parent / "0000000000000000"
+        stale = unit(checkout.root, stale_unit, ran_build_script=True) / "playwright-driver" / "playwright-1.61.0-linux"
         write(stale / "node", b"\x7fELF old node", executable=True)
-        executable = shards.COVERAGE_DEBUG / "deps" / "scenarios-4d0e03c611a711f3"
-        drivers = shards.playwright_drivers(checkout.root, executable)
-        self.assertEqual(
-            drivers,
-            [shards.COVERAGE_DEBUG / "build" / "playwright-rs-5e6f" / "out" / "playwright-driver" / "playwright-1.62.1-linux"],
-        )
+        drivers = shards.playwright_drivers(checkout.root, SCENARIO_EXECUTABLE)
+        self.assertEqual(drivers, [PLAYWRIGHT_DRIVER])
 
     def test_an_executable_naming_a_driver_the_build_did_not_leave_fails_the_pack(self) -> None:
         checkout = Checkout(self.base / "build")
-        debug = checkout.root / shards.COVERAGE_DEBUG
-        shutil.rmtree(debug / "build" / "playwright-rs-5e6f")
+        shutil.rmtree(checkout.root / PLAYWRIGHT_RUN_UNIT)
         with self.assertRaisesRegex(shards.ShardError, "names a Playwright driver"):
             checkout.pack(self.archive)
 
     def test_an_executable_built_without_a_driver_packs_none(self) -> None:
         checkout = Checkout(self.base / "build")
-        debug = checkout.root / shards.COVERAGE_DEBUG
-        elf(debug / "deps" / "scenarios-4d0e03c611a711f3", b"scenarios")
+        elf(checkout.root / SCENARIO_EXECUTABLE, b"scenarios")
         manifest = checkout.pack(self.archive)
         self.assertEqual([file.path for file in manifest.files if "playwright" in file.path], [])
 
@@ -315,7 +350,7 @@ class ArchiveTests(unittest.TestCase):
             status = shards.main(["executable"])
         self.assertEqual(status, 0)
         self.assertEqual(
-            output.getvalue().strip(), str(build.root / shards.COVERAGE_DEBUG / "deps" / "scenarios-4d0e03c611a711f3")
+            output.getvalue().strip(), str(build.root / SCENARIO_EXECUTABLE)
         )
 
     def test_a_shard_refuses_an_archive_of_another_revision(self) -> None:

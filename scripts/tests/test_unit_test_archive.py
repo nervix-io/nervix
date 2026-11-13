@@ -15,9 +15,29 @@ from unittest import mock
 
 from scripts import scenario_shards as shards
 from scripts import unit_test_archive as archive
-from scripts.tests.test_scenario_shards import TARGETS, Checkout, fake_ldd, stripped, write
+from scripts.tests.test_scenario_shards import (
+    FFI_UNIT,
+    SCENARIO_EXECUTABLE,
+    TARGETS,
+    Checkout,
+    elf,
+    fake_ldd,
+    stripped,
+    unit,
+    write,
+)
 
-UNIT_EXECUTABLE = shards.COVERAGE_DEBUG / "deps" / "nervix_cli-0f92e8a94feb2377"
+# Test executables of the coverage build, each in the output of its own build unit.
+UNIT_EXECUTABLE = shards.COVERAGE_DEBUG / "build" / "nervix-cli" / "3c4d5e6f7a8b9c0d" / "out" / "nervix_cli-3c4d5e6f7a8b9c0d"
+RUBY_EXECUTABLE = (
+    shards.COVERAGE_DEBUG / "build" / "nervix-client-ruby" / "0123456789abcdef" / "out" / "host_suite-0123456789abcdef"
+)
+NATIVE_EXECUTABLE = (
+    shards.COVERAGE_DEBUG / "build" / "nervix-client-ffi" / "abcdef0123456789" / "out" / "native_suites-abcdef0123456789"
+)
+FFI_LIBRARY = FFI_UNIT / "out" / "libnervix_client_ffi.so"
+# Where the run tests' stand-in executables lie, as the build's test executables do.
+RUN_OUTPUT = Path("target/debug/build/nervix-runs/0123456789abcdef/out")
 ROOT = shards.ROOT
 
 
@@ -34,10 +54,10 @@ def artifact(root: Path, path: Path, directory: str, *, test: bool = True, execu
 class ProgramTests(unittest.TestCase):
     def test_the_programs_are_the_test_executables_in_build_order(self) -> None:
         root = Path("/checkout")
-        library = Path("target/debug/deps/nervix_models-1")
+        library = Path("target/debug/build/nervix-models/1a/out/libnervix_models-1a.rlib")
         binary = Path("target/debug/nervix-cli")
-        unit = Path("target/debug/deps/nervix_cli-2")
-        integration = Path("target/debug/deps/report_cli-3")
+        unit = Path("target/debug/build/nervix-cli/2b/out/nervix_cli-2b")
+        integration = Path("target/debug/build/nervix-deadlock/3c/out/report_cli-3c")
         messages = [
             artifact(root, library, "crates/models", test=False, executable=False),
             artifact(root, binary, "crates/cli", test=False),
@@ -54,7 +74,7 @@ class ProgramTests(unittest.TestCase):
 
     def test_the_root_package_runs_in_the_checkout(self) -> None:
         root = Path("/checkout")
-        unit = Path("target/debug/deps/nervix_server-1")
+        unit = Path("target/debug/build/nervix-server/1a/out/nervix_server-1a")
         message = artifact(root, unit, ".")
         self.assertEqual(archive.programs_of(root, [message]), [archive.TestProgram(unit.as_posix(), ".")])
 
@@ -64,6 +84,8 @@ class Recorded(Checkout):
 
     def __init__(self, root: Path) -> None:
         super().__init__(root)
+        unit(root, UNIT_EXECUTABLE.parent.parent)
+        elf(root / UNIT_EXECUTABLE, b"cli tests")
         resolved = root.resolve()
         write(root / archive.MESSAGES, (artifact(resolved, UNIT_EXECUTABLE, "crates/cli") + "\n").encode())
         with redirect_stdout(io.StringIO()):
@@ -97,7 +119,7 @@ class ArchiveTests(unittest.TestCase):
         self.assertIn((shards.ONNX_FIXTURES / "simple_score.onnx").as_posix(), held)
         for guest in shards.WASM_GUESTS:
             self.assertIn(guest.as_posix(), held)
-        self.assertNotIn((shards.COVERAGE_DEBUG / "deps" / "scenarios-4d0e03c611a711f3").as_posix(), held)
+        self.assertNotIn(SCENARIO_EXECUTABLE.as_posix(), held)
 
     def test_a_test_executable_the_build_did_not_leave_fails_the_pack(self) -> None:
         checkout = Recorded(self.directory / "checkout")
@@ -192,7 +214,7 @@ class ArchiveTests(unittest.TestCase):
         program = archive.TestProgram(UNIT_EXECUTABLE.as_posix(), "crates/client-python")
         write(build.root / archive.PROGRAMS, json.dumps([program.to_json()]).encode())
         library = shards.COVERAGE_DEBUG / "libnervix_client_python.so"
-        content = (build.root / shards.COVERAGE_DEBUG / "deps/libnervix_client_ffi.so").read_bytes()
+        content = (build.root / FFI_LIBRARY).read_bytes()
         write(build.root / library, content, executable=True)
         packed = build.pack_tests(self.directory / "unit-tests.tar.zst")
         self.assertEqual([file.path for file in packed.files].count(library.as_posix()), 1)
@@ -210,9 +232,9 @@ class ArchiveTests(unittest.TestCase):
 
     def ruby_program(self, build: Recorded) -> archive.TestProgram:
         source = build.root / UNIT_EXECUTABLE
-        executable = UNIT_EXECUTABLE.with_name("host_suite-0123456789")
-        write(build.root / executable, source.read_bytes(), executable=True)
-        program = archive.TestProgram(executable.as_posix(), "crates/client-ruby")
+        unit(build.root, RUBY_EXECUTABLE.parent.parent)
+        write(build.root / RUBY_EXECUTABLE, source.read_bytes(), executable=True)
+        program = archive.TestProgram(RUBY_EXECUTABLE.as_posix(), "crates/client-ruby")
         write(build.root / archive.PROGRAMS, json.dumps([program.to_json()]).encode())
         return program
 
@@ -270,8 +292,7 @@ class ArchiveTests(unittest.TestCase):
     def test_native_boundary_inputs_are_complete_and_retained(self) -> None:
         root = self.directory / "native"
         root.mkdir()
-        program = archive.TestProgram("target/llvm-cov-target/debug/deps/native_suites-abcd",
-                                      "crates/client-ffi")
+        program = archive.TestProgram(NATIVE_EXECUTABLE.as_posix(), "crates/client-ffi")
         expected = [archive.NATIVE_ARTIFACTS / f"{host}-suite{suffix}"
                     for host in ("c", "cpp") for suffix in ("", "-sanitized")]
         expected.append(shards.COVERAGE_DEBUG / "libnervix_client_ffi.so")
@@ -287,15 +308,15 @@ class ArchiveTests(unittest.TestCase):
         build = Recorded(self.directory / "checkout")
         ruby_program = self.ruby_program(build)
         inputs = self.ruby_artifacts(build)
-        native = shards.COVERAGE_DEBUG / "deps/native_suites-abcd"
-        write(build.root / native, (build.root / UNIT_EXECUTABLE).read_bytes(), executable=True)
-        program = archive.TestProgram(native.as_posix(), "crates/client-ffi")
+        unit(build.root, NATIVE_EXECUTABLE.parent.parent)
+        write(build.root / NATIVE_EXECUTABLE, (build.root / UNIT_EXECUTABLE).read_bytes(), executable=True)
+        program = archive.TestProgram(NATIVE_EXECUTABLE.as_posix(), "crates/client-ffi")
         write(build.root / archive.PROGRAMS,
               json.dumps([ruby_program.to_json(), program.to_json()]).encode())
         inputs.update({archive.NATIVE_ARTIFACTS / f"{host}-suite{suffix}": f"{host}{suffix}".encode()
                        for host in ("c", "cpp") for suffix in ("", "-sanitized")})
         library = shards.COVERAGE_DEBUG / "libnervix_client_ffi.so"
-        inputs[library] = (build.root / shards.COVERAGE_DEBUG / "deps/libnervix_client_ffi.so").read_bytes()
+        inputs[library] = (build.root / FFI_LIBRARY).read_bytes()
         for path, content in inputs.items():
             write(build.root / path, content, executable=True)
         with mock.patch.dict(globals(), TARGETS=TARGETS | {"native_suites"}):
@@ -345,7 +366,7 @@ class LibraryPathTests(unittest.TestCase):
         ):
             path = archive.library_path(root)
         debug = root / shards.COVERAGE_DEBUG
-        self.assertEqual(path.split(os.pathsep), [str(debug / "deps"), str(debug), "/toolchain/lib", "/inherited"])
+        self.assertEqual(path.split(os.pathsep), [str(debug), "/toolchain/lib", "/inherited"])
 
 
 class RunTests(unittest.TestCase):
@@ -360,7 +381,7 @@ class RunTests(unittest.TestCase):
 
     def program(self, name: str, directory: str, status: int = 0) -> archive.TestProgram:
         """A stand-in test executable that records where it ran and exits with `status`."""
-        executable = Path("target/debug/deps") / name
+        executable = RUN_OUTPUT / name
         script = (
             f'#!/bin/sh\nprintf "%s %s %s %s\\n" {name} "$PWD" "$CARGO_MANIFEST_DIR" "$LD_LIBRARY_PATH" '
             f'>> "{self.log}"\nexit {status}\n'
@@ -407,9 +428,9 @@ class RunTests(unittest.TestCase):
         self.assertEqual(len(self.log.read_text().splitlines()), 3)
         message = str(failure.exception)
         self.assertIn("2 of 3 test executables failed", message)
-        self.assertIn("target/debug/deps/first exited 101", message)
-        self.assertIn("target/debug/deps/third exited 3", message)
-        self.assertNotIn("deps/second", message)
+        self.assertIn(f"{RUN_OUTPUT.as_posix()}/first exited 101", message)
+        self.assertIn(f"{RUN_OUTPUT.as_posix()}/third exited 3", message)
+        self.assertNotIn(f"{RUN_OUTPUT.as_posix()}/second", message)
 
     def test_a_run_without_a_plan_says_what_to_do(self) -> None:
         with self.assertRaisesRegex(shards.ShardError, "build or restore the unit tests first"):

@@ -61,20 +61,20 @@ export CARGO_LLVM_COV_SHOW_ENV=1
 export CARGO_LLVM_COV_TARGET_DIR=/repo/target/native-coverage-build
 """
 VERBOSE_VERSION = f"""\
-rustc 1.99.0 (48a229cea 2026-09-01)
+rustc 1.100.0 (48a229cea 2026-09-01)
 binary: rustc
 commit-hash: 48a229ceaefd4985c50990b14116b6d856af0985
 commit-date: 2026-09-01
 host: {HOST}
-release: 1.99.0
+release: 1.100.0
 LLVM version: 22.1.8
 """
 
 
 def toolchain(tools: Path = Path("/toolchain/bin")) -> Toolchain:
     return Toolchain(
-        version="rustc 1.99.0 (48a229cea 2026-09-01)",
-        release="1.99.0",
+        version="rustc 1.100.0 (48a229cea 2026-09-01)",
+        release="1.100.0",
         commit="48a229ceaefd4985c50990b14116b6d856af0985",
         host=HOST,
         llvm="22.1.8",
@@ -733,9 +733,9 @@ class WorkspaceWrapperTests(unittest.TestCase):
 
 class ToolchainTests(unittest.TestCase):
     def test_the_verbose_version_names_the_compiler_and_its_llvm_tools(self) -> None:
-        parsed = Toolchain.parse(VERBOSE_VERSION, "/home/user/.rustup/toolchains/1.99\n")
-        self.assertEqual(parsed, toolchain(Path(f"/home/user/.rustup/toolchains/1.99/lib/rustlib/{HOST}/bin")))
-        self.assertEqual(parsed.label(), "rust-1.99.0")
+        parsed = Toolchain.parse(VERBOSE_VERSION, "/home/user/.rustup/toolchains/1.100\n")
+        self.assertEqual(parsed, toolchain(Path(f"/home/user/.rustup/toolchains/1.100/lib/rustlib/{HOST}/bin")))
+        self.assertEqual(parsed.label(), "rust-1.100.0")
         self.assertEqual(parsed.describe()["llvm"], "22.1.8")
         with self.assertRaisesRegex(RunnerError, "did not report LLVM version"):
             Toolchain.parse(VERBOSE_VERSION.replace("LLVM version: 22.1.8\n", ""), "/sysroot")
@@ -751,7 +751,7 @@ class ToolchainTests(unittest.TestCase):
             tools.mkdir(parents=True)
             for name in ("llvm-profdata", "llvm-cov"):
                 (tools / name).write_text("")
-            matching = VersionCommands(sysroot, "LLVM version 22.1.8-rust-1.99.0-stable")
+            matching = VersionCommands(sysroot, "LLVM version 22.1.8-rust-1.100.0-stable")
             self.assertEqual(native_coverage.load_toolchain(matching).tools, tools)
             other = VersionCommands(sysroot, "LLVM version 21.1.0")
             with self.assertRaisesRegex(RunnerError, "rustc was built with LLVM 22.1.8"):
@@ -887,16 +887,18 @@ class BuildIdTests(unittest.TestCase):
     def test_children_are_located_by_build_id_among_the_build_outputs(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             build = Path(directory)
-            (build / "debug" / "deps").mkdir(parents=True)
-            (build / "debug" / "build" / "crate-1").mkdir(parents=True)
+            output = build / "debug" / "build" / "crate" / "123" / "out"
+            script_output = build / "debug" / "build" / "crate" / "456" / "out"
+            output.mkdir(parents=True)
+            script_output.mkdir(parents=True)
             child = elf([(note(GNU, 3, BUILD_ID, 4, 0), 4)])
             script = elf([(note(GNU, 3, bytes(32), 4, 0), 4)])
-            (build / "debug" / "deps" / "child-123").write_bytes(child)
-            (build / "debug" / "deps" / "libcrate.rlib").write_bytes(b"!<arch>\n")
-            (build / "debug" / "deps" / "broken").write_bytes(b"\x7fELF")
-            (build / "debug" / "build" / "crate-1" / "build-script-build").write_bytes(script)
+            (output / "child-123").write_bytes(child)
+            (output / "libcrate-123.rlib").write_bytes(b"!<arch>\n")
+            (output / "broken").write_bytes(b"\x7fELF")
+            (script_output / "build_script_build").write_bytes(script)
             located = native_coverage.locate(build, {BUILD_ID.hex(), bytes(32).hex()})
-        self.assertEqual(located, {BUILD_ID.hex(): build / "debug" / "deps" / "child-123"})
+        self.assertEqual(located, {BUILD_ID.hex(): output / "child-123"})
         self.assertEqual(native_coverage.locate(Path(directory) / "missing", {"x"}), {})
 
     def test_compiler_loaded_macros_in_nested_cargo_build_outputs_are_retained(self) -> None:
@@ -1243,9 +1245,9 @@ class ExportTests(unittest.TestCase):
         self.packages = Packages.from_metadata(
             {"packages": [{"name": "server", "manifest_path": str(self.root / "Cargo.toml")}]}
         )
-        deps = self.workspace.build() / "debug" / "deps"
-        deps.mkdir(parents=True)
-        self.walk = deps / "walk-1"
+        output = self.workspace.build() / "debug" / "build" / "walk" / "1" / "out"
+        output.mkdir(parents=True)
+        self.walk = output / "walk-1"
         self.walk.write_bytes(elf([(note(GNU, 3, BUILD_ID, 4, 0), 4)]))
         self.attempt = self.workspace.target / "native-coverage" / "attempt"
         (self.attempt / "profiles").mkdir(parents=True)
@@ -1368,7 +1370,7 @@ class CollectTests(unittest.TestCase):
         )
 
     def exported(self) -> Exported:
-        walk = self.workspace.build() / "debug" / "deps" / "walk-1"
+        walk = self.workspace.build() / "debug" / "build" / "walk" / "1" / "out" / "walk-1"
         sources = Sources()
         sources.total.files = 1
         sources.total.executable = 10
@@ -1413,7 +1415,7 @@ class CollectTests(unittest.TestCase):
         self.assertEqual(collected.status, 0)
         self.assertEqual(
             collected.attempt,
-            self.root / "target/native-coverage/check/ordinary/rust-1.99.0/github-100-1",
+            self.root / "target/native-coverage/check/ordinary/rust-1.100.0/github-100-1",
         )
         record = self.record(collected)
         self.assertEqual(record["verdict"], "complete")
@@ -1427,14 +1429,14 @@ class CollectTests(unittest.TestCase):
             {"provider": "github", "run": "100", "attempt": "1", "job": "extra-tests"},
         )
         self.assertEqual(record["attempt"], "github-100-1")
-        self.assertEqual(record["toolchain"]["rustc"], "rustc 1.99.0 (48a229cea 2026-09-01)")
+        self.assertEqual(record["toolchain"]["rustc"], "rustc 1.100.0 (48a229cea 2026-09-01)")
         self.assertEqual(
             record["recipes"],
             {"prepare": ["prepare"], "instrumented": "instrumented", "finish": ["finish"]},
         )
         self.assertEqual(
             record["selection"]["executions"][0]["executable"],
-            "target/native-coverage-build/debug/deps/walk-1",
+            "target/native-coverage-build/debug/build/walk/1/out/walk-1",
         )
         self.assertEqual(record["profiles"], [{"file": "1-2_0.profraw", "binary_ids": ["walk-id"]}])
         self.assertEqual(
@@ -1932,7 +1934,7 @@ FIXTURE = {
 
         walk-then-remove:
             cargo test --test walk
-            rm "$CARGO_TARGET_DIR"/debug/deps/walk-*
+            find "$CARGO_TARGET_DIR" -type f -name 'walk-*' ! -name '*.*' -delete
 
         nothing:
             true
@@ -2104,7 +2106,10 @@ class FixtureTests(unittest.TestCase):
         selection = first.record["selection"]
         assert isinstance(selection, dict)
         [walked] = selection["executions"]
-        self.assertRegex(walked["executable"], r"^target/native-coverage-build/debug/deps/walk-[0-9a-f]+$")
+        self.assertRegex(
+            walked["executable"],
+            r"^target/native-coverage-build/debug/build/coverage-fixture/[0-9a-f]+/out/walk-[0-9a-f]+$",
+        )
         self.assertEqual(walked["arguments"], [])
         [child] = selection["children"]
         self.assertIn("coverage-fixture-child", child["executable"])
@@ -2145,10 +2150,10 @@ class FixtureTests(unittest.TestCase):
             target = Path(directory) / "target with spaces"
             workspace = Workspace(self.fixture, target)
             with workspace.build_lock():
-                artifact = workspace.build() / "debug/deps/fixture.rlib"
+                artifact = workspace.build() / "debug/build/coverage-fixture/1/out/libcoverage_fixture-1.rlib"
                 artifact.parent.mkdir(parents=True)
                 artifact.write_bytes(b"compiled output")
-            attempt = workspace.new_attempt(fixture_producer("walk"), "rust-1.99.0", "complete")
+            attempt = workspace.new_attempt(fixture_producer("walk"), "rust-1.100.0", "complete")
             (attempt / "lcov.info").write_text("exported report\n")
             (attempt / "completion.json").write_text('{"verdict":"complete"}\n')
             (attempt / "profiles/walk.profraw").write_bytes(b"retained profile")

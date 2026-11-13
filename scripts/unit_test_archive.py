@@ -197,13 +197,13 @@ def pack(root: Path, archive: Path) -> shards.Manifest:
 
 
 def library_path(root: Path) -> str:
-    """The loader's path `cargo test` gives a test executable: the build's directories, then the
-    toolchain's, then what the environment held."""
+    """The loader's path `cargo test` gives a test executable: the build's profile directory, then
+    the toolchain's libraries, then what the environment held."""
     completed = subprocess.run(
         ["rustc", "--print", "target-libdir"], cwd=root, check=True, capture_output=True, text=True
     )
     debug = root / shards.COVERAGE_DEBUG
-    directories = [str(debug / "deps"), str(debug), completed.stdout.strip()]
+    directories = [str(debug), completed.stdout.strip()]
     inherited = os.environ.get("LD_LIBRARY_PATH")
     if inherited:
         directories.append(inherited)

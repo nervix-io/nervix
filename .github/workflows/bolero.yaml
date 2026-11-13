@@ -68,7 +68,7 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: "1.99"
+          toolchain: "1.100"
           targets: wasm32-unknown-unknown
 
       - name: Setup Ruby for native-gem properties
@@ -223,7 +223,7 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: "1.99"
+          toolchain: "1.100"
           targets: wasm32-unknown-unknown
 
       - name: Setup Ruby for native-gem properties

@@ -83,8 +83,9 @@ impl ContractCompiler {
                     metadata = Some(path.clone());
                 }
             }
+            // Cargo keeps each library among its build unit's results, so every directory holding
+            // one is a dependency search path.
             let debug = evidence.build_directory.join("debug");
-            dependencies.insert(debug.join("deps"));
             for entry in walkdir::WalkDir::new(&debug) {
                 let entry = entry.change_context(Error::Io {
                     operation: "discover fixture dependencies",
@@ -461,7 +462,7 @@ impl ContractCompiler {
             &[
                 "which".into(),
                 "--toolchain".into(),
-                "1.99".into(),
+                "1.100".into(),
                 "rustc".into(),
             ],
             &self.runner.root,

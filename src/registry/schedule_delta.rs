@@ -477,13 +477,7 @@ impl ScheduleDelta {
             }
         }
 
-        let kafka_partition_schedule_matches =
-            existing_kafka_partition_schedule == desired_kafka_partition_schedule;
-        if !kafka_partition_schedule_matches {
-            return false;
-        }
-
-        true
+        existing_kafka_partition_schedule == desired_kafka_partition_schedule
     }
 }
 

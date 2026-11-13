@@ -12,16 +12,18 @@ the number is the only thing a workflow changes to run more or fewer shards.
 The archive holds these files, under their paths below the checkout:
 
 - every executable the build left in `target/llvm-cov-target/debug` that `cargo llvm-cov report`
-  reads as an object: a file with an execute bit, outside the incremental, fingerprint and build
-  script directories, whose name without its extensions names a workspace package or target,
-  matched as cargo-llvm-cov 0.8 matches it. Those are the scenario executable, the CLI, the paced
-  simulation driver, the native Python extension, the C ABI for conformance clients, the deadlock
-  report tool and the formatter, so a shard's report reads the objects the build's own report
-  would read. Each is stored without its DWARF debug information, most of a test executable's
-  bytes: `objcopy --strip-debug` keeps the symbol table and the coverage mapping, so
-  a shard's report is the one the build's objects give, a panic still names its location and a
-  backtrace its functions, but a backtrace names no source line and a debugger finds no variable.
-  The copies are stripped beside the build, whose own objects keep their debug information;
+  reads as an object: a file with an execute bit, outside the incremental and fingerprint
+  directories, the output of a build script's run and the build scripts themselves, whose name
+  without its extensions names a workspace package or target, found and matched as cargo-llvm-cov
+  0.9 finds and matches it in the layout Cargo 1.100 builds. Those are the scenario executable,
+  wherever its build unit lies, the CLI, the paced simulation driver, the native Python extension,
+  the C ABI for conformance clients, the deadlock report tool and the formatter, so a shard's
+  report reads the objects the build's own report would read. Each is stored without its DWARF
+  debug information, most of a test executable's bytes: `objcopy --strip-debug` keeps the symbol
+  table and the coverage mapping, so a shard's report is the one the build's objects give, a panic
+  still names its location and a backtrace its functions, but a backtrace names no source line and
+  a debugger finds no variable. The copies are stripped beside the build, whose own objects keep
+  their debug information;
 - the Playwright driver that the build script of playwright-rs downloaded into its output
   directory, whose path the scenario executable holds. A scenario executable that names a driver
   the build did not leave fails the pack, rather than leaving a shard to whatever driver it finds;
@@ -67,14 +69,23 @@ ROOT = Path(__file__).resolve().parent.parent
 COVERAGE_DEBUG = Path("target/llvm-cov-target/debug")
 MANIFEST = Path("target/scenario-suite/manifest.json")
 # The directories cargo-llvm-cov does not search for objects: Cargo's incremental compilation and
-# fingerprints, and build scripts with their output, which hold no workspace object.
+# fingerprints.
 SKIPPED_DIRECTORIES = frozenset({"incremental", ".fingerprint", "fingerprint"})
+# Cargo keeps each build unit's results in `build/<package>/<hash>` below the profile directory: its
+# fingerprint, and its output in `out`. A unit that ran a build script also holds `run`, and its
+# `out` is the script's output, which holds no workspace object; cargo-llvm-cov searches no `out` of
+# a unit that ran a build script or keeps no fingerprint, nor any build script.
 BUILD_DIRECTORY = "build"
+UNIT_OUTPUT = "out"
+UNIT_FINGERPRINT = "fingerprint"
+BUILD_SCRIPT_RUN = "run"
+BUILD_SCRIPT_STEMS = frozenset({"build-script-build", "build_script_build"})
+BUILD_SCRIPT_PREFIX = "build_script_build-"
 # Files with these extensions are never objects, whatever their mode.
 NON_OBJECT_EXTENSIONS = frozenset({".d", ".rlib", ".rmeta"})
 # The build script of playwright-rs downloads its driver into its output directory, and the crate
 # holds that directory's path from compile time. A build whose download failed names none.
-PLAYWRIGHT_DRIVERS = "build/playwright-rs-*/out/playwright-driver/playwright-*"
+PLAYWRIGHT_DRIVERS = "build/playwright-rs/*/out/playwright-driver/playwright-*"
 PLAYWRIGHT_DRIVER_PATH = b"/out/playwright-driver/"
 PYTHON_WHEELS = Path("target/paced-simulation/wheels")
 ONNX_FIXTURES = Path("tests/fixtures/onnx")
@@ -225,23 +236,49 @@ def is_object(path: Path, pattern: re.Pattern[str]) -> bool:
     return pattern.match(full_stem(path.name)) is not None
 
 
+def is_build_script(name: str) -> bool:
+    """Whether cargo-llvm-cov reads the entry `name` of the build directory as a build script, by
+    its name without its last extension."""
+    stem = Path(name).stem
+    if stem in BUILD_SCRIPT_STEMS:
+        return True
+    return stem.startswith(BUILD_SCRIPT_PREFIX)
+
+
+def searches_build_entry(directory: Path, name: str) -> bool:
+    """Whether cargo-llvm-cov searches the subdirectory `name` of `directory`, which lies in the
+    build directory or is it."""
+    if is_build_script(name):
+        return False
+    if name != UNIT_OUTPUT:
+        return True
+    if not (directory / UNIT_FINGERPRINT).exists():
+        return False
+    ran_build_script = (directory / BUILD_SCRIPT_RUN).exists()
+    return not ran_build_script
+
+
 def coverage_objects(root: Path, pattern: re.Pattern[str]) -> list[Path]:
     """Every object below the coverage build's debug directory, relative to `root`."""
     debug = root / COVERAGE_DEBUG
     if not debug.is_dir():
         raise ShardError(f"{debug} is missing; build the tests first")
+    build = debug / BUILD_DIRECTORY
     objects = []
     for directory, subdirectories, files in os.walk(debug):
         current = Path(directory)
+        in_build = current.is_relative_to(build)
         kept = []
         for subdirectory in subdirectories:
             if subdirectory in SKIPPED_DIRECTORIES:
                 continue
-            if current == debug and subdirectory == BUILD_DIRECTORY:
+            if in_build and not searches_build_entry(current, subdirectory):
                 continue
             kept.append(subdirectory)
         subdirectories[:] = sorted(kept)
         for name in sorted(files):
+            if in_build and is_build_script(name):
+                continue
             path = current / name
             if is_object(path, pattern):
                 objects.append(path.relative_to(root))
@@ -249,14 +286,14 @@ def coverage_objects(root: Path, pattern: re.Pattern[str]) -> list[Path]:
 
 
 def scenario_executable(objects: Sequence[Path]) -> Path:
-    """The one scenario executable among `objects`."""
+    """The one scenario executable among `objects`, wherever Cargo left its build unit."""
     executables = []
     for path in objects:
-        if path.parent == COVERAGE_DEBUG / "deps" and SCENARIO_EXECUTABLE.match(path.name):
+        if SCENARIO_EXECUTABLE.match(path.name):
             executables.append(path)
     if len(executables) != 1:
         raise ShardError(
-            f"the coverage build must leave exactly one scenario executable in {COVERAGE_DEBUG / 'deps'}, "
+            f"the coverage build must leave exactly one scenario executable in {COVERAGE_DEBUG}, "
             f"not {[str(path) for path in executables]}"
         )
     return executables[0]
@@ -344,7 +381,7 @@ def revision(root: Path) -> str:
 def strip_objects(root: Path, objects: Sequence[Path]) -> set[Path]:
     """Copy every ELF object at `objects` without its debug information to its path below
     STRIPPED, and return the paths copied. Paths that are one file, as Cargo links a binary from
-    `deps` beside it, stay one file among the copies."""
+    its build unit's output into the profile directory, stay one file among the copies."""
     if shutil.which(STRIP[0]) is None:
         raise ShardError(f"{STRIP[0]} is not installed")
     staging = root / STRIPPED

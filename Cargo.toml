@@ -106,7 +106,6 @@ arrow-ipc = { workspace = true }
 arrow-ord = { workspace = true }
 arrow-schema = { workspace = true }
 arrow-select = { workspace = true }
-async-tar = { workspace = true, features = ["runtime-tokio"] }
 async-trait = { workspace = true }
 base64 = { workspace = true }
 base64-simd = { workspace = true }
@@ -259,6 +258,8 @@ zeroize = { workspace = true }
 
 [dev-dependencies]
 alloc_count = { workspace = true }
+# Resource tests build uploaded archives.
+async-tar = { workspace = true, features = ["runtime-tokio"] }
 bolero = { workspace = true }
 criterion = { workspace = true }
 jiff = { workspace = true }
@@ -655,7 +656,6 @@ nervix-plexus = { package = "nervix-plexus", path = "crates/plexus", features = 
 ] }
 nervix-primitives = { package = "nervix-primitives", path = "crates/primitives" }
 nervix-primitives-macros = { package = "nervix-primitives-macros", path = "crates/primitives/macros" }
-nervix-rate-limit = { path = "crates/rate-limit" }
 nervix-recovery = { package = "nervix-recovery", path = "crates/recovery" }
 nervix-roto = { package = "nervix-roto", path = "crates/nervix-roto" }
 nervix-server = { package = "nervix-server", path = "." }

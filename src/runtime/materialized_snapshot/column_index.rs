@@ -269,12 +269,15 @@ impl ColumnarCheckpointIndex {
             let batch = Arc::new(batch);
             let start = range.start.max(group.rows.start);
             let end = range.end.min(group.rows.end);
-            for index in start..end {
+            // The requested range was checked against the identities above, and every group
+            // selected intersects it, so `start..end` is a nonempty range of identities.
+            let identities = &self.identities[start..end];
+            for (index, identity) in (start..end).zip(identities) {
                 rows.push(
                     RuntimeRow::new(
                         batch.clone(),
                         index - group.rows.start,
-                        self.identities[index].metadata.clone(),
+                        identity.metadata.clone(),
                     )
                     .map_err(MaterializedSnapshotError::decoding)?,
                 );

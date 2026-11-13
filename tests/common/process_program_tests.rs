@@ -39,7 +39,11 @@ fn the_helper_name_selects_the_helper_of_the_scope_that_follows_it() {
 fn any_other_name_runs_the_suite() {
     assert_eq!(program_of(&[]), ProcessProgram::Suite);
     assert_eq!(
-        program_of(&["target/debug/deps/scenarios-0123", "--tags", "@smoke"]),
+        program_of(&[
+            "target/debug/build/nervix-scenarios/0123/out/scenarios-0123",
+            "--tags",
+            "@smoke"
+        ]),
         ProcessProgram::Suite
     );
     // The name is compared whole, so a path that ends in it is not the server.
@@ -61,12 +65,12 @@ fn every_program_runs_this_executable_again() {
 }
 
 #[test]
-fn the_tools_lie_one_level_above_the_executable() {
+fn the_tools_lie_in_the_profile_directory_that_holds_the_build_units() {
     let executable = scenario_executable();
     let tools = build_tools_directory();
     assert!(
-        executable.starts_with(tools.join("deps")),
-        "{} must lie in the deps directory of {}",
+        executable.starts_with(tools.join("build")),
+        "{} must lie in the build directory of {}",
         executable.display(),
         tools.display()
     );

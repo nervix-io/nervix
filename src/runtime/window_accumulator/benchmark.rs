@@ -67,7 +67,7 @@ impl WindowSketchBenchmark {
         let mut timestamps = Vec::with_capacity(rows.get());
         for row in 0..rows.get() {
             let index = i64::try_from(row).assured("a benchmark window holds fewer than 2^63 rows");
-            let pane = i64::try_from(row / rows_per_pane.get())
+            let pane = i64::try_from(row / rows_per_pane)
                 .assured("a benchmark window holds fewer than 2^63 panes");
             values.push(index % DISTINCT_VALUES);
             timestamps.push(Timestamp::from_unix_nanos(pane * PANE_NANOS));
