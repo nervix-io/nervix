@@ -1339,9 +1339,23 @@ measure-web-console-debug-strings target_dir=(cargo_target_dir + "/web-console-d
     export CARGO_TARGET_DIR={{ quote(target_dir) }}
     export CARGO_INCREMENTAL=0
     llvm_bin="$(rustc --print sysroot)/lib/rustlib/$(rustc -vV | sed -n 's/^host: //p')/bin"
-    rm -f "${CARGO_TARGET_DIR}"/debug/deps/nervix_web_console-*.rcgu.o
-    cargo rustc --package nervix-web-console --bin nervix-web-console --profile test -- -C save-temps
-    for object in "${CARGO_TARGET_DIR}"/debug/deps/nervix_web_console-*.rcgu.o; do
+    if [[ -d "${CARGO_TARGET_DIR}" ]]; then
+        find "${CARGO_TARGET_DIR}" -type f -name 'nervix_web_console-*.rcgu.o' -delete
+    fi
+    # The objects lie beside the executable among its build unit's results, which Cargo names.
+    executable="$(cargo rustc --package nervix-web-console --bin nervix-web-console --profile test \
+        --message-format=json-render-diagnostics -- -C save-temps | python3 -c '
+    import json
+    import sys
+
+    for line in sys.stdin:
+        message = json.loads(line)
+        if message.get("reason") != "compiler-artifact":
+            continue
+        if message.get("executable"):
+            print(message["executable"])
+    ')"
+    for object in "$(dirname "${executable}")"/nervix_web_console-*.rcgu.o; do
         "${llvm_bin}/llvm-size" -A "${object}" \
             | awk -v object="${object##*/}" '$1 == ".debug_str" { print $2, object }'
     done | sort -rn
