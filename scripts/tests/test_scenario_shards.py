@@ -278,6 +278,14 @@ class ArchiveTests(unittest.TestCase):
         self.assertFalse((root / CLI_SCRIPT_RUN_UNIT / "out" / "nervix-cli").exists())
         self.assertFalse((root / UNFINGERPRINTED_UNIT / "out" / "nervix-cli").exists())
 
+    def test_a_restored_checkout_holds_the_objects_the_build_reports(self) -> None:
+        build, _ = self.build()
+        pattern = shards.object_pattern(TARGETS)
+        built = shards.coverage_objects(build.root, pattern)
+        root = self.shard_checkout(build)
+        self.unpack(root)
+        self.assertEqual(shards.coverage_objects(root, pattern), built)
+
     def test_objects_are_packed_without_their_debug_information_and_the_build_keeps_its_own(self) -> None:
         build, packed = self.build()
         objects = shards.coverage_objects(build.root, shards.object_pattern(TARGETS))

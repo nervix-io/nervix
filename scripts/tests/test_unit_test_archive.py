@@ -130,6 +130,8 @@ class ArchiveTests(unittest.TestCase):
     def test_a_restore_brings_back_what_a_run_starts(self) -> None:
         build = Recorded(self.directory / "checkout")
         packed = build.pack_tests(self.directory / "unit-tests.tar.zst")
+        pattern = shards.object_pattern(TARGETS)
+        reported = [path for path in shards.coverage_objects(build.root, pattern) if path != SCENARIO_EXECUTABLE]
         saved = self.directory / "saved"
         (build.root / "target").rename(saved)
         path = os.environ["PATH"]
@@ -141,6 +143,8 @@ class ArchiveTests(unittest.TestCase):
         ):
             restored = archive.unpack(build.root.resolve(), self.directory / "unit-tests.tar.zst")
         self.assertEqual(restored.files, packed.files)
+        self.assertEqual(shards.coverage_objects(build.root, pattern), reported)
+        self.assertIn(UNIT_EXECUTABLE, reported)
         self.assertEqual(archive.read_programs(build.root.resolve()), [
             archive.TestProgram(UNIT_EXECUTABLE.as_posix(), "crates/cli"),
         ])

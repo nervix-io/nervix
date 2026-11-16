@@ -24,6 +24,8 @@ The archive holds these files, under their paths below the checkout:
   still names its location and a backtrace its functions, but a backtrace names no source line and
   a debugger finds no variable. The copies are stripped beside the build, whose own objects keep
   their debug information;
+- the fingerprint of each build unit that holds one of those objects: cargo-llvm-cov searches a
+  unit's output only beside its fingerprint, so a restored object is read as the build's is;
 - the Playwright driver that the build script of playwright-rs downloaded into its output
   directory, whose path the scenario executable holds. A scenario executable that names a driver
   the build did not leave fails the pack, rather than leaving a shard to whatever driver it finds;
@@ -299,6 +301,26 @@ def scenario_executable(objects: Sequence[Path]) -> Path:
     return executables[0]
 
 
+def unit_fingerprints(root: Path, objects: Sequence[Path]) -> list[Path]:
+    """The fingerprint files of every build unit whose output holds one of `objects`, relative to
+    `root`. cargo-llvm-cov searches a unit's output only beside its fingerprint, so an archive
+    carries them for a restored object to be read as the build's is."""
+    build = COVERAGE_DEBUG / BUILD_DIRECTORY
+    units = set()
+    for path in objects:
+        if not path.is_relative_to(build):
+            continue
+        # `<package>/<hash>/out/...` below the build directory.
+        parts = path.relative_to(build).parts
+        if len(parts) < 4 or parts[2] != UNIT_OUTPUT:
+            continue
+        units.add(build / parts[0] / parts[1])
+    fingerprints = []
+    for unit in sorted(units):
+        fingerprints.extend(files_below(root, unit / UNIT_FINGERPRINT))
+    return fingerprints
+
+
 def files_below(root: Path, directory: Path) -> list[Path]:
     """Every file below `directory`, relative to `root`, symbolic links included as links."""
     found = []
@@ -542,7 +564,8 @@ def pack(root: Path, archive: Path) -> Manifest:
     objects = coverage_objects(root, object_pattern(workspace_targets(root)))
     executable = scenario_executable(objects)
     print(f"scenario executable {executable}")
-    return write_archive(root, archive, MANIFEST, [*objects, *runtime_inputs(root, executable)], stripped=objects)
+    paths = [*objects, *unit_fingerprints(root, objects), *runtime_inputs(root, executable)]
+    return write_archive(root, archive, MANIFEST, paths, stripped=objects)
 
 
 def unpack(root: Path, archive: Path) -> Manifest:
