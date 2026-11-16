@@ -1339,9 +1339,23 @@ measure-web-console-debug-strings target_dir=(cargo_target_dir + "/web-console-d
     export CARGO_TARGET_DIR={{ quote(target_dir) }}
     export CARGO_INCREMENTAL=0
     llvm_bin="$(rustc --print sysroot)/lib/rustlib/$(rustc -vV | sed -n 's/^host: //p')/bin"
-    rm -f "${CARGO_TARGET_DIR}"/debug/deps/nervix_web_console-*.rcgu.o
-    cargo rustc --package nervix-web-console --bin nervix-web-console --profile test -- -C save-temps
-    for object in "${CARGO_TARGET_DIR}"/debug/deps/nervix_web_console-*.rcgu.o; do
+    if [[ -d "${CARGO_TARGET_DIR}" ]]; then
+        find "${CARGO_TARGET_DIR}" -type f -name 'nervix_web_console-*.rcgu.o' -delete
+    fi
+    # The objects lie beside the executable among its build unit's results, which Cargo names.
+    executable="$(cargo rustc --package nervix-web-console --bin nervix-web-console --profile test \
+        --message-format=json-render-diagnostics -- -C save-temps | python3 -c '
+    import json
+    import sys
+
+    for line in sys.stdin:
+        message = json.loads(line)
+        if message.get("reason") != "compiler-artifact":
+            continue
+        if message.get("executable"):
+            print(message["executable"])
+    ')"
+    for object in "$(dirname "${executable}")"/nervix_web_console-*.rcgu.o; do
         "${llvm_bin}/llvm-size" -A "${object}" \
             | awk -v object="${object##*/}" '$1 == ".debug_str" { print $2, object }'
     done | sort -rn
@@ -4208,7 +4222,7 @@ test-ratchet-audit *args:
 typed-ratchet-source-build:
     #!/usr/bin/env bash
     set -euo pipefail
-    source_toolchain="1.99"
+    source_toolchain="1.100"
     if [[ -n "${NERVIX_NATIVE_COVERAGE_ATTEMPT:-}" ]]; then
         source_toolchain="nightly-2026-09-17"
     fi
@@ -4310,12 +4324,12 @@ test-typed-ratchet-docs:
 
 # Current API examples compile alongside their compile_fail counterparts on the product toolchain.
 test-typed-ratchet-product-docs:
-    cargo +1.99 test --package nervix-models --doc SettingDefinition
-    cargo +1.99 test --package nervix-primitives --doc expect_lint
-    cargo +1.99 test --package nervix-vm --doc FunctionInjector
-    cargo +1.99 test --package nervix-dns --doc DnsLookupReport
-    cargo +1.99 test --package nervix-recovery --doc Discarded
-    RUSTUP_TOOLCHAIN=1.99 just test-runtime-state-capabilities
+    cargo +1.100 test --package nervix-models --doc SettingDefinition
+    cargo +1.100 test --package nervix-primitives --doc expect_lint
+    cargo +1.100 test --package nervix-vm --doc FunctionInjector
+    cargo +1.100 test --package nervix-dns --doc DnsLookupReport
+    cargo +1.100 test --package nervix-recovery --doc Discarded
+    RUSTUP_TOOLCHAIN=1.100 just test-runtime-state-capabilities
 
 qualify-typed-ratchet-cache: typed-ratchet-build
     #!/usr/bin/env bash
@@ -4340,12 +4354,12 @@ test-ratchet-runner *args:
 
 # Focused local tooling counters for patch review; the existing native producer collects CI.
 coverage-ratchet-runner *args:
-    CARGO_TARGET_DIR={{ cargo_target_dir }}/typed-ratchet/coverage cargo +1.99 llvm-cov test --manifest-path tools/nervix-lint/Cargo.toml --package nervix-ratchet --lib --test wrapper --test audit --test applicability --no-report -- {{ args }}
+    CARGO_TARGET_DIR={{ cargo_target_dir }}/typed-ratchet/coverage cargo +1.100 llvm-cov test --manifest-path tools/nervix-lint/Cargo.toml --package nervix-ratchet --lib --test wrapper --test audit --test applicability --no-report -- {{ args }}
     just coverage-ratchet-report-owner
 
 [private]
 coverage-ratchet-report-owner:
-    CARGO_TARGET_DIR={{ cargo_target_dir }}/typed-ratchet/coverage cargo +1.99 llvm-cov test --manifest-path tools/nervix-lint/Cargo.toml --package nervix-lint-report --lib --no-clean --no-default-ignore-filename-regex --lcov --output-path lcov-workspace.info
+    CARGO_TARGET_DIR={{ cargo_target_dir }}/typed-ratchet/coverage cargo +1.100 llvm-cov test --manifest-path tools/nervix-lint/Cargo.toml --package nervix-lint-report --lib --no-clean --no-default-ignore-filename-regex --lcov --output-path lcov-workspace.info
     # Cached objects name the isolated tooling workspace by its compiler source root.
     sed -i {{ quote("s|^SF:/src/|SF:" + justfile_directory() + "/tools/nervix-lint/|") }} lcov-workspace.info
     pwd -P > coverage-source-root.txt
@@ -4354,7 +4368,7 @@ coverage-ratchet-report-owner:
 ratchet-tests selection *args:
     #!/usr/bin/env bash
     set -euo pipefail
-    runner_toolchain="1.99"
+    runner_toolchain="1.100"
     if [[ -n "${NERVIX_NATIVE_COVERAGE_ATTEMPT:-}" ]]; then
         runner_toolchain="nightly-2026-09-17"
     fi
@@ -4379,7 +4393,7 @@ prepare-ratchet-contracts mode="ordinary": typed-ratchet-build
 build-ratchet-runner:
     #!/usr/bin/env bash
     set -euo pipefail
-    runner_toolchain="1.99"
+    runner_toolchain="1.100"
     if [[ -n "${NERVIX_NATIVE_COVERAGE_ATTEMPT:-}" ]]; then
         runner_toolchain="nightly-2026-09-17"
     fi

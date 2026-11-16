@@ -1984,7 +1984,7 @@ impl BranchPartitions {
     pub fn units_served_by(self, instance: u64, instances: std::num::NonZeroU64) -> Vec<Unit> {
         let mut served = Vec::new();
         for (ordinal, unit) in (0_u64..).zip(self.units()) {
-            if ordinal % instances.get() == instance {
+            if ordinal % instances == instance {
                 served.push(unit);
             }
         }

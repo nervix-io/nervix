@@ -87,15 +87,19 @@ pub(crate) fn dependency_lifecycle_helper_command(scope: &str) -> Command {
     command
 }
 
-/// The directory the build leaves the tools a scenario starts in. Cargo keeps a test executable in
-/// its `deps` directory, one level below them.
+/// The directory the build leaves the tools a scenario starts in: the profile directory. Cargo keeps
+/// a test executable among its build unit's results, below the profile's `build` directory.
 pub(crate) fn build_tools_directory() -> PathBuf {
     let executable = scenario_executable();
-    let deps = executable
+    let mut ancestors = executable.ancestors();
+    let units: &Path = ancestors
+        .find(|directory| directory.file_name() == Some(OsStr::new(BUILD_UNITS_DIRECTORY)))
+        .assured("Cargo builds every test executable below the profile's build directory");
+    let tools: &Path = units
         .parent()
-        .assured("an executable's path names a directory");
-    let tools: &Path = deps
-        .parent()
-        .assured("Cargo's deps directory lies in the profile directory");
+        .assured("Cargo's build directory lies in the profile directory");
     tools.to_path_buf()
 }
+
+/// The directory of the profile directory in which Cargo keeps every build unit's results.
+const BUILD_UNITS_DIRECTORY: &str = "build";

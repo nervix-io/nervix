@@ -106,7 +106,6 @@ arrow-ipc = { workspace = true }
 arrow-ord = { workspace = true }
 arrow-schema = { workspace = true }
 arrow-select = { workspace = true }
-async-tar = { workspace = true, features = ["runtime-tokio"] }
 async-trait = { workspace = true }
 base64 = { workspace = true }
 base64-simd = { workspace = true }
@@ -259,6 +258,8 @@ zeroize = { workspace = true }
 
 [dev-dependencies]
 alloc_count = { workspace = true }
+# Resource tests build uploaded archives.
+async-tar = { workspace = true, features = ["runtime-tokio"] }
 bolero = { workspace = true }
 criterion = { workspace = true }
 jiff = { workspace = true }
@@ -472,14 +473,14 @@ async-tar = { version = "0.6", default-features = false }
 async-trait = "0.1"
 aws-config = "1.8"
 aws-credential-types = "1.2"
-aws-lc-rs = { version = "1.18.2", default-features = false, features = [
+aws-lc-rs = { version = "1.19.0", default-features = false, features = [
   "aws-lc-sys",
 ] }
 # The boundary's stack-resident SHA-256 context uses the same module as aws-lc-rs and librdkafka.
-aws-lc-sys = { version = "=0.46.0", default-features = false }
+aws-lc-sys = { version = "0.47.0", default-features = false }
 # The FIPS module aws-lc-rs selects with its `fips` feature. nervix-crypto's `fips` feature, which
 # no Nervix build enables, runs the boundary's SHA-256 context on it for an embedding service.
-aws-lc-fips-sys = { version = "=0.14.4", default-features = false }
+aws-lc-fips-sys = { version = "0.14.4", default-features = false }
 # Disable the AWS SDK TLS defaults so the root's Smithy client owns AWS-LC selection.
 aws-sdk-sqs = { version = "1.76", default-features = false, features = [
   "default-https-client",
@@ -655,7 +656,6 @@ nervix-plexus = { package = "nervix-plexus", path = "crates/plexus", features = 
 ] }
 nervix-primitives = { package = "nervix-primitives", path = "crates/primitives" }
 nervix-primitives-macros = { package = "nervix-primitives-macros", path = "crates/primitives/macros" }
-nervix-rate-limit = { path = "crates/rate-limit" }
 nervix-recovery = { package = "nervix-recovery", path = "crates/recovery" }
 nervix-roto = { package = "nervix-roto", path = "crates/nervix-roto" }
 nervix-server = { package = "nervix-server", path = "." }
