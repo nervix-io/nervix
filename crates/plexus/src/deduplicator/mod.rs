@@ -476,7 +476,7 @@ mod tests {
     fn suggests_relay_after_from_comma_without_schema_keyword_leakage() {
         let input = "CREATE DEDUPLICATOR dedup_txns FROM ss1, ";
         let suggestions = suggest_create_deduplicator(input, input.len());
-        assert!(suggestions.contains(&"ref:relay".to_string()));
+        assert!(suggestions.contains(&"ref:input_relay".to_string()));
         assert!(!suggestions.contains(&"JSON".to_string()));
         assert!(!suggestions.contains(&"AVRO".to_string()));
     }
@@ -502,7 +502,7 @@ mod tests {
         let input = "CREATE DEDUPLICATOR dedup_txns FROM ss1 DEDUPLICATE ON ";
         let suggestions = suggest_create_deduplicator(input, input.len());
         assert!(suggestions.contains(&"deduplicate_on".to_string()));
-        assert!(!suggestions.contains(&"ref:relay".to_string()));
+        assert!(!suggestions.contains(&"ref:input_relay".to_string()));
     }
 
     #[test]
