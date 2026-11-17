@@ -57,6 +57,7 @@ mod tests {
             || {
                 let publication = Arc::new(CapabilityPublication::default());
                 let mut initial = NodeCapabilityRecord {
+                    operational: Default::default(),
                     identity: ClusterNodeIdentity::new(
                         ClusterNodeName::parse("receiver").expect("node name"),
                         ClusterNodeIncarnation::new(1),

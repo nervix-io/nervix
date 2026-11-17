@@ -26,7 +26,7 @@ use nervix_models::{ArchiveDigest, BackupArchiveSummary, CommandExecutionReferen
 use thiserror::Error;
 
 use super::browser::{Browser, CallSocket as _, DownloadedArchive, Received};
-use crate::{SESSION_LIMITS, web_console_websocket_url_from_base};
+use crate::web_console_websocket_url_from_base;
 
 /// How long a download waits for its next frame before it counts as stalled.
 pub(crate) const FRAME_TIMEOUT: Duration = Duration::from_secs(120);
@@ -304,15 +304,27 @@ impl ArchiveDownload {
         let Some(url) = self.socket_url() else {
             return Err(Report::new(DownloadError::NoAddress));
         };
-        let codec = ClientBackupDownloadWebSocketCodec::new(SESSION_LIMITS);
-        let request = BackupDownloadRequest {
-            execution_reference: self.reference.clone(),
-        }
-        .encode(&SESSION_LIMITS)
-        .assured("an execution reference is far shorter than a frame");
         let Some(mut socket) = browser.open(&url) else {
             return Err(Report::new(DownloadError::Transport));
         };
+        let opening = super::browser::read_opening(browser, &mut socket, FRAME_TIMEOUT).await;
+        let limits = match opening {
+            Ok(limits) => limits,
+            Err(report) => {
+                let context = match report.current_context() {
+                    super::browser::CallOpeningError::Transport => DownloadError::Transport,
+                    super::browser::CallOpeningError::TimedOut => DownloadError::Stalled,
+                    super::browser::CallOpeningError::Invalid => DownloadError::InvalidFrame,
+                };
+                return Err(report.change_context(context));
+            }
+        };
+        let codec = ClientBackupDownloadWebSocketCodec::new(limits);
+        let request = BackupDownloadRequest {
+            execution_reference: self.reference.clone(),
+        }
+        .encode(&limits)
+        .assured("an execution reference is far shorter than a frame");
         if socket.send(Vec::from(codec.encode(request))).await.is_err() {
             return Err(Report::new(DownloadError::Transport));
         }

@@ -22,10 +22,15 @@ use super::super::{ApplicationBound, RuntimeAdmission};
 use crate::runtime::ApplicationWait;
 
 fn runtime_admission() -> RuntimeAdmission {
-    RuntimeAdmission::new(nervix_models::ClusterNodeIdentity::new(
-        nervix_models::ClusterNodeName::parse("node-1").expect("fixture node"),
-        nervix_models::ClusterNodeIncarnation::new(1),
-    ))
+    RuntimeAdmission::new(
+        nervix_models::ClusterNodeIdentity::new(
+            nervix_models::ClusterNodeName::parse("node-1").expect("fixture node"),
+            nervix_models::ClusterNodeIncarnation::new(1),
+        ),
+        nervix_models::NodeOperationalCapabilities::default()
+            .control_plane
+            .runtime_state_retry_interval(),
+    )
 }
 
 #[nervix_primitives::test(start_paused = true)]

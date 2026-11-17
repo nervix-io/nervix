@@ -1199,6 +1199,7 @@ impl TestClusterConfig {
             shutdown: ShutdownSettings::resolve(
                 Some(self.shutdown_timeout),
                 Some(self.drain_timeout),
+                None,
             )
             .map_err(|report| io::Error::other(format!("{report:#}")))?,
             ..NodeSettings::default()

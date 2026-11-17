@@ -1148,7 +1148,10 @@ def run_inspection(session, report):
     license = license_outcome.state_inspection
     assert license is not None and license.domain is None and license.entity_name is None
     assert license.entity_kind == "LICENSE" and license.counts.rows == 3 and license.counts.branches == 0
-    assert len(license.units) == 1 and [part.name for part in license.units[0].sections] == ["summary", "quotas"]
+    assert len(license.units) == 1
+    assert [part.name for part in license.units[0].sections] == ["summary", "quotas", "transitions"]
+    transitions = license.units[0].sections[2]
+    assert transitions.frames == [] and transitions.omitted_rows == 0
     report("INSPECTION license rows=3")
     outcome = execute(session, "SHOW RELAY events MATERIALIZED STATE FOR UNBRANCHED LIMIT 1 FORMAT JSON;")
     inspection = outcome.state_inspection

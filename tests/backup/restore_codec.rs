@@ -254,11 +254,16 @@ impl ClientStreamingService<VerifiedFrame<RestoreFrame>> for ProxyService {
                 .send(start)
                 .await
                 .assured("the scenario retains the peer's observation");
-            service
+            let metadata = response.metadata().clone();
+            let mut changed = service
                 .effect
                 .answer()
                 .await
-                .ok_or_else(|| Status::unavailable("the completed restore answer was lost"))
+                .ok_or_else(|| Status::unavailable("the completed restore answer was lost"))?;
+            // The peer changes only the reply body. Keep the server's announced session bounds so
+            // the client reaches its reply decoder and classifies the unreadable outcome.
+            *changed.metadata_mut() = metadata;
+            Ok(changed)
         })
     }
 }

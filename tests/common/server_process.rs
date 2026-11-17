@@ -1286,7 +1286,7 @@ impl ServerProcess {
             );
         }));
         let mut send_request = send_request.ready().await.map_err(io::Error::other)?;
-        let request = http::Request::builder()
+        let mut request = http::Request::builder()
             .method(http::Method::POST)
             .uri(format!(
                 "http://{}{UPLOAD_RESOURCE_PATH}",
@@ -1297,6 +1297,9 @@ impl ServerProcess {
             .header(http::header::AUTHORIZATION, test_basic_authorization())
             .body(())
             .map_err(io::Error::other)?;
+        let mut offered = tonic::metadata::MetadataMap::new();
+        nervix_client_wire::grpc::limits::write(&mut offered, SessionLimits::DEFAULT);
+        request.headers_mut().extend(offered.into_headers());
         let (response, mut request_body) = send_request
             .send_request(request, false)
             .map_err(io::Error::other)?;
