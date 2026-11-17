@@ -2848,6 +2848,7 @@ impl Application {
 
                 service.inner.initialization.complete();
                 background_tasks.push(nervix_primitives::task::spawn(licensing::run(service.clone(), shutdown.clone())));
+                background_tasks.push(nervix_primitives::task::spawn(licensing::run_notices(service.clone(), shutdown.clone())));
                 background_tasks.push(nervix_primitives::task::spawn(licensing::stop_gate::run(service.clone(), shutdown.clone())));
                 Ok::<(), Report<AppError>>(())
             }) => result,
