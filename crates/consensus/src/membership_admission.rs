@@ -47,7 +47,11 @@ pub(super) async fn catch_up_learner(
             let caught_up = if let (Some(Some(matched)), Some(last)) =
                 (peers.get(&node), observed.last_log_index)
             {
-                last.saturating_sub(matched.index) <= raft.config().replication_lag_threshold
+                match last.checked_sub(matched.index) {
+                    Some(lag) => lag <= raft.config().replication_lag_threshold,
+                    // A match past the observed last entry leaves nothing to replicate.
+                    None => true,
+                }
             } else {
                 false
             };
