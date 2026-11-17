@@ -51,6 +51,13 @@ pub enum RateQuantityError {
     Zero,
 }
 
+/// Why the byte-size parser reads no quantity from a count's text. The parser's refusal is
+/// displayable but no standard error, so it stays a report frame beneath
+/// [`RateQuantityError::Unreadable`] instead of only its printed description.
+#[derive(Debug, thiserror::Error)]
+#[error("{0}")]
+struct RateQuantityCause(ubyte::Error);
+
 impl RateQuantity {
     /// The quantity `text` writes, which counts at least one unit.
     pub fn parse(text: &str) -> error_stack::Result<Self, RateQuantityError> {
@@ -68,10 +75,11 @@ impl RateQuantity {
     pub fn units(&self) -> error_stack::Result<NonZeroU64, RateQuantityError> {
         let units = match self.0.parse::<ubyte::ByteUnit>() {
             Ok(units) => units.as_u64(),
-            Err(_) => {
-                return Err(Report::new(RateQuantityError::Unreadable {
+            Err(cause) => {
+                let refusal = RateQuantityError::Unreadable {
                     text: self.0.clone(),
-                }));
+                };
+                return Err(Report::new(RateQuantityCause(cause)).change_context(refusal));
             }
         };
         NonZeroU64::new(units).ok_or_else(|| Report::new(RateQuantityError::Zero))
@@ -255,3 +263,7 @@ pub enum RateLimitRefusal {
     #[error("{entity} ingestors read on their EVERY cadence, so they take no RATE LIMIT")]
     Paced { entity: IngestorEntityKind },
 }
+
+#[cfg(test)]
+#[path = "rate_limit_tests.rs"]
+mod tests;

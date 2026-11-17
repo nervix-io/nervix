@@ -308,6 +308,13 @@ impl UnitAllowance {
 
     /// The value each measured clause computes for each payload, by clause position; a clause
     /// without a measure has none.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(
+            reason = "the VM selected-row iterator is the bounded row selection of this read's \
+                      payloads"
+        )
+    )]
     async fn measure(
         &self,
         run: ProgramRun<'_>,

@@ -144,10 +144,13 @@ pub(crate) fn clause_quota(clause: &RateLimit) -> Result<Quota, Report<RateLimit
     let period = clause
         .period()
         .change_context(RateLimitClauseIssue::Period)?;
-    Quota::new(count.get(), period, burst.get()).map_err(|refusal| {
-        let issue = RateLimitClauseIssue::Quota(*refusal.current_context());
-        refusal.change_context(issue)
-    })
+    match Quota::new(count.get(), period, burst.get()) {
+        Ok(quota) => Ok(quota),
+        Err(refusal) => {
+            let issue = RateLimitClauseIssue::Quota(*refusal.current_context());
+            Err(refusal.change_context(issue))
+        }
+    }
 }
 
 /// The payload fact `measure` reads when it is that fact alone, such as `payload.bytes`, which

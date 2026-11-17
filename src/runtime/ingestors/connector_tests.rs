@@ -827,7 +827,11 @@ async fn a_stop_during_an_intake_hold_leaves_the_batch_unconfirmed_and_ends_the_
     ] {
         let observations = run_policy_stopped_at_the_second_intake(policy).await;
         let observations = observations.lock();
-        assert_eq!(observations.intake.len(), 2, "the loop read nothing after the stop");
+        assert_eq!(
+            observations.intake.len(),
+            2,
+            "the loop read nothing after the stop"
+        );
         assert_eq!(observations.acknowledged, vec![vec![0]]);
         assert!(
             observations.rejected.is_empty(),
@@ -1263,7 +1267,10 @@ async fn individual_settlement_leaves_every_delivery_from_a_stopped_intake_on_un
         3,
         "every delivery is confirmed or left unconfirmed for redelivery"
     );
-    assert!(unconfirmed >= 2, "the stopped delivery and the one after it stay unconfirmed");
+    assert!(
+        unconfirmed >= 2,
+        "the stopped delivery and the one after it stay unconfirmed"
+    );
 }
 
 #[nervix_primitives::test]

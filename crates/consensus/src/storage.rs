@@ -95,8 +95,10 @@ const KEY_INSTALLING: &[u8] = b"installing";
 const KEY_VOTE: &[u8] = b"vote";
 const KEY_COMMITTED: &[u8] = b"committed";
 const KEY_LAST_PURGED: &[u8] = b"last_purged";
-const KEYSPACE_LOGS: &str = "raft_licensing_transitions_inferencer_pages_operational_ratelimit_logs";
-const KEYSPACE_META: &str = "raft_licensing_transitions_inferencer_pages_operational_ratelimit_meta";
+const KEYSPACE_LOGS: &str =
+    "raft_licensing_transitions_inferencer_pages_operational_ratelimit_logs";
+const KEYSPACE_META: &str =
+    "raft_licensing_transitions_inferencer_pages_operational_ratelimit_meta";
 const KEYSPACE_STATE_MACHINE: &str =
     "raft_licensing_transitions_inferencer_pages_operational_ratelimit_state";
 const KEYSPACE_SNAPSHOT: &str =

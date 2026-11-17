@@ -68,7 +68,10 @@ fn clauses(ingestor: &CreateIngestor) -> Result<(), Report<RegistryError>> {
 }
 
 /// The issue a measure refusal names for the clause at `clause`, from 1.
-fn measure_issue(result: Result<(), Report<RegistryError>>, clause: usize) -> RateLimitMeasureIssue {
+fn measure_issue(
+    result: Result<(), Report<RegistryError>>,
+    clause: usize,
+) -> RateLimitMeasureIssue {
     let Err(error) = result else {
         panic!("the measure was admitted");
     };
@@ -108,7 +111,10 @@ fn a_measure_over_payload_facts_is_admitted() {
 #[test]
 fn a_measure_reading_what_only_decoding_knows_is_refused() {
     let decoded = Expression::Field(FieldReference::scoped(FieldScope::Message, named("seq")));
-    let ingestor = kafka(vec![clause("10", None, "1s"), clause("10", Some(decoded), "1s")]);
+    let ingestor = kafka(vec![
+        clause("10", None, "1s"),
+        clause("10", Some(decoded), "1s"),
+    ]);
     let issue = measure_issue(measures(&ingestor), 2);
     assert_eq!(issue, RateLimitMeasureIssue::Scope);
 }
