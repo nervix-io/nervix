@@ -541,7 +541,7 @@ fn hash_map_choices_bind_the_key_to_the_selected_codec_and_domain() {
         let codecs = signals
             .choice_query(ChoiceControl::HashCodec)
             .assured("codec choices are scoped to the domain");
-        assert_eq!(codecs.target, ChoiceTarget::Codec);
+        assert_eq!(codecs.target, ChoiceTarget::IngestCodec);
         assert_eq!(
             codecs.dependencies[0].value,
             ChoiceValue::Domain(scope.clone())

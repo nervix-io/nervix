@@ -3,8 +3,9 @@
 //! Layer: edges.
 //!
 //! - **Owns.** Resolving a structured control's question about one domain's configuration — its
-//!   schemas, branches, relays, source references, decoding codecs, and record fields — into
-//!   ordered typed choices, their presentation, and the digest of the definitions a page cursor binds.
+//!   schemas, branches, relays, source references, codecs, and record fields — into ordered typed
+//!   choices, their presentation, and the digest of the definitions a page cursor binds. Which codecs
+//!   and relays a question accepts is the vocabulary's rule, which text completion applies too.
 //! - **Depends on.** Vocabulary Models, names, and node references, and the session choice
 //!   contract.
 //! - **Must not know.** How the configuration snapshot was read or queued, sessions, transports,
@@ -23,9 +24,10 @@ use nervix_client_wire::{
     ChoiceValue,
 };
 use nervix_models::{
-    BranchName, CanonicalPlexusError, CreateBranch, CreateRelay, CreateSchema, DomainName,
-    IngestorEntityKind, Model, ModelIndex, ModelKind, NodeRef, RelayBranching,
-    RequestedResourceVersion, ResourceName, ResourceVersionStatus, SchemaField,
+    BranchName, CanonicalPlexusError, CodecDirection, CreateBranch, CreateRelay, CreateSchema,
+    DomainName, IngestorEntityKind, Model, ModelIndex, ModelKind, NodeRef, RelayBranching,
+    RelayName, RelayQuestion, RequestedResourceVersion, ResourceName, ResourceVersionStatus,
+    SchemaField, SchemaName,
 };
 
 use super::session_service::hash_choice_text;
@@ -52,21 +54,15 @@ pub(in crate::application) enum ConfiguredQuestion {
     /// Fields of the selected codec's output schema.
     CodecFields(NodeRef),
     IngestorEntity(IngestorEntityKind),
-    IngestCodecs,
-    IngestRelays(Option<BranchName>),
+    /// Codecs that work in the direction a clause uses them in: decoding for an ingestor's or a
+    /// hash map's `DECODE USING`, encoding for an emitter's `ENCODE USING`.
+    DirectedCodecs(CodecDirection),
+    /// The relays a position accepts beside the relays the question names, which text completion
+    /// asks at the matching grammar position.
+    CompatibleRelays(RelayQuestion),
     BranchFields(NodeRef),
-    ProcessorCompatibleInputRelays(NodeRef),
-    ProcessorInputBranchRelays(NodeRef),
-    ProcessorMaterializedRelays(NodeRef),
-    /// Relays with materialized state on exactly a generator's branch: unbranched ones for
-    /// `None`, and ones branched by the named branch otherwise.
-    GeneratorMaterializedRelays(Option<BranchName>),
     EmitterEntity(nervix_models::EmitterEntityKind),
     EmitterCatalog,
-    EmitterCodecs,
-    EmitterCompatibleInputs(NodeRef),
-    EmitterMaterializedRelays(Vec<NodeRef>),
-    EmitterErrorRelays(Vec<NodeRef>),
     SchemaFields(NodeRef),
     /// The runtime nodes a placement rule may name as a `FROM` or `TO` member.
     PlacementMembers,
@@ -114,29 +110,30 @@ impl<'a> ConfiguredQuery<'a> {
             }
             ChoiceTarget::RelayField => return Self::relay_fields(request.dependencies()),
             ChoiceTarget::CodecField => return Self::codec_fields(request.dependencies()),
-            ChoiceTarget::IngestCodec => ConfiguredQuestion::IngestCodecs,
-            ChoiceTarget::IngestUnbranchedRelay => ConfiguredQuestion::IngestRelays(None),
+            ChoiceTarget::IngestCodec => {
+                ConfiguredQuestion::DirectedCodecs(CodecDirection::Decoding)
+            }
+            ChoiceTarget::IngestUnbranchedRelay => {
+                ConfiguredQuestion::CompatibleRelays(RelayQuestion::OnBranch(None))
+            }
             ChoiceTarget::IngestBranchedRelay => {
                 return Self::ingest_branched_relays(request.dependencies());
             }
             ChoiceTarget::BranchField => return Self::branch_fields(request.dependencies()),
             ChoiceTarget::ProcessorCompatibleInputRelay => {
-                return Self::processor_relays(
-                    request.dependencies(),
-                    ConfiguredQuestion::ProcessorCompatibleInputRelays,
-                );
+                return Self::processor_relays(request.dependencies(), |first| {
+                    RelayQuestion::ProcessorInput { first }
+                });
             }
             ChoiceTarget::ProcessorInputBranchRelay => {
-                return Self::processor_relays(
-                    request.dependencies(),
-                    ConfiguredQuestion::ProcessorInputBranchRelays,
-                );
+                return Self::processor_relays(request.dependencies(), |source| {
+                    RelayQuestion::ProcessorBranch { source }
+                });
             }
             ChoiceTarget::ProcessorMaterializedRelay => {
-                return Self::processor_relays(
-                    request.dependencies(),
-                    ConfiguredQuestion::ProcessorMaterializedRelays,
-                );
+                return Self::processor_relays(request.dependencies(), |first| {
+                    RelayQuestion::ProcessorState { first }
+                });
             }
             ChoiceTarget::GeneratorMaterializedRelay => {
                 return Self::generator_materialized_relays(request.dependencies());
@@ -274,7 +271,9 @@ impl<'a> ConfiguredQuery<'a> {
         }
         Some(Self {
             domain,
-            question: ConfiguredQuestion::IngestRelays(Some(BranchName::from(&branch.identifier))),
+            question: ConfiguredQuestion::CompatibleRelays(RelayQuestion::OnBranch(Some(
+                BranchName::from(&branch.identifier),
+            ))),
         })
     }
 
@@ -309,7 +308,9 @@ impl<'a> ConfiguredQuery<'a> {
                 },
             ] => Some(Self {
                 domain,
-                question: ConfiguredQuestion::GeneratorMaterializedRelays(None),
+                question: ConfiguredQuestion::CompatibleRelays(
+                    RelayQuestion::MaterializedOnBranch(None),
+                ),
             }),
             [
                 ChoiceSelection {
@@ -320,17 +321,19 @@ impl<'a> ConfiguredQuery<'a> {
                 },
             ] if branch.kind == ModelKind::Branch => Some(Self {
                 domain,
-                question: ConfiguredQuestion::GeneratorMaterializedRelays(Some(BranchName::from(
-                    &branch.identifier,
-                ))),
+                question: ConfiguredQuestion::CompatibleRelays(
+                    RelayQuestion::MaterializedOnBranch(Some(BranchName::from(&branch.identifier))),
+                ),
             }),
             _ => None,
         }
     }
 
+    /// A processor's relay question about the relay its form chose first: the domain followed by
+    /// that relay.
     fn processor_relays(
         dependencies: &'a [ChoiceSelection],
-        question: impl FnOnce(NodeRef) -> ConfiguredQuestion,
+        question: impl FnOnce(RelayName) -> RelayQuestion,
     ) -> Option<Self> {
         let [
             ChoiceSelection {
@@ -348,7 +351,9 @@ impl<'a> ConfiguredQuery<'a> {
         }
         Some(Self {
             domain,
-            question: question(input.clone()),
+            question: ConfiguredQuestion::CompatibleRelays(question(RelayName::from(
+                &input.identifier,
+            ))),
         })
     }
 }
@@ -414,18 +419,10 @@ impl ConfiguredChoices {
             | ConfiguredQuestion::WireCborSchemas
             | ConfiguredQuestion::WireAvroSchemas => self.models(question, &search),
             ConfiguredQuestion::IngestorEntity(_)
-            | ConfiguredQuestion::IngestCodecs
-            | ConfiguredQuestion::IngestRelays(_)
-            | ConfiguredQuestion::ProcessorCompatibleInputRelays(_)
-            | ConfiguredQuestion::ProcessorInputBranchRelays(_)
-            | ConfiguredQuestion::ProcessorMaterializedRelays(_)
-            | ConfiguredQuestion::GeneratorMaterializedRelays(_) => self.models(question, &search),
-            ConfiguredQuestion::EmitterEntity(_)
-            | ConfiguredQuestion::EmitterCatalog
-            | ConfiguredQuestion::EmitterCodecs
-            | ConfiguredQuestion::EmitterCompatibleInputs(_)
-            | ConfiguredQuestion::EmitterMaterializedRelays(_)
-            | ConfiguredQuestion::EmitterErrorRelays(_) => self.models(question, &search),
+            | ConfiguredQuestion::DirectedCodecs(_)
+            | ConfiguredQuestion::CompatibleRelays(_)
+            | ConfiguredQuestion::EmitterEntity(_)
+            | ConfiguredQuestion::EmitterCatalog => self.models(question, &search),
             ConfiguredQuestion::SchemaFields(schema) => self.codec_fields(schema, &search),
             ConfiguredQuestion::RelayFields(relay) => self.relay_fields(relay, &search),
             ConfiguredQuestion::CodecFields(codec) => self.codec_fields(codec, &search),
@@ -444,15 +441,13 @@ impl ConfiguredChoices {
         question: &ConfiguredQuestion,
         search: &str,
     ) -> Result<ResolvedChoices, ChoiceStatus> {
-        let emitter_context = self.emitter_context(question)?;
-        let input = match question {
-            ConfiguredQuestion::ProcessorCompatibleInputRelays(input)
-            | ConfiguredQuestion::ProcessorInputBranchRelays(input)
-            | ConfiguredQuestion::ProcessorMaterializedRelays(input) => {
-                let Some(Model::Relay(relay)) = self.models.get(input) else {
+        let rule = match question {
+            ConfiguredQuestion::CompatibleRelays(relays) => {
+                // A relay the question names that is no longer configured leaves it no context.
+                let Some(rule) = relays.rule(|name| self.models.relay(name)) else {
                     return Err(ChoiceStatus::MissingContext);
                 };
-                Some(relay)
+                Some(rule)
             }
             _ => None,
         };
@@ -473,16 +468,10 @@ impl ConfiguredChoices {
                     "Codec",
                     Model::<RequestedResourceVersion>::Codec(codec.clone()).to_canonical_plexus(),
                 )?,
-                (ConfiguredQuestion::IngestCodecs, Model::Codec(codec))
-                    if codec.wire_format.supports_decoding() =>
+                (ConfiguredQuestion::DirectedCodecs(direction), Model::Codec(codec))
+                    if direction.admits(&codec.wire_format) =>
                 {
-                    ModelCandidate::new(
-                        NodeRef::new(ModelKind::Codec, &codec.name),
-                        format!("decodes into schema {}", codec.schema),
-                        "Decoding codec",
-                        Model::<RequestedResourceVersion>::Codec(codec.clone())
-                            .to_canonical_plexus(),
-                    )?
+                    ModelCandidate::directed_codec(*direction, model, &codec.schema)?
                 }
                 (ConfiguredQuestion::IngestorEntity(kind), Model::Endpoint(endpoint))
                     if kind.capabilities().reference.admits(model) =>
@@ -505,32 +494,8 @@ impl ConfiguredChoices {
                         model.to_public_plexus(),
                     )?
                 }
-                (ConfiguredQuestion::IngestRelays(branch), Model::Relay(relay))
-                    if relay.branching.branch() == branch.as_ref() =>
-                {
-                    ModelCandidate::relay(relay)?
-                }
-                (ConfiguredQuestion::ProcessorCompatibleInputRelays(_), Model::Relay(relay))
-                    if input.is_some_and(|source| {
-                        source.schema == relay.schema && source.branching == relay.branching
-                    }) =>
-                {
-                    ModelCandidate::relay(relay)?
-                }
-                (ConfiguredQuestion::ProcessorInputBranchRelays(_), Model::Relay(relay))
-                    if input.is_some_and(|source| source.branching == relay.branching) =>
-                {
-                    ModelCandidate::relay(relay)?
-                }
-                (ConfiguredQuestion::ProcessorMaterializedRelays(_), Model::Relay(relay))
-                    if relay.materialized_state.is_some()
-                        && input.is_some_and(|source| source.branching == relay.branching) =>
-                {
-                    ModelCandidate::relay(relay)?
-                }
-                (ConfiguredQuestion::GeneratorMaterializedRelays(branch), Model::Relay(relay))
-                    if relay.materialized_state.is_some()
-                        && relay.branching.branch() == branch.as_ref() =>
+                (ConfiguredQuestion::CompatibleRelays(_), Model::Relay(relay))
+                    if rule.as_ref().is_some_and(|rule| rule.admits(relay)) =>
                 {
                     ModelCandidate::relay(relay)?
                 }
@@ -576,18 +541,12 @@ impl ConfiguredChoices {
                             .to_canonical_plexus(),
                     )?
                 }
-                (
-                    ConfiguredQuestion::EmitterEntity(_)
-                    | ConfiguredQuestion::EmitterCatalog
-                    | ConfiguredQuestion::EmitterCodecs
-                    | ConfiguredQuestion::EmitterCompatibleInputs(_)
-                    | ConfiguredQuestion::EmitterMaterializedRelays(_)
-                    | ConfiguredQuestion::EmitterErrorRelays(_),
-                    _,
-                ) => match self.emitter_candidate(question, model, &emitter_context)? {
-                    Some(candidate) => candidate,
-                    None => continue,
-                },
+                (ConfiguredQuestion::EmitterEntity(_) | ConfiguredQuestion::EmitterCatalog, _) => {
+                    match self.emitter_candidate(question, model)? {
+                        Some(candidate) => candidate,
+                        None => continue,
+                    }
+                }
                 _ => continue,
             };
             if candidate.matches(search) {
@@ -601,19 +560,12 @@ impl ConfiguredChoices {
                 .cmp(&right.choice.presentation.label)
         });
         let mut digest = blake3::Hasher::new();
-        if let Some(input) = input {
-            let definition = input
-                .to_canonical_plexus()
-                .inspect_err(|error| {
-                    nervix_recovery::Reported::reported(
-                        Err::<(), _>(error),
-                        "resolve configured choices",
-                    )
-                })
-                .map_err(|_| ChoiceStatus::LookupFailed)?;
-            hash_choice_text(&mut digest, &definition);
-        }
-        for input in &emitter_context.inputs {
+        let named = match &rule {
+            Some(rule) => rule.named(),
+            None => Vec::new(),
+        };
+        // The relays a question compares candidates with decide the page as much as the candidates.
+        for input in named {
             let definition = input
                 .to_canonical_plexus()
                 .inspect_err(|error| {
@@ -983,6 +935,20 @@ impl ModelCandidate {
         Self::new(node, detail, "Branch", branch.to_canonical_plexus())
     }
 
+    /// A codec offered to a clause that uses it in `direction`, with the schema of the records it
+    /// decodes into or encodes.
+    fn directed_codec(
+        direction: CodecDirection,
+        codec: &Model<RequestedResourceVersion>,
+        schema: &SchemaName,
+    ) -> Result<Self, ChoiceStatus> {
+        let (detail, group) = match direction {
+            CodecDirection::Decoding => (format!("decodes into schema {schema}"), "Decoding codec"),
+            CodecDirection::Encoding => (format!("encodes schema {schema}"), "Encoding codec"),
+        };
+        Self::new(codec.node_ref(), detail, group, codec.to_canonical_plexus())
+    }
+
     fn relay(relay: &CreateRelay) -> Result<Self, ChoiceStatus> {
         let branching = match &relay.branching {
             RelayBranching::Unbranched => "unbranched".to_string(),
@@ -1014,15 +980,16 @@ mod tests {
         ChoiceLookupRequest, ChoiceSelection, ChoiceStatus, ChoiceTarget, ChoiceValue,
     };
     use nervix_models::{
-        AvroType, BranchEviction, BranchName, CodecName, CodecWireFormat, CreateBranch,
-        CreateCodec, CreateRelay, CreateSchema, CreateSignalingProtocol, CreateVhost,
+        AvroType, BranchEviction, BranchName, CodecDirection, CodecName, CodecWireFormat,
+        CreateBranch, CreateCodec, CreateRelay, CreateSchema, CreateSignalingProtocol, CreateVhost,
         CreateWireSchema, DomainName, FieldName, HttpIngestorEntity, JsonType, KafkaIngestorEntity,
         MaterializedRelayState, Model, ModelKind, ModelName, NodeRef, ParseAsType, RelayBranching,
-        RelayName, RequestedResourceVersion, ResourceName, ResourceUpload, ResourceUploadIdentity,
-        ResourceUploadKey, ResourceUploadState, ResourceUploads, ResourceVersionCounter,
-        ResourceVersionStatus, SchemaField, SchemaName, SignalingProtocolName,
-        SignalingProtocolOnConnect, SignalingStep, SignalingWireFormat, UserName, VhostName,
-        WebsocketsIngestorEntity, WireSchemaField, WireSchemaName, WireSchemaStrictness,
+        RelayName, RelayQuestion, RequestedResourceVersion, ResourceName, ResourceUpload,
+        ResourceUploadIdentity, ResourceUploadKey, ResourceUploadState, ResourceUploads,
+        ResourceVersionCounter, ResourceVersionStatus, SchemaField, SchemaName,
+        SignalingProtocolName, SignalingProtocolOnConnect, SignalingStep, SignalingWireFormat,
+        UserName, VhostName, WebsocketsIngestorEntity, WireSchemaField, WireSchemaName,
+        WireSchemaStrictness,
     };
     use sorted_vec::SortedVec;
 
@@ -1123,6 +1090,18 @@ mod tests {
         )
     }
 
+    fn relay_name(name: &str) -> RelayName {
+        RelayName::parse(name).assured("the test relay names are valid")
+    }
+
+    fn relay_names(names: &[&str]) -> Vec<RelayName> {
+        let mut relays = Vec::with_capacity(names.len());
+        for name in names {
+            relays.push(relay_name(name));
+        }
+        relays
+    }
+
     fn labels(question: &ConfiguredQuestion, search: &str) -> Vec<String> {
         configuration()
             .resolve(question, search)
@@ -1152,12 +1131,20 @@ mod tests {
             );
         }
         assert_eq!(
-            labels(&ConfiguredQuestion::IngestRelays(None), ""),
+            labels(
+                &ConfiguredQuestion::CompatibleRelays(RelayQuestion::OnBranch(None)),
+                ""
+            ),
             ["audit", "dangling"]
         );
         let branch = BranchName::parse("by_tenant").assured("valid branch");
         assert_eq!(
-            labels(&ConfiguredQuestion::IngestRelays(Some(branch.clone())), ""),
+            labels(
+                &ConfiguredQuestion::CompatibleRelays(RelayQuestion::OnBranch(Some(
+                    branch.clone()
+                ))),
+                ""
+            ),
             ["orders"]
         );
         let branch_ref = NodeRef::new(ModelKind::Branch, &branch);
@@ -1179,7 +1166,9 @@ mod tests {
         );
         assert_eq!(
             ConfiguredQuery::of(&branched).map(|query| query.question),
-            Some(ConfiguredQuestion::IngestRelays(Some(branch))),
+            Some(ConfiguredQuestion::CompatibleRelays(
+                RelayQuestion::OnBranch(Some(branch))
+            )),
         );
         let key_fields = ChoiceLookupRequest::new(
             ChoiceTarget::BranchField,
@@ -1252,17 +1241,23 @@ mod tests {
         let cases = [
             (
                 ChoiceTarget::ProcessorCompatibleInputRelay,
-                ConfiguredQuestion::ProcessorCompatibleInputRelays(input.clone()),
+                ConfiguredQuestion::CompatibleRelays(RelayQuestion::ProcessorInput {
+                    first: relay_name("input"),
+                }),
                 vec!["input", "same_contract"],
             ),
             (
                 ChoiceTarget::ProcessorInputBranchRelay,
-                ConfiguredQuestion::ProcessorInputBranchRelays(input.clone()),
+                ConfiguredQuestion::CompatibleRelays(RelayQuestion::ProcessorBranch {
+                    source: relay_name("input"),
+                }),
                 vec!["input", "other_schema", "same_contract", "state"],
             ),
             (
                 ChoiceTarget::ProcessorMaterializedRelay,
-                ConfiguredQuestion::ProcessorMaterializedRelays(input.clone()),
+                ConfiguredQuestion::CompatibleRelays(RelayQuestion::ProcessorState {
+                    first: relay_name("input"),
+                }),
                 vec!["state"],
             ),
         ];
@@ -1293,7 +1288,9 @@ mod tests {
             assert_eq!(actual, expected);
         }
         let missing = configured.resolve(
-            &ConfiguredQuestion::ProcessorCompatibleInputRelays(relay_node("missing")),
+            &ConfiguredQuestion::CompatibleRelays(RelayQuestion::ProcessorInput {
+                first: relay_name("missing"),
+            }),
             "",
         );
         assert!(matches!(missing, Err(ChoiceStatus::MissingContext)));
@@ -1360,7 +1357,9 @@ mod tests {
                 dependencies: vec![ChoiceSelection {
                     value: ChoiceValue::Domain(domain()),
                 }],
-                question: ConfiguredQuestion::GeneratorMaterializedRelays(None),
+                question: ConfiguredQuestion::CompatibleRelays(
+                    RelayQuestion::MaterializedOnBranch(None),
+                ),
                 relays: vec!["flat_state"],
             },
             Case {
@@ -1372,7 +1371,9 @@ mod tests {
                         value: ChoiceValue::Model(branch_ref.clone()),
                     },
                 ],
-                question: ConfiguredQuestion::GeneratorMaterializedRelays(Some(tenant.clone())),
+                question: ConfiguredQuestion::CompatibleRelays(
+                    RelayQuestion::MaterializedOnBranch(Some(tenant.clone())),
+                ),
                 relays: vec!["tenant_state"],
             },
         ];
@@ -1507,7 +1508,10 @@ mod tests {
             )),
             ["socket"]
         );
-        assert_eq!(labels(ConfiguredQuestion::IngestCodecs), ["decode"]);
+        assert_eq!(
+            labels(ConfiguredQuestion::DirectedCodecs(CodecDirection::Decoding)),
+            ["decode"]
+        );
     }
 
     #[test]
@@ -2079,34 +2083,40 @@ mod tests {
 
     #[test]
     fn emitter_inputs_share_payload_schema_without_requiring_the_same_branch() {
-        let orders = relay_node("orders");
         assert_eq!(
             labels(
-                &ConfiguredQuestion::EmitterCompatibleInputs(orders.clone()),
+                &ConfiguredQuestion::CompatibleRelays(RelayQuestion::EmitterInput {
+                    first: relay_name("orders"),
+                }),
                 ""
             ),
             ["audit", "orders"]
         );
         assert_eq!(
             labels(
-                &ConfiguredQuestion::EmitterMaterializedRelays(vec![orders.clone()]),
+                &ConfiguredQuestion::CompatibleRelays(RelayQuestion::EmitterState {
+                    inputs: relay_names(&["orders"]),
+                }),
                 ""
             ),
             ["orders"]
         );
         assert_eq!(
             labels(
-                &ConfiguredQuestion::EmitterErrorRelays(vec![orders.clone()]),
+                &ConfiguredQuestion::CompatibleRelays(RelayQuestion::EmitterError {
+                    inputs: relay_names(&["orders"]),
+                }),
                 ""
             ),
             ["orders"]
         );
         for question in [
-            ConfiguredQuestion::EmitterMaterializedRelays(vec![
-                orders.clone(),
-                relay_node("audit"),
-            ]),
-            ConfiguredQuestion::EmitterErrorRelays(vec![orders, relay_node("audit")]),
+            ConfiguredQuestion::CompatibleRelays(RelayQuestion::EmitterState {
+                inputs: relay_names(&["orders", "audit"]),
+            }),
+            ConfiguredQuestion::CompatibleRelays(RelayQuestion::EmitterError {
+                inputs: relay_names(&["orders", "audit"]),
+            }),
         ] {
             assert!(
                 labels(&question, "").is_empty(),
@@ -2114,7 +2124,9 @@ mod tests {
             );
         }
         let missing = configuration().resolve(
-            &ConfiguredQuestion::EmitterCompatibleInputs(relay_node("missing")),
+            &ConfiguredQuestion::CompatibleRelays(RelayQuestion::EmitterInput {
+                first: relay_name("missing"),
+            }),
             "",
         );
         assert!(matches!(missing, Err(ChoiceStatus::MissingContext)));
@@ -2183,10 +2195,9 @@ mod tests {
             ConfiguredQuery::of(&request)
                 .assured("all inputs remain dependencies")
                 .question,
-            ConfiguredQuestion::EmitterMaterializedRelays(vec![
-                relay_node("orders"),
-                relay_node("audit")
-            ])
+            ConfiguredQuestion::CompatibleRelays(RelayQuestion::EmitterState {
+                inputs: relay_names(&["orders", "audit"]),
+            })
         );
     }
 
@@ -2232,7 +2243,10 @@ mod tests {
             Vec::new(),
         );
         let encoders = choices
-            .resolve(&ConfiguredQuestion::EmitterCodecs, "")
+            .resolve(
+                &ConfiguredQuestion::DirectedCodecs(CodecDirection::Encoding),
+                "",
+            )
             .assured("encoding choices resolve");
         assert_eq!(
             encoders

@@ -6,9 +6,9 @@
 //! is applied and re-checked, and each broken branch is reported with the text that reproduces it.
 //!
 //! Run the default bounded walk, which gates against the checked-in baseline:
-//!     cargo test -p nervix-plexus --test completion_walk
-//! Dig deeper without gating, to look for branches the default budget does not reach:
 //!     just plexus-completion-walk
+//! Dig deeper without gating, to look for branches the default budget does not reach:
+//!     just plexus-completion-walk-deep
 
 mod grammar;
 mod report;
