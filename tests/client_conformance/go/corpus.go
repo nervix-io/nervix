@@ -661,6 +661,12 @@ func serverLines(frame []byte, fields, keys []field) ([]string, error) {
 	}
 	message := session.GetRootAsServerMessage(frame, 0)
 	switch message.BodyType() {
+	case session.ServerBodySessionOpened:
+		value := new(session.SessionOpened)
+		if err := union(message.Body, value); err != nil {
+			return nil, err
+		}
+		return []string{fmt.Sprintf("EVENT SESSION_OPENED frame=%d transfer=%d depth=%d entries=%d string=%d", *value.FrameBytes(), *value.TransferBytes(), *value.NestingDepth(), *value.CollectionEntries(), *value.StringBytes())}, nil
 	case session.ServerBodyReply:
 		value := new(session.Reply)
 		if err := union(message.Body, value); err != nil {

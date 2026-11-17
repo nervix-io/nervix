@@ -29,13 +29,14 @@ use meticulous::OptionExt as _;
 use nervix_primitives::unmodeled::futures::mpsc;
 use nervix_recovery::Discarded as _;
 
-use crate::{ConsoleRequest, RequestRefusal, SESSION_LIMITS};
+use crate::{ConsoleRequest, RequestRefusal};
 
 /// The most requests waiting for the session loop.
 pub(crate) const MAX_WAITING_REQUESTS: usize = 64;
 /// The most text the waiting requests carry together: one frame's worth, so every request a
 /// session frame can carry fits while nothing else waits.
-pub(crate) const MAX_WAITING_REQUEST_BYTES: usize = SESSION_LIMITS.frame_bytes();
+#[cfg(test)]
+pub(crate) const MAX_WAITING_REQUEST_BYTES: usize = nervix_models::SessionFrameBytes::DEFAULT;
 const _: () = assert!(MAX_WAITING_REQUESTS > 0);
 
 /// Creates the two ends of the hand-off. Every control holds a clone of the sender; the session
@@ -50,10 +51,21 @@ pub(crate) fn request_handoff() -> (RequestSender, RequestReceiver) {
 }
 
 /// The requests waiting for the session loop and the text they carry.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct WaitingLoad {
+    limit: usize,
     requests: usize,
     bytes: usize,
+}
+
+impl Default for WaitingLoad {
+    fn default() -> Self {
+        Self {
+            limit: nervix_models::SessionFrameBytes::DEFAULT,
+            requests: 0,
+            bytes: 0,
+        }
+    }
 }
 
 impl WaitingLoad {
@@ -66,11 +78,11 @@ impl WaitingLoad {
             }));
         }
         let total_bytes = match self.bytes.checked_add(bytes) {
-            Some(total) if total <= MAX_WAITING_REQUEST_BYTES => total,
+            Some(total) if total <= self.limit => total,
             // A sum that overflows is past the bound as well.
             Some(_) | None => {
                 return Err(Report::new(RequestRefusal::TooMuchWaitingText {
-                    limit: MAX_WAITING_REQUEST_BYTES,
+                    limit: self.limit,
                 }));
             }
         };
@@ -137,6 +149,12 @@ pub(crate) struct RequestReceiver {
 }
 
 impl RequestReceiver {
+    pub(crate) fn set_frame_limit(&mut self, limit: usize) {
+        self.load
+            .try_update_value(|load| load.limit = limit)
+            .discarded("a disposed console has no waiting requests to admit");
+    }
+
     /// Drops every request still waiting, because the session they were issued for is over.
     pub(crate) fn discard_waiting(&mut self) {
         while let Ok(waiting) = self.receiver.try_recv() {

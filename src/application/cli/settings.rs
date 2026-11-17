@@ -43,6 +43,26 @@ impl SettingsArgs {
     /// Preserve the presence of command-line and environment seeds, including explicit defaults.
     pub(super) fn parameter_seeds(&self) -> nervix_models::ClusterParameterSeedValues {
         nervix_models::ClusterParameterSeedValues {
+            forced_recovery_budget: self
+                .cluster_parameters
+                .forced_recovery_budget
+                .map(|value| value.0),
+            ownership_handoff_poll_interval: self
+                .cluster_parameters
+                .ownership_handoff_poll_interval
+                .map(|value| value.0),
+            entity_gate_poll_interval: self
+                .cluster_parameters
+                .entity_gate_poll_interval
+                .map(|value| value.0),
+            domain_drain_poll_interval: self
+                .cluster_parameters
+                .domain_drain_poll_interval
+                .map(|value| value.0),
+            runtime_readiness_propagation_bound: self
+                .cluster_parameters
+                .runtime_readiness_propagation_bound
+                .map(|value| value.0),
             licensing_request_timeout: self
                 .cluster_parameters
                 .licensing_request_timeout
@@ -137,7 +157,7 @@ use clap::Parser as _;
 use error_stack::{Report, ResultExt as _};
 
 use super::{
-    capacity::CapacityArgs, consensus::ConsensusArgs, execution::ExecutionArgs,
+    OperationalArgs, capacity::CapacityArgs, consensus::ConsensusArgs, execution::ExecutionArgs,
     membership::MembershipArgs, memory_pressure::MemoryPressureArgs, resources::ResourceArgs,
     runtime::RuntimeArgs, scheduling::SchedulingArgs, shutdown::ShutdownArgs,
     transactions::TransactionArgs,
@@ -180,6 +200,8 @@ pub struct SettingsArgs {
     pub capacity: CapacityArgs,
     #[command(flatten)]
     pub execution: ExecutionArgs,
+    #[command(flatten)]
+    pub operational: OperationalArgs,
     #[command(flatten)]
     pub listeners: super::listeners::ListenerArgs,
 }
@@ -265,6 +287,10 @@ impl TryFrom<SettingsArgs> for NodeSettings {
                 .change_context(AppError::InvalidConsensusOperations)?,
             parameter_seeds,
             interconnect,
+            operational: args
+                .operational
+                .settings()
+                .change_context(AppError::InvalidOperationalCapabilities)?,
             listeners: args
                 .listeners
                 .settings()
@@ -319,6 +345,7 @@ impl From<&NodeSettings> for SettingsArgs {
             cluster_parameters: super::cluster_parameters::ClusterParameterArgs::from_seeds(
                 &settings.parameter_seeds,
             ),
+            operational: OperationalArgs::from_settings(&settings.operational),
             consensus: ConsensusArgs::from_settings(&settings.raft, &settings.raft_retention),
             membership: MembershipArgs::from_settings(&settings.membership),
             scheduling: SchedulingArgs::from_settings(&settings.scheduling),
@@ -362,6 +389,7 @@ impl SettingsArgs {
         self.resources.render(&mut command_line);
         self.capacity.render(&mut command_line);
         self.execution.render(&mut command_line);
+        self.operational.render(&mut command_line);
         self.listeners.render(&mut command_line);
         command_line.arguments
     }

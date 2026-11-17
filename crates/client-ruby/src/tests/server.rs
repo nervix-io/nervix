@@ -145,7 +145,12 @@ impl StreamingService<VerifiedFrame<ClientFrame>> for PeerService {
                     }
                 }
             });
-            Ok(Response::new(ReceiverStream::new(receiver)))
+            let mut response = Response::new(ReceiverStream::new(receiver));
+            nervix_client_core::wire::grpc::limits::write(
+                response.metadata_mut(),
+                SessionLimits::DEFAULT,
+            );
+            Ok(response)
         })
     }
 }

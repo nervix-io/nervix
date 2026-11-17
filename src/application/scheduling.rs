@@ -86,22 +86,33 @@ fn common_live_group_primary(
 ///
 /// After a whole cluster restarts, the first node to lead can reach a quorum before gossip has
 /// observed the other nodes live, which are still starting. Failing their work over then would move it
-/// away from the node that holds its state and start that state afresh. Gossip exchanges state every
-/// half second, so the grace covers many rounds, and a voter that has not appeared by its end is
-/// treated as failed exactly as before.
-pub(in crate::application) const VOTER_OBSERVATION_GRACE: Duration = Duration::from_secs(10);
-
-/// Live voter observations owned by one process's reconciliation task, including while it follows.
+/// away from the node that holds its state and start that state afresh. The grace covers twenty
+/// configured gossip rounds; a voter that has not appeared by its end is treated as failed.
+///
+/// Live voter observations belong to one process's reconciliation task, including while it follows.
 /// A first relayed heartbeat can be classified dead before gossip has enough samples for liveness;
 /// that verdict supplies no live observation and cannot end the startup wait.
-#[derive(Default)]
 pub(in crate::application) struct StartupVoterObservations {
+    grace: Duration,
     observed_live: BTreeSet<ClusterNodeName>,
 }
 
 impl StartupVoterObservations {
+    /// The startup grace for a configured gossip interval: twenty gossip rounds.
+    pub(in crate::application) fn grace_for(gossip_interval: Duration) -> Duration {
+        gossip_interval
+            .checked_mul(20)
+            .assured("twenty supported gossip rounds fit a duration")
+    }
+
+    pub(in crate::application) fn new(grace: Duration) -> Self {
+        Self {
+            grace,
+            observed_live: BTreeSet::new(),
+        }
+    }
     pub(in crate::application) fn observe(&mut self, gossip: &GossipState, elapsed: Duration) {
-        if elapsed < VOTER_OBSERVATION_GRACE {
+        if elapsed < self.grace {
             self.observed_live.extend(gossip.live_node_ids());
         } else {
             self.observed_live.clear();
@@ -113,7 +124,7 @@ impl StartupVoterObservations {
         voters: &[ClusterNodeName],
         elapsed: Duration,
     ) -> BTreeSet<ClusterNodeName> {
-        if elapsed >= VOTER_OBSERVATION_GRACE {
+        if elapsed >= self.grace {
             return BTreeSet::new();
         }
         voters
@@ -124,15 +135,10 @@ impl StartupVoterObservations {
     }
 }
 
-pub(in crate::application) const RUNTIME_REVISION_READINESS_PROPAGATION_BOUND: Duration =
-    Duration::from_secs(30);
-
 /// The least time a stopping node waits for the release of the cordon its own drain set. It is what
 /// the release has when the move of the node's work used the whole drain timeout, so a drain that
 /// timed out still clears the cordon its request may have set, and all it has when the voters that
 /// stay are too few to commit it.
-const SHUTDOWN_CORDON_RELEASE_GRACE: Duration = Duration::from_secs(1);
-const SHUTDOWN_LEADER_OBSERVATION_INTERVAL: Duration = Duration::from_millis(25);
 
 #[derive(Debug, thiserror::Error)]
 pub(in crate::application) enum SchedulePublicationError {
@@ -176,6 +182,7 @@ impl fmt::Display for ShutdownDrainObservation<'_> {
 /// The one drain timeout that a graceful shutdown's ownership move and local graph drain share,
 /// which never reaches past the shutdown deadline.
 struct ShutdownDrainBudget {
+    release_grace: Duration,
     started: Instant,
     timeout: Duration,
     deadline: ShutdownDeadline,
@@ -207,8 +214,9 @@ impl ShutdownLeaderDrainBudget {
 }
 
 impl ShutdownDrainBudget {
-    fn start(timeout: Duration, deadline: ShutdownDeadline) -> Self {
+    fn start(timeout: Duration, deadline: ShutdownDeadline, release_grace: Duration) -> Self {
         Self {
+            release_grace,
             started: Instant::now(),
             timeout,
             deadline,
@@ -227,10 +235,8 @@ impl ShutdownDrainBudget {
     /// release grace alone, since only voters that are stopping too could commit the release.
     fn cordon_release_bound(&self, quorum: ShutdownReleaseQuorum) -> Duration {
         let wait = match quorum {
-            ShutdownReleaseQuorum::Staying => {
-                self.drain_remaining().max(SHUTDOWN_CORDON_RELEASE_GRACE)
-            }
-            ShutdownReleaseQuorum::Leaving => SHUTDOWN_CORDON_RELEASE_GRACE,
+            ShutdownReleaseQuorum::Staying => self.drain_remaining().max(self.release_grace),
+            ShutdownReleaseQuorum::Leaving => self.release_grace,
         };
         wait.min(self.deadline.remaining())
     }
@@ -1161,7 +1167,11 @@ impl SessionServiceImpl {
         drain_timeout: Duration,
         deadline: ShutdownDeadline,
     ) -> ShutdownPhaseOutcome {
-        let budget = ShutdownDrainBudget::start(drain_timeout, deadline);
+        let budget = ShutdownDrainBudget::start(
+            drain_timeout,
+            deadline,
+            self.inner.raft_timings.heartbeat_interval() * 4,
+        );
         // Stop ingestor admission before the leader begins moving downstream nodes. A Kafka poll
         // admitted while an emitter moves can otherwise leave its source ACK root waiting on that
         // move until the entire drain budget expires.
@@ -1371,7 +1381,7 @@ impl SessionServiceImpl {
                     return ShutdownDrainAnswer::Failed { leader, report };
                 }
                 StoppingNodeDrainResponse::NotLeader => {
-                    sleep(SHUTDOWN_LEADER_OBSERVATION_INTERVAL).await;
+                    sleep(self.inner.raft_timings.heartbeat_interval() / 10).await;
                     leader = self.wait_for_shutdown_drain_leader().await;
                 }
             }
@@ -1385,7 +1395,7 @@ impl SessionServiceImpl {
             if let Some(leader) = leader {
                 return leader;
             }
-            sleep(SHUTDOWN_LEADER_OBSERVATION_INTERVAL).await;
+            sleep(self.inner.raft_timings.heartbeat_interval() / 10).await;
         }
     }
 

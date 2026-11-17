@@ -41,7 +41,7 @@ const SETTINGS_HEADINGS: [&str; 17] = [
 ];
 
 /// Every setting the settings groups declare, by the name its definition gives it.
-const SETTING_NAMES: [&str; 151] = [
+const SETTING_NAMES: [&str; 152] = [
     "connector-retry-multiplier",
     "connector-retry-jitter-percent",
     "kafka-domain-assignment-retry",
@@ -124,6 +124,7 @@ const SETTING_NAMES: [&str; 151] = [
     "memory-pressure-resume-jitter",
     "drain-timeout",
     "shutdown-timeout",
+    "task-grace-period",
     "resource-max-archive-bytes",
     "resource-max-extracted-bytes",
     "resource-max-file-count",

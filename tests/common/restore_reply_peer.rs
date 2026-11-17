@@ -130,11 +130,9 @@ impl StreamingService<VerifiedFrame<ClientFrame>> for ForwardExchange {
                     frames::RawCodec::<ServerFrame>::new(),
                 )
                 .await?;
-            let outgoing = response
-                .into_inner()
-                .map_ok(|frame| frame.into_bytes().to_vec());
-            let outgoing: Self::ResponseStream = Box::pin(outgoing);
-            Ok(Response::new(outgoing))
+            Ok(response.map(|incoming| -> Self::ResponseStream {
+                Box::pin(incoming.map_ok(|frame| frame.into_bytes().to_vec()))
+            }))
         })
     }
 }
@@ -205,7 +203,7 @@ impl ClientStreamingService<VerifiedFrame<RestoreFrame>> for ForwardRestore {
                         | nervix_client_wire::CommandDisposition::NotLeader(_)
                 )
             {
-                return Ok(Response::new(response.into_inner().into_bytes().to_vec()));
+                return Ok(response.map(|frame| frame.into_bytes().to_vec()));
             }
             let RestoreDisposition::Outcome(outcome) = &reply.disposition else {
                 panic!("the real restore was admitted: {reply:?}");
@@ -224,7 +222,7 @@ impl ClientStreamingService<VerifiedFrame<RestoreFrame>> for ForwardRestore {
             observer
                 .send(receipt)
                 .assured("the scenario retains its real restore witness");
-            Ok(Response::new(state.fault.substitute(reply)))
+            Ok(response.map(|_frame| state.fault.substitute(reply)))
         })
     }
 }

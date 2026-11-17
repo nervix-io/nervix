@@ -535,6 +535,9 @@ impl SessionServiceImpl {
                                 descriptor,
                                 groups,
                                 key_schema,
+                                super::branch_state::RestoreAdmissionPolicy::new(
+                                    &self.inner.operational.control_plane,
+                                ),
                             )
                             .await
                             .map_err(|error| StepFailure::Failed(format!("{error:#}")))?,
@@ -574,6 +577,9 @@ impl SessionServiceImpl {
                                 descriptor,
                                 groups,
                                 window_schemas,
+                                super::branch_state::RestoreAdmissionPolicy::new(
+                                    &self.inner.operational.control_plane,
+                                ),
                             )
                             .await
                             .map_err(|error| StepFailure::Failed(format!("{error:#}")))?,

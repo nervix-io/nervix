@@ -44,14 +44,10 @@ use thiserror::Error;
 use url::Url;
 
 use super::browser::{ArchiveFile, Browser, CallSocket as _, Received};
-use crate::{SESSION_LIMITS, web_console_websocket_url_from_base};
+use crate::web_console_websocket_url_from_base;
 
 /// Archive bytes one restore frame carries, as the native clients send them.
 pub(crate) const RESTORE_CHUNK_BYTES: usize = 256 * 1024;
-
-// A chunk fills at most half a frame, far more room than its frame's envelope needs, so a
-// non-empty chunk always encodes.
-const _: () = assert!(RESTORE_CHUNK_BYTES <= SESSION_LIMITS.frame_bytes() / 2);
 
 /// Archive bytes one read of the file digests at a time.
 pub(crate) const MEASURE_SLICE_BYTES: u64 = 4 * 1024 * 1024;
@@ -96,6 +92,8 @@ pub(crate) enum RestoreStreamError {
     Stalled,
     #[error("no reply arrived within {} seconds of the archive's last byte", FRAME_TIMEOUT.as_secs())]
     NoReply,
+    #[error("the restore request does not fit the peer session limits")]
+    InvalidRequest,
     #[error("the restore's reply does not decode")]
     InvalidReply,
     #[error("the reply answers another request")]
@@ -137,6 +135,7 @@ impl RestoreStreamError {
         match self {
             Self::Transport | Self::Stalled | Self::NoReply => true,
             Self::ReadArchive
+            | Self::InvalidRequest
             | Self::EmptyArchive
             | Self::NoAddress
             | Self::InvalidReply
@@ -161,6 +160,7 @@ impl RestoreStreamError {
             | Self::ReferenceMismatch { .. }
             | Self::UnresolvedAdmission => true,
             Self::ReadArchive
+            | Self::InvalidRequest
             | Self::EmptyArchive
             | Self::NoAddress
             | Self::StreamRefused { .. }
@@ -193,7 +193,7 @@ enum Sending<S> {
     /// sent.
     Answered(RestoreReply),
     /// The connection took the whole archive, and the reply is awaited on it.
-    Sent(S),
+    Sent(S, ClientRestoreWebSocketCodec),
 }
 
 /// Whether the leader may have admitted the restore on an attempt whose outcome the console has
@@ -478,10 +478,9 @@ impl<F: ArchiveFile> RestoreUpload<F> {
 
     /// Streams the restore once and waits for the reply that answers it.
     async fn attempt<B: Browser>(&self, browser: &B, progress: impl Fn(u64, u64)) -> AttemptEnd {
-        let codec = ClientRestoreWebSocketCodec::new(SESSION_LIMITS);
-        let sending = self.send_archive(browser, &codec, progress).await;
-        let mut socket = match sending {
-            Ok(Sending::Sent(socket)) => socket,
+        let sending = self.send_archive(browser, progress).await;
+        let (mut socket, codec) = match sending {
+            Ok(Sending::Sent(socket, codec)) => (socket, codec),
             Ok(Sending::Answered(reply)) => {
                 return AttemptEnd {
                     streamed: Streamed::Partly,
@@ -507,36 +506,47 @@ impl<F: ArchiveFile> RestoreUpload<F> {
     async fn send_archive<B: Browser>(
         &self,
         browser: &B,
-        codec: &ClientRestoreWebSocketCodec,
         progress: impl Fn(u64, u64),
     ) -> Result<Sending<B::Socket>, Report<RestoreStreamError>> {
         let Some(url) = self.socket_url() else {
             return Err(Report::new(RestoreStreamError::NoAddress));
         };
+        let Some(mut socket) = browser.open(&url) else {
+            return Err(Report::new(RestoreStreamError::Transport));
+        };
+        let opening = super::browser::read_opening(browser, &mut socket, FRAME_TIMEOUT).await;
+        let limits = match opening {
+            Ok(limits) => limits,
+            Err(report) => {
+                let context = match report.current_context() {
+                    super::browser::CallOpeningError::Transport => RestoreStreamError::Transport,
+                    super::browser::CallOpeningError::TimedOut => RestoreStreamError::Stalled,
+                    super::browser::CallOpeningError::Invalid => RestoreStreamError::InvalidReply,
+                };
+                return Err(report.change_context(context));
+            }
+        };
+        let codec = ClientRestoreWebSocketCodec::new(limits);
         let start = RestoreStart {
             request_id: RESTORE_REQUEST_ID,
             execution_reference: self.reference.clone(),
             statement: self.statement.clone(),
             archive: self.archive,
         };
-        // The statement came from the same parser and renderer whose limits bound a frame.
         let start = start
-            .encode(&SESSION_LIMITS)
-            .assured("a restore statement is far shorter than a frame");
-        let Some(mut socket) = browser.open(&url) else {
-            return Err(Report::new(RestoreStreamError::Transport));
-        };
+            .encode(&limits)
+            .map_err(|report| report.change_context(RestoreStreamError::InvalidRequest))?;
         if socket.send(Vec::from(codec.encode(start))).await.is_err() {
             return Err(Report::new(RestoreStreamError::Transport));
         }
         let total = self.archive.total_bytes.get();
-        let chunk_bytes = u64::try_from(RESTORE_CHUNK_BYTES)
+        let chunk_bytes = u64::try_from(RESTORE_CHUNK_BYTES.min(limits.frame_bytes() / 2))
             .assured("a chunk of a quarter mebibyte is counted in u64 on every target");
         let mut sent = 0_u64;
         while sent < total {
             // The leader may answer before every byte arrived, as when it refuses the restore or
             // recovers the outcome of one it already ran; nothing more is sent then.
-            if let Some(reply) = wait_for_room(browser, &mut socket, codec).await? {
+            if let Some(reply) = wait_for_room(browser, &mut socket, &codec).await? {
                 return Ok(Sending::Answered(reply));
             }
             let remaining = total
@@ -551,9 +561,8 @@ impl<F: ArchiveFile> RestoreUpload<F> {
             if bytes.is_empty() {
                 return Err(Report::new(RestoreStreamError::ReadArchive));
             }
-            let chunk = RestoreChunk::encode(&bytes, &SESSION_LIMITS).assured(
-                "a non-empty chunk of at most half a frame, as a const assertion holds it, always \
-                 encodes",
+            let chunk = RestoreChunk::encode(&bytes, &limits).assured(
+                "a non-empty chunk of at most half the announced frame limit always encodes",
             );
             if socket.send(Vec::from(codec.encode(chunk))).await.is_err() {
                 return Err(Report::new(RestoreStreamError::Transport));
@@ -565,7 +574,7 @@ impl<F: ArchiveFile> RestoreUpload<F> {
                 .verified("the bytes sent stay within the declared size, which is a u64");
             progress(sent, total);
         }
-        Ok(Sending::Sent(socket))
+        Ok(Sending::Sent(socket, codec))
     }
 
     fn socket_url(&self) -> Option<String> {

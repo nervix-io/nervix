@@ -64,7 +64,10 @@ pub(super) async fn reserve_metadata(
 ) -> Result<Reservation, Report<RestoreRefusal>> {
     let header_artifact = artifact.clone();
     let header_charge = executor
-        .reserve(MemoryClass::Bulk, 64 * 1024)
+        .reserve(
+            MemoryClass::Bulk,
+            executor.limits().snapshot_header_bytes.as_u64(),
+        )
         .await
         .change_context(RestoreRefusal::Unreadable)?;
     let manifest_length = executor

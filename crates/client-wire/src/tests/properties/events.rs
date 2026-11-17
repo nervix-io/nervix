@@ -22,6 +22,43 @@ pub(super) fn check(bytes: &[u8]) -> BTreeSet<wire::ServerBody> {
     let mut values = WireValues::new(bytes);
     let limits = SessionLimits::DEFAULT;
     let mut covered = BTreeSet::new();
+    let announced = SessionOpened {
+        limits: SessionLimits::from(&values.arbitrary.entropy().session_bounds()),
+    };
+    let opening = announced
+        .encode()
+        .assured("every complete announcement fits its fixed opening envelope");
+    let opening = opening
+        .verify(&SessionLimits::OPENING)
+        .assured("the bounded opening verifies once");
+    covered.insert(opening.root().body_type());
+    assert_eq!(opening.request_id(), None);
+    let ServerMessage::Event(ServerEvent::SessionOpened(decoded)) =
+        ServerMessage::decode(&opening).assured("the complete opening decodes")
+    else {
+        panic!("the opening keeps its event identity");
+    };
+    assert_eq!(decoded, announced);
+    #[cfg(feature = "grpc")]
+    {
+        let mut metadata = tonic::metadata::MetadataMap::new();
+        crate::grpc::limits::write(&mut metadata, announced.limits);
+        assert_eq!(
+            crate::grpc::limits::read(&metadata).assured("the complete current metadata decodes"),
+            announced.limits
+        );
+        assert!(crate::grpc::limits::offer_refusal(&metadata, announced.limits).is_none());
+        let mut previous = tonic::metadata::MetadataMap::new();
+        crate::grpc::limits::write(&mut previous, SessionLimits::DEFAULT);
+        match crate::grpc::limits::offer_refusal(&previous, announced.limits) {
+            None => assert_eq!(announced.limits, SessionLimits::DEFAULT),
+            Some(status) => assert_eq!(
+                crate::grpc::limits::changed(&status)
+                    .assured("a refusal of a complete current offer decodes"),
+                Some(announced.limits)
+            ),
+        }
+    }
     macro_rules! event {
         ($variant:ident, $original:expr) => {{
             let original = $original;

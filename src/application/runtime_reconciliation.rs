@@ -15,16 +15,16 @@
     )
 )]
 
-use std::future::Future;
+use std::{future::Future, time::Duration};
 
 use nervix_primitives::sync::{CancellationToken, watch};
 use tracing::warn;
 
-use super::runtime_admission::RUNTIME_STATE_RETRY_INTERVAL;
 use crate::runtime::RuntimeError;
 
 /// The single node-local supervisor of committed runtime installation.
 pub(in crate::application) struct RuntimeReconciliation {
+    retry_interval: Duration,
     schedules: watch::Receiver<u64>,
     domains: watch::Receiver<u64>,
     shutdown: CancellationToken,
@@ -35,8 +35,10 @@ impl RuntimeReconciliation {
         schedules: watch::Receiver<u64>,
         domains: watch::Receiver<u64>,
         shutdown: CancellationToken,
+        retry_interval: Duration,
     ) -> Self {
         Self {
+            retry_interval,
             schedules,
             domains,
             shutdown,
@@ -88,7 +90,7 @@ impl RuntimeReconciliation {
                         return;
                     }
                 }
-                _ = nervix_primitives::time::sleep(RUNTIME_STATE_RETRY_INTERVAL), if failed => {}
+                _ = nervix_primitives::time::sleep(self.retry_interval), if failed => {}
             }
         }
     }
@@ -123,25 +125,34 @@ mod tests {
         let task_shutdown = shutdown.clone();
         let (attempts, mut observed) = mpsc::channel(4);
         let task = nervix_primitives::task::spawn(async move {
-            RuntimeReconciliation::new(schedule_rx, domain_rx, task_shutdown)
-                .run(0_u8, move |count| {
-                    let attempts = attempts.clone();
-                    async move {
-                        let count = count.checked_add(1).assured(
-                            "the four-slot observer and bounded test reads keep the counter below \
-                             u8::MAX",
-                        );
-                        attempts.send(count).await.assured(
-                            "the test retains the observation receiver until the supervisor joins",
-                        );
-                        (count, if count == 1 { refused() } else { Ok(()) })
-                    }
-                })
-                .await;
+            RuntimeReconciliation::new(
+                schedule_rx,
+                domain_rx,
+                task_shutdown,
+                nervix_models::NodeOperationalCapabilities::default()
+                    .control_plane
+                    .runtime_state_retry_interval(),
+            )
+            .run(0_u8, move |count| {
+                let attempts = attempts.clone();
+                async move {
+                    let count = count.checked_add(1).assured(
+                        "the four-slot observer and bounded test reads keep the counter below \
+                         u8::MAX",
+                    );
+                    attempts.send(count).await.assured(
+                        "the test retains the observation receiver until the supervisor joins",
+                    );
+                    (count, if count == 1 { refused() } else { Ok(()) })
+                }
+            })
+            .await;
         });
 
         assert_eq!(observed.recv().await, Some(1));
-        let before_retry = RUNTIME_STATE_RETRY_INTERVAL
+        let before_retry = nervix_models::NodeOperationalCapabilities::default()
+            .control_plane
+            .runtime_state_retry_interval()
             .checked_sub(Duration::from_millis(1))
             .assured("the 500 ms retry cadence exceeds the 1 ms test boundary");
         advance(before_retry).await;
@@ -168,18 +179,25 @@ mod tests {
         let (attempts, mut observed) = mpsc::channel(4);
         let started = Instant::now();
         let task = nervix_primitives::task::spawn(async move {
-            RuntimeReconciliation::new(schedule_rx, domain_rx, task_shutdown)
-                .run((), move |()| {
-                    let inputs = (*current_schedule.borrow(), *current_domain.borrow());
-                    let attempts = attempts.clone();
-                    async move {
-                        attempts.send(inputs).await.assured(
-                            "the test retains the observation receiver until the supervisor joins",
-                        );
-                        ((), refused())
-                    }
-                })
-                .await;
+            RuntimeReconciliation::new(
+                schedule_rx,
+                domain_rx,
+                task_shutdown,
+                nervix_models::NodeOperationalCapabilities::default()
+                    .control_plane
+                    .runtime_state_retry_interval(),
+            )
+            .run((), move |()| {
+                let inputs = (*current_schedule.borrow(), *current_domain.borrow());
+                let attempts = attempts.clone();
+                async move {
+                    attempts.send(inputs).await.assured(
+                        "the test retains the observation receiver until the supervisor joins",
+                    );
+                    ((), refused())
+                }
+            })
+            .await;
         });
 
         assert_eq!(observed.recv().await, Some((0, 0)));
@@ -210,24 +228,31 @@ mod tests {
         let started = Instant::now();
         let task = nervix_primitives::task::spawn(async move {
             let mut released = Some(released);
-            RuntimeReconciliation::new(schedule_rx, domain_rx, task_shutdown)
-                .run((), move |()| {
-                    let inputs = (*current_schedule.borrow(), *current_domain.borrow());
-                    let attempts = attempts.clone();
-                    let released = released.take();
-                    async move {
-                        attempts.send(inputs).await.assured(
-                            "the test retains the observation receiver until the supervisor joins",
-                        );
-                        if let Some(released) = released {
-                            released
-                                .await
-                                .assured("the test sends the release before dropping its sender");
-                        }
-                        ((), Ok(()))
+            RuntimeReconciliation::new(
+                schedule_rx,
+                domain_rx,
+                task_shutdown,
+                nervix_models::NodeOperationalCapabilities::default()
+                    .control_plane
+                    .runtime_state_retry_interval(),
+            )
+            .run((), move |()| {
+                let inputs = (*current_schedule.borrow(), *current_domain.borrow());
+                let attempts = attempts.clone();
+                let released = released.take();
+                async move {
+                    attempts.send(inputs).await.assured(
+                        "the test retains the observation receiver until the supervisor joins",
+                    );
+                    if let Some(released) = released {
+                        released
+                            .await
+                            .assured("the test sends the release before dropping its sender");
                     }
-                })
-                .await;
+                    ((), Ok(()))
+                }
+            })
+            .await;
         });
 
         assert_eq!(observed.recv().await, Some((0, 0)));
@@ -258,17 +283,24 @@ mod tests {
         let (attempts, mut observed) = mpsc::channel(4);
         let started = Instant::now();
         let task = nervix_primitives::task::spawn(async move {
-            RuntimeReconciliation::new(schedule_rx, domain_rx, task_shutdown)
-                .run((), move |()| {
-                    let attempts = attempts.clone();
-                    async move {
-                        attempts.send(()).await.assured(
-                            "the test retains the observation receiver until the supervisor joins",
-                        );
-                        ((), refused())
-                    }
-                })
-                .await;
+            RuntimeReconciliation::new(
+                schedule_rx,
+                domain_rx,
+                task_shutdown,
+                nervix_models::NodeOperationalCapabilities::default()
+                    .control_plane
+                    .runtime_state_retry_interval(),
+            )
+            .run((), move |()| {
+                let attempts = attempts.clone();
+                async move {
+                    attempts.send(()).await.assured(
+                        "the test retains the observation receiver until the supervisor joins",
+                    );
+                    ((), refused())
+                }
+            })
+            .await;
         });
 
         assert_eq!(observed.recv().await, Some(()));
@@ -287,9 +319,16 @@ mod tests {
             let (domains, domain_rx) = watch::channel(0);
             let shutdown = CancellationToken::new();
             let task = nervix_primitives::task::spawn(async move {
-                RuntimeReconciliation::new(schedule_rx, domain_rx, shutdown)
-                    .run((), |()| async { ((), Ok(())) })
-                    .await;
+                RuntimeReconciliation::new(
+                    schedule_rx,
+                    domain_rx,
+                    shutdown,
+                    nervix_models::NodeOperationalCapabilities::default()
+                        .control_plane
+                        .runtime_state_retry_interval(),
+                )
+                .run((), |()| async { ((), Ok(())) })
+                .await;
             });
             if close_schedule {
                 drop(schedules);
