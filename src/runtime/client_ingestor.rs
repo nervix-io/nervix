@@ -1432,7 +1432,7 @@ impl Endpoint {
                 domain = self.domain.as_str(),
                 ingestor = self.ingestor.as_str(),
                 attachment = %attachment,
-                submission = %submission,
+                ?submission,
                 ?failure,
                 detail = acknowledgement.detail.as_deref(),
                 "an admitted client batch failed its downstream acknowledgement"
