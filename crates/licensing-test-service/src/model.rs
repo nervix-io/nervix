@@ -39,6 +39,7 @@ mod operations;
 #[cfg(test)]
 mod tests;
 mod timing;
+mod transitions;
 mod trust;
 use operations::Route;
 
@@ -102,6 +103,7 @@ struct HeldActivation {
     prior_decision: Option<Decision>,
     retired: Option<operations::RetiredBinding>,
     capacity_until: Option<DateTime<Utc>>,
+    transition_authority: BTreeMap<u64, (DateTime<Utc>, ConditionDuration)>,
 }
 
 impl HeldActivation {
@@ -477,10 +479,13 @@ impl Model {
             } if route == Route::Create => self
                 .create(common, license_key, kind, cluster_key)
                 .map_err(PeerRefusal::report)?,
-            Request::Refresh { activation_id, .. } if route == Route::Refresh(*activation_id) => {
-                self.refresh(common, activation_id, fault)
-                    .map_err(PeerRefusal::report)?
-            }
+            Request::Refresh {
+                activation_id,
+                transitions,
+                ..
+            } if route == Route::Refresh(*activation_id) => self
+                .refresh(common, activation_id, transitions, fault)
+                .map_err(PeerRefusal::report)?,
             Request::RotateKey {
                 activation_id,
                 state,
@@ -579,6 +584,16 @@ impl Model {
                 prior_decision: None,
                 retired: None,
                 capacity_until: None,
+                transition_authority: BTreeMap::from([(
+                    self.conditions_revision,
+                    (
+                        self.now,
+                        self.plan
+                            .operating
+                            .duration(QUOTA_GRACE)
+                            .assured("validated fixture grace"),
+                    ),
+                )]),
             },
         );
         Ok(activation_id)
@@ -588,6 +603,7 @@ impl Model {
         &mut self,
         common: &RequestCommon,
         activation_id: &Uuid,
+        reported: &[Transition],
         fault: Option<&Fault>,
     ) -> Result<Uuid, ProblemKind> {
         let held = self
@@ -619,7 +635,7 @@ impl Model {
                     },
                     ImpactTarget::Usage(&decision.conditions.usage),
                     usage,
-                    TransitionPolicy::from_operating(&held.decision.conditions.operating)
+                    TransitionPolicy::from_operating(&decision.conditions.operating)
                         .assured("validated fixture grace"),
                     ImpactContext {
                         from_conditions_revision: held.decision.conditions.conditions_revision,
@@ -640,11 +656,22 @@ impl Model {
             decision.conditions = held.decision.conditions.clone();
             decision.transitions = held.decision.transitions.clone();
         }
+        transitions::acknowledge(held, &mut decision, reported, self.now)?;
         if !matches!(fault, Some(Fault::Tamper(Tamper::PriorDecision))) {
             let held = self
                 .activations
                 .get_mut(activation_id)
                 .verified("activation was read above");
+            held.transition_authority
+                .entry(decision.conditions.conditions_revision)
+                .or_insert((
+                    decision.issued_at,
+                    decision
+                        .conditions
+                        .operating
+                        .duration(QUOTA_GRACE)
+                        .assured("validated fixture grace"),
+                ));
             held.prior_decision = Some(std::mem::replace(&mut held.decision, decision));
         }
         Ok(*activation_id)

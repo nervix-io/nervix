@@ -412,8 +412,8 @@ pub(super) async fn execute_generator_program_on_context(
     input: &VmTypedBatch,
     execution_now: Timestamp,
 ) -> error_stack::Result<GeneratorProgramOutcome, GeneratorError> {
-    let result = execute_program_with_selection_in_context(
-        executor,
+    let result = execute_accepted_program_with_selection_in_context(
+        executor.accepted_work(),
         &program.compiled,
         input,
         &VmExecutionContext {
@@ -1240,7 +1240,7 @@ mod tests {
     }
 
     #[nervix_primitives::test]
-    async fn generator_set_program_projects_columnar_state_and_branch_context() {
+    async fn accepted_work_generator_keeps_its_projected_state_while_waiting() {
         let source_schema = test_schema(&[
             ("tenant", ParseAsType::String),
             ("amount", ParseAsType::I64),
@@ -1311,7 +1311,7 @@ mod tests {
                 }),
             },
             None,
-            nervix_vm::VmSettings::default(),
+            offloaded_vm_settings(),
         )
         .expect("generator set program must compile");
 
@@ -1368,11 +1368,16 @@ mod tests {
             &input_samples,
         ));
 
-        let output = execute_generator_program_on_context(
-            &Executor::default(),
-            &program,
-            &input,
-            Timestamp::from_unix_nanos(1),
+        let executor = single_worker_executor();
+        let output = accepted_work_after_cpu_room(
+            &executor,
+            nervix_execution::CpuClass::Data,
+            execute_generator_program_on_context(
+                &executor,
+                &program,
+                &input,
+                Timestamp::from_unix_nanos(1),
+            ),
         )
         .await
         .expect("generator program must execute");

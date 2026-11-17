@@ -132,19 +132,20 @@ pub(super) fn spawn(arguments: MembershipReconciliation) -> JoinHandle<()> {
                     .await;
             }
             if let Err(error) = administrator_for_membership_reconcile
-                .reconcile_nodes(cluster_for_membership_reconcile.gossip_state(), |usage| {
-                    membership_licensing
-                        .admit_snapshot(
-                            proposer_for_parameter_seeding
-                                .observer()
-                                .licensing_snapshot(),
-                            crate::licensing::QuotaName::ClusterNodes,
-                            usage,
-                            1,
-                            false,
-                        )
-                        .map(|_| ())
-                })
+                .reconcile_nodes(
+                    cluster_for_membership_reconcile.gossip_state(),
+                    |node, usage| {
+                        membership_licensing
+                            .admit_node_snapshot(
+                                proposer_for_parameter_seeding
+                                    .observer()
+                                    .licensing_snapshot(),
+                                node,
+                                usage,
+                            )
+                            .map(|_| ())
+                    },
+                )
                 .await
             {
                 warn!(target: "nervix_server::application", error = %format_args!("{error:#}"), "raft membership reconciliation failed");
