@@ -652,6 +652,7 @@ package = "nervix-scenarios"
 selections = ["deloxide", "deloxide-order"]
 tags = [
   "@inherited_partition_lifecycle",
+  "@inferencer_state_inspection",
   "@joint_membership_recovery",
   "@client_restore_codec_native",
   "@client_restore_uncertainty_native",
@@ -3884,6 +3885,8 @@ workloads = [
 [[owner]]
 path = "crates/checkpoint-replication/src/replication.rs"
 workloads = [
+  "scenario.inferencer-inspection",
+  "stress.inferencer-inspection",
   "scenario.inferencer-description",
   "stress.inferencer-description",
   "scenario.materialized-bulk-generations",
@@ -5050,6 +5053,8 @@ workloads = [
 [[owner]]
 path = "src/runtime/state_store.rs"
 workloads = [
+  "scenario.inferencer-inspection",
+  "stress.inferencer-inspection",
   "scenario.inferencer-backup",
   "stress.inferencer-backup",
   "stress.inferencer-backup-restore",
@@ -7046,6 +7051,26 @@ invariant = "The committed external layout and its exact-unit readers retain key
 invocation = "stress-restore-scenarios"
 scenario = "An inherited topology archive restores epochs, exact key origins and next offsets"
 selections = ["deloxide-stress-restore"]
+
+[[workload]]
+coverage = "Inference inspection captures replica confirmations through the existing checkpoint replication progress lock while retaining immutable native publications. Tensor publication, Arrow copying, async admission and transport are outside Deloxide; this workload claims only the progress lock acquisition and the state-store installation locks."
+examples = 6
+feature = "tests/features/runtime/inferencer_state_inspection.feature"
+id = "scenario.inferencer-inspection"
+invariant = "Stateful inference publishes typed tensor inspection pages with complete branch headers, exact values or whole-value redaction, bounded paging and stale-cut refusal."
+invocation = "scenarios"
+scenario = "Stateful inference publishes typed tensor inspection pages"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: inference inspection captures replica confirmations through the existing checkpoint replication progress lock. Native publication, Arrow copying, async admission and transport are outside Deloxide."
+examples = 6
+feature = "tests/features/runtime/inferencer_state_inspection.feature"
+id = "stress.inferencer-inspection"
+invariant = "Stateful inference publishes typed tensor inspection pages with complete branch headers, exact values or whole-value redaction, bounded paging and stale-cut refusal."
+invocation = "stress-scenarios"
+scenario = "Stateful inference publishes typed tensor inspection pages"
+selections = ["deloxide-stress"]
 
 [[owner]]
 gap = "The diagnostic-node workload reaches successful HTTP input and its retained accounting guard. Slow bodies, capacity refusal and cancellation racing allocation observation are qualified by the ordinary listener scenarios and the production-owner Shuttle check; those interleavings are outside detector evidence. The selected accounting mutex holds no I/O, await, copy or graph dispatch."

@@ -12733,7 +12733,7 @@ mod tests {
             }
             ChoiceControl::EndpointVhost => nervix_client_wire::ChoiceTarget::Vhost,
             ChoiceControl::HashResource => nervix_client_wire::ChoiceTarget::Resource,
-            ChoiceControl::HashCodec => nervix_client_wire::ChoiceTarget::Codec,
+            ChoiceControl::HashCodec => nervix_client_wire::ChoiceTarget::IngestCodec,
             ChoiceControl::HashKey => nervix_client_wire::ChoiceTarget::CodecField,
             ChoiceControl::IngestSourceRef => {
                 nervix_client_wire::ChoiceTarget::IngestHttpEndpointSource

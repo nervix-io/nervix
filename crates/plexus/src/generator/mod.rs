@@ -17,11 +17,11 @@ use nervix_models::{AlterGenerator, AlterGeneratorOperation, CreateGenerator, Cr
 use crate::{
     lexer::{Identifier, Token},
     parser_support::{
-        LexedInput, ParseError, ParseFromSourceError, alter_generator_route_body,
+        LexedInput, ParseError, ParseFromSourceError, RelayRole, alter_generator_route_body,
         alter_op_separator, branch_selection, completion_context, completion_tokens,
         domain_clock_period_lit, flushed_explicit_processor_outputs, generator_name, generator_ref,
-        if_not_exists_clause, into_parse_error, kw, kw_phrase3, lex_input, relay_ref, suggest_from,
-        suggestions_from_errors, tok,
+        if_not_exists_clause, into_parse_error, kw, kw_phrase3, lex_input, relay_in_role,
+        relay_ref, suggest_from, suggestions_from_errors, tok,
     },
 };
 
@@ -37,7 +37,7 @@ pub fn create_generator_parser<'src>()
             Identifier::Materialized,
             Identifier::State,
         ))
-        .then(relay_ref())
+        .then(relay_in_role(RelayRole::State))
         .then_ignore(kw(Identifier::Each))
         .then(domain_clock_period_lit())
         .then(branch_selection())
@@ -332,6 +332,15 @@ mod tests {
         assert!(suggestions.contains(&"USING MATERIALIZED STATE".to_string()));
         assert!(!suggestions.contains(&"JSON".to_string()));
         assert!(!suggestions.contains(&"AVRO".to_string()));
+    }
+
+    #[test]
+    fn suggests_the_materialized_relay_in_its_state_role() {
+        let input = "CREATE GENERATOR synth USING MATERIALIZED STATE ";
+        let suggestions = suggest_create_generator(input, input.len());
+        assert!(suggestions.contains(&"ref:state_relay".to_string()));
+        assert!(!suggestions.contains(&"ref:relay".to_string()));
+        assert!(!suggestions.contains(&"EACH".to_string()));
     }
 
     #[test]

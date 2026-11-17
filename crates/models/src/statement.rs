@@ -38,13 +38,13 @@ use crate::{
     CreateReingestor, CreateReorderer, CreateSchema, CreateUdf, CreateWasmProcessor,
     CreateWindowProcessor, DeduplicatorName, DescribeInferencer, DescribeWasmProcessor,
     DomainClockPeriod, DomainClockSkew, DomainClockState, DomainName, DomainTimeRate, EmitterName,
-    EndpointName, FieldName, GeneratorName, IngestQuiesceMode, IngestorName, JsonType,
-    JunctionName, LookupName, ModelName, NodeRef, PlacementName, ProcessorOutput, ProcessorOutputs,
-    RebindResource, RefreshLicense, ReingestorName, RelayName, ReleaseLicense, ReordererName,
-    RequestedResourceVersion, ResetWasmState, ResolvedBranchPartitions, ResourceName, Restore,
-    RotateLicenseClusterKey, SchemaName, ShowWasmProcessorState, SignalingProtocolName,
-    SubscriptionName, Timestamp, TransactionInspectionRequest, UdfName, Unit, UserName, VhostName,
-    WindowProcessorName, WireSchemaName,
+    EndpointName, FieldName, GeneratorName, InferencerName, IngestQuiesceMode, IngestorName,
+    JsonType, JunctionName, LookupName, ModelName, NodeRef, PlacementName, ProcessorOutput,
+    ProcessorOutputs, RebindResource, RefreshLicense, ReingestorName, RelayName, ReleaseLicense,
+    ReordererName, RequestedResourceVersion, ResetWasmState, ResolvedBranchPartitions,
+    ResourceName, Restore, RotateLicenseClusterKey, SchemaName, ShowWasmProcessorState,
+    SignalingProtocolName, SubscriptionName, Timestamp, TransactionInspectionRequest, UdfName,
+    Unit, UserName, VhostName, WindowProcessorName, WireSchemaName,
 };
 
 #[derive(
@@ -483,6 +483,7 @@ pub struct ShowProcessorState {
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
 pub enum StateInspectedProcessor {
+    Inferencer(InferencerName),
     Reorderer(ReordererName),
     Correlator(CorrelatorName),
     Deduplicator(DeduplicatorName),

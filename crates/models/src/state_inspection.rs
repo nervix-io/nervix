@@ -127,7 +127,7 @@ pub enum StateInspectionRejection {
     ReplyTooLarge,
 }
 
-/// Typed sections of the current stateful processor kinds, including window branch metadata.
+/// Typed sections of the current stateful processor kinds, including metadata and inference tensors.
 #[derive(
     Debug,
     Clone,
@@ -151,11 +151,103 @@ pub enum ProcessorStateSection {
     Rows,
     Header,
     Accumulators,
+    /// One declared inferencer STATE entry, in declaration order from zero.
+    Tensor(u32),
 }
 
 impl ProcessorStateSection {
-    /// Headers and accumulator facts describe a window's retained rows without consuming the
-    /// row limit or advancing a continuation within those rows.
+    /// Reorderers, correlators, deduplicators and windows have fixed layouts; the window's
+    /// rows, header and accumulator facts give their maximum.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::constant(
+            fixed,
+            reason = "the fixed processor layouts contain at most the window's three sections"
+        )
+    )]
+    pub const FIXED_SECTION_COUNT: usize = 3;
+    /// Stable section names do not collide with arbitrary model port names.
+    pub fn name(self) -> String {
+        use meticulous::OptionExt as _;
+        match self {
+            Self::Tensor(index) => {
+                let ordinal = u64::from(index)
+                    .checked_add(1)
+                    .assured("a u32 tensor index plus one fits u64");
+                format!("tensor_{ordinal}")
+            }
+            _ => self.as_ref().to_string(),
+        }
+    }
+
+    /// Fixed processor layouts have at most three sections. Tensor layouts have their header
+    /// first and one section per declared entry, so their index is addressed directly even for
+    /// a large model. The identity check also rejects malformed peer section identifiers.
+    pub fn index_in<T>(self, sections: &[T], identity: impl Fn(&T) -> Self) -> Option<usize> {
+        let index = match self {
+            Self::Tensor(index) => usize::try_from(index).ok()?.checked_add(1)?,
+            Self::Header
+                if sections
+                    .first()
+                    .is_some_and(|value| identity(value) == self) =>
+            {
+                0
+            }
+            _ => sections
+                .iter()
+                .take(Self::FIXED_SECTION_COUNT)
+                .position(|value| identity(value) == self)?,
+        };
+        let found = sections.get(index)?;
+        if identity(found) == self {
+            Some(index)
+        } else {
+            None
+        }
+    }
+
+    /// The schemas of native inference observations; tensor values inherit the sensitivity of
+    /// every input and branch-key field, while shape, port names and lifecycle facts are public.
+    pub fn inferencer_fields(self, sensitive: bool) -> Vec<crate::SchemaField> {
+        use crate::ParseAsType;
+        match self {
+            Self::Header => vec![
+                metadata_field("branch_fingerprint", ParseAsType::String, true),
+                metadata_field("incarnation", ParseAsType::U64, false),
+                metadata_field("publication_revision", ParseAsType::U64, false),
+                metadata_field("persisted_revision", ParseAsType::U64, false),
+                metadata_field("state_bytes", ParseAsType::U64, false),
+                metadata_field("confirmed_replicas", ParseAsType::U64, false),
+                metadata_field("replica_count", ParseAsType::U64, false),
+                metadata_field("stage", ParseAsType::String, false),
+            ],
+            Self::Tensor(_) => {
+                let mut values = metadata_field(
+                    "values",
+                    ParseAsType::Vec {
+                        element: Box::new(ParseAsType::F32),
+                    },
+                    false,
+                );
+                values.sensitive = sensitive;
+                vec![
+                    metadata_field("input", ParseAsType::String, false),
+                    metadata_field("output", ParseAsType::String, false),
+                    metadata_field(
+                        "shape",
+                        ParseAsType::Vec {
+                            element: Box::new(ParseAsType::U64),
+                        },
+                        false,
+                    ),
+                    values,
+                ]
+            }
+            _ => Vec::new(),
+        }
+    }
+    /// Headers and accumulator facts describe a branch's retained state without consuming the
+    /// row limit or advancing a continuation within its data rows.
     pub const fn is_metadata(self) -> bool {
         matches!(self, Self::Header | Self::Accumulators)
     }
@@ -178,7 +270,12 @@ impl ProcessorStateSection {
                 metadata_field("kind", ParseAsType::String, false),
                 metadata_field("count", ParseAsType::U64, false),
             ],
-            Self::Pending | Self::Left | Self::Right | Self::Keys | Self::Rows => Vec::new(),
+            Self::Pending
+            | Self::Left
+            | Self::Right
+            | Self::Keys
+            | Self::Rows
+            | Self::Tensor(_) => Vec::new(),
         }
     }
 }
