@@ -1,9 +1,9 @@
-//! Branch-runtime unit checks.
+//! Concrete branch lifecycle, retained state and required materialized-input regressions.
 //!
-//! Layer: test harness.
-//! Owns: branch routing, parked acknowledgement, drain and force-flush owner regressions.
-//! Depends on: the production branch owner and typed in-memory runtime and ACK fixtures.
-//! Must not know: external transports, session adapters or live services.
+//! Layer: test harness, outside the product layer order.
+//! - **Owns.** Branch dispatch, state restoration, eviction and parked-input regression cases.
+//! - **Depends on.** The production branch runtime and its runtime test fixtures.
+//! - **Must not know.** Connector protocols, Plexus parsing or application transactions.
 
 use nervix_interconnect::EntityGatePurpose;
 use nervix_models::{IngestorName, ModelKind, ModelName, NodeRef, ParseAsType, RelayName};

@@ -83,7 +83,8 @@ fn a_repl_command_answered_with_another_execution_is_repeated_under_its_own_refe
     for foreign in foreign_outcomes() {
         Owner::new().with(|| {
             let signals = subscription_signals(SubscriptionTabState::Pending);
-            let mut requests = SessionRequests::new();
+            let mut requests =
+                SessionRequests::new(Some(nervix_client_wire::SessionLimits::DEFAULT));
             requests.confirm_leader();
             let first = requests.issue(repl_command("CREATE SCHEMA first ( value I64 );"));
             let second = requests.issue(repl_command("CREATE SCHEMA second ( value I64 );"));
@@ -174,7 +175,8 @@ fn a_visual_create_answered_with_another_execution_keeps_waiting_for_its_own_out
     for foreign in foreign_outcomes() {
         Owner::new().with(|| {
             let signals = subscription_signals(SubscriptionTabState::Pending);
-            let mut requests = SessionRequests::new();
+            let mut requests =
+                SessionRequests::new(Some(nervix_client_wire::SessionLimits::DEFAULT));
             requests.confirm_leader();
             signals
                 .create

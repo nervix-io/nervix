@@ -32,14 +32,17 @@ use super::{
         shutdown::{ShutdownCoordinator, ShutdownDeadline, ShutdownRequestOutcome},
         test_fixtures::{TestService, build_test_service, node_named},
     },
-    SHUTDOWN_CORDON_RELEASE_GRACE, SessionServiceImpl, ShutdownDrainAnswer, ShutdownDrainBudget,
-    ShutdownDrainCordon, ShutdownOwnershipMove, ShutdownPhaseOutcome, ShutdownReleaseQuorum,
+    SessionServiceImpl, ShutdownDrainAnswer, ShutdownDrainBudget, ShutdownDrainCordon,
+    ShutdownOwnershipMove, ShutdownPhaseOutcome, ShutdownReleaseQuorum,
 };
 use crate::captured_logs::CapturedLogs;
 
 /// A shutdown deadline `timeout` from now, from the stop request a fresh coordinator accepts.
 fn shutdown_deadline_after(timeout: Duration) -> ShutdownDeadline {
-    let coordinator = ShutdownCoordinator::new(timeout);
+    let coordinator = ShutdownCoordinator::new(
+        timeout,
+        crate::application::shutdown::ShutdownSettings::default().task_grace_period(),
+    );
     let ShutdownRequestOutcome::Accepted(request) = coordinator.request_stop() else {
         panic!("a fresh coordinator accepts its first stop request");
     };
@@ -350,6 +353,7 @@ async fn the_cordon_release_waits_for_what_remains_of_the_drain_timeout() {
     let budget = ShutdownDrainBudget::start(
         drain_timeout,
         shutdown_deadline_after(Duration::from_secs(50)),
+        release_grace(),
     );
     let bound = budget.cordon_release_bound(ShutdownReleaseQuorum::Staying);
     let elapsed = started.elapsed();
@@ -364,12 +368,13 @@ async fn the_cordon_release_keeps_its_grace_when_the_move_used_the_drain_timeout
     let budget = ShutdownDrainBudget::start(
         Duration::ZERO,
         shutdown_deadline_after(Duration::from_secs(50)),
+        release_grace(),
     );
 
     assert_eq!(budget.remaining(), Duration::ZERO);
     assert_eq!(
         budget.cordon_release_bound(ShutdownReleaseQuorum::Staying),
-        SHUTDOWN_CORDON_RELEASE_GRACE
+        release_grace()
     );
 }
 
@@ -378,11 +383,12 @@ async fn a_cordon_release_only_stopping_voters_could_commit_keeps_only_its_grace
     let budget = ShutdownDrainBudget::start(
         Duration::from_secs(30),
         shutdown_deadline_after(Duration::from_secs(50)),
+        release_grace(),
     );
 
     assert_eq!(
         budget.cordon_release_bound(ShutdownReleaseQuorum::Leaving),
-        SHUTDOWN_CORDON_RELEASE_GRACE
+        release_grace()
     );
 }
 
@@ -392,6 +398,7 @@ async fn the_cordon_release_never_waits_past_the_shutdown_deadline() {
     let budget = ShutdownDrainBudget::start(
         Duration::from_secs(30),
         shutdown_deadline_after(shutdown_timeout),
+        release_grace(),
     );
 
     assert!(budget.cordon_release_bound(ShutdownReleaseQuorum::Staying) <= shutdown_timeout);
@@ -530,6 +537,7 @@ async fn a_stopping_node_releases_only_the_cordon_its_own_drain_set() {
     let budget = ShutdownDrainBudget::start(
         Duration::from_secs(30),
         shutdown_deadline_after(Duration::from_secs(50)),
+        release_grace(),
     );
     service
         .inner
@@ -596,6 +604,7 @@ async fn a_cordon_release_that_outlasts_its_bound_is_abandoned_and_leaves_the_co
     let budget = ShutdownDrainBudget::start(
         Duration::ZERO,
         shutdown_deadline_after(Duration::from_millis(200)),
+        release_grace(),
     );
 
     let outcome = service
@@ -616,4 +625,8 @@ async fn a_cordon_release_that_outlasts_its_bound_is_abandoned_and_leaves_the_co
     drop(service);
     drop(registry);
     std::fs::remove_dir_all(path).discarded("the throwaway test database may already be gone");
+}
+
+fn release_grace() -> Duration {
+    nervix_consensus::RaftTimings::default().heartbeat_interval() * 4
 }

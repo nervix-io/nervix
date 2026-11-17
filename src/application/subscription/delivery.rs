@@ -441,7 +441,7 @@ mod tests {
     use super::*;
     use crate::{
         application::{
-            session::outbound::{self, SESSION_SUBSCRIPTION_CAPACITY, SessionFrames},
+            session::outbound::{self, SessionFrames},
             test_fixtures::named,
         },
         subscription_row::SubscriptionRowOpening,
@@ -497,7 +497,10 @@ mod tests {
     fn sender(
         behavior: SubscriptionDeliveryBehavior,
     ) -> (SubscriptionSender, SessionFrames, outbound::SessionOutbound) {
-        let (outbound, frames) = outbound::channel(CancellationToken::new());
+        let (outbound, frames) = outbound::channel(
+            CancellationToken::new(),
+            &nervix_models::SessionCapabilities::default(),
+        );
         let sender = SubscriptionSender {
             handle: handle(),
             lane: outbound.subscription_lane(),
@@ -542,7 +545,7 @@ mod tests {
     async fn a_dropping_subscription_reports_what_it_dropped_before_its_next_rows() {
         let encoder = encoder();
         let (mut sender, mut frames, _outbound) = sender(SubscriptionDeliveryBehavior::Dropping);
-        for _ in 0..SESSION_SUBSCRIPTION_CAPACITY {
+        for _ in 0..nervix_models::SessionCapabilities::default().queue_capacity() {
             sender
                 .send_rows(row_frame(&encoder, &[1]))
                 .await
@@ -567,7 +570,7 @@ mod tests {
             .send_rows(row_frame(&encoder, &[5]))
             .await
             .assured("the lane has room again");
-        for _ in 2..SESSION_SUBSCRIPTION_CAPACITY {
+        for _ in 2..nervix_models::SessionCapabilities::default().queue_capacity() {
             assert_eq!(delivered_rows(next_event(&mut frames).await), 1);
         }
         let ServerEvent::SubscriptionDeliveryLost(lost) = next_event(&mut frames).await else {

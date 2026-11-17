@@ -233,6 +233,16 @@ pub struct KafkaTopicIngestor {
 const KAFKA_INGESTOR_BOUNDS: DeclaredBounds = DeclaredBounds {
     buffers: &[
         DeclaredBuffer {
+            holds: "an inherited consumer group's unadmitted native partition position",
+            bound: BufferBound::Bounded {
+                capacity: BufferCapacity::Items {
+                    count: 1,
+                    unit: "position per inherited group reader",
+                },
+                overflow: BufferOverflow::Backpressure,
+            },
+        },
+        DeclaredBuffer {
             holds: "a record conversion report after a gathered prefix",
             bound: BufferBound::Bounded {
                 capacity: BufferCapacity::Items {
@@ -276,7 +286,7 @@ const KAFKA_INGESTOR_BOUNDS: DeclaredBounds = DeclaredBounds {
             bound: WaitBound::Driver("socket.timeout.ms, 60 s"),
         },
         DeclaredWait {
-            wait: "a consumer-group commit under ACK",
+            wait: "a consumer-group offset commit",
             bound: WaitBound::Fixed(Duration::from_secs(30)),
         },
         DeclaredWait {
@@ -285,7 +295,7 @@ const KAFKA_INGESTOR_BOUNDS: DeclaredBounds = DeclaredBounds {
             bound: WaitBound::Driver("socket.timeout.ms, 60 s per control job"),
         },
         DeclaredWait {
-            wait: "subscribe, assign and unsubscribe",
+            wait: "subscribe, assign, pause and unsubscribe",
             bound: WaitBound::Unbounded,
         },
         DeclaredWait {
@@ -297,10 +307,16 @@ const KAFKA_INGESTOR_BOUNDS: DeclaredBounds = DeclaredBounds {
         "Kafka clients accept one name per property and refuse Nervix-owned keys. The ingestor \
          supplies group.id, auto.offset.reset and enable.auto.commit, and disables \
          enable.partition.eof and allow.auto.create.topics.",
+        "An inherited consumer-group reader disables automatic offset storage and stores only \
+         positions in its committed external partition set. It pauses and rewinds an unadmitted \
+         partition through connector control execution, retaining its position until that work \
+         finishes. The broker confirms that exact unread starting offset before the reader can \
+         retire, so even a subsequent START AT LATEST join cannot skip it; replacing the reader \
+         after a topology commit admits the partition.",
         "Connector control execution has two workers per node by default. A commit still \
          unanswered after its caller's 30 s deadline retains its worker and the ingestor's one \
-         in-flight commit until the native call ends. Native subscribe, assign and unsubscribe \
-         have no cancellable deadline; their caller waits socket.timeout.ms at most.",
+         in-flight commit until the native call ends. Native subscribe, assign, pause and \
+         unsubscribe have no cancellable deadline; their caller waits socket.timeout.ms at most.",
         "A consumer whose last handle is gone is destroyed by one connector control job, which \
          waits for a place rather than being refused; no Nervix key changes librdkafka's 5 s \
          LeaveGroup timeout.",
@@ -385,9 +401,13 @@ const KAFKA_EMITTER_BOUNDS: DeclaredBounds = DeclaredBounds {
 };
 
 /// A Kafka record's position, key, timestamp and null-value state.
+/// The external partition coordinate, filled from the connector's native position.
+const PARTITION_METADATA: IngestorMetadataField =
+    IngestorMetadataField::new("partition", IngestorMetadataType::I32);
+
 const KAFKA_TOPIC_METADATA: IngestorMetadataDeclaration = IngestorMetadataDeclaration::new(&[
     IngestorMetadataField::new("topic", IngestorMetadataType::String),
-    IngestorMetadataField::new("partition", IngestorMetadataType::I32),
+    PARTITION_METADATA,
     IngestorMetadataField::new("offset", IngestorMetadataType::I64),
     IngestorMetadataField::new("key", IngestorMetadataType::Bytes),
     IngestorMetadataField::new("timestamp", IngestorMetadataType::Datetime),
@@ -397,6 +417,7 @@ const KAFKA_TOPIC_METADATA: IngestorMetadataDeclaration = IngestorMetadataDeclar
 
 impl IngestorDeclaration for KafkaTopicIngestor {
     const CAPABILITIES: IngestorEntityCapabilities = IngestorEntityCapabilities {
+        external_partitions: crate::IngestorExternalPartitions::Enumerated(PARTITION_METADATA),
         events: crate::DeclaredEvents::NONE,
         instancing: crate::IngestorInstancingCapability::PerPartition,
         // A Kafka record carries its headers as a list, in the order written, repeats included.

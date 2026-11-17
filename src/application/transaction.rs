@@ -82,10 +82,6 @@ pub use limits::{
     TransactionMaxSourceBytes, TransactionMaxStatements, TransactionTombstoneRetention,
 };
 
-/// Recovery is independent across transactions, but its background work remains bounded per node.
-/// One held executor still leaves capacity for unrelated domains and for later candidates.
-const TRANSACTION_RECOVERY_CONCURRENCY: usize = 8;
-
 pub(in crate::application) struct TransactionRecovery {
     permits: StdArc<Semaphore>,
     cursor: ParkingMutex<Option<String>>,
@@ -93,14 +89,23 @@ pub(in crate::application) struct TransactionRecovery {
 
 impl Default for TransactionRecovery {
     fn default() -> Self {
-        Self {
-            permits: StdArc::new(Semaphore::new(TRANSACTION_RECOVERY_CONCURRENCY)),
-            cursor: ParkingMutex::new(None),
-        }
+        Self::new(
+            nervix_models::ControlPlaneCapabilities::default().transaction_recovery_concurrency(),
+        )
     }
 }
 
 impl TransactionRecovery {
+    pub(in crate::application) fn new(concurrency: std::num::NonZeroU64) -> Self {
+        Self {
+            permits: StdArc::new(Semaphore::new(
+                usize::try_from(concurrency.get())
+                    .assured("the capability validates native semaphore capacity"),
+            )),
+            cursor: ParkingMutex::new(None),
+        }
+    }
+
     /// Returns COMMITTING identities after the last considered identity, wrapping once. Repeated
     /// finite reconciliation passes therefore cannot favor the start of the ordered map.
     fn candidates(&self, transactions: &BTreeMap<String, ReplicatedTransaction>) -> Vec<String> {
@@ -1160,7 +1165,7 @@ impl SessionServiceImpl {
                     &planning_domain,
                     graph,
                     current,
-                );
+                )?;
                 let ownership_moves = planned_ownership_moves(current, prepared.schedule.as_ref())
                     .into_iter()
                     .map(|moved| OwnershipMoveImpact {
@@ -1170,10 +1175,10 @@ impl SessionServiceImpl {
                         destination: moved.destination,
                         attribution: attribution.clone(),
                     });
-                TransactionScheduleDecision {
+                Ok(TransactionScheduleDecision {
                     schedule: prepared.schedule,
                     ownership_moves: CanonicalImpactSet::new(ownership_moves),
-                }
+                })
             },
         )?;
         for step in plan.steps() {
@@ -1966,6 +1971,7 @@ impl SessionServiceImpl {
                         actual: &actual,
                         outcome: &outcome,
                     }),
+                    None,
                     None,
                 ))
                 .await;

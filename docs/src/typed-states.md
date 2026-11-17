@@ -357,10 +357,10 @@ transport offset conversion. The SDK's indexed authoring and typed-inspection vi
 empty JSON value arrays. These driver representations never enter semantic Models or plans.
 
 A NATS ingestor or emitter Model distinguishes `NATS SUBJECT` and `NATS STREAM` entities in its archived union.
-The registry's `NERVIX EMIT INST` archive signature identifies the current Model layout, including
+The registry's `NERVIX PARTITION` archive signature identifies the current Model layout, including
 that union, the endpoint kind, the separate JSON and CBOR wire type enums (CBOR has six types), AVRO representation types whose arrays declare their item type, explicit `BASE64` codec
 encoding, a Pulsar subscription's required type and an owned subscription's required start position,
-a Kafka consumer group's required start position, the required 16-bit branch partition count,
+a Kafka consumer group's required start position, the direct, automatic inherited or grouped inherited branch declaration,
 typed ingestor instancing, Sentry platform, an ingestor's `TIMESTAMP AT metadata.<field>` source,
 an SQS QUEUE emitter's `SEND` request shape,
 the receive count an SQS QUEUE ingestor's `ACK PARALLEL MAX` declares, the session and quality of
@@ -372,14 +372,17 @@ expression scope and an emitter's `INSTANCES` declaration.
 Placement coverage is one semantic choice: a corridor with named endpoints or a domain-wide
 rule. Domain configuration contains its pace; named placement rules belong to the Model index.
 Relocation selects whole nodes or exact partition/instance indices using the shared node identity.
-Consensus's `raft_licensing_transitions_inferencer_pages_` keyspaces and current
-`ClusterState` metadata encoding, 37, identify its stored shapes, including the partition count of every resolved
+Consensus's `raft_licensing_transitions_inferencer_pages_operational_inherited_topology_` keyspaces and current
+`ClusterState` metadata encoding, 39, identify its stored shapes, including the partition count of every resolved
 branch declaration in the committed schedule, the partition epoch the schedule records for each
 branch whose count changed, and the statements a transaction keeps, including per-entity
 `ALTER INGESTOR` and `ALTER EMITTER` operations, `SHOW INFERENCER ... STATE` and a `RESET WASM PROCESSOR ... STATE` that takes
 its domain from the transaction. The runtime state store's
-`ranked-intake-unit-checkpoint-segments` format identifies the checkpoints it keeps, including the
+`inherited-partition-origin-checkpoint-index` format identifies the checkpoints it keeps, including the
 unsigned 64-bit instance identity and the unit every branch-aggregated metric series carries.
+Inherited schedules also retain configuration-fenced source sets, common grouping and suspended
+producers. Inherited keys carry the external coordinate, admitting epoch and actual unit through
+native checkpoints and archive records.
 Fixed intake counts remain `NonZeroU64`; branch partition counts remain `NonZeroU16`. The
 registry's instancing boundary checks native count conversion and the layout of the scheduled
 unit entries before materialization. An unaddressable declaration is a typed validation failure;
@@ -1468,3 +1471,28 @@ already admitted members outside the new-usage path.
 An inspection entity is `DomainNode` or `ClusterLicense`. Only the former contains a domain and
 node reference. Both use the shared page and Row-section representation; a cluster observation
 never invents a graph identity to satisfy the envelope.
+
+## Session Opening And Bounded Policy Values
+
+The native command's attempt state retains admission uncertainty independently of the latest
+attempt's failure. A replacement session's smaller bound can refuse a replay without settling
+an earlier attempt; that error keeps the original execution identity as uncertain. A fresh
+request refused before handoff has no earlier admission to preserve.
+
+A session opening carries all five checked bounds. Native metadata requires each dimension once;
+a WebSocket's first fixed-envelope frame has the same complete values. Missing or invalid bounds
+end the opening before ordinary traffic. An exchange and its reader retain one immutable value,
+and generation-scoped subscription queues install their byte budgets under their existing owner
+lock. Before an opening, no peer-derived subscription budget exists; ending or replacing a
+generation cannot publish a later generation's limits.
+
+Cluster duration definitions retain semantic `Duration` values. The complete parameter record
+uses its validated eight-byte seconds/nanoseconds projection without allocating. A captured
+recovery request carries exact u64 nanoseconds and validates its duration range at the destination.
+Their public JSON remains seconds and nanoseconds. Both stored and public decoders cross the
+definition's validation boundary; an invalid stored scalar cannot become a valid policy by defaulting.
+
+The eight count parameters whose definitions already cap them within `u32::MAX` use four-byte
+stored projections. Their public u64 values, defaults and admitted ranges remain unchanged;
+full-width count and byte parameters retain eight bytes. Storage and JSON both validate through
+the owning definition before publishing the complete policy.

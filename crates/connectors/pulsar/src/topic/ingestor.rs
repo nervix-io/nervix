@@ -29,6 +29,7 @@ use std::{collections::BTreeMap, fmt, io, num::NonZeroUsize, time::Duration};
 use async_trait::async_trait;
 use error_stack::{Report, ResultExt as _};
 use futures_util::StreamExt as _;
+use meticulous::ResultExt as _;
 use nervix_connector::{
     BrokerIngestorConnector, IngestMessageHeaders, IngestMessageMetadata, IngestMetadataRow,
     IngestMetadataValues, IngestRowHeaders, IngestorBatch, IngestorBatchRequest, IngestorConnector,
@@ -289,6 +290,7 @@ pub struct PulsarTopicIngestorSettings<'a> {
     /// index.
     pub consumer_name: String,
     pub ack_receipts: PulsarAckReceipts,
+    pub assignment: Option<nervix_models::ExternalPartitionRead>,
 }
 
 impl PulsarTopicIngestorSettings<'_> {
@@ -339,6 +341,8 @@ pub struct PulsarTopicIngestorPlan {
     subscription: PulsarSubscription,
     consumer_name: String,
     ack_receipts: PulsarAckReceipts,
+    assigned_topics: Option<Vec<(u32, String)>>,
+    assignment: Option<nervix_models::ExternalPartitionRead>,
 }
 
 impl PulsarTopicIngestorPlan {
@@ -352,17 +356,56 @@ impl PulsarTopicIngestorPlan {
             subscription,
             consumer_name,
             ack_receipts,
+            assignment,
         } = settings;
         let client = PulsarClientConnection::new(config, None, tls_policy)
             .open()
             .await
             .change_context(PulsarTopicIngestorError::Connect)?;
+        let topic = super::qualified_topic(config, topic);
+        let assigned_topics = match assignment {
+            Some(_) => {
+                let topics = client
+                    .lookup_partitioned_topic(topic.clone())
+                    .await
+                    .change_context(PulsarTopicIngestorError::Subscribe {
+                        topic: topic.clone(),
+                    })?;
+                Some(
+                    topics
+                        .into_iter()
+                        .enumerate()
+                        .map(|(index, (topic, _))| {
+                            let index = u32::try_from(index)
+                                .verified("the driver enumerates a u32 partition count");
+                            (index, topic)
+                        })
+                        .collect::<Vec<_>>(),
+                )
+            }
+            None => None,
+        };
         Ok(Self {
             client,
-            topic: super::qualified_topic(config, topic),
+            topic,
             subscription,
             consumer_name,
             ack_receipts,
+            assigned_topics,
+            assignment,
+        })
+    }
+
+    fn is_idle(&self, instance_index: u64) -> bool {
+        self.assignment.is_some_and(|assignment| {
+            self.assigned_topics.as_ref().is_some_and(|topics| {
+                !topics.iter().any(|(index, _)| {
+                    assignment.contains(
+                        instance_index,
+                        nervix_models::ExternalPartition::new(*index),
+                    )
+                })
+            })
         })
     }
 
@@ -379,12 +422,13 @@ impl PulsarTopicIngestorPlan {
             self.subscription.ownership,
             PulsarSubscriptionOwnership::Provisioned
         ) {
-            self.verify_provisioned(&consumer_name).await?;
+            self.verify_provisioned(instance_index, &consumer_name)
+                .await?;
         }
         let options = PulsarConsumerOptions::default()
             .with_initial_position(self.initial_position())
             .with_ack_receipt_enabled(self.ack_receipts.enabled());
-        self.consumer_builder(consumer_name, options)
+        self.consumer_builder(instance_index, consumer_name, options)
             .build()
             .await
             .map_err(|error| self.join_failure(error))
@@ -412,6 +456,9 @@ impl PulsarTopicIngestorPlan {
         &self,
         instance_index: u64,
     ) -> PulsarTopicIngestorResult<Option<PulsarConsumer<Vec<u8>, TokioExecutor>>> {
+        if self.is_idle(instance_index) {
+            return Ok(None);
+        }
         match self.consumer(instance_index).await {
             Ok(consumer) => Ok(Some(consumer)),
             Err(failure) if failure.current_context().holds_only_for_now() => Ok(None),
@@ -436,12 +483,26 @@ impl PulsarTopicIngestorPlan {
     /// type, registered under `consumer_name`.
     fn consumer_builder(
         &self,
+        instance_index: u64,
         consumer_name: String,
         options: PulsarConsumerOptions,
     ) -> PulsarConsumerBuilder<TokioExecutor> {
-        self.client
-            .consumer()
-            .with_topic(self.topic.as_str())
+        let builder = self.client.consumer();
+        let builder = match (&self.assigned_topics, self.assignment) {
+            (Some(topics), Some(assignment)) => builder.with_topics(
+                topics
+                    .iter()
+                    .filter(|(index, _)| {
+                        assignment.contains(
+                            instance_index,
+                            nervix_models::ExternalPartition::new(*index),
+                        )
+                    })
+                    .map(|(_, topic)| topic),
+            ),
+            _ => builder.with_topic(self.topic.as_str()),
+        };
+        builder
             .with_consumer_name(consumer_name)
             .with_subscription(self.subscription.name.as_str())
             .with_subscription_type(self.subscription_type())
@@ -463,10 +524,14 @@ impl PulsarTopicIngestorPlan {
     /// The broker refuses a non-durable subscribe while a durable subscription of the same name
     /// exists. Without one it opens a non-durable cursor of that name instead, which closing the
     /// probe removes again, so the check never creates the subscription it asks about.
-    async fn verify_provisioned(&self, consumer_name: &str) -> PulsarTopicIngestorResult<()> {
+    async fn verify_provisioned(
+        &self,
+        instance_index: u64,
+        consumer_name: &str,
+    ) -> PulsarTopicIngestorResult<()> {
         let options = PulsarConsumerOptions::default().durable(false);
         let probe = self
-            .consumer_builder(consumer_name.to_string(), options)
+            .consumer_builder(instance_index, consumer_name.to_string(), options)
             .build::<Vec<u8>>()
             .await;
         let mut probe = match probe {
@@ -534,6 +599,9 @@ impl PulsarTopicIngestorPlan {
             topic: super::qualified_topic(settings.config, settings.topic),
         };
         let removed = timeout(budget, async {
+            let mut settings = settings;
+            // Retirement removes the complete owned subscription after all its intake units end.
+            settings.assignment = None;
             let plan = Self::connect(settings, tls_policy).await?;
             plan.unsubscribe().await
         })
@@ -553,7 +621,7 @@ impl PulsarTopicIngestorPlan {
         let options =
             PulsarConsumerOptions::default().with_initial_position(self.initial_position());
         let mut consumer = self
-            .consumer_builder(consumer_name, options)
+            .consumer_builder(0, consumer_name, options)
             .build::<Vec<u8>>()
             .await
             .map_err(|error| {
@@ -579,6 +647,25 @@ impl PulsarTopicIngestorPlan {
 pub struct PulsarTopicIngestorPosition {
     topic: String,
     message_id: MessageIdData,
+}
+
+impl PulsarTopicIngestorPosition {
+    /// A child consumer's topic carries its native coordinate when the broker omits it from
+    /// MessageIdData. Keep the acknowledgement identity exactly as the driver received it.
+    fn partition(&self) -> i32 {
+        if let Some(index) = self.message_id.partition
+            && index >= 0
+        {
+            return index;
+        }
+        let Some((_, index)) = self.topic.rsplit_once("-partition-") else {
+            return -1;
+        };
+        match index.parse::<i32>() {
+            Ok(index) if index >= 0 => index,
+            _ => -1,
+        }
+    }
 }
 
 impl fmt::Display for PulsarTopicIngestorPosition {
@@ -705,6 +792,9 @@ impl IngestMessageMetadata for PulsarTopicIngestorMessage {
         values.string(&self.metadata.producer_name);
         values.i64(self.metadata.sequence_id);
         values.i64(self.metadata.redelivery_count);
+        values.deferred(nervix_models::IngestorMetadataType::I32, &|values| {
+            values.i32(self.position.partition());
+        });
     }
 }
 
@@ -775,7 +865,7 @@ impl IngestorConnector for PulsarTopicIngestor {
     }
 
     fn needs_resume(&mut self) -> bool {
-        self.consumer.is_none()
+        self.consumer.is_none() && !self.plan.is_idle(self.instance_index)
     }
 
     /// Suspension disconnects the consumer, and the durable subscription redelivers what it held
@@ -787,6 +877,9 @@ impl IngestorConnector for PulsarTopicIngestor {
     }
 
     async fn resume(&mut self) -> IngestorResult<IngestorResume> {
+        if self.plan.is_idle(self.instance_index) {
+            return Ok(IngestorResume::Ready);
+        }
         if self.consumer.is_none() {
             let consumer = self
                 .plan
@@ -815,6 +908,23 @@ impl BrokerIngestorConnector for PulsarTopicIngestor {
         request: IngestorBatchRequest,
         cancellation: &IngestorReadCancellation,
     ) -> IngestorResult<IngestorBatch<Self::Message>> {
+        if self.plan.is_idle(self.instance_index) {
+            return Ok(
+                match cancellation
+                    .unless_cancelled(nervix_primitives::time::sleep(
+                        request.batch_timeout.unwrap_or_else(|| {
+                            pulsar::OperationRetryOptions::default().operation_timeout
+                        }),
+                    ))
+                    .await
+                {
+                    Some(()) => IngestorBatch::Messages(Vec::new()),
+                    None => IngestorBatch::Interrupted {
+                        gathered: Vec::new(),
+                    },
+                },
+            );
+        }
         if self.pending_read_error.is_some() && cancellation.is_cancelled() {
             return Ok(IngestorBatch::Interrupted {
                 gathered: Vec::new(),

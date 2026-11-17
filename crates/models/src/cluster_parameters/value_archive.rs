@@ -18,21 +18,21 @@ use rkyv::{
 };
 use serde::{Deserialize as _, Deserializer, Serializer, de::Error as _};
 
-use super::value::{ParameterSetting, ParameterValue};
+use super::value::{ParameterSetting, ParameterStorage, ParameterValue};
 use crate::SettingDefinition;
 
 pub struct ValidatedSetting;
 
-impl<T: SettingDefinition<Context = ()>> ArchiveWith<ParameterSetting<T>> for ValidatedSetting
+impl<T, Stored> ArchiveWith<ParameterSetting<T, Stored>> for ValidatedSetting
 where
+    T: SettingDefinition<Context = ()>,
     T::Value: ParameterValue,
-    <T::Value as ParameterValue>::Stored: Archive,
+    Stored: ParameterStorage<T::Value> + Archive,
 {
-    type Archived = <<T::Value as ParameterValue>::Stored as Archive>::Archived;
-    type Resolver = <<T::Value as ParameterValue>::Stored as Archive>::Resolver;
-
+    type Archived = Stored::Archived;
+    type Resolver = Stored::Resolver;
     fn resolve_with(
-        field: &ParameterSetting<T>,
+        field: &ParameterSetting<T, Stored>,
         resolver: Self::Resolver,
         out: Place<Self::Archived>,
     ) {
@@ -40,59 +40,60 @@ where
     }
 }
 
-impl<T, S> SerializeWith<ParameterSetting<T>, S> for ValidatedSetting
+impl<T, Stored, S> SerializeWith<ParameterSetting<T, Stored>, S> for ValidatedSetting
 where
     T: SettingDefinition<Context = ()>,
-    S: Fallible + ?Sized,
     T::Value: ParameterValue,
-    <T::Value as ParameterValue>::Stored: RkyvSerialize<S>,
+    Stored: ParameterStorage<T::Value> + Archive + RkyvSerialize<S>,
+    S: Fallible + ?Sized,
 {
     fn serialize_with(
-        field: &ParameterSetting<T>,
+        field: &ParameterSetting<T, Stored>,
         serializer: &mut S,
     ) -> Result<Self::Resolver, S::Error> {
         RkyvSerialize::serialize(field.stored(), serializer)
     }
 }
 
-impl<T, D>
-    DeserializeWith<
-        <<T::Value as ParameterValue>::Stored as Archive>::Archived,
-        ParameterSetting<T>,
-        D,
-    > for ValidatedSetting
+impl<T, Stored, D> DeserializeWith<Stored::Archived, ParameterSetting<T, Stored>, D>
+    for ValidatedSetting
 where
     T: SettingDefinition<Context = ()>,
+    T::Value: ParameterValue,
+    Stored: ParameterStorage<T::Value> + Archive,
     D: Fallible + ?Sized,
     D::Error: Source,
-    T::Value: ParameterValue,
-    <T::Value as ParameterValue>::Stored: Archive,
-    <<T::Value as ParameterValue>::Stored as Archive>::Archived:
-        RkyvDeserialize<<T::Value as ParameterValue>::Stored, D>,
+    Stored::Archived: RkyvDeserialize<Stored, D>,
 {
     fn deserialize_with(
-        field: &<<T::Value as ParameterValue>::Stored as Archive>::Archived,
+        field: &Stored::Archived,
         deserializer: &mut D,
-    ) -> Result<ParameterSetting<T>, D::Error> {
+    ) -> Result<ParameterSetting<T, Stored>, D::Error> {
         let value = field.deserialize(deserializer)?;
         ParameterSetting::from_stored(value).map_err(|report| D::Error::new(report.into_error()))
     }
 }
 
-pub(crate) fn serialize<T: SettingDefinition<Context = ()>, S: Serializer>(
-    field: &ParameterSetting<T>,
+pub(crate) fn serialize<T, Stored, S>(
+    field: &ParameterSetting<T, Stored>,
     serializer: S,
 ) -> Result<S::Ok, S::Error>
 where
+    T: SettingDefinition<Context = ()>,
     T::Value: ParameterValue + serde::Serialize,
+    Stored: ParameterStorage<T::Value>,
+    S: Serializer,
 {
     serde::Serialize::serialize(&field.value(), serializer)
 }
 
-pub(crate) fn deserialize<'de, T, D>(deserializer: D) -> Result<ParameterSetting<T>, D::Error>
+pub(crate) fn deserialize<'de, T, Stored, D>(
+    deserializer: D,
+) -> Result<ParameterSetting<T, Stored>, D::Error>
 where
     T: SettingDefinition<Context = ()>,
     T::Value: ParameterValue + serde::Deserialize<'de>,
+    Stored: ParameterStorage<T::Value>,
     D: Deserializer<'de>,
 {
     let value = T::Value::deserialize(deserializer)?;

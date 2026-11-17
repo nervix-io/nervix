@@ -1,8 +1,9 @@
 //! The resolved capacity claim of one concrete node run.
 //!
 //! Layer: vocabulary.
-//! - **Owns.** CPU and memory capacity, transport, DNS, database, consensus, engine and connector
-//!   host limits, peer receive bounds and the incarnation-bound claim the node record holds.
+//! - **Owns.** CPU and memory capacity, transport, DNS, database, consensus, engine, connector
+//!   host, operational and listener limits, peer receive bounds and the incarnation-bound claim
+//!   the node record holds.
 //! - **Depends on.** Node identities and serialization primitives.
 //! - **Must not know.** Detection, consensus, transport or placement policy.
 
@@ -58,7 +59,7 @@ pub struct ConnectorHostCapabilities {
     pub retry_multiplier: std::num::NonZeroU32,
     pub retry_jitter_percent: u8,
     pub kafka_domain_assignment_retry: std::time::Duration,
-    pub kafka_partition_watch_interval: std::time::Duration,
+    pub partition_topology_poll_interval: std::time::Duration,
     pub syslog_intake_queue_capacity: NonZeroU64,
     pub syslog_read_chunk_bytes: NonZeroU64,
 }
@@ -251,6 +252,7 @@ impl NodeCapabilities {
 pub struct NodeCapabilityRecord {
     pub identity: ClusterNodeIdentity,
     pub capabilities: NodeCapabilities,
+    pub operational: nervix_primitives::sync::StdArc<crate::NodeOperationalCapabilities>,
 }
 
 /// The peer-count input shared by transport capacity and DNS concurrency derivations.

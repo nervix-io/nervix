@@ -290,10 +290,21 @@ fn detached_exchange(
     pending: Arc<Mutex<PendingReplies>>,
     emitters: EventTargets,
 ) -> Exchange {
-    let generation = emitters.begin_generation();
-    let reader = ExchangeReader::new(pending.clone(), emitters.clone(), generation.clone());
+    let generation = emitters
+        .begin_generation(&nervix_client_wire::SessionLimits::DEFAULT)
+        .assured("default client retention fits the fixture session");
+    let reader = ExchangeReader::new(
+        pending.clone(),
+        emitters.clone(),
+        generation.clone(),
+        nervix_client_wire::SessionLimits::DEFAULT,
+    );
     Exchange {
-        requests: Arc::new(ExchangeRequests { frames, pending }),
+        requests: Arc::new(ExchangeRequests {
+            limits: nervix_client_wire::SessionLimits::DEFAULT,
+            frames,
+            pending,
+        }),
         reader: Some(nervix_primitives::task::spawn(
             reader.run(nervix_primitives::stream::pending()),
         )),
@@ -428,8 +439,9 @@ fn reader_fixture(capacity: usize) -> ReaderFixture {
     let subscriptions = EventQueue::new(
         capacity,
         crate::ClientCapabilities::default()
-            .subscription_limits()
-            .total_bytes,
+            .subscription_byte_limits(&SESSION_LIMITS)
+            .assured("default subscription byte bounds fit")
+            .1,
     );
     let notices = EventQueue::new(capacity, SERVER_NOTICE_BYTES);
     let (leadership, observed_leadership) = watch::channel(None);
@@ -445,8 +457,15 @@ fn reader_fixture(capacity: usize) -> ReaderFixture {
         producers: crate::producer::ProducerRegistry::default(),
         consumers: crate::consumer::DesiredConsumers::default(),
     };
-    let generation = emitters.begin_generation();
-    let reader = ExchangeReader::new(pending.clone(), emitters, generation);
+    let generation = emitters
+        .begin_generation(&nervix_client_wire::SessionLimits::DEFAULT)
+        .assured("default client retention fits the fixture session");
+    let reader = ExchangeReader::new(
+        pending.clone(),
+        emitters,
+        generation,
+        nervix_client_wire::SessionLimits::DEFAULT,
+    );
     ReaderFixture {
         reader,
         pending,
@@ -944,7 +963,9 @@ async fn event_queue_counts_retained_bytes_as_well_as_records() {
         producers: crate::producer::ProducerRegistry::default(),
         consumers: crate::consumer::DesiredConsumers::default(),
     };
-    let generation = emitters.begin_generation();
+    let generation = emitters
+        .begin_generation(&nervix_client_wire::SessionLimits::DEFAULT)
+        .assured("default client retention fits the fixture session");
     notices.push(
         &generation,
         ServerEvent {
@@ -966,6 +987,7 @@ async fn closing_a_failed_exchange_preserves_its_grpc_status_for_waiters() {
     let fixture = reader_fixture(1);
     let (frames, _) = mpsc::channel(1);
     let exchange = ExchangeRequests {
+        limits: nervix_client_wire::SessionLimits::DEFAULT,
         frames,
         pending: fixture.pending.clone(),
     };
@@ -1351,8 +1373,15 @@ async fn the_client_reads_the_latest_observations_of_its_exchange() {
     let client = test_client("tenant");
     let pending = Arc::new(Mutex::new(PendingReplies::new()));
     let emitters = client.inner.events.emitters.clone();
-    let generation = emitters.begin_generation();
-    let mut reader = ExchangeReader::new(pending, emitters, generation);
+    let generation = emitters
+        .begin_generation(&nervix_client_wire::SessionLimits::DEFAULT)
+        .assured("default client retention fits the fixture session");
+    let mut reader = ExchangeReader::new(
+        pending,
+        emitters,
+        generation,
+        nervix_client_wire::SessionLimits::DEFAULT,
+    );
     assert_eq!(client.leadership(), None);
 
     let observed = LeadershipObserved {

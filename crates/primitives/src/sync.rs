@@ -37,7 +37,7 @@ pub use tokio::sync::{
 };
 #[cfg(all(feature = "native", not(feature = "shuttle")))]
 pub use tokio_util::sync::{CancellationToken, DropGuard, WaitForCancellationFutureOwned};
-pub use triomphe::Arc;
+pub use triomphe::{Arc, ArcUnion, ArcUnionBorrow};
 
 #[cfg(all(feature = "native", feature = "shuttle", not(feature = "loom")))]
 mod cancellation;

@@ -75,6 +75,11 @@ fn layout(
                 .partition_transition_of(branch)
                 .map(|_| *partitions),
         ),
+        // An inherited branch whose external topology is not yet committed has its key fields
+        // but no partitions, so no partition of it is moving.
+        Some(ResolvedBranching::AwaitingTopology { schema, .. }) => {
+            (schema.fields.as_slice(), None)
+        }
         Some(ResolvedBranching::Unbranched) | None => (&[][..], None),
     };
     let mut sensitive = false;

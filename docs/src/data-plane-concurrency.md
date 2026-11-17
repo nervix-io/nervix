@@ -1773,7 +1773,7 @@ existing receiver whose `borrow` leaves a subsequent `changed` able to see an in
 
 ### Partition transitions and key claims
 
-A committed change of a branch's partition count begins the branch's next partition epoch. The
+A committed change of a direct branch's partition count begins the branch's next partition epoch. The
 activation is an entity-level swap of every entity the branch reaches: its relays, the processors
 it divides into units, and every producer into and consumer of its relays. The swap's gate drains
 and force-flushes those entities first, so no unit holds pending work for a key when producers start
@@ -1849,6 +1849,45 @@ claims, runs or applies the input it parked in arrival order, since a key no uni
 where it waits, withdraws its holdings and refuses later claim steps as not ready; each holding
 unit, which holds nothing, ends with its placement tasks. A count change while a transition lasts
 is refused, so every key has exactly one unit that may hold it outside its partition.
+
+Inherited branches commit the observed external set, grouping, epoch and instance placement as one
+schedule. The leader captures the source configurations and its tenure before observing the broker;
+consensus refuses a publication whose captured inputs or tenure no longer apply. Unknown discovery
+starts no branch units. Count disagreement suspends the constructing readers and reports their
+general error. A successful topology change uses the entity swap and offset-transfer path rather
+than rebuilding the domain. Before publication the cluster entity gate suspends intake, drains
+admitted roots and demanded-key claims, and freezes each moved unit's native handoff cut. Captured
+inputs, placement eligibility and leader tenure are revalidated after preparation. The gate stays
+held through cluster-wide schedule installation and ownership activation; cancellation delegates
+release and preparation cleanup to the existing gate and handoff owners. Idle retained keys do not
+hold the drain. Kafka observation uses the leader's configured inspection cadence. The
+production-owner check
+`shuttle_partition_observation_and_instance_assignment_publish_one_epoch` races two publishers and
+reads the resulting set, grouping, epoch and assignment together.
+
+An inherited key carries an immutable external coordinate, observed epoch and actual unit while
+its fingerprint continues to identify its fields. Replacing the registry's key witness preserves
+the slot's incarnation, activity and retention rank; previously captured keys retain their original
+origin. A later topology change may arrive before the preceding key moves finish, so claims read
+the current and retained holding units, choose the newest origin witness and refuse an ambiguous
+equal-epoch copy. Materialized reads bind those publications at installation. Restores retain the
+captured topology, epochs, holding units and intake units before discovery resumes, and checkpoint
+inspection and WASM lifetimes use the actual unit rather than hashing inherited fields.
+
+A Kafka consumer group may discover a new partition before the branch commits it. The inherited
+reader holds one unadmitted position, pauses that partition and restores its exact unread offset
+through the bounded control owner. It waits for the broker to confirm that offset before ending
+the reader, so a replacement using `START AT LATEST` cannot skip the retained record. The native
+mock-broker regression exercises both acknowledgement and driver-cadence policies. Domain-offset
+readers instead assign only the partitions in their committed set; regrouping transfers their
+authoritative next offsets before replacement readers consume.
+
+The registered `scenario.inherited-*` and `stress.inherited-*` workload families cover Kafka and
+Pulsar reader lifecycles, growth, regrouping, shared readers, count agreement and topology restore
+beside their existing tracked lifecycle, offset and installation locks. The restore family also
+enters the restore-stress selection. Broker I/O, async discovery and immutable origin publication
+remain outside Deloxide's lock detector; real-broker scenarios, the publication Shuttle check and
+the registered representation properties provide their complementary evidence.
 
 ## Ordering Fences
 
@@ -3973,6 +4012,27 @@ focused canonical runner is `just test-outward-tls-publication`; full CI retains
 inventory. The cache mutex's diagnostic applicability and unrun scope are recorded in the Deloxide
 inventory. Public one-/three-node scenarios use real native/console/HTTPS and shared HTTP connector
 handshakes, including retained traffic and dynamic certificate rebinding.
+
+The main session opening publishes one immutable value through the native request body's opening
+oneshot. Its source stays unpolled until publication, and ending the publication cancels the body.
+Upload and restore companions offer the five captured bounds with their authenticated request and
+start their maintained tonic encoders immediately. The server checks the complete offer before
+polling input; a changed-bounds refusal carries the current values and admits no archive input.
+The caller retries that same identity with the current bounds while retaining any earlier admission
+uncertainty. This preserves streaming overlap without an extra negotiation round trip. Maintained
+tonic encoders and decoders retain the installed value without a recurring settings lock. The existing event-queue owner installs subscription byte budgets at generation
+start under its existing lock, using the client's two configured retention counts and the
+announced frame size. Overflow of the derived byte arithmetic fails before taking that lock or
+replacing the current generation. Its map access frequency and per-subscription overflow rules stay
+with that owner. Producer-link owner answers publish `LinkOpened` into the bounded queue before
+the link is exposed, so a concurrent idle heartbeat or receiver close cannot put an ordinary event
+before the opening. Registered Shuttle checks exercise those production publication owners;
+peer-cadence lifetime is also covered by the mixed-node public scenario.
+
+Captured-backup section reads resolve one batch bound from the immutable execution bulk quantum
+and pool capacity at stream creation. It is capped at half that pool, so the next read can coexist
+with the preceding charged transport buffer. This derivation takes no admission snapshot, adds no
+map access or lock, and retains the default 1 MiB read.
 
 ## HTTP Input And Connection Ownership
 

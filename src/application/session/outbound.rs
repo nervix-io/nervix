@@ -43,16 +43,6 @@ use nervix_primitives::sync::{
     mpsc::error::{TryRecvError, TrySendError},
 };
 
-/// How many control frames a session queues for its transport before their producers wait. A
-/// frame is at most the session frame limit, so this bounds the reply and event bytes a session
-/// holds for a client that reads slowly.
-pub(in crate::application) const SESSION_CONTROL_CAPACITY: usize = 16;
-
-/// How many subscription frames a session queues before a blocking subscription waits and a
-/// dropping one discards rows. It bounds the row bytes a session holds for a client, shared by
-/// every subscription of the session.
-pub(in crate::application) const SESSION_SUBSCRIPTION_CAPACITY: usize = 16;
-
 /// The frame was not queued: the session ended, the transport stopped taking frames, or the
 /// subscription that sent it was withdrawn.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -181,9 +171,11 @@ pub(in crate::application) struct SessionFrames {
 /// The lanes of a new session, whose end cancels `ended`.
 pub(in crate::application) fn channel(
     ended: CancellationToken,
+    capabilities: &nervix_models::SessionCapabilities,
 ) -> (SessionOutbound, SessionFrames) {
-    let (control, control_frames) = mpsc::channel(SESSION_CONTROL_CAPACITY);
-    let (subscriptions, subscription_frames) = mpsc::channel(SESSION_SUBSCRIPTION_CAPACITY);
+    let capacity = capabilities.queue_capacity();
+    let (control, control_frames) = mpsc::channel(capacity);
+    let (subscriptions, subscription_frames) = mpsc::channel(capacity);
     let ending = Arc::new(SessionEnding {
         ended,
         frame: Mutex::new(None),
@@ -415,6 +407,14 @@ impl SessionFrames {
 
 #[cfg(test)]
 mod tests {
+    fn capabilities() -> nervix_models::SessionCapabilities {
+        nervix_models::SessionCapabilities::resolve(nervix_models::SessionCapabilityValues {
+            queue_memory_bytes: std::num::NonZeroU64::new(64 << 20),
+            ..Default::default()
+        })
+        .expect("the fixture configures eight frames per lane")
+    }
+
     use std::time::Duration;
 
     use meticulous::ResultExt as _;
@@ -459,7 +459,7 @@ mod tests {
 
     #[nervix_primitives::test]
     async fn control_frames_go_ahead_of_queued_subscription_frames() {
-        let (outbound, mut frames) = channel(CancellationToken::new());
+        let (outbound, mut frames) = channel(CancellationToken::new(), &capabilities());
         let lane = outbound.subscription_lane();
         lane.send(frame("row 1")).await.assured("the lane has room");
         lane.send(frame("row 2")).await.assured("the lane has room");
@@ -483,8 +483,8 @@ mod tests {
 
     #[nervix_primitives::test]
     async fn replaceable_control_slot_keeps_the_newest_frame_while_the_lane_is_full() {
-        let (outbound, mut frames) = channel(CancellationToken::new());
-        for _ in 0..SESSION_CONTROL_CAPACITY {
+        let (outbound, mut frames) = channel(CancellationToken::new(), &capabilities());
+        for _ in 0..capabilities().queue_capacity() {
             outbound
                 .send(frame("filler"))
                 .await
@@ -506,7 +506,7 @@ mod tests {
             .assured("the lane remains open");
         slot.replace(frame("tick 3"))
             .assured("the queued slot is still replaceable");
-        for _ in 1..SESSION_CONTROL_CAPACITY {
+        for _ in 1..capabilities().queue_capacity() {
             assert_eq!(next_text(&mut frames).await.as_deref(), Some("filler"));
         }
         assert_eq!(next_text(&mut frames).await.as_deref(), Some("tick 3"));
@@ -515,7 +515,7 @@ mod tests {
 
     #[nervix_primitives::test]
     async fn withdrawn_tick_slot_does_not_precede_the_new_state() {
-        let (outbound, mut frames) = channel(CancellationToken::new());
+        let (outbound, mut frames) = channel(CancellationToken::new(), &capabilities());
         let lane = outbound.subscription_lane();
         let slot = ReplaceableControlFrame::new(frame("superseded tick"));
         outbound
@@ -535,7 +535,7 @@ mod tests {
 
     #[nervix_primitives::test]
     async fn a_withdrawn_generation_queues_nothing_more_and_its_queued_frames_are_discarded() {
-        let (outbound, mut frames) = channel(CancellationToken::new());
+        let (outbound, mut frames) = channel(CancellationToken::new(), &capabilities());
         let withdrawn = outbound.subscription_lane();
         let kept = outbound.subscription_lane();
         withdrawn
@@ -576,7 +576,7 @@ mod tests {
 
     #[nervix_primitives::test]
     async fn the_ending_follows_the_queued_control_frames_and_nothing_follows_it() {
-        let (outbound, mut frames) = channel(CancellationToken::new());
+        let (outbound, mut frames) = channel(CancellationToken::new(), &capabilities());
         let lane = outbound.subscription_lane();
         lane.send(frame("row")).await.assured("the lane has room");
         outbound
@@ -607,15 +607,15 @@ mod tests {
 
     #[nervix_primitives::test]
     async fn ending_a_session_never_waits_on_a_client_that_reads_nothing() {
-        let (outbound, _unread) = channel(CancellationToken::new());
-        for index in 0..SESSION_CONTROL_CAPACITY {
+        let (outbound, _unread) = channel(CancellationToken::new(), &capabilities());
+        for index in 0..capabilities().queue_capacity() {
             outbound
                 .send(frame(&format!("reply {index}")))
                 .await
                 .assured("the control lane has room until it is full");
         }
         let lane = outbound.subscription_lane();
-        for index in 0..SESSION_SUBSCRIPTION_CAPACITY {
+        for index in 0..capabilities().queue_capacity() {
             lane.send(frame(&format!("row {index}")))
                 .await
                 .assured("the subscription lane has room until it is full");

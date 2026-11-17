@@ -73,11 +73,11 @@ fn subject() -> PartitionClaimSubject {
     }
 }
 
-fn key() -> Vec<RemoteRuntimeField> {
-    vec![RemoteRuntimeField {
+fn key() -> nervix_models::RemoteBranchKey {
+    nervix_models::RemoteBranchKey::Direct(Box::new([RemoteRuntimeField {
         name: "tenant".to_string(),
         value: RemoteRuntimeValue::String("beta".to_string()),
-    }]
+    }]))
 }
 
 fn claim(step: PartitionClaimStep) -> PartitionTransitionRequest {
@@ -203,6 +203,11 @@ fn claim_through_hold_and_partition(run: ScenarioRun) -> Result<(), SimulationEr
                                 let mut held = first_reply_held_rx.clone();
                                 async move {
                                     let answer = match request {
+                                        PartitionTransitionRequest::Locate { .. } => {
+                                            panic!(
+                                                "this scenario sends direct-layout claim requests"
+                                            )
+                                        }
                                         PartitionTransitionRequest::Claim {
                                             step: PartitionClaimStep::Release,
                                             ..

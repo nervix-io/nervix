@@ -35,6 +35,7 @@ fn receive(bytes: u64) -> PeerReceiveSettings {
 
 fn claim(incarnation: u64, bytes: u64) -> NodeCapabilityRecord {
     NodeCapabilityRecord {
+        operational: Default::default(),
         identity: ClusterNodeIdentity::new(
             ClusterNodeName::parse("server").assured("fixture name"),
             ClusterNodeIncarnation::new(incarnation),
@@ -219,7 +220,7 @@ fn capability_roll(run: ScenarioRun) -> Result<(), SimulationError> {
                         domain: DomainName::parse("simulated").assured("fixture domain"),
                         relay: RelayName::parse("records").assured("fixture relay"),
                         unit: Unit::SINGLE,
-                        key: None,
+                        key: nervix_models::RemoteBranchKey::Unbranched,
                         batch_ipc: Executor::default()
                             .try_charge_owned(MemoryClass::Relay, bytes)
                             .assured("bounded fixture body"),

@@ -106,7 +106,7 @@ fn preserves_the_whole_command_and_issue_order(violation: Violation) {
     Owner::new().with(|| {
         let signals = subscription_signals(SubscriptionTabState::Pending);
         let state = RwSignal::new(ConsoleConnectionState::Connected);
-        let mut requests = SessionRequests::new();
+        let mut requests = SessionRequests::new(Some(nervix_client_wire::SessionLimits::DEFAULT));
         requests.confirm_leader();
         let mut first = repl_command("CREATE SCHEMA first ( value I64 );");
         let ConsoleRequest::Command { request, .. } = &mut first else {
@@ -171,7 +171,7 @@ fn an_unreadable_joined_reply_keeps_its_command() {
     Owner::new().with(|| {
         let signals = subscription_signals(SubscriptionTabState::Pending);
         let state = RwSignal::new(ConsoleConnectionState::Connected);
-        let mut requests = SessionRequests::new();
+        let mut requests = SessionRequests::new(Some(nervix_client_wire::SessionLimits::DEFAULT));
         requests.confirm_leader();
         let issued = requests.issue(repl_command("CREATE SCHEMA first ( value I64 );"));
         let command = sent(requests.accept(issued));
@@ -218,7 +218,7 @@ fn visual_create_keeps_waiting_for_its_own_outcome(violation: Violation) {
     Owner::new().with(|| {
         let signals = subscription_signals(SubscriptionTabState::Pending);
         let state = RwSignal::new(ConsoleConnectionState::Connected);
-        let mut requests = SessionRequests::new();
+        let mut requests = SessionRequests::new(Some(nervix_client_wire::SessionLimits::DEFAULT));
         requests.confirm_leader();
         signals
             .create
@@ -301,7 +301,7 @@ fn a_readable_split_reply_updates_its_waiting_request_once() {
             domain: None,
         }));
         let state = RwSignal::new(ConsoleConnectionState::Connected);
-        let mut requests = SessionRequests::new();
+        let mut requests = SessionRequests::new(Some(nervix_client_wire::SessionLimits::DEFAULT));
         requests.confirm_leader();
         let issued = requests.issue(suggest("SH"));
         let sent = sent(requests.accept(issued));

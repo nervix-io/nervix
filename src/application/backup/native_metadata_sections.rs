@@ -352,9 +352,7 @@ impl From<BackupKafkaPartitionOffset> for KafkaPartitionOffset {
 impl From<BackupBranchLifecycleEntry> for BranchLifecycleEntry {
     fn from(branch: BackupBranchLifecycleEntry) -> Self {
         Self {
-            key: branch
-                .key
-                .map(|fields| fields.into_iter().map(StateField::from_remote).collect()),
+            key: branch.key.map_fields(StateField::from_remote),
             last_ingestion: branch.last_ingestion,
             incarnation: branch.incarnation,
         }

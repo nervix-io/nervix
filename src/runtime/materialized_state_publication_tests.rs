@@ -368,7 +368,11 @@ async fn each_materialized_relay_installs_its_branch_owner_in_the_same_routing_e
     // Reconciliation reads the routing the runtime publishes, as a schedule leaves it, so the test
     // publishes the routing it gives the branch.
     let published = StdArc::new(DomainRoutingSnapshot {
-        materialized_stream_reads: runtime.materialized_relay_publications(&placed.domain, &specs),
+        materialized_stream_reads: runtime.materialized_relay_publications(
+            &placed.domain,
+            &specs,
+            &HashMap::default(),
+        ),
         materialized_stream_specs: specs,
         ..DomainRoutingSnapshot::default()
     });
@@ -765,8 +769,11 @@ mod shuttle_checks {
                 ),
             )]);
             let routing = DomainRoutingSnapshot {
-                materialized_stream_reads: runtime
-                    .materialized_relay_publications(&placed.domain, &specs),
+                materialized_stream_reads: runtime.materialized_relay_publications(
+                    &placed.domain,
+                    &specs,
+                    &HashMap::default(),
+                ),
                 materialized_stream_specs: specs,
                 ..DomainRoutingSnapshot::default()
             };

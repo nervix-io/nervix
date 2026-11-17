@@ -6,11 +6,11 @@ use crate::{
     AckMode, BranchKeyFingerprint, BranchSelection, ClusterNodeName, ClusterSchedule,
     CommandExecutionReference, CreateIngestor, CreateJunction, CreateRelay, CreateSchema,
     DomainName, DomainSchedule, EndpointIngestMode, FlushPolicy, GeneralErrorPolicy,
-    HttpEndpointIngestor, HttpIngestor, IngestQuiesceMode, IngestorEntity, KafkaPartitionSchedule,
-    Model, OwnershipStateComponent, ParseAsType, ProcessorInputs, ProcessorOutput,
-    ProcessorOutputs, RelayBranching, ResolvedBranching, ScheduledNode, SchemaField,
-    SchemaFingerprint, SyslogIngestMode, SyslogIngestor, SyslogListenerIngestor, Unit,
-    WasmStateResetReason, WasmStateResetScope,
+    HttpEndpointIngestor, HttpIngestor, IngestQuiesceMode, IngestorEntity, Model,
+    OwnershipStateComponent, ParseAsType, ProcessorInputs, ProcessorOutput, ProcessorOutputs,
+    RelayBranching, ResolvedBranching, ScheduledNode, SchemaField, SchemaFingerprint,
+    SyslogIngestMode, SyslogIngestor, SyslogListenerIngestor, Unit, WasmStateResetReason,
+    WasmStateResetScope,
 };
 
 #[test]
@@ -106,10 +106,10 @@ fn bolero_scheduled_units_round_trip_through_current_storage_shape() {
 }
 
 /// A branch's partition count of one to sixteen partitions, the boundaries included.
-fn generated_partitions(arbitrary: &mut Arbitrary<'_>) -> crate::BranchPartitions {
+fn generated_partitions(arbitrary: &mut Arbitrary<'_>) -> crate::ResolvedBranchPartitions {
     let count = arbitrary.entropy().boundary_biased(1..=16);
     let count = u16::try_from(count).assured("a count of at most sixteen fits u16");
-    crate::BranchPartitions::Direct(
+    crate::ResolvedBranchPartitions::Direct(
         std::num::NonZeroU16::new(count).assured("the generated count is at least one"),
     )
 }
@@ -398,15 +398,6 @@ fn scheduled_node_execution_uses_primary_except_for_server_listener_ingestors() 
     assert!(syslog_ingestor.executes_on(&named::<ClusterNodeName>("node-a")));
     assert!(syslog_ingestor.executes_on(&named::<ClusterNodeName>("node-b")));
     assert_eq!(syslog_ingestor.execution_nodes(), both_nodes);
-}
-
-#[test]
-fn kafka_partition_schedule_assigns_partitions_round_robin_by_instance() {
-    let schedule = KafkaPartitionSchedule::new(nonzero!(2u64), vec![3, 1, 2, 0], 7);
-
-    assert_eq!(schedule.observed_partitions, vec![0, 1, 2, 3]);
-    assert_eq!(schedule.rebalance_epoch, 7);
-    assert_eq!(schedule.instance_assignments, vec![vec![0, 2], vec![1, 3]]);
 }
 
 fn placed_schema(raw: &str, primary: &str, assigned: &[&str]) -> ScheduledNode {

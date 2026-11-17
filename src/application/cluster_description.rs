@@ -532,9 +532,16 @@ fn capability_line(record: &NodeCapabilityRecord) -> String {
         Some(bytes) => bytes.to_string(),
         None => "unknown".to_string(),
     };
+    let operational = record
+        .operational
+        .described()
+        .into_iter()
+        .map(|(name, value)| format!("{name}={value}"))
+        .collect::<Vec<_>>()
+        .join(" ");
     format!(
         "  capabilities: committed {} cpu-count={cpu} memory-bytes={memory} {} {} {} \
-         listeners={:?}",
+         listeners={:?} {operational}",
         record.identity,
         bounds_line(capabilities.receive),
         engine_capability_line(capabilities.engines),
@@ -571,8 +578,8 @@ fn connector_host_capability_line(values: nervix_models::ConnectorHostCapabiliti
         values.retry_jitter_percent,
         nervix_connector_kafka::KafkaDomainAssignmentRetry::NAME,
         humantime::format_duration(values.kafka_domain_assignment_retry),
-        crate::runtime::KafkaPartitionWatchInterval::NAME,
-        humantime::format_duration(values.kafka_partition_watch_interval),
+        crate::runtime::PartitionTopologyPollInterval::NAME,
+        humantime::format_duration(values.partition_topology_poll_interval),
         nervix_connector_syslog::SyslogIntakeQueueCapacity::NAME,
         values.syslog_intake_queue_capacity,
         nervix_connector_syslog::SyslogReadChunkBytes::NAME,
@@ -719,6 +726,7 @@ mod tests {
             receive.relay_batch_bytes = NonZeroU64::new(relay).expect("positive relay bound");
             receive.bulk_chunk_bytes = NonZeroU64::new(chunk).expect("positive chunk bound");
             NodeCapabilityRecord {
+                operational: Default::default(),
                 identity: ClusterNodeIdentity::new(
                     name(node),
                     ClusterNodeIncarnation::new(incarnation),
@@ -824,6 +832,7 @@ mod tests {
             ClusterNodeIdentity::new(name(node), ClusterNodeIncarnation::new(incarnation))
         };
         let claim = |node: &str, incarnation| NodeCapabilityRecord {
+            operational: Default::default(),
             identity: identity(node, incarnation),
             capabilities: NodeCapabilities {
                 interconnect: nervix_interconnect::TransportSettings::default().capabilities(),

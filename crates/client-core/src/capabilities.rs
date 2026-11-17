@@ -17,7 +17,7 @@ use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::{NodeCapabilities, Setting, SettingDefinition};
 use nervix_primitives::sync::Semaphore;
 
-use crate::{ClientError, ConnectOptions, SubscriptionEvent, exchange::SESSION_LIMITS};
+use crate::{ClientError, ConnectOptions, SubscriptionEvent, wire::SessionLimits};
 
 macro_rules! deadline {
     ($definition:ident, $name:literal, $field:literal, $default:expr) => {
@@ -161,12 +161,10 @@ capabilities! {
     restore_frame_capacity: ClientRestoreFrameCapacity => NonZeroUsize,
 }
 
-/// The complete record and byte bounds used by one client's subscription dispatcher.
-pub(crate) struct SubscriptionQueueLimits {
+/// The complete record-count bounds used by one client's subscription dispatcher.
+pub(crate) struct SubscriptionRecordLimits {
     pub(crate) records: usize,
-    pub(crate) bytes: usize,
     pub(crate) total_records: usize,
-    pub(crate) total_bytes: usize,
 }
 
 impl ClientCapabilities {
@@ -174,40 +172,39 @@ impl ClientCapabilities {
         if self.retry_backoff() > self.retry_max_backoff() {
             return Err(Report::new(ClientError::InvalidRetryBackoff));
         }
-        self.checked_subscription_limits()?;
+        self.checked_subscription_record_limits()?;
+        self.subscription_byte_limits(&SessionLimits::DEFAULT)?;
         Ok(())
     }
 
-    fn checked_subscription_limits(self) -> Result<SubscriptionQueueLimits, Report<ClientError>> {
-        let largest_event = SESSION_LIMITS
-            .frame_bytes()
-            .checked_add(SubscriptionEvent::HEADER_BYTES);
-        let Some(largest_event) = largest_event else {
-            return Err(Report::new(ClientError::InvalidSubscriptionRetention));
-        };
+    fn checked_subscription_record_limits(
+        self,
+    ) -> Result<SubscriptionRecordLimits, Report<ClientError>> {
         let records = self.subscription_record_capacity().get();
-        let Some(bytes) = largest_event.checked_mul(self.subscription_retained_frames().get())
+        let Some(total_records) = records.checked_mul(self.subscriptions_retained_in_full().get())
         else {
             return Err(Report::new(ClientError::InvalidSubscriptionRetention));
         };
-        let subscriptions = self.subscriptions_retained_in_full().get();
-        let Some(total_records) = records.checked_mul(subscriptions) else {
-            return Err(Report::new(ClientError::InvalidSubscriptionRetention));
-        };
-        let Some(total_bytes) = bytes.checked_mul(subscriptions) else {
-            return Err(Report::new(ClientError::InvalidSubscriptionRetention));
-        };
-        Ok(SubscriptionQueueLimits {
+        Ok(SubscriptionRecordLimits {
             records,
-            bytes,
             total_records,
-            total_bytes,
         })
     }
 
-    pub(crate) fn subscription_limits(self) -> SubscriptionQueueLimits {
-        self.checked_subscription_limits()
-            .assured("capabilities validate derived retention before construction")
+    pub(crate) fn subscription_record_limits(self) -> SubscriptionRecordLimits {
+        self.checked_subscription_record_limits()
+            .assured("capabilities validate derived record counts before construction")
+    }
+
+    pub(crate) fn subscription_byte_limits(
+        self,
+        limits: &SessionLimits,
+    ) -> Result<(usize, usize), Report<ClientError>> {
+        subscription_byte_limits(
+            limits,
+            self.subscription_retained_frames(),
+            self.subscriptions_retained_in_full(),
+        )
     }
 
     pub(crate) fn retry_delay(self, attempt: usize) -> Duration {
@@ -227,6 +224,28 @@ impl ClientCapabilities {
     }
 }
 
+/// The per-subscription and complete-exchange byte allowances for the contacted peer.
+/// The queue retains only these two configured counts, rather than all client capabilities.
+pub(crate) fn subscription_byte_limits(
+    limits: &SessionLimits,
+    retained_frames: NonZeroUsize,
+    subscriptions: NonZeroUsize,
+) -> Result<(usize, usize), Report<ClientError>> {
+    let largest_event = limits
+        .frame_bytes()
+        .checked_add(SubscriptionEvent::HEADER_BYTES);
+    let Some(largest_event) = largest_event else {
+        return Err(Report::new(ClientError::InvalidSubscriptionRetention));
+    };
+    let Some(bytes) = largest_event.checked_mul(retained_frames.get()) else {
+        return Err(Report::new(ClientError::InvalidSubscriptionRetention));
+    };
+    let Some(total_bytes) = bytes.checked_mul(subscriptions.get()) else {
+        return Err(Report::new(ClientError::InvalidSubscriptionRetention));
+    };
+    Ok((bytes, total_bytes))
+}
+
 #[cfg(test)]
 mod tests {
 
@@ -244,25 +263,25 @@ mod tests {
         };
         let capabilities =
             ClientCapabilities::from_options(&options).assured("the custom bounds validate");
-        let limits = capabilities.subscription_limits();
+        let limits = capabilities.subscription_record_limits();
+        let (bytes, total_bytes) = capabilities
+            .subscription_byte_limits(&SessionLimits::DEFAULT)
+            .assured("configured byte limits fit the default session");
         assert_eq!(limits.records, 7);
         assert_eq!(limits.total_records, 21);
-        let event_bytes = SESSION_LIMITS
+        let event_bytes = SessionLimits::DEFAULT
             .frame_bytes()
             .checked_add(SubscriptionEvent::HEADER_BYTES)
             .assured("the test frame and event header fit usize");
         assert_eq!(
-            limits.bytes,
+            bytes,
             event_bytes
                 .checked_mul(2)
                 .assured("two test frames fit usize")
         );
         assert_eq!(
-            limits.total_bytes,
-            limits
-                .bytes
-                .checked_mul(3)
-                .assured("six test frames fit usize")
+            total_bytes,
+            bytes.checked_mul(3).assured("six test frames fit usize")
         );
         assert_eq!(capabilities.retry_delay(0), Duration::from_millis(250));
         assert_eq!(capabilities.retry_delay(3), Duration::from_secs(2));

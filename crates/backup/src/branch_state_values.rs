@@ -138,21 +138,26 @@ impl Values<'_> {
         &mut self,
         branched: bool,
         identity: u8,
-    ) -> (Option<BranchKeyFingerprint>, Option<Vec<StateField>>) {
+    ) -> (
+        Option<BranchKeyFingerprint>,
+        nervix_models::BranchKeyFields<StateField>,
+    ) {
         if !branched {
-            return (None, None);
+            return (None, nervix_models::BranchKeyFields::Unbranched);
         }
-        let mut branch = Descriptors(self.0.clone())
+        let (branch, origin) = Descriptors(self.0.clone())
             .descriptor(true)
             .branch
+            .into_parts()
             .assured("a generated branched descriptor has a key");
+        let mut branch = branch.into_vec();
         branch.push(StateField {
             name: "zz_identity".into(),
             value: StateValue::U8(identity),
         });
         (
             Some(BranchKeyFingerprint::new([identity; 32])),
-            Some(branch),
+            nervix_models::BranchKeyFields::branched(branch.into(), origin),
         )
     }
 

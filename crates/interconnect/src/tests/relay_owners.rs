@@ -58,7 +58,7 @@ async fn remote_relay_frame_cost() {
                 domain: DomainName::parse("capacity").assured("the fixture domain is valid"),
                 relay: RelayName::parse("records").assured("the fixture relay is valid"),
                 unit: nervix_models::Unit::SINGLE,
-                key: None,
+                key: nervix_models::RemoteBranchKey::Unbranched,
                 batch_ipc: executor
                     .try_charge_owned(MemoryClass::Relay, bytes.clone())
                     .assured("one Arrow frame fits the relay budget"),
@@ -150,7 +150,7 @@ async fn peer_departure_reclaims_an_admitted_relays_capacity() {
         domain: DomainName::parse("capacity").assured("the fixture domain is valid"),
         relay: RelayName::parse("records").assured("the fixture relay is valid"),
         unit: nervix_models::Unit::SINGLE,
-        key: None,
+        key: nervix_models::RemoteBranchKey::Unbranched,
         batch_ipc: Executor::default()
             .try_charge_owned(MemoryClass::Relay, vec![1])
             .assured("one byte fits the fixture's relay budget"),
@@ -204,7 +204,7 @@ fn turnover_payload(
         domain: DomainName::parse("turnover").assured("the fixture domain is valid"),
         relay: RelayName::parse("records").assured("the fixture relay is valid"),
         unit: nervix_models::Unit::SINGLE,
-        key: None,
+        key: nervix_models::RemoteBranchKey::Unbranched,
         batch_ipc: Executor::default()
             .try_charge_owned(MemoryClass::Relay, vec![1])
             .assured("one byte fits the fixture's relay budget"),

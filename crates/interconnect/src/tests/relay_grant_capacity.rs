@@ -42,7 +42,7 @@ async fn receive_bound_refusal_creates_no_attempt_and_a_revised_claim_is_adopted
         domain: DomainName::parse("test").expect("domain"),
         relay: RelayName::parse("records").expect("relay"),
         unit: nervix_models::Unit::SINGLE,
-        key: None,
+        key: nervix_models::RemoteBranchKey::Unbranched,
         batch_ipc: executor
             .try_charge_owned(MemoryClass::Relay, vec![1; 16])
             .expect("body charge"),
@@ -72,6 +72,7 @@ async fn receive_bound_refusal_creates_no_attempt_and_a_revised_claim_is_adopted
         .try_charge_owned(MemoryClass::Relay, vec![1; 8])
         .expect("smaller body charge");
     let mut record = nervix_models::NodeCapabilityRecord {
+        operational: Default::default(),
         identity: ClusterNodeIdentity::new(pair.node_b.clone(), ClusterNodeIncarnation::new(1)),
         capabilities: nervix_models::NodeCapabilities {
             interconnect: crate::TransportSettings::default().capabilities(),
@@ -165,7 +166,7 @@ async fn a_grant_asked_while_the_relay_budget_is_full_is_refused_for_capacity() 
         domain: DomainName::parse("test").expect("test domain should be valid"),
         relay: RelayName::parse("relay").expect("test relay should be valid"),
         unit: nervix_models::Unit::SINGLE,
-        key: None,
+        key: nervix_models::RemoteBranchKey::Unbranched,
         batch_ipc: Executor::default()
             .try_charge_owned(MemoryClass::Relay, vec![1])
             .expect("the test relay body should fit its budget"),
@@ -235,7 +236,7 @@ async fn a_grant_request_larger_than_the_free_relay_room_is_refused_for_capacity
         domain: DomainName::parse("test").expect("test domain should be valid"),
         relay: RelayName::parse("relay").expect("test relay should be valid"),
         unit: nervix_models::Unit::SINGLE,
-        key: None,
+        key: nervix_models::RemoteBranchKey::Unbranched,
         batch_ipc: Executor::default()
             .try_charge_owned(MemoryClass::Relay, vec![1])
             .expect("the test relay body should fit its budget"),
@@ -321,7 +322,7 @@ async fn a_free_room_decode_reports_a_full_class_instead_of_waiting() {
             domain: DomainName::parse("test").expect("test domain should be valid"),
             relay: RelayName::parse("relay").expect("test relay should be valid"),
             unit: nervix_models::Unit::SINGLE,
-            key: None,
+            key: nervix_models::RemoteBranchKey::Unbranched,
             metadata: Vec::new(),
             acks: Vec::new(),
             admission: None,

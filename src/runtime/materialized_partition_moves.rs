@@ -80,6 +80,10 @@ pub(super) struct RowHolderRequest {
 
 /// What a row claim task reports back to its claimant unit's state task.
 pub(super) enum RowClaimProgress {
+    Located {
+        key: BranchKey,
+        result: error_stack::Result<Option<Unit>, PartitionClaimError>,
+    },
     /// The catalog every peer unit answered, or why a peer did not answer.
     CatalogRead(error_stack::Result<ReadCatalog, PartitionClaimError>),
     /// The claim of `key` from `holder` found its row, found it held nowhere, or failed.
@@ -193,13 +197,14 @@ impl MaterializedPartitionMoves {
             transition.unit,
         );
         let holdings = HoldingsTracker::begin(runtime, unit, &transition, held);
-        let claims_catalog = transition.is_current_unit();
+        let claims_catalog = transition.is_current_unit() && !transition.needs_key_lookup();
+        let claimant = PartitionClaimant::for_transition(capacity, &transition);
         let mut moves = Self {
             transition,
             domain,
             entity,
             schema,
-            claimant: PartitionClaimant::new(capacity),
+            claimant,
             claims_catalog,
             queued: std::collections::VecDeque::new(),
             claims_bound: capacity.max(1),
@@ -265,7 +270,14 @@ impl MaterializedPartitionMoves {
         held: bool,
         batch: ParkedRowBatch,
     ) -> RowAdmission {
-        if held {
+        if held
+            && (!self.transition.needs_key_lookup()
+                || !self.holdings.needs_confirmation(&batch.batch.key))
+        {
+            if self.transition.needs_key_lookup() {
+                self.holdings.confirmed_here(&batch.batch.key);
+                self.publish();
+            }
             return RowAdmission::Apply(batch);
         }
         let key = batch.batch.key.clone();
@@ -281,6 +293,12 @@ impl MaterializedPartitionMoves {
                 start: ClaimStart::Nothing,
             } => RowAdmission::Parked,
             ClaimAdmission::Parked {
+                start: ClaimStart::Locate,
+            } => {
+                self.spawn_locate(runtime, concrete);
+                RowAdmission::Parked
+            }
+            ClaimAdmission::Parked {
                 start: ClaimStart::CatalogRead,
             } => {
                 self.spawn_catalog_read(runtime);
@@ -294,6 +312,25 @@ impl MaterializedPartitionMoves {
                 RowAdmission::Parked
             }
         }
+    }
+
+    fn spawn_locate(&self, runtime: &Runtime, key: BranchKey) {
+        let runtime = runtime.clone();
+        let domain = self.domain.clone();
+        let entity = self.entity.clone();
+        let transition = self.transition.clone();
+        let commands = self.commands.clone();
+        nervix_primitives::task::spawn(async move {
+            let result = runtime
+                .locate_partition_key(&domain, &entity, &transition, &key)
+                .await;
+            commands
+                .send(RelayStateCommand::PartitionClaim(
+                    RowClaimProgress::Located { key, result },
+                ))
+                .await
+                .means_shutdown("materialized unit awaiting a demanded key location");
+        });
     }
 
     fn spawn_catalog_read(&self, runtime: &Runtime) {
@@ -363,6 +400,7 @@ impl MaterializedPartitionMoves {
         let now = Instant::now();
         for step in self.retries.take_due(now) {
             match step {
+                RetryStep::Locate { key } => self.spawn_locate(runtime, key),
                 RetryStep::CatalogRead => {
                     if self.claimant.start_catalog_read() {
                         self.spawn_catalog_read(runtime);
@@ -431,6 +469,29 @@ impl MaterializedPartitionMoves {
     ) -> SettledRows {
         let mut settled = SettledRows::default();
         match progress {
+            RowClaimProgress::Located {
+                key,
+                result: Ok(holder),
+            } => {
+                let holder = holder.filter(|holder| *holder != self.transition.unit);
+                match self.claimant.located(key, holder) {
+                    CatalogResolution::Begin { key, inputs } => {
+                        self.holdings.confirmed_here(&Some(key));
+                        settled.batches.extend(inputs);
+                    }
+                    CatalogResolution::Claim { key, holder } => {
+                        self.spawn_claim(runtime, key, holder)
+                    }
+                }
+                self.publish();
+            }
+            RowClaimProgress::Located {
+                key,
+                result: Err(error),
+            } => {
+                warn!(domain = self.domain.as_str(), relay = self.entity.identifier.as_str(), error = %format_args!("{error:#}"), "demanded materialized key lookup failed");
+                self.retries.later(RetryStep::Locate { key });
+            }
             RowClaimProgress::CatalogRead(Ok(catalog)) => {
                 for resolution in self.claimant.catalog_read(catalog.holders()) {
                     match resolution {
@@ -688,7 +749,9 @@ impl Runtime {
 mod tests {
     use meticulous::{OptionExt as _, ResultExt as _};
     use nervix_interconnect::RuntimeState;
-    use nervix_models::{BranchName, BranchPartitions, ModelKind, ModelName, SchemaFingerprint};
+    use nervix_models::{
+        BranchName, ModelKind, ModelName, ResolvedBranchPartitions, SchemaFingerprint,
+    };
 
     use super::{super::RuntimeStatePlacement, *};
     use crate::{
@@ -696,8 +759,8 @@ mod tests {
         runtime_schema::{RuntimeValue, test_runtime_row},
     };
 
-    fn partitions(count: u16) -> BranchPartitions {
-        BranchPartitions::Direct(
+    fn partitions(count: u16) -> ResolvedBranchPartitions {
+        ResolvedBranchPartitions::Direct(
             std::num::NonZeroU16::new(count).assured("the test counts are positive"),
         )
     }

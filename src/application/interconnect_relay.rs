@@ -294,7 +294,7 @@ mod tests {
             domain: DomainName::parse("default").expect("valid domain"),
             relay: named("incoming"),
             unit: nervix_models::Unit::SINGLE,
-            key: None,
+            key: nervix_models::RemoteBranchKey::Unbranched,
             batch_ipc: nervix_execution::Executor::default()
                 .try_charge_owned(MemoryClass::Relay, Vec::new())
                 .expect("an empty test body always fits the relay class"),

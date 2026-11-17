@@ -25,7 +25,7 @@
 use std::num::NonZeroU64;
 
 use error_stack::Report;
-use meticulous::OptionExt as _;
+use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_backup::{
     ArchiveRecord, ArchiveScope, DeclaredResource, DomainRecord, PublishedResourceVersion,
     ResourceVersionRecord, ResourceVersionState, SectionContent, SectionPath, UserRecord,
@@ -132,6 +132,56 @@ fn plan_domain(
         Some(domain),
         &record,
     )?);
+
+    if let Some(schedule) = capture.schedule.domain(domain)
+        && (schedule.nodes.values().any(|node| {
+            matches!(node.config.as_ref(), Model::Branch(branch) if branch.partitions.is_inherited())
+        }) || schedule.partition_epochs.values().any(|epoch| epoch.partitions.is_inherited()
+            || epoch.transition.as_ref().is_some_and(|transition| transition.previous.is_inherited())))
+    {
+        let mut holding_units = std::collections::BTreeMap::new();
+        for branch in schedule.partition_epochs.keys() {
+            let mut units = std::collections::BTreeSet::new();
+            for node in schedule.nodes.values() {
+                if node.partition_branch() == Some(branch) {
+                    units.extend(schedule.holding_units_of(node));
+                }
+            }
+            if !units.is_empty() {
+                holding_units.insert(branch.clone(), units);
+            }
+        }
+        let mut epochs = schedule.partition_epochs.clone();
+        for node in schedule.nodes.values() {
+            if let Some(branching) = &node.resolved_branching
+                && let (Some(branch), Some(partitions)) = (branching.branch(), branching.partitions()) {
+                epochs.entry(branch.clone()).or_insert(nervix_models::BranchPartitionEpoch {
+                    number: nervix_models::PartitionEpochNumber::FIRST, partitions, transition: None,
+                });
+            }
+        }
+        let mut intake_units = std::collections::BTreeMap::new();
+        for node in schedule.nodes.values() {
+            let Model::Ingestor(ingestor) = node.config.as_ref() else { continue; };
+            if ingestor.input.instances() != Some(nervix_models::IngestorInstances::PerPartition) {
+                continue;
+            }
+            let count = u16::try_from(node.units.len()).verified("PER PARTITION intake counts are u16");
+            if let Some(count) = std::num::NonZeroU16::new(count) {
+                intake_units.insert(ingestor.name.clone(), count);
+            }
+        }
+        let partitions = nervix_backup::PartitionTopologyRecord {
+            domain: domain.clone(),
+            snapshot: nervix_models::PartitionTopologySnapshot {
+                topology: schedule.partition_topology.clone(),
+                epochs,
+                holding_units,
+                intake_units,
+            },
+        };
+        sections.push(record_section(SectionPath::domain_partitions(domain), Some(domain), &partitions)?);
+    }
 
     let document = models_document(domain, capture.schedule.domain(domain))?;
     sections.push(PlannedSection {
@@ -399,7 +449,6 @@ fn record_kind<R: ArchiveRecord>(_record: &R) -> nervix_backup::RecordKind {
 mod tests {
     use std::collections::BTreeMap;
 
-    use meticulous::ResultExt as _;
     use nervix_consensus::{AppliedLogPosition, UserCredentials};
     use nervix_models::{
         ClusterNodeName, ClusterSchedule, DomainConfig, DomainPace, DomainStartPoint,

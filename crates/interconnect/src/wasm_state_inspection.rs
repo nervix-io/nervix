@@ -106,6 +106,23 @@ mod tests {
     use super::*;
     use crate::RkyvMessage;
 
+    async fn assert_message_round_trip<M>(message: M)
+    where
+        M: RkyvMessage + Clone + PartialEq + std::fmt::Debug,
+    {
+        let executor = Executor::default();
+        let class = PoolClass::Management;
+        let (encoded, _charge) = message
+            .clone()
+            .encode_rkyv(executor.clone(), class, class.payload_limit(&executor))
+            .await
+            .assured("the bounded current message encodes");
+        let (decoded, _charge) = M::decode_rkyv(executor, class, encoded)
+            .await
+            .assured("the current message decodes");
+        assert_eq!(decoded, message);
+    }
+
     fn generation(arbitrary: &mut Arbitrary<'_>) -> WasmStateGeneration {
         WasmStateGeneration::try_from(arbitrary.positive_u64().get())
             .assured("a positive value is a generation")
@@ -405,7 +422,45 @@ mod tests {
                         })
                     },
                 };
+                let inherited = crate::DescribeInheritedWasmStateRequest {
+                    domain: arbitrary.name(),
+                    processor: arbitrary.name(),
+                };
+                let mut units = Vec::new();
+                for _ in 0..arbitrary.entropy().byte() % 5 {
+                    let unit = arbitrary.unit();
+                    let mut checkpoints = Vec::new();
+                    for _ in 0..arbitrary.entropy().byte() % 5 {
+                        let branch = if arbitrary.entropy().flag() {
+                            Some(arbitrary.branch_fingerprint())
+                        } else {
+                            None
+                        };
+                        checkpoints.push(nervix_models::WasmCheckpointInspection {
+                            branch,
+                            state: checkpoint(&mut arbitrary),
+                        });
+                    }
+                    units.push((unit, checkpoints));
+                }
+                let inherited_reply = crate::DescribeInheritedWasmStateResponse {
+                    result: if arbitrary.entropy().flag() {
+                        Err(crate::RemoteOperationFailure::unavailable(
+                            crate::RemoteOperationSubject::Entity {
+                                domain: inherited.domain.clone(),
+                                entity: nervix_models::NodeRef::new(
+                                    nervix_models::ModelKind::WasmProcessor,
+                                    inherited.processor.clone(),
+                                ),
+                            },
+                        ))
+                    } else {
+                        Ok(units)
+                    },
+                };
                 runtime.block_on(async {
+                    assert_message_round_trip(inherited).await;
+                    assert_message_round_trip(inherited_reply).await;
                     let executor = Executor::default();
                     let class = <ReadWasmStatePage as InterconnectRequest>::CLASS;
                     let (encoded, _charge) = request

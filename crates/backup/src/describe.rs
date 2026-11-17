@@ -46,6 +46,8 @@ pub struct ArchiveDescription {
 pub struct DescribedDomain {
     pub capture: DomainCapture,
     pub record: DomainRecord,
+    /// The inherited coordinate at the cut; absent for domains with direct partitions alone.
+    pub partitions: Option<crate::PartitionTopologyRecord>,
     /// The domain's `models.plexus`.
     pub models: DescribedSection,
     /// Every resource version, in archive order.
@@ -252,6 +254,7 @@ struct Describer {
 struct AssembledDomain {
     capture: DomainCapture,
     record: Option<DomainRecord>,
+    partitions: Option<crate::PartitionTopologyRecord>,
     models: Option<DescribedSection>,
     resource_versions: Vec<DescribedResourceVersion>,
     state: Vec<AssembledRuntimeState>,
@@ -337,6 +340,7 @@ impl SectionVisitor for Describer {
             let assembled = AssembledDomain {
                 capture: capture.clone(),
                 record: None,
+                partitions: None,
                 models: None,
                 resource_versions: Vec::new(),
                 state: Vec::new(),
@@ -381,6 +385,9 @@ impl SectionVisitor for Describer {
             SectionContent::InferencerTensorValues => self.inferencer_values(entry, content),
             SectionContent::Record(RecordKind::Users) => self.users(entry, content),
             SectionContent::Record(RecordKind::Domain) => self.domain_record(entry, content),
+            SectionContent::Record(RecordKind::PartitionTopology) => {
+                self.partition_topology(entry, content)
+            }
             SectionContent::Record(RecordKind::ResourceVersion) => {
                 self.resource_version(entry, content)
             }
@@ -1074,6 +1081,25 @@ impl Describer {
         Ok(())
     }
 
+    fn partition_topology(
+        &mut self,
+        entry: &SectionEntry,
+        content: &mut SectionReader<'_>,
+    ) -> Result<(), Report<ArchiveReadError>> {
+        let bytes = content.read_all(entry, MAX_RECORD_BYTES)?;
+        let record = crate::PartitionTopologyRecord::decode(entry.path.as_str(), &bytes)?;
+        if entry.path != SectionPath::domain_partitions(&record.domain) {
+            return Err(misplaced(entry));
+        }
+        let Some(assembled) = self.domains.get_mut(&record.domain) else {
+            return Err(misplaced(entry));
+        };
+        if assembled.partitions.replace(record).is_some() {
+            return Err(misplaced(entry));
+        }
+        Ok(())
+    }
+
     fn models(
         &mut self,
         entry: &SectionEntry,
@@ -1173,6 +1199,7 @@ impl Describer {
             domains.push(DescribedDomain {
                 capture: assembled.capture,
                 record,
+                partitions: assembled.partitions,
                 models,
                 resource_versions: assembled.resource_versions,
                 state: assembled

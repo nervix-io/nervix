@@ -22,7 +22,7 @@ mod materialized_state;
 mod processor_descriptions;
 mod processor_state;
 
-use std::{collections::BTreeSet, num::NonZeroU64, time::Duration};
+use std::{collections::BTreeSet, num::NonZeroU64};
 
 use arch_into::ArchInto;
 use error_stack::{Report, ResultExt as _};
@@ -89,11 +89,6 @@ mod emitter_instances;
 mod ingestor_units;
 mod relay_units;
 mod wasm_state;
-
-const REMOTE_DESCRIBE_RELAY_TIMEOUT: Duration = Duration::from_secs(1);
-/// How long DESCRIBE waits for the node that runs an entity, or one of its units, to report the
-/// entity's dataflow status.
-const DATAFLOW_NODE_STATUS_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// A model as `DESCRIBE` reads it: the configuration it was created with, and the schedule entry
 /// that places it while its domain is running.
@@ -306,7 +301,9 @@ impl SessionServiceImpl {
                         relay: describe.relay.clone(),
                         bindings: describe.bindings.clone(),
                     },
-                    REMOTE_DESCRIBE_RELAY_TIMEOUT,
+                    self.inner
+                        .interconnect
+                        .request_deadline::<RemoteDescribeRelayRequest>(),
                 )
                 .await;
             match response {
@@ -958,7 +955,7 @@ impl SessionServiceImpl {
                     name: identifier.clone(),
                     unit: Unit::SINGLE,
                 },
-                DATAFLOW_NODE_STATUS_TIMEOUT,
+                self.coordination_rpc_timeout(),
             )
             .await;
         match response {
@@ -1629,9 +1626,25 @@ impl SessionServiceImpl {
                 ));
             }
         };
-        let scheduled_node = self
-            .scheduled_model_node(domain, ModelKind::WasmProcessor, &describe.name)
-            .await;
+        let (scheduled_node, inherited_units) = {
+            let schedule = self.inner.consensus.current_schedule().await;
+            let node = NodeRef::new(ModelKind::WasmProcessor, describe.name.clone());
+            match schedule.domain(domain) {
+                Some(domain) => match domain.nodes.get(&node) {
+                    Some(node) => {
+                        let epoch = node
+                            .partition_branch()
+                            .and_then(|branch| domain.partition_epochs.get(branch));
+                        (
+                            Some(node.clone()),
+                            node.has_inherited_partition_state(epoch),
+                        )
+                    }
+                    None => (None, false),
+                },
+                None => (None, false),
+            }
+        };
 
         let runtime_details = match self
             .describe_runtime_for_scheduled_node(
@@ -1647,7 +1660,27 @@ impl SessionServiceImpl {
         };
         let summaries = match scheduled_node.as_ref() {
             Some(node) => {
-                match wasm_state::wasm_unit_summaries(node, runtime_details.checkpoints) {
+                let checkpoints = if inherited_units {
+                    match self
+                        .inherited_wasm_checkpoints(domain, &ModelName::from(&describe.name), node)
+                        .await
+                    {
+                        Ok(checkpoints) => checkpoints,
+                        Err(error) => return command_error(format!("{error:#}")),
+                    }
+                } else {
+                    let mut by_unit = std::collections::BTreeMap::<
+                        Unit,
+                        Vec<nervix_models::WasmCheckpointInspection>,
+                    >::new();
+                    for checkpoint in runtime_details.checkpoints {
+                        if let Some(unit) = node.unit_of_branch(checkpoint.branch.as_ref()) {
+                            by_unit.entry(unit).or_default().push(checkpoint);
+                        }
+                    }
+                    by_unit
+                };
+                match wasm_state::wasm_unit_summaries(node, checkpoints) {
                     Ok(summaries) => summaries,
                     Err(error) => {
                         return command_error(format!(

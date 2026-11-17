@@ -683,10 +683,10 @@ places its key in, including that unit's generation and ownership fence. Each un
 supervisor, state writer and replica poller. Moving or restoring one unit retains the sibling units'
 tasks and state identities.
 
-An archive carries each key and the unit that held it, and the key's fingerprint is its partition
-seed. For every entity a branch's partitions divide, a restore recomputes the unit of each archived
-key under the restored count, which is the count the archived branch declares, and stages every
-piece of the key's state for that unit, whichever unit archived it:
+An archive carries each key and the unit that held it. A direct key's field fingerprint is its
+partition seed; an inherited key retains its external coordinate, admitting epoch and actual unit.
+For every entity a branch's partitions divide, restore resolves each archived key against the
+restored layout and stages every piece of the key's state for its authoritative unit:
 
 - each deduplicator, window and WASM section is installed under the key's unit;
 - each unit's branch lifecycle holds the archived entries of the keys it owns, from every archived
@@ -695,12 +695,15 @@ piece of the key's state for that unit, whichever unit archived it:
 - each unit of a materialized relay holds the archived rows of the keys it owns, regrouped from
   every archived unit into the unit's own checkpoint.
 
-A backup cut while the branch's keys moved between units holds a claimed key twice: in the unit the
+A backup cut while the branch's keys moved between units can hold a claimed key twice: in the unit the
 count current at the cut places it in, where its claim installed it, and in the unit that released
 it and had not forgotten it yet. The restore keeps the copy in the key's own unit, since the
 released copy stopped changing when it was released; a lifecycle entry archived in neither keeps the
-one last active. The restored branch begins its first partition epoch with every key in its
-partition.
+one last active. A direct branch begins its first partition epoch with every key in its partition.
+An inherited branch's `partitions.rkyv` restores the captured external observations, branch epochs,
+holding units and installed intake counts before discovery. Copy selection retains the newest
+admitted origin; equal-authority ambiguity is refused. A retained direct key during an inherited
+transition stays in the actual holding unit the capture records until a later input claims it.
 
 Running generators enumerate only their own source partition and keep remote source views only in
 their task-local read cache. They describe
@@ -1309,3 +1312,18 @@ capture. Deloxide workload records register the state-store installation and pub
 four selections; pointer publication, native tensors, async admission and transport waits are
 outside its detector. The [stateful inference qualification](https://app.clickup.com/t/86bcyakvx)
 owns chaos qualification.
+
+Backup retry cadence and restore conversion's admission wait/retry are node capabilities, with
+50ms backup retries and a 30s conversion wait with 50ms retries by default. Each conversion unit
+keeps its first-refusal time and captured policy; a retry releases the failed attempt's charges
+and does not renew that wait. Capture and restored-state staging expiry use two thirds of command
+retry validity, ten minutes by default. Their maintenance sweep uses the local restore-staging
+cadence. Local capture/install revision waits use twenty Raft heartbeats, five seconds by default.
+
+Captured-section chunks use sixteen executor bulk chunks capped at half the immutable bulk
+pool, preserving the default 1 MiB transfer piece and room for two live read/transport buffers.
+The bound reads no admission counters, and a large configured bulk quantum cannot demand more
+than the pool can admit. Header reservation and materialized identity caps use the executor snapshot header and
+section limits. Client download queue depth follows session memory and frame limits; archive chunks
+use one sixteenth of the frame bound. These changes retain complete archive verification,
+installation authority, final-chunk handover, quota ownership and per-attempt cancellation.

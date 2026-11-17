@@ -425,8 +425,13 @@ impl<'bytes> GeneratedSettings<'bytes> {
         // shutdown.
         let longest_drain = u64::try_from(shutdown_timeout.as_nanos()).unwrap_or(u64::MAX);
         let drain_timeout = Duration::from_nanos(self.entropy.boundary_biased(0..=longest_drain));
-        ShutdownSettings::resolve(Some(shutdown_timeout), Some(drain_timeout))
-            .assured("the drain never exceeds the shutdown")
+        let task_grace_period = self.duration();
+        ShutdownSettings::resolve(
+            Some(shutdown_timeout),
+            Some(drain_timeout),
+            Some(task_grace_period),
+        )
+        .assured("the drain never exceeds the shutdown")
     }
 
     fn cluster_duration(&mut self) -> Duration {
@@ -690,7 +695,7 @@ impl<'bytes> GeneratedSettings<'bytes> {
                         .assured("percentages fit u8"),
                 ),
                 kafka_assignment_retry: Some(self.cluster_duration()),
-                kafka_partition_watch_interval: Some(self.cluster_duration()),
+                partition_topology_poll_interval: Some(self.cluster_duration()),
                 syslog_queue_capacity: std::num::NonZeroUsize::new(
                     usize::try_from(self.entropy.boundary_biased(1..=128))
                         .assured("bounded queue fits usize"),
@@ -748,6 +753,7 @@ impl<'bytes> GeneratedSettings<'bytes> {
             consensus_operations: self.consensus_operations(),
             node_database: self.database(),
             consensus_database: self.database(),
+            operational: self.entropy.node_operational_capabilities(),
             listeners: self.listeners(),
             parameter_seeds: nervix_models::ClusterParameterSeedValues {
                 tls_cipher_suites: Some(tls_cipher_suites),

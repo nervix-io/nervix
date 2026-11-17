@@ -182,12 +182,14 @@ pub(crate) struct KafkaDomainOffsetPlacement {
 }
 
 client_plan!(KafkaTopicIngestorStartPlan {
+    committed_partitions: Option<nervix_models::ExternalPartitionSet>,
     topic: nervix_models::KafkaTopicName,
     offsets: KafkaOffsetPlan,
     instances: NonZeroU64,
     mode: KafkaIngestMode,
 });
 client_plan!(PulsarTopicIngestorStartPlan {
+    assignment: Option<nervix_models::ExternalPartitionRead>,
     topic: nervix_models::PulsarTopicName,
     subscription: nervix_models::PulsarSubscription,
     instances: NonZeroU64,
@@ -349,6 +351,8 @@ impl EndpointRequestPlan {
 pub(crate) struct IngestorStartPlan {
     pub(crate) ingestor: IngestorSpec,
     pub(crate) input: IngestorInputPlan,
+    /// Whether this revision must retain the intake without opening its connector.
+    pub(crate) suspended: bool,
 }
 
 /// The plan of what one ingestor reads. A transport's payloads are decoded by its codec; a client
@@ -651,7 +655,11 @@ impl IngestorStartPlan {
             },
             general_error_policy: ingestor.general_error_policy.clone(),
         };
-        Ok(Self { ingestor, input })
+        Ok(Self {
+            ingestor,
+            input,
+            suspended: false,
+        })
     }
 
     /// The acknowledgement a transport's delivery mode declares. A transport whose statement
@@ -884,7 +892,10 @@ fn client_endpoint_contract(
             .get(&route.relay)
             .map(|relay| &relay.branching);
         match branching {
-            Some(ResolvedBranching::Branched { branch, schema, .. }) => {
+            Some(
+                ResolvedBranching::Branched { branch, schema, .. }
+                | ResolvedBranching::AwaitingTopology { branch, schema },
+            ) => {
                 add(branch.as_str());
                 add(&schema
                     .to_canonical_plexus()
@@ -1027,6 +1038,7 @@ impl IngestorConnectorPlan {
                 );
                 Ok(Self::Kafka(KafkaIngestorStartPlan::Topic(
                     KafkaTopicIngestorStartPlan {
+                        committed_partitions: None,
                         client: IngestorClientSpec::resolved(
                             name,
                             expected,
@@ -1052,6 +1064,7 @@ impl IngestorConnectorPlan {
                 Model::ClientPulsar(resolved),
             ) => Ok(Self::Pulsar(PulsarIngestorStartPlan::Topic(
                 PulsarTopicIngestorStartPlan {
+                    assignment: None,
                     client: IngestorClientSpec::resolved(
                         name,
                         expected,
@@ -1423,6 +1436,7 @@ mod tests {
             }),
             plan: IngestorConnectorPlan::Kafka(KafkaIngestorStartPlan::Topic(
                 KafkaTopicIngestorStartPlan {
+                    committed_partitions: None,
                     client: client(),
                     topic: named("events"),
                     offsets: KafkaOffsetPlan::ConsumerGroup {
@@ -1457,6 +1471,7 @@ mod tests {
                     client: client(),
                     topic: named("events"),
                     subscription: pulsar_subscription(),
+                    assignment: None,
                     instances: nonzero!(1u64),
                     mode: PulsarIngestMode::NoAck,
                 },
@@ -1878,6 +1893,39 @@ mod tests {
     }
 
     #[test]
+    fn inherited_intake_suspension_belongs_to_its_decided_revision() {
+        let case = kafka_case();
+        let nodes = unplaced_schedule(domain_models(case.source, case.source_model));
+        let domain = named::<DomainName>("sales");
+        let activation =
+            crate::registry::DomainActivationPlan::from_scheduled_nodes(&domain, &nodes)
+                .assured("the fixture surfaces resolve");
+        let mut topology = nervix_models::PartitionTopology::default();
+        topology.suspended.insert(named("source"));
+        let waiting = EntrypointPlans::from_scheduled_nodes(
+            &domain,
+            &nodes,
+            &activation,
+            &topology,
+            &std::collections::BTreeMap::new(),
+        )
+        .assured("a waiting intake retains its decided input");
+        topology.suspended.clear();
+        let ready = EntrypointPlans::from_scheduled_nodes(
+            &domain,
+            &nodes,
+            &activation,
+            &topology,
+            &std::collections::BTreeMap::new(),
+        )
+        .assured("a coherent topology releases intake in its next revision");
+        assert!(start_plan(&waiting).suspended);
+        assert!(!start_plan(&ready).suspended);
+        assert_eq!(start_plan(&waiting).input, start_plan(&ready).input);
+        assert_eq!(start_plan(&waiting).ingestor, start_plan(&ready).ingestor);
+    }
+
+    #[test]
     fn plans_kafka_domain_offsets_for_the_scheduled_primary() {
         let source = IngestorEntity::Kafka(KafkaIngestor::Topic(KafkaTopicIngestor {
             client: named("upstream"),
@@ -1902,8 +1950,14 @@ mod tests {
         let activation =
             crate::registry::DomainActivationPlan::from_scheduled_nodes(&domain, &nodes)
                 .assured("the fixture surfaces resolve");
-        let plans = EntrypointPlans::from_scheduled_nodes(&domain, &nodes, &activation)
-            .assured("a domain-offset Kafka ingestor produces a plan");
+        let plans = EntrypointPlans::from_scheduled_nodes(
+            &domain,
+            &nodes,
+            &activation,
+            &nervix_models::PartitionTopology::default(),
+            &std::collections::BTreeMap::new(),
+        )
+        .assured("a domain-offset Kafka ingestor produces a plan");
         let plan = start_plan(&plans);
 
         let domain_offsets = KafkaOffsetPlan::Domain(KafkaDomainOffsetPlacement {

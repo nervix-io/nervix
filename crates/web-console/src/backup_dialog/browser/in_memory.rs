@@ -17,7 +17,7 @@ use std::{
     time::Duration,
 };
 
-use meticulous::OptionExt as _;
+use meticulous::{OptionExt as _, ResultExt as _};
 
 use super::{
     ArchiveFile, ArchiveSaveFailed, Browser, CallSocket, DownloadedArchive, Received,
@@ -119,7 +119,16 @@ impl Browser for InMemoryBrowser {
 
     fn open(&self, url: &str) -> Option<ScriptedSocket> {
         self.observed.borrow_mut().opened.push(url.to_string());
-        let script = self.scripts.borrow_mut().pop_front()?;
+        let mut script = self.scripts.borrow_mut().pop_front()?;
+        let opening = nervix_client_wire::SessionOpened {
+            limits: nervix_client_wire::SessionLimits::DEFAULT,
+        }
+        .encode()
+        .assured("the scripted server's complete numeric opening fits");
+        script.replies.push_front(Reply {
+            after_sent: 0,
+            received: Received::Binary(opening.into_bytes().to_vec()),
+        });
         Some(ScriptedSocket {
             replies: script.replies,
             accepted: script.accepted,

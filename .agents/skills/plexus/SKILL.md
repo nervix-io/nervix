@@ -208,8 +208,9 @@ the graph; otherwise use conspicuous placeholders and state the assumptions.
   ordering, and offsets.
 - Isolation: unbranched or a concrete branch key, branch TTL, optional instance limit, and the
   branch's partition count when one relay owner per branch would funnel too much traffic (see
-  [Relay Partitions](https://docs.nervix.io/relay.html#relay-partitions)); the count changes only
-  while the domain is stopped. When one emitter would funnel a partitioned branch back into one
+  [Relay Partitions](https://docs.nervix.io/relay.html#relay-partitions)). For external partition
+  inheritance and producer eligibility, read [Inherited Partitions](../../../docs/src/partitioning.md).
+  Check `DESCRIBE BRANCH` before another recount. When one emitter would funnel a partitioned branch back into one
   node, decide its `INSTANCES` (a count or `PER PARTITION`); read
   [Emitters → Emitter instances](../../../docs/src/emitters.md#emitter-instances) for the per-key
   ordering it keeps, the entities that run one instance, and placement.
@@ -366,6 +367,11 @@ For detected CPU/memory claims, capability rolls, peer receive bounds and placem
 [Node Settings](../../../docs/src/node-settings.md#committed-node-capabilities) and
 [Placement](../../../docs/src/placement.md#capacity-at-the-load-tier). Verify the committed
 incarnation with `DESCRIBE CLUSTER` before attributing a distribution to an override.
+For control-plane cadence, session-bound or client-link changes, read
+[Node Settings → Control-Plane And Session Capabilities](../../../docs/src/node-settings.md#control-plane-and-session-capabilities)
+and [Client Session Protocol → Session Limits](../../../docs/src/client-session-protocol.md#session-limits).
+Check each incarnation's committed values and reconnect clients to adopt the contacted node's
+announcement; evaluate link silence against the sender's announced heartbeat.
 Use `SHOW TRANSACTIONS;` when transaction state or a retained outcome needs
 verification. Use `DESCRIBE TRANSACTION [ '<id>' ] [ OPERATION <n> ] [ FORMAT TEXT | JSON ];` to
 explain what an open, committing, or retained transaction requires and changes before or after

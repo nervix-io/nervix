@@ -51,10 +51,14 @@ fn shuttle_a_reply_of_another_kind_racing_registration_interrupts_every_waiter()
 /// and a later frame. Every waiter ends, the first cause survives, and the later frame is unread.
 async fn races_registration(violation: &Violation) {
     let events = SessionEvents::new(crate::ClientCapabilities::default());
-    let generation = events.emitters.begin_generation();
+    let generation = events
+        .emitters
+        .begin_generation(&nervix_client_wire::SessionLimits::DEFAULT)
+        .assured("default client retention fits the fixture session");
     let pending = Arc::new(SyncMutex::new(PendingReplies::new()));
     let (frames, _outbound) = mpsc::channel(1);
     let requests = Arc::new(ExchangeRequests {
+        limits: nervix_client_wire::SessionLimits::DEFAULT,
         frames,
         pending: pending.clone(),
     });
@@ -94,7 +98,12 @@ async fn races_registration(violation: &Violation) {
     }
     .encode(&SESSION_LIMITS)
     .assured("the leadership frame fits");
-    let reader = ExchangeReader::new(pending.clone(), events.emitters.clone(), generation);
+    let reader = ExchangeReader::new(
+        pending.clone(),
+        events.emitters.clone(),
+        generation,
+        nervix_client_wire::SessionLimits::DEFAULT,
+    );
     let reading = nervix_primitives::task::spawn(reader.run(nervix_primitives::stream::iter([
         Ok(reply.verify(&SESSION_LIMITS).assured("a valid reply")),
         Ok(later.verify(&SESSION_LIMITS).assured("a valid event")),
@@ -200,9 +209,17 @@ fn shuttle_a_closed_request_registry_ends_its_silent_reader() {
     check_random_and_pct(|| {
         shuttle::future::block_on(async {
             let events = SessionEvents::new(crate::ClientCapabilities::default());
-            let generation = events.emitters.begin_generation();
+            let generation = events
+                .emitters
+                .begin_generation(&nervix_client_wire::SessionLimits::DEFAULT)
+                .assured("default client retention fits the fixture session");
             let pending = Arc::new(SyncMutex::new(PendingReplies::new()));
-            let reader = ExchangeReader::new(pending.clone(), events.emitters.clone(), generation);
+            let reader = ExchangeReader::new(
+                pending.clone(),
+                events.emitters.clone(),
+                generation,
+                nervix_client_wire::SessionLimits::DEFAULT,
+            );
             let read =
                 nervix_primitives::task::spawn(reader.run(nervix_primitives::stream::pending()));
             let waiting = nervix_primitives::task::spawn(async move {
