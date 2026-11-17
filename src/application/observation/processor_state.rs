@@ -14,7 +14,7 @@
 )]
 
 use arrow_array::RecordBatch;
-use error_stack::Report;
+use error_stack::{Report, ResultExt as _};
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_client_wire::{
     RowBranch, RowSchema, SessionLimits, StateInspection, StateInspectionPage,
@@ -40,7 +40,7 @@ use super::inspection_pages::{
     resume_position,
 };
 use crate::{
-    application::{command_result::CommandResult, session_service::SessionServiceImpl},
+    application::{AppError, command_result::CommandResult, session_service::SessionServiceImpl},
     client_row::{ArrowRowBatch, write_runtime_value},
     runtime::{
         BranchKey, ProcessorStatePageBounds, ProcessorStatePageError, ProcessorStateSelection,
@@ -1148,6 +1148,23 @@ impl SessionServiceImpl {
             sections,
             _memory: page.memory,
         })
+    }
+
+    /// Answer the processor state pages other nodes request from this one.
+    pub(in crate::application) fn register_processor_inspection_interconnect_handler(
+        &self,
+    ) -> error_stack::Result<(), AppError> {
+        let processor_inspection_service = self.clone();
+        self.inner
+            .interconnect
+            .register_stream_handler::<nervix_interconnect::ReadProcessorStatePage, _, _>(
+                move |_context, request| {
+                    let service = processor_inspection_service.clone();
+                    async move { service.stream_processor_inspection_page(request).await }
+                },
+            )
+            .change_context(AppError::RegisterInterconnectRequestHandler)?;
+        Ok(())
     }
 
     pub(in crate::application) async fn stream_processor_inspection_page(

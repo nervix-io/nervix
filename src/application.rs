@@ -2100,30 +2100,8 @@ impl Application {
                 }
             })
             .change_context(AppError::RegisterInterconnectRequestHandler)?;
-        let inspection_service = service.clone();
-        interconnect.register_stream_handler::<nervix_interconnect::ReadMaterializedStatePage, _, _>(move |_context, request| {
-            let service = inspection_service.clone();
-            async move { service.stream_materialized_inspection_page(request).await }
-        }).change_context(AppError::RegisterInterconnectRequestHandler)?;
-        let processor_inspection_service = service.clone();
-        let partitioned_inspection_service = service.clone();
-        interconnect.register_stream_handler::<nervix_interconnect::ReadPartitionedMaterializedStatePage, _, _>(move |_context, request| {
-            let service = partitioned_inspection_service.clone();
-            async move { service.stream_partitioned_materialized_inspection_page(request).await }
-        }).change_context(AppError::RegisterInterconnectRequestHandler)?;
-        let materialized_catalog_service = service.clone();
-        interconnect.register_handler::<nervix_interconnect::ReadMaterializedKeyCatalog, _, _>(move |_context, request| {
-            let service = materialized_catalog_service.clone();
-            async move { service.handle_materialized_key_catalog(request).await }
-        }).change_context(AppError::RegisterInterconnectRequestHandler)?;
-        interconnect
-            .register_stream_handler::<nervix_interconnect::ReadProcessorStatePage, _, _>(
-                move |_context, request| {
-                    let service = processor_inspection_service.clone();
-                    async move { service.stream_processor_inspection_page(request).await }
-                },
-            )
-            .change_context(AppError::RegisterInterconnectRequestHandler)?;
+        service.register_materialized_inspection_interconnect_handlers()?;
+        service.register_processor_inspection_interconnect_handler()?;
         service.register_state_replication_interconnect_handlers()?;
 
         let describe_relay_service = service.clone();
@@ -2271,15 +2249,7 @@ impl Application {
             })
             .change_context(AppError::RegisterInterconnectRequestHandler)?;
 
-        let wasm_state_page_service = service.clone();
-        interconnect
-            .register_handler::<nervix_interconnect::ReadWasmStatePage, _, _>(
-                move |_context, request| {
-                    let service = wasm_state_page_service.clone();
-                    async move { service.handle_read_wasm_state_page(request).await }
-                },
-            )
-            .change_context(AppError::RegisterInterconnectRequestHandler)?;
+        service.register_wasm_state_inspection_interconnect_handlers()?;
 
         let describe_metrics_service = service.clone();
         interconnect
@@ -2294,16 +2264,6 @@ impl Application {
             .change_context(AppError::RegisterInterconnectRequestHandler)?;
 
         let describe_lookup_service = service.clone();
-        let inherited_wasm_service = service.clone();
-        interconnect.register_handler::<nervix_interconnect::DescribeInheritedWasmStateRequest, _, _>(move |_context, request| {
-            let service = inherited_wasm_service.clone();
-            async move {
-                nervix_interconnect::DescribeInheritedWasmStateResponse {
-                    result: service.handle_describe_inherited_wasm_request(request).await,
-                }
-            }
-        }).change_context(AppError::RegisterInterconnectRequestHandler)?;
-
         interconnect
             .register_handler::<RemoteDescribeLookupRequest, _, _>(move |_context, request| {
                 let service = describe_lookup_service.clone();

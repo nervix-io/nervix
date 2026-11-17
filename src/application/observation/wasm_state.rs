@@ -37,7 +37,7 @@ use super::inspection_pages::{
     add_counts, inspection_owner, inspection_refusal, rendered_inspection,
 };
 use crate::{
-    application::{command_result::CommandResult, session_service::SessionServiceImpl},
+    application::{AppError, command_result::CommandResult, session_service::SessionServiceImpl},
     state_inspection_cursor::WasmStateInspectionCursor,
 };
 
@@ -577,6 +577,40 @@ impl SessionServiceImpl {
             origin,
             page: selection.page(request.after, limit),
         })
+    }
+
+    /// Answer the WASM state reads other nodes send this one: state pages, and the checkpoints
+    /// of an inherited key's lifetimes.
+    pub(in crate::application) fn register_wasm_state_inspection_interconnect_handlers(
+        &self,
+    ) -> error_stack::Result<(), AppError> {
+        let wasm_state_page_service = self.clone();
+        self.inner
+            .interconnect
+            .register_handler::<nervix_interconnect::ReadWasmStatePage, _, _>(
+                move |_context, request| {
+                    let service = wasm_state_page_service.clone();
+                    async move { service.handle_read_wasm_state_page(request).await }
+                },
+            )
+            .change_context(AppError::RegisterInterconnectRequestHandler)?;
+        let inherited_wasm_service = self.clone();
+        self.inner
+            .interconnect
+            .register_handler::<nervix_interconnect::DescribeInheritedWasmStateRequest, _, _>(
+                move |_context, request| {
+                    let service = inherited_wasm_service.clone();
+                    async move {
+                        nervix_interconnect::DescribeInheritedWasmStateResponse {
+                            result: service
+                                .handle_describe_inherited_wasm_request(request)
+                                .await,
+                        }
+                    }
+                },
+            )
+            .change_context(AppError::RegisterInterconnectRequestHandler)?;
+        Ok(())
     }
 
     pub(in crate::application) async fn handle_read_wasm_state_page(

@@ -10,7 +10,7 @@
     nervix::layer(control_plane, reason = "owns the boundary declared above")
 )]
 
-use error_stack::Report;
+use error_stack::{Report, ResultExt as _};
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_client_wire::{
     RowBranch, RowSchema, SessionLimits, StateInspection, StateInspectionPage,
@@ -34,7 +34,7 @@ use super::inspection_pages::{
     resume_position,
 };
 use crate::{
-    application::{command_result::CommandResult, session_service::SessionServiceImpl},
+    application::{AppError, command_result::CommandResult, session_service::SessionServiceImpl},
     client_row::{ArrowRowBatch, write_runtime_value},
     runtime::{
         MaterializedGenerationRecord, MaterializedInspectionPage, MaterializedStateCapture,
@@ -723,6 +723,46 @@ impl SessionServiceImpl {
             descriptor,
             state: captured,
         })
+    }
+
+    /// Answer the materialized state reads other nodes send this one: whole and
+    /// partition-filtered inspection pages, and the key catalog of a partition that is moving.
+    pub(in crate::application) fn register_materialized_inspection_interconnect_handlers(
+        &self,
+    ) -> error_stack::Result<(), AppError> {
+        let inspection_service = self.clone();
+        self.inner
+            .interconnect
+            .register_stream_handler::<ReadMaterializedStatePage, _, _>(move |_context, request| {
+                let service = inspection_service.clone();
+                async move { service.stream_materialized_inspection_page(request).await }
+            })
+            .change_context(AppError::RegisterInterconnectRequestHandler)?;
+        let partitioned_inspection_service = self.clone();
+        self.inner
+            .interconnect
+            .register_stream_handler::<nervix_interconnect::ReadPartitionedMaterializedStatePage, _, _>(
+                move |_context, request| {
+                    let service = partitioned_inspection_service.clone();
+                    async move {
+                        service
+                            .stream_partitioned_materialized_inspection_page(request)
+                            .await
+                    }
+                },
+            )
+            .change_context(AppError::RegisterInterconnectRequestHandler)?;
+        let materialized_catalog_service = self.clone();
+        self.inner
+            .interconnect
+            .register_handler::<nervix_interconnect::ReadMaterializedKeyCatalog, _, _>(
+                move |_context, request| {
+                    let service = materialized_catalog_service.clone();
+                    async move { service.handle_materialized_key_catalog(request).await }
+                },
+            )
+            .change_context(AppError::RegisterInterconnectRequestHandler)?;
+        Ok(())
     }
 
     pub(in crate::application) async fn handle_materialized_key_catalog(
