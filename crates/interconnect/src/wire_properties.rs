@@ -61,6 +61,7 @@ const BODY_BYTES: usize = 64;
 async fn every_relay_grant_refusal_round_trips_through_the_bounded_codec() {
     let executor = Executor::default();
     for refusal in RelayGrantRefusal::iter() {
+        nervix_primitives::task::consume_budget().await;
         let response = RelayGrantResponse {
             receiver_epoch: 41,
             disposition: RelayGrantDisposition::Refused(refusal),
