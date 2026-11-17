@@ -44,8 +44,6 @@ pub(in crate::application) const DEFAULT_USER: &str = "default";
 
 const BASIC_AUTH_REALM: &str = "Nervix";
 
-const AUTH_RATE_LIMIT_PER_SECOND: u32 = 10;
-
 mod pacing;
 
 pub(in crate::application) use pacing::AuthenticationPacing;
@@ -380,10 +378,12 @@ impl SessionServiceImpl {
             .assured("the committed parameter validates its cost")
     }
 
-    pub(in crate::application) fn new_authentication_pacing() -> AuthenticationPacing {
+    pub(in crate::application) fn new_authentication_pacing(
+        settings: &nervix_models::ControlPlaneCapabilities,
+    ) -> AuthenticationPacing {
         AuthenticationPacing::new(
-            NonZeroU32::new(AUTH_RATE_LIMIT_PER_SECOND)
-                .assured("AUTH_RATE_LIMIT_PER_SECOND is a positive constant"),
+            NonZeroU32::try_from(settings.authentication_attempts_per_second())
+                .assured("the capability's portable count bound fits positive u32 pacing"),
         )
     }
 

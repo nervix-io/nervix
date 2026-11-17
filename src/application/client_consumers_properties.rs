@@ -187,6 +187,7 @@ impl ConsumerFrameKind {
         match self {
             Self::Opening => ConsumerFrame::Opening(OpenConsumerStream {
                 serving_node: arbitrary.rule_name::<ClusterNodeName>(),
+                heartbeat: arbitrary.entropy().announced_link_heartbeat(),
                 domain: arbitrary.rule_name::<DomainName>(),
                 emitter: arbitrary.rule_name::<EmitterName>(),
                 expected_fields: arbitrary.schema_fields(0),
@@ -199,7 +200,10 @@ impl ConsumerFrameKind {
             }),
             Self::ServingHeartbeat => ConsumerFrame::Item(ConsumerItem::Heartbeat),
             Self::Close => ConsumerFrame::Item(ConsumerItem::Close),
-            Self::Opened => ConsumerFrame::Event(ConsumerEvent::Opened(description(arbitrary))),
+            Self::Opened => ConsumerFrame::Event(ConsumerEvent::Opened {
+                description: description(arbitrary),
+                heartbeat: arbitrary.entropy().announced_link_heartbeat(),
+            }),
             Self::Refused => ConsumerFrame::Event(ConsumerEvent::Refused(
                 arbitrary.entropy().pick(EVERY_REFUSAL),
             )),
@@ -253,7 +257,7 @@ impl ConsumerFrame {
                 ConsumerItem::Close => ConsumerFrameKind::Close,
             },
             Self::Event(event) => match event {
-                ConsumerEvent::Opened(_) => ConsumerFrameKind::Opened,
+                ConsumerEvent::Opened { .. } => ConsumerFrameKind::Opened,
                 ConsumerEvent::Refused(_) => ConsumerFrameKind::Refused,
                 ConsumerEvent::DeliveryStart { .. } => ConsumerFrameKind::DeliveryStart,
                 ConsumerEvent::DeliveryChunk { .. } => ConsumerFrameKind::DeliveryChunk,
@@ -391,11 +395,43 @@ fn boundary_frames() -> Vec<ConsumerFrame> {
             frames.push(ConsumerFrame::Opening(OpenConsumerStream {
                 serving_node: ClusterNodeName::parse("serving-node")
                     .assured("a literal cluster node name"),
+                heartbeat: nervix_models::ClientLinkCapabilities::default().announced_heartbeat(),
                 domain: DomainName::parse("orders").assured("a literal domain name"),
                 emitter: EmitterName::parse("outlet").assured("a literal emitter name"),
                 expected_fields,
                 limits,
             }));
+        }
+    }
+    let openings = frames
+        .iter()
+        .filter_map(|frame| match frame {
+            ConsumerFrame::Opening(opening) => Some(opening.clone()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    for interval in [
+        Duration::from_nanos(1),
+        Duration::from_secs(2),
+        Duration::from_secs(12),
+        Duration::from_secs(u64::from(u32::MAX)),
+    ] {
+        let heartbeat = nervix_models::ClientLinkCapabilities::resolve(
+            nervix_models::ClientLinkCapabilityValues {
+                heartbeat_interval: Some(interval),
+                ..Default::default()
+            },
+        )
+        .assured("the boundary cadence is valid")
+        .announced_heartbeat();
+        frames.push(ConsumerFrame::Event(ConsumerEvent::Opened {
+            description: description_at(AckWindow::Sequential, Duration::ZERO, 0, 0),
+            heartbeat,
+        }));
+        for opening in &openings {
+            let mut opening = opening.clone();
+            opening.heartbeat = heartbeat;
+            frames.push(ConsumerFrame::Opening(opening));
         }
     }
     for key in [0, 1, u64::MAX] {
@@ -437,15 +473,14 @@ fn boundary_frames() -> Vec<ConsumerFrame> {
                 max: NonZeroU64::MAX,
             },
         ] {
-            frames.push(ConsumerFrame::Event(ConsumerEvent::Opened(description_at(
-                window, duration, 0, 0,
-            ))));
-            frames.push(ConsumerFrame::Event(ConsumerEvent::Opened(description_at(
-                window,
-                duration,
-                u64::MAX,
-                u32::MAX,
-            ))));
+            frames.push(ConsumerFrame::Event(ConsumerEvent::Opened {
+                description: description_at(window, duration, 0, 0),
+                heartbeat: nervix_models::ClientLinkCapabilities::default().announced_heartbeat(),
+            }));
+            frames.push(ConsumerFrame::Event(ConsumerEvent::Opened {
+                description: description_at(window, duration, u64::MAX, u32::MAX),
+                heartbeat: nervix_models::ClientLinkCapabilities::default().announced_heartbeat(),
+            }));
         }
     }
     for branch_fingerprint in [None, Some([0; 32]), Some([u8::MAX; 32])] {

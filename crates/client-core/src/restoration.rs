@@ -62,7 +62,7 @@ use crate::{
         DomainClockAttachments, DomainClockRestorationCause,
     },
     error::{ClientError, RequestKind},
-    exchange::{EventTargets, Exchange, ExchangeRequests, PendingRequest, SESSION_LIMITS},
+    exchange::{EventTargets, Exchange, ExchangeRequests, PendingRequest},
     producer::{Answered, ProducerInner},
     subscriptions::{DesiredSubscriptions, RestoreAttempt, SubscriptionRestorationCause},
 };
@@ -166,7 +166,7 @@ impl RestorationChannel {
             request_id: registered.request_id,
             request,
         };
-        let frame = match message.encode(&SESSION_LIMITS) {
+        let frame = match message.encode(&self.requests.limits) {
             Ok(frame) => frame,
             Err(report) => {
                 return Err(report.change_context(ClientError::EncodeRequest { request: kind }));

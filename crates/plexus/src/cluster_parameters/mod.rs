@@ -119,6 +119,36 @@ impl<'src> OfferedAssignments<'src> {
     fn new() -> Self {
         Self(vec![
             assignment(
+                ClusterParameterKey::ForcedRecoveryBudget,
+                Identifier::ForcedRecoveryBudget,
+                duration_value(),
+                ClusterParameterChange::ForcedRecoveryBudget,
+            ),
+            assignment(
+                ClusterParameterKey::OwnershipHandoffPollInterval,
+                Identifier::OwnershipHandoffPollInterval,
+                duration_value(),
+                ClusterParameterChange::OwnershipHandoffPollInterval,
+            ),
+            assignment(
+                ClusterParameterKey::EntityGatePollInterval,
+                Identifier::EntityGatePollInterval,
+                duration_value(),
+                ClusterParameterChange::EntityGatePollInterval,
+            ),
+            assignment(
+                ClusterParameterKey::DomainDrainPollInterval,
+                Identifier::DomainDrainPollInterval,
+                duration_value(),
+                ClusterParameterChange::DomainDrainPollInterval,
+            ),
+            assignment(
+                ClusterParameterKey::RuntimeReadinessPropagationBound,
+                Identifier::RuntimeReadinessPropagationBound,
+                duration_value(),
+                ClusterParameterChange::RuntimeReadinessPropagationBound,
+            ),
+            assignment(
                 ClusterParameterKey::LicensingRequestTimeout,
                 Identifier::LicensingRequestTimeout,
                 duration_value(),

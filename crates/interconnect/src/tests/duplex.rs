@@ -35,7 +35,8 @@ impl InterconnectDuplexRequest for CountingStream {
 
     const NAME: &'static str = "test_counting_stream";
     const CLASS: PoolClass = PoolClass::Replication;
-    const SETUP_DEADLINE: crate::RequestDeadline = crate::RequestDeadline::Setup;
+    const SETUP_DEADLINE: crate::DuplexSetupDeadline =
+        crate::DuplexSetupDeadline::Request(crate::RequestDeadline::Setup);
 }
 
 const PIPELINED_ITEMS: u64 = 32;
@@ -49,7 +50,8 @@ impl InterconnectDuplexRequest for BulkOpening {
     const NAME: &'static str = "test_bulk_opening";
     const CLASS: PoolClass = PoolClass::Bulk;
     const SUBQUOTA: RequestSubquota = RequestSubquota::Snapshot;
-    const SETUP_DEADLINE: crate::RequestDeadline = crate::RequestDeadline::Setup;
+    const SETUP_DEADLINE: crate::DuplexSetupDeadline =
+        crate::DuplexSetupDeadline::Request(crate::RequestDeadline::Setup);
 }
 
 #[nervix_primitives::test]
@@ -293,7 +295,8 @@ impl InterconnectDuplexRequest for AppendLikeStream {
     const NAME: &'static str = "test_append_like_stream";
     const CLASS: PoolClass = PoolClass::Replication;
     const SUBQUOTA: RequestSubquota = RequestSubquota::Append;
-    const SETUP_DEADLINE: crate::RequestDeadline = crate::RequestDeadline::Setup;
+    const SETUP_DEADLINE: crate::DuplexSetupDeadline =
+        crate::DuplexSetupDeadline::Request(crate::RequestDeadline::Setup);
 }
 
 /// How many frames the holding handler is given before the test reads what its class is charged.
@@ -461,7 +464,8 @@ impl InterconnectDuplexRequest for AbandoningStream {
 
     const NAME: &'static str = "test_abandoning_stream";
     const CLASS: PoolClass = PoolClass::Replication;
-    const SETUP_DEADLINE: crate::RequestDeadline = crate::RequestDeadline::Setup;
+    const SETUP_DEADLINE: crate::DuplexSetupDeadline =
+        crate::DuplexSetupDeadline::Request(crate::RequestDeadline::Setup);
 }
 
 /// The responding side reads its frames the same way: a handler selecting its next frame against a
