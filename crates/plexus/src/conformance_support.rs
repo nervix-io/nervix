@@ -76,6 +76,32 @@ pub(crate) fn created_model(statement: &str) -> Option<Model<RequestedResourceVe
     Some(*create.body)
 }
 
+/// Common trailing metadata is independent of the selected entity's declared body grammar.
+pub(crate) fn assert_entity_labels_tail(source: &str) {
+    let Some(mut expected) = created_model(source) else {
+        panic!("the declaration must supply a valid complete CREATE: {source}");
+    };
+    let labels = serde_json::from_str(r#"{"empty":"","team/path":" Δ "}"#)
+        .assured("the fixture has unique valid keys and exact UTF-8 values");
+    *expected.labels_mut() = labels;
+    let body = source.trim_end_matches(';');
+    let labelled = format!("{body} LABELS {{ 'team/path' = ' Δ ', 'empty' = '' }};");
+    assert_eq!(created_model(&labelled), Some(expected), "{labelled}");
+    let statement = parse_statement(&labelled).assured("the generated label clause parses");
+    assert_reads_back_canonically(&statement);
+    assert!(refused(&format!(
+        "{source} LABELS {{ 'owner' = 'after semicolon' }};"
+    )));
+    assert!(refused(&format!("{body} LABELS {{}} LABELS {{}};")));
+    let prefix = format!("{body} ");
+    assert!(
+        suggest_statement(&prefix, prefix.len())
+            .iter()
+            .any(|item| item == "LABELS"),
+        "{prefix}"
+    );
+}
+
 /// Whether the grammar refuses `statement`.
 pub(crate) fn refused(statement: &str) -> bool {
     parse_statement(statement).is_err()

@@ -438,7 +438,7 @@ impl ExecutionRevision {
         #[derive(serde::Serialize)]
         struct ScheduledNodeFingerprint<'a> {
             identifier: &'a ModelName,
-            config: &'a nervix_models::Model,
+            config: std::borrow::Cow<'a, nervix_models::Model>,
             resolved_branching: &'a Option<ResolvedBranching>,
             schema_fingerprint: SchemaFingerprint,
             units: Vec<ScheduledUnitFingerprint<'a>>,
@@ -457,7 +457,7 @@ impl ExecutionRevision {
             .values()
             .map(|node| ScheduledNodeFingerprint {
                 identifier: &node.identifier,
-                config: node.config.as_ref(),
+                config: node.config.execution_configuration(),
                 resolved_branching: &node.resolved_branching,
                 schema_fingerprint: node.schema_fingerprint,
                 units: node
@@ -501,7 +501,7 @@ impl ExecutionRevision {
         struct NodeDigest<'a> {
             identity: &'a NodeRef,
             identifier: &'a ModelName,
-            config: &'a nervix_models::Model,
+            config: std::borrow::Cow<'a, nervix_models::Model>,
             resolved_branching: &'a Option<ResolvedBranching>,
             schema_fingerprint: SchemaFingerprint,
             units: Vec<(&'a Unit, &'a nervix_models::ScheduledUnit)>,
@@ -512,7 +512,7 @@ impl ExecutionRevision {
             .map(|(identity, node)| NodeDigest {
                 identity,
                 identifier: &node.identifier,
-                config: node.config.as_ref(),
+                config: node.config.execution_configuration(),
                 resolved_branching: &node.resolved_branching,
                 schema_fingerprint: node.schema_fingerprint,
                 units: node.units.iter().collect(),
@@ -751,6 +751,7 @@ mod tests {
         let fingerprint = SchemaFingerprint::from_digest([7; 32]);
         let schema = ScheduledNode::new(
             Model::Schema(CreateSchema {
+                labels: Default::default(),
                 name: named("event"),
                 fields: vec![SchemaField {
                     name: named("value"),
@@ -763,6 +764,7 @@ mod tests {
         );
         let relay = ScheduledNode::new(
             Model::Relay(CreateRelay {
+                labels: Default::default(),
                 name: named("events"),
                 schema: named("event"),
                 buffer: capacity,
@@ -791,6 +793,7 @@ mod tests {
             )],
         };
         let base = CreateInferencer {
+            labels: Default::default(),
             name: named("running"),
             from: ProcessorInputs::single(named("features")),
             output_routes: ProcessorOutputs::single(named("scored")),

@@ -1,3 +1,15 @@
+//! Typed internal and wire schema declarations.
+//!
+//! Layer: vocabulary.
+//! - **Owns.** Schema fields, native wire types and local schema alterations.
+//! - **Depends on.** Vocabulary names, metadata and serialization.
+//! - **Must not know.** Parsing, registry validation, codecs or runtime execution.
+
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(vocabulary, reason = "owns schema configuration vocabulary")
+)]
+
 use std::num::NonZeroU32;
 
 use error_stack::Report;
@@ -13,6 +25,7 @@ use crate::{FieldName, SchemaName, WireSchemaName};
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
 pub struct CreateSchema {
+    pub labels: crate::EntityLabels,
     pub name: SchemaName,
     pub fields: Vec<SchemaField>,
 }
@@ -53,6 +66,7 @@ pub struct SchemaField {
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
 pub struct CreateWireSchema<T> {
+    pub labels: crate::EntityLabels,
     pub name: WireSchemaName,
     #[serde(default)]
     pub strictness: WireSchemaStrictness,
@@ -608,6 +622,7 @@ mod tests {
     #[test]
     fn bytes_schema_survives_persisted_and_json_round_trips() {
         let schema = CreateSchema {
+            labels: Default::default(),
             name: schema_name("payload"),
             fields: vec![SchemaField {
                 name: field("chunks"),
@@ -647,6 +662,7 @@ mod tests {
     #[test]
     fn applies_internal_schema_operations_in_written_order() {
         let mut schema = CreateSchema {
+            labels: Default::default(),
             name: schema_name("events"),
             fields: vec![
                 SchemaField {
@@ -720,6 +736,7 @@ mod tests {
     #[test]
     fn rejects_invalid_internal_schema_operations_without_partial_application() {
         let original = CreateSchema {
+            labels: Default::default(),
             name: schema_name("events"),
             fields: vec![SchemaField {
                 name: field("id"),
@@ -797,6 +814,7 @@ mod tests {
     #[test]
     fn rejects_dropping_the_last_internal_schema_field() {
         let mut schema = CreateSchema {
+            labels: Default::default(),
             name: schema_name("events"),
             fields: vec![SchemaField {
                 name: field("id"),
@@ -823,6 +841,7 @@ mod tests {
     #[test]
     fn applies_exact_wire_schema_operations() {
         let mut schema = CreateWireSchema {
+            labels: Default::default(),
             name: wire_schema("payload"),
             strictness: WireSchemaStrictness::Strict,
             fields: vec![WireSchemaField {
@@ -874,6 +893,7 @@ mod tests {
     #[test]
     fn rejects_an_internal_schema_alteration_aimed_elsewhere_or_renaming_onto_a_field() {
         let original = CreateSchema {
+            labels: Default::default(),
             name: schema_name("events"),
             fields: vec![
                 SchemaField {
@@ -925,6 +945,7 @@ mod tests {
     #[test]
     fn rejects_invalid_wire_schema_operations_without_partial_application() {
         let original = CreateWireSchema {
+            labels: Default::default(),
             name: wire_schema("payload"),
             strictness: WireSchemaStrictness::Strict,
             fields: vec![

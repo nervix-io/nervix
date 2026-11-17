@@ -1006,6 +1006,7 @@ mod tests {
 
     fn schema(name: &str, fields: Vec<SchemaField>) -> Model<RequestedResourceVersion> {
         Model::Schema(CreateSchema {
+            labels: Default::default(),
             name: SchemaName::parse(name).assured("the test schema names are valid"),
             fields,
         })
@@ -1018,6 +1019,7 @@ mod tests {
         materialized_state: Option<MaterializedRelayState>,
     ) -> Model<RequestedResourceVersion> {
         Model::Relay(CreateRelay {
+            labels: Default::default(),
             name: RelayName::parse(name).assured("the test relay names are valid"),
             schema: SchemaName::parse(schema).assured("the test schema names are valid"),
             buffer: NonZeroUsize::MIN,
@@ -1028,6 +1030,7 @@ mod tests {
 
     fn branch(name: &str, eviction: Option<BranchEviction>) -> Model<RequestedResourceVersion> {
         Model::Branch(CreateBranch {
+            labels: Default::default(),
             name: BranchName::parse(name).assured("the test branch names are valid"),
             schema: SchemaName::parse("tenant_key").assured("the test schema name is valid"),
             ttl: "5m".to_string(),
@@ -1421,22 +1424,26 @@ mod tests {
 
         let models = vec![
             Model::ClientHttp(CreateClientHttp {
+                labels: Default::default(),
                 name: ClientName::parse("http_input").assured("valid client"),
                 mount: None,
                 config: Vec::new(),
             }),
             Model::ClientKafka(CreateClientKafka {
+                labels: Default::default(),
                 name: ClientName::parse("kafka_input").assured("valid client"),
                 mount: None,
                 config: Vec::new(),
             }),
             Model::Endpoint(CreateEndpoint {
+                labels: Default::default(),
                 name: EndpointName::parse("listener").assured("valid endpoint"),
                 on_vhost: VhostName::parse("host").assured("valid VHOST"),
                 path: "/in".into(),
                 kind: nervix_models::EndpointKind::Http,
             }),
             Model::Endpoint(CreateEndpoint {
+                labels: Default::default(),
                 name: EndpointName::parse("socket").assured("valid endpoint"),
                 on_vhost: VhostName::parse("host").assured("valid VHOST"),
                 path: "/ws".into(),
@@ -1445,6 +1452,7 @@ mod tests {
                 },
             }),
             Model::Codec(CreateCodec {
+                labels: Default::default(),
                 name: CodecName::parse("decode").assured("valid codec"),
                 wire_format: CodecWireFormat::JaqNative {
                     format: CodecJaqFormat::Json,
@@ -1457,6 +1465,7 @@ mod tests {
                 encoding_rules: Vec::new(),
             }),
             Model::Codec(CreateCodec {
+                labels: Default::default(),
                 name: CodecName::parse("encode_only").assured("valid codec"),
                 wire_format: CodecWireFormat::JaqNative {
                     format: CodecJaqFormat::Json,
@@ -1646,6 +1655,7 @@ mod tests {
     fn codec_and_its_output_fields_use_the_same_domain_snapshot() {
         let domain = domain();
         let schema = CreateSchema {
+            labels: Default::default(),
             name: SchemaName::parse("lookup_entry").assured("valid schema"),
             fields: vec![
                 SchemaField {
@@ -1663,6 +1673,7 @@ mod tests {
             ],
         };
         let codec = CreateCodec::<RequestedResourceVersion> {
+            labels: Default::default(),
             name: CodecName::parse("lookup_codec").assured("valid codec"),
             wire_format: CodecWireFormat::Json {
                 wire_schema: WireSchemaName::parse("lookup_wire").assured("valid wire schema"),
@@ -1752,11 +1763,13 @@ mod tests {
             domain.clone(),
             vec![
                 Model::Vhost(CreateVhost::<RequestedResourceVersion> {
+                    labels: Default::default(),
                     name: VhostName::parse("edge").assured("valid VHOST"),
                     hostnames: vec!["api.example.com".to_string()],
                     tls: None,
                 }),
                 Model::SignalingProtocol(CreateSignalingProtocol::<RequestedResourceVersion> {
+                    labels: Default::default(),
                     name: SignalingProtocolName::parse("handshake").assured("valid protocol"),
                     format: SignalingWireFormat::Json,
                     on_connect: SignalingProtocolOnConnect {
@@ -1913,6 +1926,7 @@ mod tests {
         let name = WireSchemaName::parse("payload_wire").assured("valid wire schema name");
         let models = vec![
             Model::WireJsonSchema(CreateWireSchema {
+                labels: Default::default(),
                 name: name.clone(),
                 strictness: WireSchemaStrictness::Strict,
                 fields: vec![WireSchemaField {
@@ -1922,6 +1936,7 @@ mod tests {
                 }],
             }),
             Model::WireCborSchema(CreateWireSchema {
+                labels: Default::default(),
                 name: name.clone(),
                 strictness: WireSchemaStrictness::Loose,
                 fields: vec![WireSchemaField {
@@ -1931,6 +1946,7 @@ mod tests {
                 }],
             }),
             Model::WireAvroSchema(CreateWireSchema {
+                labels: Default::default(),
                 name,
                 strictness: WireSchemaStrictness::Strict,
                 fields: vec![WireSchemaField {
@@ -2227,6 +2243,7 @@ mod tests {
                 }
             };
             models.push(Model::Codec(CreateCodec {
+                labels: Default::default(),
                 name: CodecName::parse(name).assured("valid codec name"),
                 schema: SchemaName::parse("output").assured("valid schema name"),
                 wire_format: CodecWireFormat::JaqNative {

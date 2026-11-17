@@ -135,7 +135,7 @@ pub(crate) fn finish_reply(
             body: Some(reply.as_union_value()),
         },
     );
-    finish_raw(builder, root, "NXSM")
+    finish_raw(builder, root, "NXEL")
 }
 
 pub(crate) fn verify_raw<R: FrameRoot>(bytes: Bytes) -> VerifiedFrame<R> {

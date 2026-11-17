@@ -29,6 +29,7 @@ pub mod value;
 mod value_archive;
 
 mod durations;
+mod entity_labels;
 mod limits;
 mod publication;
 #[cfg(test)]
@@ -36,6 +37,7 @@ mod tests;
 mod tls;
 
 pub use durations::*;
+pub use entity_labels::*;
 pub use limits::*;
 pub use publication::*;
 pub use tls::*;
@@ -334,6 +336,10 @@ parameter_values! {
     resource_max_archive_bytes: ResourceMaxArchiveBytes(u64) => Bytes,
     resource_max_extracted_bytes: ResourceMaxExtractedBytes(u64) => Bytes,
     resource_max_file_count: ResourceMaxFileCount(u64) => Count,
+    entity_labels_max_count: EntityLabelsMaxCount(u64) => Count,
+    entity_labels_max_key_bytes: EntityLabelsMaxKeyBytes(u64) => Bytes,
+    entity_labels_max_value_bytes: EntityLabelsMaxValueBytes(u64) => Bytes,
+    entity_labels_max_bytes: EntityLabelsMaxBytes(u64) => Bytes,
     max_batch_messages: MaxBatchMessages(u64) => Count<u32>,
     client_producer_session_bytes: ClientProducerSessionBytes(u64) => Bytes,
     client_consumer_session_bytes: ClientConsumerSessionBytes(u64) => Bytes,
@@ -346,6 +352,16 @@ parameter_values! {
     password_iterations: PasswordIterations(u64) => Count<u32>,
 }
 
+/// One bound shared by the duration declarations and their lossless representation.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the declared duration coordinate has exactly u32 seconds of range"
+    )
+)]
+const MAX_PARAMETER_DURATION: Duration = Duration::from_secs(4_294_967_295);
+
 impl ClusterParameterKey {
     pub fn keyword(self) -> String {
         self.setting_name().replace('-', "_").to_ascii_uppercase()
@@ -357,7 +373,7 @@ impl ClusterParameterKey {
                 parameter: self,
             }));
         }
-        let maximum = Duration::from_secs(u64::from(u32::MAX));
+        let maximum = MAX_PARAMETER_DURATION;
         if value > maximum {
             return Err(Report::new(ClusterParameterError::DurationTooLong {
                 parameter: self,

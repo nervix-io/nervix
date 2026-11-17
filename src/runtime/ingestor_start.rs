@@ -724,6 +724,7 @@ mod tests {
                     domain.clone(),
                     vec![
                         scheduled_model(nervix_models::Model::Schema(CreateSchema {
+                            labels: Default::default(),
                             name: schema.clone(),
                             fields: vec![SchemaField {
                                 name: named("user_id"),
@@ -734,6 +735,7 @@ mod tests {
                         })),
                         scheduled_model(nervix_models::Model::WireJsonSchema(
                             CreateJsonWireSchema {
+                                labels: Default::default(),
                                 name: wire_schema.clone(),
                                 strictness: Default::default(),
                                 fields: vec![WireSchemaField {
@@ -744,6 +746,7 @@ mod tests {
                             },
                         )),
                         scheduled_model(nervix_models::Model::Codec(CreateCodec {
+                            labels: Default::default(),
                             name: codec.clone(),
                             wire_format: CodecWireFormat::Json {
                                 wire_schema: wire_schema.clone(),
@@ -752,6 +755,7 @@ mod tests {
                             encoding_rules: Vec::new(),
                         })),
                         scheduled_model(nervix_models::Model::Relay(CreateRelay {
+                            labels: Default::default(),
                             name: relay.clone(),
                             schema: schema.clone(),
                             buffer: nonzero!(2usize),
@@ -759,6 +763,7 @@ mod tests {
                             materialized_state: None,
                         })),
                         scheduled_model(nervix_models::Model::ClientMqtt(CreateClientMqtt {
+                            labels: Default::default(),
                             name: client.clone(),
                             mount: None,
                             config: vec![
@@ -773,6 +778,7 @@ mod tests {
                             ],
                         })),
                         scheduled_model(nervix_models::Model::Ingestor(CreateIngestor {
+                            labels: Default::default(),
                             name: ingestor.clone(),
                             output_routes: with_inherit_all(ProcessorOutputs::single(
                                 relay.clone(),
@@ -875,6 +881,7 @@ mod tests {
             domain.clone(),
             vec![
                 scheduled_model(nervix_models::Model::Schema(CreateSchema {
+                    labels: Default::default(),
                     name: schema.clone(),
                     fields: vec![SchemaField {
                         name: named("user_id"),
@@ -884,6 +891,7 @@ mod tests {
                     }],
                 })),
                 scheduled_model(nervix_models::Model::WireJsonSchema(CreateJsonWireSchema {
+                    labels: Default::default(),
                     name: wire_schema.clone(),
                     strictness: Default::default(),
                     fields: vec![WireSchemaField {
@@ -893,6 +901,7 @@ mod tests {
                     }],
                 })),
                 scheduled_model(nervix_models::Model::Codec(CreateCodec {
+                    labels: Default::default(),
                     name: codec.clone(),
                     wire_format: CodecWireFormat::Json {
                         wire_schema: wire_schema.clone(),
@@ -901,6 +910,7 @@ mod tests {
                     encoding_rules: Vec::new(),
                 })),
                 scheduled_model(nervix_models::Model::Relay(CreateRelay {
+                    labels: Default::default(),
                     name: relay.clone(),
                     schema: schema.clone(),
                     buffer: nonzero!(2usize),
@@ -908,6 +918,7 @@ mod tests {
                     materialized_state: None,
                 })),
                 scheduled_model(nervix_models::Model::ClientMqtt(CreateClientMqtt {
+                    labels: Default::default(),
                     name: client.clone(),
                     mount: None,
                     config: vec![ClientConfigEntry {
@@ -916,6 +927,7 @@ mod tests {
                     }],
                 })),
                 scheduled_model(nervix_models::Model::Ingestor(CreateIngestor {
+                    labels: Default::default(),
                     name: ingestor.clone(),
                     output_routes: with_inherit_all(ProcessorOutputs::single(relay.clone()))
                         .with_flush_policy(FlushPolicy::Each {

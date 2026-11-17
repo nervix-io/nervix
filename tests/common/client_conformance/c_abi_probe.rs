@@ -8,9 +8,9 @@ use std::{io, ptr, slice, time::Duration};
 
 use nervix_client_ffi::{
     Cancel, CellState, ClockEvent, ClockEventKind, ClockState, ConnectionOptions, DomainClock,
-    EndReason, Event, EventKind, Execution, FailureKind, FieldType, Outcome, Part,
-    RestorationCause, Schema, Session, nx_cancel_free, nx_cancel_new, nx_cancel_trigger,
-    nx_cancel_with_deadline, nx_clock_event_domain, nx_clock_event_generation,
+    EndReason, EntityLabelsInspection, Event, EventKind, Execution, FailureKind, FieldType,
+    Outcome, Part, RestorationCause, Schema, Session, nx_cancel_free, nx_cancel_new,
+    nx_cancel_trigger, nx_cancel_with_deadline, nx_clock_event_domain, nx_clock_event_generation,
     nx_clock_event_kind_of, nx_clock_event_paced, nx_clock_event_release, nx_clock_event_retain,
     nx_clock_event_state, nx_clock_event_tick, nx_connect_options_add_seed,
     nx_connect_options_basic_auth, nx_connect_options_ca_certificate, nx_connect_options_free,
@@ -18,17 +18,18 @@ use nervix_client_ffi::{
     nx_domain_clock_admission_window, nx_domain_clock_admits, nx_domain_clock_generation,
     nx_domain_clock_logical_time_at, nx_domain_clock_paced, nx_domain_clock_release,
     nx_domain_clock_retain, nx_domain_clock_state, nx_domain_clock_tick,
-    nx_domain_clock_wall_duration_until, nx_error_execution_reference, nx_error_free,
+    nx_domain_clock_wall_duration_until, nx_entity_labels_count, nx_entity_labels_entry,
+    nx_entity_labels_free, nx_entity_labels_revision, nx_error_execution_reference, nx_error_free,
     nx_error_kind_of, nx_error_message, nx_event_cell_varlen, nx_event_column_fixed,
     nx_event_column_states, nx_event_column_varlen, nx_event_end_reason, nx_event_frame,
     nx_event_kind_of, nx_event_release, nx_event_restoration_cause, nx_event_restoration_message,
     nx_event_restoration_retry_after, nx_event_retain, nx_event_row_count, nx_event_schema,
     nx_event_subscription, nx_execution_free, nx_execution_reference, nx_outcome_diagnostic,
-    nx_outcome_diagnostic_count, nx_outcome_disposition, nx_outcome_execution_reference,
-    nx_outcome_free, nx_outcome_message, nx_outcome_schema, nx_outcome_subscription,
-    nx_schema_branch, nx_schema_field, nx_schema_field_count, nx_schema_free, nx_session_connect,
-    nx_session_domain_clock, nx_session_execute, nx_session_free, nx_session_next_clock_event,
-    nx_session_next_event, nx_session_prepare,
+    nx_outcome_diagnostic_count, nx_outcome_disposition, nx_outcome_entity_labels,
+    nx_outcome_execution_reference, nx_outcome_free, nx_outcome_message, nx_outcome_schema,
+    nx_outcome_subscription, nx_schema_branch, nx_schema_field, nx_schema_field_count,
+    nx_schema_free, nx_session_connect, nx_session_domain_clock, nx_session_execute,
+    nx_session_free, nx_session_next_clock_event, nx_session_next_event, nx_session_prepare,
 };
 use nervix_primitives::thread;
 
@@ -661,6 +662,55 @@ impl DomainClockReference {
         check(unsafe { nx_domain_clock_admits(self.0, utc, event, &mut admitted) })?;
         Ok(admitted)
     }
+}
+
+struct OwnedLabels(*mut EntityLabelsInspection);
+impl Drop for OwnedLabels {
+    fn drop(&mut self) {
+        // SAFETY: this guard owns the live handle returned by the binding.
+        unsafe { nx_entity_labels_free(self.0) };
+    }
+}
+
+fn check_labels(session: &OpenSession, relay: &str) -> io::Result<()> {
+    let outcome = session.execute(&format!("SHOW LABELS ON RELAY {relay} FORMAT TEXT;"))?;
+    let mut labels = ptr::null_mut();
+    // SAFETY: the outcome is live and the pointer output is writable.
+    check(unsafe { nx_outcome_entity_labels(outcome.0, &mut labels) })?;
+    if labels.is_null() {
+        return Err(io::Error::other("typed labels are absent"));
+    }
+    let labels = OwnedLabels(labels);
+    drop(outcome);
+    let mut revision = 0;
+    // SAFETY: the independently retained handle is live and revision is writable.
+    if !unsafe { nx_entity_labels_revision(labels.0, &mut revision) } {
+        return Err(io::Error::other("typed labels lack a committed revision"));
+    }
+    let mut found = false;
+    // SAFETY: the independently retained handle is live.
+    for index in 0..unsafe { nx_entity_labels_count(labels.0) } {
+        let (mut key, mut value) = (ptr::null(), ptr::null());
+        let (mut key_len, mut value_len) = (0, 0);
+        // SAFETY: the handle is live, the index is bounded, and all outputs are writable.
+        unsafe {
+            check(nx_entity_labels_entry(
+                labels.0,
+                index,
+                &mut key,
+                &mut key_len,
+                &mut value,
+                &mut value_len,
+            ))?;
+            if copied(key, key_len) == b"probe" {
+                found = copied(value, value_len) == " retained Δ ".as_bytes();
+            }
+        }
+    }
+    if !found {
+        return Err(io::Error::other("typed labels lost exact metadata"));
+    }
+    Ok(())
 }
 
 impl OwnedOutcome {
@@ -1334,6 +1384,7 @@ fn run_subscription(
         drop(event);
     }
 
+    check_labels(session, relay)?;
     check_retention(&retained, &reported, &fields, &key_fields)?;
     check_cancellation(session)?;
     emit("CHECKS ok")?;

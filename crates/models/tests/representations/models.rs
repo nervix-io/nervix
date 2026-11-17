@@ -143,6 +143,7 @@ fn assert_archived_count_records(count: usize) {
         None => NonZeroUsize::MIN,
     };
     let relay = CreateRelay {
+        labels: Default::default(),
         name: RelayName::parse("notifications").assured("the literal follows the name rule"),
         schema: SchemaName::parse("notification").assured("the literal follows the name rule"),
         buffer: capacity,

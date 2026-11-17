@@ -7,5 +7,5 @@ include "session.fbs";
 namespace nervix.session;
 
 root_type ServerMessage;
-file_identifier "NXSM";
+file_identifier "NXEL";
 file_extension "nxsm";

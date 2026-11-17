@@ -24,6 +24,7 @@ use crate::registry::{
 fn lookup_schema_rejects_bytes_in_payload_fields() {
     let domain = named::<DomainName>("binary_domain");
     let schema = CreateSchema {
+        labels: Default::default(),
         name: named("lookup_values"),
         fields: vec![SchemaField {
             name: named("payload"),
@@ -33,6 +34,7 @@ fn lookup_schema_rejects_bytes_in_payload_fields() {
         }],
     };
     let lookup = CreateLookup {
+        labels: Default::default(),
         name: named("values_by_id"),
         key_field: named("id"),
         resource: named("lookup_data"),

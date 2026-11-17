@@ -665,6 +665,12 @@ mod tests {
         DescribedDomain {
             partitions: None,
             capture: DomainCapture {
+                entity_label_policy: nervix_models::EntityLabelPolicy {
+                    revision: std::num::NonZeroU64::MIN,
+                    limits: nervix_models::EntityLabelLimits::from(
+                        &nervix_models::ClusterParameterValues::default(),
+                    ),
+                },
                 domain: domain(name),
                 revision: 7,
                 raft_log: RaftLogPosition { term: 1, index: 7 },

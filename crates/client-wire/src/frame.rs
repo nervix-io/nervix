@@ -60,7 +60,7 @@ frame_root!(
 );
 frame_root!(
     /// A frame a server sends on a session: a reply or an unsolicited message.
-    ServerFrame => ServerMessage, "NXSM"
+    ServerFrame => ServerMessage, "NXEL"
 );
 frame_root!(
     /// A frame of an upload stream: the start of the upload or one chunk of the archive.

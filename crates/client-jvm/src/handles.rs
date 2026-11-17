@@ -56,6 +56,7 @@ objects! {
     Execution => execution: host::Execution,
     Outcome => outcome: host::Outcome,
     Inspection => inspection: host::Inspection,
+    EntityLabels => entity_labels: host::EntityLabelsInspection,
     InspectionFrame => inspection_frame: host::InspectionFrame,
     Event => event: host::Event,
     ClockEvent => clock_event: host::ClockEvent,

@@ -173,35 +173,37 @@ fn declared_input<'src>()
 pub fn create_ingestor_parser<'src>()
 -> impl Parser<'src, &'src [Token], CreateStatement<CreateIngestor>, extra::Err<ParseError<'src>>>
 + Clone {
-    kw(Identifier::Create)
-        .ignore_then(if_not_exists_clause())
-        .then(declared_input())
-        .boxed()
-        .then(timestamp_source().or_not())
-        .then(filter_where_clause().or_not())
-        .boxed()
-        .then(flushed_ingestor_outputs())
-        .then(general_error_policy())
-        .then_ignore(tok(Token::Semicolon).or_not())
-        .map(
-            |(
-                ((((if_not_exists, declared), timestamp_source), filter_where), output_routes),
-                general_error_policy,
-            )| {
-                CreateStatement::new(
-                    CreateIngestor {
-                        name: declared.name,
-                        output_routes,
-                        input: declared.input,
-                        timestamp_source,
-                        general_error_policy,
-                        filter_where,
-                    },
-                    if_not_exists,
-                )
-            },
-        )
-        .boxed()
+    crate::labels::finish_creation({
+        kw(Identifier::Create)
+            .ignore_then(if_not_exists_clause())
+            .then(declared_input())
+            .boxed()
+            .then(timestamp_source().or_not())
+            .then(filter_where_clause().or_not())
+            .boxed()
+            .then(flushed_ingestor_outputs())
+            .then(general_error_policy())
+            .map(
+                |(
+                    ((((if_not_exists, declared), timestamp_source), filter_where), output_routes),
+                    general_error_policy,
+                )| {
+                    CreateStatement::new(
+                        CreateIngestor {
+                            labels: Default::default(),
+                            name: declared.name,
+                            output_routes,
+                            input: declared.input,
+                            timestamp_source,
+                            general_error_policy,
+                            filter_where,
+                        },
+                        if_not_exists,
+                    )
+                },
+            )
+            .boxed()
+    })
 }
 
 /// The operations every ingestor accepts whatever it reads: a quiesce mode its entity declares, the

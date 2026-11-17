@@ -129,7 +129,9 @@ impl Proposer {
     ) -> error_stack::Result<(), ConsensusError> {
         let response = self
             .inner
-            .client_write(ConsensusCommand::SeedClusterParameters { values })
+            .client_write(ConsensusCommand::SeedClusterParameters {
+                values: Box::new(values),
+            })
             .await?;
         Self::applied_response(response.data)
     }

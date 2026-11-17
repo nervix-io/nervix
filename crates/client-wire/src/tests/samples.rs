@@ -334,6 +334,7 @@ pub(crate) fn domain_clock_observations() -> Vec<DomainClockObservation> {
 
 pub(crate) fn command_outcome(disposition: CommandDisposition) -> CommandOutcome {
     CommandOutcome {
+        entity_labels: None,
         execution_reference: reference("0192d4e4-7b36-7c3e-9f00-5b2d8c3a1e44"),
         origin: OutcomeOrigin::Recovered,
         disposition,

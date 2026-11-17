@@ -171,6 +171,7 @@ mod tests {
 
     pub(super) fn definition(sensitive: bool) -> RelaySubscriptionDefinition {
         let schema = CreateSchema {
+            labels: Default::default(),
             name: named("event"),
             fields: vec![SchemaField {
                 name: named("secret"),
