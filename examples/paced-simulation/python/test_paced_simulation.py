@@ -2,6 +2,7 @@
 
 import unittest
 import sys
+import tempfile
 from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
 from types import SimpleNamespace
@@ -169,6 +170,30 @@ class ClockPolicyTests(unittest.TestCase):
 
 
 class OutcomeTests(unittest.TestCase):
+    def test_a_completed_ordinary_reading_waits_for_its_unobserved_rejection(self):
+        run = driver.Run(SimpleNamespace())
+        endpoint = Mock()
+        endpoint.rejoin.return_value = SimpleNamespace(result=driver.nx.SubmissionResult.COMPLETED)
+        producer = driver.Producer(endpoint)
+        producer.outstanding.update(batches=1, bytes=64)
+        run.ledger = Mock()
+        with tempfile.TemporaryDirectory() as directory:
+            run.effects = driver.EffectStore(str(Path(directory) / "effects.jsonl"))
+            run.effects.apply("reading", {
+                "kind": "reading", "reading_id": "applied", "sensor": "sensor-0", "tick": 1,
+                "occurred_at": driver.rfc3339(100), "admitted_at": driver.rfc3339(101),
+                "timestamp_source": "at", "value": 1, "generation": 7,
+            })
+            run.effects.apply("rejection", {
+                "kind": "rejection", "reading_id": "noticed", "occurred_at": driver.rfc3339(0),
+                "error_code": "validation", "error_message": "outside", "generation": 7,
+            })
+            with patch.object(driver, "line"):
+                run.await_outcome(producer, 3, ["late", "applied", "noticed"], 64, 12)
+            run.effects.file.close()
+        self.assertEqual(run.awaited_notices, ["late"])
+        self.assertEqual(producer.outstanding, {"batches": 0, "bytes": 0})
+
     def test_terminal_outcomes_preserve_the_ledger_cause(self):
         cases = [
             (SimpleNamespace(result=driver.nx.SubmissionResult.COMPLETED), ("completed", "")),
@@ -196,11 +221,13 @@ class OutcomeTests(unittest.TestCase):
         replacement.outstanding.update(batches=2, bytes=128)
         run.producer = replacement
         run.ledger = Mock()
+        run.effects = Mock()
+        run.effects.pending_notices.return_value = ["reading"]
         with patch.object(driver, "line"):
-            run.await_outcome(submitting, 3, ["reading"], ["rejection"], 64, 12)
+            run.await_outcome(submitting, 3, ["reading"], 64, 12)
         self.assertEqual(submitting.outstanding, {"batches": 0, "bytes": 0})
         self.assertEqual(replacement.outstanding, {"batches": 2, "bytes": 128})
-        self.assertEqual(run.awaited_notices, ["rejection"])
+        self.assertEqual(run.awaited_notices, ["reading"])
         run.ledger.outcome.assert_called_once_with(["reading"], "completed", "")
 
 

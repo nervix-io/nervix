@@ -416,9 +416,6 @@ struct Prepared {
 struct Submission {
     tick: u64,
     reading_ids: Vec<String>,
-    /// The readings of the batch a `TIMESTAMP AT` ingestor rejects, whose notices the run waits
-    /// for once the batch completed.
-    rejected_ids: Vec<String>,
     bytes: u64,
     id: SubmissionId,
 }
@@ -438,9 +435,8 @@ struct Planner {
     /// The generation the consumers follow.
     generations: watch::Sender<u64>,
     outcomes: Vec<JoinHandle<()>>,
-    /// The readings of completed batches whose rejection notices the run waits for before it
-    /// stops its consumers: an error route acknowledges a reading once its notice is published,
-    /// before the rejection emitter delivers it.
+    /// Completed readings still absent from the effect store. An error route acknowledges
+    /// publication before delivery, including when a center expires in transit.
     awaited_notices: Arc<SyncMutex<Vec<String>>>,
     effects: Arc<Mutex<EffectStore>>,
     /// Ends the planning, when the application is interrupted or a consumer could not open.
@@ -713,14 +709,8 @@ impl Planner {
         } = prepared;
         let count = u64::try_from(readings.len()).assured("a batch's row count fits u64");
         let mut reading_ids = Vec::with_capacity(readings.len());
-        let mut rejected_ids = Vec::new();
         for reading in &readings {
             reading_ids.push(reading.reading_id.clone());
-            if self.settings.timestamps == TimestampSource::At
-                && reading.stamp == Stamp::BeforeWindow
-            {
-                rejected_ids.push(reading.reading_id.clone());
-            }
         }
         self.ledger
             .readings(
@@ -780,7 +770,6 @@ impl Planner {
         let submission = Submission {
             tick,
             reading_ids,
-            rejected_ids,
             bytes,
             id,
         };
@@ -792,6 +781,7 @@ impl Planner {
                 counters: self.counters.clone(),
                 credit: self.credit.clone(),
                 awaited_notices: self.awaited_notices.clone(),
+                effects: self.effects.clone(),
             },
         ));
         self.outcomes.push(task);
@@ -1037,6 +1027,7 @@ struct Awaiting {
     counters: Arc<Counters>,
     credit: Arc<Credit>,
     awaited_notices: Arc<SyncMutex<Vec<String>>>,
+    effects: Arc<Mutex<EffectStore>>,
 }
 
 /// Awaits one submission's terminal outcome, records it in the ledger and reports it.
@@ -1044,7 +1035,6 @@ async fn await_outcome(submission: Submission, awaiting: Awaiting) {
     let Submission {
         tick,
         reading_ids,
-        rejected_ids,
         bytes,
         id,
     } = submission;
@@ -1056,7 +1046,8 @@ async fn await_outcome(submission: Submission, awaiting: Awaiting) {
     awaiting.credit.release(bytes);
     let (kind, cause) = outcome_of(&outcome);
     if kind == OutcomeKind::Completed {
-        awaiting.awaited_notices.lock().extend(rejected_ids);
+        let pending = awaiting.effects.lock().await.pending_notices(&reading_ids);
+        awaiting.awaited_notices.lock().extend(pending);
     }
     let count = u64::try_from(reading_ids.len()).assured("a batch's row count fits u64");
     if let Err(error) = awaiting.ledger.outcome(reading_ids, kind, cause).await {

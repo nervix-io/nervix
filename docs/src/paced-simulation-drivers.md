@@ -160,6 +160,9 @@ long as its window still retains them: the newest 256 reached centers. A center 
 longer retains is skipped with a `SKIPPED` line instead of being submitted only to be rejected.
 Skipped centers do not count toward `--ticks`: the driver continues until it has submitted the
 requested number of tick centers, or a stop, generation change or endpoint refusal ends the run.
+The clock can advance between the driver's check and server admission. If a center expires in
+transit, its timestamp rejection is an application outcome, recorded in the effect store just like
+a deliberately invalid reading's rejection.
 
 ## What A Run Does
 
@@ -180,8 +183,8 @@ requested number of tick centers, or a stop, generation change or endpoint refus
 4. Each consumer decodes a delivery, records its readings in the effect store, and only then
    acknowledges it.
 5. Once it submitted its last tick it waits for the outcomes it still awaits, and for the
-   rejection notices of its completed batches, up to `--deadline`; closes its producer and
-   consumers; detaches the clock; and prints its summary.
+   rejection notices still absent from the effect store, including centers that expired in transit,
+   up to `--deadline`; closes its producer and consumers; detaches the clock; and prints its summary.
 
 The drivers take the tick centers from the committed logical origin and `PERIOD`, one center per
 period. Every wait, current logical instant and admission check comes from the attached clock's

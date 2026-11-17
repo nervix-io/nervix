@@ -498,6 +498,16 @@ class EffectStore:
             self.condition.notify_all()
             return True
 
+    def pending_notices(self, reading_ids: list[str]) -> list[str]:
+        """Completed readings without an observed effect still await their rejection notice.
+
+        A normal reading effect precedes its acknowledgement; an error route acknowledges the
+        publication of a notice before the rejection consumer necessarily receives it.
+        """
+        with self.condition:
+            return [reading_id for reading_id in reading_ids
+                    if reading_id not in self.readings and reading_id not in self.rejections]
+
     def await_rejections(self, reading_ids: list[str], until: float,
                          stopping: Callable[[], bool]) -> None:
         """Waits until the store holds the rejection notice of every reading in `reading_ids`, or
@@ -1079,9 +1089,8 @@ class Run:
         self.refused: ConfigurationError | None = None
         self.ledger: Ledger | None = None
         self.effects: EffectStore | None = None
-        # The readings of completed batches whose rejection notices the run waits for before it
-        # stops its consumers: an error route acknowledges a reading once its notice is
-        # published, before the rejection emitter delivers it.
+        # Completed readings still absent from the effect store. An error route acknowledges
+        # publication before its notice is delivered, including when a center expires in transit.
         self.awaited_notices: list[str] = []
 
     # The generation the consumers follow.
@@ -1373,8 +1382,6 @@ class Run:
         tick, readings, batch, size = (prepared["tick"], prepared["readings"], prepared["batch"],
                                        prepared["size"])
         reading_ids = [reading.reading_id for reading in readings]
-        rejected_ids = [reading.reading_id for reading in readings
-                        if self.settings.timestamps == "at" and reading.stamp == "before_window"]
         assert self.ledger is not None
         self.ledger.readings(readings, self.settings.ingestor, self.settings.timestamps)
         self.counters.add("readings", len(readings))
@@ -1407,7 +1414,7 @@ class Run:
         line(f"SUBMITTED tick={tick} readings={len(readings)} bytes={size}")
         thread = threading.Thread(
             target=self.await_outcome,
-            args=(self.producer, tick, reading_ids, rejected_ids, size,
+            args=(self.producer, tick, reading_ids, size,
                   submission),
             name=f"outcome-{tick}", daemon=True)
         thread.start()
@@ -1420,16 +1427,19 @@ class Run:
         line(outcome_line(tick, len(reading_ids), "not_admitted", cause))
 
     def await_outcome(self, producer: Producer, tick: int, reading_ids: list[str],
-                      rejected_ids: list[str], size: int, submission: int) -> None:
+                      size: int, submission: int) -> None:
         outcome = producer.endpoint.rejoin(submission)
         kind, cause = outcome_of(outcome)
         del outcome
         with self.credit:
             producer.outstanding["batches"] -= 1
             producer.outstanding["bytes"] -= size
-            if kind == "completed":
-                self.awaited_notices.extend(rejected_ids)
             self.credit.notify_all()
+        if kind == "completed":
+            assert self.effects is not None
+            pending = self.effects.pending_notices(reading_ids)
+            with self.credit:
+                self.awaited_notices.extend(pending)
         assert self.ledger is not None
         try:
             self.ledger.outcome(reading_ids, kind, cause)
