@@ -160,6 +160,22 @@ impl Default for ShutdownSettings {
     }
 }
 
+impl ShutdownTimeout {
+    pub const DEFAULT: Duration = Duration::from_secs(50);
+}
+impl DrainTimeout {
+    pub const DEFAULT: Duration = Duration::from_secs(30);
+}
+impl ShutdownSettings {
+    pub fn capabilities(self) -> crate::ShutdownCapabilities {
+        crate::ShutdownCapabilities {
+            shutdown_timeout: self.shutdown_timeout(),
+            drain_timeout: self.drain_timeout(),
+            task_grace_period: self.task_grace_period(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
@@ -224,21 +240,5 @@ mod tests {
             format!("{refused:#}"),
             "drain-timeout (60s) must not exceed shutdown-timeout (50s)"
         );
-    }
-}
-
-impl ShutdownTimeout {
-    pub const DEFAULT: Duration = Duration::from_secs(50);
-}
-impl DrainTimeout {
-    pub const DEFAULT: Duration = Duration::from_secs(30);
-}
-impl ShutdownSettings {
-    pub fn capabilities(self) -> crate::ShutdownCapabilities {
-        crate::ShutdownCapabilities {
-            shutdown_timeout: self.shutdown_timeout(),
-            drain_timeout: self.drain_timeout(),
-            task_grace_period: self.task_grace_period(),
-        }
     }
 }
