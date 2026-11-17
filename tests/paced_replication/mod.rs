@@ -22,7 +22,7 @@ pub(crate) struct MovingCatchUp {
     attempts: BTreeMap<String, u64>,
 }
 
-#[then(expr = "within {string} a failed append-stream setup toward node {string} is observed")]
+#[then(expr = "within {string} a replication setup attempt toward node {string} is observed")]
 async fn then_failed_append_setup_is_observed(
     world: &mut ScenarioWorld,
     bound: String,
@@ -48,7 +48,7 @@ async fn then_failed_append_setup_is_observed(
                 .any(|(source, baseline)| {
                     world
                         .fault_injection
-                        .consensus_append_stream_attempt_count(&node_name(source), &target)
+                        .consensus_replication_attempt_count(&node_name(source), &target)
                         > *baseline
                 })
             {
@@ -59,7 +59,9 @@ async fn then_failed_append_setup_is_observed(
     })
     .await
     .unwrap_or_else(|error| {
-        panic!("the departed follower received no setup attempt within {bound}: {error}")
+        panic!(
+            "the departed follower received no replication setup attempt within {bound}: {error}"
+        )
     });
 }
 

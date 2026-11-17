@@ -649,7 +649,9 @@ Feature: MQTT ingestion
   # The ingestor's client connects to the broker listener that holds it to a 10-second keep-alive
   # and closes a connection that sends nothing for 15 seconds. The stalled emitter holds the
   # publish's acknowledgement for two of those keep-alive intervals.
-  @mqtt_qos0_overflow_during_acknowledgement
+  # Reserve for the 128-publish flood, filtered acknowledgement drain and replicated three-node
+  # case. The shared quarter-pool cap still lets other scenarios make progress.
+  @mqtt_qos0_overflow_during_acknowledgement @slots_8
   Scenario Outline: An MQTT ACK SEQUENTIAL ingestor keeps polling when QoS 0 fills its read-ahead during an acknowledgement wait
     Given MQTT is running
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
@@ -720,7 +722,15 @@ Feature: MQTT ingestion
       "user_id":61
       """
     When 128 JSON messages with user id 62 are rapidly published to "MQTT" input "overflow_ack_{{test_id}}"
-    And MQTT QoS 1 message is published to topic "overflow_ack_{{test_id}}"
+    Then node "{{mqtt_owner}}" observability metric "nervix_ingestor_read_ahead_dropped_payloads_total" with labels eventually equals 64
+      """
+      domain="{{domain}}"
+      ingestor="mqtt_notifications"
+      physical_node_id="{{mqtt_owner}}"
+      connector="MQTT"
+      entity="TOPIC"
+      """
+    When MQTT QoS 1 message is published to topic "overflow_ack_{{test_id}}"
       """
       {"user_id":63}
       """
