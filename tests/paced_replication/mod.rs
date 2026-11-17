@@ -9,7 +9,7 @@ use std::{collections::BTreeMap, time::Duration};
 
 use cucumber::{given, then, when};
 use meticulous::OptionExt as _;
-use nervix_primitives::time::{Instant, sleep};
+use nervix_primitives::time::{Instant, sleep, timeout};
 
 use crate::{
     ScenarioWorld, applied_burst_domains, common::cluster::node_name, expand_placeholders,
@@ -20,6 +20,46 @@ pub(crate) struct MovingCatchUp {
     follower: String,
     opens: BTreeMap<String, u64>,
     attempts: BTreeMap<String, u64>,
+}
+
+#[then(expr = "within {string} a failed append-stream setup toward node {string} is observed")]
+async fn then_failed_append_setup_is_observed(
+    world: &mut ScenarioWorld,
+    bound: String,
+    target: String,
+) {
+    let target = expand_placeholders(world, &target);
+    let observation = world
+        .append_setup_observation
+        .as_ref()
+        .assured("the preceding step started the append-input observation");
+    assert_eq!(
+        target, observation.target,
+        "observe the same departed voter"
+    );
+    let target = node_name(&target);
+    let budget = crate::parse_duration_text(&bound).expect("a valid observation bound");
+    timeout(budget, async {
+        loop {
+            if observation
+                .attempts_at_start
+                .iter()
+                .any(|(source, baseline)| {
+                    world
+                        .fault_injection
+                        .consensus_append_stream_attempt_count(&node_name(source), &target)
+                        > *baseline
+                })
+            {
+                return;
+            }
+            sleep(Duration::from_millis(200)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|error| {
+        panic!("the departed follower received no setup attempt within {bound}: {error}")
+    });
 }
 
 #[given(

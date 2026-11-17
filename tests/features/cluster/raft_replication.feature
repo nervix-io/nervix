@@ -77,6 +77,7 @@ Feature: Pipelined raft replication and bounded log retention
     When 40 domains named "paced_majority" are created on the leader node
     Then within "60s" node "node-1" has applied 40 domains named "paced_majority"
     And within "60s" node "node-2" has applied 40 domains named "paced_majority"
+    And within "60s" a failed append-stream setup toward node "node-3" is observed
     And append-stream setup attempts toward node "node-3" respect the caller retry delay
     When node "node-3" is started
     Then within "60s" node "node-3" has applied 40 domains named "paced_majority"
