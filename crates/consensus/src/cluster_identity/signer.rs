@@ -25,6 +25,12 @@ struct SigningIdentity {
     executor: Executor,
 }
 
+enum SigningOperation {
+    Current,
+    Rotation(uuid::Uuid),
+    Release(uuid::Uuid),
+}
+
 /// A leader coordinator's signing capability. It has no private-key export operation.
 /// The coordinator owns its leadership lifetime and ends use when that tenure ends.
 /// The maintained signer clears its owned private DER and native key on drop.
@@ -47,11 +53,33 @@ impl ClusterSigner {
         record: &super::ClusterIdentityRecord,
         executor: Executor,
     ) -> Result<Self, Report<ClusterIdentityError>> {
-        let signer = DocumentSigner::from_pkcs8(&record.current_key.private_pkcs8.0)
+        Self::from_key(&record.current_key, executor)
+    }
+
+    fn from_key(
+        key: &super::ClusterKey,
+        executor: Executor,
+    ) -> Result<Self, Report<ClusterIdentityError>> {
+        let signer = DocumentSigner::from_pkcs8(&key.private_pkcs8.0)
             .change_context(ClusterIdentityError::PrivateKey)?;
         Ok(Self {
             inner: Arc::new(SigningIdentity { signer, executor }),
         })
+    }
+
+    fn from_pending(
+        record: &super::ClusterIdentityRecord,
+        request_id: uuid::Uuid,
+        executor: Executor,
+    ) -> Result<Self, Report<ClusterIdentityError>> {
+        let pending = record
+            .pending_key
+            .as_ref()
+            .ok_or_else(|| Report::new(ClusterIdentityError::NoPendingRotation))?;
+        if pending.request_id != request_id {
+            return Err(Report::new(ClusterIdentityError::StaleRotation));
+        }
+        Self::from_key(&pending.key, executor)
     }
 
     /// Sign within the caller's admitted document working set. The reservation must cover the
@@ -93,6 +121,29 @@ impl Proposer {
     pub async fn cluster_signer(
         &self,
     ) -> error_stack::Result<Option<ClusterSigner>, ConsensusError> {
+        self.cluster_signer_for(SigningOperation::Current).await
+    }
+
+    pub async fn pending_cluster_signer(
+        &self,
+        request_id: uuid::Uuid,
+    ) -> error_stack::Result<Option<ClusterSigner>, ConsensusError> {
+        self.cluster_signer_for(SigningOperation::Rotation(request_id))
+            .await
+    }
+
+    pub async fn released_cluster_signer(
+        &self,
+        request_id: uuid::Uuid,
+    ) -> error_stack::Result<Option<ClusterSigner>, ConsensusError> {
+        self.cluster_signer_for(SigningOperation::Release(request_id))
+            .await
+    }
+
+    async fn cluster_signer_for(
+        &self,
+        operation: SigningOperation,
+    ) -> error_stack::Result<Option<ClusterSigner>, ConsensusError> {
         let tenure = self.current_leader_tenure().ok_or_else(|| {
             Report::new(ConsensusError::LeadershipLost {
                 observed: LeadershipObservation::NoLeader,
@@ -103,7 +154,8 @@ impl Proposer {
                 observed: LeadershipObservation::Leader(tenure.leader_id().clone()),
             }));
         }
-        let Some(record) = self.inner.store.inner.state().cluster_identity else {
+        let state = self.inner.store.inner.state();
+        let Some(record) = state.cluster_identity else {
             return Ok(None);
         };
         let executor = self.inner.store.inner.executor.clone();
@@ -125,7 +177,33 @@ impl Proposer {
                     cancellation
                         .check()
                         .change_context(ClusterIdentityError::Cancelled)?;
-                    let signer = ClusterSigner::from_record(&record, signer_executor)?;
+                    let signer = match operation {
+                        SigningOperation::Rotation(request_id) => {
+                            ClusterSigner::from_pending(&record, request_id, signer_executor)?
+                        }
+                        SigningOperation::Current => {
+                            ClusterSigner::from_record(&record, signer_executor)?
+                        }
+                        SigningOperation::Release(request_id) => {
+                            let licensing = state.licensing.ok_or_else(|| {
+                                Report::new(ClusterIdentityError::SigningKeyUnavailable)
+                            })?;
+                            let crate::LicensingMode::Released(release) = &licensing.mode else {
+                                return Err(Report::new(
+                                    ClusterIdentityError::SigningKeyUnavailable,
+                                ));
+                            };
+                            if release.request_id != request_id {
+                                return Err(Report::new(
+                                    ClusterIdentityError::SigningKeyUnavailable,
+                                ));
+                            }
+                            let key = release.signing_key().ok_or_else(|| {
+                                Report::new(ClusterIdentityError::SigningKeyUnavailable)
+                            })?;
+                            ClusterSigner::from_key(key, signer_executor)?
+                        }
+                    };
                     cancellation
                         .check()
                         .change_context(ClusterIdentityError::Cancelled)?;

@@ -16,11 +16,17 @@ use nervix_primitives::{
     task::JoinSet,
     time::{Instant, sleep},
 };
+use uuid::Uuid;
 
 use super::{LicensingOperationError, clock};
 use crate::{application::session_service::SessionServiceImpl, licensing::policy::PolicyState};
 
-type RefreshAttempts = JoinSet<Result<(), Report<LicensingOperationError>>>;
+struct RequestAttempt {
+    activation_id: Option<Uuid>,
+    result: Result<(), Report<LicensingOperationError>>,
+}
+
+type RefreshAttempts = JoinSet<RequestAttempt>;
 
 pub(in crate::application) async fn run(service: SessionServiceImpl, shutdown: CancellationToken) {
     let observer = service.inner.consensus.observer();
@@ -28,8 +34,8 @@ pub(in crate::application) async fn run(service: SessionServiceImpl, shutdown: C
     let mut applied = observer.subscribe_applied();
     let mut requests = RefreshAttempts::new();
     let mut streams = super::stream::StreamTasks::default();
-    let (hints, mut hint_changes) = nervix_primitives::sync::watch::channel(());
-    let mut notification_due = false;
+    let (hints, mut hint_changes) = nervix_primitives::sync::watch::channel(None);
+    let mut notification_due = None;
     let mut connectivity_changes = service.inner.licensing.connectivity_changes();
     let mut clock_changes = service
         .inner
@@ -40,6 +46,7 @@ pub(in crate::application) async fn run(service: SessionServiceImpl, shutdown: C
     let mut retry_at = Instant::now();
     let mut announced = None;
     let mut published = None;
+    let mut refreshed_revocations = None;
     loop {
         nervix_primitives::task::consume_budget().await;
         let current = service
@@ -53,10 +60,11 @@ pub(in crate::application) async fn run(service: SessionServiceImpl, shutdown: C
                 nervix_primitives::task::consume_budget().await;
             }
             streams.stop().await;
-            notification_due = false;
+            notification_due = None;
             hint_changes.borrow_and_update();
             tenure = current;
             retry_at = Instant::now();
+            refreshed_revocations = None;
         }
         streams.reconcile(&service, tenure.is_some(), &hints).await;
         let publication = (tenure.clone(), service.inner.licensing.connectivity());
@@ -77,6 +85,7 @@ pub(in crate::application) async fn run(service: SessionServiceImpl, shutdown: C
                 &mut requests,
                 retry_at,
                 &mut announced,
+                &mut refreshed_revocations,
                 &mut notification_due,
             )
             .await
@@ -113,7 +122,7 @@ pub(in crate::application) async fn run(service: SessionServiceImpl, shutdown: C
         nervix_primitives::select! {
             changed = hint_changes.changed() => {
                 if changed.is_err() { break; }
-                notification_due = true;
+                notification_due = *hint_changes.borrow_and_update();
                 retry_at = Instant::now();
                 service.inner.licensing_requests.expedite();
             },
@@ -129,12 +138,13 @@ pub(in crate::application) async fn run(service: SessionServiceImpl, shutdown: C
             changed = topology.changed() => if !changed { break; },
             changed = applied.changed() => if changed.is_err() { break; },
             completed = requests.join_next(), if !requests.is_empty() => {
-                let succeeded = matches!(&completed, Some(Ok(Ok(()))));
-                if !succeeded {
-                    notification_due = true;
-                }
+                let succeeded = matches!(&completed, Some(Ok(attempt)) if attempt.result.is_ok());
+                restore_failed_hint(&completed, &mut notification_due, || {
+                    service.inner.consensus.observer().licensing_snapshot().initialized
+                        .and_then(|state| activation_id(&state.record.mode))
+                });
                 report_attempt(completed);
-                retry_at = Instant::now() + if succeeded && notification_due {
+                retry_at = Instant::now() + if succeeded && notification_due.is_some() {
                     Duration::ZERO
                 } else {
                     service.cluster_parameters().licensing_request_timeout()
@@ -160,16 +170,22 @@ async fn reconcile(
     requests: &mut RefreshAttempts,
     retry_at: Instant,
     announced: &mut Option<PolicyState>,
-    notification_due: &mut bool,
+    refreshed_revocations: &mut Option<Vec<u64>>,
+    notification_due: &mut Option<Uuid>,
 ) -> Option<Duration> {
     let policy = crate::licensing::policy::evaluate_policy(
         service.inner.consensus.observer().licensing_snapshot(),
     );
     let initialized = policy.snapshot.initialized.as_ref()?;
-    if !matches!(
+    let pending = initialized.rotation.is_some()
+        || matches!(&initialized.record.mode,
+        nervix_consensus::LicensingMode::Released(release) if release.awaiting());
+    if matches!(
         initialized.record.mode,
-        nervix_consensus::LicensingMode::Activated(_)
-    ) {
+        nervix_consensus::LicensingMode::Free { .. }
+    ) && !pending
+    {
+        *notification_due = None;
         return None;
     }
     let now = clock::observe(service.inner.runtime.fault_injection());
@@ -188,13 +204,53 @@ async fn reconcile(
         }
     }
     let due = match &initialized.verification {
-        Some(Ok(verified)) => now.into_datetime() >= verified.decision.timing.refresh_after,
+        Some(Ok(verified)) => {
+            verified.signing_key_revoked
+                || now.into_datetime() >= verified.decision.timing.refresh_after
+        }
         Some(Err(_)) | None => true,
     };
-    if (due || *notification_due) && requests.is_empty() && Instant::now() >= retry_at {
-        *notification_due = false;
+    let revocations = initialized
+        .record
+        .trust
+        .iter()
+        .filter(|document| {
+            document.typ == nervix_licensing_protocol::document::DocumentType::Revocation
+        })
+        .map(|document| document.serial)
+        .collect::<Vec<_>>();
+    let newly_revoked = !pending
+        && matches!(&initialized.verification, Some(Ok(verified)) if verified.signing_key_revoked)
+        && refreshed_revocations.as_ref() != Some(&revocations);
+    let binding = activation_id(&initialized.record.mode);
+    let notified = notification_due.is_some() && *notification_due == binding;
+    if (pending
+        || (due || notified)
+            && matches!(
+                initialized.record.mode,
+                nervix_consensus::LicensingMode::Activated(_)
+            ))
+        && requests.is_empty()
+        && (newly_revoked || Instant::now() >= retry_at)
+    {
+        if newly_revoked {
+            *refreshed_revocations = Some(revocations);
+        }
+        if !pending {
+            *notification_due = None;
+        }
         let requester = service.clone();
-        requests.spawn(async move { requester.refresh_license_in_background().await });
+        requests.spawn(async move {
+            let result = if pending {
+                requester.resume_licensing_operations().await
+            } else {
+                requester.refresh_license_in_background().await
+            };
+            RequestAttempt {
+                activation_id: binding,
+                result,
+            }
+        });
     }
     if *announced != Some(policy.state) {
         publish_warning(service, policy.state, initialized.record.licensing_time);
@@ -203,19 +259,82 @@ async fn reconcile(
     delay
 }
 
-fn report_attempt(
-    completed: Option<
-        Result<Result<(), Report<LicensingOperationError>>, nervix_primitives::task::JoinError>,
-    >,
-) {
+fn report_attempt(completed: Option<Result<RequestAttempt, nervix_primitives::task::JoinError>>) {
     match completed {
-        Some(Ok(Err(error))) => {
+        Some(Ok(RequestAttempt {
+            result: Err(error), ..
+        })) => {
             tracing::warn!(error = %format_args!("{error:#}"), "licensing refresh failed")
         }
         Some(Err(error)) => {
             tracing::warn!(error = %error, "licensing refresh task ended unexpectedly")
         }
-        Some(Ok(Ok(()))) | None => {}
+        Some(Ok(RequestAttempt { result: Ok(()), .. })) | None => {}
+    }
+}
+
+fn activation_id(mode: &nervix_consensus::LicensingMode) -> Option<Uuid> {
+    match mode {
+        nervix_consensus::LicensingMode::Activated(activation) => {
+            Some(activation.binding.activation_id)
+        }
+        nervix_consensus::LicensingMode::Released(release) => {
+            Some(release.activation.binding.activation_id)
+        }
+        nervix_consensus::LicensingMode::Free { .. } => None,
+    }
+}
+
+fn restore_failed_hint(
+    completed: &Option<Result<RequestAttempt, nervix_primitives::task::JoinError>>,
+    notification_due: &mut Option<Uuid>,
+    current_binding: impl FnOnce() -> Option<Uuid>,
+) {
+    if notification_due.is_some() {
+        return;
+    }
+    *notification_due = match completed {
+        Some(Ok(attempt)) if attempt.result.is_err() => attempt.activation_id,
+        Some(Err(_)) => current_binding(),
+        _ => None,
+    };
+}
+
+#[cfg(test)]
+mod hint_tests {
+    use super::*;
+
+    #[test]
+    fn a_failed_request_keeps_its_activation_without_replacing_a_newer_hint() {
+        let previous = Uuid::from_u128(1);
+        let current = Uuid::from_u128(2);
+        let completed = Some(Ok(RequestAttempt {
+            activation_id: Some(previous),
+            result: Err(Report::new(LicensingOperationError::Request)),
+        }));
+        let mut hint = Some(current);
+        restore_failed_hint(&completed, &mut hint, || {
+            panic!("the request retained its binding")
+        });
+        assert_eq!(hint, Some(current));
+        hint = None;
+        restore_failed_hint(&completed, &mut hint, || {
+            panic!("the request retained its binding")
+        });
+        assert_eq!(hint, Some(previous));
+    }
+
+    #[test]
+    fn success_never_restores_a_completed_notification() {
+        let completed = Some(Ok(RequestAttempt {
+            activation_id: Some(Uuid::from_u128(1)),
+            result: Ok(()),
+        }));
+        let mut hint = None;
+        restore_failed_hint(&completed, &mut hint, || {
+            panic!("a completed request needs no snapshot")
+        });
+        assert_eq!(hint, None);
     }
 }
 

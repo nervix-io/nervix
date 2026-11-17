@@ -11,7 +11,10 @@
 )]
 
 pub(crate) mod archive;
+mod rotation;
 mod signer;
+pub(super) use rotation::begin as begin_rotation;
+pub use rotation::{ClusterKeyRotation, PendingClusterKey};
 #[cfg(test)]
 pub(crate) mod tests;
 
@@ -38,7 +41,19 @@ use crate::{
     StateMachineChanges, StateMachineData,
 };
 
-#[derive(Debug, PartialEq, Eq, Error)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Error,
+    Serialize,
+    Deserialize,
+    Archive,
+    RkyvSerialize,
+    RkyvDeserialize,
+)]
 pub enum ClusterIdentityError {
     #[error("the cluster UID is not a version-4 RFC 4122 UUID")]
     Uid,
@@ -58,16 +73,31 @@ pub enum ClusterIdentityError {
     Cancelled,
     #[error("failed to sign the cluster document")]
     Sign,
+    #[error("cluster key rotation is already in progress")]
+    RotationInProgress,
+    #[error("there is no matching pending cluster key rotation")]
+    NoPendingRotation,
+    #[error("the cluster key rotation proposal is stale")]
+    StaleRotation,
+    #[error("the cluster key generation is exhausted")]
+    GenerationExhausted,
+    #[error("the requested cluster signing capability is no longer available")]
+    SigningKeyUnavailable,
 }
 
 /// The public projection an observer may read. It carries no private-key owner.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct ClusterIdentity {
+    #[rkyv(with = archive::UuidBytes)]
     pub cluster_uid: Uuid,
     pub created_at: Timestamp,
     pub key_generation: NonZeroU64,
     pub ever_activated: bool,
+    #[rkyv(with = archive::KeyIdentity)]
     pub kid: KeyId,
+    #[rkyv(with = archive::PublicCoordinates)]
     pub public_jwk: PublicKey,
 }
 
@@ -99,30 +129,26 @@ struct ClusterIdentityFields {
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize)]
 #[serde(deny_unknown_fields)]
-struct ClusterKey {
+pub(crate) struct ClusterKey {
     #[rkyv(with = archive::KeyIdentity)]
-    kid: KeyId,
+    pub(crate) kid: KeyId,
     #[rkyv(with = archive::PublicCoordinates)]
-    public_jwk: PublicKey,
-    private_pkcs8: ClusterPrivateKey,
+    pub(crate) public_jwk: PublicKey,
+    pub(crate) private_pkcs8: ClusterPrivateKey,
 }
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize)]
 struct RetiredClusterKey {
+    reference: nervix_models::CommandExecutionReference,
     #[serde(flatten)]
     key: ClusterKey,
     retired_at: Timestamp,
+    #[rkyv(with = archive::UuidBytes)]
+    request_id: Uuid,
 }
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize)]
-struct PendingClusterKey {
-    #[serde(flatten)]
-    key: ClusterKey,
-    requested_at: Timestamp,
-}
-
-#[derive(Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize)]
-struct ClusterPrivateKey(Vec<u8>);
+pub(crate) struct ClusterPrivateKey(pub(crate) Vec<u8>);
 
 impl Drop for ClusterPrivateKey {
     fn drop(&mut self) {
@@ -143,7 +169,7 @@ impl fmt::Debug for ClusterIdentityRecord {
 }
 
 impl ClusterKey {
-    fn validate(&self) -> Result<(), Report<ClusterIdentityError>> {
+    pub(crate) fn validate(&self) -> Result<(), Report<ClusterIdentityError>> {
         let signer = DocumentSigner::from_pkcs8(&self.private_pkcs8.0)
             .change_context(ClusterIdentityError::PrivateKey)?;
         if signer.public_key() != &self.public_jwk {
@@ -157,6 +183,10 @@ impl ClusterKey {
 }
 
 impl ClusterIdentityRecord {
+    pub(crate) fn retain_release_key(&self) -> ClusterKey {
+        self.current_key.clone()
+    }
+
     pub(crate) fn mark_activated(&mut self) {
         self.ever_activated = true;
     }
@@ -187,7 +217,7 @@ impl ClusterIdentityRecord {
             retired.key.validate()?;
         }
         if let Some(pending) = &self.pending_key {
-            pending.key.validate()?;
+            pending.validate(self)?;
         }
         Ok(())
     }

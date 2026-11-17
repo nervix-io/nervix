@@ -24,26 +24,27 @@ use strum::{AsRefStr, EnumIter, EnumProperty, EnumString, IntoEnumIterator, Into
 use thiserror::Error;
 
 use crate::{
-    AlterDeduplicator, AlterEmitter, AlterJunction, AlterPlacement, AlterReingestor,
-    AlterReorderer, AlterSchema, AlterWireSchema, AvroType, Backup, BranchName, BranchPartitions,
-    CborType, ClientConfigEntry, ClientName, ClusterNodeName, CodecName, ConnectorKind,
-    CorrelatorName, CreateAvroWireSchema, CreateCborWireSchema, CreateClientAzureBlob,
-    CreateClientClickHouse, CreateClientGcs, CreateClientHttp, CreateClientIcebergRest,
-    CreateClientKafka, CreateClientMongoDb, CreateClientMqtt, CreateClientMySql, CreateClientNats,
-    CreateClientOtel, CreateClientPostgres, CreateClientPrometheus, CreateClientPulsar,
-    CreateClientRabbitMq, CreateClientRedis, CreateClientS3, CreateClientSentry, CreateClientSqs,
-    CreateClientSyslog, CreateClientWebsockets, CreateClientZeroMq, CreateCorrelator,
-    CreateDeduplicator, CreateEmitter, CreateInferencer, CreateJsonWireSchema, CreateJunction,
-    CreatePlacement, CreateReingestor, CreateReorderer, CreateSchema, CreateUdf,
-    CreateWasmProcessor, CreateWindowProcessor, DeduplicatorName, DescribeInferencer,
-    DescribeWasmProcessor, DomainClockPeriod, DomainClockSkew, DomainClockState, DomainName,
-    DomainTimeRate, EmitterName, EndpointName, FieldName, GeneratorName, IngestQuiesceMode,
-    IngestorName, JsonType, JunctionName, LookupName, ModelName, NodeRef, PlacementName,
-    ProcessorOutput, ProcessorOutputs, RebindResource, ReingestorName, RelayName, ReordererName,
+    ActivateLicense, AlterDeduplicator, AlterEmitter, AlterJunction, AlterPlacement,
+    AlterReingestor, AlterReorderer, AlterSchema, AlterWireSchema, AvroType, Backup, BranchName,
+    BranchPartitions, CborType, ClientConfigEntry, ClientName, ClusterNodeName, CodecName,
+    ConnectorKind, CorrelatorName, CreateAvroWireSchema, CreateCborWireSchema,
+    CreateClientAzureBlob, CreateClientClickHouse, CreateClientGcs, CreateClientHttp,
+    CreateClientIcebergRest, CreateClientKafka, CreateClientMongoDb, CreateClientMqtt,
+    CreateClientMySql, CreateClientNats, CreateClientOtel, CreateClientPostgres,
+    CreateClientPrometheus, CreateClientPulsar, CreateClientRabbitMq, CreateClientRedis,
+    CreateClientS3, CreateClientSentry, CreateClientSqs, CreateClientSyslog,
+    CreateClientWebsockets, CreateClientZeroMq, CreateCorrelator, CreateDeduplicator,
+    CreateEmitter, CreateInferencer, CreateJsonWireSchema, CreateJunction, CreatePlacement,
+    CreateReingestor, CreateReorderer, CreateSchema, CreateUdf, CreateWasmProcessor,
+    CreateWindowProcessor, DeduplicatorName, DescribeInferencer, DescribeWasmProcessor,
+    DomainClockPeriod, DomainClockSkew, DomainClockState, DomainName, DomainTimeRate, EmitterName,
+    EndpointName, FieldName, GeneratorName, IngestQuiesceMode, IngestorName, JsonType,
+    JunctionName, LookupName, ModelName, NodeRef, PlacementName, ProcessorOutput, ProcessorOutputs,
+    RebindResource, RefreshLicense, ReingestorName, RelayName, ReleaseLicense, ReordererName,
     RequestedResourceVersion, ResetWasmState, ResolvedBranchPartitions, ResourceName, Restore,
-    SchemaName, ShowWasmProcessorState, SignalingProtocolName, SubscriptionName, Timestamp,
-    TransactionInspectionRequest, UdfName, Unit, UserName, VhostName, WindowProcessorName,
-    WireSchemaName,
+    RotateLicenseClusterKey, SchemaName, ShowWasmProcessorState, SignalingProtocolName,
+    SubscriptionName, Timestamp, TransactionInspectionRequest, UdfName, Unit, UserName, VhostName,
+    WindowProcessorName, WireSchemaName,
 };
 
 #[derive(
@@ -53,6 +54,8 @@ pub enum Statement {
     AlterCluster(crate::AlterCluster),
     ActivateLicense(ActivateLicense),
     RefreshLicense(RefreshLicense),
+    ReleaseLicense(ReleaseLicense),
+    RotateLicenseClusterKey(RotateLicenseClusterKey),
     CreateDomain(CreateStatement<CreateDomain>),
     CreateUser(CreateStatement<CreateUser>),
     CreateResource(CreateStatement<CreateResource>),
@@ -156,6 +159,8 @@ impl Statement {
             Self::AlterCluster(_)
             | Self::ActivateLicense(_)
             | Self::RefreshLicense(_)
+            | Self::ReleaseLicense(_)
+            | Self::RotateLicenseClusterKey(_)
             | Self::CreateDomain(_)
             | Self::CreateUser(_)
             | Self::CreateResource(_)
@@ -672,6 +677,8 @@ pub struct DomainState {
     pub start_version: u64,
     pub last_start: DomainStartPoint,
     pub clock: Option<DomainClockState>,
+    /// Why its committed stop ended the domain, kept while it stays stopped; a start clears it.
+    pub stop_cause: Option<crate::DomainStopCause>,
 }
 
 #[derive(
@@ -2888,30 +2895,3 @@ pub struct CreateLookup<Version = u64> {
 #[cfg(test)]
 #[path = "statement_tests.rs"]
 mod tests;
-
-/// An activation credential is transient input; durable execution retains only verified output.
-#[derive(Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize)]
-pub struct ActivateLicense {
-    pub kind: nervix_licensing_vocabulary::ActivationKind,
-    pub license_key: String,
-}
-
-impl std::fmt::Debug for ActivateLicense {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("ActivateLicense")
-            .field("kind", &self.kind)
-            .finish_non_exhaustive()
-    }
-}
-
-#[derive(
-    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
-)]
-pub struct RefreshLicense;
-
-impl Drop for ActivateLicense {
-    fn drop(&mut self) {
-        zeroize::Zeroize::zeroize(&mut self.license_key);
-    }
-}

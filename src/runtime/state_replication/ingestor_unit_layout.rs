@@ -86,9 +86,7 @@ fn project_checkpoint(
             })
             .change_context(OwnershipHandoffError::IngestorUnitLayout)?
         }
-        RuntimeStateKind::BranchLru if source_index % selection.count.get() == index => {
-            snapshot.payload
-        }
+        RuntimeStateKind::BranchLru if source_index % selection.count == index => snapshot.payload,
         RuntimeStateKind::BranchLru => encode_branch_lru_snapshot(&[])
             .change_context(OwnershipHandoffError::IngestorUnitLayout)?,
         _ => return Err(refuse(IngestorUnitLayoutError::Component)),

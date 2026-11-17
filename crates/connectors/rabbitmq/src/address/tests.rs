@@ -295,6 +295,11 @@ impl AddressParts {
             written.push('?');
             written.push_str(&options.join("&"));
         }
+        // Lapin's URI reads a zero `connection_timeout` as no timeout.
+        let connection_timeout = match self.connection_timeout {
+            Some(0) => None,
+            written => written,
+        };
         let uri = AMQPUri {
             scheme,
             authority: AMQPAuthority {
@@ -307,7 +312,7 @@ impl AddressParts {
                 frame_max: self.frame_max,
                 channel_max: self.channel_max,
                 heartbeat: self.heartbeat,
-                connection_timeout: self.connection_timeout,
+                connection_timeout,
                 auth_mechanism,
             },
         };

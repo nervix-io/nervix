@@ -3983,6 +3983,13 @@ or HTTP 503 without changing failure pacing. Wrong passwords remain authenticati
 
 ### Licensing Admission Refusals
 
+Cluster-key rotation reports typed `RotationInProgress`, `StaleRotation`, `NoPendingRotation` or
+`GenerationExhausted` conflicts. Only its matching operation can complete or abandon a pending key.
+Release reports `NotActivated`, a mismatched independent `Binding`, or `Expired` when an ephemeral
+binding has reached its expiry. A stale admitted command cannot release a later activation.
+These conflicts change no identity, decision or grant. Service refusals retain their protocol
+problem kind; signature, trust and binding refusals retain the shared verifier's typed cause.
+
 `LicensingRefusal` retains the quota name, effective limit, current usage, requested amount and
 refusal state. Quota arithmetic creates its report at the refusal; policy handles preserve it,
 and the admission owner adds its domain or membership context with `change_context`. It keeps
@@ -3999,6 +4006,21 @@ ordinary outcomes.
 A membership-quota refusal is carried in the leader's typed admission verdict for that node run.
 The joining node's existing supervision reports it and stops the refused newcomer. Licensing never
 removes a committed member, and a returning member does not consume another quota slot.
+
+### Licensing Stop Gate Refusals
+
+While the [stop gate](node-settings.md#cluster-licensing) is closed, every refusal carries the typed
+`LicensingStopReason`, which renders `ephemeral activation expired at <instant>`. Admission refuses
+all usage with refusal state `stopped`. Planning refuses a direct `START` before lifecycle
+admission, a transactional `START` as `TransactionPlanningError::LicensingStop` naming the domain,
+and `RESTORE ... RESUME` as `RestoreRefusal::LicensingStop`, each with
+`licensing stopped processing` and its reason. The client receives a definitive failure. Consensus
+refuses a change that would run a domain with `ConsensusConflict::LicensingStop`, and a
+transaction's `START` step with `TransactionMutationError::LicensingStop`; neither changes state.
+Model-pause recovery that the gate refuses keeps the command's paused-domain refusal. An `ALTER` or
+a backup whose resume the gate refuses is not failed by it: the operation ends its pause with the
+licensing stop under its own mutation lease, and only a failure of that stop is reported, as
+`DomainAlterError::LicensingStop` above the consensus report.
 
 ## Startup Execution Capacity
 
