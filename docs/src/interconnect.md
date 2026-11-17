@@ -1912,6 +1912,16 @@ node's opaque diagnostic text. A materialized snapshot is streamed only after a 
 description identifies its exact length, digest, revision, fence, and branch generation; the
 placement that the request names supplies its schema fingerprint.
 
+Sealing a newer materialized generation may replace a description before its bulk fetch opens.
+The producer then returns a typed precondition refusal (HTTP 412). The requester re-describes and
+opens the replacement within the first opening attempt's original absolute deadline. This is
+neither an absent dependency nor a general execution failure: `REQUIRED WAIT`, `REQUIRED SKIP`
+and defaults still apply to the state actually read. Other refusals and transport, length, digest
+or decoding failures remain errors. An opened stream retains its exact artifact as before; the
+owner retains no history on behalf of descriptions that may never be fetched. Successful reads
+add no round trip, timer, clock read or retained allocation. The current wire fingerprint fences
+this typed refusal together with the rest of the interconnect contract.
+
 Runtime-state message properties use the production bounded encoder and decoder on each
 request's Commands, Replication or Bulk class. The `runtime-state-replication-wire` target checks
 complete request and response values, including every state kind, schema and WASM generation,
@@ -1958,6 +1968,8 @@ verified decoded generation and fetch bytes only when the owner, placement or co
 envelope changes. The envelope's digest, length, revision, ownership fence and branch generation
 all participate in reuse, so a restarted owner with changed contents at an equal or lower revision
 requires another transfer. A failed description never authorizes serving the retained view.
+After a precondition retry, the cache retains the envelope actually verified with its contents,
+so a subsequent unchanged read reuses that generation without another bulk transfer.
 This uses the existing describe and bounded fetch operations without another wire form or lane.
 
 The [Control Plane](./control-plane.md) defines when replicated changes and resources become

@@ -34,7 +34,9 @@ use super::{
 use crate::{
     PoolClass, RequestError, RequestSubquota, TransportError,
     observation::TransferDirection,
-    request::{RequestAdmission, StreamRequestEnvelope, StreamingResponse},
+    request::{
+        RequestAdmission, StreamPreconditionDeadline, StreamRequestEnvelope, StreamingResponse,
+    },
     wire,
 };
 
@@ -332,7 +334,8 @@ impl TransportState {
                     headers: &[],
                 },
             )
-            .await?;
+            .await
+            .map_err(|error| StreamPreconditionDeadline::attach(error, deadline))?;
         Ok(IncomingByteStream {
             body,
             lease,

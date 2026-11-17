@@ -1462,6 +1462,48 @@ invocation = "owner-tests"
 selections = ["deloxide", "deloxide-order", "deloxide-stress"]
 test = "runtime::materialized_state::publication_tests::deloxide_materialized_publications"
 
+[[invocation]]
+bound_seconds = 120
+evidence = true
+features = ["testing"]
+id = "materialized-snapshot-opening"
+kind = "libtest-each"
+marker = "runtime::materialized_read::reuse_tests::diagnostic_"
+package = "nervix-server"
+selections = [
+  "deloxide",
+  "deloxide-order",
+  "deloxide-stress",
+  "deloxide-stress-restore",
+]
+target = "lib"
+
+[[workload]]
+coverage = "Real authenticated description and bulk fetch force replacement of a described empty generation before opening. The production assignment and sealed-generation locks are tracked; asynchronous RPC, deadline enforcement and transfer verification are outside detector evidence."
+id = "owner.materialized-snapshot-precondition"
+invariant = "Replacing a described generation returns every complete current branch row without retaining historical artifacts or discarding the dependency's input."
+invocation = "materialized-snapshot-opening"
+selections = [
+  "deloxide",
+  "deloxide-order",
+  "deloxide-stress",
+  "deloxide-stress-restore",
+]
+test = "runtime::materialized_read::reuse_tests::diagnostic_replaced_materialized_snapshot"
+
+[[workload]]
+coverage = "A real remote generator read races description with the fetch owner's replacement, then verifies complete rows, cache admission release and reuse without another bulk transfer. Sealing takes the existing tracked locks; the task-local cache and asynchronous transport are untracked."
+id = "owner.materialized-snapshot-precondition-cache"
+invariant = "A refetched generation is retained only under its verified identity and reuses its bounded cache admission until that cache ends."
+invocation = "materialized-snapshot-opening"
+selections = [
+  "deloxide",
+  "deloxide-order",
+  "deloxide-stress",
+  "deloxide-stress-restore",
+]
+test = "runtime::materialized_read::reuse_tests::diagnostic_replaced_materialized_snapshot_cache"
+
 [[workload]]
 coverage = "Remote acknowledgement silence sweeps whose ticks are already due when runtime teardown cancels them, and the registry's final resolution, under tracked position guards."
 id = "owner.remote-ack-silence-sweeps"
@@ -4992,6 +5034,8 @@ workloads = [
   "scenario.restore-publication-coordinator",
   "stress.restore-publication-coordinator",
   "owner.materialized-publications",
+  "owner.materialized-snapshot-precondition",
+  "owner.materialized-snapshot-precondition-cache",
   "scenario.materialized-cut",
   "scenario.materialized-read-reuse",
   "scenario.materialized-bulk-generations",
