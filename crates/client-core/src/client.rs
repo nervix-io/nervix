@@ -22,9 +22,10 @@ use error_stack::{Report, ResultExt as _};
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_client_wire::{
     AttachDisposition, AttachDomainClockRequest, AttachTransactionRequest, ClientMessage,
-    ClientRequest, CommandRequest, DetachDomainClockRequest, DomainClockAttachOutcome,
-    DomainClockDetachOutcome, DomainInfo, InspectTransactionRequest, InspectionOutcome, Leadership,
-    ReplyBody, SubscribeRequest, SubscriptionType, UnsubscribeRequest,
+    ClientRequest, CommandDisposition, CommandRequest, DetachDomainClockRequest,
+    DomainClockAttachOutcome, DomainClockDetachOutcome, DomainInfo, InspectTransactionRequest,
+    InspectionOutcome, Leadership, ReplyBody, SubscribeRequest, SubscriptionType,
+    UnsubscribeRequest,
 };
 use nervix_models::{
     Backup, CommandExecutionReference, CreateSubscription, DomainName, ResourceUploadIdentity,
@@ -51,7 +52,7 @@ use crate::{
     domain_clock::{AttachedDomainClock, DomainClockEvent},
     error::{ClientError, EventStreamKind, RequestKind},
     events::{ServerEvent, SubscriptionEvent, SubscriptionRequest},
-    exchange::{EventQueueError, Exchange, ExchangeRequests, SESSION_LIMITS, SessionEvents},
+    exchange::{EventQueueError, Exchange, ExchangeRequests, SessionEvents},
     outcome::{CommandOutcome, Routing},
     restoration::Restoration,
     subscriptions::{
@@ -148,6 +149,28 @@ impl ExecutionHandle {
 pub(crate) enum SessionRecovery {
     Unavailable,
     Ready,
+}
+
+/// Evidence retained across attempts of one logical command. A later local refusal cannot
+/// establish the outcome of an earlier attempt whose admission or reply was lost.
+#[derive(Default)]
+struct CommandAttempts {
+    last_unresolved_answer: Option<ClientError>,
+    admission_possible: bool,
+}
+
+impl CommandAttempts {
+    fn observe(&mut self, attempt: &error_stack::Result<CommandOutcome, ClientError>) {
+        match attempt {
+            Err(report) if report.current_context().can_hide_admitted_work() => {
+                self.admission_possible = true;
+            }
+            Ok(outcome) if matches!(outcome.disposition, CommandDisposition::OutcomeUnknown(_)) => {
+                self.admission_possible = true;
+            }
+            _ => {}
+        }
+    }
 }
 
 /// Whether recovery may reuse a session another request has already restored.
@@ -610,15 +633,10 @@ impl Client {
                 })),
             };
         }
-        let mut last_unresolved_answer = None;
+        let mut attempts = CommandAttempts::default();
         let result = nervix_primitives::time::timeout_at(
             deadline,
-            self.execute_prepared_within_budget(
-                execution,
-                deadline,
-                cancellation,
-                &mut last_unresolved_answer,
-            ),
+            self.execute_prepared_within_budget(execution, deadline, cancellation, &mut attempts),
         )
         .await;
         let result = match result {
@@ -629,9 +647,10 @@ impl Client {
             Ok(outcome) => outcome,
             Err(report)
                 if execution.can_have_admitted_command()
-                    && report.current_context().can_hide_admitted_work() =>
+                    && (attempts.admission_possible
+                        || report.current_context().can_hide_admitted_work()) =>
             {
-                let report = match last_unresolved_answer {
+                let report = match attempts.last_unresolved_answer {
                     Some(answer)
                         if matches!(report.current_context(), ClientError::RetryDeadline) =>
                     {
@@ -685,12 +704,12 @@ impl Client {
         execution: &ExecutionHandle,
         deadline: Instant,
         cancellation: CallCancellation<'_>,
-        last_unresolved_answer: &mut Option<ClientError>,
+        attempts: &mut CommandAttempts,
     ) -> error_stack::Result<CommandOutcome, ClientError> {
         let outcome = self
-            .execute_with_redirects(execution, deadline, cancellation, last_unresolved_answer)
+            .execute_with_redirects(execution, deadline, cancellation, attempts)
             .await?;
-        *last_unresolved_answer = None;
+        attempts.last_unresolved_answer = None;
         self.record_commit_basis(&outcome).await;
         if let Some(transaction) = outcome.transaction.clone() {
             self.adopt_transaction_status(transaction).await;
@@ -862,7 +881,7 @@ impl Client {
         execution: &ExecutionHandle,
         deadline: Instant,
         cancellation: CallCancellation<'_>,
-        last_unresolved_answer: &mut Option<ClientError>,
+        attempts: &mut CommandAttempts,
     ) -> error_stack::Result<CommandOutcome, ClientError> {
         let recovery = execution.route.recovery_deadline(deadline);
         for attempt in 0..Self::MAX_LEADER_ROUTING_ATTEMPTS {
@@ -872,7 +891,9 @@ impl Client {
             if attempt > 0 && cancellation.is_requested() {
                 return Err(Report::new(ClientError::CallCancelled));
             }
-            let outcome = match self.execute_once(execution, cancellation).await {
+            let result = self.execute_once(execution, cancellation).await;
+            attempts.observe(&result);
+            let outcome = match result {
                 Ok(outcome) => outcome,
                 Err(report) if report.current_context().retryable_session_failure() => {
                     let recovering =
@@ -885,7 +906,7 @@ impl Client {
                 Err(report) => return Err(report),
             };
             if !matches!(outcome.routing(), Routing::Complete) {
-                *last_unresolved_answer = Some(ClientError::LastUnresolvedAnswer {
+                attempts.last_unresolved_answer = Some(ClientError::LastUnresolvedAnswer {
                     disposition: outcome.disposition.clone(),
                     message: outcome.message.clone(),
                 });
@@ -1349,7 +1370,7 @@ impl Client {
                         request: request.clone(),
                     };
                     let frame = message
-                        .encode(&SESSION_LIMITS)
+                        .encode(&exchange.limits)
                         .change_context(ClientError::EncodeRequest { request: kind })?;
                     if exchange.frames.send(frame).await.is_err() {
                         exchange.pending.lock().close();

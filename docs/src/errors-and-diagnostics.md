@@ -339,6 +339,13 @@ refusal a producer resends, a settlement's `StaleReference`, a domain clock atta
 `AlreadyAttached` and every command disposition are results their caller branches on. Each section
 below says which outcomes of its boundary are ordinary.
 
+Waiting for an internal worker place on already accepted data is backpressure. It creates no
+runtime error event, reaches no error policy, builds no error record, and sends no negative or
+successful acknowledgement. In particular, `ON GENERAL ERROR IGNORE` cannot discard data merely
+because a worker class is full. The owner keeps the data until room frees or its lifecycle ends.
+Request admission can still answer with a typed refusal for the caller to present again. A panic,
+evaluation failure or cancelled admitted run retains its existing error handling.
+
 A failure of one row or one record is a typed value in its batch's outcome too. The expression VM
 returns the row errors of a batch beside its result, each a `SideError` with its reason and
 expression span. An emitter answers a write with the records it delivered, the records it rejected,
@@ -352,7 +359,8 @@ beside the messages it could, so the rest of one external response continues thr
 ingest group returns the codec's report for each payload it refuses, with that payload's place in
 its batch, beside the payloads it decoded, so the host consumes each refusal as a
 [decode rejection](#decode-rejections) while the rest of the batch continues. A refusal for room
-judged no payload and is not one of these outcomes: it fails the whole batch's dispatch.
+judged no payload and is not one of these outcomes. Source-boundary admission follows the source's
+hold/refuse contract; after acceptance, worker pressure waits instead of failing the dispatch.
 
 ### Fixed Outcome Boundaries
 
@@ -506,7 +514,7 @@ generation as committed. Successful replies build no failure context.
 | Vocabulary Models and the execution-graph description | Alterations the stored Model refuses; invalid placement members, inferencer tensor schemas, and upload identities; values canonical Plexus cannot spell; and execution-graph encoding or decoding | Refuse the command and keep the stored Model unchanged, or report which statement or graph could not be rendered or decoded. |
 | Plexus language and formatter | Source text the lexer or parser rejects, with the stage that rejected it, the rejected text, and every diagnostic's message and byte span; statements the formatter cannot render, and formatted output that does not reparse to the statements it came from | Report the stage and underline each diagnostic in the text that was submitted, or leave a file unchanged and report the formatter defect. |
 | Arrow record and batch layer | Schema, field, column, row, and batch construction or decoding failures | Reject a malformed batch or a field operation without inventing a replacement value. |
-| Bounded execution | A memory charge a class could not grant (`AdmissionError`), a budgeted buffer whose growth its class did not back (`BufferGrowthError::NotCharged`, with that `AdmissionError` beneath it) or that would pass its operation's limit (`BufferGrowthError::LimitExceeded`), a job refused because its class's wait queue is full, a closed pool, a job that panicked on its worker (`ExecutionError`), and a job that stopped at a `Cancelled` check because its caller stopped waiting | The job's owner maps each to its own typed outcome. A refusal judged nothing, so it stays retryable: an emitter keeps its rows, an ingested payload fails its dispatch rather than its decode and an endpoint answers it as a retryable rejection, a credential check answers `UNAVAILABLE` rather than failing authentication, and a restore's deduplicator or window conversion releases what it holds and converts the refused window section or keyspace again, within a 30-second wait for room, rather than reporting archived state of another shape. The unfolding of a payload a quiesce buffer retained, or of a poll a paced ingestor handed over, is not refused at all: nothing could present it again, so it waits for a place. The job that admits one key group into a keyspace a restore is converting waits for a place too, because the keys admitted so far could be presented again only by converting the keyspace from its first group. So does a payload an ingestor handed over without an acknowledgement, when its transport survives a held loop; any other such payload is refused, reported as an ingestor error and counted in `nervix_ingestor_unfolding_refused_total`. An Iceberg commit's read of the staged files its emitter already accepted waits for a place as well, while the bulk memory charge it takes first, without queueing, is refused when the class has no room and the emitter retries the commit with its policy. A panic is the job's own defect. The executor catches it at that callback, reports `JobPanicked` to its caller, completes its service accounting and continues draining its admitted successors. |
+| Bounded execution | A memory charge a class could not grant (`AdmissionError`), a budgeted buffer whose growth its class did not back (`BufferGrowthError::NotCharged`, with that `AdmissionError` beneath it) or that would pass its operation's limit (`BufferGrowthError::LimitExceeded`), request work refused because its class's wait queue is full, a closed pool, a job that panicked on its worker (`ExecutionError`), and a job that stopped at a `Cancelled` check because its caller stopped waiting | The job's owner maps each to its own typed outcome. Already accepted data waits for a CPU place under its owner's lifetime. A refusal judged nothing, so it stays retryable: an emitter keeps its rows, a source payload refused at intake fails its dispatch rather than its decode and an endpoint answers it as a retryable rejection, a credential check answers `UNAVAILABLE` rather than failing authentication, and a restore's deduplicator or window conversion releases what it holds and converts the refused window section or keyspace again, within a 30-second wait for room, rather than reporting archived state of another shape. The unfolding of a payload a quiesce buffer retained, or of a poll a paced ingestor handed over, is not refused at all: nothing could present it again, so it waits for a place. The job that admits one key group into a keyspace a restore is converting waits for a place too, because the keys admitted so far could be presented again only by converting the keyspace from its first group. So does a payload an ingestor handed over without an acknowledgement, when its transport survives a held loop; any other such payload is refused, reported as an ingestor error and counted in `nervix_ingestor_unfolding_refused_total`. An Iceberg commit's read of the staged files its emitter already accepted waits for a place as well, while the bulk memory charge it takes first, without queueing, is refused when the class has no room and the emitter retries the commit with its policy. A panic is the job's own defect. The executor catches it at that callback, reports `JobPanicked` to its caller, completes its service accounting and continues draining its admitted successors. |
 | Expression VM frontend and runtime bridge | Invalid expression scopes, types, sensitivity, compiled program inputs, and evaluation failures | Refuse a model during validation, or classify an affected row or batch during execution. [VM Functions](./vm-functions.md) owns execution detail. |
 | Stateful processors | Branch-local deduplication, ordering, window, correlation, inference, and WASM execution or state failures, and a processor task's restore of the branches its lifecycle checkpoint names (`ProcessorBranchTaskError`) | Apply the processor's message or node policy, or fail a checkpoint and its held acknowledgements. A restore that fails installs no branch and stays pending: the task retries it after a backoff, holds its input, and refuses a lifecycle checkpoint or guest-state reset with `BranchesUnrestored` until an attempt succeeds. [Shutdown And Recovery](./shutdown.md#restoring-processor-branches) owns that sequence. |
 | Connector crates and host | Integration-specific configuration, decoding, external ingestor and emitter outcomes; host-owned routing, retry, flush, and acknowledgement failures | Separate a record rejection from an ingestor or emitter failure and follow the configured retry or acknowledgement contract. [Connector Crates And The Connector Contract](./connector-contract.md) owns those contracts. |
@@ -1821,6 +1829,12 @@ refusal that evaluated nothing remains an execution failure, with its typed caus
 model rejection. A route construction error occurs after the model's successful invocation and
 does not undo that invocation. A later flush dispatches its buffered outputs without running the
 model again.
+
+Inference inspection uses the shared typed state-inspection refusals. A stateless inferencer is
+`NOT_MATERIALIZED`; missing installed state or an unavailable owner is refused rather than replaced
+with zeros. Native tensor access retains `StatefulInferenceError::StateTensor { index }` beneath the
+page's typed column error. Invalid positions and changed publication cuts refuse continuation;
+row, byte, descriptor and executor admission bounds keep their existing typed outcomes.
 
 ### Client Inspection Admission
 
@@ -4048,6 +4062,59 @@ an executor total above memory. `PreflightError::MemoryBelowBudgets` additionall
 client node-credit capacities. Receive-limit and native-runtime relationship errors retain their
 typed causes beneath the startup context; they never turn a refused allocation into a decode or
 authentication failure. A runtime stack or blocking-thread refusal happens before node listeners.
+
+## Operational Settings And Session Opening
+
+`ClusterParameterDurationError` retains an integer-conversion cause when an external duration
+cannot fit the compact nanosecond scalar. Checked parameter definitions retain their own duration
+validation reports; every admitted duration is represented exactly.
+
+`NodeOperationalError` owns operational duration, count and dependent session-capability refusals;
+`SessionBoundsError` owns the five bound relationships for both configuration and wire conversion.
+The CLI adds its settings context while retaining the report. Current gRPC announcement failures
+retain `SessionAnnouncementError` through `SessionOpeningRejection` at tonic's foreign status
+boundary, including the complete rendered chain and a typed source. WebSocket opening verification
+uses `SessionOpeningError` above frame, semantic decode or unexpected-first-message causes.
+A transport/authentication refusal before a valid opening keeps its transport status and retry
+classification. If an HTTP fallback also lacks valid opening metadata, that report remains the
+status's typed source while its HTTP code, message and metadata are retained. No ordinary body is read under a guessed limit.
+
+A native upload or restore offer is validated before the server reads body input. A changed
+offer returns `FAILED_PRECONDITION` with a checked complete bound update and the fixed refusal
+marker, an ordinary pre-admission retry outcome. Missing or invalid request metadata is an
+`INVALID_ARGUMENT` with `SessionOpeningRejection` retaining its typed report. A malformed bound
+refusal or accepted response with different limits retains that report under an `UNKNOWN`
+status, because a companion may already have handed its archive over. Earlier upload or restore
+uncertainty survives a later refusal or encoding failure under the original logical identity.
+
+Native command attempts retain whether an earlier attempt may have been admitted. A later
+encoding refusal under a smaller announced frame bound keeps `EncodeRequest` and its
+`WireEncodeError` beneath `UncertainCommand` with the original execution reference. A first
+attempt refused locally retains its definite encoding refusal.
+
+A forced-recovery request validates its captured budget through the parameter definition and
+retains a validation report beneath its handoff context. It can wait for the execution revision
+before this node's local policy is ready.
+
+Configured native subscription counts are checked with each opening's announced frame size.
+An unrepresentable byte allowance returns `ClientError::InvalidSubscriptionRetention` before
+queue activation and retains the prior generation unchanged.
+
+## Licensing Transition Warnings
+
+Nervix emits licensing Warning notices for `transition_started`, `transition_acknowledged`,
+`transition_extended` and `over_limit`. The typed notice is rendered for native clients and the
+console with the transition identity, changed condition, previous and target quota, affected and
+current usage, and effective deadline. It explains that growth follows the target, excess usage
+is reported after grace, and remediation means reducing usage, restoring the plan or contacting
+the organization administrator. Licensing does not remove existing work at the deadline.
+
+Admission refusals retain their typed quota cause through the domain or membership context.
+`within_grace` means the target rejects growth while a temporary allowance still protects recovery;
+`over_limit` means the applicable allowance no longer covers the requested usage. An unacknowledged
+grant also ends at its original signed offline deadline, even if a later refresh renews the
+activation's offline allowance. Only a signed acknowledgement or administrator extension can move
+the committed grant deadline later.
 
 ## Public Listener Input Refusals
 

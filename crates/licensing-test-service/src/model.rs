@@ -20,7 +20,7 @@ use serde::Serialize;
 use url::Url;
 use uuid::Uuid;
 
-use crate::{ServiceError, limits};
+use crate::{ResponseGate, ServiceError, limits};
 pub(crate) mod notifications;
 
 #[derive(Debug, thiserror::Error)]
@@ -39,6 +39,7 @@ mod operations;
 #[cfg(test)]
 mod tests;
 mod timing;
+mod transitions;
 mod trust;
 use operations::Route;
 
@@ -63,12 +64,19 @@ const CHALLENGE_SECONDS: i64 = 300;
 
 #[derive(Clone, Debug)]
 pub enum Fault {
+    Hold(ResponseGate),
     Refuse(ProblemKind),
     Delay(std::time::Duration),
     LoseResponse,
     CorruptResponseSignature,
     Adopt,
     Tamper(Tamper),
+}
+
+#[derive(Clone, Debug)]
+pub struct FaultObservation {
+    pub request_id: Uuid,
+    pub fault: Fault,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -95,6 +103,7 @@ struct HeldActivation {
     prior_decision: Option<Decision>,
     retired: Option<operations::RetiredBinding>,
     capacity_until: Option<DateTime<Utc>>,
+    transition_authority: BTreeMap<u64, (DateTime<Utc>, ConditionDuration)>,
 }
 
 impl HeldActivation {
@@ -140,6 +149,8 @@ pub struct Model {
     activations: BTreeMap<Uuid, HeldActivation>,
     responses: BTreeMap<RequestIdentity, SavedResponse>,
     faults: VecDeque<Fault>,
+    fault_observations: Vec<FaultObservation>,
+    held_response: Option<ResponseGate>,
     refusal: Option<ProblemKind>,
     license_key: Secret,
     transition_usage: Option<nervix_licensing_protocol::impact::UsageSnapshot>,
@@ -209,6 +220,8 @@ impl Model {
             activations: BTreeMap::new(),
             responses: BTreeMap::new(),
             faults: VecDeque::new(),
+            fault_observations: Vec::new(),
+            held_response: None,
             refusal: None,
             license_key: Secret::new("NVXK-TESTABCD-fixture-secret".to_owned()),
             transition_usage: None,
@@ -218,6 +231,33 @@ impl Model {
     pub fn script(&mut self, fault: Fault) {
         assert!(self.faults.len() < MAX_ENTRIES);
         self.faults.push_back(fault);
+    }
+
+    pub fn hold_next_response(&mut self) {
+        assert!(
+            self.held_response.is_none(),
+            "release the preceding response first"
+        );
+        let gate = ResponseGate::default();
+        self.script(Fault::Hold(gate.clone()));
+        self.held_response = Some(gate);
+    }
+
+    pub fn response_is_held(&self) -> bool {
+        self.held_response
+            .as_ref()
+            .is_some_and(ResponseGate::is_held)
+    }
+
+    pub fn release_response(&mut self) {
+        self.held_response
+            .take()
+            .verified("the scenario installed a response gate")
+            .release();
+    }
+
+    pub fn fault_observations(&self) -> Vec<FaultObservation> {
+        self.fault_observations.clone()
     }
     pub fn refuse(&mut self, refusal: Option<ProblemKind>) {
         self.refusal = refusal;
@@ -295,6 +335,13 @@ impl Model {
         }
         self.requests.push(request.clone());
         let common = request.common();
+        if let Some(fault) = &fault {
+            // At most one observation per verified request, whose inventory is bounded above.
+            self.fault_observations.push(FaultObservation {
+                request_id: common.request_id,
+                fault: fault.clone(),
+            });
+        }
         if let Some(Fault::Refuse(kind)) = &fault {
             return (problem(kind.clone(), None), None);
         }
@@ -432,10 +479,13 @@ impl Model {
             } if route == Route::Create => self
                 .create(common, license_key, kind, cluster_key)
                 .map_err(PeerRefusal::report)?,
-            Request::Refresh { activation_id, .. } if route == Route::Refresh(*activation_id) => {
-                self.refresh(common, activation_id, fault)
-                    .map_err(PeerRefusal::report)?
-            }
+            Request::Refresh {
+                activation_id,
+                transitions,
+                ..
+            } if route == Route::Refresh(*activation_id) => self
+                .refresh(common, activation_id, transitions, fault)
+                .map_err(PeerRefusal::report)?,
             Request::RotateKey {
                 activation_id,
                 state,
@@ -534,6 +584,16 @@ impl Model {
                 prior_decision: None,
                 retired: None,
                 capacity_until: None,
+                transition_authority: BTreeMap::from([(
+                    self.conditions_revision,
+                    (
+                        self.now,
+                        self.plan
+                            .operating
+                            .duration(QUOTA_GRACE)
+                            .assured("validated fixture grace"),
+                    ),
+                )]),
             },
         );
         Ok(activation_id)
@@ -543,6 +603,7 @@ impl Model {
         &mut self,
         common: &RequestCommon,
         activation_id: &Uuid,
+        reported: &[Transition],
         fault: Option<&Fault>,
     ) -> Result<Uuid, ProblemKind> {
         let held = self
@@ -574,7 +635,7 @@ impl Model {
                     },
                     ImpactTarget::Usage(&decision.conditions.usage),
                     usage,
-                    TransitionPolicy::from_operating(&held.decision.conditions.operating)
+                    TransitionPolicy::from_operating(&decision.conditions.operating)
                         .assured("validated fixture grace"),
                     ImpactContext {
                         from_conditions_revision: held.decision.conditions.conditions_revision,
@@ -595,11 +656,22 @@ impl Model {
             decision.conditions = held.decision.conditions.clone();
             decision.transitions = held.decision.transitions.clone();
         }
+        transitions::acknowledge(held, &mut decision, reported, self.now)?;
         if !matches!(fault, Some(Fault::Tamper(Tamper::PriorDecision))) {
             let held = self
                 .activations
                 .get_mut(activation_id)
                 .verified("activation was read above");
+            held.transition_authority
+                .entry(decision.conditions.conditions_revision)
+                .or_insert((
+                    decision.issued_at,
+                    decision
+                        .conditions
+                        .operating
+                        .duration(QUOTA_GRACE)
+                        .assured("validated fixture grace"),
+                ));
             held.prior_decision = Some(std::mem::replace(&mut held.decision, decision));
         }
         Ok(*activation_id)

@@ -212,6 +212,7 @@ use crate::common::{
 mod backup;
 mod branch_repartition;
 mod cli_outcomes;
+mod cli_reference_completion;
 mod cli_repl;
 mod clickhouse_connections;
 mod client_consumers;
@@ -274,6 +275,7 @@ mod rabbitmq_properties;
 mod relay_partitions;
 mod restarted_voter;
 mod session_protocol;
+mod session_settings;
 mod session_tls;
 mod standalone_transaction;
 mod subscription_restoration;
@@ -5623,11 +5625,23 @@ async fn when_cli_suggests_for(world: &mut ScenarioWorld, input: String, node: S
         .assured("the scenario input marks its completion cursor");
     input.remove(cursor);
     let node = expand_placeholders(world, &node);
+    let output = cli_suggestions(world, &input, cursor, &node).await;
+    world.last_cli_output = Some(output);
+}
+
+/// Asks the CLI for the completions of `input` at the byte offset `cursor`, through `node` and in
+/// the scenario's domain.
+async fn cli_suggestions(
+    world: &ScenarioWorld,
+    input: &str,
+    cursor: usize,
+    node: &str,
+) -> std::process::Output {
     let grpc_uri = world
         .cluster()
-        .grpc_uri(&node)
+        .grpc_uri(node)
         .assured("the scenario names a cluster node");
-    let output = nervix_primitives::time::timeout(
+    nervix_primitives::time::timeout(
         Duration::from_secs(60),
         tokio::process::Command::new(scenario_cli_binary())
             .kill_on_drop(true)
@@ -5641,7 +5655,7 @@ async fn when_cli_suggests_for(world: &mut ScenarioWorld, input: String, node: S
                 "--password",
                 TEST_AUTH_PASSWORD,
                 "--suggest",
-                &input,
+                input,
                 "--cursor",
                 &cursor.to_string(),
             ])
@@ -5649,8 +5663,30 @@ async fn when_cli_suggests_for(world: &mut ScenarioWorld, input: String, node: S
     )
     .await
     .assured("the CLI suggestion request completes within one minute")
-    .assured("the CLI suggestion process starts");
-    world.last_cli_output = Some(output);
+    .assured("the CLI suggestion process starts")
+}
+
+/// The values of the completions a CLI suggestion request answered `Ready` with.
+fn offered_suggestion_values(output: &std::process::Output) -> BTreeSet<String> {
+    assert!(
+        output.status.success(),
+        "CLI failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let response: serde_json::Value = serde_json::from_slice(&output.stdout)
+        .assured("the successful CLI suggestion mode prints JSON");
+    assert_eq!(response["status"], "Ready");
+    let candidates = response["suggestions"]
+        .as_array()
+        .assured("the CLI suggestion response has an array");
+    let mut offered = BTreeSet::new();
+    for candidate in candidates {
+        let value = candidate["value"]
+            .as_str()
+            .assured("a CLI suggestion carries its value");
+        offered.insert(value.to_string());
+    }
+    offered
 }
 
 #[then(expr = "the CLI suggestion {string} applied to {string} yields {string}")]
@@ -5710,25 +5746,8 @@ fn then_cli_offers_exactly(world: &mut ScenarioWorld, expected: String) {
         .last_cli_output
         .as_ref()
         .verified("the preceding step ran the CLI");
-    assert!(
-        output.status.success(),
-        "CLI failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let response: serde_json::Value = serde_json::from_slice(&output.stdout)
-        .assured("the successful CLI suggestion mode prints JSON");
-    assert_eq!(response["status"], "Ready");
-    let candidates = response["suggestions"]
-        .as_array()
-        .assured("the CLI suggestion response has an array");
-    let mut offered = BTreeSet::new();
-    for candidate in candidates {
-        let value = candidate["value"]
-            .as_str()
-            .assured("a CLI suggestion carries its value");
-        offered.insert(value);
-    }
-    let expected: BTreeSet<&str> = expected.split(", ").collect();
+    let offered = offered_suggestion_values(output);
+    let expected: BTreeSet<String> = expected.split(", ").map(str::to_string).collect();
     assert_eq!(offered, expected);
 }
 
@@ -13652,6 +13671,264 @@ async fn given_junction_reads_materialized_state_slowly(
         nervix_models::DomainNodeRef::node_in(domain, nervix_models::ModelKind::Junction, junction),
         delay,
     );
+}
+
+fn accepted_input_processor(
+    world: &ScenarioWorld,
+    kind: &str,
+    junction: &str,
+) -> nervix_models::DomainNodeRef {
+    let domain = nervix_models::DomainName::try_from(world.domain.as_str())
+        .assured("the scenario domain is an identifier-shaped name");
+    let junction =
+        nervix_models::ModelName::try_from(expand_placeholders(world, junction).as_str())
+            .assured("the scenario processor is an identifier-shaped name");
+    let kind = match kind {
+        "junction" => nervix_models::ModelKind::Junction,
+        "deduplicator" => nervix_models::ModelKind::Deduplicator,
+        "reorderer" => nervix_models::ModelKind::Reorderer,
+        "window" => nervix_models::ModelKind::WindowProcessor,
+        "correlator" => nervix_models::ModelKind::Correlator,
+        "inferencer" => nervix_models::ModelKind::Inferencer,
+        "wasm" => nervix_models::ModelKind::WasmProcessor,
+        _ => panic!("unsupported accepted-input processor kind {kind}"),
+    };
+    nervix_models::DomainNodeRef::node_in(domain, kind, junction)
+}
+
+#[given(expr = "processor {string} {string} pauses around its accepted input's first poll")]
+async fn given_accepted_input_pause(world: &mut ScenarioWorld, kind: String, junction: String) {
+    world
+        .fault_injection
+        .pause_accepted_processor_input(accepted_input_processor(world, &kind, &junction));
+}
+
+#[then(expr = "processor {string} {string} has accepted its paused input")]
+async fn then_accepted_input_before_poll(
+    world: &mut ScenarioWorld,
+    kind: String,
+    junction: String,
+) {
+    nervix_primitives::time::timeout(
+        Duration::from_secs(60),
+        world.fault_injection.wait_for_accepted_processor_input(
+            &accepted_input_processor(world, &kind, &junction),
+            false,
+        ),
+    )
+    .await
+    .assured("the real processor accepted the input before the class fills");
+}
+
+#[when(expr = "processor {string} {string} first polls its paused input")]
+async fn when_accepted_input_first_poll(world: &mut ScenarioWorld, kind: String, junction: String) {
+    world.fault_injection.release_accepted_processor_input(
+        &accepted_input_processor(world, &kind, &junction),
+        false,
+    );
+    nervix_primitives::time::timeout(
+        Duration::from_secs(60),
+        world.fault_injection.wait_for_accepted_processor_input(
+            &accepted_input_processor(world, &kind, &junction),
+            true,
+        ),
+    )
+    .await
+    .assured("the accepted input was polled while its worker class remained full");
+}
+
+#[when(expr = "processor {string} {string} resumes its paused input")]
+async fn when_accepted_input_resumed(world: &mut ScenarioWorld, kind: String, junction: String) {
+    world
+        .fault_injection
+        .release_accepted_processor_input(&accepted_input_processor(world, &kind, &junction), true);
+}
+
+#[when(
+    expr = "accepted-work rows {int} through {int} are posted to node {string} host {string} path \
+            {string}"
+)]
+async fn when_accepted_work_rows_posted(
+    world: &mut ScenarioWorld,
+    first: i64,
+    last: i64,
+    node: String,
+    host: String,
+    path: String,
+) {
+    assert!(first <= last);
+    let rows = (first..=last)
+        .flat_map(|row| {
+            [
+                serde_json::json!({"tenant":"alpha", "id":format!("a{row}"), "value":row}),
+                serde_json::json!({"tenant":"beta", "id":format!("b{row}"), "value":row*10}),
+            ]
+        })
+        .collect::<Vec<_>>();
+    let payload = serde_json::to_string(&rows).assured("the generated rows are JSON values");
+    world
+        .cluster()
+        .publish_http(
+            &expand_placeholders(world, &node),
+            &expand_placeholders(world, &host),
+            &expand_placeholders(world, &path),
+            &payload,
+        )
+        .await
+        .assured("the public NO ACK source accepts the interleaved rows");
+}
+
+#[then(expr = "within {string} accepted-work window rows {int} through {int} arrive exactly once")]
+async fn then_accepted_work_window_rows(
+    world: &mut ScenarioWorld,
+    duration: String,
+    first: i64,
+    last: i64,
+) {
+    assert!(first <= last);
+    let expected = (first..=last)
+        .flat_map(|row| {
+            [
+                vec![
+                    "key={\"tenant\":\"alpha\"}".to_owned(),
+                    format!("\"id\":\"a{row}\""),
+                    format!("\"value\":{}", row * 2 - 1),
+                ],
+                vec![
+                    "key={\"tenant\":\"beta\"}".to_owned(),
+                    format!("\"id\":\"b{row}\""),
+                    format!("\"value\":{}", (row * 2 - 1) * 10),
+                ],
+            ]
+        })
+        .collect();
+    let matched =
+        receive_expected_fragment_sets(world, &duration, expected, UnmatchedPayloads::Fail, None)
+            .await;
+    for payload in matched {
+        let (_, payload) = payload
+            .split_once(" payload=")
+            .assured("the branched row displays separate key and payload objects");
+        let row: serde_json::Value =
+            serde_json::from_str(payload).assured("the subscription row payload is JSON");
+        let id = row["id"].as_str().assured("the original id is preserved");
+        let (tenant, scale) = if id.starts_with('a') {
+            ("alpha", 1)
+        } else {
+            ("beta", 10)
+        };
+        let sequence: i64 = id[1..]
+            .parse()
+            .assured("the original sequence is preserved");
+        assert!((first..=last).contains(&sequence));
+        assert_eq!(
+            row["tenant"], tenant,
+            "branch and tenant fields are preserved"
+        );
+        assert_eq!(
+            row["value"],
+            (sequence * 2 - 1) * scale,
+            "the retained window computes the exact sum"
+        );
+    }
+}
+
+#[when(expr = "accepted-work CPU class {string} is full on every node")]
+async fn when_accepted_work_class_full(world: &mut ScenarioWorld, class: String) {
+    let class = match class.as_str() {
+        "data" => nervix_execution::CpuClass::Data,
+        "extension" => nervix_execution::CpuClass::Extension,
+        _ => panic!("accepted-work fixture requires the data or extension class"),
+    };
+    for node_id in world.cluster().node_ids() {
+        nervix_primitives::task::consume_budget().await;
+        nervix_primitives::time::timeout(
+            Duration::from_secs(60),
+            world
+                .fault_injection
+                .saturate_execution(&crate::common::cluster::node_name(&node_id), class),
+        )
+        .await
+        .assured("the class fills all workers and waiting places before input is polled");
+    }
+}
+
+#[when("accepted-work CPU classes are released on every node")]
+async fn when_accepted_work_class_released(world: &mut ScenarioWorld) {
+    let mut executors = Vec::new();
+    for node_id in world.cluster().node_ids() {
+        let node = crate::common::cluster::node_name(&node_id);
+        executors.push((node_id, world.fault_injection.executor_on(&node)));
+        world.fault_injection.release_execution(&node);
+    }
+    nervix_primitives::time::timeout(Duration::from_secs(60), async {
+        loop {
+            nervix_primitives::task::consume_budget().await;
+            if executors.iter().all(|(_, executor)| {
+                let snapshot = executor.snapshot();
+                snapshot.data_cpu.running == 0
+                    && snapshot.data_cpu.pending == 0
+                    && snapshot.extension_cpu.running == 0
+                    && snapshot.extension_cpu.pending == 0
+            }) {
+                return;
+            }
+            nervix_primitives::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| {
+        panic!(
+            "released CPU fixtures did not drain: {:?}",
+            executors
+                .iter()
+                .map(|(node, executor)| (node, executor.snapshot()))
+                .collect::<Vec<_>>()
+        )
+    });
+}
+
+#[then(
+    expr = "within {string} HTTP admission on node {string} host {string} path {string} refuses \
+            with retry-after"
+)]
+async fn then_http_admission_refuses_without_waiting(
+    world: &mut ScenarioWorld,
+    duration: String,
+    node: String,
+    host: String,
+    path: String,
+    #[step] step: &Step,
+) {
+    let uri = world
+        .cluster()
+        .http_uri(
+            &expand_placeholders(world, &node),
+            &expand_placeholders(world, &path),
+        )
+        .assured("the configured endpoint has a listener");
+    let request = reqwest::Client::new()
+        .post(uri)
+        .header("Host", expand_placeholders(world, &host))
+        .header(reqwest::header::CONTENT_TYPE, "application/json")
+        .body(expand_placeholders(world, docstring(step)));
+    let response = nervix_primitives::time::timeout(
+        parse_duration_text(&duration).assured("the step duration is valid"),
+        request.send(),
+    )
+    .await
+    .assured("request admission answers while the worker remains held")
+    .assured("the HTTP listener answers");
+    assert_eq!(response.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE);
+    let retry = response
+        .headers()
+        .get(reqwest::header::RETRY_AFTER)
+        .assured("typed admission refusal supplies Retry-After")
+        .to_str()
+        .assured("Retry-After is ASCII")
+        .parse::<u64>()
+        .assured("Retry-After is a delay in seconds");
+    assert!(retry > 0);
 }
 
 /// The junction's first read of a message's dependency is slowed too, so a payload that reached

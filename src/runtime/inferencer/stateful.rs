@@ -49,6 +49,8 @@ use crate::{registry::InferencerStatePlan, runtime_schema::RuntimeRecordBatch};
 pub(in crate::runtime) enum StatefulInferenceError {
     #[error("failed to prepare INITIAL tensors")]
     Initial,
+    #[error("published state tensor {index} is unavailable or has an invalid type")]
+    StateTensor { index: usize },
     #[error("the stateful inference working set exceeds the configured relay operation limit")]
     WorkingSet,
     #[error(
@@ -106,6 +108,21 @@ impl std::fmt::Debug for NativeGeneration {
     }
 }
 impl NativeGeneration {
+    /// Borrow one immutable tensor for a bounded observation without materializing other entries.
+    pub(in crate::runtime) fn tensor(
+        &self,
+        index: usize,
+    ) -> error_stack::Result<(&[i64], &[f32]), StatefulInferenceError> {
+        let tensor = self
+            .tensors
+            .get(index)
+            .ok_or_else(|| Report::new(StatefulInferenceError::StateTensor { index }))?;
+        let (shape, values) = tensor
+            .try_extract_tensor::<f32>()
+            .change_context(StatefulInferenceError::StateTensor { index })?;
+        Ok((shape, values))
+    }
+
     pub(in crate::runtime) fn snapshot(
         &self,
         cancellation: &Cancellation,
@@ -373,6 +390,7 @@ impl BoundSession {
             .await
             .change_context(StatefulInferenceError::Execution)?;
         executor
+            .accepted_work()
             .run_cpu(CpuClass::Bulk, reservation, move |_charge, cancellation| {
                 cancellation
                     .check()
@@ -573,7 +591,7 @@ impl BoundSession {
     }
 }
 impl StatefulInferenceSession {
-    /// A refusal before admission is an execution error. A native row refusal is the inner result.
+    /// A full worker class waits while this branch retains its session. A native row refusal is the inner result.
     /// The previous native generation stays installed until the whole row and every output validate.
     pub(in crate::runtime) async fn execute(
         &mut self,
@@ -602,6 +620,13 @@ impl StatefulInferenceSession {
             .reserve(MemoryClass::Relay, bytes.max(1))
             .await
             .change_context(StatefulInferenceError::Execution)?;
+        // Keep the installed native session while the full class has not granted a place.
+        // Cancelling this wait drops only its charge and FIFO registration.
+        let admitted = executor
+            .accepted_work()
+            .prepare_cpu(CpuClass::Extension, charge)
+            .await
+            .change_context(StatefulInferenceError::Execution)?;
         let mut session = self
             .session
             .take()
@@ -609,8 +634,8 @@ impl StatefulInferenceSession {
         let generation = self.generation.clone();
         let definition = definition.clone();
         let limit = executor.limits().relay_decoded_bytes.as_u64();
-        let (session, result) = executor
-            .run_cpu(CpuClass::Extension, charge, move |_charge, cancellation| {
+        let (session, result) = admitted
+            .run(move |_charge, cancellation| {
                 let result = session.run(&definition, &generation, &row, limit, cancellation);
                 (session, result)
             })

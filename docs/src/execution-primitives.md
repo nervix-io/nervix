@@ -439,6 +439,12 @@ file no longer names.
 
 ## Executor Admission And Draining
 
+`Executor::bulk_read_batch_bytes` derives a read batch from the immutable bulk quantum and pool
+capacity, leaving room for a preceding charged batch. It reads no admission counters or semaphore
+state. [Node Settings](node-settings.md#execution-capabilities) owns the sizing rule; the production
+admission check covers defaults, a tuned quantum larger than a pool fraction, and an odd-byte pool.
+
+
 Every class holds a bounded FIFO of admitted jobs. A worker takes the next job directly after its
 current callback exits, retaining the same blocking-pool dispatch while a backlog remains. The
 consensus storage class has one worker and executes jobs in admission order. CPU workers use
@@ -454,6 +460,19 @@ finds an active worker that will observe its job or claims a worker itself, so s
 last worker's exit cannot strand an admitted job. No idle worker retains a blocking-pool thread.
 The queue semaphore still bounds pending work, refuses `RefuseWhenFull` with typed `QueueFull`, and
 hands a freed place to an existing `WaitForPlace` waiter before a later requester.
+
+`Executor::accepted_work` binds that waiting policy to an operation that holds already accepted
+data. `AcceptedWork` is a borrowed capability: ordinary admission adds no allocation, thread,
+lock or reference count. VM execution still owns its class and charge decisions. Branch input
+preparation, retained inference setup and runs, and relay carriage use the same waiting FIFO.
+Request work keeps its immediate refusal, including client batch decoding, statement constants,
+subscription predicates and state inspection; ingestion-boundary admission follows its source's
+own contract.
+
+An accepted owner can acquire a charged CPU queue place before transferring mutable state into a
+job. The stateful inferencer does this before taking its native session out of the branch. Dropping
+the full-queue wait leaves that session installed and returns the charge. After submission,
+cancellation follows the same queued and running job rules as every other admitted run.
 
 The storage submission adapter and each job's invocation carry explicit dispatch contracts for
 the caller-owned synchronous callback. Its effects remain the caller's responsibility; the

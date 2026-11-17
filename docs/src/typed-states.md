@@ -372,11 +372,11 @@ expression scope and an emitter's `INSTANCES` declaration.
 Placement coverage is one semantic choice: a corridor with named endpoints or a domain-wide
 rule. Domain configuration contains its pace; named placement rules belong to the Model index.
 Relocation selects whole nodes or exact partition/instance indices using the shared node identity.
-Consensus's `raft_licensing_operations_inferencer_wasm_inspection_listener_bounds_stopgate_node_` keyspaces and current
-`ClusterState` metadata encoding, 35, identify its stored shapes, including the partition count of every resolved
+Consensus's `raft_licensing_transitions_inferencer_pages_operational_ratelimit_` keyspaces and current
+`ClusterState` metadata encoding, 38, identify its stored shapes, including the partition count of every resolved
 branch declaration in the committed schedule, the partition epoch the schedule records for each
 branch whose count changed, and the statements a transaction keeps, including per-entity
-`ALTER INGESTOR` and `ALTER EMITTER` operations and a `RESET WASM PROCESSOR ... STATE` that takes
+`ALTER INGESTOR` and `ALTER EMITTER` operations, `SHOW INFERENCER ... STATE` and a `RESET WASM PROCESSOR ... STATE` that takes
 its domain from the transaction. The runtime state store's
 `ranked-intake-unit-checkpoint-segments` format identifies the checkpoints it keeps, including the
 unsigned 64-bit instance identity and the unit every branch-aggregated metric series carries.
@@ -1441,6 +1441,13 @@ bootstrap and both are present after the first identity installation. The record
 licensing time, original trust documents with their typed identities, and Free, Activated or
 Released mode. Released mode carries its independent binding, confirmation state, original signing
 capability while confirmation is pending, operation identity and unextended grant deadlines.
+Activated mode holds transitions keyed by their stable identity. Each grant carries either a pending
+acknowledgement with the introducing decision's immutable offline bound or an acknowledged signed
+copy. Its original protected member names are captured once; refresh cannot turn a newcomer into a
+replacement. Signed acknowledgements replace the corresponding copy and can extend a deadline;
+ordinary refreshes preserve pending bounds and starts. Target quota and temporary replacement
+allowance remain separate in the published policy.
+
 Pending cluster rotation belongs to the identity record and carries its target generation and
 exact retained signed request. Completion installs the key and bound decision in one atomic apply.
 The original command effect retains an atomic applied or typed refusal outcome, so later operations
@@ -1461,3 +1468,28 @@ already admitted members outside the new-usage path.
 An inspection entity is `DomainNode` or `ClusterLicense`. Only the former contains a domain and
 node reference. Both use the shared page and Row-section representation; a cluster observation
 never invents a graph identity to satisfy the envelope.
+
+## Session Opening And Bounded Policy Values
+
+The native command's attempt state retains admission uncertainty independently of the latest
+attempt's failure. A replacement session's smaller bound can refuse a replay without settling
+an earlier attempt; that error keeps the original execution identity as uncertain. A fresh
+request refused before handoff has no earlier admission to preserve.
+
+A session opening carries all five checked bounds. Native metadata requires each dimension once;
+a WebSocket's first fixed-envelope frame has the same complete values. Missing or invalid bounds
+end the opening before ordinary traffic. An exchange and its reader retain one immutable value,
+and generation-scoped subscription queues install their byte budgets under their existing owner
+lock. Before an opening, no peer-derived subscription budget exists; ending or replacing a
+generation cannot publish a later generation's limits.
+
+Cluster duration definitions retain semantic `Duration` values. The complete parameter record
+uses its validated eight-byte seconds/nanoseconds projection without allocating. A captured
+recovery request carries exact u64 nanoseconds and validates its duration range at the destination.
+Their public JSON remains seconds and nanoseconds. Both stored and public decoders cross the
+definition's validation boundary; an invalid stored scalar cannot become a valid policy by defaulting.
+
+The eight count parameters whose definitions already cap them within `u32::MAX` use four-byte
+stored projections. Their public u64 values, defaults and admitted ranges remain unchanged;
+full-width count and byte parameters retain eight bytes. Storage and JSON both validate through
+the owning definition before publishing the complete policy.

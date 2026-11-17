@@ -30,7 +30,6 @@ use crate::{
             BarrierNode, wait_for_application_revision,
         },
         runtime_admission::RuntimeAdmission,
-        scheduling::RUNTIME_REVISION_READINESS_PROPAGATION_BOUND,
         tls::HttpsListenerCertificates,
     },
     cluster,
@@ -110,6 +109,7 @@ pub(in crate::application) fn apply_current_cluster_runtime_state(
         shutdown,
     } = application;
     let barrier_node = BarrierNode {
+        retry_interval: admission.retry_interval() / 2,
         cluster,
         consensus,
         interconnect,
@@ -214,6 +214,8 @@ pub(in crate::application) fn apply_current_cluster_runtime_state(
             );
             drop(installation);
 
+            let readiness_propagation_bound =
+                parameters.values.runtime_readiness_propagation_bound();
             let node_unavailability_timeout = cluster.node_unavailability_timeout();
             // Applying a revision gets one start-time operation budget: peer-failure detection followed
             // by readiness propagation. A peer that disconnects after this starts has only the remaining
@@ -222,12 +224,12 @@ pub(in crate::application) fn apply_current_cluster_runtime_state(
                 Report::new(
                     crate::runtime::RuntimeError::RuntimeRevisionReadinessDeadlineOverflow {
                         node_unavailability_timeout,
-                        readiness_propagation_bound: RUNTIME_REVISION_READINESS_PROPAGATION_BOUND,
+                        readiness_propagation_bound,
                     },
                 )
             };
-            let Some(readiness_timeout) = node_unavailability_timeout
-                .checked_add(RUNTIME_REVISION_READINESS_PROPAGATION_BOUND)
+            let Some(readiness_timeout) =
+                node_unavailability_timeout.checked_add(readiness_propagation_bound)
             else {
                 return Err(deadline_overflow());
             };

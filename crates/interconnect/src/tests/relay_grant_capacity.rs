@@ -72,6 +72,7 @@ async fn receive_bound_refusal_creates_no_attempt_and_a_revised_claim_is_adopted
         .try_charge_owned(MemoryClass::Relay, vec![1; 8])
         .expect("smaller body charge");
     let mut record = nervix_models::NodeCapabilityRecord {
+        operational: Default::default(),
         identity: ClusterNodeIdentity::new(pair.node_b.clone(), ClusterNodeIncarnation::new(1)),
         capabilities: nervix_models::NodeCapabilities {
             interconnect: crate::TransportSettings::default().capabilities(),

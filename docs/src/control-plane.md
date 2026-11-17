@@ -45,6 +45,21 @@ This is the part of Nervix where Raft-backed consistency matters. It keeps clust
 
 ## Durability And Recovery
 
+Reconciliation cadences and local concurrency are node capabilities. Membership, scheduling,
+resource replication, application-health probing, transaction/archive maintenance and restore
+staging each use the immutable settings of their node incarnation. Transaction recovery retains
+its rotating cursor while bounding concurrent recoveries; lowering its concurrency does not
+favor the first transaction identities. Resource replication keeps its independent concurrency
+bound. [Node Settings](node-settings.md#control-plane-and-session-capabilities) owns the
+declarations, defaults and inspection of these capabilities.
+
+Coordination guarantees use the committed parameter record: forced-recovery budgets, handoff
+reconciliation polling, entity-gate polling, domain-drain polling and readiness propagation.
+An operation captures its applicable values at admission. A polling tick never restarts or
+extends the operation's deadline. RPC attempts remain bounded by their remaining operation
+budget and the deadline derived from the transport request timeout. Startup reconciliation waits
+derive from the gossip round and remain cancellable during shutdown.
+
 A control-plane mutation returns its semantic result only after Raft has committed it and the
 leader has durably applied it. The applied write stores the changed semantic records together with
 its final log position, membership, transaction progress, and revision. Recovery therefore finds a
@@ -957,6 +972,13 @@ serialized request owner. A notification can expedite a foreground or background
 while stream reads and backoff never occupy that request turn. Operator and notification wakeups
 stay independent: a queued attempt consumes its represented notification without taking another
 waiting operator's signal. Failed refreshes retain their pending work and respect retry timing.
+The coalesced hint retains its activation and the revisions reported by a sync. After acquiring
+the request turn, an automatic refresh compares that requirement with the fresh committed
+observation. A foreground response that already covers those decision, conditions and trust
+revisions satisfies the sync without another service request. An explicit refresh still runs.
+A notification-revision gap, decision or trust event remains an invalidation, including a change
+that arrived after an in-flight response was issued; a due deadline or revoked signing key also
+continues to require refresh.
 The independent deadline timer and normal due polling continue while the stream
 is silent or reconnecting. [Cluster Licensing](node-settings.md#cluster-licensing) owns the public
 contract and settings; [Shared Licensing Protocol](licensing-protocol.md#notification-payloads)

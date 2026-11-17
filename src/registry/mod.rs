@@ -111,12 +111,10 @@ pub(crate) use placement::{
 pub(crate) use processor_plan::{
     BranchedNodeSpecs, BranchedProcessorNodeSpec, BranchedProcessorOperationSpec,
     BranchedProcessorOutputSpec, BranchedProcessorOutputsSpec, BranchedProcessorSpec,
-    InferencerStatePlan,
+    InferencerStatePlan, InferencerStatePortPlan,
 };
 #[cfg(test)]
-pub(crate) use processor_plan::{
-    InferencerStatePortPlan, PlannedModel, branched_node_specs_from_models,
-};
+pub(crate) use processor_plan::{PlannedModel, branched_node_specs_from_models};
 pub(crate) use rate_limit_plan::{
     IngestorRateLimitPlan, LoweredMeasure, RateLimitCharge, RateLimitClauseIssue,
     RateLimitClausePlan, clause_quota,

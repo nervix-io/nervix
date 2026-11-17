@@ -93,7 +93,12 @@ impl StreamingService<VerifiedFrame<ClientFrame>> for OpenExchange {
             if exchanges.send(exchange).await.is_err() {
                 return Err(Status::unavailable("the test takes no more exchanges"));
             }
-            Ok(Response::new(ReceiverStream::new(outbound)))
+            let mut response = Response::new(ReceiverStream::new(outbound));
+            nervix_client_core::wire::grpc::limits::write(
+                response.metadata_mut(),
+                SessionLimits::DEFAULT,
+            );
+            Ok(response)
         })
     }
 }

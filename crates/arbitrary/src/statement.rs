@@ -307,6 +307,21 @@ impl Arbitrary<'_> {
             nervix_models::ClusterParameterChange::NodeUnavailabilityTimeout(
                 std::time::Duration::from_millis(self.entropy.between(1..=1000)),
             ),
+            nervix_models::ClusterParameterChange::ForcedRecoveryBudget(
+                std::time::Duration::from_millis(self.entropy.between(1..=1000)),
+            ),
+            nervix_models::ClusterParameterChange::OwnershipHandoffPollInterval(
+                std::time::Duration::from_millis(self.entropy.between(1..=1000)),
+            ),
+            nervix_models::ClusterParameterChange::EntityGatePollInterval(
+                std::time::Duration::from_millis(self.entropy.between(1..=1000)),
+            ),
+            nervix_models::ClusterParameterChange::DomainDrainPollInterval(
+                std::time::Duration::from_millis(self.entropy.between(1..=1000)),
+            ),
+            nervix_models::ClusterParameterChange::RuntimeReadinessPropagationBound(
+                std::time::Duration::from_millis(self.entropy.between(1..=1000)),
+            ),
             nervix_models::ClusterParameterChange::DomainDrainTimeout(
                 std::time::Duration::from_millis(self.entropy.between(1..=1000)),
             ),
@@ -760,11 +775,12 @@ impl Arbitrary<'_> {
                 })
             }
             StatementVariant::ShowProcessorState => {
-                let processor = match self.entropy.byte() % 4 {
+                let processor = match self.entropy.byte() % 5 {
                     0 => StateInspectedProcessor::Reorderer(self.name()),
                     1 => StateInspectedProcessor::Correlator(self.name()),
                     2 => StateInspectedProcessor::Deduplicator(self.name()),
-                    _ => StateInspectedProcessor::WindowProcessor(self.name()),
+                    3 => StateInspectedProcessor::WindowProcessor(self.name()),
+                    _ => StateInspectedProcessor::Inferencer(self.name()),
                 };
                 let clauses = self.state_inspection_clauses();
                 Statement::ShowProcessorState(ShowProcessorState {

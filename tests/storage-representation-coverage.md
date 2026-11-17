@@ -9,6 +9,13 @@ licensing refusals, and statement/archive/canonical domains include `DESCRIBE LI
 `client-state-inspection` and the shared host inspection property preserve cluster-license scope
 without manufacturing a domain or graph-node identity.
 
+Statement and consensus record domains include `SHOW INFERENCER ... STATE` with the shared branch,
+page and format clauses. `interconnect-processor-state-inspection` preserves its owner request,
+partition catalog and indexed tensor sections. `client-published-processor-sections` preserves the
+complete header and tensor schemas, exact F32 bits, shapes and whole-value redaction through the
+session codec. These observations remain in memory; the current consensus namespace and encoding
+identify the statement layout before decoding.
+
 Names drawn from `nervix-arbitrary` include current Plexus keyword spellings where their name
 kind and domain admit them. The [property register](../docs/src/property-testing-and-fuzzing.md)
 records each generated domain's revision and input bounds.
@@ -61,7 +68,7 @@ datetimes or bytes. JSON, CBOR and AVRO retain their own wire type enums; CBOR c
 native representation types, and an AVRO array nests its item type, arrays included, to a
 bounded depth. The Model/archive, registry and consensus properties preserve those complete
 values, including inferencer state bindings and their initial expressions.
-The `NERVIX RATELIMIT` registry signature and `raft_licensing_operations_inferencer_wasm_inspection_listener_bounds_stopgate_node_ratelimit_` consensus namespace
+The `NERVIX RATELIMIT` registry signature and `raft_licensing_transitions_inferencer_pages_operational_ratelimit_` consensus namespace
 identify the current Model layout before decoding, including the ordered `RATE LIMIT` clauses an
 ingestor body writes and the `SET RATE LIMIT` and `DROP RATE LIMIT` alterations.
 
@@ -71,7 +78,7 @@ Kafka's and Pulsar's `SET START AT`, a declared quiesce mode and `SET CLIENT` wh
 or writes through a client. They mix them with the shared operations, the in-place construction
 changes of a route or an emitter, and an emitter's envelope clauses and properties. The
 Model/archive, consensus and canonical Plexus properties preserve the complete operations in order,
-and the `raft_licensing_operations_inferencer_wasm_inspection_listener_bounds_stopgate_node_` consensus namespace identifies the statement layout the
+and the `raft_licensing_transitions_inferencer_pages_operational_ratelimit_` consensus namespace identifies the statement layout the
 transactions it keeps are stored in before decoding.
 
 `RESET WASM PROCESSOR ... STATE` statement generators draw a processor and an unbranched,
@@ -113,7 +120,7 @@ contain synthetic data and describe the current shapes.
 | Stored representation | Target | Complete oracle |
 | --- | --- | --- |
 | Committed cluster parameters | `cluster-parameters` | All 22 class-typed parameter values, duration nanoseconds, byte limits, counts and revision identities survive validated archive and JSON round trips with complete equality |
-| Committed node records and their typed announcement messages | `node-records` | Complete commit revision, node name, incarnation, explicit unknown or positive CPU and memory measurements, transport/DNS/database/consensus policy, engine/connector host capacities, all four positive receive bounds, every detected and undetected property outcome and tags at their bounds survive canonical durable encoding; current announcement requests and every publication outcome survive the same validated archive codec |
+| Committed node records and their typed announcement messages | `node-records` | Complete commit revision, node name, incarnation, explicit unknown or positive CPU and memory measurements, transport/DNS/database/consensus policy, engine/connector host capacities, operational and listener limits, all four positive receive bounds, every detected and undetected property outcome and tags at their bounds survive canonical durable encoding, and the capacity claim survives validated JSON; current announcement requests and every publication outcome survive the same validated archive codec |
 | Domain schedule units in control-plane storage | `scheduled-units` | The complete schedule, including each unit kind, full-width ordinal, primary, assigned nodes and ownership state, survives archive encoding unchanged |
 | Execution revision built from a scheduled domain | `execution-revision-units` | Every declared partition retains its placement and the handoff fingerprint changes with it; moving one unit names that exact unit in the reassignment and preserves every sibling |
 | Consensus state records: unit-keyed schedules, domains with their clock mappings and authorities, users, resource versions, node statuses, node records and uploads, cordons, admission fences, mutation leases, restore installations, transactions, commit plans, impact reports, command executions and the metadata with its retry fence and required cluster parameters | `consensus-state-records` | The recovered `StateMachineData` equals the stored one, records, derived indexes and metadata alike, for a revision written into an empty keyspace and for a second revision written as the changes from it, with records replaced and removed |

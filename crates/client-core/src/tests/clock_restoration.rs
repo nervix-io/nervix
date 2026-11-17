@@ -52,6 +52,7 @@ impl ServedExchange {
             pending,
             exchange.emitters.clone(),
             exchange.generation.clone(),
+            nervix_client_wire::SessionLimits::DEFAULT,
         );
         let client = client_on(exchange, Some(domain("tenant")));
         (client, Self { requests, reader })
@@ -64,7 +65,12 @@ impl ServedExchange {
         let pending = Arc::new(Mutex::new(PendingReplies::new()));
         let emitters = client.inner.events.emitters.clone();
         let exchange = detached_exchange(frames, pending.clone(), emitters.clone());
-        let reader = ExchangeReader::new(pending, emitters, exchange.generation.clone());
+        let reader = ExchangeReader::new(
+            pending,
+            emitters,
+            exchange.generation.clone(),
+            nervix_client_wire::SessionLimits::DEFAULT,
+        );
         (exchange, Self { requests, reader })
     }
 

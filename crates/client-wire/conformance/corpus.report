@@ -116,6 +116,56 @@ REPLY 1 COMMAND failed reference=0192d4e4-7b36-7c3e-9f00-5b2d8c3a1e44 origin=Rec
 DIAGNOSTIC span=7..12 message=str:756e657870656374656420746f6b656e202752454c415927
 DIAGNOSTIC span=4294967295..4294967295 message=str:616e20656d707479207370616e206d61726b73206120706f736974696f6e
 DIAGNOSTIC span=none message=str:
+FRAME server_command_inferencer_state.nxsm
+REPLY 23 COMMAND completed reference=0192d4e4-7b36-7c3e-9f00-5b2d8c3a1e44 origin=Recovered message=str:636f6d6d6974746564207472616e73616374696f6e3b2071756965736365206c6576656c3a20454e544954595f5041555345
+DIAGNOSTIC span=7..12 message=str:756e657870656374656420746f6b656e202752454c415927
+DIAGNOSTIC span=4294967295..4294967295 message=str:616e20656d707479207370616e206d61726b73206120706f736974696f6e
+DIAGNOSTIC span=none message=str:
+STATE domain=sales kind=Inferencer name=running
+STATE_PAGE branches=0 rows=1 bytes=8 units=1 continuation=none
+STATE_PLACEMENT single
+STATE_UNIT owner=node_a replicas=node_b,node_c node=node_a incarnation=17 fingerprint=2525252525252525252525252525252525252525252525252525252525252525 generation=18446744073709551615 revision=19 stage=Live branches=0 rows=1 bytes=8
+STATE_SECTION name=header omitted=0 watermarks=none
+FIELD branch_fingerprint STRING nullable public
+FIELD incarnation U64 required public
+FIELD publication_revision U64 required public
+FIELD persisted_revision U64 required public
+FIELD state_bytes U64 required public
+FIELD confirmed_replicas U64 required public
+FIELD replica_count U64 required public
+FIELD stage STRING required public
+ROW [] branch_fingerprint=null incarnation=u64:18446744073709551615 publication_revision=u64:18446744073709551615 persisted_revision=u64:18446744073709551615 state_bytes=u64:8 confirmed_replicas=u64:1 replica_count=u64:2 stage=str:504552534953544544
+STATE_SECTION name=tensor_1 omitted=0 watermarks=none
+FIELD input STRING required public
+FIELD output STRING required public
+FIELD shape LIST<U64> required public
+FIELD values LIST<F32> required public
+ROW [] input=str:73746174655f696e output=str:73746174655f6f7574 shape=list[u64:2] values=list[f32:80000000,f32:7fc12345]
+FRAME server_command_inferencer_state_redacted.nxsm
+REPLY 24 COMMAND completed reference=0192d4e4-7b36-7c3e-9f00-5b2d8c3a1e44 origin=Recovered message=str:636f6d6d6974746564207472616e73616374696f6e3b2071756965736365206c6576656c3a20454e544954595f5041555345
+DIAGNOSTIC span=7..12 message=str:756e657870656374656420746f6b656e202752454c415927
+DIAGNOSTIC span=4294967295..4294967295 message=str:616e20656d707479207370616e206d61726b73206120706f736974696f6e
+DIAGNOSTIC span=none message=str:
+STATE domain=sales kind=Inferencer name=running
+STATE_PAGE branches=0 rows=1 bytes=8 units=1 continuation=none
+STATE_PLACEMENT single
+STATE_UNIT owner=node_a replicas=node_b,node_c node=node_a incarnation=17 fingerprint=2525252525252525252525252525252525252525252525252525252525252525 generation=18446744073709551615 revision=19 stage=Live branches=0 rows=1 bytes=8
+STATE_SECTION name=header omitted=0 watermarks=none
+FIELD branch_fingerprint STRING nullable public
+FIELD incarnation U64 required public
+FIELD publication_revision U64 required public
+FIELD persisted_revision U64 required public
+FIELD state_bytes U64 required public
+FIELD confirmed_replicas U64 required public
+FIELD replica_count U64 required public
+FIELD stage STRING required public
+ROW [] branch_fingerprint=null incarnation=u64:18446744073709551615 publication_revision=u64:18446744073709551615 persisted_revision=u64:18446744073709551615 state_bytes=u64:8 confirmed_replicas=u64:1 replica_count=u64:2 stage=str:504552534953544544
+STATE_SECTION name=tensor_1 omitted=0 watermarks=none
+FIELD input STRING required public
+FIELD output STRING required public
+FIELD shape LIST<U64> required public
+FIELD values LIST<F32> required sensitive
+ROW [] input=str:73746174655f696e output=str:73746174655f6f7574 shape=list[u64:2] values=redacted
 FRAME server_command_leader_unknown.nxsm
 REPLY 3 COMMAND not_leader reference=0192d4e4-7b36-7c3e-9f00-5b2d8c3a1e44 origin=Recovered message=str:636f6d6d6974746564207472616e73616374696f6e3b2071756965736365206c6576656c3a20454e544954595f5041555345
 DIAGNOSTIC span=7..12 message=str:756e657870656374656420746f6b656e202752454c415927
@@ -259,6 +309,8 @@ FRAME server_rows.nxsm
 EVENT ROWS name=live generation=18446744073709551615
 ROW [tenant=str:61636d65 region=null token=redacted] u8=u8:0 i8=i8:-128 u16=u16:0 i16=i16:-32768 u32=u32:0 i32=i32:-2147483648 u64=u64:0 i64=i64:-9223372036854775808 f32=f32:80000000 f64=f64:fff0000000000000 flag=bool:false text=str: seen_at=datetime:-9223372036854775808 note=null secret=redacted maybe_secret=redacted triple=list[i32:-2147483648,i32:0,i32:2147483647] pairs=list[]
 ROW [tenant=str:61636d65 region=null token=redacted] u8=u8:255 i8=i8:127 u16=u16:65535 i16=i16:32767 u32=u32:4294967295 i32=i32:2147483647 u64=u64:18446744073709551615 i64=i64:9223372036854775807 f32=f32:7fc00001 f64=f64:0000000000000001 flag=bool:true text=str:c3bc6ec3af63c3b864c3a920f09fa6802000 seen_at=datetime:9223372036854775807 note=str:70726573656e74 secret=redacted maybe_secret=redacted triple=list[i32:1,i32:2,i32:3] pairs=list[list[u8:0,u8:255],list[u8:7,u8:8]]
+FRAME server_session_opened.nxsm
+EVENT SESSION_OPENED frame=4194304 transfer=67108864 depth=64 entries=262144 string=67108864
 FRAME server_submission_completed.nxsm
 REPLY 20 SUBMISSION completed message=str:
 FRAME server_submission_failed.nxsm

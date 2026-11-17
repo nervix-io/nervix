@@ -337,7 +337,7 @@ resets its counters.
 | `licensing_time_seconds` | Gauge | The committed licensing timestamp as Unix seconds, present after first installation. |
 | `requests_total` | Counter, `operation` and `outcome` | On the leader, every operation/outcome pair starts at 0. |
 | `stream_connected` | Gauge | On the leader, 0. |
-| `transitions_active` | Gauge | Number of retained transitions whose deadline is after committed licensing time; 0 in free mode. |
+| `transitions_active` | Gauge | Number of committed transitions whose effective deadline is after committed licensing time, including pending acknowledgements; 0 in free mode. |
 | `over_limit` | Gauge, catalog `condition` | Every cluster quota starts at 0. |
 | `admissions_refused_total` | Counter, catalog `condition` and refusal `state` | Every cluster quota/refusal-state pair starts at 0. |
 
@@ -350,6 +350,13 @@ admission refusals. An activated record supplies its committed revision and exis
 deadlines. Deadline ticks change the state gauge without rewriting those deadlines.
 Released mode keeps its decision revision, reports `releasing` and exposes `next_grant` until the
 last grant ends. Confirmation and local key rotation never extend those deadlines.
+Activated mode also exposes `next_grant`. An unacknowledged grant uses the earlier of its committed
+grace deadline and the original introducing decision's offline deadline. A refresh cannot renew
+that bound. A signed acknowledgement replaces the grant; an administrator extension can move its
+deadline. `over_limit` remains 0 while active grants protect the committed usage and becomes 1
+when their allowance expires with usage still above the target. `within_grace` refusal counters
+count growth denied by the target while recovery remains permitted within the existing allowance.
+No metric or licensing deadline removes existing domains or cluster members.
 An invalid or unverifiable response increments `rejected_by_cluster`; typed service refusals increment
 `refused_by_service`, and failed transport attempts record `unreachable` or `timeout`. A request is
 `committed` after its verified decision applies. Counters describe attempts on this process and
@@ -543,6 +550,17 @@ Node scheduling:
   `nervix_node_scheduler_samples_total`: how late the node's reactor has been polling work that was
   already runnable. A timer asks to be woken every 250 milliseconds; the excess it is woken by is
   the delay every other task on that worker paid
+
+Control-plane configuration:
+
+- `nervix_control_plane_cadence_seconds{operation="..."}` is a gauge of the scraped node's
+  configured reconcile cadence or failure retry delay. Its fixed `operation` values are
+  `membership`, `scheduling`, `resource_replication`, `health`, `leadership_sync_retry`,
+  `runtime_state_retry`, `transaction_sweep` and `restore_staging`. The default values are
+  respectively 1, 1, 1, 1, 0.25, 0.5, 0.25 and 1 seconds. These immutable local capabilities
+  change on restart; they do not describe the duration of a pass or its observed frequency. A post-work delay starts after the
+  pass completes. [Node Settings](node-settings.md#control-plane-and-session-capabilities)
+  lists the options and the matching incarnation claim in `DESCRIBE CLUSTER`.
 
 Consensus retention:
 

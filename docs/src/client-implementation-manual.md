@@ -73,8 +73,9 @@ Unsolicited `ServerMessage` bodies carry no request identity:
 
 | Body | Meaning |
 | --- | --- |
-| `LeadershipObserved` | Which node leads, first on every session and again on every change |
-| `DomainsObserved` | The domain list, second on every session and again on every change |
+| `SessionOpened` | The five checked session limits, first on a WebSocket session |
+| `LeadershipObserved` | Which node leads, first after the limits are announced and again on every change |
+| `DomainsObserved` | The domain list, after leadership and again on every change |
 | `DomainSnapshotObserved`, `ClusterObserved` | The selected domain's live graph and entities, and the cluster summary, after `SelectDomainRequest` |
 | `ServerNotice` | Text for display at `Info`, `Warning`, or `Error`, of one kind: `Membership`, `Leadership`, `ClusterParameters`, `Runtime`, or `ControlPlane` |
 | `SubscriptionRows`, `SubscriptionDeliveryLost`, `SubscriptionRowsSkipped`, `SubscriptionEnded` | Frames of one subscription generation |
@@ -106,9 +107,9 @@ archive; see [Restore Streams](#restore-streams).
   `ClientMessage` and `NXUM` for an `UploadMessage`, and without a size prefix. It MUST NOT split a
   frame across messages, join frames in one message, or send a WebSocket text message.
 - **F-3.** Before it reads any field of a received frame, it MUST check that the frame is at most
-  the frame limit of 4 MiB, at least 8 bytes long, and carries the expected identifier, `NXSM` on a
+  the announced frame limit, at least 8 bytes long, and carries the expected identifier, `NXSM` on a
   session and `NXUR` for an upload reply. Where its FlatBuffers runtime has a verifier, it MUST
-  verify the frame with a nesting limit of 64, a table limit of the frame length divided by 4, and
+  verify the frame with the announced nesting limit, a table limit of the frame length divided by 4, and
   an apparent-size limit of 8 times the frame length. Where its runtime has none, as for Go and
   TypeScript, it MUST check every union discriminant, required field, and required value it reads,
   and MUST treat a read that its runtime fails, such as an offset outside the frame, as a protocol
@@ -121,11 +122,11 @@ archive; see [Restore Streams](#restore-streams).
   both when it reads one and when it writes one. For example, it omits
   `expected_transaction_position` when it expects no position and writes `0` when it expects
   position zero.
-- **F-6.** It MUST NOT send a frame above 4 MiB, a string above 64 MiB, a vector above 262,144
-  entries, or tables nested deeper than 64.
+- **F-6.** It MUST NOT send a frame, string, vector or nested table structure above the
+  corresponding limit announced for that exchange.
 - **F-7.** It MUST reassemble `TransferPart` replies into one reply per request identity. It MUST
   refuse a part that names another request identity or another total, a first total above the
-  transfer limit of 64 MiB, a part whose offset is not the number of bytes received so far, and an
+  announced transfer limit, a part whose offset is not the number of bytes received so far, and an
   empty chunk. It MUST verify the joined bytes as a `ServerMessage` frame under the transfer limit
   that holds a `Reply` to the same request whose body is not itself a transfer part. It MUST accept
   other frames between the parts of one reply, and MUST NOT deliver a partial reply.
@@ -136,6 +137,30 @@ archive; see [Restore Streams](#restore-streams).
   frame alive and unchanged while any such value is in use, and MUST copy what must outlive it. It
   SHOULD copy a small frame out of a large receive buffer before retaining it, as the Rust gRPC
   codec does below 64 KiB, so a retained frame does not pin the whole buffer.
+- **F-10.** Before using an exchange or companion call, an implementation MUST read and validate all five limits
+  in [Session Limits](client-session-protocol.md#session-limits). A native client MUST require
+  exactly one value for each `nervix-session-*` response metadata key and MUST install the announced frame
+  bound before buffering response messages. A WebSocket client MUST first verify a
+  `SessionOpened` `NXSM` frame under the fixed 1 KiB announcement bound, then install its
+  announced limits before sending requests or reading ordinary frames. The frame and transfer
+  bounds MUST lie within the documented ranges, the transfer MUST hold a frame, and the string
+  bound MUST fit the transfer. A missing, duplicated, zero, unrepresentable or otherwise invalid
+  bound MUST fail that opening. Every reconnect MUST adopt the contacted node's announcement;
+  encoders, verifiers, reassembly and retained subscription frames MUST use that exchange's
+  checked limits. Local retention multipliers MUST be checked against the contacted peer's
+  frame size before the queue generation becomes active; arithmetic overflow MUST refuse
+  opening rather than wrap or truncate the bound. A prior exchange MUST NOT replace the bounds of its successor. Native upload
+  and restore clients MUST offer all five previously announced values in request metadata and
+  MAY stream immediately within that complete offer. The server checks it before reading input.
+  On `FAILED_PRECONDITION` with exactly one `nervix-session-bounds-changed: 1`, the client MUST
+  validate all five returned limits and retry the same identity and archive under them. This is
+  a pre-admission refusal of that attempt; it MUST NOT settle an earlier uncertain attempt.
+  An accepted response MUST announce exactly the offered bounds. A malformed refusal MUST NOT
+  be treated as proof that handed-over input was not admitted. WebSocket upload/restore clients
+  MUST consume their opening before encoding starts or chunks. Upload and restore calls MUST still require
+  one terminal response message. A download request MAY
+  precede native response headers within the fixed 1 KiB opening envelope; a WebSocket download
+  MUST consume its opening first. Companion calls MUST use the limits of the endpoint they reach.
 
 ## Transports And Authentication
 
@@ -352,6 +377,8 @@ configuration export. The backup contract carries complete configuration.
 - **E-3.** A client MUST NOT create a new reference for a command whose outcome is uncertain. It
   MUST repeat the command under the same reference until it receives a terminal disposition, or give
   up and report the outcome as unknown, naming the reference.
+  A later attempt's local refusal, including an encoding refusal under a replacement session's
+  smaller limits, MUST NOT turn an earlier uncertain attempt into a definite failure.
   An applying execution retains the finished transactions its recovery needs even beyond their
   configured tombstone age; transaction retention does not require a new execution reference.
 - **E-4.** A client SHOULD stop repeating a reference well before the retry validity, 15 minutes by
@@ -1419,7 +1446,11 @@ from the presence of `state` or parse text to reconstruct rows.
 Clients MUST preserve the inspection entity's typed scope. `DomainNodeInspectionEntity` contains
 a domain and node reference; `ClusterLicenseInspectionEntity` contains neither. Native host
 domain/name accessors return absent values for a cluster-license observation, and its entity kind
-is `LICENSE`. The page and Row-section contract is shared by both scopes.
+is `LICENSE`. The page and Row-section contract is shared by both scopes. Licensing's `transitions`
+section uses that generic contract for committed grants; preserve its complete schema and typed
+rows, including datetime precision and all original/target values. The section's rows contribute
+to the page and unit counts. Native and console warnings render the same licensing transition
+codes and parameters supplied by the server.
 
 Embedded `NXRB` frames use the existing verified Row/Cell representation and the session transfer
 bound. A retained frame MUST keep its backing bytes alive after its containing outcome is released.
@@ -1445,6 +1476,13 @@ the complete count, and undeclared enum values or union members, as for every ot
 absent fingerprint is the unbranched execution, never an empty or zero fingerprint. Resume a WASM
 continuation with the same domain, processor and selector; a refused resume starts a new read, and
 entries of the abandoned sequence are not combined with the new one.
+
+Inferencer inspections use that same contract. Clients preserve `header` metadata and each
+`tensor_1` onwards section, including the exact port names, `VEC<U64>` shape and `VEC<F32>`
+values. Float bits and whole-cell redaction survive without numeric conversion. Headers do not
+advance the tensor-row continuation. Section names are distinct from arbitrary model port names;
+their order is the written `STATE` order. See
+[Inspect Carried Inference State](./processors.md#inspect-carried-inference-state).
 
 The native Python, Ruby and JVM bindings expose this envelope through
 `Outcome.state_inspection` (Python property and Ruby method) and `Outcome.stateInspection()`

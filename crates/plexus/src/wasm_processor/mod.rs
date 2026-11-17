@@ -22,11 +22,12 @@ use nervix_models::{
 use crate::{
     lexer::{Identifier, Token},
     parser_support::{
-        LexedInput, ParseError, ParseFromSourceError, ack_mode, branch_selection, byte_size_lit,
-        filter_where_clause, from_relay_clauses, if_not_exists_clause, into_parse_error, kw,
-        kw_phrase2, kw_phrase3, lex_input, materialized_state_dependencies, message_error_policy,
-        nonzero_u64_value, relay_ref, resource_ref, resource_version_clause,
-        set_or_where_route_construction, string_lit, suggest_from, tok, wasm_processor_name,
+        LexedInput, ParseError, ParseFromSourceError, RelayRole, ack_mode, branch_selection,
+        byte_size_lit, filter_where_clause, from_relay_clauses, if_not_exists_clause,
+        into_parse_error, kw, kw_phrase2, kw_phrase3, lex_input, materialized_state_dependencies,
+        message_error_policy, nonzero_u64_value, relay_in_role, resource_ref,
+        resource_version_clause, set_or_where_route_construction, string_lit, suggest_from, tok,
+        wasm_processor_name,
     },
 };
 
@@ -103,7 +104,7 @@ fn wasm_route_construction<'src>()
 fn wasm_processor_output_route<'src>()
 -> impl Parser<'src, &'src [Token], ProcessorOutput, extra::Err<ParseError<'src>>> + Clone {
     kw(Identifier::To)
-        .ignore_then(relay_ref())
+        .ignore_then(relay_in_role(RelayRole::Output))
         .then(wasm_route_construction().or_not())
         .then(message_error_policy())
         .map(

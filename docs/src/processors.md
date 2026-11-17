@@ -7,6 +7,18 @@ graph edges; expressions use language-defined scopes instead of relay-qualified 
 
 ## Shared input and branch contracts
 
+An internal worker class at capacity backpressures accepted input. The branch keeps its records,
+acknowledgements and processor state while waiting for a place, and takes no more input meanwhile.
+The wait produces no error-policy outcome or retry, including for `NO ACK` sources and detached
+consumers. The same rule covers branch input preparation, expression programs, inference session
+setup and model runs, and WASM input and output processing. Active waits renew the held
+acknowledgements, including other rows retained by a reorderer or correlator; parked window
+acknowledgements and an HTTP endpoint's absolute ACK deadline retain their existing meaning.
+Normal evaluation failures keep their
+existing handling. Stop, eviction and ownership teardown bound the wait with their existing
+deadlines; logical timers due during a wait run in order afterwards. See
+[VM Execution Bounds](vm-functions.md#scheduling-and-execution-bounds).
+
 Ordinary multi-source processors require every `FROM` relay to reference the same declared schema
 Model. Merely having structurally equal schemas is not enough. The relays must also use the same
 exact named branch, or all be unbranched.
@@ -669,6 +681,37 @@ values. Any node can serve the command by asking the scheduled unit owners for t
 
 The [inferencer state metrics](metrics-and-observability.md#inferencer-state) measure active state
 bytes, snapshot failures and branch initialization on each execution owner.
+
+### Inspect Carried Inference State
+
+```plexus
+SHOW INFERENCER running STATE
+  FOR BRANCH KEY { tenant = 'alpha' } LIMIT 100 FORMAT JSON;
+```
+
+`SHOW INFERENCER <name> STATE` reads the immutable tensor generation published by each selected
+branch. It uses the [shared state inspection envelope](relay.md#inspect-materialized-state),
+owner routing, ordered selection and paging clauses, declared read bounds and typed refusals.
+An inferencer without `STATE` returns `not_materialized`. A stateful inferencer with no live
+branches returns zero counts and no sections.
+
+Each branch has a `header` row with its fingerprint, incarnation, publication revision, persisted
+revision, tensor bytes, confirmed and assigned replica counts, and persistence stage. Stages are
+`PUBLISHED`, `PERSISTED` and, when at least one replica is assigned and all confirm the captured revision,
+`REPLICA_CONFIRMED`. Progress describes that captured generation; it does not hold up a read.
+
+Sections `tensor_1` onwards follow the `STATE` declaration order. Each row carries `input` and
+`output` port names, its `shape` as `VEC<U64>` and its `values` as `VEC<F32>`. Float bits are
+preserved. If any input or branch-key field is sensitive, the entire `values` cell is redacted;
+port names, shape and lifecycle metadata remain visible. There is no implicit leakage exception.
+
+Complete row counts, `LIMIT` and continuation offsets count tensor rows. Header rows consume
+the reply's section and byte bounds separately. A continuation names the complete selected
+publication cut, owner incarnations, committed revision and selector. Changed tensors, branch
+membership, ownership or configuration make it stale. Start a new read after
+`stale_continuation`; do not combine rows from different cuts. During repartitioning, the
+installed claimant or its holder supplies each key exactly once. Reads leave inference,
+publication cadence, branch activity, checkpoints and acknowledgements unchanged.
 
 ## WASM processor
 

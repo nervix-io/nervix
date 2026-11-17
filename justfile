@@ -382,6 +382,10 @@ test-window-collection-arrays *args: build-deps build-plexus-format build-test-c
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
     cargo test --package nervix-scenarios --test scenarios -- --input tests/features/runtime/window_collect_array.feature {{ quote(args) }}
 
+# Complete codec and relay references through the public CLI, against the rules the forms apply.
+test-reference-completion *args: build-deps build-plexus-format build-test-cli build-deadlock-report
+    ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)" cargo test --package nervix-scenarios --test scenarios -- --input {{ quote(justfile_directory() / "tests/features/tools/cli_reference_completion{,}.feature") }} {{ quote(args) }}
+
 # Observe released and installed processor keys through bounded public inspection pages.
 test-partition-state-inspection *args: build-deps build-plexus-format build-test-cli build-deadlock-report
     ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)" cargo test --package nervix-scenarios --test scenarios -- --input {{ quote(justfile_directory() / "tests/features/runtime/partition_state_inspection{,}.feature") }} {{ quote(args) }}
@@ -477,6 +481,25 @@ test-password-credentials *args: build-deps build-plexus-format build-test-cli b
     set -euo pipefail
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
     cargo test --package nervix-scenarios --test scenarios -- --input tests/features/cluster/password_credentials.feature {{ quote(args) }}
+
+# Build the focused public settings scenario owner separately from its runtime budget.
+build-control-plane-settings: build-deps build-plexus-format build-test-cli build-deadlock-report
+    cargo test --package nervix-scenarios --test scenarios --no-run
+
+# Check the typed capability and wire-bound owners without building the server graph.
+check-operational-settings:
+    cargo check --package nervix-models --package nervix-client-wire --features nervix-client-wire/grpc
+
+# Check native per-call opening and client bounds without building the server graph.
+check-client-session-open:
+    cargo check --package nervix-client-core --features arrow,autocomplete
+
+# Check public control-plane cadence, session bounds, reconnects and forwarding links.
+test-control-plane-settings *args: build-deps build-plexus-format build-test-cli build-deadlock-report
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    cargo test --package nervix-scenarios --test scenarios -- --input {{ quote(justfile_directory() / "tests/features/cluster/{control_plane_settings,control_plane_settings}.feature") }} {{ quote(args) }}
 
 # Check the node's capability-derived execution and memory settings through its public surface.
 test-execution-capabilities *args: build-deps build-plexus-format build-test-cli build-deadlock-report
@@ -1723,6 +1746,33 @@ test-shuttle-checks filter="":
     report=()
     if [[ -n "$evidence" ]]; then report=(--report "$evidence"); fi
     python3 -m scripts.shuttle_checks --target-dir {{ quote(cargo_target_dir) }} run {{ quote(filter) }} "${report[@]}"
+
+# Run a focused package through the same inventory, exploration and nondeterminism gates as CI.
+# The ordinary test-shuttle recipe still qualifies the entire registered inventory.
+test-shuttle-package package filter="": download-onnxruntime
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    export CARGO_TARGET_DIR={{ quote(cargo_target_dir + "/shuttle") }}
+    export NERVIX_SHUTTLE_PACKAGE={{ quote(package) }}
+    export NERVIX_SHUTTLE_FILTER={{ quote(filter) }}
+    python3 - <<'PYTHON'
+    import os
+    from pathlib import Path
+    from scripts import shuttle_checks
+
+    root = Path.cwd()
+    inventory = shuttle_checks.parse_inventory((root / shuttle_checks.INVENTORY).read_text())
+    package = os.environ["NERVIX_SHUTTLE_PACKAGE"]
+    scope = shuttle_checks.Inventory(checks={package: inventory.checks[package]})
+    target = Path(os.environ["CARGO_TARGET_DIR"]).resolve()
+    target.mkdir(parents=True, exist_ok=True)
+    report = Path(os.environ.get("NERVIX_MODEL_EVIDENCE", str(target / f"{package}-focused.json")))
+    raise SystemExit(shuttle_checks.run_checks(
+        shuttle_checks.Commands(root), scope, target,
+        os.environ["NERVIX_SHUTTLE_FILTER"], report=report, jobs=1,
+    ))
+    PYTHON
 
 # Compile every package `test-shuttle-checks` explores, as it builds them, without running a check.
 [private]
@@ -3652,6 +3702,10 @@ bench-smoke-bodies:
 # transformation. Extra arguments are forwarded to Criterion.
 bench-admitted-work *args: build-web-console
     cargo bench --package nervix-server --bench admitted_work --features benchmarks -- {{ args }}
+
+# Measure an exact preserved build when comparing admitted work before and after a source change.
+bench-admitted-work-executable executable *args:
+    {{ quote(executable) }} {{ quote(args) }}
 
 # Real RabbitMQ write costs. Serialize measurements across checkouts of this repository.
 bench-rabbitmq-publish *args:

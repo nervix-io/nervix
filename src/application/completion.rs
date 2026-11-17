@@ -33,10 +33,7 @@ use nervix_primitives::{sync::Arc, task::AbortOnDropHandle};
 use nervix_recovery::Reported as _;
 use thiserror::Error;
 
-use super::{
-    scheduling::RUNTIME_REVISION_READINESS_PROPAGATION_BOUND, session_service::SessionServiceImpl,
-    tls::HttpsListenerCertificates,
-};
+use super::{session_service::SessionServiceImpl, tls::HttpsListenerCertificates};
 use crate::cluster::ClusterHandle;
 
 mod progress;
@@ -47,8 +44,6 @@ pub(in crate::application) use progress::{
     ApplicationProgressState, register_application_progress_report_handler,
     spawn_application_progress_reporting, spawn_authoritative_progress_recording,
 };
-
-const APPLICATION_REVISION_PROBE_RETRY: std::time::Duration = std::time::Duration::from_millis(250);
 
 /// Registers the handler that answers this incarnation's progress record to a revision query.
 pub(in crate::application) fn register_application_revision_handler(
@@ -357,6 +352,7 @@ async fn probe_https_listeners(
 /// application progress it records and holds.
 #[derive(Clone, Copy)]
 pub(in crate::application) struct BarrierNode<'a> {
+    pub(in crate::application) retry_interval: std::time::Duration,
     pub(in crate::application) cluster: &'a ClusterHandle,
     pub(in crate::application) consensus: &'a Observer,
     pub(in crate::application) interconnect: &'a Transport,
@@ -376,6 +372,7 @@ pub(in crate::application) async fn wait_for_application_revision(
     deadline: nervix_primitives::time::Instant,
 ) -> Result<(), ApplicationRevisionTimeout> {
     let BarrierNode {
+        retry_interval,
         cluster,
         consensus,
         interconnect,
@@ -410,7 +407,7 @@ pub(in crate::application) async fn wait_for_application_revision(
                 _ = nervix_primitives::time::sleep_until(deadline) => deadline_elapsed = true,
                 _ = &mut cluster_change => {},
                 () = observer.changed() => {},
-                _ = nervix_primitives::time::sleep(APPLICATION_REVISION_PROBE_RETRY) => {},
+                _ = nervix_primitives::time::sleep(retry_interval) => {},
             }
             continue;
         };
@@ -494,13 +491,13 @@ pub(in crate::application) async fn wait_for_application_revision(
                         }
                         _ = &mut cluster_change => {}
                         () = observer.changed() => {}
-                        _ = nervix_primitives::time::sleep(APPLICATION_REVISION_PROBE_RETRY) => {}
+                        _ = nervix_primitives::time::sleep(retry_interval) => {}
                     }
                 }
             }
             _ = &mut cluster_change => {}
             () = observer.changed() => {}
-            _ = nervix_primitives::time::sleep(APPLICATION_REVISION_PROBE_RETRY) => {}
+            _ = nervix_primitives::time::sleep(retry_interval) => {}
         }
     }
 }
@@ -551,13 +548,16 @@ impl SessionServiceImpl {
     fn completion_deadline(
         &self,
     ) -> Result<nervix_primitives::time::Instant, Report<CompletionError>> {
+        let readiness_propagation_bound = self
+            .cluster_parameters()
+            .runtime_readiness_propagation_bound();
         let node_unavailability_timeout = self.inner.cluster.node_unavailability_timeout();
         let overflow = CompletionError::DeadlineOverflow {
             node_unavailability_timeout,
-            propagation_bound: RUNTIME_REVISION_READINESS_PROPAGATION_BOUND,
+            propagation_bound: readiness_propagation_bound,
         };
         let Some(wait_budget) =
-            node_unavailability_timeout.checked_add(RUNTIME_REVISION_READINESS_PROPAGATION_BOUND)
+            node_unavailability_timeout.checked_add(readiness_propagation_bound)
         else {
             return Err(Report::new(overflow));
         };
@@ -578,6 +578,7 @@ impl SessionServiceImpl {
     /// What this node's revision barriers read.
     pub(in crate::application) fn barrier_node(&self) -> BarrierNode<'_> {
         BarrierNode {
+            retry_interval: self.inner.raft_timings.heartbeat_interval(),
             cluster: &self.inner.cluster,
             consensus: &self.inner.consensus,
             interconnect: &self.inner.interconnect,
@@ -646,7 +647,7 @@ impl SessionServiceImpl {
                         pending_nodes: vec![pending_node],
                     }));
                 }
-                nervix_primitives::time::sleep(APPLICATION_REVISION_PROBE_RETRY).await;
+                nervix_primitives::time::sleep(self.inner.raft_timings.heartbeat_interval()).await;
                 continue;
             };
             let probed = probe_https_listeners(
@@ -693,7 +694,7 @@ impl SessionServiceImpl {
             nervix_primitives::select! {
                 biased;
                 _ = nervix_primitives::time::sleep_until(deadline) => {}
-                _ = nervix_primitives::time::sleep(APPLICATION_REVISION_PROBE_RETRY) => {}
+                _ = nervix_primitives::time::sleep(self.inner.raft_timings.heartbeat_interval()) => {}
             }
         }
     }
@@ -702,14 +703,17 @@ impl SessionServiceImpl {
         &self,
         revision: u64,
     ) -> Result<(), Report<crate::runtime::RuntimeError>> {
+        let readiness_propagation_bound = self
+            .cluster_parameters()
+            .runtime_readiness_propagation_bound();
         let node_unavailability_timeout = self.inner.cluster.node_unavailability_timeout();
         let Some(wait_budget) =
-            node_unavailability_timeout.checked_add(RUNTIME_REVISION_READINESS_PROPAGATION_BOUND)
+            node_unavailability_timeout.checked_add(readiness_propagation_bound)
         else {
             return Err(Report::new(
                 crate::runtime::RuntimeError::RuntimeRevisionReadinessDeadlineOverflow {
                     node_unavailability_timeout,
-                    readiness_propagation_bound: RUNTIME_REVISION_READINESS_PROPAGATION_BOUND,
+                    readiness_propagation_bound,
                 },
             ));
         };
@@ -718,7 +722,7 @@ impl SessionServiceImpl {
             return Err(Report::new(
                 crate::runtime::RuntimeError::RuntimeRevisionReadinessDeadlineOverflow {
                     node_unavailability_timeout,
-                    readiness_propagation_bound: RUNTIME_REVISION_READINESS_PROPAGATION_BOUND,
+                    readiness_propagation_bound,
                 },
             ));
         };

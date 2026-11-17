@@ -56,12 +56,14 @@ mod names;
 mod node_capabilities;
 pub use database_settings::*;
 mod node_endpoint;
+mod node_operations;
 mod node_record;
 mod node_ref;
 mod partition_epoch;
 mod password_credential;
 mod placement;
 mod prerequisites;
+pub use node_operations::*;
 pub use password_credential::{PasswordCost, PasswordCredential};
 mod processor;
 mod quiesce;
@@ -117,7 +119,9 @@ pub use command::{
     CommandExecutionReference, CommandExecutionReferenceError,
     CommandExecutionReferenceTimestampError,
 };
-pub use completion::{BuiltinFunctionScope, SemanticReference};
+pub use completion::{
+    BuiltinFunctionScope, CodecDirection, RelayQuestion, RelayRule, SemanticReference,
+};
 pub use connector::{
     AcknowledgementConfirmation, AzureBlobConfigEntry, BufferBound, BufferCapacity, BufferOverflow,
     CLICKHOUSE_VALUE_ENCODINGS, CLIENT_CONFIG_REDACTION, ChoiceRequirement, ClickHouseConfigEntry,

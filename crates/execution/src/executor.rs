@@ -2,7 +2,7 @@
 
 use arch_into::ArchInto as _;
 use error_stack::Report;
-use meticulous::ResultExt as _;
+use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_primitives::sync::{Arc, StdArc};
 use thiserror::Error;
 
@@ -146,6 +146,12 @@ impl Default for Executor {
 }
 
 impl Executor {
+    /// Bind execution to work the caller has already accepted and continues to own.
+    /// Its CPU jobs wait for a worker place until the owner ends the future.
+    pub fn accepted_work(&self) -> crate::AcceptedWork<'_> {
+        crate::AcceptedWork { executor: self }
+    }
+
     /// Build the executor from limits that are validated together, so a node whose budgets cannot
     /// hold the largest operation it is configured to accept fails at startup instead of stalling
     /// on the first one.
@@ -232,6 +238,18 @@ impl Executor {
     /// The per-operation maxima every decoder and writer bounds itself by.
     pub fn limits(&self) -> &OperationLimits {
         &self.inner.limits
+    }
+
+    /// Groups bulk quanta for one read while leaving room for a preceding batch still in flight.
+    /// The capacity is immutable; deriving this bound reads no admission counters or locks.
+    pub fn bulk_read_batch_bytes(&self, chunks: std::num::NonZeroU32) -> u64 {
+        let pair_capacity = self.budget(MemoryClass::Bulk).capacity_bytes() / 2;
+        self.limits()
+            .bulk_chunk_bytes
+            .as_u64()
+            .checked_mul(u64::from(chunks.get()))
+            .assured("the validated bulk quantum and batch count each fit u32")
+            .min(pair_capacity)
     }
 
     /// Charge `bytes` to `class` without waiting. An operation that cannot be charged is refused
@@ -411,7 +429,7 @@ impl Executor {
         }
     }
 
-    fn cpu_pool(&self, class: CpuClass) -> &WorkerPool {
+    pub(crate) fn cpu_pool(&self, class: CpuClass) -> &WorkerPool {
         match class {
             CpuClass::Control => &self.inner.control_cpu,
             CpuClass::Credentials => &self.inner.credentials_cpu,

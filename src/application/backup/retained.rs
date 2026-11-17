@@ -40,15 +40,11 @@ use nervix_primitives::sync::{Arc, blocking::Mutex, mpsc};
 use nervix_recovery::Reported as _;
 use thiserror::Error;
 
-/// Archive bytes one download frame carries at most.
-const DOWNLOAD_CHUNK_BYTES: usize = 256 * 1024;
-
-// Under the limits a session transport serves by default, a whole chunk fills at most half a
-// frame, far more room than its frame's envelope needs.
-const _: () = assert!(DOWNLOAD_CHUNK_BYTES <= SessionLimits::DEFAULT.frame_bytes() / 2);
-
-/// Download frames queued for a client before the stream waits for it to read.
-pub(in crate::application) const DOWNLOAD_FRAME_CAPACITY: usize = 4;
+/// Explicit class-derived capacity for isolated retained-download fixtures.
+#[cfg(test)]
+fn download_frame_capacity() -> usize {
+    nervix_models::SessionCapabilities::default().download_capacity()
+}
 
 /// An archive a backup assembled, as a download needs it.
 pub(in crate::application) trait RetainedArtifact:
@@ -262,7 +258,7 @@ pub(in crate::application) enum DownloadEnd {
     ReadFailed,
 }
 
-/// Streams the archive `lease` holds to one client, at most [`DOWNLOAD_FRAME_CAPACITY`] frames
+/// Streams the archive `lease` holds to one client, at most the session's derived queue capacity frames
 /// ahead of it.
 ///
 /// Every send waits while the client's queue is full, so a slow client slows the reads instead of
@@ -288,9 +284,9 @@ where
     if frames.send(frame).await.is_err() {
         return DownloadEnd::ClientGone;
     }
-    // A chunk fills at most half a frame of the session's own limits, which leaves its frame's
-    // envelope more room than it needs.
-    let chunk_bytes = DOWNLOAD_CHUNK_BYTES.min(limits.frame_bytes() / 2);
+    // One sixteenth of the session's frame bound preserves the default 256 KiB chunks while
+    // scaling with that node's bound and leaving room for the envelope.
+    let chunk_bytes = limits.frame_bytes() / 16;
     let chunk_bytes: u64 = chunk_bytes.arch_into();
     loop {
         nervix_primitives::task::consume_budget().await;
@@ -490,7 +486,7 @@ mod tests {
         let lease = registry
             .open(&reference("backup-1"), &user("alice"), at(10))
             .assured("the owner opens a retained archive");
-        let (sender, receiver) = mpsc::channel(DOWNLOAD_FRAME_CAPACITY);
+        let (sender, receiver) = mpsc::channel(download_frame_capacity());
         let received = nervix_primitives::task::spawn(receive(receiver));
         let end = stream_archive(lease, source, sender, SessionLimits::DEFAULT).await;
         assert_eq!(end, DownloadEnd::Collected);
@@ -614,7 +610,7 @@ mod tests {
         let lease = registry
             .open(&reference("lost"), &user("alice"), at(10))
             .assured("the owner opens a retained archive");
-        let (sender, mut receiver) = mpsc::channel(DOWNLOAD_FRAME_CAPACITY);
+        let (sender, mut receiver) = mpsc::channel(download_frame_capacity());
         let reader = nervix_primitives::task::spawn(async move {
             receiver.recv().await.assured("the start frame arrives");
             drop(receiver);
@@ -675,15 +671,23 @@ mod shuttle_tests {
 
     /// The most frames a bounded stream reads ahead of its client: a full queue, and the one chunk
     /// it holds while it waits for room.
-    const BOUNDED_LEAD: usize = DOWNLOAD_FRAME_CAPACITY + 1;
+    fn bounded_lead() -> usize {
+        download_frame_capacity() + 1
+    }
     /// One chunk more than the bounded lead, so a stream that stopped waiting for its client reads
     /// past the bound before the client takes the start frame.
-    const ARCHIVE_CHUNKS: usize = BOUNDED_LEAD + 1;
+    fn archive_chunks() -> usize {
+        bounded_lead() + 1
+    }
     /// Full chunks, then one byte in the last, as a download of the default session limits reads
     /// them.
-    const ARCHIVE_BYTES: usize = (ARCHIVE_CHUNKS - 1) * DOWNLOAD_CHUNK_BYTES + 1;
+    fn archive_bytes() -> usize {
+        (archive_chunks() - 1) * (nervix_models::SessionFrameBytes::DEFAULT / 16) + 1
+    }
     /// The frames an intact download of the archive sends: its start, one per chunk, completion.
-    const DOWNLOAD_FRAMES: usize = 1 + ARCHIVE_CHUNKS + 1;
+    fn download_frames() -> usize {
+        1 + archive_chunks() + 1
+    }
 
     const MODEL_THREAD_JOINS: &str =
         "Shuttle fails the whole execution when a model thread panics, so no join observes one";
@@ -699,7 +703,7 @@ mod shuttle_tests {
 
     fn retained(releases: &StdArc<AtomicUsize>) -> (RetainedBackups<MemoryArchive>, Vec<u8>) {
         let registry = RetainedBackups::default();
-        let bytes = (0..ARCHIVE_BYTES)
+        let bytes = (0..archive_bytes())
             .map(|value| value.to_le_bytes()[0])
             .collect::<Vec<_>>();
         registry.retain(
@@ -737,7 +741,7 @@ mod shuttle_tests {
         let lease = registry
             .open(&reference(), &owner(), now())
             .unwrap_or_else(|refusal| panic!("the archive opens: {refusal:?}"));
-        let (sender, mut receiver) = mpsc::channel(DOWNLOAD_FRAME_CAPACITY);
+        let (sender, mut receiver) = mpsc::channel(download_frame_capacity());
         let chunks_read = StdArc::new(AtomicUsize::new(0));
         let mut counted = source(&bytes);
         counted.chunks_read = Some(chunks_read.clone());
@@ -750,12 +754,12 @@ mod shuttle_tests {
             let produced = chunks_read.load(Ordering::SeqCst) + 1;
             let ahead = produced.saturating_sub(frames_read);
             assert!(
-                ahead <= BOUNDED_LEAD,
+                ahead <= bounded_lead(),
                 "the stream read {ahead} frames ahead of its client"
             );
             thread::yield_now();
         }
-        assert_eq!(frames_read, DOWNLOAD_FRAMES);
+        assert_eq!(frames_read, download_frames());
         assert_eq!(
             stream
                 .join()
@@ -775,7 +779,7 @@ mod shuttle_tests {
         let lease = registry
             .open(&reference(), &owner(), now())
             .unwrap_or_else(|refusal| panic!("the archive opens: {refusal:?}"));
-        let (sender, mut receiver) = mpsc::channel(DOWNLOAD_FRAME_CAPACITY);
+        let (sender, mut receiver) = mpsc::channel(download_frame_capacity());
         let limits = SessionLimits::DEFAULT;
         let stream =
             thread::spawn(move || block_on(stream_archive(lease, source(&bytes), sender, limits)));
@@ -817,8 +821,9 @@ mod shuttle_tests {
             let collected = collected.clone();
             downloads.push(thread::spawn(move || {
                 block_on(async move {
-                    let (sender, mut receiver) =
-                        mpsc::channel::<EncodedFrame<BackupDownloadFrame>>(DOWNLOAD_FRAME_CAPACITY);
+                    let (sender, mut receiver) = mpsc::channel::<EncodedFrame<BackupDownloadFrame>>(
+                        download_frame_capacity(),
+                    );
                     let limits = SessionLimits::DEFAULT;
                     let expected = bytes.clone();
                     let reader = nervix_primitives::task::spawn(async move {

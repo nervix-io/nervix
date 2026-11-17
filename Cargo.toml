@@ -272,6 +272,8 @@ jiff = { workspace = true }
 nervix-arbitrary = { workspace = true }
 nervix-client-core = { workspace = true, features = ["arrow"] }
 nervix-connector-fake = { workspace = true }
+nervix-consensus = { workspace = true, features = ["testing"] }
+nervix-licensing-protocol = { workspace = true, features = ["testing"] }
 nervix-model-harness = { workspace = true }
 # The runtime's timer tests advance a paused clock.
 nervix-primitives = { workspace = true, features = ["native", "test-util"] }
@@ -548,6 +550,7 @@ hickory-resolver = { version = "0.26.3", default-features = false, features = [
   "tokio",
 ] }
 http = "1"
+http-body = "1"
 http-body-util = "0.1"
 httparse = "1"
 httpdate = "1"

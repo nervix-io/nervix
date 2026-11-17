@@ -1,8 +1,8 @@
-//! Operation deadlines projected from this transport's configured request budget.
+//! Operation deadlines projected from this transport's configured budgets.
 //!
 //! Layer: engines and infrastructure.
-//! - **Owns.** The relative budgets of control, coordination, setup and transfer requests.
-//! - **Depends on.** Transport request and committed liveness settings.
+//! - **Owns.** Request-relative budgets and the selected source of a duplex opening budget.
+//! - **Depends on.** Transport setup, request and committed liveness settings.
 //! - **Must not know.** Message payloads, graph state or application retries.
 #![cfg_attr(
     nervix_lint,
@@ -53,5 +53,52 @@ impl RequestDeadline {
             super::RequestTimeout::default_value(&()),
             super::InterconnectLiveness::default(),
         )
+    }
+}
+
+/// The settings owner that bounds opening one duplex stream, independently of its lifetime.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DuplexSetupDeadline {
+    /// Open a client link within this transport's complete connection-setup budget.
+    ConnectionSetup,
+    /// Keep an engine operation's existing relationship to the request budget.
+    Request(RequestDeadline),
+}
+
+impl DuplexSetupDeadline {
+    pub fn resolve(
+        self,
+        connection_setup: Duration,
+        request: Duration,
+        liveness: super::InterconnectLiveness,
+    ) -> Duration {
+        match self {
+            Self::ConnectionSetup => connection_setup,
+            Self::Request(deadline) => deadline.resolve(request, liveness),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn duplex_opening_uses_its_selected_transport_budget() {
+        let connection_setup = Duration::from_secs(3);
+        let request = Duration::from_secs(14);
+        let liveness = super::super::InterconnectLiveness::default();
+        assert_eq!(
+            DuplexSetupDeadline::ConnectionSetup.resolve(connection_setup, request, liveness),
+            connection_setup
+        );
+        assert_eq!(
+            DuplexSetupDeadline::Request(RequestDeadline::Setup).resolve(
+                connection_setup,
+                request,
+                liveness
+            ),
+            Duration::from_secs(7)
+        );
     }
 }

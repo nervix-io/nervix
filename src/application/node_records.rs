@@ -13,13 +13,18 @@
 )]
 
 use nervix_consensus::Proposer;
-use nervix_models::{NodeCapabilities, NodeCapabilityRecord, NodeProperties, NodeRecord, NodeTags};
+use nervix_models::{
+    NodeCapabilities, NodeCapabilityRecord, NodeOperationalCapabilities, NodeProperties,
+    NodeRecord, NodeTags,
+};
+use nervix_primitives::sync::StdArc;
 
 /// What this run states about itself beside who it is: resolved once at startup and announced
 /// unchanged for as long as the run lasts.
 #[derive(Debug, Clone)]
 pub(super) struct LocalNodeFacts {
     capabilities: NodeCapabilities,
+    operational: StdArc<NodeOperationalCapabilities>,
     properties: NodeProperties,
     tags: NodeTags,
 }
@@ -27,11 +32,13 @@ pub(super) struct LocalNodeFacts {
 impl LocalNodeFacts {
     pub(super) fn new(
         capabilities: NodeCapabilities,
+        operational: NodeOperationalCapabilities,
         properties: NodeProperties,
         tags: NodeTags,
     ) -> Self {
         Self {
             capabilities,
+            operational: StdArc::new(operational),
             properties,
             tags,
         }
@@ -48,6 +55,7 @@ pub(super) async fn announce(
         claim: NodeCapabilityRecord {
             identity,
             capabilities: facts.capabilities,
+            operational: facts.operational.clone(),
         },
         properties: facts.properties.clone(),
         tags: facts.tags.clone(),
@@ -81,11 +89,13 @@ pub(super) fn spawn(
     facts: LocalNodeFacts,
     shutdown: nervix_primitives::sync::CancellationToken,
 ) -> nervix_primitives::task::JoinHandle<()> {
+    let retry_interval = facts
+        .operational
+        .control_plane
+        .runtime_state_retry_interval();
     nervix_primitives::task::spawn(async move {
         let mut announced = false;
-        let mut cadence = nervix_primitives::time::interval(
-            super::runtime_admission::RUNTIME_STATE_RETRY_INTERVAL,
-        );
+        let mut cadence = nervix_primitives::time::interval(retry_interval);
         loop {
             nervix_primitives::select! {
                 biased;

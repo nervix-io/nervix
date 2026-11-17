@@ -448,6 +448,44 @@ fn corpus_frames() -> Vec<(&'static str, Bytes)> {
             command(1, CommandDisposition::Failed),
         ),
         (
+            "server_command_inferencer_state.nxsm",
+            reply(
+                23,
+                ReplyBody::Command(Box::new({
+                    let mut outcome = command_outcome(CommandDisposition::Completed {
+                        already_existed: false,
+                    });
+                    outcome.state = Some(Box::new(
+                        crate::state_inspection::tests::published::inference_sections(
+                            u64::MAX,
+                            [0x8000_0000, 0x7fc1_2345],
+                            false,
+                        ),
+                    ));
+                    outcome
+                })),
+            ),
+        ),
+        (
+            "server_command_inferencer_state_redacted.nxsm",
+            reply(
+                24,
+                ReplyBody::Command(Box::new({
+                    let mut outcome = command_outcome(CommandDisposition::Completed {
+                        already_existed: false,
+                    });
+                    outcome.state = Some(Box::new(
+                        crate::state_inspection::tests::published::inference_sections(
+                            u64::MAX,
+                            [0x7f80_0000, 0xff80_0000],
+                            true,
+                        ),
+                    ));
+                    outcome
+                })),
+            ),
+        ),
+        (
             "server_command_leader_unknown.nxsm",
             command(
                 3,
@@ -761,6 +799,13 @@ fn corpus_frames() -> Vec<(&'static str, Bytes)> {
             ),
         ),
         ("server_rows.nxsm", rows_frame(&limits()).into_bytes()),
+        (
+            "server_session_opened.nxsm",
+            crate::SessionOpened { limits: limits() }
+                .encode()
+                .assured("the current opening fits its fixed envelope")
+                .into_bytes(),
+        ),
         (
             "server_submission_completed.nxsm",
             submission(20, ClientSubmissionOutcome::Completed, ""),
@@ -1453,6 +1498,17 @@ fn render_server(message: &ServerMessage, lines: &mut Vec<String>) {
                 )),
                 other => panic!("the corpus holds no {other:?} reply"),
             }
+        }
+        ServerMessage::Event(ServerEvent::SessionOpened(opened)) => {
+            let limits = opened.limits;
+            lines.push(format!(
+                "EVENT SESSION_OPENED frame={} transfer={} depth={} entries={} string={}",
+                limits.frame_bytes(),
+                limits.transfer_bytes(),
+                limits.nesting_depth(),
+                limits.collection_entries(),
+                limits.string_bytes()
+            ));
         }
         ServerMessage::Event(ServerEvent::SubscriptionRows(rows)) => {
             let handle = rows.subscription();

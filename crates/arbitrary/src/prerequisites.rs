@@ -102,6 +102,7 @@ impl Arbitrary<'_> {
                 _ => AdmissionVerdict::QuotaRefused {
                     refusal: nervix_licensing_vocabulary::LicensingRefusal {
                         state: self.entropy.pick([
+                            nervix_licensing_vocabulary::AdmissionState::WithinGrace,
                             nervix_licensing_vocabulary::AdmissionState::OverLimit,
                             nervix_licensing_vocabulary::AdmissionState::Lapsed,
                             nervix_licensing_vocabulary::AdmissionState::Stopped,

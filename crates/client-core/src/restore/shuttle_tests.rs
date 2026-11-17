@@ -10,6 +10,7 @@ use nervix_model_harness::shuttle::check_dfs;
 use nervix_primitives::task;
 
 use super::*;
+use crate::exchange::SESSION_LIMITS;
 
 #[test]
 fn shuttle_finishing_a_restore_attempt_fences_its_last_frame() {

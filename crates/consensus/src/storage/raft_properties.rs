@@ -148,6 +148,7 @@ fn bolero_consensus_raft_records_round_trip_through_the_storage_codec() {
                 crate::ConsensusResponse::Conflict(crate::ConsensusConflict::LicensingQuota {
                     refusal: nervix_licensing_vocabulary::LicensingRefusal {
                         state: arbitrary.entropy().pick([
+                            nervix_licensing_vocabulary::AdmissionState::WithinGrace,
                             nervix_licensing_vocabulary::AdmissionState::OverLimit,
                             nervix_licensing_vocabulary::AdmissionState::Lapsed,
                             nervix_licensing_vocabulary::AdmissionState::Stopped,

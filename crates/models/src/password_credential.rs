@@ -20,7 +20,7 @@ use serde_big_array::BigArray;
 
 use crate::{
     ClusterParameterError, PasswordIterations, Setting,
-    cluster_parameters::archive::{self, ValidatedSetting},
+    settings::archive::{self, ValidatedSetting},
 };
 
 /// A positive iteration count within the cluster's declared verification bound.

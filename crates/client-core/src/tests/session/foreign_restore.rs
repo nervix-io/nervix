@@ -19,13 +19,14 @@ pub(super) struct RestoreWithForeignReference {
     pub(super) gate: Arc<Mutex<Option<RestoreReplyGate>>>,
 }
 
-impl ClientStreamingService<VerifiedFrame<RestoreFrame>> for RestoreWithForeignReference {
+impl StreamingService<VerifiedFrame<RestoreFrame>> for RestoreWithForeignReference {
     type Response = EncodedFrame<RestoreReplyFrame>;
-    type Future = BoxFuture<Response<Self::Response>, Status>;
+    type ResponseStream = AnnouncedAnswers<Self::Response>;
+    type Future = BoxFuture<Response<Self::ResponseStream>, Status>;
 
     fn call(&mut self, request: Request<Streaming<VerifiedFrame<RestoreFrame>>>) -> Self::Future {
         let gate = self.gate.clone();
-        Box::pin(async move {
+        let completion = async move {
             let mut stream = request.into_inner();
             let first = stream
                 .message()
@@ -65,10 +66,10 @@ impl ClientStreamingService<VerifiedFrame<RestoreFrame>> for RestoreWithForeignR
                 request_id: Some(start.request_id),
                 disposition: RestoreDisposition::Outcome(outcome),
             };
-            Ok(Response::new(
-                reply.encode(&limits()).assured("the current reply encodes"),
-            ))
-        })
+            Ok(reply.encode(&limits()).assured("the current reply encodes"))
+        };
+        let response = announced_answer(completion, limits());
+        Box::pin(async move { Ok(response) })
     }
 }
 

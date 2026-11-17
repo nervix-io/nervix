@@ -1968,6 +1968,16 @@ it:
   stop ends it as well. The race holds no lock and no guard across an await
 - one concrete processor branch serializes its own batches, while other branches remain
   independent
+- accepted branch input and programs wait for a place in their bounded worker class through the
+  executor's borrowed `AcceptedWork` contract. The class semaphore preserves arrival order ahead
+  of later requests. The owner takes no further input while waiting, holds no queue lock across
+  the wait, and preserves its processor state. Teardown drops the future within its existing
+  grace or drain deadline, returning the wait's charge and place. A stateful inferencer obtains
+  its queue place before handing its native session to a job. Logical deadlines due during the
+  wait are handled before the branch takes another input. Borrowed ACK scopes renew active and
+  retained rows without copying their sets; window acknowledgement parking and endpoint absolute
+  deadlines keep their existing meaning. The branch stop grace covers both queuing STOP and
+  joining its task
 - one already-resolved histogram series serializes its bounded accumulator update, once per
   recording: a batch's delivery latencies arrive as one folded recording, so the lock is taken once
   per batch; counter series are atomic
@@ -3799,6 +3809,20 @@ subject to the current task execution policy.
 
 ## Processor State Inspection Requests
 
+Inferencer inspection walks one immutable state-routing publication on the Bulk executor, with
+cancellation checked for every route and memory admission before retaining each registered native
+generation. It sorts selected concrete keys once, counts the entire selected cut, and builds only
+the requested tensor rows directly into Arrow list builders. Captures charge the retained native
+payload and shape footprint because a generation can outlive the owner's next replacement. The
+handles retain their values through column construction. The published tensors, branch activity, mutation
+owner, acknowledgement path and snapshot cadence are unchanged. A bounded synchronous read of the
+existing checkpoint-replication progress owner supplies header progress; no guard crosses a wait.
+Progress may advance while tensor revisions stay fixed and does not fence a tensor continuation.
+The new public inspection outline and direct native-owner tests check branch separation, exact
+float bits, paging and bounds. These reads add no publication or wakeup protocol and make no new
+memory-ordering claim. The existing replication progress lock is tracked by Deloxide; its campaigns
+remain subject to the live task execution policy.
+
 Deduplicator and window inspections capture one immutable published generation per selected
 concrete branch. A cold Bulk job scans the installed state registries, releases each map guard
 after cloning its generation and existing catalog registration identity, then sorts branches by
@@ -3943,6 +3967,27 @@ focused canonical runner is `just test-outward-tls-publication`; full CI retains
 inventory. The cache mutex's diagnostic applicability and unrun scope are recorded in the Deloxide
 inventory. Public one-/three-node scenarios use real native/console/HTTPS and shared HTTP connector
 handshakes, including retained traffic and dynamic certificate rebinding.
+
+The main session opening publishes one immutable value through the native request body's opening
+oneshot. Its source stays unpolled until publication, and ending the publication cancels the body.
+Upload and restore companions offer the five captured bounds with their authenticated request and
+start their maintained tonic encoders immediately. The server checks the complete offer before
+polling input; a changed-bounds refusal carries the current values and admits no archive input.
+The caller retries that same identity with the current bounds while retaining any earlier admission
+uncertainty. This preserves streaming overlap without an extra negotiation round trip. Maintained
+tonic encoders and decoders retain the installed value without a recurring settings lock. The existing event-queue owner installs subscription byte budgets at generation
+start under its existing lock, using the client's two configured retention counts and the
+announced frame size. Overflow of the derived byte arithmetic fails before taking that lock or
+replacing the current generation. Its map access frequency and per-subscription overflow rules stay
+with that owner. Producer-link owner answers publish `LinkOpened` into the bounded queue before
+the link is exposed, so a concurrent idle heartbeat or receiver close cannot put an ordinary event
+before the opening. Registered Shuttle checks exercise those production publication owners;
+peer-cadence lifetime is also covered by the mixed-node public scenario.
+
+Captured-backup section reads resolve one batch bound from the immutable execution bulk quantum
+and pool capacity at stream creation. It is capped at half that pool, so the next read can coexist
+with the preceding charged transport buffer. This derivation takes no admission snapshot, adds no
+map access or lock, and retains the default 1 MiB read.
 
 ## HTTP Input And Connection Ownership
 

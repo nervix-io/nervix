@@ -17,7 +17,7 @@
     )
 )]
 
-use std::{collections::BTreeSet, time::Duration};
+use std::collections::BTreeSet;
 
 use arch_into::ArchInto;
 use error_stack::{Report, ResultExt as _};
@@ -42,13 +42,6 @@ use super::{
     transaction::{QuiescenceAttempt, TransactionStepImpactRecorder},
 };
 use crate::runtime::EntityGateLease;
-
-pub(in crate::application) const ENTITY_GATE_RELEASE_RETRY_INTERVAL: Duration =
-    Duration::from_millis(100);
-
-/// The pause before an ownership-handoff gate engagement retries a request whose interconnect
-/// stream broke, which gives the transport time to replace the connection.
-const ENTITY_GATE_ENGAGEMENT_RETRY_INTERVAL: Duration = Duration::from_millis(100);
 
 #[derive(Debug, Clone, Copy, strum::Display)]
 pub(in crate::application) enum EntityGateControlOperation {
@@ -373,7 +366,7 @@ impl SessionServiceImpl {
                 RemoteDomainDrainStatusRequest {
                     domain: domain.clone(),
                 },
-                Duration::from_secs(2),
+                self.coordination_rpc_timeout(),
             )
             .await
             .change_context(EntityGateControlError::Request {
@@ -469,7 +462,7 @@ impl SessionServiceImpl {
             let remaining =
                 deadline.saturating_duration_since(nervix_primitives::time::Instant::now());
             let deadline_millis = u64::try_from(remaining.as_millis().max(1)).unwrap_or(u64::MAX);
-            let reply_timeout = remaining.min(Duration::from_secs(2));
+            let reply_timeout = remaining.min(self.coordination_rpc_timeout());
             #[cfg(feature = "testing")]
             let broken_stream = purpose == EntityGatePurpose::OwnershipHandoff
                 && self
@@ -555,7 +548,15 @@ impl SessionServiceImpl {
                     );
                     let remaining =
                         deadline.saturating_duration_since(nervix_primitives::time::Instant::now());
-                    sleep(remaining.min(ENTITY_GATE_ENGAGEMENT_RETRY_INTERVAL)).await;
+                    sleep(
+                        remaining.min(
+                            self.inner
+                                .operational
+                                .control_plane
+                                .entity_gate_engagement_retry_interval(),
+                        ),
+                    )
+                    .await;
                 }
                 Err(error) => return EntityGateEngagementOutcome::Uncertain(error.to_string()),
             }
@@ -608,7 +609,7 @@ impl SessionServiceImpl {
                     targets: targets.clone(),
                     purpose,
                 },
-                remaining.min(Duration::from_secs(2)),
+                remaining.min(self.coordination_rpc_timeout()),
             )
             .await
             .change_context(EntityGateControlError::Request {
@@ -709,7 +710,7 @@ impl SessionServiceImpl {
             }
             nervix_primitives::select! {
                 _ = self.inner.drain_support_shutdown.cancelled() => return,
-                _ = sleep(ENTITY_GATE_RELEASE_RETRY_INTERVAL) => {}
+                _ = sleep(self.inner.operational.control_plane.entity_gate_release_retry_interval()) => {}
             }
         }
     }
@@ -974,7 +975,7 @@ impl SessionServiceImpl {
         deadline: nervix_primitives::time::Instant,
     ) -> Result<(), Report<DomainAlterError>> {
         let domain = &gate.domain;
-        let mut polling = interval(Duration::from_millis(25));
+        let mut polling = interval(self.cluster_parameters().entity_gate_poll_interval());
         polling.set_missed_tick_behavior(nervix_primitives::time::MissedTickBehavior::Skip);
         let mut last_status = None::<(ClusterNodeName, EntityDrainStatusEnvelope)>;
         loop {
@@ -1202,7 +1203,7 @@ impl SessionServiceImpl {
                         domain: gate.domain.clone(),
                     }));
                 }
-                _ = sleep(ENTITY_GATE_RELEASE_RETRY_INTERVAL) => {}
+                _ = sleep(self.inner.operational.control_plane.entity_gate_release_retry_interval()) => {}
             }
         }
         gate.release_owner = None;
