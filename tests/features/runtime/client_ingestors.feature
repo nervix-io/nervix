@@ -466,10 +466,13 @@ Feature: Client ingestors
     And producer "orders" submits batch "b1" with rows
       | region | order_id | amount | card   |
       | eu     | o-1      | 1      | 4111-1 |
-    And producer "orders" submits batch "b2" with rows
+    # Establish the first two admissions before the third task waits for credit.
+    Then producer "orders" holds batches "b1"
+    When producer "orders" submits batch "b2" with rows
       | region | order_id | amount | card   |
       | us     | o-2      | 2      | 4111-2 |
-    And producer "orders" submits batch "b3" with rows
+    Then producer "orders" holds batches "b1, b2"
+    When producer "orders" submits batch "b3" with rows
       | region | order_id | amount | card   |
       | eu     | o-3      | 3      | 4111-3 |
     Then HTTP receiver "emitter" eventually receives at least 1 request

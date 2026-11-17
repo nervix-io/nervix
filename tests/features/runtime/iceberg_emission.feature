@@ -1781,24 +1781,20 @@ Feature: Iceberg emission
       value I64
       message STRING
       """
-    # Each payload reaches the emitter as a relay batch of its own, below the 32 MiB a relay frame
-    # carries between nodes. The emitter collects both on its own node into one input batch, which
-    # it stages as one staged batch larger than the 32 MiB bulk memory class.
+    # One small two-row input batch crosses the relay while bulk memory is held. Collection
+    # releases that whole batch; VALUES constructs both original 17 MiB messages on the emitter
+    # owner before staging, so input transfer needs no memory the commit is meant to wait for.
     And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA large_message (value I64, message STRING);
-      CREATE WIRE JSON SCHEMA large_message_wire MODE STRICT (value integer, message string);
-      CREATE WIRE JSON CODEC large_message_codec FROM WIRE SCHEMA large_message_wire TO SCHEMA large_message;
       CREATE RELAY large_messages SCHEMA large_message UNBRANCHED;
-      CREATE VHOST edge iceberg-oversized-{{test_id}}.example.com;
-      CREATE HTTP ENDPOINT large_messages_endpoint ON edge PATH '/messages';
-      CREATE HTTP ENDPOINT INGESTOR http_large_messages
-        FROM large_messages_endpoint MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 64MiB DECODE USING large_message_codec
+      CREATE CLIENT PRODUCER INGESTOR large_messages_in
+        FROM SCHEMA large_message MODE ACK PARALLEL MAX 2 ACK TIMEOUT 5m
+          RETRY POLICY BACKOFF 100ms MAX 1s ON QUIESCE SUSPEND
+        TIMESTAMP NOW
         TO large_messages INHERIT ALL UNBRANCHED
-        FLUSH IMMEDIATE
-        ON MESSAGE ERROR LOG
+          FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
       CREATE S3 CLIENT s3_main
         CONFIG {
@@ -1814,8 +1810,8 @@ Feature: Iceberg emission
           'warehouse' = 's3://nervix-iceberg/warehouse'
         };
       CREATE ICEBERG TABLE EMITTER iceberg_oversized FROM large_messages
-        COLLECT FOR 1h MAX BATCH SIZE 33MiB
-        TO s3_main TABLE 'oversized_messages_{{test_id}}' NAMESPACE '{{domain}}' LOCATION 's3://nervix-iceberg/tables/oversized_messages_{{test_id}}' CATALOG iceberg_catalog COMMIT EACH 1h MAX SIZE 1B MODE ACK RETRY POLICY BACKOFF 100ms MAX 1s VALUES { 'value' = input.value, 'message' = input.message } FLUSH EACH 100ms MAX BATCH SIZE 64MiB
+        COLLECT FOR 1h MAX BATCH SIZE 1B
+        TO s3_main TABLE 'oversized_messages_{{test_id}}' NAMESPACE '{{domain}}' LOCATION 's3://nervix-iceberg/tables/oversized_messages_{{test_id}}' CATALOG iceberg_catalog COMMIT EACH 1h MAX SIZE 1B MODE ACK RETRY POLICY BACKOFF 100ms MAX 1s VALUES { 'value' = input.value, 'message' = repeat(input.message, 17825792) } FLUSH EACH 100ms MAX BATCH SIZE 64MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
       START;
@@ -1823,13 +1819,18 @@ Feature: Iceberg emission
     # The scenario holds half of every node's bulk memory class before any row arrives, so the
     # commit can read the staged batch only once the scenario gives that half back.
     When bulk memory on every node keeps only "16777216" bytes free
-    And http payload with value 81 and a 17825792 byte message is posted to host "iceberg-oversized-{{test_id}}.example.com" path "/messages"
-    And http payload with value 82 and a 17825792 byte message is posted to host "iceberg-oversized-{{test_id}}.example.com" path "/messages"
+    Given client "large_app" is connected to node "node-1"
+    When client "large_app" opens producer "large_input" on ingestor "large_messages_in" expecting fields "value I64, message STRING"
+    And producer "large_input" submits batch "oversized_rows" with rows
+      | value | message |
+      | 81    | x       |
+      | 82    | x       |
     Then within "120s" DESCRIBE EMITTER "iceberg_oversized" on the leader node reports an Iceberg commit waiting for the whole bulk memory class, whose staged batch bytes are saved as placeholder "staged_bytes"
     And the Iceberg table "oversized_messages_{{test_id}}" holds 0 rows
     When bulk memory on every node is released
     Then within "120s" the Iceberg table "oversized_messages_{{test_id}}" holds 2 rows
     And within "30s" DESCRIBE EMITTER "iceberg_oversized" on the leader node reports "bytes_total" "sent" relay "large_messages" totalling "{{staged_bytes}}"
+    And batch "oversized_rows" completes
     And within "30s" every node reserves only the bulk memory the scenario holds
 
     Examples:

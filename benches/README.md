@@ -304,6 +304,24 @@ serde case is a reference cost for this fixture, not the former server codec pat
 The full measurements and generated-instruction inspection are in
 [SIMD kernels 02](https://app.clickup.com/t/86bc85v8c).
 
+### Emitter flush cost
+
+`just bench-emitter-flush --rows 32 --iterations 1000 --trials 9` measures a retained emitter's
+complete flush: buffering, identity-transformation encoding, scripted confirmation and host
+outcome accounting. Each batch exceeds a one-byte size boundary and publishes in that call.
+Construction, policy parsing and metric registration precede timing. Every iteration checks
+the delivered row count. Each trial writes its row count, iteration count and elapsed nanoseconds
+as JSON. The arguments bound rows, iterations, trials and warmup; the scripted connector retains
+only the writes of that bounded trial.
+
+Build both revisions before timing and alternate their executables on one host. Keep the same
+compiler, profile, batch sizes and confirmation script, and retain source and driver identities
+with the measurements on the owning task. The scripted confirmation isolates host work; broker
+latency and end-to-end throughput are outside this measurement's scope. `bench-smoke` executes
+one flush and its row oracle.
+`just check-emitter-flush-graph` also checks that the scripted boundary is enabled by
+`benchmarks` and absent from the ordinary server's normal and build dependencies.
+
 ### Delivery latency per batch
 
 `just bench-relay-interaction delivery_observation` measures what a node input records for one

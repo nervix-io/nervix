@@ -171,6 +171,20 @@ impl ScriptedBroker {
 }
 
 impl ScriptedConnection {
+    /// Observes that a cancelled connection setup released its transport.
+    pub(crate) async fn expect_closed(&mut self) {
+        let mut byte = [0];
+        let received = self
+            .stream
+            .read(&mut byte)
+            .await
+            .expect("the peer can observe EOF");
+        assert_eq!(
+            received, 0,
+            "connection setup releases its transport on cancellation"
+        );
+    }
+
     /// Reads the next packet the client sends, which must be a QoS 1 or QoS 2 PUBLISH.
     pub(crate) async fn read_publish(&mut self) -> ReceivedPublish {
         let (packet_type, body) = self.read_packet().await;
