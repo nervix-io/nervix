@@ -1,8 +1,10 @@
 //! Semantic choices for visual emitter construction.
 //!
 //! Layer: edges.
-//! - **Owns.** Emitter reference, encoding, input and branch-compatible dependency questions.
-//! - **Depends on.** The immutable configured-choice snapshot and vocabulary declarations.
+//! - **Owns.** Emitter reference and catalog choices, and the typed questions an emitter form asks
+//!   about its codec and relays.
+//! - **Depends on.** The immutable configured-choice snapshot, vocabulary declarations and the
+//!   vocabulary's codec and relay questions.
 //! - **Must not know.** Browser drafts, transport state or emitter execution.
 
 #![cfg_attr(
@@ -14,7 +16,8 @@ use nervix_client_wire::{
     ChoiceLookupRequest, ChoiceSelection, ChoiceStatus, ChoiceTarget, ChoiceValue,
 };
 use nervix_models::{
-    CreateRelay, EmitterEntityKind, IcebergEmitterEntity, Model, ModelKind, OptionForm, OptionValue,
+    CodecDirection, EmitterEntityKind, IcebergEmitterEntity, Model, ModelKind, OptionForm,
+    OptionValue, RelayName, RelayQuestion,
 };
 
 use super::{ConfiguredChoices, ConfiguredQuery, ConfiguredQuestion, ModelCandidate};
@@ -44,7 +47,7 @@ impl<'a> ConfiguredQuery<'a> {
                 ConfiguredQuestion::EmitterCatalog
             }
             ChoiceTarget::EmitterCodec if dependencies.is_empty() => {
-                ConfiguredQuestion::EmitterCodecs
+                ConfiguredQuestion::DirectedCodecs(CodecDirection::Encoding)
             }
             ChoiceTarget::EmitterCompatibleInputRelay => {
                 let [
@@ -58,7 +61,9 @@ impl<'a> ConfiguredQuery<'a> {
                 if relay.kind != ModelKind::Relay {
                     return None;
                 }
-                ConfiguredQuestion::EmitterCompatibleInputs(relay.clone())
+                ConfiguredQuestion::CompatibleRelays(RelayQuestion::EmitterInput {
+                    first: RelayName::from(&relay.identifier),
+                })
             }
             ChoiceTarget::SchemaField => {
                 let [
@@ -86,12 +91,12 @@ impl<'a> ConfiguredQuery<'a> {
                     if input.kind != ModelKind::Relay {
                         return None;
                     }
-                    inputs.push(input.clone());
+                    inputs.push(RelayName::from(&input.identifier));
                 }
                 if request.target() == ChoiceTarget::EmitterMaterializedRelay {
-                    ConfiguredQuestion::EmitterMaterializedRelays(inputs)
+                    ConfiguredQuestion::CompatibleRelays(RelayQuestion::EmitterState { inputs })
                 } else {
-                    ConfiguredQuestion::EmitterErrorRelays(inputs)
+                    ConfiguredQuestion::CompatibleRelays(RelayQuestion::EmitterError { inputs })
                 }
             }
             _ => return None,
@@ -100,48 +105,7 @@ impl<'a> ConfiguredQuery<'a> {
     }
 }
 
-pub(super) struct EmitterChoiceContext<'a> {
-    pub(super) inputs: Vec<&'a CreateRelay>,
-    common_branch: bool,
-}
-
 impl ConfiguredChoices {
-    #[cfg_attr(
-        nervix_lint,
-        nervix::error_boundary(
-            outcome,
-            reason = "missing configured references project to the typed choice status"
-        )
-    )]
-    pub(super) fn emitter_context(
-        &self,
-        question: &ConfiguredQuestion,
-    ) -> Result<EmitterChoiceContext<'_>, ChoiceStatus> {
-        let references = match question {
-            ConfiguredQuestion::EmitterCompatibleInputs(input) => std::slice::from_ref(input),
-            ConfiguredQuestion::EmitterMaterializedRelays(inputs)
-            | ConfiguredQuestion::EmitterErrorRelays(inputs) => inputs.as_slice(),
-            _ => &[],
-        };
-        let mut inputs: Vec<&CreateRelay> = Vec::with_capacity(references.len());
-        let mut common_branch = true;
-        for reference in references {
-            let Some(Model::Relay(input)) = self.models.get(reference) else {
-                return Err(ChoiceStatus::MissingContext);
-            };
-            if let Some(first) = inputs.first()
-                && first.branching != input.branching
-            {
-                common_branch = false;
-            }
-            inputs.push(input);
-        }
-        Ok(EmitterChoiceContext {
-            inputs,
-            common_branch,
-        })
-    }
-
     #[cfg_attr(
         nervix_lint,
         nervix::error_boundary(
@@ -153,7 +117,6 @@ impl ConfiguredChoices {
         &self,
         question: &ConfiguredQuestion,
         model: &Model<nervix_models::RequestedResourceVersion>,
-        context: &EmitterChoiceContext<'_>,
     ) -> Result<Option<ModelCandidate>, ChoiceStatus> {
         let candidate = match (question, model) {
             (ConfiguredQuestion::EmitterEntity(kind), model)
@@ -180,34 +143,6 @@ impl ConfiguredChoices {
                     model.to_public_plexus(),
                 )?
             }
-            (ConfiguredQuestion::EmitterCodecs, Model::Codec(codec))
-                if codec.wire_format.supports_encoding() =>
-            {
-                ModelCandidate::new(
-                    model.node_ref(),
-                    format!("encodes schema {}", codec.schema),
-                    "Encoding codec",
-                    model.to_canonical_plexus(),
-                )?
-            }
-            (ConfiguredQuestion::EmitterCompatibleInputs(_), Model::Relay(relay))
-                if context
-                    .inputs
-                    .first()
-                    .is_some_and(|input| input.schema == relay.schema) =>
-            {
-                ModelCandidate::relay(relay)?
-            }
-            (ConfiguredQuestion::EmitterMaterializedRelays(_), Model::Relay(relay))
-                if relay.materialized_state.is_some() && context.accepts_branch(relay) =>
-            {
-                ModelCandidate::relay(relay)?
-            }
-            (ConfiguredQuestion::EmitterErrorRelays(_), Model::Relay(relay))
-                if context.accepts_branch(relay) =>
-            {
-                ModelCandidate::relay(relay)?
-            }
             _ => return Ok(None),
         };
         Ok(Some(candidate))
@@ -223,15 +158,5 @@ impl ConfiguredChoices {
             } => Some(connector),
             _ => None,
         }
-    }
-}
-
-impl EmitterChoiceContext<'_> {
-    fn accepts_branch(&self, candidate: &CreateRelay) -> bool {
-        self.common_branch
-            && self
-                .inputs
-                .first()
-                .is_some_and(|input| input.branching == candidate.branching)
     }
 }

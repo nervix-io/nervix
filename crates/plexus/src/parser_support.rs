@@ -51,6 +51,10 @@ use crate::{
     },
 };
 
+mod reference_role;
+
+pub(crate) use reference_role::{RelayRole, codec_direction, codec_for, relay_in_role};
+
 /// Whether source text fits the integer literal's declared range. The grammar supplies its
 /// span-bound diagnostic when this validity check refuses the text.
 #[cfg_attr(
@@ -646,7 +650,7 @@ pub fn materialized_state_dependency<'src>()
     kw(Identifier::Using)
         .ignore_then(kw(Identifier::Materialized))
         .ignore_then(kw(Identifier::State))
-        .ignore_then(relay_ref())
+        .ignore_then(relay_in_role(RelayRole::State))
         .then(materialized_state_policy())
         .map(|(relay, policy)| MaterializedStateDependency { relay, policy })
         .boxed()
@@ -734,15 +738,6 @@ pub fn schema_field_ref<'src>()
 }
 
 pub fn relay_ref<'src>()
--> impl Parser<'src, &'src [Token], RelayName, extra::Err<ParseError<'src>>> + Clone {
-    parse_name_excluding_reserved(
-        "ref:relay",
-        &[Identifier::Message, Identifier::Branch],
-        RelayName::parse,
-    )
-}
-
-pub fn message_error_relay_ref<'src>()
 -> impl Parser<'src, &'src [Token], RelayName, extra::Err<ParseError<'src>>> + Clone {
     parse_name_excluding_reserved(
         "ref:relay",
@@ -1251,7 +1246,7 @@ pub fn message_error_policy<'src>()
             kw(Identifier::Ignore).to(MessageErrorPolicy::Ignore),
             kw(Identifier::Log).to(MessageErrorPolicy::Log),
             kw_phrase2(Identifier::Send, Identifier::To)
-                .ignore_then(message_error_relay_ref())
+                .ignore_then(relay_in_role(RelayRole::Error))
                 .then(set_only_route_construction())
                 .try_map(|(relay, construction), span| {
                     if construction.inherit.is_some()
@@ -1285,7 +1280,7 @@ fn alter_message_error_policy<'src>()
             kw(Identifier::Ignore).to(MessageErrorPolicy::Ignore),
             kw(Identifier::Log).to(MessageErrorPolicy::Log),
             kw_phrase2(Identifier::Send, Identifier::To)
-                .ignore_then(message_error_relay_ref())
+                .ignore_then(relay_in_role(RelayRole::Error))
                 .then(set_only_alter_route_construction())
                 .try_map(|(relay, construction), span| {
                     if construction.inherit.is_some()
@@ -1881,7 +1876,7 @@ pub fn expression_list<'src>(
 pub fn from_relay_clause<'src>()
 -> impl Parser<'src, &'src [Token], (RelayName, Vec<ProcessorInputWhere>), extra::Err<ParseError<'src>>>
 + Clone {
-    relay_ref()
+    relay_in_role(RelayRole::Input)
         .then(where_expression().or_not())
         .map(|(relay, where_clause)| {
             let from_where = where_clause
@@ -1927,7 +1922,7 @@ pub fn filter_where_clause<'src>()
 fn explicit_processor_output_route<'src>()
 -> impl Parser<'src, &'src [Token], ProcessorOutput, extra::Err<ParseError<'src>>> + Clone {
     kw(Identifier::To)
-        .ignore_then(relay_ref())
+        .ignore_then(relay_in_role(RelayRole::Output))
         .then(explicit_route_construction())
         .then(message_error_policy())
         .map(
@@ -1945,7 +1940,7 @@ fn explicit_processor_output_route<'src>()
 fn flushed_processor_output_route<'src>()
 -> impl Parser<'src, &'src [Token], ProcessorOutput, extra::Err<ParseError<'src>>> + Clone {
     kw(Identifier::To)
-        .ignore_then(relay_ref())
+        .ignore_then(relay_in_role(RelayRole::Output))
         .then(route_construction().or_not())
         .then(flush_each())
         .then(message_error_policy())
@@ -1964,7 +1959,7 @@ fn flushed_processor_output_route<'src>()
 fn flushed_explicit_processor_output_route<'src>()
 -> impl Parser<'src, &'src [Token], ProcessorOutput, extra::Err<ParseError<'src>>> + Clone {
     kw(Identifier::To)
-        .ignore_then(relay_ref())
+        .ignore_then(relay_in_role(RelayRole::Output))
         .then(explicit_route_construction())
         .then(flush_each())
         .then(message_error_policy())
@@ -2105,9 +2100,10 @@ fn parse_name<'src, N: Clone + 'static>(
     label: &'static str,
     parse: fn(&str) -> Result<N, Report<NameError>>,
 ) -> impl Parser<'src, &'src [Token], N, extra::Err<ParseError<'src>>> + Clone {
+    let named = diagnostic_label(label);
     word_raw()
         .try_map(move |raw: String, span| {
-            parse(raw.as_str()).map_err(|err| Rich::custom(span, format!("invalid {label}: {err}")))
+            parse(raw.as_str()).map_err(|err| Rich::custom(span, format!("invalid {named}: {err}")))
         })
         .labelled(label)
         .boxed()
@@ -2119,6 +2115,7 @@ fn parse_name_excluding_reserved<'src, N: Clone + 'static>(
     reserved: &'static [Identifier],
     parse: fn(&str) -> Result<N, Report<NameError>>,
 ) -> impl Parser<'src, &'src [Token], N, extra::Err<ParseError<'src>>> + Clone {
+    let named = diagnostic_label(label);
     word_raw()
         .try_map(move |raw: String, span| {
             if reserved
@@ -2127,10 +2124,10 @@ fn parse_name_excluding_reserved<'src, N: Clone + 'static>(
             {
                 return Err(Rich::custom(
                     span,
-                    format!("invalid {label}: '{raw}' is reserved"),
+                    format!("invalid {named}: '{raw}' is reserved"),
                 ));
             }
-            parse(raw.as_str()).map_err(|err| Rich::custom(span, format!("invalid {label}: {err}")))
+            parse(raw.as_str()).map_err(|err| Rich::custom(span, format!("invalid {named}: {err}")))
         })
         .labelled(label)
         .boxed()
@@ -2377,16 +2374,25 @@ fn expected_to_suggestion(pattern: &RichPattern<'_, Token>) -> String {
     }
 }
 
+/// What a diagnostic calls the concept a grammar label expects. A completion label that names an
+/// expression position or a reference's role keeps the name of what is written there.
+fn diagnostic_label(label: &str) -> &str {
+    match label {
+        "ref:expression_function" | "ref:expression_invocation" => "function_name",
+        "ref:expression_field" | "ref:expression_target" | "ref:ingestor_timestamp_metadata" => {
+            "field_name"
+        }
+        "ref:expression_udf" => "udf_name",
+        _ => match reference_role::diagnostic_label(label) {
+            Some(kind) => kind,
+            None => label,
+        },
+    }
+}
+
 fn format_expected_pattern(pattern: &RichPattern<'_, Token>) -> String {
     match pattern {
-        RichPattern::Label(label) => match label.as_ref() {
-            "ref:expression_function" | "ref:expression_invocation" => "function_name".to_string(),
-            "ref:expression_field"
-            | "ref:expression_target"
-            | "ref:ingestor_timestamp_metadata" => "field_name".to_string(),
-            "ref:expression_udf" => "udf_name".to_string(),
-            _ => label.to_string(),
-        },
+        RichPattern::Label(label) => diagnostic_label(label.as_ref()).to_string(),
         RichPattern::Identifier(identifier) => identifier.to_string(),
         RichPattern::Token(token) => format_found_token(token),
         RichPattern::Any => "any token".to_string(),

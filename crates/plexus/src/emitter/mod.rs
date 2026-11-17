@@ -224,7 +224,7 @@ fn on_conflict_phrase<'src>()
 fn encode_using_clause<'src>()
 -> impl Parser<'src, &'src [Token], CodecName, extra::Err<ParseError<'src>>> + Clone {
     kw_phrase2(Identifier::Encode, Identifier::Using)
-        .ignore_then(codec_ref())
+        .ignore_then(codec_for(CodecDirection::Encoding))
         .boxed()
 }
 

@@ -20,10 +20,11 @@ use nervix_models::{
 use crate::{
     lexer::{Identifier, Token},
     parser_support::{
-        LexedInput, ParseError, ParseFromSourceError, ack_mode, branch_selection, collect_for,
-        correlator_name, duration_lit, embedded_expression, flushed_explicit_processor_outputs,
-        from_relay_clause, if_not_exists_clause, into_parse_error, kw, kw_phrase2, kw_phrase3,
-        lex_input, materialized_state_dependencies, relay_ref, suggest_from, tok,
+        LexedInput, ParseError, ParseFromSourceError, RelayRole, ack_mode, branch_selection,
+        collect_for, correlator_name, duration_lit, embedded_expression,
+        flushed_explicit_processor_outputs, from_relay_clause, if_not_exists_clause,
+        into_parse_error, kw, kw_phrase2, kw_phrase3, lex_input, materialized_state_dependencies,
+        relay_in_role, suggest_from, tok,
     },
 };
 
@@ -67,13 +68,16 @@ fn side_from_clauses<'src>(
         })
 }
 
-fn timeout_action<'src>()
--> impl Parser<'src, &'src [Token], CorrelationTimeoutAction, extra::Err<ParseError<'src>>> + Clone
+/// What a correlator does with records of one side when they time out; `role` names that side's
+/// timeout relay.
+fn timeout_action<'src>(
+    role: RelayRole,
+) -> impl Parser<'src, &'src [Token], CorrelationTimeoutAction, extra::Err<ParseError<'src>>> + Clone
 {
     choice((
         kw(Identifier::Drop).to(CorrelationTimeoutAction::Drop),
         kw_phrase2(Identifier::Send, Identifier::To)
-            .ignore_then(relay_ref())
+            .ignore_then(relay_in_role(role))
             .map(|relay| CorrelationTimeoutAction::SendTo { relay }),
     ))
 }
@@ -82,9 +86,9 @@ fn timeout_policy<'src>()
 -> impl Parser<'src, &'src [Token], CorrelationTimeoutPolicy, extra::Err<ParseError<'src>>> + Clone
 {
     kw_phrase3(Identifier::On, Identifier::Correlation, Identifier::Timeout)
-        .ignore_then(timeout_action())
+        .ignore_then(timeout_action(RelayRole::LeftTimeout))
         .then_ignore(tok(Token::Comma))
-        .then(timeout_action())
+        .then(timeout_action(RelayRole::RightTimeout))
         .map(|(left, right)| CorrelationTimeoutPolicy { left, right })
 }
 
