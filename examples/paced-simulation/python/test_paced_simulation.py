@@ -46,6 +46,30 @@ class ConnectionTests(unittest.TestCase):
         self.assertIs(run.session, session)
 
 
+class PlannerTests(unittest.TestCase):
+    def test_an_expired_center_does_not_consume_a_requested_submission(self):
+        run = driver.Run(SimpleNamespace(ticks=2, timestamps="at", domain="simulation"))
+        clock = Mock()
+        clock.paced.skew = 0
+        clock.admits.side_effect = lambda utc, event: event >= 100
+        window = driver.Window(clock, 0, 100, 1000)
+        grid = driver.TickGrid(7, SimpleNamespace(origin=0, period=100))
+        run.clock = Mock()
+        run.clock.reach.return_value = ("center", window)
+        run.clock.paced.return_value = clock
+        run.producer = SimpleNamespace(endpoint=SimpleNamespace(admission=driver.nx.Admission.OPEN))
+        run.first_tick = Mock(return_value=0)
+        run.reopen = Mock(side_effect=lambda current: current)
+        run.plan = Mock(return_value=[])
+        run.prepare = Mock(side_effect=lambda tick, readings: {"tick": tick, "size": 1})
+        run.wait_for_credit = Mock(return_value=True)
+        run.send = Mock()
+        with patch.object(driver, "line"), patch.object(driver.Window, "at", return_value=window):
+            run.simulate(grid)
+        self.assertEqual([call.args[0]["tick"] for call in run.send.call_args_list], [1, 2])
+        self.assertEqual([call.args[-1] for call in run.plan.call_args_list], [1, 1, 2])
+
+
 class EndpointOpenTests(unittest.TestCase):
     def open_sequence(self, refusals, intent, times):
         def attempt():

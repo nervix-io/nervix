@@ -559,7 +559,6 @@ impl Planner {
             let Some(window) = self.clock.window(self.generation) else {
                 continue;
             };
-            planned = number;
             let next = tick
                 .checked_add(1)
                 .assured("a tick center past 2^64 periods is unrepresentable and ended the loop");
@@ -572,6 +571,7 @@ impl Planner {
                 tick = next;
                 continue;
             }
+            planned = number;
             report::line(format!(
                 "SUBMIT tick={tick} occurred_at={} window={}..{}",
                 center.to_rfc3339(),

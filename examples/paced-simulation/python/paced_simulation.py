@@ -1304,11 +1304,11 @@ class Run:
                 window = Window.at(clock, time.time_ns()) if clock is not None else None
                 if window is None:
                     continue
-                planned = number
                 if self.settings.timestamps == "at" and not window.contains(center):
                     line(f"SKIPPED tick={tick} reason=behind_admission_window")
                     tick += 1
                     continue
+                planned = number
                 line(f"SUBMIT tick={tick} occurred_at={rfc3339(center)} "
                      f"window={rfc3339(window.earliest)}..{rfc3339(window.latest)}")
                 self.send(prepared)

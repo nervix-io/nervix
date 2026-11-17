@@ -388,6 +388,36 @@ Feature: Paced simulation drivers
       | python | rust     |
 
   @paced_simulation
+  Scenario Outline: The <driver> driver submits every requested tick after backpressure expires a center
+    Given a 1 node nervix cluster is started
+    And the active domain is "paced_simulation"
+    And the leader node is configured with the paced simulation example graph
+    # The 256-center admission window retains 6.4 wall seconds at this rate. Holding an output
+    # for seven seconds with one producer credit positively expires the next prepared center.
+    When these Plexus commands are executed on the leader node
+      """
+      START AT NOW TIME RATE 4.0;
+      """
+    And the <driver> paced simulation driver runs through node "node-1" with arguments "--ticks 3 --sensors 1 --credit-batches 1 --processing-time 7s"
+    Then within "60s" the paced simulation driver prints a line starting with "SKIPPED tick="
+    And within "120s" the paced simulation driver exits with status 0
+    And the paced simulation driver reports
+      | readings        | 3    |
+      | completed       | 3    |
+      | effects         | 3    |
+      | duplicates      | 0    |
+      | not_admitted    | 0    |
+      | outcome_unknown | 0    |
+      | credit_waits    | >= 1 |
+    And the paced simulation effects hold every reading of its ledger exactly once
+    And every paced simulation reading was admitted no earlier than it occurred
+
+    Examples:
+      | driver |
+      | rust   |
+      | python |
+
+  @paced_simulation
   Scenario Outline: The <driver> driver saturates its producer on one session while its consumers acknowledge, commands complete and the clock keeps ticking on <cluster_size> nodes
     Given a <cluster_size> node nervix cluster is started
     And the active domain is "paced_simulation"
