@@ -73,7 +73,7 @@ pub(super) fn kafka_domain_offset_describe_from_topology(
     let mut instance_assignments = vec![Vec::new(); instances.get().arch_into()];
     for partition in &observed_partitions {
         let index = u64::try_from(*partition).verified("Kafka partition indices are nonnegative")
-            % instances.get();
+            % instances;
         instance_assignments
             [usize::try_from(index).verified("the planned instance count is addressable")]
         .push(*partition);

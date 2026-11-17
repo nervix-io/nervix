@@ -246,7 +246,7 @@ impl ExternalPartitionAssignment {
     pub fn contains(self, reader: u64, partition: ExternalPartition) -> bool {
         reader < self.readers.get()
             && self.partitions.contains(partition)
-            && u64::from(partition.index()) % self.readers.get() == reader
+            && u64::from(partition.index()) % self.readers == reader
     }
 }
 
