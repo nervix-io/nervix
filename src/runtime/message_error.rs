@@ -960,28 +960,30 @@ impl Runtime {
             "error.occurred_at".to_string(),
             RuntimeValue::Datetime(error.occurred_at.as_datetime().fixed_offset()),
         );
-        let lookup_columns = compute_lookup_hash_map_columns(
-            run.executor,
-            program,
-            &FilterMapBatchInputs {
-                carrier: &carrier,
-                namespace_batches: &namespace_batches,
-                keys: &keys,
-                side_inputs: &side_inputs,
-                ingest_metadata,
-            },
-            run.now,
-            None,
-        )
-        .await
-        .map_err(|lookup_error| {
-            MessageErrorHandlingError::record_construction(
-                error,
-                MessageErrorRecordConstructionError::LookupColumns {
-                    error: lookup_error,
+        let lookup_columns = message
+            .acks
+            .keep_alive_while_pending(compute_lookup_hash_map_columns(
+                run.executor,
+                program,
+                &FilterMapBatchInputs {
+                    carrier: &carrier,
+                    namespace_batches: &namespace_batches,
+                    keys: &keys,
+                    side_inputs: &side_inputs,
+                    ingest_metadata,
                 },
-            )
-        })?;
+                run.now,
+                None,
+            ))
+            .await
+            .map_err(|lookup_error| {
+                MessageErrorHandlingError::record_construction(
+                    error,
+                    MessageErrorRecordConstructionError::LookupColumns {
+                        error: lookup_error,
+                    },
+                )
+            })?;
         let uninitialized = VmUninitializedInput {
             fields: program
                 .compiled
@@ -1014,25 +1016,27 @@ impl Runtime {
                 },
             )
         })?;
-        let result = execute_program_with_selection_in_context(
-            run.executor,
-            &program.compiled,
-            &batch,
-            &VmExecutionContext {
-                now: run.now,
-                injector: Some(IngestHeaderFunctionInjector::from_metadata(
-                    ingest_metadata,
-                    batch.row_count(),
-                )),
-            },
-        )
-        .await
-        .map_err(|report| {
-            MessageErrorHandlingError::record_construction(
-                error,
-                MessageErrorRecordConstructionError::Execution { report },
-            )
-        })?;
+        let result = message
+            .acks
+            .keep_alive_while_pending(execute_accepted_program_with_selection_in_context(
+                run.executor.accepted_work(),
+                &program.compiled,
+                &batch,
+                &VmExecutionContext {
+                    now: run.now,
+                    injector: Some(IngestHeaderFunctionInjector::from_metadata(
+                        ingest_metadata,
+                        batch.row_count(),
+                    )),
+                },
+            ))
+            .await
+            .map_err(|report| {
+                MessageErrorHandlingError::record_construction(
+                    error,
+                    MessageErrorRecordConstructionError::Execution { report },
+                )
+            })?;
         if result.batch.row_count() != 1 {
             return Err(MessageErrorHandlingError::record_construction(
                 error,
@@ -1569,7 +1573,7 @@ mod tests {
     }
 
     #[nervix_primitives::test]
-    async fn message_error_set_uses_vm_functions_and_captured_snapshots() {
+    async fn accepted_work_error_record_assignments_keep_captured_snapshots_while_waiting() {
         let source = test_runtime_row([("input_id".to_string(), RuntimeValue::U32(7))]);
         let message = RelayMessage {
             key: None,
@@ -1657,7 +1661,7 @@ mod tests {
                 allow_header_reads: false,
             },
             RuntimeVmCompileContext {
-                settings: nervix_vm::VmSettings::default(),
+                settings: offloaded_vm_settings(),
                 available_materialized_streams: &materialized_specs,
                 available_lookups: &HashMap::default(),
                 current_branching: &ResolvedBranching::unbranched(),
@@ -1665,17 +1669,22 @@ mod tests {
             },
         )
         .expect("message-error SET should compile through the VM");
-        let output = Runtime::execute_message_error_set_program(
-            ProgramRun {
-                executor: &Executor::default(),
-                now: occurred_at,
-            },
-            &program,
-            &message,
-            &error,
-            Some(&partial_output),
-            &materialized_state,
-            None,
+        let executor = single_worker_executor();
+        let output = accepted_work_after_cpu_room(
+            &executor,
+            nervix_execution::CpuClass::Data,
+            Runtime::execute_message_error_set_program(
+                ProgramRun {
+                    executor: &executor,
+                    now: occurred_at,
+                },
+                &program,
+                &message,
+                &error,
+                Some(&partial_output),
+                &materialized_state,
+                None,
+            ),
         )
         .await
         .expect("message-error SET should execute through the VM");
