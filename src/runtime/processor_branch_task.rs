@@ -915,11 +915,11 @@ pub(super) async fn run_processor_node_runtime(
         );
     }
     if let Some(response) = handoff_response {
-        let handoffs =
-            match pending_restore {
-                // The successor restores the branches this task never installed.
-                Some(restore) => restore.into_handoffs(),
-                None => nervix_primitives::expect_lint!(
+        let handoffs = match pending_restore {
+            // The successor restores the branches this task never installed.
+            Some(restore) => restore.into_handoffs(),
+            None => {
+                nervix_primitives::expect_lint!(
                     nervix::lifecycle_call,
                     "the ownership transfer transition captures and detaches its retained branch \
                      generations",
@@ -931,8 +931,9 @@ pub(super) async fn run_processor_node_runtime(
                         &mut instances,
                     )
                 )
-                .await,
-            };
+                .await
+            }
+        };
         response
             .send(handoffs)
             .means_peer_left("processor handoff requester");
