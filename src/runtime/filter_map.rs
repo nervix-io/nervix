@@ -17,8 +17,8 @@ use nervix_models::HeaderValues;
 
 use super::*;
 
-/// What one expression program runs against: the node's bounded executor, which admits the program
-/// when it leaves the caller's task, and the domain time it reads.
+/// The provider and domain time of a program over data this owner has accepted.
+/// Its VM operation binds the executor's waiting capability before leaving this task.
 #[derive(Clone, Copy)]
 pub(super) struct ProgramRun<'a> {
     pub(super) executor: &'a Executor,
@@ -339,20 +339,21 @@ pub(super) async fn plan_filter_map_messages(
 ) -> Result<FilterMapPlan, PlannedGeneralFailure> {
     let processor = processor.into();
     let program_name = ProgramName::of(&operation);
-    let lookup_columns = match compute_lookup_hash_map_columns(
-        run.executor,
-        program,
-        &FilterMapBatchInputs {
-            carrier: &batch.batch,
-            namespace_batches: &[],
-            keys: &batch.keys,
-            side_inputs,
-            ingest_metadata: None,
-        },
-        run.now,
-        None,
-    )
-    .await
+    let lookup_columns = match batch
+        .keep_alive_while_pending(compute_lookup_hash_map_columns(
+            run.executor,
+            program,
+            &FilterMapBatchInputs {
+                carrier: &batch.batch,
+                namespace_batches: &[],
+                keys: &batch.keys,
+                side_inputs,
+                ingest_metadata: None,
+            },
+            run.now,
+            None,
+        ))
+        .await
     {
         Ok(columns) => columns,
         Err(error) => {
@@ -395,16 +396,18 @@ pub(super) async fn plan_filter_map_messages(
     let metadata = batch.metadata.clone();
     let mut acks = std::mem::take(&mut batch.acks);
     let state_snapshot = relay_state_snapshot_from_side_inputs(side_inputs);
-    let result = match execute_program_with_selection_in_context(
-        run.executor,
-        &program.compiled,
-        &vm_batch,
-        &VmExecutionContext {
-            now: run.now,
-            injector: None,
-        },
-    )
-    .await
+    let result = match acks
+        .as_slice()
+        .keep_alive_while_pending(execute_accepted_program_with_selection_in_context(
+            run.executor.accepted_work(),
+            &program.compiled,
+            &vm_batch,
+            &VmExecutionContext {
+                now: run.now,
+                injector: None,
+            },
+        ))
+        .await
     {
         Ok(result) => result,
         Err(error) => {
@@ -821,16 +824,18 @@ pub(super) async fn execute_prepared_filter_map(
     acks: Vec<AckSet>,
     injector: Option<Arc<Box<dyn VmFunctionInjector>>>,
 ) -> Result<ExecutedFilterMap, PlannedGeneralFailure> {
-    let result = match execute_program_with_selection_in_context(
-        run.executor,
-        &program.compiled,
-        &vm_batch,
-        &VmExecutionContext {
-            now: run.now,
-            injector,
-        },
-    )
-    .await
+    let result = match acks
+        .as_slice()
+        .keep_alive_while_pending(execute_accepted_program_with_selection_in_context(
+            run.executor.accepted_work(),
+            &program.compiled,
+            &vm_batch,
+            &VmExecutionContext {
+                now: run.now,
+                injector,
+            },
+        ))
+        .await
     {
         Ok(result) => result,
         Err(error) => {
@@ -871,14 +876,16 @@ pub(super) async fn execute_filter_map_program_on_batch(
     mut shared: Option<&mut SharedBatchColumns>,
 ) -> Result<ExecutedFilterMap, PlannedGeneralFailure> {
     let operation = MessageErrorOperation::Set;
-    let lookup_columns = match compute_lookup_hash_map_columns(
-        run.executor,
-        program,
-        &inputs,
-        run.now,
-        shared.as_mut().map(|shared| &mut shared.lookups),
-    )
-    .await
+    let lookup_columns = match acks
+        .as_slice()
+        .keep_alive_while_pending(compute_lookup_hash_map_columns(
+            run.executor,
+            program,
+            &inputs,
+            run.now,
+            shared.as_mut().map(|shared| &mut shared.lookups),
+        ))
+        .await
     {
         Ok(columns) => columns,
         Err(error) => {
@@ -1014,8 +1021,8 @@ pub(super) async fn evaluate_output_branch_program(
         None,
     )
     .change_context(PlannedGeneralError::PrepareInput { operation })?;
-    let result = execute_program_with_selection_in_context(
-        run.executor,
+    let result = execute_accepted_program_with_selection_in_context(
+        run.executor.accepted_work(),
         &program.program.compiled,
         &vm_input,
         &VmExecutionContext {
@@ -1712,6 +1719,55 @@ mod tests {
                 found: 0,
             }
         );
+    }
+
+    #[nervix_primitives::test]
+    async fn accepted_work_route_keeps_every_row_while_the_data_class_is_full() {
+        let executor = single_worker_executor();
+        let schema = test_schema(&[("value", ParseAsType::I64)]);
+        let program = validation_filter_map_program(&schema);
+        let carrier = schema
+            .batch_from_test_rows(
+                (0..1025).map(|value| [("value".to_owned(), RuntimeValue::I64(value))]),
+            )
+            .assured("the large batch has the route's input schema");
+        let now = Timestamp::from_unix_nanos(1);
+        let metadata = RecordMetadataColumns::from_rows((0..1025).map(|_| {
+            crate::runtime_schema::RuntimeRecordMetadata::from_ingested_at_watermarks(now, now)
+        }));
+        let keys = vec![None; 1025];
+        let side_inputs = HashMap::default();
+        let outcomes = accepted_work_after_cpu_room(
+            &executor,
+            nervix_execution::CpuClass::Data,
+            evaluate_filter_map_on_batch(
+                &executor,
+                &program,
+                FilterMapOutcomeInputs {
+                    carrier: &carrier,
+                    record_metadata: &metadata,
+                    keys: &keys,
+                    filter_map_metadata: None,
+                    side_inputs: &side_inputs,
+                },
+                now,
+            ),
+        )
+        .await
+        .assured("a full worker class cannot fail an accepted route");
+        assert_eq!(outcomes.len(), 1025);
+        for (value, outcome) in outcomes.into_iter().enumerate() {
+            let SingleRecordFilterMapOutcome::Output(row) = outcome else {
+                panic!("every input row passes the identity route");
+            };
+            assert_eq!(
+                row_value(&row, "value"),
+                Some(RuntimeValue::I64(
+                    i64::try_from(value).assured("the test value fits I64")
+                ))
+            );
+        }
+        assert_eq!(executor.snapshot().data_cpu.refused, 0);
     }
 
     #[test]
@@ -2851,8 +2907,8 @@ mod tests {
         let input = vm_input_from_test_rows(&records, &program.program.input_schema)
             .expect("VM input batch should build");
 
-        let output = execute_program_with_selection_in_context(
-            &Executor::default(),
+        let output = execute_accepted_program_with_selection_in_context(
+            Executor::default().accepted_work(),
             &program.program,
             &input,
             &VmExecutionContext {

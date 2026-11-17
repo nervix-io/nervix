@@ -98,6 +98,28 @@ pub(crate) struct WorkerPool {
     inner: Arc<PoolShared>,
 }
 
+/// One queue place, borrowed from its pool until the caller submits or gives it back.
+pub(crate) struct PreparedWork<'a> {
+    pool: &'a WorkerPool,
+    slot: QueueSlot,
+}
+
+impl PreparedWork<'_> {
+    pub(crate) async fn run<T>(
+        self,
+        reservation: Reservation,
+        job: impl FnOnce(Reservation, &Cancellation) -> T + Send + 'static,
+    ) -> Result<T, Report<ExecutionError>>
+    where
+        T: Send + 'static,
+    {
+        let StartingJob { running, started } = self.pool.enqueue(self.slot, reservation, job);
+        started.await.map_err(|cause| self.pool.closed(cause))?;
+        let RunningJob { handle, obligation } = running;
+        self.pool.finish(handle.await, obligation)
+    }
+}
+
 #[derive(Debug)]
 #[cfg_attr(
     nervix_lint,
@@ -185,13 +207,23 @@ impl WorkerPool {
         T: Send + 'static,
     {
         let RunningJob { handle, obligation } = self.start(admission, reservation, job).await?;
-        let outcome = handle.await.map_err(|cause| {
-            Report::new(cause).change_context(ExecutionError::PoolClosed {
-                class: self.inner.class.as_str(),
-            })
-        })?;
+        self.finish(handle.await, obligation)
+    }
+
+    fn finish<T>(
+        &self,
+        result: Result<Result<T, Report<ExecutionError>>, oneshot::error::RecvError>,
+        obligation: QueueCancellation,
+    ) -> Result<T, Report<ExecutionError>> {
+        let outcome = result.map_err(|cause| self.closed(cause))?;
         obligation.disarm();
         outcome
+    }
+
+    fn closed(&self, cause: oneshot::error::RecvError) -> Report<ExecutionError> {
+        Report::new(cause).change_context(ExecutionError::PoolClosed {
+            class: self.inner.class.as_str(),
+        })
     }
 
     /// Return once the job has been handed to a worker. Until then the submitting future still
@@ -229,6 +261,30 @@ impl WorkerPool {
         T: Send + 'static,
     {
         let slot = self.enter_queue(admission).await?;
+        let StartingJob { running, started } = self.enqueue(slot, reservation, job);
+        started.await.map_err(|cause| self.closed(cause))?;
+        Ok(running)
+    }
+
+    pub(crate) async fn prepare(
+        &self,
+        admission: QueueAdmission,
+    ) -> Result<PreparedWork<'_>, Report<ExecutionError>> {
+        Ok(PreparedWork {
+            pool: self,
+            slot: self.enter_queue(admission).await?,
+        })
+    }
+
+    fn enqueue<T>(
+        &self,
+        slot: QueueSlot,
+        reservation: Reservation,
+        job: impl FnOnce(Reservation, &Cancellation) -> T + Send + 'static,
+    ) -> StartingJob<T>
+    where
+        T: Send + 'static,
+    {
         let ArmedCancellation { obligation, signal } = Cancellation::armed();
         let (result, handle) = oneshot::channel();
         let (started, has_started) = oneshot::channel();
@@ -278,12 +334,10 @@ impl WorkerPool {
             };
             self.inner.dispatch(worker);
         }
-        has_started.await.map_err(|cause| {
-            Report::new(cause).change_context(ExecutionError::PoolClosed {
-                class: self.inner.class.as_str(),
-            })
-        })?;
-        Ok(RunningJob { handle, obligation })
+        StartingJob {
+            running: RunningJob { handle, obligation },
+            started: has_started,
+        }
     }
 
     async fn enter_queue(
@@ -508,6 +562,12 @@ impl Drop for Worker {
 struct RunningJob<T> {
     handle: oneshot::Receiver<Result<T, Report<ExecutionError>>>,
     obligation: QueueCancellation,
+}
+
+/// An enqueued job still owns cancellation until its worker reports that it started.
+struct StartingJob<T> {
+    running: RunningJob<T>,
+    started: oneshot::Receiver<()>,
 }
 
 #[cfg_attr(

@@ -455,6 +455,19 @@ last worker's exit cannot strand an admitted job. No idle worker retains a block
 The queue semaphore still bounds pending work, refuses `RefuseWhenFull` with typed `QueueFull`, and
 hands a freed place to an existing `WaitForPlace` waiter before a later requester.
 
+`Executor::accepted_work` binds that waiting policy to an operation that holds already accepted
+data. `AcceptedWork` is a borrowed capability: ordinary admission adds no allocation, thread,
+lock or reference count. VM execution still owns its class and charge decisions. Branch input
+preparation, retained inference setup and runs, and relay carriage use the same waiting FIFO.
+Request work keeps its immediate refusal, including client batch decoding, statement constants,
+subscription predicates and state inspection; ingestion-boundary admission follows its source's
+own contract.
+
+An accepted owner can acquire a charged CPU queue place before transferring mutable state into a
+job. The stateful inferencer does this before taking its native session out of the branch. Dropping
+the full-queue wait leaves that session installed and returns the charge. After submission,
+cancellation follows the same queued and running job rules as every other admitted run.
+
 The storage submission adapter and each job's invocation carry explicit dispatch contracts for
 the caller-owned synchronous callback. Its effects remain the caller's responsibility; the
 executor's bounded contract covers admission and queue transitions outside that callback.

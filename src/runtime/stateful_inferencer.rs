@@ -207,16 +207,18 @@ async fn admit_stateful_inferencer_rows(
                 continue;
             }
         };
-        let executed = match execute_program_with_selection_in_context(
-            context.branch.runtime.executor(),
-            &context.program.compiled,
-            &projected,
-            &VmExecutionContext {
-                now: context.execution_now,
-                injector: None,
-            },
-        )
-        .await
+        let executed = match message
+            .acks
+            .keep_alive_while_pending(execute_accepted_program_with_selection_in_context(
+                context.branch.runtime.executor().accepted_work(),
+                &context.program.compiled,
+                &projected,
+                &VmExecutionContext {
+                    now: context.execution_now,
+                    injector: None,
+                },
+            ))
+            .await
         {
             Ok(executed) => executed,
             Err(error) => {
@@ -247,14 +249,14 @@ async fn admit_stateful_inferencer_rows(
                 continue;
             }
         };
-        let generated = match context
-            .session
-            .execute(
+        let generated = match message
+            .acks
+            .keep_alive_while_pending(context.session.execute(
                 context.branch.runtime.executor(),
                 &path,
                 context.prepared,
                 mapped,
-            )
+            ))
             .await
         {
             Ok(Ok(generated)) => {
