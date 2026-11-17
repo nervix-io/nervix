@@ -22,6 +22,7 @@
 )]
 
 use error_stack::ResultExt as _;
+use futures_util::future::Either;
 use nervix_interconnect::{RelayGrantRefusal, TransportError};
 
 use super::{
@@ -1152,15 +1153,6 @@ impl Runtime {
         dispatcher.local_node_id() == node_id
     }
 
-    pub(in crate::runtime) async fn inject_remote_stream_boundary_message(
-        &self,
-        services: &RelayBoundaryServices,
-        unit: Unit,
-        batch: &RelayRecordBatch,
-    ) -> RelayDispatchResult {
-        services.inject_remote_message(unit, batch).await
-    }
-
     pub(crate) async fn handle_remote_stream(
         &self,
         payload: RelayPayload,
@@ -1462,19 +1454,22 @@ impl Runtime {
                     &remote.relay,
                 ))
         })?;
+        // A routed batch has passed its owner's dispatch gate. Count it on this node before
+        // acknowledging admission releases that owner's dispatch permit, so a cluster drain
+        // cannot see the batch missing from both nodes. Owner ingress still waits for its gate
+        // before entering the owner buffer.
+        let dispatch = if owner_ingress {
+            Either::Left(self.ingest_stream_boundary_message(
+                &remote.domain,
+                &remote.relay,
+                &services,
+                &batch,
+            ))
+        } else {
+            Either::Right(services.inject_remote_message(remote.unit, &batch))
+        };
         let dispatch = async {
-            let dispatch = if owner_ingress {
-                self.ingest_stream_boundary_message(
-                    &remote.domain,
-                    &remote.relay,
-                    &services,
-                    &batch,
-                )
-                .await
-            } else {
-                self.inject_remote_stream_boundary_message(&services, remote.unit, &batch)
-                    .await
-            };
+            let dispatch = dispatch.await;
             if dispatch.is_ok() {
                 for ack in batch.acks.iter() {
                     ack.ack_success();

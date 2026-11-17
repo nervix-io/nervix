@@ -320,6 +320,7 @@ Feature: NATS emission
       | 1            |
       | 3            |
 
+  @slots_8
   Scenario Outline: NATS SUBJECT emitter drains a wide columnar batch in order without duplicates
     Given NATS is running
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"

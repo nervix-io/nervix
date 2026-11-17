@@ -1261,6 +1261,12 @@ the encoded bodies of held senders, to fill the relay budgets of both nodes. The
 ends it, failing the held deliveries as the five-second dispatch bound did before deliveries were
 held.
 
+A batch routed to another node's consumers counts as held relay work there before the receiver
+acknowledges runtime admission. That count spans the admission response, local subscription fan-out
+and delivery to the attached consumers, so a concurrent alteration cannot overlook work between
+the relay owner and its consumers. Completion or cancellation releases the count once. Owner
+ingress still waits for its dispatch gate before entering the owner buffer.
+
 `nervix_interconnect_relay_grant_refusals_total` counts the refusals a node answered and the ones it
 received, by direction and reason; a rising count of capacity refusals received means held
 deliveries are waiting for the receiver's room.
