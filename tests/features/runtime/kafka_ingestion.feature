@@ -686,6 +686,10 @@ Feature: Kafka ingestion
   # bounds eight staggered joins inside the unchanged sixty-second delivery wait; the driver's
   # forty-five-second default can spend most of that wait on just one rebalance. Heartbeats every
   # second keep these live members present. LeaveGroup still has its independent five-second wait.
+  # Held heartbeats also lapse that six-second session, after which a consumer closes without a
+  # LeaveGroup. DROP returns only once every instance has stopped, and instances that overrun their
+  # stop grace can take that long. The worker observation therefore runs while DROP is retiring the
+  # consumers, not after it returns.
   @kafka_consumer_retirement
   Scenario Outline: A Kafka ingestor dropped on <cluster_size> nodes retires its consumers on the connector workers while another ingestor delivers
     Given a mock Kafka broker serves topic "retired_{{test_id}}"
@@ -736,7 +740,7 @@ Feature: Kafka ingestion
       """
     Then the last cluster status owner for scheduled "ingestor" "retiring_ingestor" is saved as placeholder "kafka_owner"
     Given the mock Kafka broker holds every answer
-    When these Plexus statements are executed on the leader node
+    When these Plexus statements begin executing in the background
       """
       DROP INGESTOR retiring_ingestor;
       """
@@ -744,6 +748,7 @@ Feature: Kafka ingestion
       """
       class="connector_storage"
       """
+    And the background Plexus execution succeeds
     When http payload is posted to host "retire-{{test_id}}.example.com" path "/events"
       """
       {"seq":42}
