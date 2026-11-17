@@ -1227,6 +1227,7 @@ fn branched_node_specs_capture_downstream_processing_tree() {
                                 ZeroMqPullIngestor {
                                     client: named("zmq_client"),
                                     mode: ZeroMqIngestMode::NoAck,
+                                    rate_limits: nervix_models::RateLimits::NONE,
                                     quiesce: nervix_models::IngestQuiesceMode::Suspend,
                                 },
                             )),
@@ -1377,6 +1378,7 @@ fn branched_node_specs_capture_window_processor_as_branch_node() {
                                 ZeroMqPullIngestor {
                                     client: named("zmq_client"),
                                     mode: ZeroMqIngestMode::NoAck,
+                                    rate_limits: nervix_models::RateLimits::NONE,
                                     quiesce: nervix_models::IngestQuiesceMode::Suspend,
                                 },
                             )),
@@ -1494,6 +1496,7 @@ fn branched_node_specs_capture_inferencer_as_branch_node() {
                                 ZeroMqPullIngestor {
                                     client: named("zmq_client"),
                                     mode: ZeroMqIngestMode::NoAck,
+                                    rate_limits: nervix_models::RateLimits::NONE,
                                     quiesce: nervix_models::IngestQuiesceMode::Suspend,
                                 },
                             )),
@@ -1688,6 +1691,7 @@ fn branched_node_specs_capture_processor_output_route_tree() {
                                 ZeroMqPullIngestor {
                                     client: named("zmq_client"),
                                     mode: ZeroMqIngestMode::NoAck,
+                                    rate_limits: nervix_models::RateLimits::NONE,
                                     quiesce: nervix_models::IngestQuiesceMode::Suspend,
                                 },
                             )),
@@ -1841,6 +1845,7 @@ fn branched_node_specs_capture_junction_as_single_branch_processor() {
                                 ZeroMqPullIngestor {
                                     client: named("zmq_client"),
                                     mode: ZeroMqIngestMode::NoAck,
+                                    rate_limits: nervix_models::RateLimits::NONE,
                                     quiesce: nervix_models::IngestQuiesceMode::Suspend,
                                 },
                             )),
@@ -1871,6 +1876,7 @@ fn branched_node_specs_capture_junction_as_single_branch_processor() {
                                 ZeroMqPullIngestor {
                                     client: named("zmq_client"),
                                     mode: ZeroMqIngestMode::NoAck,
+                                    rate_limits: nervix_models::RateLimits::NONE,
                                     quiesce: nervix_models::IngestQuiesceMode::Suspend,
                                 },
                             )),
@@ -1986,6 +1992,7 @@ fn branched_node_specs_capture_single_processor_output_route_tree() {
                                 ZeroMqPullIngestor {
                                     client: named("zmq_client"),
                                     mode: ZeroMqIngestMode::NoAck,
+                                    rate_limits: nervix_models::RateLimits::NONE,
                                     quiesce: nervix_models::IngestQuiesceMode::Suspend,
                                 },
                             )),
@@ -2102,6 +2109,7 @@ fn branched_node_specs_include_singleton_branch_for_empty_branching() {
                                 ZeroMqPullIngestor {
                                     client: named("zmq_client"),
                                     mode: ZeroMqIngestMode::NoAck,
+                                    rate_limits: nervix_models::RateLimits::NONE,
                                     quiesce: nervix_models::IngestQuiesceMode::Suspend,
                                 },
                             )),

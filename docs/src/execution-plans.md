@@ -185,6 +185,15 @@ the already-validated batch configuration; planning does not maintain another re
 table. Transport-ingestor ACK, batch and retry durations are likewise validated before admission,
 including the shared schedulable bound, so an unusable policy cannot reach ingestor installation.
 
+An ingestor plan also carries its typed rate-limit plan: each `RATE LIMIT` clause converted once
+into the allowance's quota, within the engine's bounds, and the charge a payload pays in it, one
+unit, a payload fact read directly such as `payload.bytes`, or a measure lowered into the program
+the host compiles against the payload facts, metadata and headers the entity declares. A clause
+the conversion refuses fails the plan as `EntrypointPlanError::InvalidRateLimit`; `CREATE` and
+`ALTER` refuse it before through the same conversion. Binding compiles each measure once per node
+with the projection of what the measures read, and every execution unit's allowance starts from
+that shared binding.
+
 Connector plans preserve the vocabulary's connector/entity nesting. The ingestor planner emits,
 for example, `IngestorConnectorPlan::Kafka(KafkaIngestorStartPlan::Topic(...))`; the emitter planner
 emits `EmitterConnectorPlan::Otel(OtelEmitterPlan::{Logs, Traces, Metrics}(...))`. Each entity has

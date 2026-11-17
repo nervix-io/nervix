@@ -13,9 +13,12 @@
 )]
 
 use chumsky::prelude::*;
-use nervix_models::{PrometheusIngestMode, PrometheusQueryIngestor, PrometheusQueryIngestorChange};
+use nervix_models::{
+    IngestDeliveryKind, PrometheusIngestMode, PrometheusQueryIngestor,
+    PrometheusQueryIngestorChange,
+};
 
-use super::delivery::{no_ack, polling_quiesce_clause};
+use super::delivery::{no_ack, polling_quiesce_clause, rate_limits_in};
 use crate::{
     lexer::{Identifier, Token},
     parser_support::{
@@ -36,6 +39,9 @@ pub(super) fn query_body<'src>()
         .then(domain_clock_period_lit())
         .then_ignore(kw(Identifier::Mode))
         .then(no_ack().to(PrometheusIngestMode::NoAck))
+        .then_ignore(rate_limits_in::<PrometheusQueryIngestor>(
+            IngestDeliveryKind::NoAck,
+        ))
         .then(polling_quiesce_clause())
         .map(
             |(((((client, query), max_body_size), every), mode), quiesce)| {

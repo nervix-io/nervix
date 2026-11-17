@@ -111,6 +111,8 @@ pub(crate) enum IpcStreamError {
     NegativeRowCount,
     #[error("a record batch has {rows} rows, more than the {limit} one batch may carry")]
     TooManyRows { rows: u64, limit: usize },
+    #[error("the record batches declare more rows together than a count holds")]
+    RowCountOverflow,
     #[error("a record batch declares variadic buffer counts, which no Nervix type has")]
     VariadicBuffers,
     #[error(
@@ -160,7 +162,8 @@ impl IpcStreamError {
             | Self::UnexpectedMessage { .. }
             | Self::Compressed
             | Self::NegativeRowCount
-            | Self::TooManyRows { .. } => false,
+            | Self::TooManyRows { .. }
+            | Self::RowCountOverflow => false,
         }
     }
 }
@@ -205,6 +208,9 @@ pub(crate) struct ScannedStream<'a> {
     stream: &'a [u8],
     /// How many record batch messages follow the schema message.
     pub(crate) record_batches: usize,
+    /// How many rows those record batches declare together, read from their headers before any of
+    /// them is decoded.
+    pub(crate) rows: u64,
     /// How many bytes follow the stream's end. Only a stream that may end before its bytes do has
     /// any.
     pub(crate) trailing: usize,
@@ -393,12 +399,12 @@ impl StreamShape {
 
     /// Checks one record batch message, whose buffers the walk has held to its body: uncompressed,
     /// a row count within `max_rows`, and the field nodes and buffers this shape's fields take,
-    /// each holding what Arrow's reader reads without checking.
+    /// each holding what Arrow's reader reads without checking. Returns the row count it declares.
     fn check_record_batch(
         &self,
         batch: &RecordBatch<'_>,
         max_rows: Option<NonZeroUsize>,
-    ) -> Result<(), Report<IpcStreamError>> {
+    ) -> Result<u64, Report<IpcStreamError>> {
         if batch.compression().is_some() {
             return Err(Report::new(IpcStreamError::Compressed));
         }
@@ -418,7 +424,8 @@ impl StreamShape {
             }
         }
         let buffers = batch.buffers().unwrap_or_default();
-        self.check_fields(batch, buffers)
+        self.check_fields(batch, buffers)?;
+        Ok(rows)
     }
 
     /// Checks that the record batch declares exactly the field nodes and buffers this shape's
@@ -561,6 +568,7 @@ impl<'a> IpcMessages<'a> {
     ) -> Result<ScannedStream<'a>, Report<IpcStreamError>> {
         let mut shape: Option<StreamShape> = None;
         let mut record_batches = 0_usize;
+        let mut rows = 0_u64;
         // Every message occupies at least its two frame words, so the walk ends within the stream.
         while let Some(message) = self.next_message().map_err(IpcStreamError::misframed)? {
             let header = message.header_type();
@@ -579,7 +587,10 @@ impl<'a> IpcMessages<'a> {
                 "the message verifier admits a union type only beside its value, and the type was \
                  just checked to be a record batch",
             );
-            declared.check_record_batch(&batch, max_rows)?;
+            let batch_rows = declared.check_record_batch(&batch, max_rows)?;
+            rows = rows
+                .checked_add(batch_rows)
+                .ok_or_else(|| Report::new(IpcStreamError::RowCountOverflow))?;
             record_batches = record_batches
                 .checked_add(1)
                 .assured("every counted message occupies bytes of a body that fits in memory");
@@ -594,6 +605,7 @@ impl<'a> IpcMessages<'a> {
         Ok(ScannedStream {
             stream,
             record_batches,
+            rows,
             trailing: after.len(),
         })
     }

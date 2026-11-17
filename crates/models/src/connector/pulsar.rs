@@ -146,6 +146,8 @@ pub struct PulsarTopicIngestor {
     pub subscription: PulsarSubscription,
     pub instances: crate::IngestorInstances,
     pub mode: PulsarIngestMode,
+    /// The `RATE LIMIT` clauses the body writes after its delivery mode, in order.
+    pub rate_limits: crate::RateLimits,
     pub quiesce: IngestQuiesceMode,
 }
 
@@ -524,6 +526,9 @@ impl IngestorDeclaration for PulsarTopicIngestor {
             DeclaredDelivery::ACK_PARALLEL,
         ],
         quiesce: &[DeclaredQuiesce::SUSPEND],
+        // The broker sends only what the consumer's permits ask for, so a receive the host does not
+        // make holds the topic back.
+        rate_limit: crate::RateLimitDeclaration::Held,
         locator: Some(LocatorDeclaration {
             keywords: "TOPIC",
             name: LocatorName::External(PulsarTopicName::DECLARATION),
@@ -603,6 +608,14 @@ impl IngestorEntityBody for PulsarTopicIngestor {
 
     fn quiesce_mut(&mut self) -> &mut IngestQuiesceMode {
         &mut self.quiesce
+    }
+
+    fn rate_limits(&self) -> &crate::RateLimits {
+        &self.rate_limits
+    }
+
+    fn rate_limits_mut(&mut self) -> Option<&mut crate::RateLimits> {
+        Some(&mut self.rate_limits)
     }
 
     fn acknowledgement(&self) -> IngestAcknowledgement<'_> {

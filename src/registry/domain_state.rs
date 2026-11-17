@@ -49,7 +49,8 @@ use crate::registry::{
             validate_http_emitter_client, validate_http_literal_request_fields,
             validate_http_request_expressions, validate_iceberg_client_pairing,
             validate_ingestor_client, validate_ingestor_filter_where_for_internal_schemas,
-            validate_ingestor_source, validate_sqs_fifo_group_expression, validate_vhost_hostnames,
+            validate_ingestor_rate_limit_measures, validate_ingestor_source,
+            validate_sqs_fifo_group_expression, validate_vhost_hostnames,
         },
         expression::add_udf_dependency_edges,
         materialized_state::{
@@ -748,6 +749,12 @@ impl DomainState {
                         &[(&message_namespace, producer_schema)],
                         None,
                         ingestor.filter_where.as_ref(),
+                        &ingestor.input,
+                    )?;
+                    validate_ingestor_rate_limit_measures(
+                        domain,
+                        identifier,
+                        models,
                         &ingestor.input,
                     )?;
                     for output in ingestor.output_routes.outputs() {

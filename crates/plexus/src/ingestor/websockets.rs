@@ -16,12 +16,13 @@
 
 use chumsky::prelude::*;
 use nervix_models::{
-    WebsocketsConnectionIngestor, WebsocketsConnectionIngestorChange, WebsocketsEndpointIngestor,
-    WebsocketsEndpointIngestorChange, WebsocketsIngestMode, WebsocketsUpgradeHeader,
+    IngestDeliveryKind, WebsocketsConnectionIngestor, WebsocketsConnectionIngestorChange,
+    WebsocketsEndpointIngestor, WebsocketsEndpointIngestorChange, WebsocketsIngestMode,
+    WebsocketsUpgradeHeader,
 };
 
 use super::{
-    delivery::{no_ack, push_quiesce_clause},
+    delivery::{no_ack, push_quiesce_clause, rate_limits_in},
     endpoint::{self, EndpointIntake, intake},
 };
 use crate::{
@@ -54,6 +55,9 @@ pub(super) fn connection_body<'src>()
         .then(upgrade_headers().or_not())
         .then_ignore(kw(Identifier::Mode))
         .then(no_ack().to(WebsocketsIngestMode::NoAck))
+        .then_ignore(rate_limits_in::<WebsocketsConnectionIngestor>(
+            IngestDeliveryKind::NoAck,
+        ))
         .then(push_quiesce_clause())
         .map(
             |(((client, headers), mode), quiesce)| WebsocketsConnectionIngestor {
@@ -70,7 +74,7 @@ pub(super) fn connection_body<'src>()
 pub(super) fn endpoint_body<'src>()
 -> impl Parser<'src, &'src [Token], WebsocketsEndpointIngestor, extra::Err<ParseError<'src>>> + Clone
 {
-    intake().map(
+    intake::<WebsocketsEndpointIngestor>().map(
         |EndpointIntake {
              endpoint,
              mode,

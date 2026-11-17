@@ -2,8 +2,9 @@
 //!
 //! Layer: edges.
 //!
-//! - **Owns.** Source-specific fields, explicit delivery and quiesce selections, and their
-//!   conversion to one current `IngestorEntity` variant.
+//! - **Owns.** Source-specific fields, explicit delivery and quiesce selections, the ordered
+//!   `RATE LIMIT` rows of an entity that holds its source back, and their conversion to one current
+//!   `IngestorEntity` variant.
 //! - **Depends on.** Source vocabulary, typed names, and selected browser references.
 //! - **Must not know.** Connector drivers, registry snapshots, or runtime quiescence.
 
@@ -15,6 +16,7 @@
 use std::num::{NonZeroU16, NonZeroU64};
 
 use error_stack::{Report, ResultExt as _};
+use meticulous::OptionExt as _;
 use nervix_models::{
     ChoiceRequirement, ClientIngestorEntity, ClientName, DomainClockPeriod, EndpointIngestMode,
     EndpointName, HttpEndpointIngestor, HttpIngestorEntity, HttpRequestHeader,
@@ -29,13 +31,15 @@ use nervix_models::{
     PulsarIngestMode, PulsarIngestorEntity, PulsarSubscription, PulsarSubscriptionName,
     PulsarSubscriptionOwnership, PulsarSubscriptionType, PulsarTopicIngestor, PulsarTopicName,
     RabbitMqIngestMode, RabbitMqIngestorEntity, RabbitMqQueueIngestor, RabbitMqQueueName,
-    RedisChannelName, RedisChannelPattern, RedisIngestorEntity, RedisPubSubIngestMode,
-    RedisPubSubIngestor, RedisSubscriptionTarget, RetryPolicy, SqsIngestMode, SqsIngestorEntity,
-    SqsQueueIngestor, SqsQueueName, SqsReceiveMax, SyslogIngestMode, SyslogIngestorEntity,
-    SyslogListenerIngestor, WebsocketsConnectionIngestor, WebsocketsEndpointIngestor,
-    WebsocketsIngestMode, WebsocketsIngestorEntity, WebsocketsUpgradeHeader,
-    WebsocketsUpgradeHeaders, ZeroMqIngestMode, ZeroMqIngestorEntity, ZeroMqPullIngestor,
+    RateLimit, RateLimitRefusal, RateLimits, RateQuantity, RedisChannelName, RedisChannelPattern,
+    RedisIngestorEntity, RedisPubSubIngestMode, RedisPubSubIngestor, RedisSubscriptionTarget,
+    RetryPolicy, SqsIngestMode, SqsIngestorEntity, SqsQueueIngestor, SqsQueueName, SqsReceiveMax,
+    SyslogIngestMode, SyslogIngestorEntity, SyslogListenerIngestor, WebsocketsConnectionIngestor,
+    WebsocketsEndpointIngestor, WebsocketsIngestMode, WebsocketsIngestorEntity,
+    WebsocketsUpgradeHeader, WebsocketsUpgradeHeaders, ZeroMqIngestMode, ZeroMqIngestorEntity,
+    ZeroMqPullIngestor,
 };
+use nervix_plexus::parse_expression;
 use strum::IntoEnumIterator as _;
 use thiserror::Error;
 
@@ -111,6 +115,43 @@ impl From<&HttpRequestHeader> for RequestHeaderDraft {
     }
 }
 
+/// One `RATE LIMIT` clause as a form edits it, every part as its author writes it: the count, the
+/// optional `OF` measure expression, the `PER` period and the `BURST`.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub(super) struct RateLimitDraft {
+    pub(super) count: String,
+    pub(super) measure: String,
+    pub(super) period: String,
+    pub(super) burst: String,
+}
+
+impl RateLimitDraft {
+    /// The clause this row writes, as the clause at `clause` of its body, from 1.
+    fn build(&self, clause: usize) -> error_stack::Result<RateLimit, IngestorEntityDraftError> {
+        let count = RateQuantity::parse(self.count.trim())
+            .change_context(IngestorEntityDraftError::RateLimitCount { clause })?;
+        let measure = if self.measure.trim().is_empty() {
+            None
+        } else {
+            let measure = parse_expression(self.measure.trim())
+                .change_context(IngestorEntityDraftError::RateLimitMeasure { clause })?;
+            Some(measure)
+        };
+        let burst = RateQuantity::parse(self.burst.trim())
+            .change_context(IngestorEntityDraftError::RateLimitBurst { clause })?;
+        let limit = RateLimit {
+            count,
+            measure,
+            period: self.period.trim().to_owned(),
+            burst,
+        };
+        limit
+            .period()
+            .change_context(IngestorEntityDraftError::RateLimitPeriod { clause })?;
+        Ok(limit)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub(super) struct IngestorEntityDraft {
     pub(super) kind: Option<IngestorEntityKind>,
@@ -147,9 +188,54 @@ pub(super) struct IngestorEntityDraft {
     pub(super) buffer_size: String,
     pub(super) overflow: Option<IngestQuiesceOverflow>,
     pub(super) retry_after: String,
+    /// The `RATE LIMIT` clauses in the order the body writes them.
+    pub(super) rate_limits: Vec<RateLimitDraft>,
 }
 
 impl IngestorEntityDraft {
+    /// Whether the chosen entity holds its source back in some delivery mode, so the form offers
+    /// `RATE LIMIT` rows for it.
+    pub(super) fn offers_rate_limits(&self) -> bool {
+        let Some(kind) = self.kind else {
+            return false;
+        };
+        kind.capabilities().rate_limit.holds_in_some_mode()
+    }
+
+    /// The refusal the chosen entity's declaration gives a `RATE LIMIT` in the chosen delivery
+    /// mode, where that mode cannot hold the source back.
+    pub(super) fn rate_limit_refusal(&self) -> Option<RateLimitRefusal> {
+        let kind = self.kind?;
+        let mode = self.delivery?;
+        kind.capabilities().rate_limit.refusal(kind, mode)
+    }
+
+    /// Whether a `RATE LIMIT` row may be added: the chosen delivery mode holds the source back.
+    pub(super) fn rate_limits_enabled(&self) -> bool {
+        self.offers_rate_limits() && self.delivery.is_some() && self.rate_limit_refusal().is_none()
+    }
+
+    /// The clauses the rows write, in order. Rows the chosen mode cannot honor are refused with the
+    /// declaration's own reason.
+    fn rate_limits(&self) -> error_stack::Result<RateLimits, IngestorEntityDraftError> {
+        if self.rate_limits.is_empty() {
+            return Ok(RateLimits::NONE);
+        }
+        if let Some(refusal) = self.rate_limit_refusal() {
+            return Err(Report::new(IngestorEntityDraftError::RateLimitRefused(
+                refusal,
+            )));
+        }
+        let mut clauses = Vec::with_capacity(self.rate_limits.len());
+        for (index, row) in self.rate_limits.iter().enumerate() {
+            let clause = index
+                .checked_add(1)
+                .assured("a vector holds fewer than usize::MAX rows");
+            clauses.push(row.build(clause)?);
+        }
+        Ok(RateLimits::from(clauses))
+    }
+
     pub(super) fn choose_kind(&mut self, kind: IngestorEntityKind) {
         if self.kind != Some(kind) {
             *self = Self {
@@ -354,6 +440,8 @@ impl IngestorEntityDraft {
             }
         }
         let quiesce = self.build_quiesce()?;
+        // Rows an entity or mode cannot honor are refused here, also for a body that writes none.
+        let rate_limits = self.rate_limits()?;
         let source: IngestorEntity = match kind {
             IngestorEntityKind::Client(ClientIngestorEntity::Producer) => {
                 return Err(Report::new(IngestorEntityDraftError::ClientInput));
@@ -385,6 +473,7 @@ impl IngestorEntityDraft {
                 offset_mode: self.offset_mode()?,
                 instances: self.instances()?,
                 mode: self.kafka_mode()?,
+                rate_limits,
                 quiesce,
             }
             .into(),
@@ -395,6 +484,7 @@ impl IngestorEntityDraft {
                 subscription: self.pulsar_subscription()?,
                 instances: self.instances()?,
                 mode: self.pulsar_mode()?,
+                rate_limits,
                 quiesce,
             }
             .into(),
@@ -406,6 +496,7 @@ impl IngestorEntityDraft {
                 session: self.mqtt_session()?,
                 qos: self.mqtt_qos()?,
                 mode: self.mqtt_mode()?,
+                rate_limits,
                 quiesce,
             }
             .into(),
@@ -427,6 +518,7 @@ impl IngestorEntityDraft {
                 consumer: NatsConsumerName::parse(&self.consumer)
                     .change_context(IngestorEntityDraftError::Consumer)?,
                 mode: self.nats_stream_mode()?,
+                rate_limits,
                 quiesce,
             }
             .into(),
@@ -436,6 +528,7 @@ impl IngestorEntityDraft {
                     .change_context(IngestorEntityDraftError::Queue)?,
                 instances: self.instances()?,
                 mode: self.rabbitmq_mode()?,
+                rate_limits,
                 quiesce,
             }
             .into(),
@@ -460,6 +553,7 @@ impl IngestorEntityDraft {
             IngestorEntityKind::ZeroMq(ZeroMqIngestorEntity::Pull) => ZeroMqPullIngestor {
                 client: self.client()?,
                 mode: ZeroMqIngestMode::NoAck,
+                rate_limits,
                 quiesce,
             }
             .into(),
@@ -469,6 +563,7 @@ impl IngestorEntityDraft {
                     .change_context(IngestorEntityDraftError::Queue)?,
                 instances: self.instances()?,
                 mode: self.sqs_mode()?,
+                rate_limits,
                 quiesce,
             }
             .into(),
@@ -492,6 +587,7 @@ impl IngestorEntityDraft {
             IngestorEntityKind::Syslog(SyslogIngestorEntity::Listener) => SyslogListenerIngestor {
                 client: self.client()?,
                 mode: SyslogIngestMode::NoAck,
+                rate_limits,
                 quiesce,
             }
             .into(),
@@ -924,6 +1020,16 @@ pub(super) enum IngestorEntityDraftError {
     Overflow,
     #[error("Enter REJECT RETRY AFTER")]
     RetryAfter,
+    #[error("{0}")]
+    RateLimitRefused(RateLimitRefusal),
+    #[error("RATE LIMIT {clause}: enter a positive count or byte size")]
+    RateLimitCount { clause: usize },
+    #[error("RATE LIMIT {clause}: enter a valid OF measure expression, or leave it empty")]
+    RateLimitMeasure { clause: usize },
+    #[error("RATE LIMIT {clause}: PER must be a duration longer than 0")]
+    RateLimitPeriod { clause: usize },
+    #[error("RATE LIMIT {clause}: enter a positive BURST count or byte size")]
+    RateLimitBurst { clause: usize },
 }
 
 #[cfg(test)]
@@ -1029,6 +1135,20 @@ mod tests {
                 draft.retry_backoff = retry.backoff.clone();
                 draft.retry_max = retry.max_backoff.clone();
             }
+        }
+        for clause in source.rate_limits().clauses() {
+            let measure = match &clause.measure {
+                Some(measure) => {
+                    nervix_models::expression_to_plexus(measure).assured("a measure renders")
+                }
+                None => String::new(),
+            };
+            draft.rate_limits.push(super::RateLimitDraft {
+                count: clause.count.as_str().to_owned(),
+                measure,
+                period: clause.period.clone(),
+                burst: clause.burst.as_str().to_owned(),
+            });
         }
         draft.quiesce = Some(source.quiesce().kind());
         match source.quiesce() {
@@ -1167,6 +1287,120 @@ mod tests {
                     );
                 }
             });
+    }
+
+    #[test]
+    fn rate_limit_rows_write_their_clauses_in_order_as_their_author_wrote_them() {
+        let mut draft = complete(IngestorEntityKind::Pulsar(PulsarIngestorEntity::Topic));
+        assert!(draft.offers_rate_limits());
+        assert!(draft.rate_limits_enabled());
+        draft.rate_limits = vec![
+            super::RateLimitDraft {
+                count: "16MiB".into(),
+                measure: "payload.bytes".into(),
+                period: "1s".into(),
+                burst: "64MiB".into(),
+            },
+            super::RateLimitDraft {
+                count: "60".into(),
+                measure: String::new(),
+                period: "1m".into(),
+                burst: "3".into(),
+            },
+        ];
+        let source = draft.build().assured("both rows are complete clauses");
+        let written = source
+            .rate_limits()
+            .to_canonical_plexus()
+            .assured("the clauses render");
+        assert_eq!(
+            written,
+            "RATE LIMIT 16MiB OF payload.bytes PER 1s BURST 64MiB RATE LIMIT 60 PER 1m BURST 3"
+        );
+    }
+
+    #[test]
+    fn a_rate_limit_row_names_the_part_it_is_missing() {
+        let mut draft = complete(IngestorEntityKind::Pulsar(PulsarIngestorEntity::Topic));
+        let row = super::RateLimitDraft {
+            count: "10".into(),
+            measure: String::new(),
+            period: "1s".into(),
+            burst: "10".into(),
+        };
+        for (broken, expected) in [
+            (
+                super::RateLimitDraft {
+                    burst: String::new(),
+                    ..row.clone()
+                },
+                "RATE LIMIT 2: enter a positive BURST count or byte size",
+            ),
+            (
+                super::RateLimitDraft {
+                    count: "0".into(),
+                    ..row.clone()
+                },
+                "RATE LIMIT 2: enter a positive count or byte size",
+            ),
+            (
+                super::RateLimitDraft {
+                    period: "0s".into(),
+                    ..row.clone()
+                },
+                "RATE LIMIT 2: PER must be a duration longer than 0",
+            ),
+            (
+                super::RateLimitDraft {
+                    measure: "payload.bytes +".into(),
+                    ..row.clone()
+                },
+                "RATE LIMIT 2: enter a valid OF measure expression, or leave it empty",
+            ),
+        ] {
+            draft.rate_limits = vec![row.clone(), broken];
+            let error = draft.build().expect_err("the second row is incomplete");
+            assert_eq!(error.current_context().to_string(), expected);
+        }
+    }
+
+    #[test]
+    fn rate_limit_rows_follow_whether_the_chosen_mode_holds_the_source_back() {
+        let mut nats = complete(IngestorEntityKind::Nats(NatsIngestorEntity::Subject));
+        assert!(!nats.offers_rate_limits());
+        assert!(!nats.rate_limits_enabled());
+        nats.rate_limits = vec![super::RateLimitDraft::default()];
+        let error = nats
+            .build()
+            .expect_err("a NATS SUBJECT ingestor cannot hold its source back");
+        assert_eq!(
+            error.current_context().to_string(),
+            "NATS SUBJECT ingestors in MODE NO ACK cannot hold their source back, so they take no \
+             RATE LIMIT"
+        );
+
+        let mut rabbitmq = complete(IngestorEntityKind::RabbitMq(
+            nervix_models::RabbitMqIngestorEntity::Queue,
+        ));
+        rabbitmq.delivery = Some(IngestDeliveryKind::NoAck);
+        assert!(rabbitmq.offers_rate_limits());
+        assert!(!rabbitmq.rate_limits_enabled());
+        rabbitmq.rate_limits = vec![super::RateLimitDraft {
+            count: "10".into(),
+            measure: String::new(),
+            period: "1s".into(),
+            burst: "10".into(),
+        }];
+        let error = rabbitmq
+            .build()
+            .expect_err("RABBITMQ QUEUE holds its source back only in its ACK modes");
+        assert_eq!(
+            error.current_context().to_string(),
+            "RABBITMQ QUEUE ingestors in MODE NO ACK cannot hold their source back, so they take \
+             no RATE LIMIT"
+        );
+        rabbitmq.delivery = Some(IngestDeliveryKind::AckSequential);
+        assert!(rabbitmq.rate_limits_enabled());
     }
 
     #[test]

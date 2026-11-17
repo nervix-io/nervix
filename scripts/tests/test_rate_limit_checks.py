@@ -14,7 +14,7 @@ class FocusedEvidenceTests(unittest.TestCase):
     def test_property_scope_preserves_budgets_and_drops_unrelated_preparations(self) -> None:
         full = bolero.load_inventory()
         selected = rate_limit_checks.property_inventory(full)
-        self.assertEqual({item.id for item in selected.targets}, {"rate-limit-quota-bounds", "rate-limit-utc-generations"})
+        self.assertEqual({item.id for item in selected.targets}, {"rate-limit-capacity", "rate-limit-quota-bounds", "rate-limit-utc-generations"})
         self.assertEqual({item.package for item in selected.targets}, {rate_limit_checks.PACKAGE})
         self.assertEqual({item.random_iterations for item in selected.targets}, {256})
         self.assertEqual(selected.prepared_targets, ())

@@ -2218,6 +2218,23 @@ every mode it counts the payload in `nervix_ingestor_decode_rejections_total` an
 record as the ingestor's last decode rejection, which `DESCRIBE INGESTOR` reads from the node that
 runs the ingestor through the typed fields of its describe envelope.
 
+A payload an ingestor's [`RATE LIMIT`](./ingestors.md#rate-limits) can never admit, because it
+costs more than a clause's `BURST`, or whose measure fails, is consumed the same way as a
+`RateLimitRejection`: a UUIDv7 reference, the code `validation`, the operation `rate_limit`, the
+position of the clause from 1, the instant the host rejected it, the transport position its ingest
+metadata row names, and its cause, either the cost and the burst it exceeds or the measure's typed
+failure rendered once. The cause carries `nervix::error_boundary(outcome, ...)`, since the
+rejection is a record outcome the host performs. `LOG` publishes `ingestor '<name>' general error in
+domain '<domain>': rate limit rejection <record>`, such as `a payload costing 40 exceeds the burst 16
+of RATE LIMIT clause 1 from Kafka topic 'orders' partition 0 offset 1`, and logs the reference,
+code and operation as fields; `IGNORE` reports nothing. The payload is never presented again, its
+acknowledgement root resolves with the rest of its batch, and `nervix_ingestor_rate_limit_rejected_total`
+or `nervix_ingestor_rate_limit_program_rejections_total` counts it. A `CLIENT PRODUCER` batch
+rejected this way is answered `processing_failed` with cause `rejected` and the same record as its
+detail. A measure that could not run at all, as opposed to failing for one payload, ends the intake
+of its batch as `IngestorIntakeError::RateLimit`, which the host reports as an ingestor error before
+the batch is presented again.
+
 ### Emitter And Emitter Rejections
 
 A batch payload's rejection becomes one message error per member, each a copy of the emitter's

@@ -237,7 +237,8 @@ fn bolero_entity_presentations_keep_declared_rows_and_complete_configuration() {
                 let ingestor = arbitrary.create_ingestor_from(kind);
                 let presentation = ingestor.input.entity_presentation();
                 assert_eq!(presentation.phrase(), kind.phrase());
-                assert_presentation_rows(&presentation, "from");
+                let rate_limits = ingestor.input.rate_limits().clauses().len();
+                assert_presentation_rows(&presentation, "from", rate_limits);
                 statements.push(ClientStatement::Server(Statement::Create(
                     CreateStatement::new(Box::new(Model::Ingestor(ingestor)), false),
                 )));
@@ -250,7 +251,7 @@ fn bolero_entity_presentations_keep_declared_rows_and_complete_configuration() {
                     .entity_presentation()
                     .unwrap_or_else(|error| panic!("the generated emitter renders: {error:#}"));
                 assert_eq!(presentation.phrase(), kind.phrase());
-                assert_presentation_rows(&presentation, "to");
+                assert_presentation_rows(&presentation, "to", 0);
                 statements.push(ClientStatement::Server(Statement::Create(
                     CreateStatement::new(Box::new(Model::Emitter(emitter)), false),
                 )));
@@ -298,8 +299,16 @@ fn assert_entity_round_trips(statements: &[ClientStatement]) {
     }
 }
 
-fn assert_presentation_rows(presentation: &nervix_models::EntityPresentation, reference: &str) {
-    let rows = presentation.describe_lines();
+/// Checks that `presentation` shows its declared rows in order, one `rate limit` row for each of
+/// the `rate_limits` clauses its body writes.
+fn assert_presentation_rows(
+    presentation: &nervix_models::EntityPresentation,
+    reference: &str,
+    rate_limits: usize,
+) {
+    let rows = presentation
+        .describe_lines()
+        .unwrap_or_else(|error| panic!("the generated entity renders: {error:#}"));
     let keys = rows
         .iter()
         .map(|row| {
@@ -308,7 +317,10 @@ fn assert_presentation_rows(presentation: &nervix_models::EntityPresentation, re
                 .0
         })
         .collect::<Vec<_>>();
-    assert_eq!(keys, [reference, "options", "mode", "quiesce", "envelope"]);
+    let mut expected = vec![reference, "options", "mode"];
+    expected.extend(std::iter::repeat_n("rate limit", rate_limits));
+    expected.extend(["quiesce", "envelope"]);
+    assert_eq!(keys, expected);
     assert!(rows[0].starts_with(&format!("{reference}: {} ", presentation.phrase())));
 }
 

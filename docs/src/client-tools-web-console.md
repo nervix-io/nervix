@@ -334,7 +334,13 @@ ordered name/value rows. An `HTTP REQUEST` edits its request headers as ordered 
 holds a literal value, or, with **Client secret** checked, the client key it reads, and the preview
 shows `CLIENT SECRET '<key>'`. A RabbitMQ queue offers its declared `NO ACK`, `ACK SEQUENTIAL` and
 `ACK PARALLEL` modes; the parallel window, batch timeout and retry settings are retained in the
-preview and submitted command. A topic,
+preview and submitted command. An entity that holds its source back in some delivery mode edits
+its [`RATE LIMIT`](./ingestors.md#rate-limits) clauses as ordered rows of a count, an optional
+`OF` measure expression, a `PER` period and a `BURST`, each kept as typed. A row can be added only
+while the chosen mode holds the source back, and a form whose mode cannot, such as `RABBITMQ QUEUE`
+or `MQTT TOPIC` under `NO ACK`, refuses its rows with the reason the entity declares. The draft
+names the clause and the part a row is missing, and the preview writes the clauses after the mode
+in row order. A topic,
 queue, subject, channel, consumer group, queue group or subscription keeps its text exactly as
 typed, case and spaces included, and the form refuses a name its entity's rule refuses. A
 `PULSAR TOPIC` subscription also requires an explicit ownership choice, `OWNED BY INGESTOR START AT EARLIEST` or

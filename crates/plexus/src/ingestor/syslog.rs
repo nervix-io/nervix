@@ -13,26 +13,34 @@
 )]
 
 use chumsky::prelude::*;
-use nervix_models::{SyslogIngestMode, SyslogListenerIngestor, SyslogListenerIngestorChange};
+use nervix_models::{
+    IngestDeliveryKind, SyslogIngestMode, SyslogListenerIngestor, SyslogListenerIngestorChange,
+};
 
-use super::delivery::{flexible_quiesce_clause, no_ack};
+use super::delivery::{flexible_quiesce_clause, no_ack, rate_limits_in};
 use crate::{
     lexer::{Identifier, Token},
     parser_support::{ParseError, client_ref, kw},
 };
 
-/// `FROM <client> MODE NO ACK ON QUIESCE SUSPEND|BUFFER …|DROP`.
+/// `FROM <client> MODE NO ACK [RATE LIMIT …] ON QUIESCE SUSPEND|BUFFER …|DROP`.
 pub(super) fn listener_body<'src>()
 -> impl Parser<'src, &'src [Token], SyslogListenerIngestor, extra::Err<ParseError<'src>>> + Clone {
     client_ref()
         .then_ignore(kw(Identifier::Mode))
         .then(no_ack().to(SyslogIngestMode::NoAck))
+        .then(rate_limits_in::<SyslogListenerIngestor>(
+            IngestDeliveryKind::NoAck,
+        ))
         .then(flexible_quiesce_clause())
-        .map(|((client, mode), quiesce)| SyslogListenerIngestor {
-            client,
-            mode,
-            quiesce,
-        })
+        .map(
+            |(((client, mode), rate_limits), quiesce)| SyslogListenerIngestor {
+                client,
+                mode,
+                rate_limits,
+                quiesce,
+            },
+        )
         .boxed()
 }
 

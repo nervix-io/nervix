@@ -5,8 +5,8 @@
 //!
 //! - **Owns.** The one spelling of each delivery mode an ingestor writes — `NO ACK`,
 //!   `ACK SEQUENTIAL …` and `ACK PARALLEL MAX n …` — and the grammar of `INSTANCES`,
-//!   `BATCH TIMEOUT`, `START AT` and the quiesce bodies, which each connector's grammar composes
-//!   into the subset its entity accepts.
+//!   `BATCH TIMEOUT`, `START AT`, the `RATE LIMIT` clauses that follow a delivery mode and the
+//!   quiesce bodies, which each connector's grammar composes into the subset its entity accepts.
 //! - **Depends on.** Shared Plexus grammar primitives and the delivery and quiesce vocabulary.
 //! - **Must not know.** Which connector accepts which clause; the connector modules choose.
 
@@ -18,17 +18,19 @@
 use std::num::NonZeroU64;
 
 use chumsky::{Boxed, prelude::*};
-use meticulous::ResultExt as _;
+use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::{
-    DeclaredQuiesce, IngestQuiesceKind, IngestQuiesceMode, IngestQuiesceOverflow,
-    IngestStartPosition, IngestorEntityModel, IngestorInstances, RetryPolicy,
+    DeclaredQuiesce, IngestAcknowledgement, IngestDeliveryKind, IngestQuiesceKind,
+    IngestQuiesceMode, IngestQuiesceOverflow, IngestStartPosition, IngestorEntityModel,
+    IngestorInstances, RateLimit, RateLimits, RateQuantity, RetryPolicy,
 };
+use strum::IntoEnumIterator as _;
 
 use crate::{
-    lexer::{Identifier, Token},
+    lexer::{Identifier, Token, Word},
     parser_support::{
-        ParseError, ack_timeout, byte_size_lit, duration_lit, kw, kw_phrase2, nonzero_u64_value,
-        parallel_ack_window, retry_policy, sequential_ack_window,
+        ParseError, ack_timeout, byte_size_lit, duration_lit, embedded_expression, kw, kw_phrase2,
+        nonzero_u64_value, parallel_ack_window, retry_policy, sequential_ack_window, unknown_word,
     },
 };
 
@@ -277,3 +279,137 @@ pub(super) fn declared_quiesce_body<'src>(
     }
     choice(bodies).boxed()
 }
+
+/// A count a `RATE LIMIT` clause writes for its rate or its burst: a whole number such as `100`,
+/// or a byte size such as `16MiB`. Its unit is never a keyword, so the `PER` or `BURST` after a bare
+/// number is not read as one.
+fn rate_quantity<'src>(
+    label: &'static str,
+) -> impl Parser<'src, &'src [Token], RateQuantity, extra::Err<ParseError<'src>>> + Clone {
+    select! { Token::NumberLiteral(number) => number }
+        .labelled(label)
+        .then(unknown_word().or_not())
+        .try_map(|(number, unit), span| {
+            let text = match unit {
+                Some(unit) => format!("{number}{unit}"),
+                None => number,
+            };
+            RateQuantity::parse(&text)
+                .map_err(|refusal| Rich::custom(span, refusal.current_context().to_string()))
+        })
+        .boxed()
+}
+
+/// `RATE LIMIT <count> [OF <measure>] PER <period> BURST <burst>`: one allowance a payload pays.
+fn rate_limit_clause<'src>()
+-> impl Parser<'src, &'src [Token], RateLimit, extra::Err<ParseError<'src>>> + Clone {
+    kw_phrase2(Identifier::Rate, Identifier::Limit)
+        .ignore_then(rate_quantity("rate_limit_count"))
+        .then(
+            kw(Identifier::Of)
+                .ignore_then(embedded_expression("rate_limit_measure"))
+                .or_not(),
+        )
+        .then_ignore(kw(Identifier::Per))
+        .then(duration_lit())
+        .then_ignore(kw(Identifier::Burst))
+        .then(rate_quantity("rate_limit_burst"))
+        .map(|(((count, measure), period), burst)| RateLimit {
+            count,
+            measure,
+            period,
+            burst,
+        })
+        .boxed()
+}
+
+/// Every `RATE LIMIT` clause `SET RATE LIMIT` writes: at least one, in order.
+pub(super) fn rate_limit_sequence<'src>()
+-> impl Parser<'src, &'src [Token], RateLimits, extra::Err<ParseError<'src>>> + Clone {
+    rate_limit_clause()
+        .repeated()
+        .at_least(1)
+        .collect::<Vec<_>>()
+        .map(RateLimits::from)
+        .boxed()
+}
+
+/// A `RATE LIMIT` written where its entity cannot hold its source back in the delivery mode the
+/// statement names. Its first keyword is read without a label, so a parse that reaches it refuses
+/// the clause by name, and completion, which offers only labelled expectations, never offers it.
+pub(super) fn refused_rate_limit<'src, R>(
+    refusal: R,
+) -> impl Parser<'src, &'src [Token], (), extra::Err<ParseError<'src>>> + Clone
+where
+    R: std::fmt::Display + Clone + 'src,
+{
+    select! { Token::Word(Word::KnownWord { iden: Identifier::Rate, .. }) => () }
+        .try_map(move |(), span| Err(Rich::custom(span, refusal.to_string())))
+}
+
+/// What may follow `MODE <mode>` in the body of an entity `S` whose statement names the delivery
+/// mode `delivery`: any number of `RATE LIMIT` clauses where `S` declares the mode holds its source
+/// back, and otherwise none, refusing one written by name.
+pub(super) fn rate_limits_in<'src, S: IngestorEntityModel>(
+    delivery: IngestDeliveryKind,
+) -> Boxed<'src, 'src, &'src [Token], RateLimits, extra::Err<ParseError<'src>>> {
+    match S::KIND.capabilities().rate_limit.refusal(S::KIND, delivery) {
+        None => rate_limit_clause()
+            .repeated()
+            .collect::<Vec<_>>()
+            .map(RateLimits::from)
+            .boxed(),
+        Some(refusal) => refused_rate_limit(refusal)
+            .or_not()
+            .map(|_| RateLimits::NONE)
+            .boxed(),
+    }
+}
+
+/// The delivery mode a body names, which decides what may follow it.
+pub(super) trait NamedDelivery: Clone {
+    fn delivery_kind(&self) -> IngestDeliveryKind;
+}
+
+impl NamedDelivery for IngestAcknowledgement<'_> {
+    fn delivery_kind(&self) -> IngestDeliveryKind {
+        self.kind()
+    }
+}
+
+/// The parse extras of the clauses after a delivery mode `M` that a body has just read.
+pub(super) type AfterDelivery<'src, M> = extra::Full<ParseError<'src>, (), M>;
+
+/// What may follow the delivery mode the context holds in the body of an entity `S`: what
+/// [`rate_limits_in`] reads after that mode. Each declared mode's parser is built once, and the
+/// mode read selects among them.
+pub(super) fn rate_limits_after<'src, S, M>()
+-> impl Parser<'src, &'src [Token], RateLimits, AfterDelivery<'src, M>> + Clone
+where
+    S: IngestorEntityModel,
+    M: NamedDelivery + 'src,
+{
+    let by_delivery: Vec<_> = IngestDeliveryKind::iter()
+        .map(|delivery| (delivery, rate_limits_in::<S>(delivery)))
+        .collect();
+    custom::<_, _, _, AfterDelivery<'src, M>>(move |input| {
+        let delivery = input.ctx().delivery_kind();
+        // Four delivery kinds exist, one parser for each, so the scan is bounded by them.
+        let (_, parser) = by_delivery
+            .iter()
+            .find(|(kind, _)| *kind == delivery)
+            .assured("a parser was built above for every delivery kind there is");
+        input.parse(map_ctx::<
+            _,
+            _,
+            _,
+            AfterDelivery<'src, M>,
+            extra::Err<ParseError<'src>>,
+            _,
+        >(|_| (), parser.clone()))
+    })
+}
+
+#[cfg(test)]
+#[path = "rate_limit_tests.rs"]
+mod rate_limit_tests;

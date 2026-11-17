@@ -303,6 +303,7 @@ fn topic_ingestor(session: MqttSession, qos: MqttQos, mode: MqttIngestMode) -> M
         session,
         qos,
         mode,
+        rate_limits: crate::RateLimits::NONE,
         quiesce: IngestQuiesceMode::Drop,
     }
 }

@@ -133,6 +133,9 @@ pub struct EntityPresentation {
     locator: Option<String>,
     options: BTreeMap<&'static str, PresentedOption>,
     mode: String,
+    /// The `RATE LIMIT` clauses an ingestor's body writes after its mode, in order. Rendering one
+    /// can fail, so a presentation keeps the Models and renders them where it is written out.
+    rate_limits: crate::RateLimits,
     quiesce: Option<String>,
     conflict: Option<String>,
     /// The envelope section an emitter writes, as one line of canonical Plexus. Absent for an
@@ -150,6 +153,7 @@ impl EntityPresentation {
             locator: None,
             options: BTreeMap::new(),
             mode: entity.acknowledgement().to_canonical_plexus(),
+            rate_limits: entity.rate_limits().clone(),
             quiesce: Some(ingest_quiesce_to_plexus(entity.quiesce())),
             conflict: None,
             envelope: None,
@@ -258,12 +262,13 @@ impl EntityPresentation {
         options.join(" ")
     }
 
-    /// The same ordered configuration rows for either side of a connector.
-    pub fn describe_lines(&self) -> Vec<String> {
+    /// The same ordered configuration rows for either side of a connector: one `rate limit:` row
+    /// for each `RATE LIMIT` clause an ingestor's body writes, after its mode.
+    pub fn describe_lines(&self) -> error_stack::Result<Vec<String>, CanonicalPlexusError> {
         let options = self.options_to_plexus();
         let options = if options.is_empty() { "none" } else { &options };
         let quiesce = self.quiesce.as_deref().unwrap_or("none");
-        vec![
+        let mut lines = vec![
             format!(
                 "{}: {}",
                 self.boundary.reference_label(),
@@ -271,9 +276,16 @@ impl EntityPresentation {
             ),
             format!("options: {options}"),
             format!("mode: {}", self.mode),
-            format!("quiesce: {quiesce}"),
-            format!("envelope: {}", self.envelope.as_deref().unwrap_or("none")),
-        ]
+        ];
+        for clause in self.rate_limits.clauses() {
+            lines.push(format!("rate limit: {}", clause.to_canonical_plexus()?));
+        }
+        lines.push(format!("quiesce: {quiesce}"));
+        lines.push(format!(
+            "envelope: {}",
+            self.envelope.as_deref().unwrap_or("none")
+        ));
+        Ok(lines)
     }
 
     /// This presentation of an emitter's entity with the envelope section the emitter writes.
@@ -300,13 +312,19 @@ impl EntityPresentation {
         words.join(" ")
     }
 
-    pub(super) fn ingestor_body_to_plexus(&self) -> String {
+    pub(super) fn ingestor_body_to_plexus(
+        &self,
+    ) -> error_stack::Result<String, CanonicalPlexusError> {
         let mut body = format!("{} MODE {}", self.reference_to_plexus(), self.mode);
+        if !self.rate_limits.is_empty() {
+            body.push(' ');
+            body.push_str(&self.rate_limits.to_canonical_plexus()?);
+        }
         if let Some(quiesce) = &self.quiesce {
             body.push_str(" ON QUIESCE ");
             body.push_str(quiesce);
         }
-        body
+        Ok(body)
     }
 
     pub(super) fn payload_clauses(&self) -> Vec<Clause> {
@@ -355,7 +373,7 @@ pub(super) trait IngestorPresentationModel {
 }
 
 impl<T: IngestorPresentationModel> IngestorBodyPlexus for T {
-    fn body_to_plexus(&self) -> String {
+    fn body_to_plexus(&self) -> error_stack::Result<String, CanonicalPlexusError> {
         self.entity_presentation().ingestor_body_to_plexus()
     }
 }
@@ -368,6 +386,7 @@ impl IngestorPresentationModel for ClientProducerIngestor {
             locator: None,
             options: BTreeMap::new(),
             mode: self.mode.to_canonical_plexus(),
+            rate_limits: self.rate_limits.clone(),
             quiesce: Some(ingest_quiesce_to_plexus(&IngestQuiesceMode::Suspend)),
             conflict: None,
             envelope: None,
@@ -626,6 +645,7 @@ impl EmitterEntity {
             locator: None,
             options: BTreeMap::new(),
             mode: self.publishing().to_canonical_plexus(),
+            rate_limits: crate::RateLimits::NONE,
             quiesce: None,
             conflict: None,
             envelope: None,

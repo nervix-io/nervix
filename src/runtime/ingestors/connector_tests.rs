@@ -85,6 +85,8 @@ struct FakeHost {
     read_observations: Arc<Mutex<ReadObservations>>,
     lifecycle: Arc<Mutex<LifecycleObservations>>,
     refused_payload: Option<u8>,
+    /// The payload whose intake the ingestor's stop meets while it waits for its allowance.
+    stopped_payload: Option<u8>,
     allow_unconfirmed_stop: bool,
     acknowledgements: BTreeMap<u8, TestAcknowledgementPlan>,
     observations: Arc<Mutex<IngestorLoopObservations>>,
@@ -102,6 +104,7 @@ impl FakeHost {
             read_observations: Arc::new(Mutex::new(ReadObservations::default())),
             lifecycle: Arc::new(Mutex::new(LifecycleObservations::default())),
             refused_payload: None,
+            stopped_payload: None,
             allow_unconfirmed_stop: false,
             acknowledgements: BTreeMap::new(),
             observations,
@@ -136,6 +139,13 @@ impl IngestorHostServices for FakeHost {
             .lock()
             .intake
             .push((RecordedIntake::Unacknowledged, messages.len()));
+        if self.stopped_payload.is_some_and(|stopped| {
+            messages
+                .first()
+                .is_some_and(|message| message.payload == [stopped])
+        }) {
+            return Err(Report::new(IngestorIntakeError::Stopped));
+        }
         Ok(())
     }
 
@@ -159,6 +169,13 @@ impl IngestorHostServices for FakeHost {
                 .is_some_and(|message| message.payload == [refused])
         }) {
             return Err(Report::new(IngestorIntakeError::Dispatch));
+        }
+        if self.stopped_payload.is_some_and(|stopped| {
+            messages
+                .first()
+                .is_some_and(|message| message.payload == [stopped])
+        }) {
+            return Err(Report::new(IngestorIntakeError::Stopped));
         }
         Ok(IngestorBatchAcknowledgement::new(
             ImmediateAcknowledgement {
@@ -775,6 +792,60 @@ async fn ingestor_loop_accepts_no_ack_messages_one_at_a_time() {
     assert!(observations.rejected.is_empty());
 }
 
+/// Runs `policy` over three queued messages for a host whose intake of the second meets the
+/// ingestor's stop while it waits for its `RATE LIMIT` allowance.
+async fn run_policy_stopped_at_the_second_intake(
+    policy: IngestorAckPolicy,
+) -> Arc<Mutex<IngestorLoopObservations>> {
+    let observations = Arc::new(Mutex::new(IngestorLoopObservations::default()));
+    let mut connector = empty_ingestor(observations.clone());
+    connector.queued().extend(three_messages());
+    let mut services = FakeHost::running(observations.clone());
+    services.stopped_payload = Some(1);
+    services.allow_unconfirmed_stop = true;
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    run_ingestor_instance_with_retry(
+        connector,
+        IngestorHost::new(services),
+        replayable(policy),
+        shutdown_rx,
+        nervix_connector::RetryBackoffSettings::default(),
+    )
+    .await;
+    drop(shutdown_tx);
+    observations
+}
+
+#[nervix_primitives::test]
+async fn a_stop_during_an_intake_hold_leaves_the_batch_unconfirmed_and_ends_the_loop() {
+    for policy in [
+        IngestorAckPolicy::None,
+        IngestorAckPolicy::Sequential {
+            timeout: Duration::from_secs(1),
+            retry: retry_policy(),
+        },
+    ] {
+        let observations = run_policy_stopped_at_the_second_intake(policy).await;
+        let observations = observations.lock();
+        assert_eq!(
+            observations.intake.len(),
+            2,
+            "the loop read nothing after the stop"
+        );
+        assert_eq!(observations.acknowledged, vec![vec![0]]);
+        assert!(
+            observations.rejected.is_empty(),
+            "a stop rejects nothing on the transport"
+        );
+        assert_eq!(observations.unconfirmed_stops, vec![1]);
+        assert!(
+            observations.reported_errors.is_empty(),
+            "a stop is no failure to report: {:?}",
+            observations.reported_errors
+        );
+    }
+}
+
 #[nervix_primitives::test]
 async fn ingestor_loop_waits_and_commits_each_sequential_ack() {
     let observations = run_policy(IngestorAckPolicy::Sequential {
@@ -1154,6 +1225,52 @@ fn shuttle_individual_settlement_keeps_admitted_graph_work_until_transport_recov
     nervix_model_harness::shuttle::check_interleavings(|| {
         shuttle::future::block_on(individual_transport_recovery_keeps_admitted_graph_work());
     });
+}
+
+#[nervix_primitives::test]
+async fn individual_settlement_leaves_every_delivery_from_a_stopped_intake_on_unconfirmed() {
+    let observations = Arc::new(Mutex::new(IngestorLoopObservations::default()));
+    let mut services = FakeHost::running(observations.clone());
+    services.stopped_payload = Some(1);
+    services.allow_unconfirmed_stop = true;
+    let mut host = IngestorHost::new(services);
+    let mut connector = empty_ingestor(observations.clone());
+    let batch =
+        IndividualBatch::intake(&mut host, three_messages().into(), Duration::from_secs(1)).await;
+    let result = batch
+        .settle(
+            &mut connector,
+            &mut host,
+            BatchSettlement {
+                position_class: PositionClass::BrokerRedelivered,
+                retry_after: Duration::from_millis(1),
+            },
+        )
+        .await;
+    assert!(matches!(result, BatchDisposition::Shutdown));
+    let record = observations.lock();
+    // The stop ended the intake: the delivery after the stopped one was never offered to the host.
+    assert_eq!(record.intake, [(RecordedIntake::Acknowledged, 1); 2]);
+    assert!(
+        record.rejected.is_empty(),
+        "a stop rejects nothing on the transport"
+    );
+    assert!(
+        record.reported_errors.is_empty(),
+        "a stop is no failure to report: {:?}",
+        record.reported_errors
+    );
+    let unconfirmed: usize = record.unconfirmed_stops.iter().sum();
+    let confirmed: usize = record.acknowledged.iter().map(Vec::len).sum();
+    assert_eq!(
+        unconfirmed + confirmed,
+        3,
+        "every delivery is confirmed or left unconfirmed for redelivery"
+    );
+    assert!(
+        unconfirmed >= 2,
+        "the stopped delivery and the one after it stay unconfirmed"
+    );
 }
 
 #[nervix_primitives::test]

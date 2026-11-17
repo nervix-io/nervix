@@ -357,8 +357,8 @@ transport offset conversion. The SDK's indexed authoring and typed-inspection vi
 empty JSON value arrays. These driver representations never enter semantic Models or plans.
 
 A NATS ingestor or emitter Model distinguishes `NATS SUBJECT` and `NATS STREAM` entities in its archived union.
-The registry's `NERVIX LBL PARTS` archive signature identifies the current Model layout, including
-that union, the endpoint kind, the separate JSON and CBOR wire type enums (CBOR has six types), AVRO representation types whose arrays declare their item type, explicit `BASE64` codec
+The registry's `NERVIX LBL RATES` archive signature identifies the current Model layout, including
+that union, the ordered `RATE LIMIT` clauses an ingestor body writes, the endpoint kind, the separate JSON and CBOR wire type enums (CBOR has six types), AVRO representation types whose arrays declare their item type, explicit `BASE64` codec
 encoding, a Pulsar subscription's required type and an owned subscription's required start position,
 a Kafka consumer group's required start position, the direct, automatic inherited or grouped inherited branch declaration,
 typed ingestor instancing, Sentry platform, an ingestor's `TIMESTAMP AT metadata.<field>` source,
@@ -379,7 +379,7 @@ complete unsigned 64-bit range. Duration settings preserve their declared range 
 precision in eight bytes. Decoding validates the same declaration before publishing a parameter
 value.
 
-Consensus's `raft_entity_labels_inherited_topology_` keyspaces and current
+Consensus's `raft_entity_labels_inherited_topology_ratelimit_` keyspaces and current
 `ClusterState` metadata encoding, 40, identify its stored shapes, including the partition count of every resolved
 branch declaration in the committed schedule, the partition epoch the schedule records for each
 branch whose count changed, and the statements a transaction keeps, including per-entity

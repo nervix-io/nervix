@@ -26,6 +26,8 @@ use super::*;
 pub(crate) enum EntrypointProgram {
     #[strum(to_string = "FILTER WHERE")]
     FilterWhere,
+    #[strum(to_string = "measure of RATE LIMIT clause {clause}")]
+    RateLimitMeasure { clause: usize },
     #[strum(to_string = "FROM WHERE of input relay '{relay}'")]
     SourceWhere { relay: RelayName },
     #[strum(to_string = "route to '{relay}'")]
@@ -148,6 +150,8 @@ pub(super) struct BoundIngestorRoutes {
 pub(super) struct BoundIngestorPrograms {
     pub(super) filter_where: Option<CompiledProgramWithMaterializedInterest>,
     pub(super) routes: Arc<BoundIngestorRoutes>,
+    /// Its `RATE LIMIT` clauses compiled for this node, absent for an ingestor that writes none.
+    pub(super) rate_limit: Option<Arc<BoundRateLimit>>,
 }
 
 /// One reingestor output route, compiled for this node, with the cadence its task buffers it on.
@@ -339,10 +343,77 @@ impl ExecutionBuildDeps<'_> {
                 node: identifier.clone(),
             })
         })?;
+        let rate_limit = self.bind_ingestor_rate_limit(ingestor, target)?;
         Ok(BoundIngestorPrograms {
             filter_where,
             routes: Arc::new(BoundIngestorRoutes { routes, metadata }),
+            rate_limit,
         })
+    }
+
+    /// Compiles an ingestor's `RATE LIMIT` clauses: each measure against what a payload carries
+    /// before it is decoded, and one projection of the metadata and payload facts they read.
+    fn bind_ingestor_rate_limit(
+        &self,
+        ingestor: &IngestorSpec,
+        target: EntrypointTarget<'_>,
+    ) -> error_stack::Result<Option<Arc<BoundRateLimit>>, EntrypointBindingError> {
+        if ingestor.rate_limit.is_empty() {
+            return Ok(None);
+        }
+        let mut read = Vec::new();
+        let mut payload_read = Vec::new();
+        let mut measured = false;
+        for clause in ingestor.rate_limit.clauses() {
+            let crate::registry::RateLimitCharge::Measure(measure) = &clause.charge else {
+                continue;
+            };
+            measured = true;
+            for (namespace, field) in collect_program_field_refs(&measure.program().inner) {
+                if namespace == INGEST_METADATA_NAMESPACE {
+                    read.push(field);
+                } else if namespace == INGEST_PAYLOAD_NAMESPACE {
+                    payload_read.push(field);
+                }
+            }
+        }
+        let projection = if measured {
+            let projection = IngestMetadataProjection::reading_input(
+                ingestor.metadata_declaration(),
+                read.iter().map(String::as_str),
+                ingestor.payload_declaration(),
+                payload_read.iter().map(String::as_str),
+            )
+            .map_err(|error| {
+                error.change_context(EntrypointBindingError::ProjectMetadata {
+                    node: target.node.clone(),
+                })
+            })?;
+            Some(projection)
+        } else {
+            None
+        };
+        let unbranched = ResolvedBranching::unbranched();
+        let mut clause = 0_usize;
+        let bound = BoundRateLimit::bind(ingestor.rate_limit.clauses(), projection, |measure| {
+            clause = clause
+                .checked_add(1)
+                .verified("a body's clauses are far fewer than usize::MAX");
+            bind_ingestor_measure_program(
+                target.node,
+                measure,
+                ingestor.metadata_declaration(),
+                ingestor.payload_declaration(),
+                ingestor.reads_headers(),
+                self.compile_context(&unbranched),
+            )
+            .map_err(|error| {
+                error.change_context(
+                    target.compile_failure(EntrypointProgram::RateLimitMeasure { clause }),
+                )
+            })
+        })?;
+        Ok(Some(Arc::new(bound)))
     }
 
     /// The metadata fields the arrival filter, routes and `TIMESTAMP AT` read, plus their payload
@@ -662,6 +733,7 @@ mod tests {
                         source: IngestorEntity::ZeroMq(ZeroMqIngestor::Pull(ZeroMqPullIngestor {
                             client: named("zmq"),
                             mode: ZeroMqIngestMode::NoAck,
+                            rate_limits: nervix_models::RateLimits::NONE,
                             quiesce: IngestQuiesceMode::Suspend,
                         })),
                         codec: named("payload_codec"),
@@ -728,6 +800,7 @@ mod tests {
                                 max_backoff: "1s".to_string(),
                             },
                         },
+                        rate_limits: nervix_models::RateLimits::NONE,
                     },
                 ),
                 timestamp_source: None,

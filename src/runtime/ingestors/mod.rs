@@ -412,6 +412,7 @@ mod tests {
                     offset_mode: nervix_models::KafkaOffsetMode::Domain,
                     instances: nervix_models::IngestorInstances::Count(nonzero_ext::nonzero!(3u64)),
                     mode: nervix_models::KafkaIngestMode::NoAck,
+                    rate_limits: nervix_models::RateLimits::NONE,
                     quiesce: IngestQuiesceMode::Suspend,
                 },
             )),
@@ -618,6 +619,7 @@ mod tests {
                             max_backoff: "1s".to_string(),
                         },
                     },
+                    rate_limits: nervix_models::RateLimits::NONE,
                     quiesce: IngestQuiesceMode::Suspend,
                 })),
                 Model::ClientRabbitMq(CreateClientRabbitMq {
@@ -639,6 +641,7 @@ mod tests {
                             max_backoff: "1s".to_string(),
                         },
                     },
+                    rate_limits: nervix_models::RateLimits::NONE,
                     quiesce: IngestQuiesceMode::Suspend,
                 })),
                 Model::ClientSqs(CreateClientSqs {
@@ -673,6 +676,7 @@ mod tests {
                     session: MqttSession::Clean,
                     qos: MqttQos::Qos0,
                     mode: MqttIngestMode::NoAck,
+                    rate_limits: nervix_models::RateLimits::NONE,
                     quiesce: IngestQuiesceMode::Drop,
                 })),
                 Model::ClientMqtt(CreateClientMqtt {
@@ -760,6 +764,7 @@ mod tests {
         let pull = IngestorEntity::ZeroMq(ZeroMqIngestor::Pull(ZeroMqPullIngestor {
             client: client.name.clone(),
             mode: ZeroMqIngestMode::NoAck,
+            rate_limits: nervix_models::RateLimits::NONE,
             quiesce: IngestQuiesceMode::Suspend,
         }));
         let plans = planned_transport_ingestor(&domain, pull, Model::ClientZeroMq(client));
