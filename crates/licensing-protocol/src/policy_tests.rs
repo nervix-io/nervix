@@ -344,6 +344,93 @@ fn improvements_safe_reductions_expiry_and_deadline_overflow_are_explicit() {
 }
 
 #[test]
+fn tick_and_release_assess_a_reduction_without_inventing_a_conditions_revision() {
+    let current = FREE_POLICY.usage();
+    let target = usage(Quota::Bounded { value: 1 }, Quota::Unlimited);
+    for trigger in [
+        crate::documents::TransitionTrigger::Tick {
+            decision_id: crate::test_fixture::id(71),
+        },
+        crate::documents::TransitionTrigger::Release {
+            request_id: crate::test_fixture::id(72),
+        },
+    ] {
+        let mut change = context(7, 7, 10);
+        change.trigger = trigger.clone();
+        let transitions = assess_impact(
+            EffectiveUsage {
+                conditions: &current,
+                transitions: &[],
+            },
+            ImpactTarget::Usage(&target),
+            UsageSnapshot {
+                cluster_nodes: 2,
+                cluster_domains: 0,
+            },
+            policy(),
+            change,
+            limits().bytes,
+        )
+        .assured("the bounded committed trigger has a representable grace deadline");
+        assert_eq!(transitions.len(), 1, "missing transition for {trigger:?}");
+        let transition = &transitions[0];
+        assert_eq!(transition.from_conditions_revision, 7);
+        assert_eq!(transition.to_conditions_revision, 7);
+        assert_eq!(transition.trigger, trigger);
+        assert_eq!(transition.started_at, at(10));
+        assert_eq!(transition.deadline, at(110));
+        assert_eq!(transition.affected[0].usage, 2);
+    }
+}
+
+#[test]
+fn overlapping_transitions_cap_full_width_allowances_without_overflow() {
+    let free = FREE_POLICY.usage();
+    let target = usage(Quota::Bounded { value: 1 }, Quota::Unlimited);
+    let mut transitions = assess_impact(
+        EffectiveUsage {
+            conditions: &free,
+            transitions: &[],
+        },
+        ImpactTarget::Usage(&target),
+        UsageSnapshot {
+            cluster_nodes: u64::MAX,
+            cluster_domains: 0,
+        },
+        policy(),
+        context(1, 2, 0),
+        limits().bytes,
+    )
+    .assured("the full-width bounded reduction has a finite deadline");
+    let mut second = transitions[0].clone();
+    second.transition_id = id(73);
+    second.deadline = at(200);
+    transitions.push(second);
+    let effective = EffectiveUsage {
+        conditions: &target,
+        transitions: &transitions,
+    };
+    assert_eq!(
+        effective
+            .quota(CLUSTER_NODES, at(99))
+            .assured("a capped grant sum fits u64"),
+        Quota::Bounded { value: u64::MAX }
+    );
+    assert_eq!(
+        effective
+            .quota(CLUSTER_NODES, at(100))
+            .assured("one full-width grant remains"),
+        Quota::Bounded { value: u64::MAX }
+    );
+    assert_eq!(
+        effective
+            .quota(CLUSTER_NODES, at(200))
+            .assured("both deadlines remove their allowances"),
+        Quota::Bounded { value: 1 }
+    );
+}
+
+#[test]
 fn transition_policy_comes_from_complete_bounded_signed_operating_values() {
     let mut operating = plan().operating;
     let policy = TransitionPolicy::from_operating(&operating).assured("signed bounded durations");
