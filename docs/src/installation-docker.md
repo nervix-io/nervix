@@ -103,6 +103,7 @@ docker run --detach \
   --env NERVIX_OBSERVABILITY_LISTEN_ADDR=0.0.0.0:9090 \
   --env NERVIX_CLUSTER_ID=nervix-docker \
   --env NERVIX_NODE_ID=node-1 \
+  --env NERVIX_NODE_TAGS=rack=r1 \
   --env NERVIX_INTERCONNECT_LISTEN_ADDR=0.0.0.0:47395 \
   --env NERVIX_INTERCONNECT_ADVERTISE_ADDR=nervix-1:47395 \
   --env NERVIX_INTERCONNECT_TLS_CA=/etc/nervix/interconnect/ca.pem \
@@ -146,6 +147,7 @@ docker run --detach \
   --env NERVIX_OBSERVABILITY_LISTEN_ADDR=0.0.0.0:9090 \
   --env NERVIX_CLUSTER_ID=nervix-docker \
   --env NERVIX_NODE_ID=node-2 \
+  --env NERVIX_NODE_TAGS=rack=r2 \
   --env NERVIX_INTERCONNECT_LISTEN_ADDR=0.0.0.0:47395 \
   --env NERVIX_INTERCONNECT_ADVERTISE_ADDR=nervix-2:47395 \
   --env NERVIX_INTERCONNECT_TLS_CA=/etc/nervix/interconnect/ca.pem \
@@ -175,6 +177,7 @@ docker run --detach \
   --env NERVIX_OBSERVABILITY_LISTEN_ADDR=0.0.0.0:9090 \
   --env NERVIX_CLUSTER_ID=nervix-docker \
   --env NERVIX_NODE_ID=node-3 \
+  --env NERVIX_NODE_TAGS=rack=r3 \
   --env NERVIX_INTERCONNECT_LISTEN_ADDR=0.0.0.0:47395 \
   --env NERVIX_INTERCONNECT_ADVERTISE_ADDR=nervix-3:47395 \
   --env NERVIX_INTERCONNECT_TLS_CA=/etc/nervix/interconnect/ca.pem \
@@ -258,6 +261,7 @@ services:
     environment:
       <<: *nervix-environment
       NERVIX_NODE_ID: node-1
+      NERVIX_NODE_TAGS: rack=r1
       NERVIX_GRPC_ADVERTISE_ADDR: 127.0.0.1:47391
       NERVIX_WEB_CONSOLE_ADVERTISE_ADDR: 127.0.0.1:47421
       NERVIX_INTERCONNECT_ADVERTISE_ADDR: nervix-1:47395
@@ -281,6 +285,7 @@ services:
     environment:
       <<: *nervix-environment
       NERVIX_NODE_ID: node-2
+      NERVIX_NODE_TAGS: rack=r2
       NERVIX_GRPC_ADVERTISE_ADDR: 127.0.0.1:47392
       NERVIX_WEB_CONSOLE_ADVERTISE_ADDR: 127.0.0.1:47422
       NERVIX_INTERCONNECT_ADVERTISE_ADDR: nervix-2:47395
@@ -303,6 +308,7 @@ services:
     environment:
       <<: *nervix-environment
       NERVIX_NODE_ID: node-3
+      NERVIX_NODE_TAGS: rack=r3
       NERVIX_GRPC_ADVERTISE_ADDR: 127.0.0.1:47393
       NERVIX_WEB_CONSOLE_ADVERTISE_ADDR: 127.0.0.1:47423
       NERVIX_INTERCONNECT_ADVERTISE_ADDR: nervix-3:47395

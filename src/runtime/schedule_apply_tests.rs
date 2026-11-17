@@ -41,6 +41,7 @@ async fn scheduled_relay_placement_does_not_create_metric_replication_state() {
             start_version: 1,
             last_start: nervix_models::DomainStartPoint::Resume,
             clock: None,
+            stop_cause: None,
         },
     )]));
     let schedule = ClusterSchedule::from_iter([DomainSchedule::new(
@@ -102,6 +103,7 @@ async fn paused_schedule_keeps_full_execution_without_rebuilding_unchanged_graph
         start_version: 1,
         last_start: nervix_models::DomainStartPoint::Resume,
         clock: None,
+        stop_cause: None,
     };
     runtime.sync_domains(&BTreeMap::from([(domain.clone(), running.clone())]));
     let schedule = ClusterSchedule::from_iter([DomainSchedule::new(
@@ -179,6 +181,7 @@ async fn stale_cluster_state_cannot_replace_a_newer_runtime_schedule() {
             start_version: 1,
             last_start: nervix_models::DomainStartPoint::Resume,
             clock: None,
+            stop_cause: None,
         },
     )]);
     let schema_node = scheduled_model(nervix_models::Model::Schema(CreateSchema {

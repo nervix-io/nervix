@@ -94,7 +94,7 @@ impl VerifiedDecision {
             return Err(Report::new(DecisionRejection::Service));
         }
         decision.validate_binding(&context)?;
-        decision.validate_timing()?;
+        decision.validate_timing(context.operation)?;
         let stopped = decision.status == DecisionStatus::Expired;
         let unknown_conditions = Catalog::validate_parts(
             &decision.conditions.usage,
@@ -204,8 +204,11 @@ impl Decision {
         Ok(())
     }
 
-    fn validate_timing(&self) -> Result<(), Report<DecisionRejection>> {
-        if self.issued_at > self.timing.refresh_after
+    fn validate_timing(
+        &self,
+        operation: DecisionOperation<'_>,
+    ) -> Result<(), Report<DecisionRejection>> {
+        if (operation == DecisionOperation::Apply && self.issued_at > self.timing.refresh_after)
             || self.timing.refresh_after > self.timing.overdue_at
         {
             return Err(Report::new(DecisionRejection::Timing {

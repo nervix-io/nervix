@@ -211,10 +211,15 @@ class is a compile-time error. [Node Settings](node-settings.md) owns their oper
 carriers, defaults, change procedures and source ratchet.
 
 `NodeCapabilities` also holds resolved optional positive CPU/memory measurements and positive
-`PeerReceiveBounds`. `NodeCapabilityRecord` binds those values to the shared `ClusterNodeIdentity`.
-The committed node-name key must match its identity. Schedule topology and transaction planning
-fences include the captured records; data-plane payload attempts and row admission prefixes remain
-volatile. A peer-pool publication retains the committed claim without replacing its connection
+`PeerReceiveBounds`. `NodeCapabilityRecord` binds those values to the shared `ClusterNodeIdentity`,
+and `NodeRecord` holds that claim beside the run's `NodeProperties` and `NodeTags`. A property the
+node could not detect is `Detected::Undetected` with an `UndetectedReason`, a GPU inventory or ONNX
+Runtime that was not read is its own undetected variant, and a node without GPUs or tags has an
+empty inventory or tag set, never a sentinel. Tag keys, tag values, property text and property lists
+validate their bounds when constructed and when decoded. `CommittedNodeRecord` adds the revision
+that committed the record. The committed node-name key must match its identity. Schedule topology
+and transaction planning fences include the captured records; data-plane payload attempts and row
+admission prefixes remain volatile. A peer-pool publication retains the committed claim without replacing its connection
 slots, and `RelaySliceCursor` advances a contiguous prefix only after confirmed admission.
 
 Redis subscription plans carry a nonzero bounded message capacity and a validated idle deadline.
@@ -367,8 +372,8 @@ expression scope and an emitter's `INSTANCES` declaration.
 Placement coverage is one semantic choice: a corridor with named endpoints or a domain-wide
 rule. Domain configuration contains its pace; named placement rules belong to the Model index.
 Relocation selects whole nodes or exact partition/instance indices using the shared node identity.
-Consensus's `raft_inferencer_wasm_inspection_listener_bounds_` keyspaces and current
-`ClusterState` metadata encoding, 32, identify its stored shapes, including the partition count of every resolved
+Consensus's `raft_licensing_operations_inferencer_wasm_inspection_listener_bounds_stopgate_node_` keyspaces and current
+`ClusterState` metadata encoding, 35, identify its stored shapes, including the partition count of every resolved
 branch declaration in the committed schedule, the partition epoch the schedule records for each
 branch whose count changed, and the statements a transaction keeps, including per-entity
 `ALTER INGESTOR` and `ALTER EMITTER` operations and a `RESET WASM PROCESSOR ... STATE` that takes
@@ -1433,7 +1438,13 @@ complete shape. See [Algorithm Policy](cryptography.md#algorithm-policy).
 
 The consensus state pairs its cluster identity with one `LicensingRecord`. Both are absent before
 bootstrap and both are present after the first identity installation. The record carries committed
-licensing time, original trust documents with their typed identities, and its current `Free` mode.
+licensing time, original trust documents with their typed identities, and Free, Activated or
+Released mode. Released mode carries its independent binding, confirmation state, original signing
+capability while confirmation is pending, operation identity and unextended grant deadlines.
+Pending cluster rotation belongs to the identity record and carries its target generation and
+exact retained signed request. Completion installs the key and bound decision in one atomic apply.
+The original command effect retains an atomic applied or typed refusal outcome, so later operations
+cannot erase the result during the gap before final command response storage.
 Recovery refuses an incomplete pair; it never substitutes an embedded record for missing storage.
 
 `LicensingPolicy` is one immutable publication containing the effective conditions, usage and

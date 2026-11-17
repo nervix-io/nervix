@@ -1,6 +1,36 @@
 Feature: Licensing change notifications
   Notification hints refresh verified decisions while polling remains independent.
 
+  Scenario Outline: A notification received during rotation survives its completion on <cluster_size> nodes
+    Given an HTTPS licensing test service is available
+    And a <cluster_size> node nervix cluster is started
+    When these Plexus commands are executed on the leader node
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      ALTER CLUSTER SET LICENSING_REQUEST_TIMEOUT = 10s, LICENSING_RETRY_BACKOFF_MAX = 10s;
+      ACTIVATE LICENSE PERSISTENT WITH KEY 'NVXK-TESTABCD-fixture-secret';
+      """
+    Then the licensing service holds exactly one authenticated notification stream
+    Given the next licensing rotation response is delayed
+    When this Plexus command request begins executing in the background on the leader node
+      """
+      ROTATE LICENSE CLUSTER KEY;
+      """
+    Then the licensing rotation request has reached the service
+    When the licensing service changes the domain quota to 12
+    Then the background command request succeeds
+    And node "node-1" eventually describes this license without a selected domain
+      """
+      quota cluster.domains: 1 of 12
+      verification: verified
+      """
+    And the licensing service holds exactly one authenticated notification stream
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
   Scenario Outline: The licensed leader holds a notification stream on <cluster_size> nodes
     Given an HTTPS licensing test service is available
     And a <cluster_size> node nervix cluster is started

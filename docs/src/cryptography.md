@@ -262,7 +262,7 @@ The signing operation lives in `nervix_crypto::ed25519`.
 `crates/connectors/nats/src/client/authentication.rs` owns wire decoding and maps the boundary's
 typed errors into the driver's authentication callback. This is preparation, with no
 FIPS-validation claim. The
-pinned [aws-lc-rs Ed25519 implementation](https://github.com/aws/aws-lc-rs/blob/v1.18.2/aws-lc-rs/src/ed25519.rs)
+pinned [aws-lc-rs Ed25519 implementation](https://github.com/aws/aws-lc-rs/blob/v1.19.0/aws-lc-rs/src/ed25519.rs)
 marks signing as unsuitable for FIPS use, so the future FIPS mode must refuse these NATS methods
 until its boundary has a validated signing service for the protocol. Token authentication has no
 Nervix-owned nonce-signing operation.
@@ -285,6 +285,13 @@ reference ends. Neither owner is cloneable or prints any key bytes in `Debug`. C
 or copying private DER must protect and clear their own storage. Public extraction borrows the
 backend's SEC 1 uncompressed point or returns its fixed-width `x` and `y` coordinates without
 implementing another point encoder.
+
+Cluster rotation keeps the current and pending signing capabilities separate: the current key
+signs the outer request and the pending key signs its challenge-bound possession proof. Exact
+signed request bytes are retained before transmission because reconstructing a randomized proof
+would change its idempotency digest. A release awaiting service confirmation retains its original
+key until confirmation, independently of later local cluster rotations. These bounded private
+owners use the same zeroization and redacted diagnostic contract.
 
 The boundary tests retain the complete P-256/SHA-256 section of the
 [NIST CAVP FIPS 186-4 verification vectors](https://csrc.nist.gov/projects/cryptographic-algorithm-validation-program/digital-signatures),
@@ -509,7 +516,7 @@ the connector epics move each path onto AWS-LC, and a change may lower it but ne
 
 The gate therefore refuses a product graph that does not link exactly one AWS-LC module: one
 `aws-lc-sys`, or the FIPS module's `aws-lc-fips-sys`, in one version across both release targets.
-An `aws-lc-rs` upgrade onto `aws-lc-sys` 0.47 that leaves the fork on 0.46 links two modules, and so
+An `aws-lc-rs` upgrade onto `aws-lc-sys` 0.48 that leaves the fork on 0.47 links two modules, and so
 does `aws-lc-sys` beside `aws-lc-fips-sys`. The refusal names each module with the packages that
 link it, so it says which dependency brought the second one, and no count or baseline admits it. A
 graph without a module is refused too, since the product's cryptography comes from AWS-LC and such
