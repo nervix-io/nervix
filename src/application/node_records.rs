@@ -14,8 +14,8 @@
 
 use nervix_consensus::Proposer;
 use nervix_models::{
-    NodeCapabilities, NodeCapabilityRecord, NodeOperationalCapabilities, NodeProperties, NodeRecord,
-    NodeTags,
+    NodeCapabilities, NodeCapabilityRecord, NodeOperationalCapabilities, NodeProperties,
+    NodeRecord, NodeTags,
 };
 use nervix_primitives::sync::StdArc;
 
