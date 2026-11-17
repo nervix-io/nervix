@@ -14,6 +14,7 @@
 )]
 
 mod model;
+mod response_gate;
 #[cfg(test)]
 mod tests;
 mod tls;
@@ -36,7 +37,7 @@ use hyper_util::{
 };
 use meticulous::{OptionExt as _, ResultExt as _};
 pub use model::{
-    Fault, Model, Tamper,
+    Fault, FaultObservation, Model, Tamper,
     notifications::{StreamMode, StreamObservation},
 };
 use nervix_licensing_protocol::{document::DocumentLimits, documents::EmbeddedTrustBundle};
@@ -47,6 +48,7 @@ use nervix_primitives::{
     time::timeout,
 };
 use nervix_recovery::Discarded as _;
+pub use response_gate::ResponseGate;
 use thiserror::Error;
 use url::Url;
 
@@ -260,6 +262,7 @@ async fn request(
     }
     let (response, fault) = state.model.lock().await.answer(uri.path(), &body);
     match fault {
+        Some(Fault::Hold(gate)) => gate.hold(&state.stop).await,
         Some(Fault::Delay(duration)) => {
             nervix_primitives::select! {
                 _ = state.stop.cancelled() => return lost_response(),
