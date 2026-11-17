@@ -134,7 +134,7 @@ fn bolero_inferencer_descriptors_and_raw_tensors_refuse_malformed_inputs() {
                     2 => changed.shapes[0][0] = 0,
                     3 => changed.shapes[0] = vec![u64::MAX, 2],
                     4 => {
-                        if changed.branch.is_some() {
+                        if changed.branch.is_branched() {
                             changed.branch_fingerprint = None;
                         } else {
                             changed.branch_fingerprint =
@@ -143,10 +143,13 @@ fn bolero_inferencer_descriptors_and_raw_tensors_refuse_malformed_inputs() {
                     }
                     5 => changed.shapes.clear(),
                     _ => {
-                        changed.branch = Some(vec![crate::StateField {
-                            name: "invalid field".into(),
-                            value: crate::StateValue::U8(0),
-                        }]);
+                        changed.branch = nervix_models::BranchKeyFields::Direct(
+                            vec![crate::StateField {
+                                name: "invalid field".into(),
+                                value: crate::StateValue::U8(0),
+                            }]
+                            .into(),
+                        );
                         changed.branch_fingerprint =
                             Some(nervix_models::BranchKeyFingerprint::new([0; 32]));
                     }

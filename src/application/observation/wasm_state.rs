@@ -15,6 +15,7 @@
 
 use std::{cmp::Ordering, collections::BTreeMap};
 
+use error_stack::ResultExt as _;
 use meticulous::ResultExt as _;
 use nervix_client_wire::{
     MAX_ENCODED_WASM_BRANCH_ENTRY_BYTES, SessionLimits, StateInspection, StateInspectionPage,
@@ -36,7 +37,7 @@ use super::inspection_pages::{
     add_counts, inspection_owner, inspection_refusal, rendered_inspection,
 };
 use crate::{
-    application::{command_result::CommandResult, session_service::SessionServiceImpl},
+    application::{AppError, command_result::CommandResult, session_service::SessionServiceImpl},
     state_inspection_cursor::WasmStateInspectionCursor,
 };
 
@@ -140,15 +141,8 @@ fn wasm_origin(
 /// sampled, without branch entries.
 pub(in crate::application) fn wasm_unit_summaries(
     node: &ScheduledNode,
-    checkpoints: Vec<WasmCheckpointInspection>,
+    mut by_unit: BTreeMap<Unit, Vec<WasmCheckpointInspection>>,
 ) -> Result<Vec<(Unit, WasmUnitStateInspection)>, WasmStateInspectionError> {
-    let mut by_unit = BTreeMap::<Unit, Vec<WasmCheckpointInspection>>::new();
-    for checkpoint in checkpoints {
-        let Some(unit) = node.unit_of_branch(checkpoint.branch.as_ref()) else {
-            continue;
-        };
-        by_unit.entry(unit).or_default().push(checkpoint);
-    }
     let mut summaries = Vec::with_capacity(node.units.len());
     for (unit, scheduled) in &node.units {
         let sampled = by_unit.remove(unit).unwrap_or_default();
@@ -163,6 +157,78 @@ pub(in crate::application) fn wasm_unit_summaries(
 }
 
 impl SessionServiceImpl {
+    pub(in crate::application) async fn handle_describe_inherited_wasm_request(
+        &self,
+        request: nervix_interconnect::DescribeInheritedWasmStateRequest,
+    ) -> Result<
+        Vec<(Unit, Vec<nervix_models::WasmCheckpointInspection>)>,
+        nervix_interconnect::RemoteOperationFailure,
+    > {
+        self.prepare_owner_control_request(
+            &request.domain,
+            ModelKind::WasmProcessor,
+            &request.processor,
+        )
+        .await?;
+        Ok(self
+            .inner
+            .runtime
+            .inspect_inherited_wasm_processor_state_for(&request.domain, &request.processor)
+            .into_iter()
+            .collect())
+    }
+
+    pub(super) async fn inherited_wasm_checkpoints(
+        &self,
+        domain: &DomainName,
+        processor: &nervix_models::ModelName,
+        node: &ScheduledNode,
+    ) -> error_stack::Result<
+        std::collections::BTreeMap<Unit, Vec<nervix_models::WasmCheckpointInspection>>,
+        super::ObservationError,
+    > {
+        let mut checkpoints =
+            std::collections::BTreeMap::<Unit, Vec<nervix_models::WasmCheckpointInspection>>::new();
+        for owner in node.execution_nodes() {
+            let reported = if &owner == self.inner.consensus.local_node_id() {
+                self.inner
+                    .runtime
+                    .inspect_inherited_wasm_processor_state_for(domain, processor)
+                    .into_iter()
+                    .collect::<Vec<_>>()
+            } else {
+                self.inner
+                    .interconnect
+                    .request(
+                        &owner,
+                        nervix_interconnect::DescribeInheritedWasmStateRequest {
+                            domain: domain.clone(),
+                            processor: processor.clone(),
+                        },
+                    )
+                    .await
+                    .change_context(super::ObservationError::RemoteDescribeRequest {
+                        domain: domain.clone(),
+                        entity: nervix_models::NodeRef::new(
+                            ModelKind::WasmProcessor,
+                            processor.clone(),
+                        ),
+                        node: owner.clone(),
+                    })?
+                    .result
+                    .map_err(|failure| {
+                        error_stack::Report::new(super::ObservationError::RemoteDescribeFailure {
+                            failure,
+                        })
+                    })?
+            };
+            for (unit, values) in reported {
+                checkpoints.entry(unit).or_default().extend(values);
+            }
+        }
+        Ok(checkpoints)
+    }
+
     pub(in crate::application) async fn show_wasm_processor_state(
         &self,
         domain: &DomainName,
@@ -476,16 +542,31 @@ impl SessionServiceImpl {
             .units
             .get(&request.unit)
             .ok_or(StateInspectionRejection::StaleContinuation)?;
-        let mut checkpoints = Vec::new();
-        for checkpoint in self
-            .inner
-            .runtime
-            .inspect_wasm_processor_state_for(&request.domain, request.processor.clone())
-        {
-            if node.unit_of_branch(checkpoint.branch.as_ref()) == Some(request.unit) {
-                checkpoints.push(checkpoint);
+        let epoch = node
+            .partition_branch()
+            .and_then(|branch| domain_schedule.partition_epochs.get(branch));
+        let checkpoints = if node.has_inherited_partition_state(epoch) {
+            self.inner
+                .runtime
+                .inspect_inherited_wasm_processor_state_for(
+                    &request.domain,
+                    &nervix_models::ModelName::from(&request.processor),
+                )
+                .remove(&request.unit)
+                .unwrap_or_default()
+        } else {
+            let mut checkpoints = Vec::new();
+            for checkpoint in self
+                .inner
+                .runtime
+                .inspect_wasm_processor_state_for(&request.domain, request.processor.clone())
+            {
+                if node.unit_of_branch(checkpoint.branch.as_ref()) == Some(request.unit) {
+                    checkpoints.push(checkpoint);
+                }
             }
-        }
+            checkpoints
+        };
         let selection = WasmUnitStateSelection::of_unit(scheduled, checkpoints, request.selection)
             .map_err(|error| inspection_refusal(error, StateInspectionRejection::NotReady))?;
         let origin = wasm_origin(local, &selection);
@@ -496,6 +577,40 @@ impl SessionServiceImpl {
             origin,
             page: selection.page(request.after, limit),
         })
+    }
+
+    /// Answer the WASM state reads other nodes send this one: state pages, and the checkpoints
+    /// of an inherited key's lifetimes.
+    pub(in crate::application) fn register_wasm_state_inspection_interconnect_handlers(
+        &self,
+    ) -> error_stack::Result<(), AppError> {
+        let wasm_state_page_service = self.clone();
+        self.inner
+            .interconnect
+            .register_handler::<nervix_interconnect::ReadWasmStatePage, _, _>(
+                move |_context, request| {
+                    let service = wasm_state_page_service.clone();
+                    async move { service.handle_read_wasm_state_page(request).await }
+                },
+            )
+            .change_context(AppError::RegisterInterconnectRequestHandler)?;
+        let inherited_wasm_service = self.clone();
+        self.inner
+            .interconnect
+            .register_handler::<nervix_interconnect::DescribeInheritedWasmStateRequest, _, _>(
+                move |_context, request| {
+                    let service = inherited_wasm_service.clone();
+                    async move {
+                        nervix_interconnect::DescribeInheritedWasmStateResponse {
+                            result: service
+                                .handle_describe_inherited_wasm_request(request)
+                                .await,
+                        }
+                    }
+                },
+            )
+            .change_context(AppError::RegisterInterconnectRequestHandler)?;
+        Ok(())
     }
 
     pub(in crate::application) async fn handle_read_wasm_state_page(

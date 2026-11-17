@@ -151,9 +151,11 @@ pub struct PulsarTopicIngestor {
 
 impl PulsarTopicIngestor {
     /// Whether this ingestor's instances fit the type of its subscription. A type that reads through
-    /// one consumer requires one fixed instance rather than a partition-dependent count.
+    /// one consumer requires one fixed instance or explicit partition-topic assignment, whose
+    /// inherited branch requirement the registry validates.
     pub fn instances_fit_subscription(&self) -> bool {
-        matches!(self.instances, crate::IngestorInstances::Count(count) if count.get() == 1)
+        self.instances == crate::IngestorInstances::PerPartition
+            || matches!(self.instances, crate::IngestorInstances::Count(count) if count.get() == 1)
             || !self.subscription.kind.reads_through_one_consumer()
     }
 }
@@ -417,6 +419,16 @@ const PULSAR_INGESTOR_BOUNDS: DeclaredBounds = DeclaredBounds {
             bound: WaitBound::Driver("30 s, one attempt"),
         },
         DeclaredWait {
+            wait: "partition topology observation, including resolution and connection",
+            bound: WaitBound::Driver("one operation timeout per connection or metadata lookup"),
+        },
+        DeclaredWait {
+            wait: "an idle inherited group with no assigned partition topics",
+            bound: WaitBound::Driver(
+                "the batch timeout or one driver operation timeout; cancellation ends it earlier",
+            ),
+        },
+        DeclaredWait {
             wait: "an acknowledgement under ACK",
             bound: WaitBound::Driver("30 s operation timeout"),
         },
@@ -475,7 +487,10 @@ const PULSAR_EMITTER_BOUNDS: DeclaredBounds = DeclaredBounds {
     driver_limits: &["Messages above the broker's announced maximum are rejected."],
 };
 
-/// The identity, producer metadata and delivery count of a Pulsar message.
+/// The external partition coordinate, filled from the connector's native position.
+const PARTITION_METADATA: IngestorMetadataField =
+    IngestorMetadataField::new("partition", IngestorMetadataType::I32);
+
 const PULSAR_TOPIC_METADATA: IngestorMetadataDeclaration = IngestorMetadataDeclaration::new(&[
     IngestorMetadataField::new("topic", IngestorMetadataType::String),
     IngestorMetadataField::new("message_id", IngestorMetadataType::String),
@@ -486,10 +501,12 @@ const PULSAR_TOPIC_METADATA: IngestorMetadataDeclaration = IngestorMetadataDecla
     IngestorMetadataField::new("producer_name", IngestorMetadataType::String),
     IngestorMetadataField::new("sequence_id", IngestorMetadataType::I64),
     IngestorMetadataField::new("redelivery_count", IngestorMetadataType::I64),
+    PARTITION_METADATA,
 ]);
 
 impl IngestorDeclaration for PulsarTopicIngestor {
     const CAPABILITIES: IngestorEntityCapabilities = IngestorEntityCapabilities {
+        external_partitions: crate::IngestorExternalPartitions::Enumerated(PARTITION_METADATA),
         events: crate::DeclaredEvents::NONE,
         instancing: crate::IngestorInstancingCapability::PerPartition,
         // A Pulsar message carries its properties as a list, in the order the producer wrote them.

@@ -46,7 +46,7 @@ impl Deduplicator {
         );
         descriptor = self.descriptor.clone();
         descriptor.branch_fingerprint = Some(BranchKeyFingerprint::new([9; 32]));
-        descriptor.branch = Some(Vec::new());
+        descriptor.branch = nervix_models::BranchKeyFields::Direct(Vec::new().into());
         rejects_field::<DeduplicatorStateDescriptor>(
             descriptor.encode().assured("an empty branch encodes"),
             "branch key",

@@ -131,7 +131,7 @@ async fn read(
             page::build(
                 branches,
                 &plan,
-                None,
+                nervix_models::StateInspectionKeyCatalog::Unrequested,
                 after,
                 ProcessorStatePageBounds { rows, bytes },
                 memory,

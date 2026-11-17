@@ -54,7 +54,7 @@ async fn runtime_report_chain_checkpoint_notification_log() {
         None,
     )
     .to_remote();
-    remote.branch_key = Some(Vec::new());
+    remote.branch_key = nervix_models::RemoteBranchKey::Direct((Vec::new()).into());
     let mut logs = ReportLogObserver::new();
     logs.observe(async {
         runtime.handle_state_checkpoint_available(

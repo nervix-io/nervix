@@ -29,7 +29,7 @@ use super::{
 
 #[derive(Debug, Clone, Archive, RkyvSerialize, RkyvDeserialize)]
 struct BranchLruSnapshotEntry {
-    key: Option<Vec<RemoteRuntimeField>>,
+    key: nervix_models::RemoteBranchKey,
     last_ingestion_unix_nanos: i64,
     incarnation: u64,
 }
@@ -71,7 +71,7 @@ pub(super) fn write_branch_lru_snapshot(
             .change_context(BranchLruSnapshotError::BranchKey { entry: index })?;
         let fields = BranchKey::to_remote_key(&key);
         nested = nested.max(
-            field_scratch(fields.as_deref().unwrap_or(&[]))
+            field_scratch(fields.fields().unwrap_or(&[]))
                 .ok_or_else(|| Report::new(encode_error()))?,
         );
     }
@@ -230,8 +230,8 @@ impl ArchivedBranchLruSnapshotEntry {
     /// The entry's branch key in the remote form it is stored in.
     fn stored_key(
         &self,
-    ) -> error_stack::Result<Option<Vec<RemoteRuntimeField>>, BranchLruSnapshotError> {
-        rkyv::deserialize::<Option<Vec<RemoteRuntimeField>>, rkyv::rancor::Error>(&self.key)
+    ) -> error_stack::Result<nervix_models::RemoteBranchKey, BranchLruSnapshotError> {
+        rkyv::deserialize::<nervix_models::RemoteBranchKey, rkyv::rancor::Error>(&self.key)
             .map_err(|error| Report::new(BranchLruSnapshotError::Decode).attach_printable(error))
     }
 
@@ -436,7 +436,7 @@ mod tests {
     fn lifecycle_snapshot_refuses_an_absent_incarnation() {
         let snapshot = BranchLruSnapshot {
             entries: vec![BranchLruSnapshotEntry {
-                key: None,
+                key: nervix_models::RemoteBranchKey::Unbranched,
                 last_ingestion_unix_nanos: 42,
                 incarnation: 0,
             }],
@@ -516,7 +516,7 @@ mod tests {
     async fn validating_a_lifecycle_keeps_the_decoder_s_typed_failures() {
         let zero = BranchLruSnapshot {
             entries: vec![BranchLruSnapshotEntry {
-                key: None,
+                key: nervix_models::RemoteBranchKey::Unbranched,
                 last_ingestion_unix_nanos: 42,
                 incarnation: 0,
             }],
@@ -526,7 +526,7 @@ mod tests {
             .to_vec();
         let empty_key = BranchLruSnapshot {
             entries: vec![BranchLruSnapshotEntry {
-                key: Some(Vec::new()),
+                key: nervix_models::RemoteBranchKey::Direct((Vec::new()).into()),
                 last_ingestion_unix_nanos: 0,
                 incarnation: 1,
             }],
@@ -542,7 +542,9 @@ mod tests {
         };
         let unordered_key = BranchLruSnapshot {
             entries: vec![BranchLruSnapshotEntry {
-                key: Some(vec![field("zone"), field("tenant")]),
+                key: nervix_models::RemoteBranchKey::Direct(
+                    (vec![field("zone"), field("tenant")]).into(),
+                ),
                 last_ingestion_unix_nanos: 0,
                 incarnation: 1,
             }],
@@ -596,7 +598,7 @@ mod tests {
 
         let snapshot = BranchLruSnapshot {
             entries: vec![BranchLruSnapshotEntry {
-                key: Some(Vec::new()),
+                key: nervix_models::RemoteBranchKey::Direct((Vec::new()).into()),
                 last_ingestion_unix_nanos: 0,
                 incarnation: 1,
             }],

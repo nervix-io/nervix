@@ -33,7 +33,7 @@ use nervix_interconnect::{
 };
 use nervix_models::{
     BranchKeyFingerprint, BranchName, DomainName, DomainNodeRef, DomainNodeUnitRef, ModelKind,
-    NodeUnitRef, PartitionEpochNumber, RelayName, RemoteRuntimeField, Unit,
+    NodeUnitRef, PartitionEpochNumber, RelayName, Unit,
 };
 use nervix_primitives::{
     collections::DashMap,
@@ -44,7 +44,7 @@ use nervix_primitives::{
 use super::{
     BranchKey, ProcessorNodeCommand, RelayUnitRef, Runtime,
     materialized_partition_moves::{RelayStateCommand, RowHolderRequest},
-    partition_claims::UnitPartitionTransition,
+    partition_claims::{KeyPartitionTarget, UnitPartitionTransition},
     processor_partition_moves::HolderKeyRequest,
 };
 
@@ -61,7 +61,7 @@ pub(super) type MisplacedKeys = GenericOrdMap<BranchKeyFingerprint, MisplacedKey
 pub(super) struct MisplacedKey {
     pub(super) key: BranchKey,
     /// The unit the current count places the key in.
-    pub(super) target: Unit,
+    pub(super) target: KeyPartitionTarget,
 }
 
 /// What one unit of a branch-keyed entity holds in its branch's current epoch.
@@ -347,6 +347,19 @@ impl HoldingsTracker {
         }
     }
 
+    pub(super) fn needs_confirmation(&self, key: &Option<BranchKey>) -> bool {
+        match key {
+            Some(key) => self.misplaced.contains_key(&key.fingerprint()),
+            None => false,
+        }
+    }
+
+    pub(super) fn confirmed_here(&mut self, key: &Option<BranchKey>) {
+        if let Some(key) = key {
+            self.misplaced.remove(&key.fingerprint());
+        }
+    }
+
     /// Counts one key claimed into this unit.
     pub(super) fn claimed_one(&mut self) {
         self.claimed = self
@@ -428,7 +441,7 @@ impl Runtime {
             std::ops::Bound::<BranchKeyFingerprint>::Unbounded,
         ));
         for (fingerprint, misplaced) in range {
-            if misplaced.target != claimant {
+            if misplaced.target != KeyPartitionTarget::Known(claimant) {
                 continue;
             }
             if keys.len() == limit {
@@ -436,9 +449,7 @@ impl Runtime {
                 break;
             }
             // A held key outside its partition is always concrete, so it always has fields.
-            let Some(fields) = BranchKey::to_remote_key(&Some(misplaced.key.clone())) else {
-                continue;
-            };
+            let fields = BranchKey::to_remote_key(&Some(misplaced.key.clone()));
             keys.push(PartitionCatalogKey {
                 fingerprint: *fingerprint,
                 key: fields,
@@ -455,6 +466,38 @@ impl Runtime {
         request: PartitionTransitionRequest,
     ) -> Result<PartitionTransitionAnswer, RemoteOperationFailure> {
         match request {
+            PartitionTransitionRequest::Locate {
+                subject,
+                fingerprint,
+            } => {
+                let unit = DomainNodeUnitRef::new(
+                    subject.entity.clone().in_domain(&subject.domain),
+                    subject.holder,
+                );
+                let Some(holdings) = self.inner.partition_holdings.get(&unit) else {
+                    return Err(RemoteOperationFailure::not_ready(
+                        RemoteOperationSubject::Entity {
+                            domain: subject.domain,
+                            entity: subject.entity,
+                        },
+                    ));
+                };
+                if holdings.epoch != subject.epoch {
+                    return Err(RemoteOperationFailure::not_ready(
+                        RemoteOperationSubject::Entity {
+                            domain: subject.domain,
+                            entity: subject.entity,
+                        },
+                    ));
+                }
+                Ok(PartitionTransitionAnswer::Located(
+                    holdings.misplaced.get(&fingerprint).map(|held| {
+                        nervix_interconnect::PartitionKeyLocation {
+                            origin: held.key.inherited_origin(),
+                        }
+                    }),
+                ))
+            }
             PartitionTransitionRequest::Holdings {
                 domain,
                 branch,
@@ -502,14 +545,14 @@ impl Runtime {
     async fn answer_partition_claim(
         &self,
         subject: PartitionClaimSubject,
-        key: Vec<RemoteRuntimeField>,
+        key: nervix_models::RemoteBranchKey,
         step: PartitionClaimStep,
     ) -> Result<PartitionClaimOutcome, RemoteOperationFailure> {
         let entity_subject = || RemoteOperationSubject::Entity {
             domain: subject.domain.clone(),
             entity: subject.entity.clone(),
         };
-        let key = BranchKey::from_remote_key(Some(key)).map_err(|error| {
+        let key = BranchKey::from_remote_key(key).map_err(|error| {
             RemoteOperationFailure::failed(entity_subject(), format!("{error:#}"))
         })?;
         if subject.entity.kind == ModelKind::Relay {

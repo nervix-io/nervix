@@ -376,7 +376,7 @@ fn state_frame_placement(generation: u64) -> StatePlacementEnvelope {
         kind: ModelKind::WasmProcessor,
         identifier: ModelName::parse("guest").assured("fixture processor is valid"),
         unit: nervix_models::Unit::SINGLE,
-        branch_key: None,
+        branch_key: nervix_models::RemoteBranchKey::Unbranched,
     }
 }
 
@@ -556,7 +556,7 @@ fn exchange_typed_arrow_batch(run: ScenarioRun) -> Result<(), SimulationError> {
                         domain: DomainName::parse("simulated").assured("fixture domain is valid"),
                         relay: RelayName::parse("records").assured("fixture relay is valid"),
                         unit: nervix_models::Unit::SINGLE,
-                        key: None,
+                        key: nervix_models::RemoteBranchKey::Unbranched,
                         batch_ipc,
                         metadata: Vec::new(),
                         acks: Vec::new(),

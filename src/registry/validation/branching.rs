@@ -946,11 +946,10 @@ pub(in crate::registry) fn resolved_branch_selection(
     let schema = schema_model(domain, identifier, models, &branch.schema)?
         .definition()
         .to_owned();
-    Ok(ResolvedBranching::branched(
-        branch_ref.clone(),
-        schema,
-        branch.partitions,
-    ))
+    Ok(match branch.partitions.direct_layout() {
+        Some(partitions) => ResolvedBranching::branched(branch_ref.clone(), schema, partitions),
+        None => ResolvedBranching::awaiting_topology(branch_ref.clone(), schema),
+    })
 }
 
 pub(in crate::registry) fn branch_model<'a>(
@@ -1220,7 +1219,7 @@ mod tests {
         let branching = ResolvedBranching::branched(
             branch_name.clone(),
             branch_schema.clone(),
-            nervix_models::BranchPartitions::ONE,
+            nervix_models::ResolvedBranchPartitions::ONE,
         );
         let mut graph = DiGraph::<ActiveNode, EdgeKind>::new();
         let relay_index = graph.add_node(ActiveNode {
@@ -1283,7 +1282,7 @@ mod tests {
             ResolvedBranching::branched(
                 branch_name,
                 sensitive_schema,
-                nervix_models::BranchPartitions::ONE,
+                nervix_models::ResolvedBranchPartitions::ONE,
             ),
             &indices,
             &mut graph,
@@ -1298,7 +1297,7 @@ mod tests {
             ResolvedBranching::branched(
                 named("by_account"),
                 branch_schema,
-                nervix_models::BranchPartitions::ONE,
+                nervix_models::ResolvedBranchPartitions::ONE,
             ),
             &indices,
             &mut graph,
@@ -2105,7 +2104,8 @@ mod tests {
                 &crate::registry::uniform_capabilities(&[
                     ClusterNodeName::parse("node-1").expect("valid name")
                 ]),
-            );
+            )
+            .assured("the fixture topology resolves");
         let deduped = scheduled_node(&schedule, ModelKind::Relay, "deduped");
         assert_eq!(
             deduped

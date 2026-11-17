@@ -88,7 +88,7 @@ impl PeerFixture {
             domain: nervix_models::DomainName::parse("test").assured("the fixture domain is valid"),
             relay: nervix_models::RelayName::parse("records").assured("the fixture relay is valid"),
             unit: nervix_models::Unit::SINGLE,
-            key: None,
+            key: nervix_models::RemoteBranchKey::Unbranched,
             metadata: Vec::new(),
             acks: Vec::new(),
             admission: Some(registration),

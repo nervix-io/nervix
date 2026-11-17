@@ -1280,8 +1280,11 @@ impl Runtime {
                 rows,
             }));
         }
-        let key = BranchKey::from_remote_key(remote.key.take())
-            .change_context(RemoteRelayDecodeError::BranchKey)?;
+        let key = BranchKey::from_remote_key(std::mem::replace(
+            &mut remote.key,
+            nervix_models::RemoteBranchKey::Unbranched,
+        ))
+        .change_context(RemoteRelayDecodeError::BranchKey)?;
         Ok(DecodedRemoteRows { batch, key })
     }
 

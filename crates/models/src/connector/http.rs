@@ -349,6 +349,7 @@ const HTTP_REQUEST_METADATA: IngestorMetadataDeclaration = IngestorMetadataDecla
 
 impl IngestorDeclaration for HttpRequestIngestor {
     const CAPABILITIES: IngestorEntityCapabilities = IngestorEntityCapabilities {
+        external_partitions: crate::IngestorExternalPartitions::None,
         events: crate::DeclaredEvents::NONE,
         instancing: crate::IngestorInstancingCapability::Single,
         // An HTTP response's fields, as the client's header map keeps them: names in lowercase, every
@@ -459,6 +460,7 @@ const HTTP_ENDPOINT_METADATA: IngestorMetadataDeclaration = IngestorMetadataDecl
 
 impl IngestorDeclaration for HttpEndpointIngestor {
     const CAPABILITIES: IngestorEntityCapabilities = IngestorEntityCapabilities {
+        external_partitions: crate::IngestorExternalPartitions::None,
         events: crate::DeclaredEvents::NONE,
         instancing: crate::IngestorInstancingCapability::Single,
         // An HTTP request's fields, as the server's header map keeps them: names in lowercase, every

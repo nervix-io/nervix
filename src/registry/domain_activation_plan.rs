@@ -581,7 +581,7 @@ mod tests {
         branched_node.resolved_branching = Some(ResolvedBranching::branched(
             branch_name,
             branch_schema,
-            nervix_models::BranchPartitions::ONE,
+            nervix_models::ResolvedBranchPartitions::ONE,
         ));
 
         let plan = DomainActivationPlan::from_scheduled_nodes(&domain, &scheduled)
@@ -680,7 +680,7 @@ mod tests {
             .resolved_branching = Some(ResolvedBranching::branched(
             branch_name.clone(),
             branch_schema.clone(),
-            nervix_models::BranchPartitions::ONE,
+            nervix_models::ResolvedBranchPartitions::ONE,
         ));
         let error = DomainActivationPlan::from_scheduled_nodes(&domain, &branched_relay)
             .expect_err("the named branch must exist");

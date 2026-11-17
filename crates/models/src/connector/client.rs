@@ -132,6 +132,7 @@ impl IngestorDeclaration for ClientProducerIngestor {
     /// A submitted batch carries no transport headers, so its rows expose an empty header list
     /// that no program may read.
     const CAPABILITIES: IngestorEntityCapabilities = IngestorEntityCapabilities {
+        external_partitions: crate::IngestorExternalPartitions::None,
         events: crate::DeclaredEvents::NONE,
         instancing: crate::IngestorInstancingCapability::Single,
         headers: None,

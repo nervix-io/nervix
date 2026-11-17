@@ -1634,9 +1634,25 @@ impl SessionServiceImpl {
                 ));
             }
         };
-        let scheduled_node = self
-            .scheduled_model_node(domain, ModelKind::WasmProcessor, &describe.name)
-            .await;
+        let (scheduled_node, inherited_units) = {
+            let schedule = self.inner.consensus.current_schedule().await;
+            let node = NodeRef::new(ModelKind::WasmProcessor, describe.name.clone());
+            match schedule.domain(domain) {
+                Some(domain) => match domain.nodes.get(&node) {
+                    Some(node) => {
+                        let epoch = node
+                            .partition_branch()
+                            .and_then(|branch| domain.partition_epochs.get(branch));
+                        (
+                            Some(node.clone()),
+                            node.has_inherited_partition_state(epoch),
+                        )
+                    }
+                    None => (None, false),
+                },
+                None => (None, false),
+            }
+        };
 
         let runtime_details = match self
             .describe_runtime_for_scheduled_node(
@@ -1652,7 +1668,27 @@ impl SessionServiceImpl {
         };
         let summaries = match scheduled_node.as_ref() {
             Some(node) => {
-                match wasm_state::wasm_unit_summaries(node, runtime_details.checkpoints) {
+                let checkpoints = if inherited_units {
+                    match self
+                        .inherited_wasm_checkpoints(domain, &ModelName::from(&describe.name), node)
+                        .await
+                    {
+                        Ok(checkpoints) => checkpoints,
+                        Err(error) => return command_error(format!("{error:#}")),
+                    }
+                } else {
+                    let mut by_unit = std::collections::BTreeMap::<
+                        Unit,
+                        Vec<nervix_models::WasmCheckpointInspection>,
+                    >::new();
+                    for checkpoint in runtime_details.checkpoints {
+                        if let Some(unit) = node.unit_of_branch(checkpoint.branch.as_ref()) {
+                            by_unit.entry(unit).or_default().push(checkpoint);
+                        }
+                    }
+                    by_unit
+                };
+                match wasm_state::wasm_unit_summaries(node, checkpoints) {
                     Ok(summaries) => summaries,
                     Err(error) => {
                         return command_error(format!(

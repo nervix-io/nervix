@@ -5,17 +5,44 @@
 //! - **Depends on.** Typed branch declarations, schema definitions and vocabulary names.
 //! - **Must not know.** Registry validation, scheduling decisions or runtime tasks.
 
-use super::{BranchName, BranchPartitions, FieldName, ResolvedBranching, Unit};
+use super::{BranchName, FieldName, ResolvedBranchPartitions, ResolvedBranching, Unit};
 
 impl ResolvedBranching {
     pub fn unbranched() -> Self {
         Self::Unbranched
     }
 
+    pub fn awaiting_topology(
+        branch: BranchName,
+        schema: impl Into<crate::SchemaDefinition>,
+    ) -> Self {
+        Self::AwaitingTopology {
+            branch,
+            schema: schema.into(),
+        }
+    }
+
+    pub fn is_awaiting_topology(&self) -> bool {
+        matches!(self, Self::AwaitingTopology { .. })
+    }
+
+    pub fn with_partitions(self, partitions: ResolvedBranchPartitions) -> Self {
+        match self {
+            Self::Unbranched => Self::Unbranched,
+            Self::AwaitingTopology { branch, schema } | Self::Branched { branch, schema, .. } => {
+                Self::Branched {
+                    branch,
+                    schema,
+                    partitions,
+                }
+            }
+        }
+    }
+
     pub fn branched(
         branch: BranchName,
         schema: impl Into<crate::SchemaDefinition>,
-        partitions: BranchPartitions,
+        partitions: ResolvedBranchPartitions,
     ) -> Self {
         Self::Branched {
             branch,
@@ -27,32 +54,20 @@ impl ResolvedBranching {
     pub fn branch(&self) -> Option<&BranchName> {
         match self {
             Self::Unbranched => None,
-            Self::Branched { branch, .. } => Some(branch),
+            Self::Branched { branch, .. } | Self::AwaitingTopology { branch, .. } => Some(branch),
         }
     }
 
     /// Whether `other` names the same branch with the same key schema, whatever partition count
     /// each places keys by: the keys and their values are the same under either count.
     pub fn same_key_as(&self, other: &Self) -> bool {
-        match (self, other) {
-            (
-                Self::Branched { branch, schema, .. },
-                Self::Branched {
-                    branch: other_branch,
-                    schema: other_schema,
-                    ..
-                },
-            ) => branch == other_branch && schema == other_schema,
-            (Self::Unbranched, Self::Unbranched) => true,
-            (Self::Unbranched, Self::Branched { .. })
-            | (Self::Branched { .. }, Self::Unbranched) => false,
-        }
+        self.branch() == other.branch() && self.schema() == other.schema()
     }
 
     /// The partitions of the branch, when the declaration is branched.
-    pub fn partitions(&self) -> Option<BranchPartitions> {
+    pub fn partitions(&self) -> Option<ResolvedBranchPartitions> {
         match self {
-            Self::Unbranched => None,
+            Self::Unbranched | Self::AwaitingTopology { .. } => None,
             Self::Branched { partitions, .. } => Some(*partitions),
         }
     }
@@ -63,6 +78,7 @@ impl ResolvedBranching {
     pub fn units(&self) -> Vec<Unit> {
         match self {
             Self::Unbranched => vec![Unit::SINGLE],
+            Self::AwaitingTopology { .. } => Vec::new(),
             Self::Branched { partitions, .. } => partitions.units(),
         }
     }
@@ -70,14 +86,14 @@ impl ResolvedBranching {
     pub fn schema(&self) -> Option<&crate::SchemaDefinition> {
         match self {
             Self::Unbranched => None,
-            Self::Branched { schema, .. } => Some(schema),
+            Self::Branched { schema, .. } | Self::AwaitingTopology { schema, .. } => Some(schema),
         }
     }
 
     pub fn fields(&self) -> &[crate::SchemaField] {
         match self {
             Self::Unbranched => &[],
-            Self::Branched { schema, .. } => &schema.fields,
+            Self::Branched { schema, .. } | Self::AwaitingTopology { schema, .. } => &schema.fields,
         }
     }
 

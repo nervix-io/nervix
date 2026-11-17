@@ -17,8 +17,8 @@
 )]
 
 use nervix_models::{
-    DomainName, InferencerModelFingerprint, ModelKind, ModelName, RemoteRuntimeField,
-    SchemaFingerprint, Unit, WasmStateGeneration,
+    DomainName, InferencerModelFingerprint, ModelKind, ModelName, SchemaFingerprint, Unit,
+    WasmStateGeneration,
 };
 use rkyv::{Archive, Deserialize, Serialize};
 use strum::{FromRepr, IntoStaticStr};
@@ -169,7 +169,7 @@ pub struct StatePlacementEnvelope {
     pub kind: ModelKind,
     pub identifier: ModelName,
     pub unit: Unit,
-    pub branch_key: Option<Vec<RemoteRuntimeField>>,
+    pub branch_key: nervix_models::RemoteBranchKey,
 }
 
 /// The exact checkpoint of the state a placement names. Its bytes travel through the bulk pool;
@@ -318,7 +318,7 @@ pub struct BranchCheckpointPage {
     /// Where the replica stands once it applied this page.
     pub cursor: BranchCheckpointCursor,
     /// The branches whose state went away.
-    pub removed: Vec<Option<Vec<RemoteRuntimeField>>>,
+    pub removed: Vec<nervix_models::RemoteBranchKey>,
     /// The branch checkpoints that changed, each at its newest revision. A branch whose state went
     /// away and was registered again appears in both lists, and its checkpoint is the newer fact.
     pub revised: Vec<BranchCheckpointRevision>,
@@ -329,7 +329,7 @@ pub struct BranchCheckpointPage {
 /// The newest checkpoint revision of one branch state.
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq)]
 pub struct BranchCheckpointRevision {
-    pub branch_key: Option<Vec<RemoteRuntimeField>>,
+    pub branch_key: nervix_models::RemoteBranchKey,
     pub state: RuntimeState,
     pub lsm: u64,
 }

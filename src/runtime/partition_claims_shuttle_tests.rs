@@ -124,6 +124,9 @@ impl ClaimantUnit {
             ClaimAdmission::Parked {
                 start: ClaimStart::Claim { .. },
             } => self.report(Event::Claimed(key)),
+            ClaimAdmission::Parked {
+                start: ClaimStart::Locate,
+            } => panic!("the model's direct claimant resolves keys through its catalog"),
         }
     }
 

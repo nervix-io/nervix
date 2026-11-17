@@ -490,7 +490,8 @@ fn synchronized_domain_schedule_persists_models_for_restart() {
             &crate::registry::uniform_capabilities(&[
                 ClusterNodeName::parse("node-1").expect("valid name")
             ]),
-        );
+        )
+        .assured("the fixture topology resolves");
     let scheduled_relay = schedule
         .nodes
         .get(&NodeRef::new(

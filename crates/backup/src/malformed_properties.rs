@@ -61,6 +61,7 @@ fn validate<R: ArchiveRecord + PartialEq + Debug>(
 fn validate_kind(kind: RecordKind, bytes: &[u8]) -> Result<(), Report<ArchiveReadError>> {
     match kind {
         RecordKind::Manifest => validate::<BackupManifest>(bytes),
+        RecordKind::PartitionTopology => validate::<crate::PartitionTopologyRecord>(bytes),
         RecordKind::Users => validate::<UsersRecord>(bytes),
         RecordKind::Domain => validate::<DomainRecord>(bytes),
         RecordKind::ResourceVersion => validate::<ResourceVersionRecord>(bytes),
@@ -80,6 +81,7 @@ fn validate_kind(kind: RecordKind, bytes: &[u8]) -> Result<(), Report<ArchiveRea
 fn current_version(kind: RecordKind) -> u16 {
     match kind {
         RecordKind::Manifest => BackupManifest::VERSION,
+        RecordKind::PartitionTopology => crate::PartitionTopologyRecord::VERSION,
         RecordKind::Users => UsersRecord::VERSION,
         RecordKind::Domain => DomainRecord::VERSION,
         RecordKind::ResourceVersion => ResourceVersionRecord::VERSION,
@@ -208,7 +210,7 @@ impl Case {
                     )
                     .assured("the current lifecycle decodes");
                     wire.branches = vec![crate::wire::BranchLifecycleEntryWire {
-                        key: None,
+                        key: nervix_models::BranchKeyFields::Unbranched,
                         last_ingestion_unix_nanos: 0,
                         incarnation: 0,
                     }];

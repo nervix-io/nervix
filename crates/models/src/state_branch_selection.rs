@@ -188,7 +188,7 @@ mod tests {
                     sensitive: false,
                 }],
             },
-            crate::BranchPartitions::ONE,
+            crate::ResolvedBranchPartitions::ONE,
         )
     }
 

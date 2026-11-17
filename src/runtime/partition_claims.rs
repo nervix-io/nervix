@@ -77,6 +77,9 @@ impl UnitPartitionTransition {
 
     /// Whether this unit holds `key` outside its partition under the current count.
     pub(super) fn misplaces(&self, key: &Option<BranchKey>) -> bool {
+        if self.needs_key_lookup() {
+            return key.is_some();
+        }
         match self.current.unit_of(key) {
             Ok(unit) => unit != self.unit,
             // A key no unit owns is no unit's to claim.
@@ -85,8 +88,18 @@ impl UnitPartitionTransition {
     }
 
     /// The unit the current count places `key` in.
-    pub(super) fn target_of(&self, key: &Option<BranchKey>) -> Option<Unit> {
-        self.current.unit_of(key).ok()
+    pub(super) fn target_of(&self, key: &Option<BranchKey>) -> Option<KeyPartitionTarget> {
+        if self.needs_key_lookup() {
+            return key.as_ref().map(|_| KeyPartitionTarget::Unknown);
+        }
+        self.current
+            .unit_of(key)
+            .ok()
+            .map(KeyPartitionTarget::Known)
+    }
+
+    pub(super) fn needs_key_lookup(&self) -> bool {
+        self.current.is_inherited() || self.previous.is_inherited()
     }
 
     /// The units of the previous count other than this one: every unit that may hold a key this
@@ -109,6 +122,9 @@ impl UnitPartitionTransition {
 
     /// Whether the previous count placed `key` in another unit, so it may still lie there.
     pub(super) fn may_lie_elsewhere(&self, key: &Option<BranchKey>) -> bool {
+        if self.needs_key_lookup() {
+            return key.is_some();
+        }
         match self.previous.unit_of(key) {
             Ok(unit) => unit != self.unit,
             Err(_) => false,
@@ -116,9 +132,17 @@ impl UnitPartitionTransition {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum KeyPartitionTarget {
+    Known(Unit),
+    Unknown,
+}
+
 /// What a claimant knows about where the keys it owns now lie, as far as its catalog was read.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum ClaimCatalog {
+    /// Resolve only keys with parked demand. The external publisher has no declared hash function.
+    Lookup,
     /// No catalog read has begun.
     Unread,
     /// The catalog is being read from every peer unit.
@@ -139,12 +163,15 @@ pub(super) enum ClaimAdmission<I> {
 /// The asynchronous work a parked input requires the claimant to start.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum ClaimStart {
+    Locate,
     /// Nothing new: the catalog read or the key's claim is already in flight.
     Nothing,
     /// Read the catalog from every peer unit.
     CatalogRead,
     /// Claim the key from the unit that holds it.
-    Claim { holder: Unit },
+    Claim {
+        holder: Unit,
+    },
 }
 
 /// A key the catalog read resolved, with the input it parked.
@@ -212,6 +239,27 @@ impl<I> PartitionClaimant<I> {
         }
     }
 
+    pub(super) fn for_transition(capacity: usize, transition: &UnitPartitionTransition) -> Self {
+        let mut claimant = Self::new(capacity);
+        if transition.needs_key_lookup() {
+            claimant.catalog = ClaimCatalog::Lookup;
+        }
+        claimant
+    }
+
+    pub(super) fn located(&mut self, key: BranchKey, holder: Option<Unit>) -> CatalogResolution<I> {
+        match holder {
+            Some(holder) => {
+                self.claiming.insert(key.clone(), holder);
+                CatalogResolution::Claim { key, holder }
+            }
+            None => {
+                let inputs = self.release(&key);
+                CatalogResolution::Begin { key, inputs }
+            }
+        }
+    }
+
     /// Whether the claimant holds as much parked input as its bound allows.
     pub(super) fn is_full(&self) -> bool {
         self.parked_inputs >= self.capacity
@@ -237,6 +285,7 @@ impl<I> PartitionClaimant<I> {
             };
         }
         let start = match &self.catalog {
+            ClaimCatalog::Lookup => ClaimStart::Locate,
             ClaimCatalog::Unread => {
                 self.catalog = ClaimCatalog::Reading;
                 ClaimStart::CatalogRead
@@ -319,7 +368,7 @@ impl<I> PartitionClaimant<I> {
     pub(super) fn begin_claim(&mut self, key: &BranchKey, holder: Unit) -> bool {
         let listed = match &self.catalog {
             ClaimCatalog::Read(holders) => holders.contains_key(&key.fingerprint()),
-            ClaimCatalog::Unread | ClaimCatalog::Reading => false,
+            ClaimCatalog::Lookup | ClaimCatalog::Unread | ClaimCatalog::Reading => false,
         };
         if !listed || self.claiming.contains_key(key) {
             return false;
@@ -376,12 +425,21 @@ impl<I> PartitionClaimant<I> {
 /// A claim step that failed and is tried again once its time comes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum RetryStep {
+    Locate {
+        key: BranchKey,
+    },
     /// Read the catalog again for the input still parked.
     CatalogRead,
     /// Claim `key` from `holder` again.
-    Claim { key: BranchKey, holder: Unit },
+    Claim {
+        key: BranchKey,
+        holder: Unit,
+    },
     /// Ask `holder` again to forget `key`, which this unit installed.
-    Forget { key: BranchKey, holder: Unit },
+    Forget {
+        key: BranchKey,
+        holder: Unit,
+    },
 }
 
 /// The failed claim steps of one claimant unit, each tried again after the runtime's reconnect
@@ -444,6 +502,15 @@ impl ClaimRetries {
 /// claimant tries again.
 #[derive(Debug, thiserror::Error)]
 pub(super) enum PartitionClaimError {
+    #[error("the partition topology of {entity:?} changed before the key lookup")]
+    TopologyChanged { entity: NodeRef },
+    #[error("locating a retained key of {entity:?} could not obtain bounded memory")]
+    LookupAdmission { entity: NodeRef },
+    #[error("units of {entity:?} hold indistinguishable copies of key {fingerprint}")]
+    AmbiguousHolders {
+        entity: NodeRef,
+        fingerprint: BranchKeyFingerprint,
+    },
     #[error("unit {unit:?} of {entity:?} has no owner in the installed schedule")]
     UnitUnowned { entity: NodeRef, unit: Unit },
     #[error("the owner of unit {unit:?} of {entity:?} did not answer")]
@@ -550,7 +617,7 @@ impl Runtime {
     ) -> error_stack::Result<PartitionClaimOutcome, PartitionClaimError> {
         let request = PartitionTransitionRequest::Claim {
             subject: subject.clone(),
-            key: BranchKey::to_remote_key(&Some(key.clone())).unwrap_or_default(),
+            key: BranchKey::to_remote_key(&Some(key.clone())),
             step,
         };
         let answer = self
@@ -558,13 +625,150 @@ impl Runtime {
             .await?;
         match answer {
             PartitionTransitionAnswer::Claim(outcome) => Ok(outcome),
-            PartitionTransitionAnswer::CatalogShard(_) | PartitionTransitionAnswer::Holdings(_) => {
+            PartitionTransitionAnswer::Located(_)
+            | PartitionTransitionAnswer::CatalogShard(_)
+            | PartitionTransitionAnswer::Holdings(_) => {
                 Err(Report::new(PartitionClaimError::UnexpectedAnswer {
                     entity: subject.entity.clone(),
                     unit: subject.holder,
                 }))
             }
         }
+    }
+
+    /// A demanded inherited key may have moved to any external shard on growth. Ask holders
+    /// about this fingerprint only, retaining no cross-product of partition and key catalogs.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "a demanded key is located once per key and epoch, again only after a failed \
+                      attempt"
+        )
+    )]
+    pub(super) async fn locate_partition_key(
+        &self,
+        domain: &DomainName,
+        entity: &NodeRef,
+        transition: &UnitPartitionTransition,
+        key: &BranchKey,
+    ) -> error_stack::Result<Option<Unit>, PartitionClaimError> {
+        #[derive(Clone, Copy)]
+        struct Candidate {
+            unit: Unit,
+            epoch: Option<PartitionEpochNumber>,
+            current: bool,
+        }
+        let peers = {
+            let installed = self.inner.executions.get(domain).ok_or_else(|| {
+                Report::new(PartitionClaimError::TopologyChanged {
+                    entity: entity.clone(),
+                })
+            })?;
+            if installed
+                .revision
+                .partition_epochs
+                .get(&transition.branch)
+                .is_none_or(|epoch| epoch.number != transition.epoch)
+            {
+                return Err(Report::new(PartitionClaimError::TopologyChanged {
+                    entity: entity.clone(),
+                }));
+            }
+            let node = installed.revision.nodes.get(entity).ok_or_else(|| {
+                Report::new(PartitionClaimError::TopologyChanged {
+                    entity: entity.clone(),
+                })
+            })?;
+            node.units.keys().copied().collect::<Vec<_>>()
+        };
+        let admission = || PartitionClaimError::LookupAdmission {
+            entity: entity.clone(),
+        };
+        let bytes = peers
+            .len()
+            .checked_mul(std::mem::size_of::<Candidate>())
+            .ok_or_else(|| Report::new(admission()))?;
+        let bytes = u64::try_from(bytes).change_context_lazy(admission)?;
+        let _memory = self
+            .inner
+            .executor
+            .try_reserve(nervix_execution::MemoryClass::Bulk, bytes.max(1))
+            .change_context_lazy(admission)?;
+        let mut copies = Vec::new();
+        let mut located = None::<Candidate>;
+        let mut ambiguous = false;
+        for peer in peers {
+            nervix_primitives::task::consume_budget().await;
+            let request = PartitionTransitionRequest::Locate {
+                subject: PartitionClaimSubject {
+                    domain: domain.clone(),
+                    entity: entity.clone(),
+                    epoch: transition.epoch,
+                    holder: peer,
+                    claimant: transition.unit,
+                },
+                fingerprint: key.fingerprint(),
+            };
+            match self
+                .send_partition_request(domain, entity, peer, request)
+                .await?
+            {
+                PartitionTransitionAnswer::Located(Some(location)) => {
+                    let candidate = Candidate {
+                        unit: peer,
+                        epoch: location.origin.map(|origin| origin.epoch),
+                        current: !transition.current.is_inherited() && peer == transition.unit,
+                    };
+                    copies.push(candidate);
+                    let rank = (candidate.current, candidate.epoch);
+                    match located {
+                        Some(previous) if (previous.current, previous.epoch) > rank => {}
+                        Some(previous) if (previous.current, previous.epoch) == rank => {
+                            ambiguous = true;
+                        }
+                        _ => {
+                            located = Some(candidate);
+                            ambiguous = false;
+                        }
+                    }
+                }
+                PartitionTransitionAnswer::Located(None) => {}
+                _ => {
+                    return Err(Report::new(PartitionClaimError::UnexpectedAnswer {
+                        entity: entity.clone(),
+                        unit: peer,
+                    }));
+                }
+            }
+        }
+        if ambiguous {
+            return Err(Report::new(PartitionClaimError::AmbiguousHolders {
+                entity: entity.clone(),
+                fingerprint: key.fingerprint(),
+            }));
+        }
+        let Some(winner) = located else {
+            return Ok(None);
+        };
+        // The newer admitted origin has already installed this state. Lower-epoch retained copies
+        // cannot be authoritative again; dropping them leaves that complete winner in place.
+        for copy in copies {
+            nervix_primitives::task::consume_budget().await;
+            if copy.unit == winner.unit {
+                continue;
+            }
+            let subject = PartitionClaimSubject {
+                domain: domain.clone(),
+                entity: entity.clone(),
+                epoch: transition.epoch,
+                holder: copy.unit,
+                claimant: transition.unit,
+            };
+            self.request_partition_step(&subject, key, PartitionClaimStep::Forget)
+                .await?;
+        }
+        Ok(Some(winner.unit))
     }
 
     /// Reads the catalog of `transition`'s unit: every key each other unit of the previous count
@@ -608,13 +812,12 @@ impl Runtime {
                     }));
                 };
                 for listed in shard.keys {
-                    let key =
-                        BranchKey::from_remote_key(Some(listed.key)).change_context_lazy(|| {
-                            PartitionClaimError::CatalogKey {
-                                entity: entity.clone(),
-                                unit: peer,
-                            }
-                        })?;
+                    let key = BranchKey::from_remote_key(listed.key).change_context_lazy(|| {
+                        PartitionClaimError::CatalogKey {
+                            entity: entity.clone(),
+                            unit: peer,
+                        }
+                    })?;
                     let Some(key) = key else {
                         return Err(Report::new(PartitionClaimError::CatalogKey {
                             entity: entity.clone(),
@@ -818,7 +1021,7 @@ mod tests {
     #[test]
     fn only_a_unit_the_current_count_schedules_is_a_current_unit() {
         let partitions = |count: u16| {
-            nervix_models::BranchPartitions::Direct(
+            nervix_models::ResolvedBranchPartitions::Direct(
                 std::num::NonZeroU16::new(count).assured("the test counts are positive"),
             )
         };
@@ -836,7 +1039,7 @@ mod tests {
     #[test]
     fn a_unit_misplaces_exactly_the_keys_the_current_count_places_elsewhere() {
         let partitions = |count: u16| {
-            nervix_models::BranchPartitions::Direct(
+            nervix_models::ResolvedBranchPartitions::Direct(
                 std::num::NonZeroU16::new(count).assured("the test counts are positive"),
             )
         };
@@ -851,7 +1054,10 @@ mod tests {
         let gamma = Some(tenant("gamma"));
         // Under eight partitions beta lands in partition 5 and gamma in partition 1.
         assert!(transition.misplaces(&beta));
-        assert_eq!(transition.target_of(&beta), Some(Unit::partition(5)));
+        assert_eq!(
+            transition.target_of(&beta),
+            Some(KeyPartitionTarget::Known(Unit::partition(5)))
+        );
         assert!(!transition.misplaces(&gamma));
         assert!(!transition.misplaces(&None));
         assert_eq!(

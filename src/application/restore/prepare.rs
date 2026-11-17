@@ -520,6 +520,7 @@ impl SessionServiceImpl {
                         state: &domain.state,
                         resources: &resources,
                         completed,
+                        partitions: domain.partitions.as_ref(),
                     },
                     &statements,
                 )
@@ -616,7 +617,8 @@ impl SessionServiceImpl {
         schedule: &nervix_models::DomainSchedule,
     ) -> Result<(), Report<RestoreRefusal>> {
         let states = archive.states_for(&domain.source);
-        let partitions = super::partitions::RestoredPartitions::of(schedule, states);
+        let partitions = super::partitions::RestoredPartitions::of(schedule, states)
+            .change_context(RestoreRefusal::Plan)?;
         let relays =
             super::materialized::ArchivedMaterializedUnit::of_divided_relays(states, &partitions);
         for (reference, mut archived) in relays {

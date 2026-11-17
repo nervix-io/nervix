@@ -498,7 +498,7 @@ It also fences the licensing stop gate: the stop cause a `StopDomain` command ca
 record retains, the typed `LicensingStop` refusal of a change that would run a domain, the
 transaction refusal of a `START` step under the gate, and the `stopped` admission refusal state.
 
-The fingerprint also covers bounded entity labels on configuration Models and the typed label edits retained in transactions, with their committed acceptance limits. It identifies the combined label, inferencer-description, inferencer state page, listener-capability, licensing stop-gate, licensing transition and node-record contract; metadata-only edits preserve the execution and state identities those reports observe.
+The fingerprint also covers bounded entity labels on configuration Models and the typed label edits retained in transactions, with their committed acceptance limits. It identifies the combined label, inferencer-description, inferencer state page, listener-capability, licensing stop-gate, licensing transition, node-record and inherited partition-topology contract; metadata-only edits preserve the execution and state identities those reports observe.
 
 All nodes in a running cluster use one current wire contract. A fixed fingerprint covers the set of
 supported operations and their encoded shapes. It is one of the prerequisites every hello carries,
@@ -551,6 +551,13 @@ Execution-unit identities use an eight-byte rank with four-byte archive alignmen
 partition relay grants retain that bounded footprint when other entities declare external
 instances. Grant admission charges the exact encoded metadata size, body, decoded batch and
 scratch; the unit representation does not add alignment padding to unrelated relay traffic.
+
+Inherited branch keys carry their immutable external coordinate, partition epoch and actual unit
+alongside their fields. Direct keys carry their fields without an origin. Fingerprints identify
+the fields in either case; claim censuses carry origin witnesses to select the authoritative copy
+across retained units. Materialized page requests and WASM checkpoint inspection and reset targets
+retain the concrete unit because hashing inherited key fields cannot locate its state. These shapes
+and the atomic partition-topology consensus update share the current wire fingerprint.
 
 Control records use bounded `rkyv` archives. The receiver validates an archive, including its shape
 and nesting depth, before exposing it to an operation handler. Encoded and decoded memory is charged

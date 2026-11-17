@@ -560,7 +560,7 @@ fn partitioned_wasm_reset_nodes(processor: &ModelName) -> Vec<ScheduledNode> {
             sensitive: false,
         }],
     };
-    let partitions = nervix_models::BranchPartitions::Direct(nonzero!(2u16));
+    let partitions = nervix_models::ResolvedBranchPartitions::Direct(nonzero!(2u16));
     for node in &mut nodes {
         match node.config.as_mut() {
             nervix_models::Model::Relay(relay) => {
@@ -589,7 +589,7 @@ fn partitioned_wasm_reset_nodes(processor: &ModelName) -> Vec<ScheduledNode> {
             name: branch,
             schema: schema.name,
             ttl: "5m".to_string(),
-            partitions,
+            partitions: nervix_models::BranchPartitions::Direct(partitions.count()),
             eviction: None,
         },
     )));

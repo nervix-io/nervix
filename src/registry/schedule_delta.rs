@@ -154,6 +154,20 @@ impl ScheduleDelta {
                 }
                 continue;
             };
+            if let nervix_models::Model::Ingestor(ingestor) = desired_node.config.as_ref()
+                && (existing.partition_topology.sources.get(&ingestor.name)
+                    != desired.partition_topology.sources.get(&ingestor.name)
+                    || existing
+                        .partition_topology
+                        .suspended
+                        .contains(&ingestor.name)
+                        != desired
+                            .partition_topology
+                            .suspended
+                            .contains(&ingestor.name))
+            {
+                entities.push(desired_node.identity());
+            }
             let repartitions = moving.contains(identity);
             let retires = retiring.contains(identity);
             for (unit, placement) in &desired_node.units {
@@ -437,14 +451,12 @@ impl ScheduleDelta {
             identifier: existing_identifier,
             resolved_branching: existing_resolved_branching,
             schema_fingerprint: existing_schema_fingerprint,
-            kafka_partition_schedule: existing_kafka_partition_schedule,
             ..
         } = existing;
         let ScheduledNode {
             identifier: desired_identifier,
             resolved_branching: desired_resolved_branching,
             schema_fingerprint: desired_schema_fingerprint,
-            kafka_partition_schedule: desired_kafka_partition_schedule,
             ..
         } = desired;
 
@@ -477,7 +489,7 @@ impl ScheduleDelta {
             }
         }
 
-        existing_kafka_partition_schedule == desired_kafka_partition_schedule
+        true
     }
 }
 
@@ -1204,7 +1216,7 @@ mod tests {
     fn repartitioned_schedule(transition: bool) -> DomainSchedule {
         let branch = || named::<nervix_models::BranchName>("by_tenant");
         let partitions = |count: u16| {
-            nervix_models::BranchPartitions::Direct(
+            nervix_models::ResolvedBranchPartitions::Direct(
                 std::num::NonZeroU16::new(count).expect("test counts are positive"),
             )
         };
@@ -1294,9 +1306,9 @@ mod tests {
             let mut schedule = repartitioned_schedule(transition);
             let mut epochs = schedule.partition_epochs.clone();
             for epoch in epochs.values_mut() {
-                epoch.partitions = nervix_models::BranchPartitions::Direct(nonzero!(4u16));
+                epoch.partitions = nervix_models::ResolvedBranchPartitions::Direct(nonzero!(4u16));
                 epoch.transition = transition.then_some(nervix_models::PartitionTransition {
-                    previous: nervix_models::BranchPartitions::Direct(nonzero!(8u16)),
+                    previous: nervix_models::ResolvedBranchPartitions::Direct(nonzero!(8u16)),
                 });
             }
             schedule = schedule.with_partition_epochs(epochs);
@@ -1321,9 +1333,9 @@ mod tests {
         let mut changed = repartitioned_schedule(true);
         let next = nervix_models::BranchPartitionEpoch {
             number: nervix_models::PartitionEpochNumber::FIRST.next().next(),
-            partitions: nervix_models::BranchPartitions::Direct(nonzero!(8u16)),
+            partitions: nervix_models::ResolvedBranchPartitions::Direct(nonzero!(8u16)),
             transition: Some(nervix_models::PartitionTransition {
-                previous: nervix_models::BranchPartitions::Direct(nonzero!(8u16)),
+                previous: nervix_models::ResolvedBranchPartitions::Direct(nonzero!(8u16)),
             }),
         };
         changed = changed.with_partition_epochs(std::collections::BTreeMap::from([(

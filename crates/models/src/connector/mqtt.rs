@@ -415,6 +415,7 @@ const MQTT_TOPIC_METADATA: IngestorMetadataDeclaration = IngestorMetadataDeclara
 
 impl IngestorDeclaration for MqttTopicIngestor {
     const CAPABILITIES: IngestorEntityCapabilities = IngestorEntityCapabilities {
+        external_partitions: crate::IngestorExternalPartitions::None,
         events: crate::DeclaredEvents::NONE,
         instancing: crate::IngestorInstancingCapability::PerPartition,
         // MQTT 5 user properties: a broker keeps their order and repeats from the publisher, and

@@ -100,6 +100,28 @@ pub(super) enum BoundRouteBranch {
     Preserved,
     /// The records receive the branch key this program constructs.
     Constructed(CompiledBranchProgram),
+    Inherited(Box<BoundInheritedBranch>),
+}
+
+#[derive(Debug, Clone)]
+pub(super) struct BoundInheritedBranch {
+    pub(super) program: CompiledBranchProgram,
+    pub(super) projection: crate::registry::InheritedBranchProjection,
+}
+
+impl BoundRouteBranch {
+    pub(super) fn construction(
+        &self,
+    ) -> Option<(
+        &CompiledBranchProgram,
+        Option<crate::registry::InheritedBranchProjection>,
+    )> {
+        match self {
+            Self::Constructed(program) => Some((program, None)),
+            Self::Inherited(branch) => Some((&branch.program, Some(branch.projection))),
+            _ => None,
+        }
+    }
 }
 
 /// One ingestor or reingestor output route, compiled for this node.
@@ -194,6 +216,7 @@ impl ExecutionBuildDeps<'_> {
             PlannedRouteBranch::Unbranched => return Ok(BoundRouteBranch::Unbranched),
             PlannedRouteBranch::Preserved(_) => return Ok(BoundRouteBranch::Preserved),
             PlannedRouteBranch::Constructed { program, .. } => program,
+            PlannedRouteBranch::Inherited(branch) => &branch.program,
         };
         let Some(branch_schema) = self
             .relay_branchings
@@ -219,7 +242,15 @@ impl ExecutionBuildDeps<'_> {
                 relay: relay.clone(),
             }))
         })?;
-        Ok(BoundRouteBranch::Constructed(program))
+        match branch {
+            PlannedRouteBranch::Inherited(branch) => Ok(BoundRouteBranch::Inherited(Box::new(
+                BoundInheritedBranch {
+                    program,
+                    projection: branch.projection,
+                },
+            ))),
+            _ => Ok(BoundRouteBranch::Constructed(program)),
+        }
     }
 
     /// Compiles an ingestor's node filter and routes against its input schema: what its codec
@@ -303,7 +334,7 @@ impl ExecutionBuildDeps<'_> {
                 message_error_policy: route.message_error_policy().clone(),
             });
         }
-        let metadata = Self::metadata_projection(ingestor).map_err(|error| {
+        let metadata = Self::metadata_projection(ingestor, &routes).map_err(|error| {
             error.change_context(EntrypointBindingError::ProjectMetadata {
                 node: identifier.clone(),
             })
@@ -318,9 +349,15 @@ impl ExecutionBuildDeps<'_> {
     /// facts. An ingestor reading neither builds no metadata column.
     fn metadata_projection(
         ingestor: &IngestorSpec,
+        routes: &[BoundEntryRoute],
     ) -> Result<Arc<IngestMetadataProjection>, Report<IngestMetadataError>> {
         let mut read = Vec::new();
         let mut payload_read = Vec::new();
+        for route in routes {
+            if let BoundRouteBranch::Inherited(branch) = &route.branch {
+                read.push(branch.projection.field.name().to_string());
+            }
+        }
         for route in &ingestor.routes {
             for (namespace, field) in
                 collect_program_field_refs(&route.construction.program().inner)

@@ -532,7 +532,7 @@ mod tests {
                             })
                             .collect(),
                     },
-                    nervix_models::BranchPartitions::ONE,
+                    nervix_models::ResolvedBranchPartitions::ONE,
                 ),
             );
         }

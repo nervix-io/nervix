@@ -791,6 +791,7 @@ impl SessionServiceImpl {
             request_domain,
             None,
             None,
+            None,
         ))
         .await
     }
@@ -803,6 +804,7 @@ impl SessionServiceImpl {
         query: &str,
         domain: &DomainName,
         lease: &DomainMutationLease,
+        partitions: Option<&nervix_models::PartitionTopologySnapshot>,
     ) -> CommandResult {
         Box::pin(self.process_model_mutation_batch_with_transaction(
             statements,
@@ -810,6 +812,7 @@ impl SessionServiceImpl {
             Some(domain),
             None,
             Some(lease),
+            partitions,
         ))
         .await
     }
@@ -846,6 +849,7 @@ impl SessionServiceImpl {
         request_domain: Option<&DomainName>,
         transaction_step: Option<TransactionModelStepContext<'_>>,
         command_lease: Option<&DomainMutationLease>,
+        restored_partitions: Option<&nervix_models::PartitionTopologySnapshot>,
     ) -> CommandResult {
         let Some(domain) = request_domain.cloned() else {
             return command_error("no active domain selected".to_string());
@@ -1203,8 +1207,29 @@ impl SessionServiceImpl {
                 let inputs = captured_inputs
                     .take()
                     .verified("a direct model plan carries the inputs it validated");
-                let prepared =
-                    Box::pin(self.prepare_domain_schedule(inputs, planned.candidate_graph())).await;
+                let prepared = {
+                    let snapshot = self
+                        .capture_domain_schedule_planning_snapshot(&inputs)
+                        .await;
+                    snapshot.prepare_restored(
+                        &inputs,
+                        &domain,
+                        planned.candidate_graph(),
+                        inputs.schedule(),
+                        restored_partitions,
+                    )
+                };
+                let prepared = match prepared {
+                    Ok(prepared) => prepared,
+                    Err(error) => {
+                        return create_registry_error_response(
+                            query,
+                            &domain,
+                            &error_target,
+                            &error,
+                        );
+                    }
+                };
                 ScheduleTransition {
                     expected_schedule: prepared.inputs.schedule().cloned(),
                     prepared_schedule: prepared.schedule,

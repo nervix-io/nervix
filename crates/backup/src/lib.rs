@@ -38,6 +38,7 @@ mod inferencer;
 mod layout;
 mod manifest;
 mod materialized;
+mod partitioning;
 mod path;
 mod reader;
 mod records;
@@ -67,6 +68,7 @@ pub use materialized::{
     MATERIALIZED_COLUMNS_BYTES, MATERIALIZED_IDENTITIES_BYTES, MaterializedIdentitiesRecord,
     MaterializedRecordIdentity, MaterializedRelayDescriptor,
 };
+pub use partitioning::PartitionTopologyRecord;
 pub use path::SectionPath;
 pub use reader::{
     ManifestHeader, SectionReader, SectionVisitor, read_archive, read_manifest_header,

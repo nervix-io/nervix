@@ -2516,13 +2516,16 @@ fn with_large_native_metadata(source: &Path, target: &Path) {
                 .last_ingestion;
             for index in 0..1024_u64 {
                 record.branches.push(BranchLifecycleEntry {
-                    key: Some(vec![StateField {
-                        name: "tenant".to_string(),
-                        value: StateValue::String(format!(
-                            "metadata-{index:04}-{}",
-                            "x".repeat(34 * 1024)
-                        )),
-                    }]),
+                    key: nervix_models::BranchKeyFields::Direct(
+                        vec![StateField {
+                            name: "tenant".to_string(),
+                            value: StateValue::String(format!(
+                                "metadata-{index:04}-{}",
+                                "x".repeat(34 * 1024)
+                            )),
+                        }]
+                        .into_boxed_slice(),
+                    ),
                     last_ingestion,
                     incarnation: 1000 + index,
                 });

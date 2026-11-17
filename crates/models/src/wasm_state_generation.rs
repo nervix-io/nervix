@@ -765,7 +765,7 @@ mod tests {
                 sensitive: false,
             }],
         };
-        let partitions = crate::BranchPartitions::Direct(nonzero!(2u16));
+        let partitions = crate::ResolvedBranchPartitions::Direct(nonzero!(2u16));
         let node = node.with_resolved_branching(Some(crate::ResolvedBranching::branched(
             branch, schema, partitions,
         )));
@@ -848,7 +848,8 @@ mod tests {
             processor.admit_wasm_state_recovery(
                 scope,
                 generation(2),
-                WasmSavedStateRejection::ApplicationState
+                WasmSavedStateRejection::ApplicationState,
+                None
             ),
             Some(WasmStateRecoveryAdmission::Admitted(_))
         ));
@@ -1190,6 +1191,7 @@ mod tests {
                 scope,
                 WasmStateGeneration::FIRST,
                 WasmSavedStateRejection::ApplicationState,
+                None,
             )
             .assured("the test scheduled a WASM processor with recovery state");
         let WasmStateRecoveryAdmission::Admitted(request) = admitted else {
@@ -1199,6 +1201,7 @@ mod tests {
             &scope,
             &request,
             WasmStateRecoveryOutcome::Failed,
+            None,
         ));
         let inspection =
             single_unit_selection(&processor, Vec::new(), StateInspectionBranchSelection::All);
@@ -1327,6 +1330,7 @@ mod tests {
                 refused,
                 WasmStateGeneration::FIRST,
                 WasmSavedStateRejection::ApplicationState,
+                None,
             ),
             Some(WasmStateRecoveryAdmission::Admitted(_))
         ));
@@ -1436,7 +1440,12 @@ mod tests {
         let refused = WasmStateGeneration::FIRST;
 
         let admitted = processor
-            .admit_wasm_state_recovery(scope, refused, WasmSavedStateRejection::ApplicationState)
+            .admit_wasm_state_recovery(
+                scope,
+                refused,
+                WasmSavedStateRejection::ApplicationState,
+                None,
+            )
             .expect("a WASM processor records recoveries");
         let WasmStateRecoveryAdmission::Admitted(request) = admitted else {
             panic!("the first report of a refused lifetime must be admitted: {admitted:?}");
@@ -1449,7 +1458,8 @@ mod tests {
             processor.admit_wasm_state_recovery(
                 scope,
                 refused,
-                WasmSavedStateRejection::ApplicationState
+                WasmSavedStateRejection::ApplicationState,
+                None
             ),
             Some(WasmStateRecoveryAdmission::Resumed(request.clone()))
         );
@@ -1457,18 +1467,21 @@ mod tests {
         assert!(processor.settle_wasm_state_recovery(
             &scope,
             &request,
-            WasmStateRecoveryOutcome::Failed
+            WasmStateRecoveryOutcome::Failed,
+            None
         ));
         assert!(!processor.settle_wasm_state_recovery(
             &scope,
             &request,
-            WasmStateRecoveryOutcome::Recovered
+            WasmStateRecoveryOutcome::Recovered,
+            None
         ));
         assert_eq!(
             processor.admit_wasm_state_recovery(
                 scope,
                 refused,
-                WasmSavedStateRejection::ApplicationState
+                WasmSavedStateRejection::ApplicationState,
+                None
             ),
             Some(WasmStateRecoveryAdmission::Exhausted)
         );
@@ -1480,7 +1493,8 @@ mod tests {
             processor.admit_wasm_state_recovery(
                 sibling,
                 refused,
-                WasmSavedStateRejection::SnapshotEnvelope
+                WasmSavedStateRejection::SnapshotEnvelope,
+                None
             ),
             Some(WasmStateRecoveryAdmission::Admitted(_))
         ));
@@ -1488,7 +1502,8 @@ mod tests {
             processor.admit_wasm_state_recovery(
                 scope,
                 generation(4),
-                WasmSavedStateRejection::ApplicationState
+                WasmSavedStateRejection::ApplicationState,
+                None
             ),
             Some(WasmStateRecoveryAdmission::Admitted(_))
         ));
@@ -1502,19 +1517,26 @@ mod tests {
         let request = scope.recovery_request(refused);
 
         processor
-            .admit_wasm_state_recovery(scope, refused, WasmSavedStateRejection::SnapshotEnvelope)
+            .admit_wasm_state_recovery(
+                scope,
+                refused,
+                WasmSavedStateRejection::SnapshotEnvelope,
+                None,
+            )
             .expect("a WASM processor records recoveries");
         assert!(processor.settle_wasm_state_recovery(
             &scope,
             &request,
-            WasmStateRecoveryOutcome::Recovered
+            WasmStateRecoveryOutcome::Recovered,
+            None
         ));
 
         assert_eq!(
             processor.admit_wasm_state_recovery(
                 scope,
                 refused,
-                WasmSavedStateRejection::SnapshotEnvelope
+                WasmSavedStateRejection::SnapshotEnvelope,
+                None
             ),
             Some(WasmStateRecoveryAdmission::AlreadyRecovered)
         );
@@ -1551,6 +1573,7 @@ mod tests {
                 WasmStateResetScope::Branch(branch(3)),
                 generation(2),
                 WasmSavedStateRejection::ApplicationState,
+                None,
             )
             .expect("a WASM processor records recoveries");
         let recoveries = processor
@@ -1651,5 +1674,60 @@ mod tests {
             Err(InvalidWasmStateGeneration(0))
         );
         assert_eq!(u64::from(generation(9)), 9);
+    }
+
+    #[test]
+    fn an_inherited_recovery_uses_the_retained_units_lifetime_without_inventing_an_origin() {
+        let mut node = partitioned_processor();
+        let Some(crate::ResolvedBranching::Branched { partitions, .. }) =
+            &mut node.resolved_branching
+        else {
+            unreachable!("the fixture has a concrete branch");
+        };
+        *partitions = crate::ResolvedBranchPartitions::Inherited(nonzero!(2u16));
+        let held = crate::Unit::partition(0);
+        let key = branch(1);
+        let scope = WasmStateResetScope::Branch(key);
+        assert!(
+            node.wasm_state_generations_of_key(Some(&key), None)
+                .is_none()
+        );
+        assert_eq!(
+            node.wasm_state_generations_of_key(Some(&key), Some(held))
+                .assured("the retained unit has a real lifetime")
+                .of_branch(Some(&key)),
+            generation(1)
+        );
+        let admission = node.admit_wasm_state_recovery(
+            scope,
+            generation(1),
+            WasmSavedStateRejection::ApplicationState,
+            Some(held),
+        );
+        let Some(WasmStateRecoveryAdmission::Admitted(request)) = admission else {
+            panic!("the retained lifetime has its one attempt");
+        };
+        assert!(
+            node.units[&crate::Unit::partition(1)]
+                .wasm_state_recoveries
+                .as_ref()
+                .assured("WASM units have recovery state")
+                .is_empty()
+        );
+        assert!(node.settle_wasm_state_recovery(
+            &scope,
+            &request,
+            WasmStateRecoveryOutcome::Recovered,
+            Some(held)
+        ));
+        assert_eq!(
+            node.admit_wasm_state_recovery(
+                scope,
+                generation(1),
+                WasmSavedStateRejection::ApplicationState,
+                Some(held)
+            ),
+            Some(WasmStateRecoveryAdmission::AlreadyRecovered)
+        );
     }
 }
