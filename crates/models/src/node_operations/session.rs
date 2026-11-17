@@ -524,17 +524,14 @@ impl SessionCapabilities {
     }
 
     pub fn queue_capacity(&self) -> usize {
-        usize::try_from(self.queue_memory_bytes().get() / self.bounds.frame_bytes().get() / 2)
-            .assured(
-                "the session memory validation bounds each lane by the portable channel capacity",
-            )
+        usize::try_from(self.queue_memory_bytes().get() / self.bounds.frame_bytes() / 2).assured(
+            "the session memory validation bounds each lane by the portable channel capacity",
+        )
     }
 
     pub fn download_capacity(&self) -> usize {
-        usize::try_from(
-            (self.queue_memory_bytes().get() / self.bounds.frame_bytes().get() / 8).max(1),
-        )
-        .assured("a download's capacity never exceeds the validated session lane capacity")
+        usize::try_from((self.queue_memory_bytes().get() / self.bounds.frame_bytes() / 8).max(1))
+            .assured("a download's capacity never exceeds the validated session lane capacity")
     }
 
     pub fn values(&self) -> SessionCapabilityValues {
