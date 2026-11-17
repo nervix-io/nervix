@@ -379,11 +379,11 @@ complete unsigned 64-bit range. Duration settings preserve their declared range 
 precision in eight bytes. Decoding validates the same declaration before publishing a parameter
 value.
 
-Consensus's `raft_entity_labels_stopgate_node_` keyspaces and current
-`ClusterState` metadata encoding, 36, identify its stored shapes, including the partition count of every resolved
+Consensus's `raft_entity_labels_inferencer_pages_` keyspaces and current
+`ClusterState` metadata encoding, 37, identify its stored shapes, including the partition count of every resolved
 branch declaration in the committed schedule, the partition epoch the schedule records for each
 branch whose count changed, and the statements a transaction keeps, including per-entity
-`ALTER INGESTOR` and `ALTER EMITTER` operations and a `RESET WASM PROCESSOR ... STATE` that takes
+`ALTER INGESTOR` and `ALTER EMITTER` operations, `SHOW INFERENCER ... STATE` and a `RESET WASM PROCESSOR ... STATE` that takes
 its domain from the transaction. The runtime state store's
 `ranked-intake-unit-checkpoint-segments` format identifies the checkpoints it keeps, including the
 unsigned 64-bit instance identity and the unit every branch-aggregated metric series carries.
