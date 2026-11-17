@@ -15,6 +15,7 @@
 
 use std::{cmp::Ordering, collections::BTreeMap};
 
+use error_stack::ResultExt as _;
 use meticulous::ResultExt as _;
 use nervix_client_wire::{
     MAX_ENCODED_WASM_BRANCH_ENTRY_BYTES, SessionLimits, StateInspection, StateInspectionPage,
@@ -156,6 +157,78 @@ pub(in crate::application) fn wasm_unit_summaries(
 }
 
 impl SessionServiceImpl {
+    pub(in crate::application) async fn handle_describe_inherited_wasm_request(
+        &self,
+        request: nervix_interconnect::DescribeInheritedWasmStateRequest,
+    ) -> Result<
+        Vec<(Unit, Vec<nervix_models::WasmCheckpointInspection>)>,
+        nervix_interconnect::RemoteOperationFailure,
+    > {
+        self.prepare_owner_control_request(
+            &request.domain,
+            ModelKind::WasmProcessor,
+            &request.processor,
+        )
+        .await?;
+        Ok(self
+            .inner
+            .runtime
+            .inspect_inherited_wasm_processor_state_for(&request.domain, &request.processor)
+            .into_iter()
+            .collect())
+    }
+
+    pub(super) async fn inherited_wasm_checkpoints(
+        &self,
+        domain: &DomainName,
+        processor: &nervix_models::ModelName,
+        node: &ScheduledNode,
+    ) -> error_stack::Result<
+        std::collections::BTreeMap<Unit, Vec<nervix_models::WasmCheckpointInspection>>,
+        super::ObservationError,
+    > {
+        let mut checkpoints =
+            std::collections::BTreeMap::<Unit, Vec<nervix_models::WasmCheckpointInspection>>::new();
+        for owner in node.execution_nodes() {
+            let reported = if &owner == self.inner.consensus.local_node_id() {
+                self.inner
+                    .runtime
+                    .inspect_inherited_wasm_processor_state_for(domain, processor)
+                    .into_iter()
+                    .collect::<Vec<_>>()
+            } else {
+                self.inner
+                    .interconnect
+                    .request(
+                        &owner,
+                        nervix_interconnect::DescribeInheritedWasmStateRequest {
+                            domain: domain.clone(),
+                            processor: processor.clone(),
+                        },
+                    )
+                    .await
+                    .change_context(super::ObservationError::RemoteDescribeRequest {
+                        domain: domain.clone(),
+                        entity: nervix_models::NodeRef::new(
+                            ModelKind::WasmProcessor,
+                            processor.clone(),
+                        ),
+                        node: owner.clone(),
+                    })?
+                    .result
+                    .map_err(|failure| {
+                        error_stack::Report::new(super::ObservationError::RemoteDescribeFailure {
+                            failure,
+                        })
+                    })?
+            };
+            for (unit, values) in reported {
+                checkpoints.entry(unit).or_default().extend(values);
+            }
+        }
+        Ok(checkpoints)
+    }
+
     pub(in crate::application) async fn show_wasm_processor_state(
         &self,
         domain: &DomainName,
