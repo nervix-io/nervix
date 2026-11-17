@@ -126,6 +126,8 @@ pub(in crate::runtime) enum RuntimeVmCompileError {
     InvalidFilter { node: ModelName },
     #[error("filter compile failed for '{node}'")]
     CompileFilter { node: ModelName },
+    #[error("failed to compile a RATE LIMIT measure for '{node}'")]
+    CompileRateLimitMeasure { node: ModelName },
     #[error("output construction for '{node}' is invalid")]
     InvalidOutputConstruction { node: ModelName },
     #[error("FILTER-MAP compile failed for '{node}'")]
@@ -903,6 +905,63 @@ pub(super) fn bind_scoped_filter_program(
             RuntimeFilterScope::FinalizedOutput => OutputNamespaceInput::Finalized,
         },
         lookup_hash_maps,
+        error_sites,
+    })
+}
+
+/// Binds a lowered `RATE LIMIT` measure to what an ingestor's payloads carry before their codec
+/// decodes them: the metadata fields and payload facts its entity declares, and its headers where
+/// the entity has them. The program writes one exact, required `U64` per payload and reads nothing
+/// else: no decoded field, materialized state, lookup or branch.
+pub(super) fn bind_ingestor_measure_program(
+    node: &ModelName,
+    measure: &crate::registry::LoweredMeasure,
+    metadata: nervix_models::IngestorMetadataDeclaration,
+    payload: nervix_models::IngestorPayloadDeclaration,
+    allow_header_reads: bool,
+    context: RuntimeVmCompileContext<'_>,
+) -> RuntimeVmCompileResult<CompiledProgramWithMaterializedInterest> {
+    let failure = || RuntimeVmCompileError::CompileRateLimitMeasure { node: node.clone() };
+    let parsed = measure.program();
+    let error_sites =
+        compiled_message_error_sites(parsed, &[MessageErrorOperation::RateLimit], None)
+            .change_context_lazy(failure)?;
+    let output = StdArc::new(arrow_schema::Schema::new(vec![arrow_schema::Field::new(
+        crate::registry::LoweredMeasure::FIELD,
+        arrow_schema::DataType::UInt64,
+        false,
+    )]));
+    let mut bindings = vec![VmCompileBinding::writeonly(
+        crate::registry::LoweredMeasure::NAMESPACE,
+        output.clone(),
+    )];
+    if let Some(schema) = metadata.arrow_schema() {
+        bindings.push(VmCompileBinding::readonly(
+            INGEST_METADATA_NAMESPACE,
+            StdArc::new(schema),
+        ));
+    }
+    if let Some(binding) = ingestor_payload_binding(payload, parsed) {
+        bindings.push(binding);
+    }
+    let compiled = compile_vm_program_with_options_for_bindings_with_sensitivity(
+        parsed,
+        output,
+        nervix_vm::SchemaSensitivity::empty(),
+        bindings,
+        context.compile_options(VmCompileOptions {
+            output_mode: nervix_vm::OutputMode::ExplicitOnly,
+            allow_sensitive_output: false,
+            allow_header_reads,
+            ..VmCompileOptions::default()
+        }),
+    )
+    .change_context_lazy(failure)?;
+    Ok(CompiledProgramWithMaterializedInterest {
+        compiled: Arc::new(compiled),
+        materialized_interest: MaterializedProgramInterest::default(),
+        output_namespace_input: OutputNamespaceInput::Uninitialized,
+        lookup_hash_maps: Vec::new(),
         error_sites,
     })
 }

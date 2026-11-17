@@ -15,14 +15,15 @@
 
 use chumsky::prelude::*;
 use nervix_models::{
-    NatsConsumerName, NatsIngestMode, NatsQueueGroupName, NatsStreamIngestMode, NatsStreamIngestor,
-    NatsStreamIngestorChange, NatsStreamName, NatsSubjectIngestor, NatsSubjectIngestorChange,
-    NatsSubjectName,
+    IngestDeliveryKind, NatsConsumerName, NatsIngestMode, NatsQueueGroupName, NatsStreamIngestMode,
+    NatsStreamIngestor, NatsStreamIngestorChange, NatsStreamName, NatsSubjectIngestor,
+    NatsSubjectIngestorChange, NatsSubjectName,
 };
 
 use super::delivery::{
-    ParallelAck, SequentialAck, ack_parallel, ack_sequential, flexible_quiesce_clause, instances,
-    no_ack, push_quiesce_clause,
+    NamedDelivery, ParallelAck, SequentialAck, ack_parallel, ack_sequential,
+    flexible_quiesce_clause, instances, no_ack, push_quiesce_clause, rate_limits_after,
+    rate_limits_in,
 };
 use crate::{
     lexer::{Identifier, Token},
@@ -42,6 +43,9 @@ pub(super) fn subject_body<'src>()
         .then(instances::<NatsSubjectIngestor>())
         .then_ignore(kw(Identifier::Mode))
         .then(no_ack().to(NatsIngestMode::NoAck))
+        .then_ignore(rate_limits_in::<NatsSubjectIngestor>(
+            IngestDeliveryKind::NoAck,
+        ))
         .then(push_quiesce_clause())
         .map(
             |(((((client, subject), queue_group), instances), mode), quiesce)| {
@@ -60,6 +64,12 @@ pub(super) fn subject_body<'src>()
 
 /// `FROM <client> STREAM '<stream>' CONSUMER '<consumer>' MODE ACK SEQUENTIAL …|ACK PARALLEL MAX
 /// <n> … ON QUIESCE SUSPEND|BUFFER …|DROP`.
+impl NamedDelivery for NatsStreamIngestMode {
+    fn delivery_kind(&self) -> IngestDeliveryKind {
+        self.acknowledgement().kind()
+    }
+}
+
 pub(super) fn stream_body<'src>()
 -> impl Parser<'src, &'src [Token], NatsStreamIngestor, extra::Err<ParseError<'src>>> + Clone {
     client_ref()
@@ -68,14 +78,18 @@ pub(super) fn stream_body<'src>()
         .then_ignore(kw(Identifier::Consumer))
         .then(external_name::<NatsConsumerName>())
         .then_ignore(kw(Identifier::Mode))
-        .then(stream_mode())
+        .then(
+            stream_mode()
+                .then_with_ctx(rate_limits_after::<NatsStreamIngestor, NatsStreamIngestMode>()),
+        )
         .then(flexible_quiesce_clause())
         .map(
-            |((((client, stream), consumer), mode), quiesce)| NatsStreamIngestor {
+            |((((client, stream), consumer), (mode, rate_limits)), quiesce)| NatsStreamIngestor {
                 client,
                 stream,
                 consumer,
                 mode,
+                rate_limits,
                 quiesce,
             },
         )

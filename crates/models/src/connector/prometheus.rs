@@ -225,6 +225,7 @@ impl IngestorDeclaration for PrometheusQueryIngestor {
         acknowledgement_confirmation: AcknowledgementConfirmation::None,
         delivery: &[DeclaredDelivery::NO_ACK],
         quiesce: &[DeclaredQuiesce::SUSPEND, DeclaredQuiesce::BUFFER],
+        rate_limit: crate::RateLimitDeclaration::Paced,
         locator: None,
         options: &[
             OptionDeclaration {

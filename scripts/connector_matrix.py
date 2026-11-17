@@ -174,6 +174,7 @@ def entity_rows(row, side, notes):
         rows.extend([
             ("Instancing", row["instancing"]),
             ("Quiesce (complete bodies after ON QUIESCE)", "\n".join(row["quiesce"])),
+            ("RATE LIMIT", rate_limit_text(row["rate_limit"])),
             ("Metadata", "\n".join(row["metadata"]) or absent(notes, row, "metadata")),
             ("Payload facts", "\n".join(row["payload"])),
             ("Every live node", "yes" if row["every_node"] else "no; scheduled owner"),
@@ -330,6 +331,33 @@ def manual(row, side, notes):
             + f"\nSee the [{row['entity']} capability and mirror reference]({link}).\n")
 
 
+def rate_limit_text(limit):
+    """The delivery modes in which an entity takes `RATE LIMIT`, as its declaration states them."""
+    if limit["class"] == "paced":
+        return "Refused: the entity reads on its `EVERY` cadence."
+    if not limit["held"]:
+        return "Refused in every mode: the entity cannot hold its source back."
+    held = ", ".join(f"`{mode}`" for mode in limit["held"])
+    if not limit["refused"]:
+        return f"Accepted in {held}."
+    refused = ", ".join(f"`{mode}`" for mode in limit["refused"])
+    return f"Accepted in {held}; refused in {refused}."
+
+
+def rate_limit_table(surface, explanations):
+    """Where each ingest entity takes `RATE LIMIT`, from its declaration, and why."""
+    classes = {row["rate_limit"]["class"] for row in surface["ingest"]}
+    if classes != set(explanations):
+        raise ValueError("rate_limit: explanation classes do not match the declarations")
+    rows = []
+    for row in surface["ingest"]:
+        limit = row["rate_limit"]
+        held = ", ".join(f"`{mode}`" for mode in limit["held"]) or "None"
+        refused = ", ".join(f"`{mode}`" for mode in limit["refused"]) or "None"
+        rows.append((f"`{row['entity']}`", held, refused, explanations[limit["class"]]))
+    return table(rows, ("Entity", "Takes `RATE LIMIT` in", "Refuses it in", "Why"))
+
+
 def classified_table(surface, field, explanations):
     groups = {}
     for row in surface["ingest"]:
@@ -394,6 +422,7 @@ def documents(root, surface, notes, policy):
                     if option["keywords"] == "INSTANCES":
                         rows.append((row["entity"], row["instancing"], option["presence"]))
             text = region(text, "instancing", table(rows, ("Entity", "Capability", "INSTANCES")))
+            text = region(text, "rate-limit", rate_limit_table(surface, policy["rate_limit"]))
         text = region(text, f"{side}-headers", side_headers(surface, side))
         output[path] = text
     path = "docs/src/connector-contract.md"

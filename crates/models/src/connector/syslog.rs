@@ -205,6 +205,8 @@ impl SyslogFrameLimits {
 pub struct SyslogListenerIngestor {
     pub client: ClientName,
     pub mode: SyslogIngestMode,
+    /// The `RATE LIMIT` clauses the body writes after its delivery mode, in order.
+    pub rate_limits: crate::RateLimits,
     pub quiesce: IngestQuiesceMode,
 }
 
@@ -304,6 +306,10 @@ impl IngestorDeclaration for SyslogListenerIngestor {
             DeclaredQuiesce::BUFFER,
             DeclaredQuiesce::DROP,
         ],
+        // The listener's loop waits as it does for a full intake: TCP and TLS senders wait once its
+        // bounded frame queue is full, and UDP datagrams wait in the kernel's receive buffer, which
+        // drops what exceeds it.
+        rate_limit: crate::RateLimitDeclaration::Held,
         locator: None,
         options: &[],
         bounds: SYSLOG_LISTENER_BOUNDS,
@@ -332,6 +338,14 @@ impl IngestorEntityBody for SyslogListenerIngestor {
 
     fn quiesce_mut(&mut self) -> &mut IngestQuiesceMode {
         &mut self.quiesce
+    }
+
+    fn rate_limits(&self) -> &crate::RateLimits {
+        &self.rate_limits
+    }
+
+    fn rate_limits_mut(&mut self) -> Option<&mut crate::RateLimits> {
+        Some(&mut self.rate_limits)
     }
 
     fn acknowledgement(&self) -> IngestAcknowledgement<'_> {

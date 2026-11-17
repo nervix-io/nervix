@@ -1551,6 +1551,7 @@ mod tests {
                                                 max_backoff: "5s".to_string(),
                                             },
                                         },
+                                        rate_limits: nervix_models::RateLimits::NONE,
                                         quiesce: nervix_models::IngestQuiesceMode::Suspend,
                                     },
                                 )),

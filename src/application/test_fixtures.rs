@@ -407,6 +407,7 @@ fn model_of_kind(identifier_raw: &str, kind: ModelKind) -> Model {
                             max_backoff: "30s".to_string(),
                         },
                     },
+                    rate_limits: nervix_models::RateLimits::NONE,
                     quiesce: nervix_models::IngestQuiesceMode::Suspend,
                 })),
                 codec: named("events_codec"),

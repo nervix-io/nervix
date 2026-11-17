@@ -78,9 +78,12 @@ impl Clause {
     }
 }
 
-/// A whole payload's cost in one clause. Zero costs are rejected before constructing this value.
+/// A whole payload's cost in one clause.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Charge {
+    /// The payload costs nothing in this clause, such as an empty payload measured in bytes: the
+    /// clause neither charges it nor holds it back, whatever its kind.
+    Free,
     Direct(NonZeroU32),
     Keyed {
         key: KeyFingerprint,
@@ -89,9 +92,11 @@ pub enum Charge {
 }
 
 impl Charge {
-    fn cost(self) -> NonZeroU32 {
+    /// What the payload costs, or nothing for a free charge.
+    fn cost(self) -> Option<NonZeroU32> {
         match self {
-            Self::Direct(cost) | Self::Keyed { cost, .. } => cost,
+            Self::Free => None,
+            Self::Direct(cost) | Self::Keyed { cost, .. } => Some(cost),
         }
     }
 }
@@ -130,6 +135,16 @@ pub enum AdmissionError {
     VisitRange,
     #[error("the allowance generation contains duplicate keys or invalid state")]
     GenerationState,
+}
+
+/// How many payloads that each cost one unit of every clause asked about are admissible at one
+/// instant, which is how much a source that is read on demand may be asked for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UnitCapacity {
+    /// Up to this many such payloads are admissible now, one after another.
+    Available(NonZeroU32),
+    /// None is admissible before this instant, when every clause asked about admits one again.
+    ExhaustedUntil(Instant),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -238,8 +253,9 @@ impl Limiter {
         let offset = self.offset(now)?;
         for (index, (allowance, charge)) in self.clauses.iter().zip(charges).enumerate() {
             match (&allowance.store, charge) {
-                (Store::Direct(_), Charge::Direct(_)) | (Store::Keyed(_), Charge::Keyed { .. }) => {
-                }
+                (_, Charge::Free)
+                | (Store::Direct(_), Charge::Direct(_))
+                | (Store::Keyed(_), Charge::Keyed { .. }) => {}
                 _ => return Err(Report::new(AdmissionError::ChargeKind { clause: index })),
             }
             let horizon = allowance.clause.quota().horizon;
@@ -261,10 +277,12 @@ impl Limiter {
         let offset = self.validate(charges, now)?;
         for (index, (allowance, charge)) in self.clauses.iter().zip(charges).enumerate() {
             let burst = allowance.clause.quota().burst();
-            if charge.cost() > burst {
+            if let Some(cost) = charge.cost()
+                && cost > burst
+            {
                 return Ok(Admission::NeverAdmissible {
                     clause: index,
-                    cost: charge.cost(),
+                    cost,
                     burst,
                 });
             }
@@ -274,6 +292,9 @@ impl Limiter {
         let mut wait: Option<Instant> = None;
         let mut exhausted = None;
         for (index, (allowance, charge)) in self.clauses.iter().zip(charges).enumerate() {
+            let Some(cost) = charge.cost() else {
+                continue;
+            };
             let kind = match (&allowance.store, *charge) {
                 (Store::Direct(cell), Charge::Direct(_)) => LeaseKind::Direct(cell),
                 (Store::Keyed(store), Charge::Keyed { key, .. }) => {
@@ -304,7 +325,7 @@ impl Limiter {
                     store,
                     AdmissionClock(now),
                 );
-            match limiter.check_n(charge.cost()) {
+            match limiter.check_n(cost) {
                 Ok(Ok(())) => {}
                 Ok(Err(not_until)) => {
                     let deadline = not_until.earliest_possible().0;
@@ -327,6 +348,77 @@ impl Limiter {
             lease.commit();
         }
         Ok(Admission::Admitted)
+    }
+
+    /// How many payloads costing one unit of each direct clause in `counting` those clauses admit
+    /// at `now`, charging nothing. Admitting that many one-unit payloads at `now` succeeds, and
+    /// the next one waits; when none is admissible, the instant is the one at which admission
+    /// would succeed again. A keyed clause has no capacity independent of its keys.
+    pub fn unit_capacity_at(
+        &self,
+        counting: &[usize],
+        now: Instant,
+    ) -> Result<UnitCapacity, Report<AdmissionError>> {
+        let offset = self.offset(now)?;
+        let mut available: Option<u32> = None;
+        let mut exhausted_until: Option<Instant> = None;
+        for &index in counting {
+            let Some(allowance) = self.clauses.get(index) else {
+                return Err(Report::new(AdmissionError::ChargeCount));
+            };
+            let Store::Direct(cell) = &allowance.store else {
+                return Err(Report::new(AdmissionError::ChargeKind { clause: index }));
+            };
+            let quota = allowance.clause.quota();
+            let interval = u64::try_from(quota.replenish_interval().as_nanos())
+                .verified("quota bounds its interval to u64");
+            let beyond_first = quota
+                .burst()
+                .get()
+                .checked_sub(1)
+                .verified("a quota's burst is at least one");
+            let tolerance = interval
+                .checked_mul(u64::from(beyond_first))
+                .verified("quota bounds its interval times its burst to half of u64");
+            let debt = nervix_primitives::expect_lint!(
+                nervix::clamped_arithmetic,
+                "a horizon at or before this instant leaves no allowance debt",
+                cell.horizon().saturating_sub(offset)
+            );
+            match debt.checked_sub(tolerance) {
+                Some(excess) if excess > 0 => {
+                    let at = now
+                        .checked_add(Duration::from_nanos(excess))
+                        .ok_or_else(|| Report::new(AdmissionError::ClockRange))?;
+                    exhausted_until = Some(match exhausted_until {
+                        Some(previous) => previous.max(at),
+                        None => at,
+                    });
+                }
+                _ => {
+                    let spare = tolerance
+                        .checked_sub(debt)
+                        .verified("the debt is at most the tolerance on this arm");
+                    let units = (spare / interval)
+                        .checked_add(1)
+                        .verified("the spare tolerance is at most the burst's u32 intervals");
+                    let units = u32::try_from(units)
+                        .verified("a clause admits at most its burst, which fits u32");
+                    available = Some(match available {
+                        Some(previous) => previous.min(units),
+                        None => units,
+                    });
+                }
+            }
+        }
+        if let Some(until) = exhausted_until {
+            return Ok(UnitCapacity::ExhaustedUntil(until));
+        }
+        let Some(units) = available else {
+            return Err(Report::new(AdmissionError::ChargeCount));
+        };
+        let units = NonZeroU32::new(units).verified("an unexhausted clause admits at least one");
+        Ok(UnitCapacity::Available(units))
     }
 
     /// Expire inactive keys before reporting occupancy; TTL removals are not capacity evictions.

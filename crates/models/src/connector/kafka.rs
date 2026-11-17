@@ -226,6 +226,8 @@ pub struct KafkaTopicIngestor {
     pub offset_mode: KafkaOffsetMode,
     pub instances: crate::IngestorInstances,
     pub mode: KafkaIngestMode,
+    /// The `RATE LIMIT` clauses the body writes after its delivery mode, in order.
+    pub rate_limits: crate::RateLimits,
     pub quiesce: IngestQuiesceMode,
 }
 
@@ -413,6 +415,9 @@ impl IngestorDeclaration for KafkaTopicIngestor {
             DeclaredDelivery::ACK_PARALLEL,
         ],
         quiesce: &[DeclaredQuiesce::SUSPEND],
+        // The broker keeps every record until the consumer fetches it, so the host reads only what
+        // its allowance admits.
+        rate_limit: crate::RateLimitDeclaration::Held,
         locator: Some(LocatorDeclaration {
             keywords: "TOPIC",
             name: LocatorName::External(KafkaTopicName::DECLARATION),
@@ -466,6 +471,14 @@ impl IngestorEntityBody for KafkaTopicIngestor {
 
     fn quiesce_mut(&mut self) -> &mut IngestQuiesceMode {
         &mut self.quiesce
+    }
+
+    fn rate_limits(&self) -> &crate::RateLimits {
+        &self.rate_limits
+    }
+
+    fn rate_limits_mut(&mut self) -> Option<&mut crate::RateLimits> {
+        Some(&mut self.rate_limits)
     }
 
     fn acknowledgement(&self) -> IngestAcknowledgement<'_> {

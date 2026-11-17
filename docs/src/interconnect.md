@@ -541,8 +541,11 @@ Emitter statements exchanged through the control plane use explicit `KEY` expres
 corridor/domain-wide placement coverage, pace-only domain configuration, exact partition/instance
 relocation selections, ingestor acknowledgement and connector lifecycle observations, and the current
 transaction operation and commit-step alternatives, durable licensing rotation/release effects and
-consensus commands with their exact request and independent binding records, and the engine and
-connector host capabilities in each node's incarnation-bound claim. Peers must
+consensus commands with their exact request and independent binding records, the engine and
+connector host capabilities in each node's incarnation-bound claim, the ordered `RATE LIMIT`
+clauses of an ingestor body with their `SET RATE LIMIT` and `DROP RATE LIMIT` alterations, and the
+rate-limit hold, hold time, rejection and program rejection counters a `DESCRIBE INGESTOR` answer
+carries for a unit whose ingestor writes `RATE LIMIT`. Peers must
 match it exactly.
 
 Execution-unit identities use an eight-byte rank with four-byte archive alignment. Single and

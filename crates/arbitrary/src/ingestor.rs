@@ -14,12 +14,12 @@ use nervix_models::{
     NatsStreamIngestor, NatsSubjectIngestor, PrometheusIngestMode, PrometheusIngestorEntity,
     PrometheusQueryIngestor, PulsarIngestMode, PulsarIngestorEntity, PulsarSubscription,
     PulsarSubscriptionOwnership, PulsarTopicIngestor, RabbitMqIngestMode, RabbitMqIngestorEntity,
-    RabbitMqQueueIngestor, RedisIngestorEntity, RedisPubSubIngestMode, RedisPubSubIngestor,
-    RedisSubscriptionTarget, RetryPolicy, SqsIngestMode, SqsIngestorEntity, SqsQueueIngestor,
-    SqsReceiveMax, SyslogIngestMode, SyslogIngestorEntity, SyslogListenerIngestor,
-    TransportIngestorInput, WebsocketsConnectionIngestor, WebsocketsEndpointIngestor,
-    WebsocketsIngestMode, WebsocketsIngestorEntity, ZeroMqIngestMode, ZeroMqIngestorEntity,
-    ZeroMqPullIngestor,
+    RabbitMqQueueIngestor, RateLimit, RateLimits, RateQuantity, RedisIngestorEntity,
+    RedisPubSubIngestMode, RedisPubSubIngestor, RedisSubscriptionTarget, RetryPolicy,
+    SqsIngestMode, SqsIngestorEntity, SqsQueueIngestor, SqsReceiveMax, SyslogIngestMode,
+    SyslogIngestorEntity, SyslogListenerIngestor, TransportIngestorInput,
+    WebsocketsConnectionIngestor, WebsocketsEndpointIngestor, WebsocketsIngestMode,
+    WebsocketsIngestorEntity, ZeroMqIngestMode, ZeroMqIngestorEntity, ZeroMqPullIngestor,
 };
 
 use crate::{
@@ -86,6 +86,7 @@ impl Arbitrary<'_> {
                 ack_timeout: self.duration(),
                 retry_policy: self.retry_policy(),
             },
+            rate_limits: self.rate_limits(),
         }
     }
 
@@ -241,6 +242,7 @@ impl Arbitrary<'_> {
             offset_mode,
             instances,
             mode: self.kafka_mode(),
+            rate_limits: RateLimits::NONE,
             quiesce: IngestQuiesceMode::Suspend,
         };
         self.quiescing_as_supported(source)
@@ -274,6 +276,7 @@ impl Arbitrary<'_> {
             },
             instances,
             mode: self.pulsar_mode(),
+            rate_limits: RateLimits::NONE,
             quiesce: IngestQuiesceMode::Suspend,
         };
         self.quiescing_as_supported(source)
@@ -326,6 +329,7 @@ impl Arbitrary<'_> {
             session,
             qos,
             mode,
+            rate_limits: RateLimits::NONE,
             quiesce: IngestQuiesceMode::Suspend,
         };
         self.quiescing_as_supported(source)
@@ -351,6 +355,7 @@ impl Arbitrary<'_> {
             stream: self.nats_stream_name(),
             consumer: self.nats_consumer_name(),
             mode: self.nats_stream_mode(),
+            rate_limits: RateLimits::NONE,
             quiesce: IngestQuiesceMode::Suspend,
         };
         self.quiescing_as_supported(source)
@@ -363,6 +368,7 @@ impl Arbitrary<'_> {
             queue: self.rabbitmq_queue_name(),
             instances: self.ingestor_instances(),
             mode: self.rabbitmq_mode(),
+            rate_limits: RateLimits::NONE,
             quiesce: IngestQuiesceMode::Suspend,
         };
         self.quiescing_as_supported(source)
@@ -413,6 +419,7 @@ impl Arbitrary<'_> {
         let source = ZeroMqPullIngestor {
             client: self.name(),
             mode: ZeroMqIngestMode::NoAck,
+            rate_limits: RateLimits::NONE,
             quiesce: IngestQuiesceMode::Suspend,
         };
         self.quiescing_as_supported(source)
@@ -425,6 +432,7 @@ impl Arbitrary<'_> {
             queue: self.sqs_queue_name(),
             instances: self.ingestor_instances(),
             mode: self.sqs_mode(),
+            rate_limits: RateLimits::NONE,
             quiesce: IngestQuiesceMode::Suspend,
         };
         self.quiescing_as_supported(source)
@@ -463,19 +471,70 @@ impl Arbitrary<'_> {
         let source = SyslogListenerIngestor {
             client: self.name(),
             mode: SyslogIngestMode::NoAck,
+            rate_limits: RateLimits::NONE,
             quiesce: IngestQuiesceMode::Suspend,
         };
         self.quiescing_as_supported(source)
     }
 
-    /// `source` quiescing in one of the modes it supports.
+    /// `source` quiescing in one of the modes it supports, and writing `RATE LIMIT` clauses where
+    /// its entity holds its source back in its delivery mode.
     fn quiescing_as_supported<Source: IngestorEntityBody + IngestorDeclaration>(
         &mut self,
         mut source: Source,
     ) -> Source {
         let quiesce = self.supported_quiesce(&source);
         *source.quiesce_mut() = quiesce;
+        let delivery = source.acknowledgement().kind();
+        if Source::CAPABILITIES.rate_limit.holds(delivery) {
+            let limits = self.rate_limits();
+            if let Some(held) = source.rate_limits_mut() {
+                *held = limits;
+            }
+        }
         source
+    }
+
+    /// Up to two `RATE LIMIT` clauses, none included.
+    pub fn rate_limits(&mut self) -> RateLimits {
+        let count = self.entropy.byte() % 3;
+        let mut clauses = Vec::with_capacity(usize::from(count));
+        for _ in 0..count {
+            clauses.push(self.rate_limit());
+        }
+        RateLimits::from(clauses)
+    }
+
+    /// The one or two clauses a `SET RATE LIMIT` writes, which replaces every clause with at least
+    /// one.
+    pub fn written_rate_limits(&mut self) -> RateLimits {
+        let count = 1 + self.entropy.byte() % 2;
+        let mut clauses = Vec::with_capacity(usize::from(count));
+        for _ in 0..count {
+            clauses.push(self.rate_limit());
+        }
+        RateLimits::from(clauses)
+    }
+
+    /// One `RATE LIMIT` clause as a statement writes it: positive counts, a period longer than
+    /// zero, and a measure or none.
+    pub fn rate_limit(&mut self) -> RateLimit {
+        RateLimit {
+            count: self.rate_quantity(),
+            measure: self.optional_expression(),
+            period: self.positive_duration(),
+            burst: self.rate_quantity(),
+        }
+    }
+
+    /// A positive `RATE LIMIT` count: a whole number, or a byte size spelled as written.
+    pub fn rate_quantity(&mut self) -> RateQuantity {
+        let text = if self.entropy.flag() {
+            self.entropy.boundary_biased(1..=u64::MAX).to_string()
+        } else {
+            self.positive_byte_size()
+        };
+        RateQuantity::parse(&text).assured("a positive whole number or byte size is a count")
     }
 
     /// Any quiesce mode a statement can write.

@@ -1765,6 +1765,7 @@ mod tests {
                     max_backoff: "200ms".to_string(),
                 },
             },
+            rate_limits: nervix_models::RateLimits::NONE,
             quiesce: nervix_models::IngestQuiesceMode::Suspend,
         }));
         let program = bind_ingestor_route_for_test(

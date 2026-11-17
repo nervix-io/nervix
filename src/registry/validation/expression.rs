@@ -86,6 +86,11 @@ pub(in crate::registry) fn visit_model_expressions(
 
     match model {
         Model::Ingestor(model) => {
+            for clause in model.input.rate_limits().clauses() {
+                if let Some(measure) = &clause.measure {
+                    visitor(measure);
+                }
+            }
             visit_filter(&model.filter_where, visitor);
             visit_outputs(&model.output_routes, visitor);
         }

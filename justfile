@@ -400,6 +400,28 @@ test-ingestor-payload *args: build-deps build-plexus-format build-test-cli build
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
     cargo test --package nervix-scenarios --test scenarios -- --input 'tests/features/runtime/ingestor_payload*.feature' {{ quote(args) }}
 
+# Exercise unkeyed ingestor rate limits through every public outline on one and three nodes.
+test-ingestor-rate-limit *args: build-deps build-plexus-format build-test-cli build-deadlock-report
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    cargo test --package nervix-scenarios --test scenarios -- --input 'tests/features/runtime/ingestor_rate_limit.feature' {{ quote(args) }}
+
+# Exercise RATE LIMIT through its owners: the allowance engine, the clause grammar and its
+# declaration-driven conformance, the vocabulary, the typed plan and its validation, the broker
+# loop's holds, the describe envelope and the console's rows.
+test-ingestor-rate-limit-owners: download-onnxruntime build-web-console
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    cargo test --package nervix-rate-limit --lib
+    cargo test --package nervix-plexus --lib ingestor::
+    cargo test --package nervix-plexus --lib canonical_round_trip_tests::
+    cargo test --package nervix-models --lib
+    cargo test --package nervix-arbitrary --lib
+    cargo test --package nervix-server --features testing --lib -- rate_limit runtime::ingestors::connector::read_tests:: describe_output:: registry::validation::connector
+    cargo test --package nervix-web-console --bin nervix-web-console create_dialog::ingestor
+
 # Verify payload syntax and declaration-driven completion through the composed Plexus grammar.
 test-ingestor-payload-language:
     cargo test --package nervix-plexus --lib semantic_program::tests::payload_
@@ -1223,6 +1245,16 @@ test-visual-create *args: build-web-console wasm-processor-guests download-onnxr
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
     cargo test --package nervix-scenarios --test scenarios -- \
         --input "$PWD/tests/features/web-console/visual_create{,}.feature" "$@"
+
+# Create ingestors through the web console's visual form on in-process one- and three-node clusters,
+# their RATE LIMIT rows included. The input is an absolute glob, as `test-visual-create` explains.
+[positional-arguments]
+test-visual-create-ingestor *args: build-web-console wasm-processor-guests download-onnxruntime
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    cargo test --package nervix-scenarios --test scenarios -- \
+        --input "$PWD/tests/features/web-console/visual_create_ingestor{,}.feature" "$@"
 
 # Create window processors and correlators through the web console's visual forms on in-process
 # one- and three-node clusters, with only the in-process server's prerequisites.

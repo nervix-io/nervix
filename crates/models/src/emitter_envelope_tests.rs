@@ -347,12 +347,15 @@ fn an_emitter_presents_the_envelope_it_writes_among_its_inspection_rows() {
         .with_envelope(&envelope)
         .expect("the envelope renders");
 
+    let plain = plain
+        .describe_lines()
+        .expect("an emitter writes no RATE LIMIT");
+    let written = written
+        .describe_lines()
+        .expect("an emitter writes no RATE LIMIT");
+    assert_eq!(plain.last().map(String::as_str), Some("envelope: none"));
     assert_eq!(
-        plain.describe_lines().last().map(String::as_str),
-        Some("envelope: none")
-    );
-    assert_eq!(
-        written.describe_lines().last().map(String::as_str),
+        written.last().map(String::as_str),
         Some(
             "envelope: PERSISTENT DELAY 1s MESSAGE ID 'id' PROPERTIES {'content_type' = \
              'application/json'}"

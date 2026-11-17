@@ -572,6 +572,9 @@ pub struct IngestorEntityCapabilities {
     pub delivery: &'static [DeclaredDelivery],
     /// The quiesce modes its transport can honor, each kind at most once.
     pub quiesce: &'static [DeclaredQuiesce],
+    /// Whether its ingestors can hold their source back, which a `RATE LIMIT` needs, and in which
+    /// delivery modes.
+    pub rate_limit: crate::RateLimitDeclaration,
     /// The name that locates what it reads, for an entity whose body names one. A body may write
     /// one of the entity's [alternative locators](IngestorDeclaration::ALTERNATIVE_LOCATORS)
     /// instead, and [`IngestorEntityKind::locators`] reads them together.
@@ -764,6 +767,18 @@ pub trait IngestorEntityBody {
 
     fn quiesce_mut(&mut self) -> &mut IngestQuiesceMode;
 
+    /// The `RATE LIMIT` clauses the body writes. An entity whose ingestors cannot hold their source
+    /// back writes none.
+    fn rate_limits(&self) -> &crate::RateLimits {
+        &crate::connector::NO_RATE_LIMITS
+    }
+
+    /// The clauses `SET RATE LIMIT` and `DROP RATE LIMIT` replace, for an entity whose ingestors can
+    /// hold their source back in some delivery mode.
+    fn rate_limits_mut(&mut self) -> Option<&mut crate::RateLimits> {
+        None
+    }
+
     /// The acknowledgement this body's delivery mode declares. A body that declares no delivery
     /// mode acknowledges nothing.
     fn acknowledgement(&self) -> IngestAcknowledgement<'_>;
@@ -846,6 +861,10 @@ pub(crate) trait AlteredIngestorEntity: IngestorEntityModel + Clone {
 
     /// The client the ingestor `input` reads through, where its pair reads through one.
     fn client_of_mut(input: &mut IngestorInput) -> Option<&mut ClientName>;
+
+    /// The `RATE LIMIT` clauses of the ingestor `input` reads, where its pair's ingestors can hold
+    /// their source back in some delivery mode.
+    fn rate_limits_of_mut(input: &mut IngestorInput) -> Option<&mut crate::RateLimits>;
 }
 
 /// What the kind of one connector's ingestor entities answers for each of them.
@@ -1028,6 +1047,11 @@ impl IngestorEntity {
 
     pub fn quiesce(&self) -> &IngestQuiesceMode {
         self.body().quiesce()
+    }
+
+    /// The `RATE LIMIT` clauses this ingestor's body writes.
+    pub fn rate_limits(&self) -> &crate::RateLimits {
+        self.body().rate_limits()
     }
 
     /// Whether this ingestor can honor `quiesce`: its entity declares the mode, and this ingestor's

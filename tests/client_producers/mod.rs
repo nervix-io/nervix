@@ -1242,6 +1242,33 @@ async fn then_batch_completed_after_receiver_request(
     );
 }
 
+/// The client records the outcome when it arrives, which load only delays, so the gap from the
+/// instant the scenario recorded before submitting can only grow on a busy host.
+#[then(
+    expr = "batch {string} completes no sooner than {string} after the recorded rate limit start"
+)]
+async fn then_batch_completes_after_rate_limit_start(
+    world: &mut ScenarioWorld,
+    batch: String,
+    minimum_gap: String,
+) {
+    let minimum_gap =
+        parse_duration_text(&minimum_gap).expect("the step names a valid minimum gap");
+    let started_at = world.rate_limit.started_at();
+    let answered = answered(world, &batch).await;
+    assert_eq!(
+        answered.outcome.class, "completed",
+        "batch '{batch}' did not complete: {:?}",
+        answered.outcome
+    );
+    let gap = answered.at.duration_since(started_at);
+    assert!(
+        gap >= minimum_gap,
+        "batch '{batch}' completed {gap:?} after the recorded rate limit start, sooner than the \
+         allowance permits ({minimum_gap:?})"
+    );
+}
+
 /// Stops waiting for a batch the Rust client submits. A batch still waiting for credit is never
 /// sent; one the producer already holds stays with it.
 #[when(expr = "the wait for batch {string} is cancelled")]

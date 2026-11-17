@@ -22,14 +22,14 @@ use nervix_models::{
     ClientIngestMode, CodecBatchContainer, CreateClientHttp, CreateCodec, CreateEmitter,
     CreateIngestor, CreateSchema, CreateSignalingProtocol, DomainName, EmitterEntity,
     EmitterEntityModel, EmitterEnvelope, EndpointName, EnvelopeClauseForm, EnvelopeClauseKind,
-    EnvelopeValueType, Expression, FieldName, HttpBodyMode, HttpEmitter, HttpHeaderName,
-    HttpHeaderValue, HttpMethod, HttpOrigin, HttpRequestEmitter, IcebergCatalogProperties,
-    IcebergStorageBackend, IcebergTableEmitter, IngestTimestampSource, IngestorEntity,
-    IngestorInput, IngestorMetadataType, LiteralHeaderWrite, Model, ModelIndex, ModelKind,
-    ModelName, NodeRef, OtelEmitter, OtelMappings, OtelMetricKind, OtelMetricsEmitter, ParseAsType,
-    ProcessorOutput, PropertyType, RelayName, RouteConstruction, SQS_DELAY_MAXIMUM, SchemaField,
-    SchemaName, SignalingWireFormat, SqsEmitter, SqsQueueEmitter, SqsQueueName, VhostName,
-    parse_duration_text,
+    EnvelopeValueType, Expression, FieldName, FieldScope, HttpBodyMode, HttpEmitter,
+    HttpHeaderName, HttpHeaderValue, HttpMethod, HttpOrigin, HttpRequestEmitter,
+    IcebergCatalogProperties, IcebergStorageBackend, IcebergTableEmitter, IngestTimestampSource,
+    IngestorEntity, IngestorInput, IngestorMetadataType, LiteralHeaderWrite, Model, ModelIndex,
+    ModelKind, ModelName, NodeRef, OtelEmitter, OtelMappings, OtelMetricKind, OtelMetricsEmitter,
+    ParseAsType, ProcessorOutput, PropertyType, RelayName, RouteConstruction, SQS_DELAY_MAXIMUM,
+    SchemaField, SchemaName, SignalingWireFormat, SqsEmitter, SqsQueueEmitter, SqsQueueName,
+    VhostName, parse_duration_text,
 };
 use nervix_primitives::sync::StdArc;
 use nervix_vm::{
@@ -46,7 +46,7 @@ use crate::{
         error::{
             ConnectorDeclarationIssue, ConnectorDurationSetting, EnvelopeValueSite,
             IngestorPayloadReadSite, OtelMappingIssue, OtelMappingSection, OtelMappingSignal,
-            RegistryError,
+            RateLimitMeasureIssue, RegistryError,
         },
         validation::{
             branching::relay_declared_branch_schema,
@@ -54,7 +54,10 @@ use crate::{
                 LookupHashMapRewriteResult, collect_program_field_refs, lookup_hash_map_bindings,
                 program_uses_header_reads, rewrite_lookup_hash_map_program,
             },
-            materialized_state::referenced_materialized_stream_bindings,
+            materialized_state::{
+                expression_contains_nondeterministic_or_side_effect_call,
+                referenced_materialized_stream_bindings,
+            },
             processor::{ModelValidationContext, validate_where_program_for_internal_schemas},
             schema::{
                 arrow_schema_for_internal_schema, readonly_binding_for_internal_schema,
@@ -68,6 +71,10 @@ use crate::{
 #[cfg(test)]
 #[path = "connector_payload_tests.rs"]
 mod payload_tests;
+
+#[cfg(test)]
+#[path = "connector_rate_limit_tests.rs"]
+mod rate_limit_tests;
 
 #[cfg(test)]
 #[path = "connector_metadata_tests.rs"]
@@ -132,6 +139,7 @@ pub(in crate::registry) fn validate_ingestor_source(
             issue: ConnectorDeclarationIssue::Delivery(unmet),
         }));
     }
+    validate_ingestor_rate_limit_clauses(domain, identifier, &ingestor.input)?;
     let quiesce = ingestor.input.quiesce();
     if !ingestor.input.supports_quiesce(quiesce) {
         return Err(invalid(format!(
@@ -1640,6 +1648,145 @@ fn refuse_undeclared_metadata_reads(
         }));
     }
     Ok(())
+}
+
+/// Refuses `RATE LIMIT` clauses written where the input's entity cannot hold its source back in the
+/// delivery mode it names, and clauses that declare no allowance the engine can keep.
+fn validate_ingestor_rate_limit_clauses(
+    domain: &DomainName,
+    identifier: &ModelName,
+    input: &IngestorInput,
+) -> Result<(), Report<RegistryError>> {
+    let refused = |issue| RegistryError::InvalidConnectorDeclaration {
+        domain: domain.clone(),
+        node: NodeRef::new(ModelKind::Ingestor, identifier.clone()),
+        issue,
+    };
+    if let Some(refusal) = input.rate_limit_refusal() {
+        return Err(Report::new(refused(ConnectorDeclarationIssue::RateLimit(
+            refusal,
+        ))));
+    }
+    for (index, clause) in input.rate_limits().clauses().iter().enumerate() {
+        let position = index
+            .checked_add(1)
+            .assured("a body's clauses are far fewer than usize::MAX");
+        if let Err(refusal) = crate::registry::clause_quota(clause) {
+            let issue = ConnectorDeclarationIssue::RateLimitClause {
+                clause: position,
+                issue: *refusal.current_context(),
+            };
+            return Err(refusal.change_context(refused(issue)));
+        }
+    }
+    Ok(())
+}
+
+/// Refuses a `RATE LIMIT` measure that cannot cost a payload before its codec decodes it: one that
+/// reads a field outside the payload and metadata scopes, calls a function the payload does not
+/// determine, reads a payload fact or a header the input's entity does not offer, or computes
+/// anything but an exact, non-null, non-sensitive `U64`.
+pub(in crate::registry) fn validate_ingestor_rate_limit_measures(
+    domain: &DomainName,
+    identifier: &ModelName,
+    models: &ModelIndex,
+    input: &IngestorInput,
+) -> Result<(), Report<RegistryError>> {
+    for (index, clause) in input.rate_limits().clauses().iter().enumerate() {
+        let Some(measure) = &clause.measure else {
+            continue;
+        };
+        let position = index
+            .checked_add(1)
+            .assured("a body's clauses are far fewer than usize::MAX");
+        let refused = |issue| RegistryError::InvalidConnectorDeclaration {
+            domain: domain.clone(),
+            node: NodeRef::new(ModelKind::Ingestor, identifier.clone()),
+            issue: ConnectorDeclarationIssue::RateLimitMeasure {
+                clause: position,
+                issue,
+            },
+        };
+        let mut reads_another_scope = false;
+        measure.visit_fields(&mut |field| {
+            if !matches!(field.scope, FieldScope::Payload | FieldScope::Metadata) {
+                reads_another_scope = true;
+            }
+        });
+        if reads_another_scope {
+            return Err(Report::new(refused(RateLimitMeasureIssue::Scope)));
+        }
+        if expression_contains_nondeterministic_or_side_effect_call(measure, models) {
+            return Err(Report::new(refused(
+                RateLimitMeasureIssue::Nondeterministic,
+            )));
+        }
+        let lowered = crate::registry::LoweredMeasure::lower(measure)
+            .change_context_lazy(|| refused(RateLimitMeasureIssue::Scope))?;
+        let program = lowered.program();
+        refuse_undeclared_payload_reads(
+            domain,
+            identifier,
+            input,
+            IngestorPayloadReadSite::RateLimit(position),
+            &program.inner,
+        )?;
+        if program_uses_header_reads(&program.inner) && !input.reads_headers() {
+            return Err(Report::new(RegistryError::InvalidModel {
+                domain: domain.as_str().to_string(),
+                identifier: identifier.as_str().to_string(),
+                reason: format!(
+                    "{} ingestors do not support read_header or read_headers",
+                    input.source_phrase()
+                ),
+            }));
+        }
+        let schema = measure_schema();
+        let capabilities = input.entity_kind().capabilities();
+        let mut bindings = vec![CompileBinding::readonly(
+            "payload",
+            StdArc::new(capabilities.payload.arrow_schema()),
+        )];
+        if let Some(metadata) = capabilities.metadata.arrow_schema() {
+            bindings.push(CompileBinding::readonly("metadata", StdArc::new(metadata)));
+        }
+        bindings.push(writable_binding_for_internal_schema(
+            crate::registry::LoweredMeasure::NAMESPACE,
+            &schema,
+        ));
+        compile_program_with_options_for_bindings_with_sensitivity(
+            program,
+            arrow_schema_for_internal_schema(&schema),
+            schema_sensitivity_for_internal_schema(&schema),
+            bindings,
+            udf_compile_options(
+                models,
+                CompileOptions {
+                    output_mode: OutputMode::ExplicitOnly,
+                    allow_sensitive_output: false,
+                    allow_header_reads: input.reads_headers(),
+                    ..CompileOptions::default()
+                },
+            ),
+        )
+        .change_context_lazy(|| refused(RateLimitMeasureIssue::Program))?;
+    }
+    Ok(())
+}
+
+/// The one exact, required, non-sensitive `U64` field a measure writes.
+fn measure_schema() -> CreateSchema {
+    CreateSchema {
+        name: SchemaName::parse(crate::registry::LoweredMeasure::NAMESPACE)
+            .assured("the measure namespace is a schema name"),
+        fields: vec![SchemaField {
+            name: FieldName::parse(crate::registry::LoweredMeasure::FIELD)
+                .assured("the measure's field is a field name"),
+            ty: ParseAsType::U64,
+            optional: false,
+            sensitive: false,
+        }],
+    }
 }
 
 fn refuse_undeclared_payload_reads(

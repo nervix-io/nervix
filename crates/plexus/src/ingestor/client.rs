@@ -13,9 +13,11 @@
 )]
 
 use chumsky::prelude::*;
-use nervix_models::{ClientIngestMode, ClientProducerIngestor, ClientProducerIngestorChange};
+use nervix_models::{
+    ClientIngestMode, ClientProducerIngestor, ClientProducerIngestorChange, IngestDeliveryKind,
+};
 
-use super::delivery::suspend_only_quiesce_clause;
+use super::delivery::{NamedDelivery, rate_limits_after, suspend_only_quiesce_clause};
 use crate::{
     lexer::{Identifier, Token},
     parser_support::{ParseError, ack_timeout, ack_window, kw, retry_policy, schema_ref},
@@ -36,17 +38,27 @@ fn mode<'src>()
         })
 }
 
-/// `FROM SCHEMA <schema> MODE ACK … ON QUIESCE SUSPEND`: typed batches application clients submit
-/// through their sessions. Suspension is the only quiesce mode it honors, and it decodes nothing,
-/// so no `DECODE USING` follows.
+impl NamedDelivery for ClientIngestMode {
+    fn delivery_kind(&self) -> IngestDeliveryKind {
+        self.kind()
+    }
+}
+
+/// `FROM SCHEMA <schema> MODE ACK … [RATE LIMIT …] ON QUIESCE SUSPEND`: typed batches application
+/// clients submit through their sessions. Suspension is the only quiesce mode it honors, and it
+/// decodes nothing, so no `DECODE USING` follows.
 pub(super) fn producer_body<'src>()
 -> impl Parser<'src, &'src [Token], ClientProducerIngestor, extra::Err<ParseError<'src>>> + Clone {
     kw(Identifier::Schema)
         .ignore_then(schema_ref())
         .then_ignore(kw(Identifier::Mode))
-        .then(mode())
+        .then(mode().then_with_ctx(rate_limits_after::<ClientProducerIngestor, ClientIngestMode>()))
         .then_ignore(suspend_only_quiesce_clause())
-        .map(|(schema, mode)| ClientProducerIngestor { schema, mode })
+        .map(|(schema, (mode, rate_limits))| ClientProducerIngestor {
+            schema,
+            mode,
+            rate_limits,
+        })
         .boxed()
 }
 

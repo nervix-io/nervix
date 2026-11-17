@@ -49,6 +49,7 @@ fn syslog_listener(name: &str, client: &str) -> Model {
             source: IngestorEntity::from(SyslogListenerIngestor {
                 client: named(client),
                 mode: nervix_models::SyslogIngestMode::NoAck,
+                rate_limits: nervix_models::RateLimits::NONE,
                 quiesce: nervix_models::IngestQuiesceMode::Drop,
             }),
             codec: named("event_codec"),

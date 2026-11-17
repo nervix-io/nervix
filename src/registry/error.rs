@@ -46,6 +46,8 @@ impl fmt::Display for DeclaredIngestorPayload {
 pub(crate) enum IngestorPayloadReadSite {
     FilterWhere,
     Route(RelayName),
+    /// The measure of the `RATE LIMIT` clause at this position, from 1.
+    RateLimit(usize),
 }
 
 impl fmt::Display for IngestorPayloadReadSite {
@@ -53,6 +55,9 @@ impl fmt::Display for IngestorPayloadReadSite {
         match self {
             Self::FilterWhere => formatter.write_str("FILTER WHERE"),
             Self::Route(relay) => write!(formatter, "its route to '{relay}'"),
+            Self::RateLimit(clause) => {
+                write!(formatter, "the measure of its RATE LIMIT clause {clause}")
+            }
         }
     }
 }
@@ -202,6 +207,39 @@ pub(crate) enum ConnectorDeclarationIssue {
     },
     #[error("PARTITION FROM BRANCH requires branched input; relay '{relay}' is unbranched")]
     PartitionRequiresBranch { relay: nervix_models::RelayName },
+    #[error("{0}")]
+    RateLimit(nervix_models::RateLimitRefusal),
+    #[error("RATE LIMIT clause {clause} declares no allowance: {issue}")]
+    RateLimitClause {
+        clause: usize,
+        issue: crate::registry::RateLimitClauseIssue,
+    },
+    #[error("the measure of RATE LIMIT clause {clause} {issue}")]
+    RateLimitMeasure {
+        clause: usize,
+        issue: RateLimitMeasureIssue,
+    },
+}
+
+/// Why the measure of a `RATE LIMIT` clause computes no cost the host can charge before decoding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::error_boundary(
+        outcome,
+        reason = "checking a measure against what a payload offers before decoding is a pure \
+                  refusal"
+    )
+)]
+pub(crate) enum RateLimitMeasureIssue {
+    #[error(
+        "reads a field outside the payload and metadata scopes, which is not known before decoding"
+    )]
+    Scope,
+    #[error("calls a function whose value is not determined by the payload")]
+    Nondeterministic,
+    #[error("must compute an exact, non-null, non-sensitive U64")]
+    Program,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, strum::Display)]

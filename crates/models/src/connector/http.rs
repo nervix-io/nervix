@@ -362,6 +362,7 @@ impl IngestorDeclaration for HttpRequestIngestor {
         acknowledgement_confirmation: AcknowledgementConfirmation::None,
         delivery: &[DeclaredDelivery::NO_ACK],
         quiesce: &[DeclaredQuiesce::SUSPEND, DeclaredQuiesce::BUFFER],
+        rate_limit: crate::RateLimitDeclaration::Paced,
         locator: None,
         options: &[
             OptionDeclaration {
@@ -472,6 +473,8 @@ impl IngestorDeclaration for HttpEndpointIngestor {
         acknowledgement_confirmation: AcknowledgementConfirmation::None,
         delivery: &[DeclaredDelivery::NO_ACK, DeclaredDelivery::ACK_REQUEST],
         quiesce: &[DeclaredQuiesce::REJECT, DeclaredQuiesce::ENDPOINT_BUFFER],
+        // Clients send requests whenever they choose, and an endpoint can only answer them.
+        rate_limit: crate::RateLimitDeclaration::Unheld,
         locator: None,
         options: &[],
         bounds: HTTP_ENDPOINT_INGESTOR_BOUNDS,

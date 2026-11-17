@@ -27,12 +27,14 @@ deloxide = [
   "dep:nervix-deadlock",
   "nervix-deadlock/deloxide",
   "nervix-primitives/deloxide",
+  "nervix-rate-limit/deloxide",
 ]
 # The same diagnostic mode with compile-time historical lock-order instrumentation.
 deloxide-order = [
   "deloxide",
   "nervix-deadlock/deloxide-order",
   "nervix-primitives/deloxide-order",
+  "nervix-rate-limit/deloxide-order",
 ]
 # The same diagnostic mode with Deloxide's bounded scheduling disturbance before nested acquisitions
 # of tracked locks, for active detection on contention-prone lifecycle paths.
@@ -40,6 +42,7 @@ deloxide-stress = [
   "deloxide",
   "nervix-deadlock/deloxide-stress",
   "nervix-primitives/deloxide-stress",
+  "nervix-rate-limit/deloxide-stress",
 ]
 # Selects Loom's primitives for the whole graph, and runs the Loom models of the server's owners.
 loom = [
@@ -50,6 +53,7 @@ loom = [
   "nervix-execution/loom",
   "nervix-model-harness/loom",
   "nervix-primitives/loom",
+  "nervix-rate-limit/loom",
 ]
 # Selects Shuttle's primitives for the whole graph through nervix-primitives. Sockets and the edge
 # I/O modules remain Tokio's real implementations, outside every model.
@@ -83,6 +87,7 @@ shuttle = [
   "nervix-interconnect/shuttle",
   "nervix-model-harness/shuttle",
   "nervix-primitives/shuttle",
+  "nervix-rate-limit/shuttle",
   "nervix-wasm/shuttle",
 ]
 # Test-only feature used by the standard test recipes for fault injection, random multinode
@@ -184,6 +189,7 @@ nervix-licensing-vocabulary = { workspace = true }
 nervix-models = { workspace = true, features = ["arrow"] }
 nervix-plexus = { workspace = true }
 nervix-primitives = { workspace = true, features = ["native"] }
+nervix-rate-limit = { workspace = true }
 nervix-recovery = { workspace = true }
 nervix-roto = { workspace = true }
 nervix-simd-kernels = { workspace = true }
@@ -656,6 +662,7 @@ nervix-plexus = { package = "nervix-plexus", path = "crates/plexus", features = 
 ] }
 nervix-primitives = { package = "nervix-primitives", path = "crates/primitives" }
 nervix-primitives-macros = { package = "nervix-primitives-macros", path = "crates/primitives/macros" }
+nervix-rate-limit = { package = "nervix-rate-limit", path = "crates/rate-limit" }
 nervix-recovery = { package = "nervix-recovery", path = "crates/recovery" }
 nervix-roto = { package = "nervix-roto", path = "crates/nervix-roto" }
 nervix-server = { package = "nervix-server", path = "." }

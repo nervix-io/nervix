@@ -73,6 +73,9 @@ Paced time is also important for expiration:
 
 The maintenance scan that releases expired branches and the snapshot wakeups that persist
 branch-local state run on the physical clock, and so does the WASM executor's own safety timeout.
+An ingestor's [`RATE LIMIT`](ingestors.md#rate-limits) allowances refill and wait on the node's
+physical monotonic clock too: a rate limit caps what an ingestor takes from its transport per real
+second, so neither `TIME RATE`, a paced frontier nor a stopped domain clock changes it.
 Their predicates still compare logical deadlines, so a scan never expires a branch early: its
 interval is release latency measured after the logical boundary, reported separately from the TTL
 itself. See [TTL](relay.md#ttl).

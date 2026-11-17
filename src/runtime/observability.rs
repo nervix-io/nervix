@@ -107,6 +107,63 @@ pub(crate) struct IngestorDescribe {
     pub(crate) kafka_domain_offsets: Option<KafkaDomainOffsetDescribe>,
     /// The producers attached to a client ingestor this node runs an endpoint for.
     pub(crate) client_producers: Option<ClientIngestorGauges>,
+    /// What the unit's `RATE LIMIT` allowance held back and rejected on this node, for an ingestor
+    /// whose running plan writes one.
+    pub(crate) rate_limit: Option<IngestorRateLimitTotals>,
+}
+
+/// The rate-limit counters of one ingestor unit on the node that executes it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct IngestorRateLimitTotals {
+    /// How many times the unit held its source back.
+    pub(crate) held_total: u64,
+    /// How long it held its source back, in milliseconds of the physical clock.
+    pub(crate) hold_millis_total: u64,
+    /// Payloads consumed because they cost more than a clause's burst.
+    pub(crate) rejected_total: u64,
+    /// Payloads consumed because a clause's measure failed on them.
+    pub(crate) program_rejections_total: u64,
+}
+
+impl Runtime {
+    /// The rate-limit counters of the unit `unit` of `ingestor`, when the plan this node runs it
+    /// under writes a `RATE LIMIT`. They are read only then, because reading creates the series,
+    /// which exist only for a unit an allowance counts in.
+    fn ingestor_rate_limit_totals(
+        &self,
+        domain: &DomainName,
+        ingestor: &IngestorName,
+        unit: Unit,
+        kind: nervix_models::IngestorEntityKind,
+    ) -> Option<IngestorRateLimitTotals> {
+        let rate_limited = {
+            let execution = self.inner.executions.get(domain)?;
+            let plan = execution.revision.entrypoints.ingestor(ingestor, unit)?;
+            !plan.ingestor.rate_limit.is_empty()
+        };
+        if !rate_limited {
+            return None;
+        }
+        let dispatcher = self.inner.remote_dispatcher.load();
+        let counters = self.inner.metrics.ingestor_rate_limit_counters(
+            domain,
+            ingestor,
+            unit,
+            dispatcher.as_deref().map(RemoteDispatcher::local_node_id),
+            kind,
+        );
+        let hold_millis = counters.hold_seconds.get() * 1000.0;
+        let hold_millis_total = hold_millis.checked_approx_into::<u64>().assured(
+            "the counter sums the nonnegative, finite seconds of every hold, far below u64 \
+             milliseconds",
+        );
+        Some(IngestorRateLimitTotals {
+            held_total: counters.held.get(),
+            hold_millis_total,
+            rejected_total: counters.rejected.get(),
+            program_rejections_total: counters.program_rejections.get(),
+        })
+    }
 }
 
 impl Runtime {
@@ -860,6 +917,7 @@ impl Runtime {
             )
             .get();
         let last_decode_rejection = self.last_decode_rejection(&key);
+        let rate_limit = self.ingestor_rate_limit_totals(domain, ingestor, unit, kind);
         if !self.inner.executions.contains_key(domain) || !self.inner.ingestors.contains_key(&key) {
             // An ingestor that did not start describes its own start report. One that recorded no
             // failure of its own is not running because its domain's execution failed to build,
@@ -888,6 +946,7 @@ impl Runtime {
                 reconnect_wait_millis: transient.reconnect_wait_millis,
                 kafka_domain_offsets: None,
                 client_producers: self.client_ingestor_gauges(domain, ingestor),
+                rate_limit,
             });
         }
         let Some(execution) = self.inner.executions.get(domain) else {
@@ -907,6 +966,7 @@ impl Runtime {
                 reconnect_wait_millis: transient.reconnect_wait_millis,
                 kafka_domain_offsets: None,
                 client_producers: self.client_ingestor_gauges(domain, ingestor),
+                rate_limit,
             });
         };
         let kafka_domain_offsets = if let Some(plan) =
@@ -953,6 +1013,7 @@ impl Runtime {
             reconnect_wait_millis: transient.reconnect_wait_millis,
             kafka_domain_offsets,
             client_producers: self.client_ingestor_gauges(domain, ingestor),
+            rate_limit,
         })
     }
 

@@ -113,6 +113,8 @@ pub struct SqsQueueIngestor {
     pub queue: SqsQueueName,
     pub instances: crate::IngestorInstances,
     pub mode: SqsIngestMode,
+    /// The `RATE LIMIT` clauses the body writes after its delivery mode, in order.
+    pub rate_limits: crate::RateLimits,
     pub quiesce: IngestQuiesceMode,
 }
 
@@ -211,6 +213,8 @@ impl IngestorDeclaration for SqsQueueIngestor {
         delivery: &[DeclaredDelivery::ACK_SEQUENTIAL, SQS_ACK_PARALLEL],
         // The queue keeps each message until the ingestor deletes it, so suspending loses nothing.
         quiesce: &[DeclaredQuiesce::SUSPEND],
+        // The queue keeps every message until a receive asks for it.
+        rate_limit: crate::RateLimitDeclaration::Held,
         locator: Some(LocatorDeclaration {
             keywords: "QUEUE",
             name: LocatorName::External(SqsQueueName::DECLARATION),
@@ -239,6 +243,14 @@ impl IngestorEntityBody for SqsQueueIngestor {
 
     fn quiesce_mut(&mut self) -> &mut IngestQuiesceMode {
         &mut self.quiesce
+    }
+
+    fn rate_limits(&self) -> &crate::RateLimits {
+        &self.rate_limits
+    }
+
+    fn rate_limits_mut(&mut self) -> Option<&mut crate::RateLimits> {
+        Some(&mut self.rate_limits)
     }
 
     fn acknowledgement(&self) -> IngestAcknowledgement<'_> {

@@ -206,6 +206,7 @@ ALTER <CONNECTOR> <ENTITY> INGESTOR <name>
   SET CLIENT <client> |
   SET <locator> | SET <option> | DROP <option> |
   SET MODE <declared delivery mode> |
+  SET RATE LIMIT <clause> [RATE LIMIT <clause> ...] | DROP RATE LIMIT |
   SET START AT EARLIEST|LATEST |
   SET QUIESCE <declared quiesce body> |
   SET DECODE USING <codec> |
@@ -301,7 +302,9 @@ reference, locator and options; for example a `KAFKA TOPIC` body names its clien
 The generated [Connector Capabilities](./connector-capabilities.md) catalog lists the current pairs,
 and the [Ingestors](./ingestors.md) and [Emitters](./emitters.md) manuals give each complete body.
 Completion offers each composed head as one item. Inspection and addressing use the named Model
-kind: `DESCRIBE INGESTOR`, `SHOW CREATE EMITTER` and `DROP CLIENT`.
+kind: `DESCRIBE INGESTOR`, `SHOW CREATE EMITTER` and `DROP CLIENT`. An ingestor body whose entity
+holds its source back may write repeatable `RATE LIMIT <count> [OF <measure>] PER <duration> BURST
+<count>` clauses between its `MODE` and `ON QUIESCE`; see [Rate Limits](./ingestors.md#rate-limits).
 
 `CREATE DOMAIN <name>` is the short spelling for `CREATE UNPACED DOMAIN <name>`.
 

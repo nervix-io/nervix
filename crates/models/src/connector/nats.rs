@@ -277,6 +277,9 @@ impl IngestorDeclaration for NatsSubjectIngestor {
         // Core NATS keeps no backlog for a subscriber, so intake cannot suspend: a quiesced member
         // keeps reading its share and buffers or drops it.
         quiesce: &[DeclaredQuiesce::BUFFER, DeclaredQuiesce::DROP],
+        // Core NATS sends every message to its subscribers the moment it is published and keeps
+        // none for a subscriber that has not read it.
+        rate_limit: crate::RateLimitDeclaration::Unheld,
         locator: Some(LocatorDeclaration {
             keywords: "SUBJECT",
             name: LocatorName::External(NatsSubjectName::DECLARATION),
@@ -390,6 +393,8 @@ pub struct NatsStreamIngestor {
     pub stream: NatsStreamName,
     pub consumer: NatsConsumerName,
     pub mode: NatsStreamIngestMode,
+    /// The `RATE LIMIT` clauses the body writes after its delivery mode, in order.
+    pub rate_limits: crate::RateLimits,
     pub quiesce: IngestQuiesceMode,
 }
 
@@ -466,6 +471,8 @@ impl IngestorDeclaration for NatsStreamIngestor {
             DeclaredQuiesce::BUFFER,
             DeclaredQuiesce::DROP,
         ],
+        // The stream keeps every message until the pull consumer asks for it.
+        rate_limit: crate::RateLimitDeclaration::Held,
         locator: Some(LocatorDeclaration {
             keywords: "STREAM",
             name: LocatorName::External(NatsStreamName::DECLARATION),
@@ -497,6 +504,14 @@ impl IngestorEntityBody for NatsStreamIngestor {
 
     fn quiesce_mut(&mut self) -> &mut IngestQuiesceMode {
         &mut self.quiesce
+    }
+
+    fn rate_limits(&self) -> &crate::RateLimits {
+        &self.rate_limits
+    }
+
+    fn rate_limits_mut(&mut self) -> Option<&mut crate::RateLimits> {
+        Some(&mut self.rate_limits)
     }
 
     fn acknowledgement(&self) -> IngestAcknowledgement<'_> {

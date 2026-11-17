@@ -518,8 +518,8 @@ status, keeping the start version, start mode, clock, schedule and incremental s
 
 The current emitter Models carry explicit key expressions, source-partition routing and
 expression-only SQS FIFO groups. The dedicated database owns exactly four current keyspaces:
-`raft_licensing_operations_inferencer_wasm_inspection_listener_bounds_stopgate_node_logs`, `raft_licensing_operations_inferencer_wasm_inspection_listener_bounds_stopgate_node_meta`, `raft_licensing_operations_inferencer_wasm_inspection_listener_bounds_stopgate_node_state`, and
-`raft_licensing_operations_inferencer_wasm_inspection_listener_bounds_stopgate_node_snapshots`. Opening it validates the complete keyspace namespace before
+`raft_licensing_operations_inferencer_wasm_inspection_listener_bounds_stopgate_node_ratelimit_logs`, `raft_licensing_operations_inferencer_wasm_inspection_listener_bounds_stopgate_node_ratelimit_meta`, `raft_licensing_operations_inferencer_wasm_inspection_listener_bounds_stopgate_node_ratelimit_state`, and
+`raft_licensing_operations_inferencer_wasm_inspection_listener_bounds_stopgate_node_ratelimit_snapshots`. Opening it validates the complete keyspace namespace before
 reading any records. The committed cluster-parameter record stores ordered typed TLS cipher
 suites and key-exchange groups; recovery validates their complete pair before returning that
 record. This namespace identifies the current Model shape, including the statement
@@ -533,15 +533,15 @@ consumer group's required start position, the serialized Sentry platform field, 
 count an SQS QUEUE ingestor's `ACK PARALLEL MAX` declares, the session and quality of service an
 MQTT TOPIC ingestor writes beside its delivery mode, the quality of service an MQTT TOPIC emitter
 writes beside its publishing mode, its retained-publication flag and MQTT 5 property mappings, a
-`REDIS PUBSUB` ingestor's `CHANNEL` or `PATTERN` subscription, an emitter's `INSTANCES`
-declaration,
+`REDIS PUBSUB` ingestor's `CHANNEL` or `PATTERN` subscription, the ordered `RATE LIMIT` clauses
+an ingestor body writes, an emitter's `INSTANCES` declaration,
 whether a polled HTTP request's header holds a literal or names a client secret, the endpoint kind
 whose signaling data exists only on its WebSockets variant, the branch partition count every
 resolved branch declaration of the committed schedule carries, and the partition epoch the
 committed schedule records for every branch whose count changed. It identifies
 the current statement shape as well, which the statements a transaction keeps are stored in:
 `ALTER BRANCH` and `DESCRIBE INFERENCER` among those statements, an `ALTER INGESTOR` or `ALTER EMITTER` operation that
-changes one part of its entity's body, an envelope clause or the properties, or one part of a
+changes one part of its entity's body (`SET RATE LIMIT` and `DROP RATE LIMIT` among them), an envelope clause or the properties, or one part of a
 construction where it stands, including the typed `payload` expression scope and a
 `RESET WASM PROCESSOR ... STATE` that names its processor and scope and takes its domain from
 the transaction, as the step effect and commit plan step keep it too. The database also stores

@@ -14,12 +14,13 @@
 
 use chumsky::prelude::*;
 use nervix_models::{
-    SqsIngestMode, SqsQueueIngestor, SqsQueueIngestorChange, SqsQueueName, SqsReceiveMax,
+    IngestDeliveryKind, SqsIngestMode, SqsQueueIngestor, SqsQueueIngestorChange, SqsQueueName,
+    SqsReceiveMax,
 };
 
 use super::delivery::{
-    ParallelAck, SequentialAck, ack_parallel_within, ack_sequential, optional_instances,
-    suspend_only_quiesce_clause,
+    NamedDelivery, ParallelAck, SequentialAck, ack_parallel_within, ack_sequential,
+    optional_instances, rate_limits_after, suspend_only_quiesce_clause,
 };
 use crate::{
     lexer::{Identifier, Token},
@@ -71,6 +72,12 @@ fn mode<'src>()
 
 /// `FROM <client> QUEUE '<queue>' [INSTANCES <n>] MODE ACK SEQUENTIAL … | ACK PARALLEL MAX <n> …
 /// ON QUIESCE SUSPEND`.
+impl NamedDelivery for SqsIngestMode {
+    fn delivery_kind(&self) -> IngestDeliveryKind {
+        self.acknowledgement().kind()
+    }
+}
+
 pub(super) fn queue_body<'src>()
 -> impl Parser<'src, &'src [Token], SqsQueueIngestor, extra::Err<ParseError<'src>>> + Clone {
     client_ref()
@@ -78,14 +85,15 @@ pub(super) fn queue_body<'src>()
         .then(external_name::<SqsQueueName>())
         .then(optional_instances::<SqsQueueIngestor>())
         .then_ignore(kw(Identifier::Mode))
-        .then(mode())
+        .then(mode().then_with_ctx(rate_limits_after::<SqsQueueIngestor, SqsIngestMode>()))
         .then(suspend_only_quiesce_clause())
         .map(
-            |((((client, queue), instances), mode), quiesce)| SqsQueueIngestor {
+            |((((client, queue), instances), (mode, rate_limits)), quiesce)| SqsQueueIngestor {
                 client,
                 queue,
                 instances,
                 mode,
+                rate_limits,
                 quiesce,
             },
         )

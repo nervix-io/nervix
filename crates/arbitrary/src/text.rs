@@ -47,7 +47,7 @@ const DELIMITER_NAMES: [&str; 12] = [
 /// Every keyword Plexus reads, statement and expression keywords alike, spelled as a name spells it:
 /// in lower case. `nervix-plexus` checks this list against the one lexer's keyword set, so a keyword
 /// the language adds is generated as a name as soon as it exists.
-pub const KEYWORDS: [&str; 430] = [
+pub const KEYWORDS: [&str; 432] = [
     "headers",
     "secret",
     "create",
@@ -118,6 +118,7 @@ pub const KEYWORDS: [&str; 430] = [
     "now",
     "time",
     "rate",
+    "burst",
     "timestamp",
     "session",
     "subscription",
@@ -469,6 +470,7 @@ pub const KEYWORDS: [&str; 430] = [
     "initial",
     "zeros",
     "per",
+    "of",
     "partition",
     "activate",
     "refresh",
@@ -757,6 +759,13 @@ impl Arbitrary<'_> {
     /// A duration as Plexus keeps it: a whole number and a unit, spelled as written.
     pub fn duration(&mut self) -> String {
         let count = self.entropy.boundary_biased(0..=u64::from(u32::MAX));
+        let unit = self.entropy.pick(DURATION_UNITS);
+        format!("{count}{unit}")
+    }
+
+    /// A duration longer than zero as Plexus keeps it: a positive whole number and a unit.
+    pub fn positive_duration(&mut self) -> String {
+        let count = self.entropy.boundary_biased(1..=u64::from(u32::MAX));
         let unit = self.entropy.pick(DURATION_UNITS);
         format!("{count}{unit}")
     }

@@ -1912,7 +1912,7 @@ impl CreateIngestor {
         };
         let mut clauses = vec![Clause::line(format!(
             "FROM {}",
-            ingestor_input_body_to_plexus(&self.input)
+            ingestor_input_body_to_plexus(&self.input)?
         ))];
         if let Some(codec) = self.input.codec() {
             clauses.push(Clause::line(format!("DECODE USING {}", codec.as_str())));
@@ -2821,7 +2821,7 @@ fn alter_emitter_operation_to_plexus(
 /// The body an ingestor's statement writes after `FROM` for one entity's source, without the
 /// connector its head already names.
 pub(crate) trait IngestorBodyPlexus {
-    fn body_to_plexus(&self) -> String;
+    fn body_to_plexus(&self) -> error_stack::Result<String, CanonicalPlexusError>;
 }
 
 /// The canonical Plexus of every operation of an alteration, in order.
@@ -2865,7 +2865,7 @@ pub(crate) fn alter_ingestor_operation_to_plexus<
 ) -> error_stack::Result<String, CanonicalPlexusError> {
     match operation {
         AlterIngestorOperation::SetSource { source } => {
-            Ok(format!("SET FROM {}", source.body_to_plexus()))
+            Ok(format!("SET FROM {}", source.body_to_plexus()?))
         }
         AlterIngestorOperation::Change { change } => {
             crate::IngestorEntityChange::to_canonical_plexus(change)
@@ -2876,6 +2876,10 @@ pub(crate) fn alter_ingestor_operation_to_plexus<
         AlterIngestorOperation::SetQuiesce { quiesce } => {
             Ok(format!("SET QUIESCE {}", ingest_quiesce_to_plexus(quiesce)))
         }
+        AlterIngestorOperation::SetRateLimit { limits } => {
+            Ok(format!("SET {}", limits.to_canonical_plexus()?))
+        }
+        AlterIngestorOperation::DropRateLimit => Ok("DROP RATE LIMIT".to_string()),
         AlterIngestorOperation::SetTimestamp { source } => Ok(match source {
             IngestTimestampSource::Now => "SET TIMESTAMP NOW".to_string(),
             IngestTimestampSource::At(field) => {
@@ -3085,8 +3089,38 @@ impl ClientIngestMode {
 }
 
 /// The body an ingestor writes after FROM, projected from its current entity Model.
-pub fn ingestor_input_body_to_plexus(input: &IngestorInput) -> String {
+pub fn ingestor_input_body_to_plexus(
+    input: &IngestorInput,
+) -> error_stack::Result<String, CanonicalPlexusError> {
     input.entity_presentation().ingestor_body_to_plexus()
+}
+
+impl crate::RateLimit {
+    /// The clause after its `RATE LIMIT` keywords, as `DESCRIBE` shows it and a body writes it.
+    pub fn to_canonical_plexus(&self) -> error_stack::Result<String, CanonicalPlexusError> {
+        let mut clause = self.count.as_str().to_owned();
+        if let Some(measure) = &self.measure {
+            clause.push_str(" OF ");
+            clause.push_str(&expression_to_plexus(measure)?);
+        }
+        clause.push_str(" PER ");
+        clause.push_str(&self.period);
+        clause.push_str(" BURST ");
+        clause.push_str(self.burst.as_str());
+        Ok(clause)
+    }
+}
+
+impl crate::RateLimits {
+    /// Every clause with its `RATE LIMIT` keywords, in order, as a body or `SET` writes them. A body
+    /// that writes none renders as nothing.
+    pub fn to_canonical_plexus(&self) -> error_stack::Result<String, CanonicalPlexusError> {
+        let mut clauses = Vec::with_capacity(self.clauses().len());
+        for clause in self.clauses() {
+            clauses.push(format!("RATE LIMIT {}", clause.to_canonical_plexus()?));
+        }
+        Ok(clauses.join(" "))
+    }
 }
 
 fn retry_policy_to_plexus(policy: &RetryPolicy) -> String {
@@ -5093,6 +5127,7 @@ mod tests {
                             timeout: "5s".to_string(),
                             retry_policy: retry.clone(),
                         },
+                        rate_limits: crate::RateLimits::NONE,
                         quiesce: crate::IngestQuiesceMode::Suspend,
                     }),
                 ),
@@ -5114,6 +5149,7 @@ mod tests {
                         },
                         instances: crate::IngestorInstances::Count(nonzero!(1u64)),
                         mode: PulsarIngestMode::NoAck,
+                        rate_limits: crate::RateLimits::NONE,
                         quiesce: crate::IngestQuiesceMode::Suspend,
                     }),
                 ),
@@ -5131,6 +5167,7 @@ mod tests {
                         session: MqttSession::Clean,
                         qos: MqttQos::Qos0,
                         mode: MqttIngestMode::NoAck,
+                        rate_limits: crate::RateLimits::NONE,
                         quiesce: crate::IngestQuiesceMode::Drop,
                     }),
                 ),
@@ -5147,6 +5184,7 @@ mod tests {
                         session: MqttSession::Persistent,
                         qos: MqttQos::Qos2,
                         mode: MqttIngestMode::NoAck,
+                        rate_limits: crate::RateLimits::NONE,
                         quiesce: crate::IngestQuiesceMode::Suspend,
                     }),
                 ),
@@ -5180,6 +5218,7 @@ mod tests {
                             timeout: "20s".to_string(),
                             retry_policy: retry.clone(),
                         },
+                        rate_limits: crate::RateLimits::NONE,
                         quiesce: crate::IngestQuiesceMode::Suspend,
                     }),
                 ),
@@ -5240,6 +5279,7 @@ mod tests {
                     decoded(ZeroMqPullIngestor {
                         client: named("zmq_main"),
                         mode: ZeroMqIngestMode::NoAck,
+                        rate_limits: crate::RateLimits::NONE,
                         quiesce: crate::IngestQuiesceMode::Suspend,
                     }),
                 ),
@@ -5257,6 +5297,7 @@ mod tests {
                             timeout: "45s".to_string(),
                             retry_policy: retry.clone(),
                         },
+                        rate_limits: crate::RateLimits::NONE,
                         quiesce: crate::IngestQuiesceMode::Suspend,
                     }),
                 ),
@@ -5297,6 +5338,7 @@ mod tests {
                     decoded(SyslogListenerIngestor {
                         client: named("syslog_main"),
                         mode: SyslogIngestMode::NoAck,
+                        rate_limits: crate::RateLimits::NONE,
                         quiesce: crate::IngestQuiesceMode::Drop,
                     }),
                 ),
@@ -5329,6 +5371,7 @@ mod tests {
                         max_backoff: "5s".to_string(),
                     },
                 },
+                rate_limits: crate::RateLimits::NONE,
             }),
         );
         assert_eq!(

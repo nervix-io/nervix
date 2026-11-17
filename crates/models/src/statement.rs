@@ -2338,6 +2338,12 @@ impl CreateIngestor {
             AlterIngestorOperation::SetQuiesce { quiesce } => {
                 Source::set_quiesce_of(&mut self.input, quiesce.clone())?;
             }
+            AlterIngestorOperation::SetRateLimit { limits } => {
+                *crate::RateLimits::altered::<Source>(&mut self.input)? = limits.clone();
+            }
+            AlterIngestorOperation::DropRateLimit => {
+                *crate::RateLimits::altered::<Source>(&mut self.input)? = crate::RateLimits::NONE;
+            }
             AlterIngestorOperation::SetTimestamp { source } => {
                 self.timestamp_source = Some(source.clone());
             }
@@ -2442,6 +2448,13 @@ pub enum AlterIngestorOperation<Source: crate::IngestorEntityModel> {
     SetQuiesce {
         quiesce: IngestQuiesceMode,
     },
+    /// `SET RATE LIMIT <clause> [RATE LIMIT <clause> …]`: replaces every `RATE LIMIT` clause the
+    /// body writes with these, in order.
+    SetRateLimit {
+        limits: crate::RateLimits,
+    },
+    /// `DROP RATE LIMIT`: removes every `RATE LIMIT` clause the body writes.
+    DropRateLimit,
     SetTimestamp {
         source: IngestTimestampSource,
     },
@@ -2529,6 +2542,8 @@ pub enum AlterIngestorError {
     },
     #[error("{kind} ingestors read through no client, so SET CLIENT has none to change")]
     ClientUnsupported { kind: crate::IngestorEntityKind },
+    #[error("{kind} ingestors cannot hold their source back, so they take no RATE LIMIT")]
+    RateLimitUnsupported { kind: crate::IngestorEntityKind },
     #[error("the stored {kind} ingestor writes no {option}, so there is no {option} to drop")]
     OptionNotWritten {
         kind: crate::IngestorEntityKind,

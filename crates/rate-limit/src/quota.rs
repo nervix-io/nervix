@@ -13,7 +13,7 @@ use meticulous::OptionExt as _;
 use thiserror::Error;
 
 /// A refusal to construct an allowance or its bounded key store.
-#[derive(Debug, Error, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Error, PartialEq, Eq)]
 #[cfg_attr(
     nervix_lint,
     nervix::error_boundary(outcome, reason = "pure allowance configuration validation")

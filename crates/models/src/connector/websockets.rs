@@ -215,6 +215,8 @@ impl IngestorDeclaration for WebsocketsConnectionIngestor {
         delivery: &[DeclaredDelivery::NO_ACK],
         // Both keep reading: stopping reads would starve ping/pong and disconnect the peer.
         quiesce: &[DeclaredQuiesce::BUFFER, DeclaredQuiesce::DROP],
+        // The server sends frames over a connection it owns, whenever it chooses.
+        rate_limit: crate::RateLimitDeclaration::Unheld,
         locator: None,
         options: &[OptionDeclaration {
             keywords: "HEADERS",
@@ -301,6 +303,8 @@ impl IngestorDeclaration for WebsocketsEndpointIngestor {
         acknowledgement_confirmation: AcknowledgementConfirmation::None,
         delivery: &[DeclaredDelivery::NO_ACK, DeclaredDelivery::ACK_REQUEST],
         quiesce: &[DeclaredQuiesce::REJECT, DeclaredQuiesce::ENDPOINT_BUFFER],
+        // Clients send frames over their connections whenever they choose.
+        rate_limit: crate::RateLimitDeclaration::Unheld,
         locator: None,
         options: &[],
         bounds: WEBSOCKETS_ENDPOINT_BOUNDS,

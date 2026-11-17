@@ -1918,6 +1918,37 @@ hold comes close to the bound. In an acknowledged mode the held rows' shares sta
 keepalives, so a hold longer than the ingestor's `ACK TIMEOUT` rejects their positions and the ingestor
 delivers them again, possibly after the held delivery was admitted.
 
+### Read budgets and rate-limit holds
+
+An ingestor's [`RATE LIMIT`](./ingestors.md#rate-limits) is host policy: the entity declares only
+whether, and in which delivery modes, its transport keeps what the host has not taken, and the host
+owns the allowance of each execution unit, its waits and its rejections. A connector learns of an
+allowance only through the size of the reads it is asked for.
+
+Before every broker read the host asks its services for the read's budget,
+`IngestorHostServices::read_budget`, given the window its delivery mode leaves: one message under
+`NO ACK` and `ACK SEQUENTIAL`, `MAX` under `ACK PARALLEL`. A host whose ingestor writes no
+`RATE LIMIT` returns the window. Otherwise the budget lowers `IngestorBatchRequest::max_messages`
+to how many one-unit payloads the clauses without `OF` admit now, or is `WaitUntil` an instant
+while any clause has no room for a single unit. A read takes no more than `max_messages`: an SQS
+receive and a NATS STREAM pull ask for no more, the gathering reads of Kafka, Pulsar, RabbitMQ and
+MQTT stop once they hold that many, and a ZeroMQ or Syslog read takes one message, so everything
+else stays with the transport. On `WaitUntil` the loop
+holds before reading, on a deadline of the boundary's timer, servicing its ingest group's flush
+cadence; a quiesce change or a stop ends the hold, and every turn asks for the budget again.
+`IngestorHostServices::record_rate_limit_hold_started` counts each hold as it starts and
+`record_rate_limit_hold_ended` adds its length once it ended.
+
+A clause with `OF` is paid once the read returned: the host measures every payload of the read
+once, before decoding, and admits each in order, dispatching what it admitted before it holds a
+payload that does not fit yet. Admission happens inside `intake_unacknowledged` and
+`intake_acknowledged`, so an acknowledged batch's `ACK TIMEOUT` starts only once its last payload
+was admitted. A payload no allowance can ever admit, or whose measure fails, is consumed as a
+`rate_limit` rejection, like a decode rejection. A stop that meets an intake hold ends the intake
+with `IngestorIntakeError::Stopped`: nothing the host had not yet taken in was dispatched, and the
+loop leaves the batch's positions unconfirmed, records them as an unconfirmed stop and ends, so the
+transport presents them again by its own redelivery contract.
+
 ### Interrupted reads
 
 The broker loop awaits every `next_batch` it starts and never drops a read in flight. An ingestor may

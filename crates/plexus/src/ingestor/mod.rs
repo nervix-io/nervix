@@ -32,13 +32,14 @@ mod syslog;
 mod websockets;
 mod zeromq;
 
-use chumsky::prelude::*;
+use chumsky::{Boxed, prelude::*};
 use meticulous::OptionExt as _;
 use nervix_models::{
-    AlterIngestor, AlterIngestorOperation, AlterTransportIngestorOperation, ClientProducerIngestor,
-    CreateIngestor, CreateStatement, IngestTimestampSource, IngestorAlteration, IngestorEntity,
-    IngestorEntityKind, IngestorEntityModel, IngestorInput, IngestorName, IngestorReferenceKind,
-    ShowIngestors, TransportIngestorInput,
+    AlterIngestor, AlterIngestorError, AlterIngestorOperation, AlterTransportIngestorOperation,
+    ClientProducerIngestor, CreateIngestor, CreateStatement, IngestTimestampSource,
+    IngestorAlteration, IngestorEntity, IngestorEntityKind, IngestorEntityModel, IngestorInput,
+    IngestorName, IngestorReferenceKind, RateLimitDeclaration, RateLimitRefusal, ShowIngestors,
+    TransportIngestorInput,
 };
 
 use crate::{
@@ -250,6 +251,7 @@ where
         .map(|(relay, alteration)| AlterIngestorOperation::AlterRoute { relay, alteration });
     let set_general_error =
         set_general_error_policy().map(|policy| AlterIngestorOperation::SetGeneralError { policy });
+    let rate_limit_operations = rate_limit_operations::<S>();
 
     let mut operations = vec![
         set_quiesce.boxed(),
@@ -263,6 +265,7 @@ where
         alter_route.boxed(),
         set_general_error.boxed(),
     ];
+    operations.extend(rate_limit_operations);
     if let IngestorReferenceKind::Client(_) = capabilities.reference {
         operations.push(
             kw_phrase2(Identifier::Set, Identifier::Client)
@@ -272,6 +275,39 @@ where
         );
     }
     choice(operations).boxed()
+}
+
+/// `SET RATE LIMIT <clause> …` and `DROP RATE LIMIT` where the pair `S` holds its source back in
+/// some delivery mode. Whether the mode of the complete result holds it back is checked once every
+/// operation applied. Elsewhere both are refused by name and never offered.
+fn rate_limit_operations<'src, S>()
+-> Vec<Boxed<'src, 'src, &'src [Token], AlterIngestorOperation<S>, extra::Err<ParseError<'src>>>>
+where
+    S: IngestorEntityModel + Clone + 'src,
+{
+    let refusal = match S::KIND.capabilities().rate_limit {
+        RateLimitDeclaration::Held | RateLimitDeclaration::HeldIn(_) => {
+            let set = kw(Identifier::Set)
+                .ignore_then(delivery::rate_limit_sequence())
+                .map(|limits| AlterIngestorOperation::SetRateLimit { limits });
+            let drop = kw(Identifier::Drop)
+                .ignore_then(kw_phrase2(Identifier::Rate, Identifier::Limit))
+                .to(AlterIngestorOperation::DropRateLimit);
+            return vec![set.boxed(), drop.boxed()];
+        }
+        RateLimitDeclaration::Paced => RateLimitRefusal::Paced { entity: S::KIND }.to_string(),
+        RateLimitDeclaration::Unheld => {
+            AlterIngestorError::RateLimitUnsupported { kind: S::KIND }.to_string()
+        }
+    };
+    let refused = || {
+        delivery::refused_rate_limit(refusal.clone())
+            .map(|()| AlterIngestorOperation::DropRateLimit)
+    };
+    vec![
+        kw(Identifier::Set).ignore_then(refused()).boxed(),
+        kw(Identifier::Drop).ignore_then(refused()).boxed(),
+    ]
 }
 
 /// `SET FROM <body>`, which reads only the body of the pair the head names.
@@ -953,6 +989,7 @@ mod tests {
                         max_backoff: "5s".to_string(),
                     },
                 },
+                rate_limits: nervix_models::RateLimits::NONE,
                 quiesce: IngestQuiesceMode::Suspend,
             }))
         );
@@ -1167,6 +1204,7 @@ mod tests {
                         max_backoff: "8s".to_string(),
                     },
                 },
+                rate_limits: nervix_models::RateLimits::NONE,
                 quiesce: IngestQuiesceMode::Suspend,
             }))
         );
@@ -1227,6 +1265,7 @@ mod tests {
                         max_backoff: "30s".to_string(),
                     },
                 },
+                rate_limits: nervix_models::RateLimits::NONE,
                 quiesce: IngestQuiesceMode::Suspend,
             }))
         );
@@ -1631,6 +1670,7 @@ mod tests {
                 session: MqttSession::Clean,
                 qos: MqttQos::Qos0,
                 mode: MqttIngestMode::NoAck,
+                rate_limits: nervix_models::RateLimits::NONE,
                 quiesce: IngestQuiesceMode::Drop,
             }))
         );
@@ -1707,6 +1747,7 @@ mod tests {
                         max_backoff: "2s".to_string(),
                     },
                 },
+                rate_limits: nervix_models::RateLimits::NONE,
                 quiesce: IngestQuiesceMode::Drop,
             }))
         );
@@ -2303,6 +2344,7 @@ mod tests {
                 client: nervix_models::ClientName::try_from("zmq_main")
                     .expect("valid client identifier"),
                 mode: ZeroMqIngestMode::NoAck,
+                rate_limits: nervix_models::RateLimits::NONE,
                 quiesce: IngestQuiesceMode::Suspend,
             }))
         );
@@ -2327,6 +2369,7 @@ mod tests {
                 client: nervix_models::ClientName::try_from("syslog_listener")
                     .expect("valid client identifier"),
                 mode: SyslogIngestMode::NoAck,
+                rate_limits: nervix_models::RateLimits::NONE,
                 quiesce: IngestQuiesceMode::Buffer {
                     max_size: "1MiB".to_string(),
                     overflow: IngestQuiesceOverflow::DropOldest,
@@ -2393,6 +2436,7 @@ mod tests {
                         max_backoff: "1m".to_string(),
                     },
                 },
+                rate_limits: nervix_models::RateLimits::NONE,
                 quiesce: IngestQuiesceMode::Suspend,
             }))
         );
@@ -2600,6 +2644,7 @@ mod tests {
                         max_backoff: "5s".to_string(),
                     },
                 },
+                rate_limits: nervix_models::RateLimits::NONE,
             })
         );
         assert_eq!(parsed.timestamp_source, Some(IngestTimestampSource::Now));

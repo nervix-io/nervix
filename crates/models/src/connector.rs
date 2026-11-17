@@ -55,6 +55,7 @@ mod prometheus;
 mod publishing;
 mod pulsar;
 mod rabbitmq;
+mod rate_limit;
 mod redis;
 mod sentry;
 mod sqs;
@@ -69,10 +70,12 @@ pub use self::{
     declaration::*, emitter::*, external_name::ExternalNameError, header_model::*, header_pairs::*,
     host_port::*, http::*, iceberg::*, ingestor::*, ingestor_metadata::*, ingestor_payload::*,
     kafka::*, mapped_values::*, mongodb::*, mqtt::*, mysql::*, nats::*, otel::*, postgres::*,
-    prometheus::*, pulsar::*, rabbitmq::*, redis::*, sentry::*, sqs::*, syslog::*, websockets::*,
-    zeromq::*,
+    prometheus::*, pulsar::*, rabbitmq::*, rate_limit::*, redis::*, sentry::*, sqs::*, syslog::*,
+    websockets::*, zeromq::*,
 };
-pub(crate) use self::{entity_union::ALTERED_PAIR_CHECKED, ingestor::AlteredIngestorEntity};
+pub(crate) use self::{
+    entity_union::ALTERED_PAIR_CHECKED, ingestor::AlteredIngestorEntity, rate_limit::NO_RATE_LIMITS,
+};
 
 /// The kind of external system, or of Nervix-served boundary, that a client connects to and a
 /// ingestor or emitter exchanges data with.

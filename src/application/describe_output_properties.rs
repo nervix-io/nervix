@@ -25,8 +25,8 @@ use nervix_models::{CodecName, FieldPath, Timestamp};
 
 use super::*;
 use crate::runtime::{
-    ClientIngestorGauges, DecodeRejection, IngestorQuiesceCounters, KafkaDomainOffsetDescribe,
-    TransportPosition,
+    ClientIngestorGauges, DecodeRejection, IngestorQuiesceCounters, IngestorRateLimitTotals,
+    KafkaDomainOffsetDescribe, TransportPosition,
 };
 
 const CASE_BYTES: usize = 2048;
@@ -180,6 +180,18 @@ impl<'a> Reports<'a> {
         })
     }
 
+    fn rate_limit(&mut self) -> Option<IngestorRateLimitTotals> {
+        if !self.arbitrary.entropy().flag() {
+            return None;
+        }
+        Some(IngestorRateLimitTotals {
+            held_total: self.number(),
+            hold_millis_total: self.number(),
+            rejected_total: self.number(),
+            program_rejections_total: self.number(),
+        })
+    }
+
     fn report(&mut self) -> RuntimeIngestorDescribe {
         let running = self.arbitrary.entropy().flag();
         let ready = self.arbitrary.entropy().flag();
@@ -204,6 +216,7 @@ impl<'a> Reports<'a> {
         };
         let kafka_domain_offsets = self.kafka_domain_offsets();
         let client_producers = self.client_producers();
+        let rate_limit = self.rate_limit();
         let source_metrics = self.metrics();
         RuntimeIngestorDescribe {
             source_metrics,
@@ -221,6 +234,7 @@ impl<'a> Reports<'a> {
             reconnect_wait_millis,
             kafka_domain_offsets,
             client_producers,
+            rate_limit,
         }
     }
 

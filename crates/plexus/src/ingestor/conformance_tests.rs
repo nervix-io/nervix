@@ -26,7 +26,11 @@ use nervix_models::{
 };
 use strum::IntoEnumIterator as _;
 
-use crate::conformance_support::{assert_offers_exactly, created_model, refused};
+use crate::{
+    conformance_support::{assert_offers_exactly, created_model, refused},
+    parser_support::ParseFromSourceError,
+    statement::{parse_statement, suggest_statement},
+};
 
 /// The choice a generated statement makes for each option a requirement names, by the option's
 /// keywords.
@@ -47,6 +51,8 @@ struct Generated {
     /// The locator as the statement writes it, where the entity declares one.
     locator: Option<String>,
     delivery: &'static str,
+    /// The `RATE LIMIT` clauses written after the delivery mode, where a test writes any.
+    rate_limit: Option<&'static str>,
     quiesce: &'static str,
 }
 
@@ -66,6 +72,7 @@ impl Generated {
             foreign: None,
             locator: declared.locator.as_ref().map(LocatorDeclaration::example),
             delivery: delivery.example,
+            rate_limit: None,
             quiesce: quiesce.example(),
         }
     }
@@ -134,7 +141,14 @@ impl Generated {
 
     /// The statement up to the quiesce mode `ON QUIESCE` introduces.
     fn through_quiesce(&self) -> String {
-        format!("{}{} ON QUIESCE ", self.through_mode(), self.delivery)
+        match self.rate_limit {
+            Some(rate_limit) => format!(
+                "{}{} {rate_limit} ON QUIESCE ",
+                self.through_mode(),
+                self.delivery
+            ),
+            None => format!("{}{} ON QUIESCE ", self.through_mode(), self.delivery),
+        }
     }
 
     fn text(&self) -> String {
@@ -159,6 +173,23 @@ impl Generated {
         };
         assert_eq!(ingestor.input.entity_kind(), self.kind, "{text}");
         ingestor
+    }
+
+    /// Checks that the grammar refuses the statement with a diagnostic that says `expected`.
+    fn assert_refused_with(&self, expected: &str) {
+        let text = self.text();
+        let Err(error) = parse_statement(&text) else {
+            panic!("the grammar accepts what {} refuses: {text}", self.kind);
+        };
+        let ParseFromSourceError::Parse { diagnostics, .. } = error.current_context() else {
+            panic!("expected a parse error for {text}, got {error:?}");
+        };
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.message == expected),
+            "{expected:?} in {diagnostics:?} for {text}"
+        );
     }
 
     /// Checks that the grammar refuses the statement, which its entity does not declare.
@@ -633,3 +664,64 @@ fn completion_names_the_declared_locator_then_the_declared_options() {
 
 #[path = "alter_conformance_tests.rs"]
 mod alter;
+
+/// The clause a generated statement writes after its delivery mode where a test writes one.
+const RATE_LIMIT: &str = "RATE LIMIT 10 PER 1s BURST 10";
+
+#[test]
+fn every_declared_delivery_mode_takes_a_rate_limit_exactly_where_it_holds_its_source_back() {
+    for kind in IngestorEntityKind::all() {
+        let declared = kind.capabilities();
+        for delivery in declared.delivery {
+            let generated = Generated {
+                delivery: delivery.example,
+                rate_limit: Some(RATE_LIMIT),
+                ..Generated::of(kind)
+            }
+            .choosing(delivery.requires);
+            let Some(refusal) = declared.rate_limit.refusal(kind, delivery.kind) else {
+                let ingestor = generated.parse();
+                let text = generated.text();
+                let clauses = ingestor.input.rate_limits().clauses();
+                assert_eq!(clauses.len(), 1, "{text}");
+                let clause = &clauses[0];
+                assert_eq!(clause.count.as_str(), "10", "{text}");
+                assert_eq!(clause.measure, None, "{text}");
+                assert_eq!(clause.period, "1s", "{text}");
+                assert_eq!(clause.burst.as_str(), "10", "{text}");
+                assert_eq!(ingestor.input.rate_limit_refusal(), None, "{text}");
+                continue;
+            };
+            generated.assert_refused_with(&refusal.to_string());
+        }
+    }
+}
+
+#[test]
+fn completion_offers_a_rate_limit_after_exactly_the_modes_that_hold_their_source_back() {
+    for kind in IngestorEntityKind::all() {
+        let declared = kind.capabilities();
+        for delivery in declared.delivery {
+            let generated = Generated {
+                delivery: delivery.example,
+                ..Generated::of(kind)
+            }
+            .choosing(delivery.requires);
+            let prefix = format!("{}{} ", generated.through_mode(), delivery.example);
+            let suggestions = suggest_statement(&prefix, prefix.len());
+            assert_eq!(
+                suggestions
+                    .iter()
+                    .any(|suggestion| suggestion == "RATE LIMIT"),
+                declared.rate_limit.holds(delivery.kind),
+                "completion of `{prefix}` offers {suggestions:?}"
+            );
+            assert!(
+                suggestions
+                    .iter()
+                    .any(|suggestion| suggestion == "ON QUIESCE"),
+                "completion of `{prefix}` still offers the quiesce clause: {suggestions:?}"
+            );
+        }
+    }
+}

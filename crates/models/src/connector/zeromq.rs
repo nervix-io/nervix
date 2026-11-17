@@ -58,6 +58,8 @@ const CLIENT_CONFIG: crate::ClientConfigSchema = {
 pub struct ZeroMqPullIngestor {
     pub client: ClientName,
     pub mode: ZeroMqIngestMode,
+    /// The `RATE LIMIT` clauses the body writes after its delivery mode, in order.
+    pub rate_limits: crate::RateLimits,
     pub quiesce: IngestQuiesceMode,
 }
 
@@ -126,6 +128,9 @@ impl IngestorDeclaration for ZeroMqPullIngestor {
             DeclaredQuiesce::BUFFER,
             DeclaredQuiesce::DROP,
         ],
+        // A PULL socket that stops taking messages leaves its pushers waiting at their high-water
+        // mark.
+        rate_limit: crate::RateLimitDeclaration::Held,
         locator: None,
         options: &[],
         bounds: ZEROMQ_INGESTOR_BOUNDS,
@@ -147,6 +152,14 @@ impl IngestorEntityBody for ZeroMqPullIngestor {
 
     fn quiesce_mut(&mut self) -> &mut IngestQuiesceMode {
         &mut self.quiesce
+    }
+
+    fn rate_limits(&self) -> &crate::RateLimits {
+        &self.rate_limits
+    }
+
+    fn rate_limits_mut(&mut self) -> Option<&mut crate::RateLimits> {
+        Some(&mut self.rate_limits)
     }
 
     fn acknowledgement(&self) -> IngestAcknowledgement<'_> {

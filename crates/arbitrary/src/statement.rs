@@ -1512,7 +1512,8 @@ impl Arbitrary<'_> {
 
     /// One operation every ingestor accepts, whose `SET FROM` states a source `source` builds and
     /// whose changes `change` builds. Plexus writes `SET CLIENT` only for an entity that reads
-    /// through a client.
+    /// through a client, and `SET RATE LIMIT` and `DROP RATE LIMIT` only for an entity that holds
+    /// its source back in some delivery mode.
     fn alter_ingestor_operation<Source: IngestorEntityModel>(
         &mut self,
         source: impl Fn(&mut Self) -> Source,
@@ -1522,7 +1523,8 @@ impl Arbitrary<'_> {
             Source::KIND.capabilities().reference,
             IngestorReferenceKind::Client(_)
         );
-        match self.entropy.byte() % 13 {
+        let holds_its_source_back = Source::KIND.capabilities().rate_limit.holds_in_some_mode();
+        match self.entropy.byte() % 15 {
             0 => AlterIngestorOperation::SetSource {
                 source: source(self),
             },
@@ -1568,6 +1570,14 @@ impl Arbitrary<'_> {
                 relay: self.name(),
                 alteration: self.construction_alteration(RouteShape::Transforming),
             },
+            12 if holds_its_source_back || self.domain != Domain::Plexus => {
+                AlterIngestorOperation::SetRateLimit {
+                    limits: self.written_rate_limits(),
+                }
+            }
+            13 if holds_its_source_back || self.domain != Domain::Plexus => {
+                AlterIngestorOperation::DropRateLimit
+            }
             _ => AlterIngestorOperation::SetGeneralError {
                 policy: self.general_error_policy(),
             },

@@ -16,13 +16,14 @@
 
 use chumsky::prelude::*;
 use nervix_models::{
-    PulsarIngestMode, PulsarSubscription, PulsarSubscriptionName, PulsarSubscriptionOwnership,
-    PulsarSubscriptionType, PulsarTopicIngestor, PulsarTopicIngestorChange, PulsarTopicName,
+    IngestDeliveryKind, PulsarIngestMode, PulsarSubscription, PulsarSubscriptionName,
+    PulsarSubscriptionOwnership, PulsarSubscriptionType, PulsarTopicIngestor,
+    PulsarTopicIngestorChange, PulsarTopicName,
 };
 
 use super::delivery::{
-    ParallelAck, SequentialAck, ack_parallel, ack_sequential, no_ack, optional_instances,
-    start_position, suspend_only_quiesce_clause,
+    NamedDelivery, ParallelAck, SequentialAck, ack_parallel, ack_sequential, no_ack,
+    optional_instances, rate_limits_after, start_position, suspend_only_quiesce_clause,
 };
 use crate::{
     lexer::{Identifier, Token},
@@ -32,6 +33,12 @@ use crate::{
 /// `FROM <client> TOPIC '<topic>' SUBSCRIPTION '<subscription>'
 /// (OWNED BY INGESTOR START AT EARLIEST|LATEST)|PROVISIONED
 /// TYPE SHARED|KEY_SHARED|FAILOVER|EXCLUSIVE [INSTANCES <n>] MODE … ON QUIESCE SUSPEND`.
+impl NamedDelivery for PulsarIngestMode {
+    fn delivery_kind(&self) -> IngestDeliveryKind {
+        self.acknowledgement().kind()
+    }
+}
+
 pub(super) fn topic_body<'src>()
 -> impl Parser<'src, &'src [Token], PulsarTopicIngestor, extra::Err<ParseError<'src>>> + Clone {
     client_ref()
@@ -40,16 +47,19 @@ pub(super) fn topic_body<'src>()
         .then(subscription())
         .then(optional_instances::<PulsarTopicIngestor>())
         .then_ignore(kw(Identifier::Mode))
-        .then(mode())
+        .then(mode().then_with_ctx(rate_limits_after::<PulsarTopicIngestor, PulsarIngestMode>()))
         .then(suspend_only_quiesce_clause())
         .map(
-            |(((((client, topic), subscription), instances), mode), quiesce)| PulsarTopicIngestor {
-                client,
-                topic,
-                subscription,
-                instances,
-                mode,
-                quiesce,
+            |(((((client, topic), subscription), instances), (mode, rate_limits)), quiesce)| {
+                PulsarTopicIngestor {
+                    client,
+                    topic,
+                    subscription,
+                    instances,
+                    mode,
+                    rate_limits,
+                    quiesce,
+                }
             },
         )
         .boxed()

@@ -109,7 +109,7 @@ use nervix_primitives::{
         broadcast, mpsc, oneshot, watch,
     },
     task::{AbortOnDropHandle, JoinHandle, TaskTracker},
-    time::{Instant, sleep, sleep_until},
+    time::{Instant, sleep, sleep_until, timeout_at},
 };
 use nervix_recovery::{Discarded as _, NoReceiver as _};
 use nervix_roto::{UdfExecutor, UdfProgram};
@@ -276,6 +276,7 @@ mod ingest_group;
 mod ingest_metadata;
 #[cfg(test)]
 mod ingest_payload_tests;
+mod ingest_rate_limit;
 mod ingest_task_handles;
 mod ingestion_time;
 mod ingestor_quiesce;
@@ -530,14 +531,18 @@ use inferencer_state::ReplicatedInferencerState;
 pub(in crate::runtime) use ingest_group::INGEST_GROUP_MAX_ROWS;
 use ingest_group::{
     BatchPayload, BoundIngestor, BoundIngestorInput, BranchedEntrypointInput, ClientBatchDispatch,
-    IngestGroupDispatch, IngestRouteCollector, IngestorDependencies, IngestorRouteRuntimes,
-    PayloadDecodeFailure, RawIngestAcceptance, RefusedEntry, SplitPayloads, UnfoldingNotAdmitted,
-    decode_ingested_payload, prepare_branched_entrypoint_input,
+    ClientBatchMetadata, IngestGroupDispatch, IngestRouteCollector, IngestorDependencies,
+    IngestorRouteRuntimes, PayloadDecodeFailure, RawIngestAcceptance, RefusedEntry, SplitPayloads,
+    UnfoldingNotAdmitted, decode_ingested_payload, prepare_branched_entrypoint_input,
 };
 use ingest_metadata::{
     BRANCH_NAMESPACE, INGEST_METADATA_NAMESPACE, INGEST_PAYLOAD_NAMESPACE,
     IngestHeaderFunctionInjector, IngestMetadataBuilders, IngestMetadataError,
     IngestMetadataProjection,
+};
+use ingest_rate_limit::{
+    AllowanceDecision, BoundRateLimit, PayloadCost, RateLimitRejection, RateLimitRejectionCause,
+    RateLimitReporting, UnitAllowance,
 };
 pub(in crate::runtime) use ingestor_quiesce::{
     BufferedIngestMetadata, BufferedIngestPayload, IngestorQuiesceCause, IngestorQuiesceControl,
@@ -714,8 +719,9 @@ use vm_compile::{
     CompiledMessageErrorSite, CompiledMessageErrorSites, GeneratorSetProgramSchemas,
     OutputNamespaceInput, RouteProgram, RuntimeFilterScope, RuntimeVmCompileError,
     RuntimeVmCompileResult, RuntimeVmSchema, RuntimeVmSchemaPair, bind_ingestor_filter_map_program,
-    bind_output_branch_program, bind_processor_output_filter_map_program,
-    bind_scoped_filter_program, collect_expression_field_paths, compile_emitter_filter_map_part,
+    bind_ingestor_measure_program, bind_output_branch_program,
+    bind_processor_output_filter_map_program, bind_scoped_filter_program,
+    collect_expression_field_paths, compile_emitter_filter_map_part,
     compile_finalized_output_filter_program, compile_generator_set_program,
     compile_message_error_set_program, compile_processor_output_filter_map_program,
     compile_reorderer_program, compile_scoped_filter_program,
@@ -1047,7 +1053,9 @@ pub use nervix_models::{
 };
 pub use node::{DEFAULT_TEMP_DIR, Runtime};
 use observability::BranchMetricsMark;
-pub(crate) use observability::{IngestorDescribe, KafkaDomainOffsetDescribe};
+pub(crate) use observability::{
+    IngestorDescribe, IngestorRateLimitTotals, KafkaDomainOffsetDescribe,
+};
 pub(crate) use ownership_handoff_error::{OwnershipHandoffError, OwnershipHandoffResult};
 pub(crate) use relay_batch::{RelayMessage, RelayRecordBatch};
 pub(crate) use relay_channel::{RelayBroadcast, RelayReceiver as RelaySubscriptionReceiver};

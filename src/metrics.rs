@@ -52,8 +52,8 @@ use nervix_primitives::{
 use nervix_recovery::{Discarded as _, Reported as _};
 use nervix_simd_kernels::{ElapsedHistogram, ElapsedLayout, elapsed_nanos};
 use prometheus::{
-    Encoder, Gauge, Histogram, HistogramOpts, HistogramVec, IntCounter, IntCounterVec, IntGauge,
-    IntGaugeVec, Opts, Registry, TextEncoder,
+    Counter, CounterVec, Encoder, Gauge, Histogram, HistogramOpts, HistogramVec, IntCounter,
+    IntCounterVec, IntGauge, IntGaugeVec, Opts, Registry, TextEncoder,
     core::{Collector, Desc},
     proto::{MetricFamily, MetricType},
 };
@@ -109,6 +109,11 @@ const INGESTOR_OVERSIZED_PAYLOADS_TOTAL: &str = "ingestor_oversized_payloads_tot
 const INGESTOR_HEADER_VALUES_DROPPED_TOTAL: &str = "ingestor_header_values_dropped_total";
 const INGESTOR_READ_AHEAD_DROPPED_PAYLOADS_TOTAL: &str =
     "ingestor_read_ahead_dropped_payloads_total";
+const INGESTOR_RATE_LIMIT_HELD_TOTAL: &str = "ingestor_rate_limit_held_total";
+const INGESTOR_RATE_LIMIT_HOLD_SECONDS_TOTAL: &str = "ingestor_rate_limit_hold_seconds_total";
+const INGESTOR_RATE_LIMIT_REJECTED_TOTAL: &str = "ingestor_rate_limit_rejected_total";
+const INGESTOR_RATE_LIMIT_PROGRAM_REJECTIONS_TOTAL: &str =
+    "ingestor_rate_limit_program_rejections_total";
 const SESSION_SUBSCRIPTIONS: &str = "session_subscriptions";
 const CLIENT_INGESTOR_PRODUCERS: &str = "client_ingestor_producers";
 const CLIENT_INGESTOR_FORWARDED_PRODUCERS: &str = "client_ingestor_forwarded_producers";
@@ -1712,6 +1717,10 @@ struct PrometheusMetrics {
     ingestor_oversized_payloads_total: IntCounterVec,
     ingestor_header_values_dropped_total: IntCounterVec,
     ingestor_read_ahead_dropped_payloads_total: IntCounterVec,
+    ingestor_rate_limit_held_total: IntCounterVec,
+    ingestor_rate_limit_hold_seconds_total: CounterVec,
+    ingestor_rate_limit_rejected_total: IntCounterVec,
+    ingestor_rate_limit_program_rejections_total: IntCounterVec,
     session_subscriptions: IntGaugeVec,
     session_subscription_dropped_rows_total: IntCounterVec,
     client_ingestor_producers: IntGaugeVec,
@@ -2020,6 +2029,58 @@ impl PrometheusMetrics {
             "the metric name, help text and label names are constants that satisfy Prometheus \
              naming rules",
         );
+        let ingestor_rate_limit_held_total = IntCounterVec::new(
+            Opts::new(
+                INGESTOR_RATE_LIMIT_HELD_TOTAL,
+                "Total times an ingestor's execution unit held its source back because a RATE \
+                 LIMIT allowance had no room for the next payload.",
+            )
+            .namespace("nervix"),
+            INGESTOR_QUIESCE_PROMETHEUS_LABELS,
+        )
+        .assured(
+            "the metric name, help text and label names are constants that satisfy Prometheus \
+             naming rules",
+        );
+        let ingestor_rate_limit_hold_seconds_total = CounterVec::new(
+            Opts::new(
+                INGESTOR_RATE_LIMIT_HOLD_SECONDS_TOTAL,
+                "Total seconds an ingestor's execution unit held its source back for its RATE \
+                 LIMIT allowances, on the physical clock.",
+            )
+            .namespace("nervix"),
+            INGESTOR_QUIESCE_PROMETHEUS_LABELS,
+        )
+        .assured(
+            "the metric name, help text and label names are constants that satisfy Prometheus \
+             naming rules",
+        );
+        let ingestor_rate_limit_rejected_total = IntCounterVec::new(
+            Opts::new(
+                INGESTOR_RATE_LIMIT_REJECTED_TOTAL,
+                "Total payloads an ingestor consumed as rate_limit rejections because they cost \
+                 more than a RATE LIMIT clause's BURST, so no allowance could ever admit them.",
+            )
+            .namespace("nervix"),
+            INGESTOR_QUIESCE_PROMETHEUS_LABELS,
+        )
+        .assured(
+            "the metric name, help text and label names are constants that satisfy Prometheus \
+             naming rules",
+        );
+        let ingestor_rate_limit_program_rejections_total = IntCounterVec::new(
+            Opts::new(
+                INGESTOR_RATE_LIMIT_PROGRAM_REJECTIONS_TOTAL,
+                "Total payloads an ingestor consumed as rate_limit rejections because a RATE \
+                 LIMIT measure failed on them.",
+            )
+            .namespace("nervix"),
+            INGESTOR_QUIESCE_PROMETHEUS_LABELS,
+        )
+        .assured(
+            "the metric name, help text and label names are constants that satisfy Prometheus \
+             naming rules",
+        );
         let ingestor_oversized_payloads_total = IntCounterVec::new(
             Opts::new(
                 INGESTOR_OVERSIZED_PAYLOADS_TOTAL,
@@ -2155,6 +2216,22 @@ impl PrometheusMetrics {
             );
         registry
             .register(Box::new(ingestor_oversized_payloads_total.clone()))
+            .assured(
+                "this registry is built here and each metric is registered once under a distinct \
+                 name",
+            );
+        for family in [
+            &ingestor_rate_limit_held_total,
+            &ingestor_rate_limit_rejected_total,
+            &ingestor_rate_limit_program_rejections_total,
+        ] {
+            registry.register(Box::new(family.clone())).assured(
+                "this registry is built here and each metric is registered once under a distinct \
+                 name",
+            );
+        }
+        registry
+            .register(Box::new(ingestor_rate_limit_hold_seconds_total.clone()))
             .assured(
                 "this registry is built here and each metric is registered once under a distinct \
                  name",
@@ -2420,6 +2497,10 @@ impl PrometheusMetrics {
             ingestor_oversized_payloads_total,
             ingestor_header_values_dropped_total,
             ingestor_read_ahead_dropped_payloads_total,
+            ingestor_rate_limit_held_total,
+            ingestor_rate_limit_hold_seconds_total,
+            ingestor_rate_limit_rejected_total,
+            ingestor_rate_limit_program_rejections_total,
             session_subscriptions,
             session_subscription_dropped_rows_total,
             client_ingestor_producers,
@@ -3237,6 +3318,19 @@ pub(crate) struct NodeBatchMetricsSpec<'a> {
     pub(crate) branch: Option<BranchKeyFingerprint>,
 }
 
+/// One ingestor unit's rate-limit counters, resolved once when the unit starts.
+#[derive(Debug, Clone)]
+pub(crate) struct IngestorRateLimitCounters {
+    /// How many times the unit held its source back for its allowances.
+    pub(crate) held: IntCounter,
+    /// How long, in seconds of the physical clock, the unit held its source back.
+    pub(crate) hold_seconds: Counter,
+    /// Payloads consumed because they cost more than a clause's burst.
+    pub(crate) rejected: IntCounter,
+    /// Payloads consumed because a clause's measure failed on them.
+    pub(crate) program_rejections: IntCounter,
+}
+
 impl RuntimeMetrics {
     pub(crate) fn resolve_node_batch_metrics(
         &self,
@@ -3896,6 +3990,44 @@ impl RuntimeMetrics {
             ])
     }
 
+    /// The rate-limit counters of the unit `unit` of `ingestor` on `physical_node_id`. A unit
+    /// resolves them when it starts, so each series exists at zero before the first hold or
+    /// rejection; a describe of the ingestor reads the same series.
+    pub(crate) fn ingestor_rate_limit_counters(
+        &self,
+        domain: &DomainName,
+        ingestor: &IngestorName,
+        unit: Unit,
+        physical_node_id: Option<&ClusterNodeName>,
+        kind: nervix_models::IngestorEntityKind,
+    ) -> IngestorRateLimitCounters {
+        let instance = instance_label(unit);
+        let connector = kind.connector();
+        let labels = [
+            domain.as_str(),
+            ingestor.as_str(),
+            physical_node_label(physical_node_id),
+            instance.as_ref(),
+            connector.as_ref(),
+            kind.entity_keyword(),
+        ];
+        let prometheus = &self.series.prometheus;
+        IngestorRateLimitCounters {
+            held: prometheus
+                .ingestor_rate_limit_held_total
+                .with_label_values(&labels),
+            hold_seconds: prometheus
+                .ingestor_rate_limit_hold_seconds_total
+                .with_label_values(&labels),
+            rejected: prometheus
+                .ingestor_rate_limit_rejected_total
+                .with_label_values(&labels),
+            program_rejections: prometheus
+                .ingestor_rate_limit_program_rejections_total
+                .with_label_values(&labels),
+        }
+    }
+
     /// The count of payloads the connector of `ingestor` on `physical_node_id`
     /// dropped because they exceed its client's message size bound. The series exists from the
     /// first time an ingestor host or a describe of the ingestor asks for it.
@@ -4369,11 +4501,18 @@ impl RuntimeMetrics {
                 &prometheus.ingestor_oversized_payloads_total,
                 &prometheus.ingestor_header_values_dropped_total,
                 &prometheus.ingestor_read_ahead_dropped_payloads_total,
+                &prometheus.ingestor_rate_limit_held_total,
+                &prometheus.ingestor_rate_limit_rejected_total,
+                &prometheus.ingestor_rate_limit_program_rejections_total,
             ] {
                 counter
                     .remove_label_values(&labels)
                     .discarded(WITHDRAWN_SERIES_MAY_NOT_EXIST);
             }
+            prometheus
+                .ingestor_rate_limit_hold_seconds_total
+                .remove_label_values(&labels)
+                .discarded(WITHDRAWN_SERIES_MAY_NOT_EXIST);
         }
     }
 

@@ -584,6 +584,7 @@ fn an_mqtt_source_suspends_only_a_persistent_session_delivered_at_least_once() {
             session,
             qos,
             mode,
+            rate_limits: nervix_models::RateLimits::NONE,
             quiesce: IngestQuiesceMode::Drop,
         })
     };
@@ -648,6 +649,7 @@ fn a_source_references_the_client_or_endpoint_its_body_names() {
         offset_mode: KafkaOffsetMode::Domain,
         instances: nervix_models::IngestorInstances::ONE,
         mode: KafkaIngestMode::NoAck,
+        rate_limits: nervix_models::RateLimits::NONE,
         quiesce: IngestQuiesceMode::Suspend,
     });
     assert_eq!(kafka.source_ref().as_str(), "events");
@@ -1334,6 +1336,7 @@ fn a_source_acknowledges_as_its_delivery_mode_states() {
             offset_mode: KafkaOffsetMode::Domain,
             instances: nervix_models::IngestorInstances::ONE,
             mode,
+            rate_limits: nervix_models::RateLimits::NONE,
             quiesce: IngestQuiesceMode::Suspend,
         })
     };
@@ -1383,6 +1386,7 @@ fn a_source_acknowledges_as_its_delivery_mode_states() {
             session: MqttSession::Persistent,
             qos: MqttQos::Qos1,
             mode,
+            rate_limits: nervix_models::RateLimits::NONE,
             quiesce: IngestQuiesceMode::Drop,
         });
         assert_eq!(source.acknowledgement(), expected);
