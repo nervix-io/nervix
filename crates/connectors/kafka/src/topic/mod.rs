@@ -50,8 +50,9 @@ use error_stack::{Report, ResultExt as _};
 pub use ingestor::{
     KafkaDomainOffsetError, KafkaDomainOffsetHost, KafkaDomainOffsetInitialization,
     KafkaDomainOffsetResult, KafkaDomainOffsetServices, KafkaDomainOffsetStart, KafkaGroupCommit,
-    KafkaOffsetPosition, KafkaTopicIngestor, KafkaTopicIngestorError, KafkaTopicIngestorMessage,
-    KafkaTopicIngestorOffsetMode, KafkaTopicIngestorPlan, TopicPartitionInspector,
+    KafkaGroupPartitionRead, KafkaOffsetPosition, KafkaTopicIngestor, KafkaTopicIngestorError,
+    KafkaTopicIngestorMessage, KafkaTopicIngestorOffsetMode, KafkaTopicIngestorPlan,
+    TopicPartitionInspector,
 };
 // Criterion measures the per-partition folds an acknowledgement and a rejection run.
 #[cfg(feature = "benchmarks")]

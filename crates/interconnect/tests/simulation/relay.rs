@@ -102,7 +102,7 @@ fn relay_payload(delivery: RelayDelivery, ack_id: u64, sender: &Transport) -> Re
         domain: DomainName::parse("simulated").assured("fixture domain is valid"),
         relay: RelayName::parse("records").assured("fixture relay is valid"),
         unit: nervix_models::Unit::SINGLE,
-        key: None,
+        key: nervix_models::RemoteBranchKey::Unbranched,
         batch_ipc,
         metadata: Vec::new(),
         acks: Vec::new(),

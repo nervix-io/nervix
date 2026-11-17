@@ -181,7 +181,8 @@ impl RestoredBranchDeclarations {
         };
         match branching {
             ResolvedBranching::Unbranched => self.unbranched = true,
-            ResolvedBranching::Branched { branch, schema, .. } => {
+            ResolvedBranching::Branched { branch, schema, .. }
+            | ResolvedBranching::AwaitingTopology { branch, schema } => {
                 self.branches.insert(branch.clone(), schema.clone());
             }
         }
@@ -208,7 +209,7 @@ impl RestoredBranchDeclarations {
     /// each with a value of the field's declared type.
     pub(in crate::application) fn admit(
         &self,
-        archived: Option<&Vec<StateField>>,
+        archived: &nervix_models::BranchKeyFields<StateField>,
     ) -> Result<Option<BranchKey>, Report<ArchivedBranchKeyError>> {
         let key = BranchKey::from_remote_key(remote_branch_key(archived))
             .change_context(ArchivedBranchKeyError::NotABranchKey)?;
@@ -278,7 +279,7 @@ impl ArchivedKeyCheck {
                         .checked_add(1)
                         .assured("an entry's index is below the length of the list that holds it");
                     self.declarations
-                        .admit(entry.key.as_ref())
+                        .admit(&entry.key)
                         .change_context_lazy(|| {
                             self.refusal(
                                 domain,
@@ -291,16 +292,16 @@ impl ArchivedKeyCheck {
             }
             DescribedRuntimeState::Inferencer {
                 descriptor, record, ..
-            } => self.admit_descriptor(domain, descriptor.branch.as_ref(), record),
+            } => self.admit_descriptor(domain, &descriptor.branch, record),
             DescribedRuntimeState::Wasm {
                 descriptor, record, ..
-            } => self.admit_descriptor(domain, descriptor.branch.as_ref(), record),
+            } => self.admit_descriptor(domain, &descriptor.branch, record),
             DescribedRuntimeState::Deduplicator {
                 descriptor, record, ..
-            } => self.admit_descriptor(domain, descriptor.branch.as_ref(), record),
+            } => self.admit_descriptor(domain, &descriptor.branch, record),
             DescribedRuntimeState::Window {
                 descriptor, record, ..
-            } => self.admit_descriptor(domain, descriptor.branch.as_ref(), record),
+            } => self.admit_descriptor(domain, &descriptor.branch, record),
             // Kafka offsets carry no branch key, and materialized record identities are admitted
             // by the conversion that reads them from their own sections.
             DescribedRuntimeState::KafkaOffsets { .. }
@@ -311,7 +312,7 @@ impl ArchivedKeyCheck {
     fn admit_descriptor(
         &self,
         domain: &DomainName,
-        branch: Option<&Vec<StateField>>,
+        branch: &nervix_models::BranchKeyFields<StateField>,
         record: &DescribedSection,
     ) -> Result<(), Report<RestoreRefusal>> {
         self.declarations
@@ -491,7 +492,7 @@ mod tests {
                 "tenant_shard",
                 &[("tenant", ParseAsType::String), ("shard", ParseAsType::I32)],
             ),
-            nervix_models::BranchPartitions::ONE,
+            nervix_models::ResolvedBranchPartitions::ONE,
         )
     }
 
@@ -499,7 +500,7 @@ mod tests {
         ResolvedBranching::branched(
             branch("by_region"),
             key_schema("region_key", &[("region", ParseAsType::String)]),
-            nervix_models::BranchPartitions::ONE,
+            nervix_models::ResolvedBranchPartitions::ONE,
         )
     }
 
@@ -540,17 +541,19 @@ mod tests {
             .assured("the test schedule declares the entity's branching")
     }
 
-    fn archived(fields: &[(&str, StateValue)]) -> Vec<StateField> {
-        fields
-            .iter()
-            .map(|(name, value)| StateField {
-                name: (*name).to_string(),
-                value: value.clone(),
-            })
-            .collect()
+    fn archived(fields: &[(&str, StateValue)]) -> nervix_models::BranchKeyFields<StateField> {
+        nervix_models::BranchKeyFields::Direct(
+            fields
+                .iter()
+                .map(|(name, value)| StateField {
+                    name: (*name).to_string(),
+                    value: value.clone(),
+                })
+                .collect(),
+        )
     }
 
-    fn tenant(shard: StateValue) -> Vec<StateField> {
+    fn tenant(shard: StateValue) -> nervix_models::BranchKeyFields<StateField> {
         archived(&[
             ("shard", shard),
             ("tenant", StateValue::String("north".to_string())),
@@ -577,13 +580,13 @@ mod tests {
         let router = declarations(&schedule, ModelKind::Junction, "router");
 
         let admitted = router
-            .admit(Some(&tenant(StateValue::I32(4))))
+            .admit(&tenant(StateValue::I32(4)))
             .assured("a key of exactly the declared fields and types is admitted")
             .assured("a concrete archived key stays concrete");
         assert_eq!(admitted.as_str(), r#"{"shard":4,"tenant":"north"}"#);
 
         let unbranched = router
-            .admit(None)
+            .admit(&nervix_models::BranchKeyFields::Unbranched)
             .expect_err("a branched processor holds no unbranched key");
         assert_eq!(
             unbranched.to_string(),
@@ -591,10 +594,10 @@ mod tests {
         );
 
         let missing = router
-            .admit(Some(&archived(&[(
+            .admit(&archived(&[(
                 "tenant",
                 StateValue::String("north".to_string()),
-            )])))
+            )]))
             .expect_err("a key without a declared field is refused");
         assert_eq!(
             missing.current_context(),
@@ -610,7 +613,7 @@ mod tests {
         );
 
         let retyped = router
-            .admit(Some(&tenant(StateValue::String("4".to_string()))))
+            .admit(&tenant(StateValue::String("4".to_string())))
             .expect_err("a key whose field holds another type is refused");
         assert_eq!(
             format!("{retyped:#}"),
@@ -619,7 +622,7 @@ mod tests {
         );
 
         let not_a_key = router
-            .admit(Some(&tenant(StateValue::F64Bits(f64::NAN.to_bits()))))
+            .admit(&tenant(StateValue::F64Bits(f64::NAN.to_bits())))
             .expect_err("a key holding a non-finite float is no typed branch key");
         assert_eq!(
             not_a_key.current_context(),
@@ -645,12 +648,12 @@ mod tests {
 
         assert_eq!(
             router
-                .admit(None)
+                .admit(&nervix_models::BranchKeyFields::Unbranched)
                 .assured("an unbranched processor holds the absent key"),
             None
         );
         let concrete = router
-            .admit(Some(&tenant(StateValue::I32(4))))
+            .admit(&tenant(StateValue::I32(4)))
             .expect_err("an unbranched processor holds no concrete key");
         assert_eq!(
             concrete.current_context(),
@@ -682,19 +685,19 @@ mod tests {
         let source = declarations(&schedule, ModelKind::Ingestor, "source");
 
         source
-            .admit(Some(&tenant(StateValue::I32(4))))
+            .admit(&tenant(StateValue::I32(4)))
             .assured("a key of the first route's branch is admitted");
         source
-            .admit(Some(&archived(&[(
+            .admit(&archived(&[(
                 "region",
                 StateValue::String("west".to_string()),
-            )])))
+            )]))
             .assured("a key of the second route's branch is admitted");
         source
-            .admit(None)
+            .admit(&nervix_models::BranchKeyFields::Unbranched)
             .assured("the unbranched route's absent key is admitted");
         let foreign = source
-            .admit(Some(&archived(&[("zone", StateValue::I32(1))])))
+            .admit(&archived(&[("zone", StateValue::I32(1))]))
             .expect_err("a key of no route's branch is refused");
         assert_eq!(
             foreign.to_string(),

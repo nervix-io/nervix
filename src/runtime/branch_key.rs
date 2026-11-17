@@ -1,5 +1,9 @@
 use error_stack::ResultExt as _;
-use nervix_models::SchemaField;
+use nervix_models::{
+    ExternalPartition, InheritedPartitionOrigin, InheritedRemoteBranchKey, RemoteBranchKey,
+    SchemaField,
+};
+use nervix_primitives::sync::{ArcUnion, ArcUnionBorrow};
 
 use super::*;
 use crate::runtime_schema::RuntimeValueTypeError;
@@ -14,8 +18,27 @@ struct BranchKeyInner {
     fingerprint: BranchKeyFingerprint,
 }
 
-#[derive(Clone, PartialEq, Eq, Hash)]
-pub struct BranchKey(Arc<BranchKeyInner>);
+#[derive(Debug)]
+struct InheritedBranchKeyInner {
+    key: BranchKeyInner,
+    origin: InheritedPartitionOrigin,
+}
+
+/// A one-word shared handle. Direct keys retain their field-only allocation.
+#[derive(Clone)]
+pub struct BranchKey(ArcUnion<BranchKeyInner, InheritedBranchKeyInner>);
+
+impl PartialEq for BranchKey {
+    fn eq(&self, other: &Self) -> bool {
+        self.inner() == other.inner()
+    }
+}
+impl Eq for BranchKey {}
+impl std::hash::Hash for BranchKey {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.inner().hash(state);
+    }
+}
 
 /// Why a set of fields does not form a concrete branch key.
 ///
@@ -52,9 +75,9 @@ pub(crate) enum BranchKeyShapeError {
 impl std::fmt::Debug for BranchKey {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("BranchKey")
-            .field("fields", &self.0.fields)
-            .field("json", &self.0.json)
-            .field("fingerprint", &self.0.fingerprint)
+            .field("fields", &self.inner().fields)
+            .field("json", &self.inner().json)
+            .field("fingerprint", &self.inner().fingerprint)
             .finish()
     }
 }
@@ -65,8 +88,9 @@ pub(crate) enum RelayPartitioning {
     /// An unbranched relay, or one whose branch declares one partition: its one `Single` unit owns
     /// every key.
     Whole,
+    AwaitingTopology,
     /// A relay whose branch declares several partitions: `Partition(seed mod n)` owns a key.
-    Partitioned(BranchPartitions),
+    Partitioned(ResolvedBranchPartitions),
 }
 
 /// Why a batch names no unit of its relay.
@@ -74,11 +98,18 @@ pub(crate) enum RelayPartitioning {
 pub(crate) enum RelayPartitionError {
     #[error("a batch of a partitioned relay names no concrete branch key")]
     UnbranchedBatchOfPartitionedRelay,
+    #[error("an inherited branch key has no external partition coordinate")]
+    MissingExternalPartition,
+    #[error("the inherited branch has no committed external partition topology")]
+    AwaitingTopology,
 }
 
 impl RelayPartitioning {
     /// The partitioning a relay of `branching` has.
     pub(crate) fn of(branching: Option<&ResolvedBranching>) -> Self {
+        if branching.is_some_and(ResolvedBranching::is_awaiting_topology) {
+            return Self::AwaitingTopology;
+        }
         match branching.and_then(ResolvedBranching::partitions) {
             Some(partitions) => Self::of_partitions(partitions),
             None => Self::Whole,
@@ -87,18 +118,23 @@ impl RelayPartitioning {
 
     /// The partitioning a relay of a branch declaring `partitions` has: one owner for a single
     /// partition, and one unit per partition otherwise.
-    pub(crate) fn of_partitions(partitions: BranchPartitions) -> Self {
-        if partitions.is_partitioned() {
+    pub(crate) fn of_partitions(partitions: ResolvedBranchPartitions) -> Self {
+        if partitions.is_partitioned() || partitions.is_inherited() {
             Self::Partitioned(partitions)
         } else {
             Self::Whole
         }
     }
 
+    pub(super) fn is_inherited(self) -> bool {
+        matches!(self, Self::Partitioned(partitions) if partitions.is_inherited())
+    }
+
     /// The units such a relay is scheduled as, in partition order.
     pub(crate) fn units(self) -> Vec<Unit> {
         match self {
             Self::Whole => vec![Unit::SINGLE],
+            Self::AwaitingTopology => Vec::new(),
             Self::Partitioned(partitions) => partitions.units(),
         }
     }
@@ -112,8 +148,16 @@ impl RelayPartitioning {
         match (self, key) {
             (Self::Whole, _) => Ok(Unit::SINGLE),
             (Self::Partitioned(partitions), Some(key)) => {
-                Ok(partitions.unit_of(key.partition_seed()))
+                let seed = if partitions.is_inherited() {
+                    key.external_partition()
+                        .ok_or_else(|| Report::new(RelayPartitionError::MissingExternalPartition))?
+                        .seed()
+                } else {
+                    key.partition_seed()
+                };
+                Ok(partitions.unit_of(seed))
             }
+            (Self::AwaitingTopology, _) => Err(Report::new(RelayPartitionError::AwaitingTopology)),
             (Self::Partitioned(_), None) => Err(Report::new(
                 RelayPartitionError::UnbranchedBatchOfPartitionedRelay,
             )),
@@ -123,11 +167,11 @@ impl RelayPartitioning {
 
 impl BranchKey {
     pub(crate) fn field_value(&self, name: &str) -> Option<&RuntimeValue> {
-        self.0.fields.get(name)
+        self.inner().fields.get(name)
     }
 
     pub(crate) fn field_count(&self) -> usize {
-        self.0.fields.len()
+        self.inner().fields.len()
     }
 
     /// Checks that this key is a key of the branch schema that declares `fields`: it holds every
@@ -162,7 +206,7 @@ impl BranchKey {
             .iter()
             .map(|field| &field.name)
             .collect::<BTreeSet<_>>();
-        for name in self.0.fields.keys() {
+        for name in self.inner().fields.keys() {
             if !declared.contains(name) {
                 return Err(Report::new(BranchKeyShapeError::UndeclaredField {
                     field: name.clone(),
@@ -181,7 +225,24 @@ impl BranchKey {
     pub(crate) fn from_fields(
         fields: impl IntoIterator<Item = (FieldName, RuntimeValue)>,
     ) -> error_stack::Result<Self, BranchKeyError> {
-        let fields = fields.into_iter().collect::<BTreeMap<_, _>>();
+        Self::from_values(fields.into_iter().collect(), None)
+    }
+
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(reason = "the caller supplies an iterator of typed branch fields")
+    )]
+    pub(crate) fn from_inherited_fields(
+        fields: impl IntoIterator<Item = (FieldName, RuntimeValue)>,
+        partition: InheritedPartitionOrigin,
+    ) -> error_stack::Result<Self, BranchKeyError> {
+        Self::from_values(fields.into_iter().collect(), Some(partition))
+    }
+
+    fn from_values(
+        fields: BTreeMap<FieldName, RuntimeValue>,
+        partition: Option<InheritedPartitionOrigin>,
+    ) -> error_stack::Result<Self, BranchKeyError> {
         if fields.is_empty() {
             return Err(Report::new(BranchKeyError::NoFields));
         }
@@ -201,17 +262,24 @@ impl BranchKey {
         }
         let json = serde_json::Value::Object(object).to_string();
         let fingerprint = BranchKeyFingerprint::of_canonical_text(&json);
-        Ok(Self(Arc::new(BranchKeyInner {
+        let key = BranchKeyInner {
             fields,
             json,
             fingerprint,
-        })))
+        };
+        Ok(Self(match partition {
+            None => ArcUnion::from_first(Arc::new(key)),
+            Some(partition) => ArcUnion::from_second(Arc::new(InheritedBranchKeyInner {
+                key,
+                origin: partition,
+            })),
+        }))
     }
 
     pub(crate) fn from_remote_key(
-        fields: Option<Vec<RemoteRuntimeField>>,
+        remote: RemoteBranchKey,
     ) -> error_stack::Result<Option<Self>, BranchKeyError> {
-        let Some(fields) = fields else {
+        let Some((fields, partition)) = remote.into_parts() else {
             return Ok(None);
         };
         let mut values = BTreeMap::new();
@@ -228,37 +296,72 @@ impl BranchKey {
             })?;
             values.insert(name, value);
         }
-        let key = Self::from_fields(values)?;
-        Ok(Some(key))
+        Self::from_values(values, partition).map(Some)
     }
 
-    pub(crate) fn to_remote_key(key: &Option<Self>) -> Option<Vec<RemoteRuntimeField>> {
-        key.as_ref().map(|key| {
-            key.0
-                .fields
-                .iter()
-                .map(|(name, value)| RemoteRuntimeField {
-                    name: name.as_str().to_string(),
-                    value: value.to_remote(),
-                })
-                .collect()
-        })
+    pub(crate) fn to_remote_key(key: &Option<Self>) -> RemoteBranchKey {
+        let Some(key) = key else {
+            return RemoteBranchKey::Unbranched;
+        };
+        let fields = key
+            .inner()
+            .fields
+            .iter()
+            .map(|(name, value)| RemoteRuntimeField {
+                name: name.as_str().to_string(),
+                value: value.to_remote(),
+            })
+            .collect::<Box<[_]>>();
+        match key.inherited_origin() {
+            None => RemoteBranchKey::Direct(fields),
+            Some(origin) => {
+                RemoteBranchKey::Inherited(Box::new(InheritedRemoteBranchKey { fields, origin }))
+            }
+        }
+    }
+
+    #[inline]
+    fn inner(&self) -> &BranchKeyInner {
+        match self.0.borrow() {
+            ArcUnionBorrow::First(key) => key.get(),
+            ArcUnionBorrow::Second(key) => &key.get().key,
+        }
+    }
+
+    #[inline]
+    pub(crate) fn external_partition(&self) -> Option<ExternalPartition> {
+        match self.0.borrow() {
+            ArcUnionBorrow::First(_) => None,
+            ArcUnionBorrow::Second(key) => Some(key.origin.partition),
+        }
+    }
+
+    pub(crate) fn inherited_origin(&self) -> Option<InheritedPartitionOrigin> {
+        match self.0.borrow() {
+            ArcUnionBorrow::First(_) => None,
+            ArcUnionBorrow::Second(key) => Some(key.origin),
+        }
+    }
+
+    pub(super) fn same_origin(left: &Option<Self>, right: &Option<Self>) -> bool {
+        left.as_ref().and_then(Self::inherited_origin)
+            == right.as_ref().and_then(Self::inherited_origin)
     }
 
     pub(crate) fn as_str(&self) -> &str {
-        self.0.json.as_str()
+        self.inner().json.as_str()
     }
 
     /// The non-sensitive identity the control plane names this concrete branch by, computed when
     /// the key was constructed.
     pub(crate) fn fingerprint(&self) -> BranchKeyFingerprint {
-        self.0.fingerprint
+        self.inner().fingerprint
     }
 
     /// The seed this key is partitioned by: the first eight bytes of its fingerprint. A key lands
     /// in partition `seed mod n` of a branch declared with n partitions.
     pub(crate) fn partition_seed(&self) -> PartitionSeed {
-        self.0.fingerprint.partition_seed()
+        self.inner().fingerprint.partition_seed()
     }
 
     /// Orders two branch scopes by their canonical key text, the unbranched execution first, so
@@ -426,6 +529,73 @@ mod tests {
     use super::*;
     use crate::runtime::{branch_runtime::BranchEntrypointError, test_fixtures::string_branch_key};
 
+    #[test]
+    fn immutable_inherited_origins_preserve_field_identity_and_the_compact_direct_handle() {
+        use meticulous::{OptionExt as _, ResultExt as _};
+        assert_eq!(
+            std::mem::size_of::<BranchKey>(),
+            std::mem::size_of::<usize>()
+        );
+        assert_eq!(
+            std::mem::size_of::<Option<BranchKey>>(),
+            std::mem::size_of::<usize>()
+        );
+        assert_eq!(
+            std::mem::size_of::<nervix_models::RemoteBranchKey>(),
+            3 * std::mem::size_of::<usize>()
+        );
+        assert_eq!(
+            std::mem::size_of::<rkyv::Archived<nervix_models::RemoteBranchKey>>(),
+            12
+        );
+        let fields = || {
+            [(
+                FieldName::parse("tenant").assured("valid fixture field"),
+                RuntimeValue::String("alpha".to_owned()),
+            )]
+        };
+        let origin = |partition, epoch, unit| InheritedPartitionOrigin {
+            partition: nervix_models::ExternalPartition::new(partition),
+            epoch: nervix_models::PartitionEpochNumber::new(
+                std::num::NonZeroU64::new(epoch).assured("positive fixture epoch"),
+            ),
+            unit,
+        };
+        let first = BranchKey::from_inherited_fields(
+            fields(),
+            origin(7, 1, nervix_models::Unit::partition(3)),
+        )
+        .assured("a typed inherited key validates");
+        let captured = first.clone();
+        let next = BranchKey::from_inherited_fields(
+            fields(),
+            origin(13, 2, nervix_models::Unit::partition(1)),
+        )
+        .assured("the replacement origin validates");
+        let direct = BranchKey::from_fields(fields()).assured("the same direct fields validate");
+        assert_eq!(first, next);
+        assert_eq!(direct, next);
+        assert_eq!(first.as_str(), next.as_str());
+        assert_eq!(first.fingerprint(), next.fingerprint());
+        assert_eq!(
+            captured.inherited_origin(),
+            Some(origin(7, 1, nervix_models::Unit::partition(3)))
+        );
+        assert_eq!(
+            next.inherited_origin(),
+            Some(origin(13, 2, nervix_models::Unit::partition(1)))
+        );
+        let remote = BranchKey::to_remote_key(&Some(next.clone()));
+        let restored = BranchKey::from_remote_key(remote)
+            .assured("the current remote key validates")
+            .assured("it stays concrete");
+        assert!(BranchKey::same_origin(
+            &Some(restored.clone()),
+            &Some(next.clone())
+        ));
+        assert_eq!(restored.inherited_origin(), next.inherited_origin());
+    }
+
     /// How every diagnostic names the branch keyed by tenant `acme-secret`.
     const SECRET_TENANT_BRANCH: &str =
         "branch 3525112b62a3c2262596c624543a4333a324f9e7bc945c6031936604e166af12";
@@ -508,13 +678,16 @@ mod tests {
 
     #[test]
     fn a_remote_key_decodes_to_an_absent_or_concrete_branch() {
-        assert_eq!(BranchKey::from_remote_key(None).ok(), Some(None));
+        assert_eq!(
+            BranchKey::from_remote_key(RemoteBranchKey::Unbranched).ok(),
+            Some(None)
+        );
 
         let fields = vec![RemoteRuntimeField {
             name: "tenant".to_string(),
             value: RuntimeValue::String("acme".to_string()).to_remote(),
         }];
-        let key = BranchKey::from_remote_key(Some(fields))
+        let key = BranchKey::from_remote_key(RemoteBranchKey::Direct(fields.into()))
             .assured("a valid remote field decodes to a branch key")
             .assured("a present remote key decodes to a present branch key");
 
@@ -523,14 +696,17 @@ mod tests {
 
     #[test]
     fn a_remote_key_rejects_an_empty_field_set_and_an_invalid_field_name() {
-        let empty = BranchKey::from_remote_key(Some(Vec::new()))
+        let empty = BranchKey::from_remote_key(RemoteBranchKey::Direct(Box::new([])))
             .expect_err("a present remote key must name at least one field");
         assert_eq!(empty.current_context(), &BranchKeyError::NoFields);
 
-        let invalid = BranchKey::from_remote_key(Some(vec![RemoteRuntimeField {
-            name: "bad/name".to_string(),
-            value: RuntimeValue::String("acme".to_string()).to_remote(),
-        }]))
+        let invalid = BranchKey::from_remote_key(RemoteBranchKey::Direct(
+            vec![RemoteRuntimeField {
+                name: "bad/name".to_string(),
+                value: RuntimeValue::String("acme".to_string()).to_remote(),
+            }]
+            .into(),
+        ))
         .expect_err("a remote field must carry a valid field name");
         assert_eq!(
             invalid.current_context(),
@@ -550,10 +726,13 @@ mod tests {
             nervix_models::RemoteRuntimeValue::F64(f64::NEG_INFINITY),
             nervix_models::RemoteRuntimeValue::F32(f32::INFINITY),
         ] {
-            let malformed = BranchKey::from_remote_key(Some(vec![RemoteRuntimeField {
-                name: "reading".to_string(),
-                value,
-            }]));
+            let malformed = BranchKey::from_remote_key(RemoteBranchKey::Direct(
+                vec![RemoteRuntimeField {
+                    name: "reading".to_string(),
+                    value,
+                }]
+                .into(),
+            ));
 
             let error = malformed.expect_err("a non-finite float must not form a branch key");
             assert_eq!(
@@ -570,10 +749,15 @@ mod tests {
     /// the key's typed validation instead of stopping the node that reads it.
     #[test]
     fn a_remote_key_rejects_datetime_text_it_cannot_read() {
-        let malformed = BranchKey::from_remote_key(Some(vec![RemoteRuntimeField {
-            name: "seen_at".to_string(),
-            value: nervix_models::RemoteRuntimeValue::Datetime("2026-13-40T25:61:61Z".to_string()),
-        }]))
+        let malformed = BranchKey::from_remote_key(RemoteBranchKey::Direct(
+            vec![RemoteRuntimeField {
+                name: "seen_at".to_string(),
+                value: nervix_models::RemoteRuntimeValue::Datetime(
+                    "2026-13-40T25:61:61Z".to_string(),
+                ),
+            }]
+            .into(),
+        ))
         .expect_err("a datetime field whose text is not RFC 3339 must not form a branch key");
 
         assert_eq!(

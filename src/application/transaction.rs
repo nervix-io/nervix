@@ -1165,7 +1165,7 @@ impl SessionServiceImpl {
                     &planning_domain,
                     graph,
                     current,
-                );
+                )?;
                 let ownership_moves = planned_ownership_moves(current, prepared.schedule.as_ref())
                     .into_iter()
                     .map(|moved| OwnershipMoveImpact {
@@ -1175,10 +1175,10 @@ impl SessionServiceImpl {
                         destination: moved.destination,
                         attribution: attribution.clone(),
                     });
-                TransactionScheduleDecision {
+                Ok(TransactionScheduleDecision {
                     schedule: prepared.schedule,
                     ownership_moves: CanonicalImpactSet::new(ownership_moves),
-                }
+                })
             },
         )?;
         for step in plan.steps() {
@@ -1971,6 +1971,7 @@ impl SessionServiceImpl {
                         actual: &actual,
                         outcome: &outcome,
                     }),
+                    None,
                     None,
                 ))
                 .await;

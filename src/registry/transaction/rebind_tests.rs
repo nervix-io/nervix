@@ -306,17 +306,21 @@ fn a_tls_rebinding_refreshes_the_https_listener_without_pausing_a_running_domain
         &[rebind_tls(RequestedResourceVersion::Number(2), None)],
         0,
         false,
-        move |graph, _current, _attribution| TransactionScheduleDecision {
-            schedule: graph.map(|graph| {
-                graph.schedule_for_domain(
-                    &domain,
-                    std::slice::from_ref(&node),
-                    0,
-                    None,
-                    &crate::registry::uniform_capabilities(std::slice::from_ref(&node)),
-                )
-            }),
-            ownership_moves: CanonicalImpactSet::default(),
+        move |graph, _current, _attribution| {
+            Ok(TransactionScheduleDecision {
+                schedule: graph.map(|graph| {
+                    graph
+                        .schedule_for_domain(
+                            &domain,
+                            std::slice::from_ref(&node),
+                            0,
+                            None,
+                            &crate::registry::uniform_capabilities(std::slice::from_ref(&node)),
+                        )
+                        .assured("the fixture topology resolves")
+                }),
+                ownership_moves: CanonicalImpactSet::default(),
+            })
         },
     )
     .assured("the VHOST binding can move to a completed version");
@@ -385,17 +389,21 @@ fn a_wasm_rebinding_reports_a_guest_state_reset_over_every_concrete_branch() {
         })],
         0,
         false,
-        move |graph, _current, _attribution| TransactionScheduleDecision {
-            schedule: graph.map(|graph| {
-                graph.schedule_for_domain(
-                    &domain,
-                    std::slice::from_ref(&node),
-                    0,
-                    None,
-                    &crate::registry::uniform_capabilities(std::slice::from_ref(&node)),
-                )
-            }),
-            ownership_moves: CanonicalImpactSet::default(),
+        move |graph, _current, _attribution| {
+            Ok(TransactionScheduleDecision {
+                schedule: graph.map(|graph| {
+                    graph
+                        .schedule_for_domain(
+                            &domain,
+                            std::slice::from_ref(&node),
+                            0,
+                            None,
+                            &crate::registry::uniform_capabilities(std::slice::from_ref(&node)),
+                        )
+                        .assured("the fixture topology resolves")
+                }),
+                ownership_moves: CanonicalImpactSet::default(),
+            })
         },
     )
     .assured("the WASM module binding can move to a completed version");

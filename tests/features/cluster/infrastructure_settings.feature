@@ -12,8 +12,13 @@ Feature: Declared infrastructure settings
     Given node-1 starts with interconnect-max-peers = 16
     And node-1 starts with interconnect-request-quota = 4
     And node-1 starts with interconnect-request-timeout = 20s
+    And node-1 starts with partition-topology-poll-interval = 250ms
     And a <cluster_size> node nervix cluster is started
     Then node "node-<cluster_size>" eventually describes node "node-1" with "interconnect: max-peers=16 request-quota=4 health-probes=16 max-connections=192 handshakes=32 queue=1024 completion=1 watermarks=8192 stream-window=65536 connection-window=262144 setup=5s request=20s progress=5s backoff=200ms max-backoff=5s jitter-permille=0"
+    And the last command output contains
+      """
+      partition-topology-poll-interval=250ms
+      """
     When 4 domains named "configured_infrastructure" are created on the leader node
     Then within "60s" every node has applied 4 domains named "configured_infrastructure"
 

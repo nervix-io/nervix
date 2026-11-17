@@ -45,10 +45,10 @@ fn placement(tenant: &str) -> StatePlacementEnvelope {
         kind: ModelKind::Relay,
         identifier: ModelName::parse("profiles").assured("valid fixture relay"),
         unit: nervix_models::Unit::SINGLE,
-        branch_key: Some(vec![RemoteRuntimeField {
+        branch_key: nervix_models::RemoteBranchKey::Direct(Box::new([RemoteRuntimeField {
             name: "tenant".to_string(),
             value: RemoteRuntimeValue::String(tenant.to_string()),
-        }]),
+        }])),
     }
 }
 

@@ -69,7 +69,7 @@ fn generated_lifecycle(arbitrary: &mut Arbitrary<'_>) -> Vec<BackupBranchLifecyc
     let mut entries = Vec::new();
     for _ in 0..arbitrary.entropy().count(16) {
         let key = if arbitrary.entropy().flag() {
-            Some(
+            nervix_models::RemoteBranchKey::Direct(
                 vec![
                     StateField {
                         name: "identity".into(),
@@ -89,10 +89,11 @@ fn generated_lifecycle(arbitrary: &mut Arbitrary<'_>) -> Vec<BackupBranchLifecyc
                 ]
                 .into_iter()
                 .map(StateField::into_remote)
-                .collect(),
+                .collect::<Vec<_>>()
+                .into(),
             )
         } else {
-            None
+            nervix_models::RemoteBranchKey::Unbranched
         };
         entries.push(BackupBranchLifecycleEntry {
             key,
@@ -148,15 +149,12 @@ fn bolero_streamed_lifecycle_preserves_complete_current_values() {
 
 fn lifecycle_values(
     entries: &[BackupBranchLifecycleEntry],
-) -> Vec<(Option<Vec<StateField>>, Timestamp, u64)> {
+) -> Vec<(nervix_models::BranchKeyFields<StateField>, Timestamp, u64)> {
     entries
         .iter()
         .map(|entry| {
             (
-                entry
-                    .key
-                    .clone()
-                    .map(|fields| fields.into_iter().map(StateField::from_remote).collect()),
+                entry.key.clone().map_fields(StateField::from_remote),
                 entry.last_ingestion,
                 entry.incarnation,
             )

@@ -206,7 +206,11 @@ impl Runtime {
         &self,
         plan: &IngestorStartPlan,
     ) -> error_stack::Result<(), IngestorStartError> {
-        let IngestorStartPlan { ingestor, input } = plan;
+        let IngestorStartPlan {
+            ingestor,
+            input,
+            suspended,
+        } = plan;
         let quiesce = self.prepare_ingestor_quiescence(&ingestor.domain, ingestor);
         if self.inner.ingestors.contains_key(&ingestor.runtime_key()) {
             return Err(Report::new(IngestorStartError::AlreadyRunning {
@@ -216,6 +220,26 @@ impl Runtime {
             }));
         }
 
+        if *suspended {
+            self.prepare_ingestor_readiness(&ingestor.domain, &ingestor.name, ingestor.unit);
+            self.record_ingestor_transient_error(
+                &ingestor.domain,
+                &ingestor.name,
+                ingestor.unit,
+                "waiting for a coherent external partition topology",
+            );
+            let (shutdown, _) = watch::channel(false);
+            self.inner.ingestors.insert(
+                ingestor.runtime_key(),
+                IngestorRuntime {
+                    shutdown,
+                    branched: Vec::new(),
+                    tasks: Vec::new(),
+                    domain_offsets: None,
+                },
+            );
+            return Ok(());
+        }
         let BoundIngestor {
             input,
             dependencies,

@@ -173,6 +173,7 @@ def entity_rows(row, side, notes):
     if side == "ingest":
         rows.extend([
             ("Instancing", row["instancing"]),
+            ("External partitions", "Enumerable; native coordinate from metadata." + row["external_partitions"]["metadata"] if row.get("external_partitions") else "No enumerable external partition set."),
             ("Quiesce (complete bodies after ON QUIESCE)", "\n".join(row["quiesce"])),
             ("Metadata", "\n".join(row["metadata"]) or absent(notes, row, "metadata")),
             ("Payload facts", "\n".join(row["payload"])),

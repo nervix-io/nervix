@@ -1265,6 +1265,8 @@ pub(super) struct PlannedMessageError {
 /// report, and nothing is formatted until the node's error policy reports the failure.
 #[derive(Debug, PartialEq, thiserror::Error)]
 pub(super) enum PlannedGeneralError {
+    #[error("reingestors cannot construct inherited branches")]
+    InheritedBranchConstruction,
     #[error(
         "{} received {found} {sidecar} rows for {expected} records",
         ProgramName::of(.operation)

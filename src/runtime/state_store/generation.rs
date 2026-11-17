@@ -41,7 +41,7 @@ const _: () = assert!(StoredCheckpoint::SEGMENTED_BYTES <= RESTORE_STATE_CHUNK_B
 /// key or payload changes shape, such as the unit every branch-aggregated metric series carries or
 /// the one revision-index entry a placement keeps for its selected checkpoint, so a store written
 /// in an earlier shape fails to open instead of being read as the current one.
-pub(super) const STORAGE_FORMAT: &[u8] = b"inferencer-model-unit-checkpoint-index";
+pub(super) const STORAGE_FORMAT: &[u8] = b"inherited-partition-origin-checkpoint-index";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum StateNamespace {

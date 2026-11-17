@@ -64,6 +64,7 @@ async fn a_branch_key_that_fails_for_one_row_leaves_the_other_rows_their_keys() 
         &batch.batch,
         &batch.keys,
         &HashMap::default(),
+        None,
     )
     .await
     .expect("the branch program runs over the batch");
@@ -107,6 +108,7 @@ async fn branch_construction_refuses_inputs_and_keys_of_another_row_count() {
         &two_rows.batch,
         &two_rows.keys,
         &HashMap::default(),
+        None,
     )
     .await
     .expect_err("one input row cannot key two output rows");
@@ -131,6 +133,7 @@ async fn branch_construction_refuses_inputs_and_keys_of_another_row_count() {
         &two_rows.batch,
         &one_row.keys,
         &HashMap::default(),
+        None,
     )
     .await
     .expect_err("one key cannot describe two rows");

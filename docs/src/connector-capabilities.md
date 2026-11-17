@@ -22,6 +22,7 @@ Client CONFIG keys below come from the same declaration used by validation, comp
 | Headers | Not offered: Native Arrow batches cross an application session; producers submit batches and consumers explicitly acknowledge delivery attempts, with no broker envelope. |  |
 | Connector events | None declared. |  |
 | Instancing | single |  |
+| External partitions | No enumerable external partition set. |  |
 | Quiesce (complete bodies after ON QUIESCE) | SUSPEND |  |
 | Metadata | metadata.user: STRING OPTIONAL |  |
 | Payload facts | payload.bytes: U64<br>payload.rows: U64 |  |
@@ -45,6 +46,7 @@ Client CONFIG keys below come from the same declaration used by validation, comp
 | Headers | `read_header`, `read_headers`; `repeats_by_name`, lowercase names: every value of a name, together and in the order written; the order of different names is not declared; a name is recorded in ASCII lowercase, so names that differ only in letter case are one name |  |
 | Connector events | None declared. |  |
 | Instancing | single |  |
+| External partitions | No enumerable external partition set. |  |
 | Quiesce (complete bodies after ON QUIESCE) | SUSPEND<br>BUFFER MAX SIZE 64MiB ON OVERFLOW DROP OLDEST |  |
 | Metadata | metadata.status: U16 OPTIONAL<br>metadata.polled_at: DATETIME OPTIONAL |  |
 | Payload facts | payload.bytes: U64 |  |
@@ -68,6 +70,7 @@ Client CONFIG keys below come from the same declaration used by validation, comp
 | Headers | `read_header`, `read_headers`; `repeats_by_name`, lowercase names: every value of a name, together and in the order written; the order of different names is not declared; a name is recorded in ASCII lowercase, so names that differ only in letter case are one name |  |
 | Connector events | None declared. |  |
 | Instancing | single |  |
+| External partitions | No enumerable external partition set. |  |
 | Quiesce (complete bodies after ON QUIESCE) | REJECT RETRY AFTER 5s<br>BUFFER MAX SIZE 64MiB |  |
 | Metadata | metadata.method: STRING OPTIONAL<br>metadata.path: STRING OPTIONAL<br>metadata.query: STRING OPTIONAL<br>metadata.remote_addr: STRING OPTIONAL<br>metadata.host: STRING OPTIONAL<br>metadata.remote_ip: STRING OPTIONAL |  |
 | Payload facts | payload.bytes: U64 |  |
@@ -91,15 +94,16 @@ Client CONFIG keys below come from the same declaration used by validation, comp
 | Headers | `read_header`, `read_headers`; `ordered_repeats`, exact names: every header in the order it was written; a repeated name keeps each of its values in its place; a name matches only a name spelled the same, letter case included |  |
 | Connector events | None declared. |  |
 | Instancing | per_partition |  |
+| External partitions | Enumerable; native coordinate from metadata.partition |  |
 | Quiesce (complete bodies after ON QUIESCE) | SUSPEND |  |
 | Metadata | metadata.topic: STRING OPTIONAL<br>metadata.partition: I32 OPTIONAL<br>metadata.offset: I64 OPTIONAL<br>metadata.key: BYTES OPTIONAL<br>metadata.timestamp: DATETIME OPTIONAL<br>metadata.timestamp_type: STRING OPTIONAL<br>metadata.tombstone: BOOL OPTIONAL |  |
 | Payload facts | payload.bytes: U64 |  |
 | Every live node | no; scheduled owner |  |
 | Position class | replayable |  |
 | Acknowledgement confirmation | answered |  |
-| Buffers | a record conversion report after a gathered prefix: at most 1 report per ingestor instance; when full, holds back what fills it<br>messages librdkafka prefetches: driver default, queued.min.messages 100000 per partition, queued.max.messages.kbytes 65536; when full, holds back what fills it<br>admitted synchronous control jobs per node: at most 1024 pending jobs; when full, immediately refuses the request for its sender to retry |  |
-| Network waits | name resolution: unbounded<br>connection setup: TCP, TLS and SASL: driver default, socket.connection.setup.timeout.ms, 30 s<br>a fetch: driver default, socket.timeout.ms, 60 s<br>a consumer-group commit under ACK: fixed 30s<br>metadata, partition inspection, offset lookups, watermarks and seeks including executor admission: driver default, socket.timeout.ms, 60 s per control job<br>subscribe, assign and unsubscribe: unbounded<br>destroying a consumer that joined its group, for its LeaveGroup answer: driver default, 5 s per LeaveGroup request |  |
-| Driver limits | Kafka clients accept one name per property and refuse Nervix-owned keys. The ingestor supplies group.id, auto.offset.reset and enable.auto.commit, and disables enable.partition.eof and allow.auto.create.topics.<br>Connector control execution has two workers per node by default. A commit still unanswered after its caller's 30 s deadline retains its worker and the ingestor's one in-flight commit until the native call ends. Native subscribe, assign and unsubscribe have no cancellable deadline; their caller waits socket.timeout.ms at most.<br>A consumer whose last handle is gone is destroyed by one connector control job, which waits for a place rather than being refused; no Nervix key changes librdkafka's 5 s LeaveGroup timeout.<br>receive.message.max.bytes 100000000 |  |
+| Buffers | an inherited consumer group's unadmitted native partition position: at most 1 position per inherited group reader; when full, holds back what fills it<br>a record conversion report after a gathered prefix: at most 1 report per ingestor instance; when full, holds back what fills it<br>messages librdkafka prefetches: driver default, queued.min.messages 100000 per partition, queued.max.messages.kbytes 65536; when full, holds back what fills it<br>admitted synchronous control jobs per node: at most 1024 pending jobs; when full, immediately refuses the request for its sender to retry |  |
+| Network waits | name resolution: unbounded<br>connection setup: TCP, TLS and SASL: driver default, socket.connection.setup.timeout.ms, 30 s<br>a fetch: driver default, socket.timeout.ms, 60 s<br>a consumer-group offset commit: fixed 30s<br>metadata, partition inspection, offset lookups, watermarks and seeks including executor admission: driver default, socket.timeout.ms, 60 s per control job<br>subscribe, assign, pause and unsubscribe: unbounded<br>destroying a consumer that joined its group, for its LeaveGroup answer: driver default, 5 s per LeaveGroup request |  |
+| Driver limits | Kafka clients accept one name per property and refuse Nervix-owned keys. The ingestor supplies group.id, auto.offset.reset and enable.auto.commit, and disables enable.partition.eof and allow.auto.create.topics.<br>An inherited consumer-group reader disables automatic offset storage and stores only positions in its committed external partition set. It pauses and rewinds an unadmitted partition through connector control execution, retaining its position until that work finishes. The broker confirms that exact unread starting offset before the reader can retire, so even a subsequent START AT LATEST join cannot skip it; replacing the reader after a topology commit admits the partition.<br>Connector control execution has two workers per node by default. A commit still unanswered after its caller's 30 s deadline retains its worker and the ingestor's one in-flight commit until the native call ends. Native subscribe, assign, pause and unsubscribe have no cancellable deadline; their caller waits socket.timeout.ms at most.<br>A consumer whose last handle is gone is destroyed by one connector control job, which waits for a place rather than being refused; no Nervix key changes librdkafka's 5 s LeaveGroup timeout.<br>receive.message.max.bytes 100000000 |  |
 | Stalled-peer checks | None: no client deadline key bounds a wait. |  |
 
 ### PULSAR TOPIC ingest
@@ -114,14 +118,15 @@ Client CONFIG keys below come from the same declaration used by validation, comp
 | Headers | `read_header`, `read_headers`; `ordered_repeats`, exact names: every header in the order it was written; a repeated name keeps each of its values in its place; a name matches only a name spelled the same, letter case included |  |
 | Connector events | None declared. |  |
 | Instancing | per_partition |  |
+| External partitions | Enumerable; native coordinate from metadata.partition |  |
 | Quiesce (complete bodies after ON QUIESCE) | SUSPEND |  |
-| Metadata | metadata.topic: STRING OPTIONAL<br>metadata.message_id: STRING OPTIONAL<br>metadata.publish_time: DATETIME OPTIONAL<br>metadata.event_time: DATETIME OPTIONAL<br>metadata.key: STRING OPTIONAL<br>metadata.ordering_key: BYTES OPTIONAL<br>metadata.producer_name: STRING OPTIONAL<br>metadata.sequence_id: I64 OPTIONAL<br>metadata.redelivery_count: I64 OPTIONAL |  |
+| Metadata | metadata.topic: STRING OPTIONAL<br>metadata.message_id: STRING OPTIONAL<br>metadata.publish_time: DATETIME OPTIONAL<br>metadata.event_time: DATETIME OPTIONAL<br>metadata.key: STRING OPTIONAL<br>metadata.ordering_key: BYTES OPTIONAL<br>metadata.producer_name: STRING OPTIONAL<br>metadata.sequence_id: I64 OPTIONAL<br>metadata.redelivery_count: I64 OPTIONAL<br>metadata.partition: I32 OPTIONAL |  |
 | Payload facts | payload.bytes: U64 |  |
 | Every live node | no; scheduled owner |  |
 | Position class | replayable |  |
 | Acknowledgement confirmation | answered |  |
 | Buffers | messages each partition consumer receives ahead of the host: driver default, a receiver queue of 1000 messages; when full, holds back what fills it |  |
-| Network waits | name resolution: unbounded<br>connection: TCP, TLS and CONNECT: driver default, 10 s per address, one attempt<br>topic lookup and subscribe: driver default, 30 s, one attempt<br>an acknowledgement under ACK: driver default, 30 s operation timeout<br>close: unbounded |  |
+| Network waits | name resolution: unbounded<br>connection: TCP, TLS and CONNECT: driver default, 10 s per address, one attempt<br>topic lookup and subscribe: driver default, 30 s, one attempt<br>partition topology observation, including resolution and connection: driver default, one operation timeout per connection or metadata lookup<br>an idle inherited group with no assigned partition topics: driver default, the batch timeout or one driver operation timeout; cancellation ends it earlier<br>an acknowledgement under ACK: driver default, 30 s operation timeout<br>close: unbounded |  |
 | Driver limits | Inbound frames have no size limit. |  |
 | Stalled-peer checks | None: no client deadline key bounds a wait. |  |
 
@@ -137,6 +142,7 @@ Client CONFIG keys below come from the same declaration used by validation, comp
 | Headers | `read_header`, `read_headers`; `ordered_repeats`, exact names: every header in the order it was written; a repeated name keeps each of its values in its place; a name matches only a name spelled the same, letter case included |  |
 | Connector events | None declared. |  |
 | Instancing | per_partition |  |
+| External partitions | No enumerable external partition set. |  |
 | Quiesce (complete bodies after ON QUIESCE) | SUSPEND (requires SESSION PERSISTENT and QOS 1 or 2)<br>BUFFER MAX SIZE 64MiB ON OVERFLOW DROP OLDEST<br>DROP |  |
 | Metadata | metadata.topic: STRING OPTIONAL<br>metadata.retain: BOOL OPTIONAL<br>metadata.qos: U8 OPTIONAL<br>metadata.duplicate: BOOL OPTIONAL<br>metadata.content_type: STRING OPTIONAL<br>metadata.response_topic: STRING OPTIONAL<br>metadata.correlation_data: BYTES OPTIONAL<br>metadata.message_expiry: U32 OPTIONAL |  |
 | Payload facts | payload.bytes: U64 |  |
@@ -160,6 +166,7 @@ Client CONFIG keys below come from the same declaration used by validation, comp
 | Headers | `read_header`, `read_headers`; `ordered_repeats`, exact names: every header in the order it was written; a repeated name keeps each of its values in its place; a name matches only a name spelled the same, letter case included |  |
 | Connector events | None declared. |  |
 | Instancing | per_partition |  |
+| External partitions | No enumerable external partition set. |  |
 | Quiesce (complete bodies after ON QUIESCE) | BUFFER MAX SIZE 64MiB ON OVERFLOW DROP OLDEST<br>DROP |  |
 | Metadata | metadata.subject: STRING OPTIONAL<br>metadata.reply: STRING OPTIONAL |  |
 | Payload facts | payload.bytes: U64 |  |
@@ -183,6 +190,7 @@ Client CONFIG keys below come from the same declaration used by validation, comp
 | Headers | `read_header`, `read_headers`; `ordered_repeats`, exact names: every header in the order it was written; a repeated name keeps each of its values in its place; a name matches only a name spelled the same, letter case included |  |
 | Connector events | None declared. |  |
 | Instancing | single |  |
+| External partitions | No enumerable external partition set. |  |
 | Quiesce (complete bodies after ON QUIESCE) | SUSPEND<br>BUFFER MAX SIZE 64MiB ON OVERFLOW DROP OLDEST<br>DROP |  |
 | Metadata | metadata.subject: STRING OPTIONAL<br>metadata.reply: STRING OPTIONAL<br>metadata.stream: STRING OPTIONAL<br>metadata.consumer: STRING OPTIONAL<br>metadata.sequence: U64 OPTIONAL<br>metadata.timestamp: DATETIME OPTIONAL<br>metadata.delivered: U64 OPTIONAL |  |
 | Payload facts | payload.bytes: U64 |  |
@@ -206,6 +214,7 @@ Client CONFIG keys below come from the same declaration used by validation, comp
 | Headers | `read_header`, `read_headers`; `sorted_by_name`, exact names: one value per name, the last one written for it; names in ascending byte order; a name matches only a name spelled the same, letter case included |  |
 | Connector events | None declared. |  |
 | Instancing | per_partition |  |
+| External partitions | No enumerable external partition set. |  |
 | Quiesce (complete bodies after ON QUIESCE) | SUSPEND |  |
 | Metadata | metadata.exchange: STRING OPTIONAL<br>metadata.routing_key: STRING OPTIONAL<br>metadata.delivery_tag: U64 OPTIONAL<br>metadata.redelivered: BOOL OPTIONAL<br>metadata.content_type: STRING OPTIONAL<br>metadata.content_encoding: STRING OPTIONAL<br>metadata.message_id: STRING OPTIONAL<br>metadata.correlation_id: STRING OPTIONAL<br>metadata.reply_to: STRING OPTIONAL<br>metadata.type: STRING OPTIONAL<br>metadata.app_id: STRING OPTIONAL<br>metadata.user_id: STRING OPTIONAL<br>metadata.priority: U8 OPTIONAL<br>metadata.expiration: STRING OPTIONAL<br>metadata.timestamp: DATETIME OPTIONAL |  |
 | Payload facts | payload.bytes: U64 |  |
@@ -229,6 +238,7 @@ Client CONFIG keys below come from the same declaration used by validation, comp
 | Headers | Not offered: Redis Pub/Sub carries a channel and a payload, and for a pattern subscription the pattern that matched, but no headers. A subscription has no acknowledgement; PUBLISH answers with a subscriber count rather than a delivery receipt. An ingestor subscribes to a quoted channel or channel pattern and an emitter publishes to a quoted channel, each case-preserving. |  |
 | Connector events | None declared. |  |
 | Instancing | single |  |
+| External partitions | No enumerable external partition set. |  |
 | Quiesce (complete bodies after ON QUIESCE) | BUFFER MAX SIZE 64MiB ON OVERFLOW DROP OLDEST<br>DROP |  |
 | Metadata | metadata.channel: STRING OPTIONAL<br>metadata.pattern: STRING OPTIONAL |  |
 | Payload facts | payload.bytes: U64 |  |
@@ -252,6 +262,7 @@ Client CONFIG keys below come from the same declaration used by validation, comp
 | Headers | Not offered: An HTTP response's headers describe a whole answer rather than one of its samples, and each sample's labels travel in its payload under metric, so a query ingestor reads no transport headers. |  |
 | Connector events | None declared. |  |
 | Instancing | single |  |
+| External partitions | No enumerable external partition set. |  |
 | Quiesce (complete bodies after ON QUIESCE) | SUSPEND<br>BUFFER MAX SIZE 64MiB ON OVERFLOW DROP OLDEST |  |
 | Metadata | metadata.query: STRING OPTIONAL<br>metadata.evaluated_at: DATETIME OPTIONAL |  |
 | Payload facts | payload.bytes: U64 |  |
@@ -275,6 +286,7 @@ Client CONFIG keys below come from the same declaration used by validation, comp
 | Headers | Not offered: The PULL listener receives payload frames and the PUSH socket sends them; neither has a broker acknowledgement or header map. |  |
 | Connector events | None declared. |  |
 | Instancing | single |  |
+| External partitions | No enumerable external partition set. |  |
 | Quiesce (complete bodies after ON QUIESCE) | SUSPEND<br>BUFFER MAX SIZE 64MiB ON OVERFLOW DROP OLDEST<br>DROP |  |
 | Metadata | Not offered: The driver exposes no peer identity on receive. Only frame 0 is ingested, with no broker position or typed transport metadata namespace. |  |
 | Payload facts | payload.bytes: U64 |  |
@@ -298,6 +310,7 @@ Client CONFIG keys below come from the same declaration used by validation, comp
 | Headers | `read_header`, `read_headers`; `last_wins`, exact names: one value per name, the last one written for it; the order of names is not declared; a name matches only a name spelled the same, letter case included |  |
 | Connector events | None declared. |  |
 | Instancing | per_partition |  |
+| External partitions | No enumerable external partition set. |  |
 | Quiesce (complete bodies after ON QUIESCE) | SUSPEND |  |
 | Metadata | metadata.message_id: STRING OPTIONAL<br>metadata.sent_at: DATETIME OPTIONAL<br>metadata.receive_count: U32 OPTIONAL<br>metadata.first_received_at: DATETIME OPTIONAL<br>metadata.group_id: STRING OPTIONAL<br>metadata.deduplication_id: STRING OPTIONAL<br>metadata.sequence_number: STRING OPTIONAL<br>metadata.sender_id: STRING OPTIONAL |  |
 | Payload facts | payload.bytes: U64 |  |
@@ -321,6 +334,7 @@ Client CONFIG keys below come from the same declaration used by validation, comp
 | Headers | `read_header`, `read_headers`; `repeats_by_name`, lowercase names: every value of a name, together and in the order written; the order of different names is not declared; a name is recorded in ASCII lowercase, so names that differ only in letter case are one name |  |
 | Connector events | None declared. |  |
 | Instancing | single |  |
+| External partitions | No enumerable external partition set. |  |
 | Quiesce (complete bodies after ON QUIESCE) | BUFFER MAX SIZE 64MiB ON OVERFLOW DROP OLDEST<br>DROP |  |
 | Metadata | metadata.frame_type: STRING OPTIONAL |  |
 | Payload facts | payload.bytes: U64 |  |
@@ -344,6 +358,7 @@ Client CONFIG keys below come from the same declaration used by validation, comp
 | Headers | `read_header`, `read_headers`; `repeats_by_name`, lowercase names: every value of a name, together and in the order written; the order of different names is not declared; a name is recorded in ASCII lowercase, so names that differ only in letter case are one name |  |
 | Connector events | None declared. |  |
 | Instancing | single |  |
+| External partitions | No enumerable external partition set. |  |
 | Quiesce (complete bodies after ON QUIESCE) | REJECT RETRY AFTER 5s<br>BUFFER MAX SIZE 64MiB |  |
 | Metadata | metadata.frame_type: STRING OPTIONAL<br>metadata.remote_addr: STRING OPTIONAL<br>metadata.path: STRING OPTIONAL<br>metadata.remote_ip: STRING OPTIONAL |  |
 | Payload facts | payload.bytes: U64 |  |
@@ -367,6 +382,7 @@ Client CONFIG keys below come from the same declaration used by validation, comp
 | Headers | Not offered: A listener admits UDP datagrams or framed TCP/TLS input and exposes its peer socket address, IP without its port, transport and optional verified TLS client subject; a collector writes encoded syslog records. Syslog fields belong to the wire schema rather than a transport header map. |  |
 | Connector events | None declared. |  |
 | Instancing | single |  |
+| External partitions | No enumerable external partition set. |  |
 | Quiesce (complete bodies after ON QUIESCE) | SUSPEND<br>BUFFER MAX SIZE 64MiB ON OVERFLOW DROP OLDEST<br>DROP |  |
 | Metadata | metadata.peer_addr: STRING OPTIONAL<br>metadata.transport: STRING OPTIONAL<br>metadata.tls_peer: STRING OPTIONAL<br>metadata.remote_ip: STRING OPTIONAL |  |
 | Payload facts | payload.bytes: U64 |  |

@@ -624,7 +624,7 @@ Feature: Ingestor instances are independent placement units
       | 1     | CLIENT PRODUCER       | FROM SCHEMA event                 |
       | 3     | CLIENT PRODUCER       | FROM SCHEMA event                 |
 
-  Scenario Outline: Pulsar single-consumer types require one fixed instance
+  Scenario Outline: Pulsar single-consumer types require one fixed instance or an inherited branch
     Given a 1 node nervix cluster is started
     And the leader node is configured with these Plexus commands
       """
@@ -637,7 +637,7 @@ Feature: Ingestor instances are independent placement units
       CREATE RELAY events SCHEMA event BRANCHED BY by_tenant;
       CREATE PULSAR CLIENT broker CONFIG { 'addr' = 'pulsar://127.0.0.1:6650' };
       """
-    When these Plexus statements fail with "reads through one consumer, so it refuses INSTANCES"
+    When these Plexus statements fail with "<error>"
       """
       CREATE PULSAR TOPIC INGESTOR spread_ingestor
         FROM broker TOPIC 'events' SUBSCRIPTION 'readers' PROVISIONED
@@ -648,11 +648,11 @@ Feature: Ingestor instances are independent placement units
       """
 
     Examples:
-      | kind      | instances     |
-      | FAILOVER  | 2             |
-      | EXCLUSIVE | 2             |
-      | FAILOVER  | PER PARTITION |
-      | EXCLUSIVE | PER PARTITION |
+      | kind      | instances     | error                                                                 |
+      | FAILOVER  | 2             | reads through one consumer, so it refuses INSTANCES                   |
+      | EXCLUSIVE | 2             | reads through one consumer, so it refuses INSTANCES                   |
+      | FAILOVER  | PER PARTITION | Pulsar FAILOVER INSTANCES PER PARTITION requires an inherited branch  |
+      | EXCLUSIVE | PER PARTITION | Pulsar EXCLUSIVE INSTANCES PER PARTITION requires an inherited branch |
 
   Scenario Outline: Partition-following sources require one constructing branch contract
     Given a <nodes> node nervix cluster is started

@@ -26,8 +26,7 @@ use nervix_backup::{
 };
 use nervix_execution::{ChargedBytes, CpuClass, MemoryClass};
 use nervix_models::{
-    BranchKeyFingerprint, ModelKind, NodeRef, RemoteRuntimeField, RemoteRuntimeRecordMetadata,
-    ScheduledNode, Unit,
+    BranchKeyFingerprint, ModelKind, NodeRef, RemoteRuntimeRecordMetadata, ScheduledNode, Unit,
 };
 use nervix_primitives::sync::{Arc, StdArc};
 use thiserror::Error;
@@ -193,7 +192,7 @@ pub(super) async fn prepare_materialized_checkpoint(
                         .check()
                         .change_context(MaterializedRestoreError::Cancelled)?;
                     if !branches.insert(identity.branch.clone())
-                        || (identity.branch.is_none() && descriptor_count != 1)
+                        || (!identity.branch.is_branched() && descriptor_count != 1)
                     {
                         return Err(Report::new(MaterializedRestoreError::Identities));
                     }
@@ -201,18 +200,15 @@ pub(super) async fn prepare_materialized_checkpoint(
                         "an identity's index is below the length of the list that holds it",
                     );
                     declarations
-                        .admit(identity.branch.as_ref())
+                        .admit(&identity.branch)
                         .change_context_lazy(|| MaterializedRestoreError::BranchKey {
                             section: section.clone(),
                             record: record_number,
                         })?;
                     native_identities.push((
-                        identity.branch.map(|fields| {
-                            fields
-                                .into_iter()
-                                .map(|field| field.into_remote())
-                                .collect()
-                        }),
+                        identity
+                            .branch
+                            .map_fields(nervix_backup::StateField::into_remote),
                         identity.watermarks,
                     ));
                 }
@@ -348,7 +344,7 @@ impl<'a> ArchivedMaterializedUnit<'a> {
 struct SelectedRows {
     /// The kept rows' places in the group's Arrow order.
     rows: Vec<usize>,
-    identities: Vec<(Option<Vec<RemoteRuntimeField>>, RemoteRuntimeRecordMetadata)>,
+    identities: Vec<(nervix_models::RemoteBranchKey, RemoteRuntimeRecordMetadata)>,
 }
 
 /// What a group's identity scan hands back: its kept rows, and the keys kept and seen so far.
@@ -356,6 +352,118 @@ struct ScannedIdentities {
     selected: SelectedRows,
     kept: ahash::HashSet<BranchKeyFingerprint>,
     seen: ahash::HashSet<BranchKeyFingerprint>,
+}
+
+/// The restored placement against which one archived group's concrete keys are selected.
+struct RestoredRowSelection<'a> {
+    declarations: &'a RestoredBranchDeclarations,
+    node: &'a ScheduledNode,
+    unit: Unit,
+    archived_unit: Unit,
+    owners: Option<&'a RestoredRowOwners>,
+}
+
+struct RestoredRowOwners {
+    holders: BTreeMap<BranchKeyFingerprint, super::partitions::RestoredKeyHolder>,
+    _reservations: Vec<nervix_execution::Reservation>,
+}
+
+/// An inherited coordinate cannot be reconstructed from fields. Census the bounded identity
+/// sections before selecting rows so a released copy cannot hide a later admitted origin.
+async fn inherited_row_owners(
+    runtime: &Runtime,
+    archive: &VerifiedArchive,
+    archived: &[ArchivedMaterializedUnit<'_>],
+    node: &ScheduledNode,
+    declarations: &Arc<RestoredBranchDeclarations>,
+) -> Result<Option<Arc<RestoredRowOwners>>, Report<MaterializedRestoreError>> {
+    if !node
+        .resolved_branching
+        .as_ref()
+        .and_then(|branching| branching.partitions())
+        .is_some_and(|partitions| partitions.is_inherited())
+    {
+        return Ok(None);
+    }
+    let mut owners = RestoredRowOwners {
+        holders: BTreeMap::new(),
+        _reservations: Vec::new(),
+    };
+    for source in archived {
+        for group in source.groups {
+            let bytes = read_section(
+                runtime,
+                archive,
+                &group.identities,
+                MATERIALIZED_IDENTITIES_BYTES,
+            )
+            .await?;
+            let reservation = runtime
+                .executor()
+                .try_reserve(
+                    MemoryClass::Bulk,
+                    u64::try_from(bytes.len())
+                        .verified("bounded identity bytes fit")
+                        .checked_mul(4)
+                        .ok_or_else(|| Report::new(MaterializedRestoreError::Admission))?,
+                )
+                .change_context(MaterializedRestoreError::Admission)?;
+            let node = node.clone();
+            let declarations = declarations.clone();
+            let path = group.identities.path.clone();
+            let unit = source.descriptor.unit;
+            owners = runtime
+                .executor()
+                .run_cpu(CpuClass::Bulk, reservation, move |charge, cancellation| {
+                    let record = MaterializedIdentitiesRecord::decode(path.as_str(), &bytes)
+                        .change_context(MaterializedRestoreError::Identities)?;
+                    for (index, identity) in record.identities.into_iter().enumerate() {
+                        cancellation
+                            .check()
+                            .change_context(MaterializedRestoreError::Cancelled)?;
+                        let key = declarations
+                            .admit(&identity.branch)
+                            .change_context_lazy(|| MaterializedRestoreError::BranchKey {
+                                section: path.clone(),
+                                record: index.checked_add(1).verified(
+                                    "a bounded identity record index leaves room for its \
+                                     one-based number",
+                                ),
+                            })?
+                            .ok_or_else(|| Report::new(MaterializedRestoreError::Identities))?;
+                        let fingerprint = key.fingerprint();
+                        let origin = key.inherited_origin();
+                        let rank =
+                            super::partitions::holder_rank(&node, unit, &fingerprint, origin);
+                        match owners.holders.get_mut(&fingerprint) {
+                            Some(present) if present.rank > rank => {}
+                            Some(present) if present.rank == rank => {
+                                present.ambiguous |= present.unit != unit;
+                            }
+                            _ => {
+                                owners.holders.insert(
+                                    fingerprint,
+                                    super::partitions::RestoredKeyHolder {
+                                        unit,
+                                        origin,
+                                        rank,
+                                        ambiguous: false,
+                                    },
+                                );
+                            }
+                        }
+                    }
+                    owners._reservations.push(charge);
+                    Ok::<_, Report<MaterializedRestoreError>>(owners)
+                })
+                .await
+                .change_context(MaterializedRestoreError::Admission)??;
+        }
+    }
+    if owners.holders.values().any(|holder| holder.ambiguous) {
+        return Err(Report::new(MaterializedRestoreError::Identities));
+    }
+    Ok(Some(Arc::new(owners)))
 }
 
 /// The native sealed checkpoint of `unit` of the materialized relay `node`, a node a branch's
@@ -373,6 +481,7 @@ pub(super) async fn prepare_regrouped_materialized_checkpoint(
     declarations: Arc<RestoredBranchDeclarations>,
 ) -> Result<Option<StagedArtifact>, Report<MaterializedRestoreError>> {
     let executor = runtime.executor();
+    let owners = inherited_row_owners(runtime, archive, archived, node, &declarations).await?;
     let mut kept = ahash::HashSet::new();
     let mut pieces = Vec::new();
     let mut records = 0_u64;
@@ -401,6 +510,8 @@ pub(super) async fn prepare_regrouped_materialized_checkpoint(
                 .change_context(MaterializedRestoreError::Admission)?;
             let declarations = declarations.clone();
             let node = node.clone();
+            let owners = owners.clone();
+            let archived_unit = source.descriptor.unit;
             let scan = ScannedIdentities {
                 selected: SelectedRows {
                     rows: Vec::new(),
@@ -414,9 +525,13 @@ pub(super) async fn prepare_regrouped_materialized_checkpoint(
                     scan.select(
                         &identities,
                         &section,
-                        &declarations,
-                        &node,
-                        unit,
+                        RestoredRowSelection {
+                            declarations: &declarations,
+                            node: &node,
+                            unit,
+                            archived_unit,
+                            owners: owners.as_deref(),
+                        },
                         cancellation,
                     )
                 })
@@ -495,11 +610,16 @@ impl ScannedIdentities {
         mut self,
         identities: &ChargedBytes,
         section: &SectionPath,
-        declarations: &RestoredBranchDeclarations,
-        node: &ScheduledNode,
-        unit: Unit,
+        selection: RestoredRowSelection<'_>,
         cancellation: &nervix_execution::Cancellation,
     ) -> Result<Self, Report<MaterializedRestoreError>> {
+        let RestoredRowSelection {
+            declarations,
+            node,
+            unit,
+            archived_unit,
+            owners,
+        } = selection;
         cancellation
             .check()
             .change_context(MaterializedRestoreError::Cancelled)?;
@@ -513,7 +633,7 @@ impl ScannedIdentities {
                 .checked_add(1)
                 .assured("an identity's index is below the length of the list that holds it");
             let key = declarations
-                .admit(identity.branch.as_ref())
+                .admit(&identity.branch)
                 .change_context_lazy(|| MaterializedRestoreError::BranchKey {
                     section: section.clone(),
                     record: record_number,
@@ -526,17 +646,29 @@ impl ScannedIdentities {
             if !self.seen.insert(fingerprint) {
                 return Err(Report::new(MaterializedRestoreError::Identities));
             }
-            if node.unit_of_branch(Some(&fingerprint)) != Some(unit) {
+            if owners.is_some_and(|owners| {
+                owners.holders.get(&fingerprint).is_none_or(|holder| {
+                    holder.unit != archived_unit || holder.origin != key.inherited_origin()
+                })
+            }) {
+                continue;
+            }
+            let selected_unit = node
+                .unit_of_key(Some(&fingerprint), key.inherited_origin())
+                .or_else(|| {
+                    (key.inherited_origin().is_none() && node.units.contains_key(&archived_unit))
+                        .then_some(archived_unit)
+                });
+            if selected_unit != Some(unit) {
                 continue;
             }
             if !self.kept.insert(fingerprint) {
                 continue;
             }
             self.selected.rows.push(index);
-            self.selected.identities.push((
-                remote_branch_key(identity.branch.as_ref()),
-                identity.watermarks,
-            ));
+            self.selected
+                .identities
+                .push((remote_branch_key(&identity.branch), identity.watermarks));
         }
         Ok(self)
     }

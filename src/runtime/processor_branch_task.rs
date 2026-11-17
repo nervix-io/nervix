@@ -982,6 +982,19 @@ pub(super) async fn dispatch_processor_node_input(
             return;
         }
     };
+    if (key
+        .as_ref()
+        .is_some_and(|key| key.external_partition().is_some())
+        || template
+            .partition_transition
+            .as_ref()
+            .is_some_and(|transition| transition.needs_key_lookup()))
+        && instances
+            .stored_key(&key)
+            .is_some_and(|stored| !BranchKey::same_origin(stored, &key))
+    {
+        instances.replace_key(key.clone());
+    }
     let instance = if let Some(state) = instances.touch(&key, accepted_at) {
         GetOrCreateBranchInstance {
             state,

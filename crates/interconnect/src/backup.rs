@@ -308,13 +308,24 @@ mod wire_properties {
                             RuntimeState::WindowProcessor { .. } => ModelKind::WindowProcessor,
                             RuntimeState::Inferencer { .. } => ModelKind::Inferencer,
                         };
-                        for branched in [false, true] {
-                            let branch_key = branched.then(|| {
-                                vec![RemoteRuntimeField {
-                                    name: "tenant".to_string(),
-                                    value: RemoteRuntimeValue::I64(case.value),
-                                }]
-                            });
+                        for scope in 0..3 {
+                            let fields = vec![RemoteRuntimeField {
+                                name: "tenant".to_string(),
+                                value: RemoteRuntimeValue::I64(case.value),
+                            }]
+                            .into_boxed_slice();
+                            let branch_key = match scope {
+                                0 => nervix_models::RemoteBranchKey::Unbranched,
+                                1 => nervix_models::RemoteBranchKey::Direct(fields),
+                                _ => nervix_models::RemoteBranchKey::branched(
+                                    fields,
+                                    Some(nervix_models::InheritedPartitionOrigin {
+                                        partition: nervix_models::ExternalPartition::new(0),
+                                        epoch: nervix_models::PartitionEpochNumber::FIRST,
+                                        unit: nervix_models::Unit::SINGLE,
+                                    }),
+                                ),
+                            };
                             for length in [0, u64::MAX, case.declared_length] {
                                 actions.push(InstallRestoredStateAction::Begin {
                                     placement: StatePlacementEnvelope {
@@ -326,7 +337,9 @@ mod wire_properties {
                                         unit: nervix_models::Unit::SINGLE,
                                         branch_key: branch_key.clone(),
                                     },
-                                    branch_fingerprint: branched.then_some(case.digest),
+                                    branch_fingerprint: branch_key
+                                        .is_branched()
+                                        .then_some(case.digest),
                                     revision: case.revision,
                                     length,
                                     digest: case.digest,

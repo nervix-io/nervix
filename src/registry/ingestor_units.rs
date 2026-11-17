@@ -17,20 +17,24 @@ use std::{
 };
 
 use error_stack::{Report, ResultExt as _};
-use meticulous::OptionExt as _;
 use nervix_models::{
-    BranchSelection, CreateIngestor, DomainName, IngestorEntity, IngestorEntityKind,
+    BranchName, BranchSelection, CreateIngestor, DomainName, IngestorEntity, IngestorEntityKind,
     IngestorInstances, IngestorInstancingCapability, KafkaIngestor, KafkaOffsetMode, ModelIndex,
     ModelName, RelayName, Unit,
 };
 use thiserror::Error;
 
-use super::{error::RegistryError, validation::branching::resolved_branch_selection};
+use super::{
+    error::RegistryError,
+    validation::branching::{branch_model, resolved_branch_selection},
+};
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub(crate) enum IngestorInstancingError {
     #[error("INSTANCES {count} cannot be represented as execution units on this target")]
     UnaddressableCount { count: NonZeroU64 },
+    #[error("installed per-partition intake has {count} units, above the partition bound")]
+    InstalledPartitionUnitCount { count: usize },
     #[error("{entity} does not support the declared instancing form")]
     Unsupported { entity: IngestorEntityKind },
     #[error("{entity} INSTANCES PER PARTITION requires OFFSET BY DOMAIN")]
@@ -39,6 +43,10 @@ pub(crate) enum IngestorInstancingError {
         "INSTANCES PER PARTITION requires constructing routes to one branch partition structure"
     )]
     MissingConstruction,
+    #[error("Pulsar {kind} INSTANCES PER PARTITION requires an inherited branch")]
+    PulsarPartitionTopics {
+        kind: nervix_models::PulsarSubscriptionType,
+    },
     #[error(
         "INSTANCES PER PARTITION requires constructing routes to one branch partition structure; \
          route to '{relay}' differs"
@@ -52,8 +60,9 @@ pub(in crate::registry) enum IngestorUnits {
     Single,
     Instances(NonZeroU64),
     PerPartition {
-        count: NonZeroU16,
+        count: Option<NonZeroU16>,
         relays: Vec<RelayName>,
+        branches: Vec<BranchName>,
     },
 }
 
@@ -101,6 +110,7 @@ impl IngestorUnits {
         let identifier = ModelName::from(&ingestor.name);
         let mut structure = None;
         let mut relays = BTreeSet::new();
+        let mut branches = BTreeSet::new();
         for route in ingestor.output_routes.outputs() {
             let Some(branch) = route.branch.as_ref().and_then(|branch| branch.branch()) else {
                 continue;
@@ -114,27 +124,98 @@ impl IngestorUnits {
                 },
             )?;
             let fields = resolved.fields().to_vec();
-            let partitions = resolved
-                .partitions()
-                .assured("an explicitly named branch resolves as branched");
-            if let Some((expected_fields, expected_partitions)) = &structure {
-                if *expected_fields != fields || *expected_partitions != partitions {
+            let declaration = branch_model(domain, &identifier, models, branch)?.partitions;
+            if let Some((expected_fields, expected_declaration, _)) = &structure {
+                if *expected_fields != fields || *expected_declaration != declaration {
                     return Err(refusal(IngestorInstancingError::DifferentStructure {
                         relay: route.relay.clone(),
                     }));
                 }
             } else {
-                structure = Some((fields, partitions));
+                structure = Some((
+                    fields,
+                    declaration,
+                    resolved.partitions().map(|value| value.count()),
+                ));
             }
+            branches.insert(branch.clone());
             relays.insert(route.relay.clone());
         }
-        let Some((_, partitions)) = structure else {
+        let Some((_, declaration, count)) = structure else {
             return Err(refusal(IngestorInstancingError::MissingConstruction));
         };
+        if let Some(IngestorEntity::Pulsar(nervix_models::PulsarIngestor::Topic(source))) =
+            ingestor.input.transport_entity()
+            && source.subscription.kind.reads_through_one_consumer()
+            && !declaration.is_inherited()
+        {
+            return Err(refusal(IngestorInstancingError::PulsarPartitionTopics {
+                kind: source.subscription.kind,
+            }));
+        }
         Ok(Self::PerPartition {
-            count: partitions.count(),
+            count,
             relays: relays.into_iter().collect(),
+            branches: branches.into_iter().collect(),
         })
+    }
+
+    /// Retains the installed units while a changed topology is unresolved, so their native
+    /// position states remain available to the eventual unit-layout transfer.
+    pub(in crate::registry) fn resolve_topology(
+        &mut self,
+        domain: &DomainName,
+        ingestor: &nervix_models::IngestorName,
+        topology: &nervix_models::PartitionTopology,
+        existing: Option<&nervix_models::ScheduledNode>,
+        restored: Option<NonZeroU16>,
+    ) -> Result<(), Report<RegistryError>> {
+        let Self::PerPartition {
+            count, branches, ..
+        } = self
+        else {
+            return Ok(());
+        };
+        let mut observed = None;
+        let mut complete = true;
+        for branch in branches {
+            let Some(layout) = topology.branches.get(branch) else {
+                complete = false;
+                break;
+            };
+            let found = layout.partitions().count();
+            if observed.is_some_and(|expected| expected != found) {
+                complete = false;
+                break;
+            }
+            observed = Some(found);
+        }
+        if complete {
+            *count = observed;
+            return Ok(());
+        }
+        if count.is_some() {
+            return Ok(());
+        }
+        if let Some(installed) = restored {
+            *count = Some(installed);
+            return Ok(());
+        }
+        if let Some(existing) = existing
+            && matches!(existing.config.as_ref(), nervix_models::Model::Ingestor(model)
+                if model.input.instances() == Some(IngestorInstances::PerPartition))
+        {
+            let installed = u16::try_from(existing.units.len())
+                .change_context(IngestorInstancingError::InstalledPartitionUnitCount {
+                    count: existing.units.len(),
+                })
+                .change_context(RegistryError::IngestorInstancing {
+                    domain: domain.clone(),
+                    ingestor: ingestor.clone(),
+                })?;
+            *count = NonZeroU16::new(installed);
+        }
+        Ok(())
     }
 
     pub(in crate::registry) fn unit_layout(&self) -> super::unit_placement::UnitLayout {
@@ -142,7 +223,10 @@ impl IngestorUnits {
         match self {
             Self::Single => UnitLayout::Single,
             Self::Instances(count) => UnitLayout::Instances(*count),
-            Self::PerPartition { count, .. } => UnitLayout::Instances(NonZeroU64::from(*count)),
+            Self::PerPartition {
+                count: Some(count), ..
+            } => UnitLayout::Instances(NonZeroU64::from(*count)),
+            Self::PerPartition { count: None, .. } => UnitLayout::AwaitingTopology,
         }
     }
 }

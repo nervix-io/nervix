@@ -5,8 +5,6 @@
 //! - **Depends on.** The production ingestor settings and vocabulary.
 //! - **Must not know.** Runtime schedules, graph installation or a live broker.
 
-use meticulous::ResultExt as _;
-
 use super::*;
 
 fn entry(key: &str, value: &str) -> ClientConfigEntry {
@@ -21,6 +19,7 @@ fn settings<'a>(
     topic: &'a PulsarTopicName,
 ) -> PulsarTopicIngestorSettings<'a> {
     PulsarTopicIngestorSettings {
+        assignment: None,
         config,
         topic,
         subscription: PulsarSubscription {
