@@ -864,8 +864,11 @@ pub(super) async fn wasm_envelope_from_relay_batch(
     next_ack_token: &mut u64,
 ) -> error_stack::Result<(WasmEnvelope, WasmAckMap), WasmInstanceError> {
     let arrow_ipc_batch = batch
-        .batch
-        .encode_arrow_ipc(executor, nervix_execution::QueueAdmission::RefuseWhenFull)
+        .keep_alive_while_pending(
+            batch
+                .batch
+                .encode_arrow_ipc(executor, nervix_execution::QueueAdmission::WaitForPlace),
+        )
         .await
         .change_context(WasmInstanceError::EncodeInput)?
         .to_vec();

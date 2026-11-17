@@ -724,6 +724,10 @@ impl RelayRecordBatch {
 }
 
 impl AcknowledgementKeepalive for RelayRecordBatch {
+    fn needs_keepalive(&self) -> bool {
+        self.acks.as_slice().needs_keepalive()
+    }
+
     /// Reports every row's acknowledgement alive to its source.
     fn keep_alive(&self) {
         for acks in &self.acks {

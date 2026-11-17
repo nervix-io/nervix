@@ -1494,8 +1494,11 @@ async fn run_processor_branch_task(
                 match received {
                     Some(ProcessorBranchInput { relay, batch, work }) => {
                         events.record();
-                        branch
-                            .execute_processor_input(&processor, &relay, batch)
+                        runtime_handle.inner.fault_injection
+                            .run_accepted_processor_input(
+                                branch.owner.node.in_domain(&domain),
+                                branch.execute_processor_input(&processor, &relay, batch),
+                            )
                             .await;
                         quiesce_gauges.observe(&branch, &processor);
                         drop(work);
@@ -1668,17 +1671,23 @@ pub(super) async fn stop_processor_branch_task(
     mode: ProcessorBranchStopMode,
 ) {
     let processor = processor.into();
-    entry
-        .commands
-        .send(ProcessorBranchCommand::Stop(mode))
-        .await
-        .means_shutdown("processor branch task");
-    let Some(mut task) = entry.task.lock().take() else {
-        return;
-    };
-    match nervix_primitives::time::timeout(PROCESSOR_BRANCH_TASK_SHUTDOWN_GRACE, &mut task).await {
-        Ok(Ok(())) => {}
-        Ok(Err(error)) => {
+    let mut task = None;
+    let stopped = nervix_primitives::time::timeout(PROCESSOR_BRANCH_TASK_SHUTDOWN_GRACE, async {
+        entry
+            .commands
+            .send(ProcessorBranchCommand::Stop(mode))
+            .await
+            .means_shutdown("processor branch task");
+        task = entry.task.lock().take();
+        match task.as_mut() {
+            Some(task) => Some(task.await),
+            None => None,
+        }
+    })
+    .await;
+    match stopped {
+        Ok(Some(Ok(()))) | Ok(None) => {}
+        Ok(Some(Err(error))) => {
             warn!(
                 domain = domain.as_str(),
                 processor = processor.as_str(),
@@ -1695,6 +1704,9 @@ pub(super) async fn stop_processor_branch_task(
                 grace_period = %humantime::format_duration(PROCESSOR_BRANCH_TASK_SHUTDOWN_GRACE),
                 "processor branch task exceeded shutdown grace period; aborting"
             );
+            let Some(task) = task.or_else(|| entry.task.lock().take()) else {
+                return;
+            };
             task.abort();
             if let Err(error) = task.await
                 && !error.is_cancelled()

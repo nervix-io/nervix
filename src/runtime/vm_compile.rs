@@ -17,6 +17,7 @@
 use error_stack::ResultExt as _;
 use nervix_connector::TypedRecordHeader;
 use nervix_models::HeaderValues;
+use nervix_vm::execute_program_with_selection_in_context;
 
 use super::*;
 

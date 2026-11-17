@@ -393,12 +393,9 @@ fn bolero_stateful_tensor_columns_preserve_shape_and_float_bits() {
         });
 }
 
-#[nervix_primitives::test]
-async fn native_refusal_keeps_the_previous_generation_and_other_branches_independent() {
-    let mut config = ExecutionConfig::default();
-    config.workers.extension_cpu = NonZeroUsize::MIN;
-    config.workers.pending_jobs = nervix_execution::PendingJobCounts::uniform(NonZeroUsize::MIN);
-    let executor = Executor::new(config).expect("one extension worker with one queue place");
+async fn checked_running_fixture(
+    executor: &Executor,
+) -> (Arc<PreparedStatefulInference>, std::path::PathBuf) {
     let state = InferencerStatePlan {
         bindings: vec![InferencerStatePortPlan {
             input: "state_in".to_owned(),
@@ -411,7 +408,7 @@ async fn native_refusal_keeps_the_previous_generation_and_other_branches_indepen
     };
     let prepared = Arc::new(
         PreparedStatefulInference::prepare(
-            &executor,
+            executor,
             &[InferencerTensorMapping {
                 tensor: "features".to_owned(),
                 schema: schema(&[2]),
@@ -430,6 +427,35 @@ async fn native_refusal_keeps_the_previous_generation_and_other_branches_indepen
     );
     let path =
         Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/onnx/checked_running_sum.onnx");
+    (prepared, path)
+}
+
+#[nervix_primitives::test]
+async fn accepted_work_first_stateful_row_waits_for_its_native_session() {
+    let executor = crate::runtime::single_worker_executor();
+    let (prepared, path) = checked_running_fixture(&executor).await;
+    let mut session =
+        prepared.instantiate(state_metrics().track_branch(prepared.state.bytes_per_branch));
+    let output = crate::runtime::test_fixtures::accepted_work_after_cpu_room(
+        &executor,
+        CpuClass::Bulk,
+        session.execute(&executor, &path, &prepared, row(&[1.0, 10.0])),
+    )
+    .await
+    .assured("the accepted first row waits for its native session")
+    .assured("the fixture model accepts the row");
+    assert_eq!(score(&output), 11.0);
+    assert!(session.session.is_some());
+    assert_eq!(executor.snapshot().bulk_cpu.refused, 0);
+}
+
+#[nervix_primitives::test]
+async fn accepted_work_stateful_inference_keeps_its_session_on_abandoned_waits() {
+    let mut config = ExecutionConfig::default();
+    config.workers.extension_cpu = NonZeroUsize::MIN;
+    config.workers.pending_jobs = nervix_execution::PendingJobCounts::uniform(NonZeroUsize::MIN);
+    let executor = Executor::new(config).expect("one extension worker with one queue place");
+    let (prepared, path) = checked_running_fixture(&executor).await;
     let mut first =
         prepared.instantiate(state_metrics().track_branch(prepared.state.bytes_per_branch));
     let mut second =
@@ -479,12 +505,12 @@ async fn native_refusal_keeps_the_previous_generation_and_other_branches_indepen
         nervix_primitives::task::yield_now().await;
     }
     let before_admission = first.generation.clone();
-    let admission = nervix_primitives::time::timeout(
-        std::time::Duration::from_secs(5),
-        first.execute(&executor, &path, &prepared, row(&[1.0, 1000.0])),
-    )
-    .await;
-    // Release and join before asserting, including when an implementation waited outside the queue.
+    let mut admission = Box::pin(first.execute(&executor, &path, &prepared, row(&[1.0, 1000.0])));
+    let waiting = futures_util::poll!(admission.as_mut()).is_pending();
+    // Abandon a full-queue wait without moving the branch's native session into a job.
+    drop(admission);
+    let session_preserved = first.session.is_some();
+    // Release and join even when the old implementation refused immediately.
     release
         .send(())
         .expect("the occupying job retains its release receiver");
@@ -496,20 +522,11 @@ async fn native_refusal_keeps_the_previous_generation_and_other_branches_indepen
         .await
         .expect("the queued task joins")
         .expect("the queued job exits");
-    let admission = admission
-        .expect("full queue refusal does not await the occupied worker")
-        .expect_err("a full extension queue refuses before evaluating the row");
-    assert!(matches!(
-        admission.current_context(),
-        StatefulInferenceError::Execution
-    ));
-    assert!(admission.frames().any(|frame| matches!(
-        frame.downcast_ref::<nervix_execution::ExecutionError>(),
-        Some(nervix_execution::ExecutionError::QueueFull {
-            class: "extension_cpu",
-            ..
-        })
-    )));
+    assert!(waiting, "an accepted stateful inference waits for a place");
+    assert!(
+        session_preserved,
+        "abandoning the wait retains the branch's native session"
+    );
     assert!(Arc::ptr_eq(&before_admission, &first.generation));
     assert_native_diagnostic_projection(&executor, &path, &prepared).await;
     let before = first.generation.clone();
