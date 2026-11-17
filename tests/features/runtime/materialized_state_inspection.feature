@@ -104,6 +104,11 @@ Feature: Bounded typed materialized relay inspection
       "seq":3
       "seq":4
       """
+    And within "30s" node "node-1" eventually reports materialized state for relay "events" containing
+      """
+      {"branch":{"tenant":"\u003cmasked\u003e"},"fields":{"tenant":"\u003cmasked\u003e","secret":"\u003cmasked\u003e","seq":3,"ingested_at_low_watermark":7}}
+      {"branch":{"tenant":"\u003cmasked\u003e"},"fields":{"tenant":"\u003cmasked\u003e","secret":"\u003cmasked\u003e","seq":4,"ingested_at_low_watermark":8}}
+      """
     Given client "reader" is connected to node "node-1"
     When client "reader" executes these Plexus commands
       """
@@ -153,6 +158,11 @@ Feature: Bounded typed materialized relay inspection
       """
       "seq":5
       """
+    And within "30s" node "node-1" eventually reports materialized state for relay "events" containing
+      """
+      {"branch":{"tenant":"\u003cmasked\u003e"},"fields":{"tenant":"\u003cmasked\u003e","secret":"\u003cmasked\u003e","seq":5,"ingested_at_low_watermark":9}}
+      """
+    And the materialized inspection cut differs from the saved continuation
     When inspection client "reader" resumes relay "events" with the saved continuation
     Then the typed inspection refuses the read with "stale_continuation"
     When client "reader" submits this Plexus command request

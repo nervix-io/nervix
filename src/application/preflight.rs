@@ -5,9 +5,10 @@
 //! - **Owns.** The startup preflight: building the executor from limits validated together, the
 //!   node's memory limit against its memory budgets and its memory-pressure watermark, its database
 //!   and temporary directories, the quotas their volume must hold and the restore staging quota it
-//!   resolves against that volume, and loading its resolver.
+//!   resolves against that volume, loading its resolver, and, once every check passed, detecting
+//!   the node's properties, which never refuses the start.
 //! - **Depends on.** The executor's configuration, the settings groups it checks, the capacity
-//!   detection, and the resolver's loader.
+//!   detection, the node's detection input, and the resolver's loader.
 //! - **Must not know.** What the node runs once it has started.
 
 #![cfg_attr(
@@ -28,7 +29,7 @@ use thiserror::Error;
 use tracing::{Instrument as _, info};
 use ubyte::ByteUnit;
 
-use super::{NodeSettings, startup::STORAGE_JOB_RESERVATION_BYTES};
+use super::{NodeDetection, NodeSettings, startup::STORAGE_JOB_RESERVATION_BYTES};
 use crate::{
     capacity::{DetectedMemory, NodeMemory, VolumeCapacityError, volume_capacity},
     memory_pressure::MemoryHighWatermark,
@@ -62,6 +63,8 @@ pub enum PreflightError {
     ConsensusCapacity,
     #[error("the executor's memory budgets cannot hold the operations its limits admit")]
     ExecutionLimits,
+    #[error("the listener bounds do not fit intake memory")]
+    ListenerLimits,
     #[error("the peer receive bounds do not fit the resolved executor")]
     PeerReceiveLimits,
     #[error("the client endpoint capacities do not fit the node memory")]
@@ -124,6 +127,7 @@ pub(in crate::application) struct PreflightOutcome {
     pub(in crate::application) dns: DnsResolver,
     pub(in crate::application) memory: NodeMemory,
     pub(in crate::application) capabilities: nervix_models::NodeCapabilities,
+    pub(in crate::application) properties: nervix_models::NodeProperties,
     pub(in crate::application) peer_receive: nervix_interconnect::PeerReceiveSettings,
     pub(in crate::application) client_endpoints: crate::runtime::ClientEndpointSettings,
     pub(in crate::application) memory_pressure: crate::memory_pressure::MemoryPressureSettings,
@@ -139,6 +143,7 @@ pub(in crate::application) struct Preflight<'node> {
     pub(in crate::application) temp_dir: &'node Path,
     pub(in crate::application) dns: &'node DnsConfiguration,
     pub(in crate::application) cpu_detection: crate::capacity::CpuDetection,
+    pub(in crate::application) detection: &'node NodeDetection,
 }
 
 /// One directory's facts: it exists, is writable, and lives on a volume of this capacity.
@@ -186,6 +191,10 @@ impl Preflight<'_> {
         let config = ExecutionSettings::resolve(self.settings.execution, cpu_count, memory_bytes)
             .change_context(PreflightError::ExecutionLimits)?
             .config();
+        self.settings
+            .listeners
+            .validate_intake(config.budgets.intake)
+            .change_context(PreflightError::ListenerLimits)?;
         super::RuntimeThreadSettings::resolve(
             self.settings.runtime_threads,
             cpu_count,
@@ -237,6 +246,7 @@ impl Preflight<'_> {
             ),
             engines: self.settings.runtime.engine_capabilities(),
             connector_host: self.settings.runtime.connector_host.capabilities(),
+            listeners: self.settings.listeners.bounds(),
             cpu_count,
             memory_bytes,
             receive: peer_receive.bounds(),
@@ -300,8 +310,15 @@ impl Preflight<'_> {
             .await
             .change_context(PreflightError::Resolver)?;
 
+        let properties = self
+            .detection
+            .detect(&executor, self.settings.capacity.detection_timeout())
+            .instrument(tracing::info_span!("detect_node_properties"))
+            .await;
+
         info!(
             capabilities = ?capabilities,
+            properties = ?properties,
             memory = %memory,
             memory_budgets = %budgets,
             database_volume = %database.capacity,
@@ -314,6 +331,7 @@ impl Preflight<'_> {
             dns,
             memory,
             capabilities,
+            properties,
             peer_receive,
             client_endpoints,
             memory_pressure,

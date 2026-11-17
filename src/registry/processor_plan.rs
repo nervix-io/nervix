@@ -163,6 +163,31 @@ impl InferencerStatePlan {
         }))
     }
 
+    /// Read the declared footprint without cloning INITIAL expressions or constructing a plan.
+    pub(crate) fn bytes_from_validated(bindings: &[nervix_models::InferencerStateBinding]) -> u64 {
+        let mut bytes_per_branch = 0u64;
+        for binding in bindings {
+            let (_, bytes) = Self::port_layout(&binding.schema);
+            bytes_per_branch = bytes_per_branch
+                .checked_add(bytes)
+                .verified("registry state validation checked the combined branch state byte count");
+        }
+        bytes_per_branch
+    }
+
+    fn port_layout(schema: &nervix_models::InferencerTensorSchema) -> (usize, u64) {
+        let elements = schema
+            .fixed_element_count()
+            .verified("registry state validation proved every fixed tensor element count fits");
+        let bytes = u64::try_from(elements)
+            .verified("the supported native usize widths fit in u64")
+            .checked_mul(
+                u64::try_from(std::mem::size_of::<f32>()).assured("the size of f32 fits in u64"),
+            )
+            .verified("registry state validation checked the tensor byte count");
+        (elements, bytes)
+    }
+
     fn from_validated(bindings: &[nervix_models::InferencerStateBinding]) -> Option<Self> {
         if bindings.is_empty() {
             return None;
@@ -171,16 +196,7 @@ impl InferencerStatePlan {
         let bindings = bindings
             .iter()
             .map(|binding| {
-                let elements = binding.schema.fixed_element_count().verified(
-                    "registry state validation proved every fixed tensor element count fits",
-                );
-                let bytes = u64::try_from(elements)
-                    .verified("the supported native usize widths fit in u64")
-                    .checked_mul(
-                        u64::try_from(std::mem::size_of::<f32>())
-                            .assured("the size of f32 fits in u64"),
-                    )
-                    .verified("registry state validation checked the tensor byte count");
+                let (elements, bytes) = Self::port_layout(&binding.schema);
                 bytes_per_branch = bytes_per_branch.checked_add(bytes).verified(
                     "registry state validation checked the combined branch state byte count",
                 );

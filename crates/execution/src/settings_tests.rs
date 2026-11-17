@@ -106,7 +106,7 @@ fn one_gibibyte_holds_every_independent_pool_and_the_current_credential_profile(
     assert_eq!(config.budgets.state_read_cache, config.budgets.relay);
     assert_eq!(config.budgets.credentials, ByteUnit::Mebibyte(19));
     assert_eq!(config.limits.credential_working_bytes, ByteUnit::Byte(64));
-    assert_eq!(config.budgets.total(), Some(ByteUnit::Mebibyte(427)));
+    assert_eq!(config.budgets.total(), Some(ByteUnit::Mebibyte(555)));
     let pair = config
         .limits
         .relay_operation_bytes()
@@ -237,7 +237,7 @@ fn unknown_capacity_has_explicit_conservative_defaults_without_a_measured_claim(
         .config();
     assert_eq!(config.workers.data_cpu.get(), 1);
     assert_eq!(config.workers.filesystem_storage.get(), 2);
-    assert_eq!(config.budgets.total(), Some(ByteUnit::Mebibyte(2723)));
+    assert_eq!(config.budgets.total(), Some(ByteUnit::Mebibyte(2851)));
     assert_eq!(config.limits.relay_encoded_bytes, ByteUnit::Mebibyte(32));
 }
 

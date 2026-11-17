@@ -162,7 +162,7 @@ pub(super) fn project_offset_snapshot(
         let partition = entry.partition.to_native();
         // Kafka partitions are numbered consecutively from zero. Unsigned conversion also gives
         // every representable native key one destination in representation checks.
-        if u64::from(partition.cast_unsigned()) % selection.count.get() == index {
+        if u64::from(partition.cast_unsigned()) % selection.count == index {
             offsets.push(KafkaOffsetEntrySnapshot {
                 topic: entry.topic.as_str().to_owned(),
                 partition,
@@ -241,7 +241,7 @@ pub(super) fn merge_offset_snapshots(
                 .change_context(RuntimePersistenceError::Cancelled)?;
             let topic = entry.topic.as_str();
             let partition = entry.partition.to_native();
-            let owner = u64::from(partition.cast_unsigned()) % source_count.get();
+            let owner = u64::from(partition.cast_unsigned()) % source_count;
             let key = (topic.to_owned(), partition);
             let offset = entry.next_offset.to_native();
             if source_index == owner {
@@ -619,7 +619,7 @@ impl KafkaOffsetStateOriginator {
                 for partitions in table.topics.values_mut() {
                     partitions.retain(|partition, _| {
                         let retain =
-                            u64::from(partition.cast_unsigned()) % selection.count.get() != index;
+                            u64::from(partition.cast_unsigned()) % selection.count != index;
                         changed |= !retain;
                         retain
                     });
@@ -1216,7 +1216,7 @@ impl CapturedKafkaOffsets {
         for (topic, partitions) in &current.topics {
             for (partition, offset) in partitions {
                 check()?;
-                if u64::from(partition.cast_unsigned()) % selection.count.get() == index {
+                if u64::from(partition.cast_unsigned()) % selection.count == index {
                     seed.record_partition(topic, *partition, offset.load(Ordering::SeqCst));
                 }
             }
@@ -2181,8 +2181,7 @@ mod tests {
                             let earlier = canonical
                                 .iter()
                                 .filter(|position| {
-                                    u64::from(position.partition.cast_unsigned()) % count.get()
-                                        == index
+                                    u64::from(position.partition.cast_unsigned()) % count == index
                                 })
                                 .cloned()
                                 .collect();
@@ -2197,9 +2196,7 @@ mod tests {
                         }
                         if initialized {
                             for position in &canonical {
-                                if u64::from(position.partition.cast_unsigned()) % count.get()
-                                    != index
-                                {
+                                if u64::from(position.partition.cast_unsigned()) % count != index {
                                     continue;
                                 }
                                 let offset =
@@ -2270,7 +2267,7 @@ mod tests {
                                 let received = complete.entry(topic).or_insert_with(BTreeMap::new);
                                 for (partition, offset) in partitions {
                                     assert_eq!(
-                                        u64::from(partition.cast_unsigned()) % target_count.get(),
+                                        u64::from(partition.cast_unsigned()) % target_count,
                                         index
                                     );
                                     assert!(

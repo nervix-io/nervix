@@ -79,10 +79,33 @@ async fn default_limits_validate_together() {
     assert_eq!(snapshot.connector_storage.workers, 2);
 }
 
+#[test]
+fn request_input_capacity_is_validated_before_pools_are_constructed() {
+    for budget in [0, u64::from(u32::MAX) + 1] {
+        let mut config = ExecutionConfig::default();
+        config.budgets.intake = ByteUnit::Byte(budget);
+        let Err(error) = Executor::new(config) else {
+            panic!("an unenforceable intake budget must refuse executor construction");
+        };
+        match (budget, error.current_context()) {
+            (0, ExecutionConfigError::EmptyBudget { class: "intake" }) => {}
+            (
+                requested,
+                ExecutionConfigError::BudgetTooLarge {
+                    class: "intake",
+                    budget,
+                },
+            ) if *budget == requested => {}
+            _ => panic!("the refusal must identify the intake budget: {error:#}"),
+        }
+    }
+}
+
 /// Each configured pool and both equally sized derived read pools count in the total.
 #[test]
 fn the_memory_total_counts_every_class_once() {
     let budgets = MemoryBudgets {
+        intake: ByteUnit::Byte(128),
         management: ByteUnit::Byte(1),
         commands: ByteUnit::Byte(2),
         relay: ByteUnit::Byte(4),
@@ -94,7 +117,7 @@ fn the_memory_total_counts_every_class_once() {
         credentials: ByteUnit::Byte(64),
     };
 
-    assert_eq!(budgets.total(), Some(ByteUnit::Byte(135)));
+    assert_eq!(budgets.total(), Some(ByteUnit::Byte(263)));
 }
 
 /// Budgets whose sum does not fit a byte count have no total, rather than one that wrapped.
@@ -109,7 +132,7 @@ fn memory_budgets_beyond_a_byte_count_have_no_total() {
 }
 
 /// The startup preflight refuses a memory limit below the total, so the total is what the executor
-/// can reserve: the capacity of every memory class together, 2,723 MiB by default.
+/// can reserve: the capacity of every memory class together, 2,851 MiB by default.
 #[nervix_primitives::test]
 async fn the_default_memory_total_is_what_the_executor_can_reserve() {
     use meticulous::ResultExt as _;
@@ -118,6 +141,7 @@ async fn the_default_memory_total_is_what_the_executor_can_reserve() {
     let executor = Executor::new(config).assured("the default budgets hold the default limits");
     let mut reservable = 0_u64;
     for class in [
+        MemoryClass::Intake,
         MemoryClass::Management,
         MemoryClass::Commands,
         MemoryClass::Relay,
@@ -130,11 +154,11 @@ async fn the_default_memory_total_is_what_the_executor_can_reserve() {
     ] {
         reservable = reservable
             .checked_add(executor.memory(class).capacity_bytes)
-            .assured("nine budgets that each fit a u32 permit count add up within a u64");
+            .assured("ten budgets that each fit a u32 permit count add up within a u64");
     }
 
     assert_eq!(config.budgets.total(), Some(ByteUnit::Byte(reservable)));
-    assert_eq!(reservable, ByteUnit::Mebibyte(2723).as_u64());
+    assert_eq!(reservable, ByteUnit::Mebibyte(2851).as_u64());
 }
 
 #[nervix_primitives::test]
@@ -774,6 +798,7 @@ mod shuttle_checks {
 
             let mut probes = Vec::new();
             for class in [
+                MemoryClass::Intake,
                 MemoryClass::Management,
                 MemoryClass::Commands,
                 MemoryClass::StateRead,

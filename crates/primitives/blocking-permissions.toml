@@ -451,3 +451,10 @@ items = ["thread::spawn"]
 owner = "The outward TLS policy production-owner Shuttle check."
 path = "crates/tls/src/shuttle_tests.rs"
 reason = "These finite synchronous model contenders exercise the owner directly, outside node execution jobs."
+
+[[permission]]
+bound = "One modeled allocation-observation participant per Shuttle execution; it performs one bounded ledger observation and joins before the execution returns. The calling participant cancels the input guard."
+items = ["thread::spawn"]
+owner = "The public HTTP input accounting cancellation check."
+path = "src/application/listener_input.rs"
+reason = "This modeled contender drives the production accounting owner under Shuttle's scheduler, rather than executing a node job through the bounded executor. It is compiled only for the Shuttle check."

@@ -16,6 +16,7 @@
     )
 )]
 
+mod inferencer;
 mod inspection_pages;
 mod materialized_state;
 mod processor_descriptions;
@@ -111,6 +112,11 @@ struct LookupTarget {
 
 #[derive(Debug, thiserror::Error)]
 pub(in crate::application) enum ObservationError {
+    #[error("inferencer '{}' changed while preparing its description in domain '{}'", .name.as_str(), .domain.as_str())]
+    InferencerConfigurationChanged {
+        domain: DomainName,
+        name: nervix_models::InferencerName,
+    },
     #[error("failed to describe {kind} '{name}' in domain '{domain}' locally", kind = .entity.kind.as_str(), name = .entity.identifier.as_str())]
     LocalDescribe { domain: DomainName, entity: NodeRef },
     #[error("failed to describe {kind} '{name}' in domain '{domain}' on node '{node}'", kind = .entity.kind.as_str(), name = .entity.identifier.as_str())]
@@ -435,9 +441,12 @@ impl SessionServiceImpl {
         let mut lines = vec![
             format!("domain: {}", domain.as_str()),
             format!("status: {:?}", domain_state.status).to_ascii_lowercase(),
-            format!("start version: {}", domain_state.start_version),
-            format!("start point: {:?}", domain_state.last_start),
         ];
+        if let Some(nervix_models::DomainStopCause::Licensing(reason)) = domain_state.stop_cause {
+            lines.push(format!("stopped by licensing: {reason}"));
+        }
+        lines.push(format!("start version: {}", domain_state.start_version));
+        lines.push(format!("start point: {:?}", domain_state.last_start));
         if let Some(mapping) = &domain_state.clock {
             lines.push(format!(
                 "clock mapping: UTC anchor {}, logical origin {}, time rate {}",
@@ -2788,6 +2797,7 @@ mod tests {
                     start_version: 0,
                     last_start: nervix_models::DomainStartPoint::Resume,
                     clock: None,
+                    stop_cause: None,
                 },
                 None,
                 nervix_licensing_vocabulary::Quota::Unlimited,

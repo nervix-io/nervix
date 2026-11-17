@@ -85,7 +85,11 @@ with a diagnostic naming both. The normal runtime dependency graph contains neit
 
 ## Listener And Peer Topology
 
-Each node exposes one TCP listener for all node-to-node traffic. Every accepted connection uses
+Each node exposes one TCP listener for all node-to-node traffic. Its accept owner waits the node's
+positive `listener-accept-retry-delay` after a node-local failure such as descriptor exhaustion;
+connection-local failures retry immediately. Admission shutdown cancels the pause. The setting's
+default, validation and committed publication are shared with the public listener
+[Listener Bounds](node-settings.md#listener-bounds). Every accepted connection uses
 mutually authenticated TLS 1.3 and HTTP/2. The listener is independent of Raft leadership and graph
 placement, so every live node can receive every class of interconnect operation. TLS provides
 confidentiality and integrity as well as peer authentication.
@@ -490,6 +494,10 @@ the same fingerprint as every other consensus and prerequisite shape.
 
 The current fingerprint also fences signed licensing activation and decision commands, retained trust documents, committed licensing time and transaction refusals projected without executable Models. These consensus request and snapshot shapes share the contract with emitter instance identities.
 
+It also fences the licensing stop gate: the stop cause a `StopDomain` command carries and a domain
+record retains, the typed `LicensingStop` refusal of a change that would run a domain, the
+transaction refusal of a `START` step under the gate, and the `stopped` admission refusal state.
+
 All nodes in a running cluster use one current wire contract. A fixed fingerprint covers the set of
 supported operations and their encoded shapes. It is one of the prerequisites every hello carries,
 so a node whose fingerprint differs is refused at join as a wire-contract mismatch, and a hello of
@@ -501,6 +509,8 @@ commands and snapshots. Its private key travels only over the authenticated inte
 identity observation and backup source metadata use their separate public projections.
 The current fingerprint includes the conditional orphaned model-pause recovery command, its exact
 mutation lease, typed recovery reply and typed mutation-fence and restore-installation conflicts.
+It also covers the node record announcement: the `consensus.announce_node_record` request and the
+Raft command that commit a node's capacity claim, detected properties and tags as one record.
 The subscription-interest visibility request includes the advertisement version, and its current
 wire fingerprint fences that request shape during connection setup.
 
@@ -530,7 +540,9 @@ Emitter statements exchanged through the control plane use explicit `KEY` expres
 `payload` expression scope, typed materialized relay inspection, ingestor read interactions,
 corridor/domain-wide placement coverage, pace-only domain configuration, exact partition/instance
 relocation selections, ingestor acknowledgement and connector lifecycle observations, and the current
-transaction operation and commit-step alternatives. Peers must
+transaction operation and commit-step alternatives, durable licensing rotation/release effects and
+consensus commands with their exact request and independent binding records, and the engine and
+connector host capabilities in each node's incarnation-bound claim. Peers must
 match it exactly.
 
 Execution-unit identities use an eight-byte rank with four-byte archive alignment. Single and
@@ -2481,6 +2493,21 @@ the freeze of that same unit. A sibling instance's control or ACK count cannot a
 back the selected handoff. The current wire fingerprint identifies this required request shape;
 peers must use the same current contract. Its fingerprint also includes the required committed
 cluster-parameter publication.
+
+## Inferencer Unit Observation
+
+An inferencer describe request names the domain, inferencer, execution unit and expected pinned
+model fingerprint. Its receiver verifies the current model binding and that it executes that
+unit. The reply carries typed branch and byte counts, publication and persistence revisions, and
+the owner's confirmed progress for its current replicas. The control plane composes these unit
+facts with the stored tensor declarations and placement before rendering the description.
+
+Collection visits immutable state publications on the bounded executor, checks cancellation
+between entries and reads only counts and revision metadata. It never encodes a tensor or a branch
+key. Revision zero is a known baseline; absence means no progress was observed. The per-unit
+revision at each stage is the highest observed branch-local revision, not a common checkpoint.
+This request uses the ordinary bounded control-request transport and deadline. It neither requests
+publication nor changes replication progress or gossip.
 
 ## Cluster Parameter Observations
 

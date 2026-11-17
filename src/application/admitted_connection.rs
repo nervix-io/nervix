@@ -23,6 +23,7 @@
 )]
 
 use std::{
+    cell::Cell,
     io,
     pin::Pin,
     task::{Context, Poll},
@@ -54,13 +55,21 @@ impl AdmittingListener {
     /// failure.
     pub(in crate::application) fn into_connections(
         self,
-    ) -> impl Stream<Item = io::Result<AdmittedConnection<TcpStream>>> {
+    ) -> impl Stream<Item = io::Result<AdmittedConnection<super::listener_io::ListenerIo<TcpStream>>>>
+    {
         stream::unfold(self, Self::accept_next)
     }
 
-    async fn accept_next(mut self) -> Option<(io::Result<AdmittedConnection<TcpStream>>, Self)> {
+    async fn accept_next(
+        mut self,
+    ) -> Option<(
+        io::Result<AdmittedConnection<super::listener_io::ListenerIo<TcpStream>>>,
+        Self,
+    )> {
+        let timeout = self.listener.settings().tls_timeout();
         let (stream, _) = self.listener.accept().await;
-        let connection = AdmittedConnection::new(stream, &self.cut);
+        let mut connection = AdmittedConnection::new(stream, &self.cut);
+        connection.setup = Some(Box::pin(nervix_primitives::time::sleep(timeout)));
         Some((Ok(connection), self))
     }
 }
@@ -69,6 +78,8 @@ impl AdmittingListener {
 pub(in crate::application) struct AdmittedConnection<IO> {
     io: IO,
     cut: Cut,
+    setup: Option<Pin<Box<nervix_primitives::time::Sleep>>>,
+    connected: Cell<bool>,
 }
 
 /// Whether the node has cut the connections its listener accepted.
@@ -93,9 +104,21 @@ impl Cut {
 }
 
 impl<IO> AdmittedConnection<IO> {
+    fn setup_expired(&mut self, cx: &mut Context<'_>) -> bool {
+        if self.connected.get() {
+            self.setup = None;
+            return false;
+        }
+        self.setup
+            .as_mut()
+            .is_some_and(|timer| timer.as_mut().poll(cx).is_ready())
+    }
+
     fn new(io: IO, cut: &CancellationToken) -> Self {
         Self {
             io,
+            setup: None,
+            connected: Cell::new(false),
             cut: Cut::Pending(Box::pin(cut.clone().cancelled_owned())),
         }
     }
@@ -108,6 +131,10 @@ fn connection_cut() -> io::Error {
     )
 }
 
+fn setup_timed_out() -> io::Error {
+    super::listener_capacity::ConnectionExpiry::TlsHandshake.into_io_error()
+}
+
 impl<IO> AsyncRead for AdmittedConnection<IO>
 where
     IO: AsyncRead + Unpin,
@@ -118,6 +145,9 @@ where
         buf: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
         let connection = self.get_mut();
+        if connection.setup_expired(context) {
+            return Poll::Ready(Err(setup_timed_out()));
+        }
         if connection.cut.poll_done(context) {
             return Poll::Ready(Err(connection_cut()));
         }
@@ -135,6 +165,9 @@ where
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
         let connection = self.get_mut();
+        if connection.setup_expired(context) {
+            return Poll::Ready(Err(setup_timed_out()));
+        }
         if connection.cut.poll_done(context) {
             return Poll::Ready(Err(connection_cut()));
         }
@@ -147,6 +180,9 @@ where
         bufs: &[io::IoSlice<'_>],
     ) -> Poll<io::Result<usize>> {
         let connection = self.get_mut();
+        if connection.setup_expired(context) {
+            return Poll::Ready(Err(setup_timed_out()));
+        }
         if connection.cut.poll_done(context) {
             return Poll::Ready(Err(connection_cut()));
         }
@@ -159,6 +195,9 @@ where
 
     fn poll_flush(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<io::Result<()>> {
         let connection = self.get_mut();
+        if connection.setup_expired(context) {
+            return Poll::Ready(Err(setup_timed_out()));
+        }
         if connection.cut.poll_done(context) {
             return Poll::Ready(Err(connection_cut()));
         }
@@ -167,6 +206,9 @@ where
 
     fn poll_shutdown(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<io::Result<()>> {
         let connection = self.get_mut();
+        if connection.setup_expired(context) {
+            return Poll::Ready(Err(setup_timed_out()));
+        }
         if connection.cut.poll_done(context) {
             return Poll::Ready(Err(connection_cut()));
         }
@@ -181,6 +223,9 @@ where
     type ConnectInfo = IO::ConnectInfo;
 
     fn connect_info(&self) -> Self::ConnectInfo {
+        // Tonic obtains connection information only after its TLS accept completes. The plain
+        // path calls this before serving HTTP/2. Preserve its native TCP/TLS info unchanged.
+        self.connected.set(true);
         self.io.connect_info()
     }
 }

@@ -23,6 +23,7 @@ mod dns;
 mod engines;
 mod execution;
 mod interconnect;
+mod listeners;
 mod membership;
 mod memory_pressure;
 mod node;
@@ -46,7 +47,7 @@ pub use self::{
     execution::ExecutionArgs,
     membership::MembershipArgs,
     memory_pressure::MemoryPressureArgs,
-    node::NodeArgs,
+    node::{NODE_TAGS_OPTION, NodeArgs},
     resources::ResourceArgs,
     runtime::RuntimeArgs,
     scheduling::SchedulingArgs,

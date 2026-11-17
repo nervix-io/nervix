@@ -531,6 +531,8 @@ impl TransportSettings {
             None => request_timeout,
         };
         TransportOptions {
+            accept_retry_delay: Setting::<crate::AcceptRetryDelay>::resolve(None, &())
+                .assured("the declared accept-retry default is positive and clock-representable"),
             relay_retention: super::RelayRetentionSettings::default(),
             reconnect_jitter_permille: *self.reconnect_jitter_permille.value(),
             peer_receive,

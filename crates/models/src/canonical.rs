@@ -931,6 +931,9 @@ impl Statement {
             Self::DescribeReorderer(describe) => {
                 Ok(format!("DESCRIBE REORDERER {};", describe.name.as_str()))
             }
+            Self::DescribeInferencer(describe) => {
+                Ok(format!("DESCRIBE INFERENCER {};", describe.name.as_str()))
+            }
             Self::DescribeEmitter(describe) => {
                 Ok(format!("DESCRIBE EMITTER {};", describe.name.as_str()))
             }
@@ -1007,6 +1010,8 @@ impl Statement {
                 ))
             }
             Self::RefreshLicense(_) => Ok("REFRESH LICENSE;".to_string()),
+            Self::ReleaseLicense(_) => Ok("RELEASE LICENSE;".to_string()),
+            Self::RotateLicenseClusterKey(_) => Ok("ROTATE LICENSE CLUSTER KEY;".to_string()),
             Self::DescribeLicense(_) => Ok("DESCRIBE LICENSE;".to_string()),
             Self::ShowTransactions(_) => Ok("SHOW TRANSACTIONS;".to_string()),
             Self::DescribeTransaction(describe) => Ok(describe.to_canonical_plexus()),

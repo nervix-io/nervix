@@ -334,6 +334,126 @@ fn a_finished_attempt_requires_an_edit_before_it_can_be_submitted_again() {
 }
 
 #[test]
+fn reopening_a_pending_create_keeps_its_family_draft_scope_and_outcome() {
+    Owner::new().with(|| {
+        for connected in [true, false] {
+            let signals = CreateSignals::new();
+            let kind = CreateKind::Resource;
+            let scope = domain("orders");
+            signals.open(kind, Some(scope.clone()), "trigger");
+            signals
+                .resource
+                .update(|draft| draft.name = "bundle".to_string());
+            let (attempt, revision) = signals.begin_submission(connected);
+            let pending = signals.progress.get_untracked();
+            // Native owner tests have no DOM trigger to restore focus to.
+            signals.return_focus.set(None);
+            signals.close();
+            assert_eq!(signals.open.get_untracked(), None);
+            assert_eq!(signals.progress.get_untracked(), pending);
+
+            signals.open(CreateKind::User, Some(domain("elsewhere")), "other-trigger");
+            assert_eq!(signals.open.get_untracked(), Some(kind));
+            assert_eq!(signals.progress.get_untracked(), pending);
+            assert_eq!(signals.captured_domain.get_untracked(), Some(scope.clone()));
+            assert_eq!(signals.resource.get_untracked().name, "bundle");
+            signals.change_scope(Some(domain("elsewhere")));
+            assert_eq!(signals.captured_domain.get_untracked(), Some(scope));
+            assert_eq!(signals.progress.get_untracked(), pending);
+            assert!(signals.completed(attempt, revision));
+            assert_eq!(signals.progress.get_untracked(), CreateProgress::Completed);
+        }
+    });
+}
+
+#[test]
+fn contextual_open_actions_cannot_replace_a_pending_create_draft() {
+    Owner::new().with(|| {
+        for connected in [true, false] {
+            let signals = CreateSignals::new();
+            let kind = CreateKind::Subscription;
+            let scope = domain("orders");
+            let relay = RelayName::parse("orders_in").assured("valid relay name");
+            signals.open_subscription(scope.clone(), relay, "graph-search");
+            let draft = signals.subscription.get_untracked();
+            let next_name = signals.next_subscription_name.get_untracked();
+            let (attempt, revision) = signals.begin_submission(connected);
+            let pending = signals.progress.get_untracked();
+            signals.return_focus.set(None);
+            signals.close();
+
+            signals.open_placement_from(
+                domain("elsewhere"),
+                ModelName::parse("other").assured("valid model name"),
+                "graph-search",
+            );
+            assert_eq!(signals.open.get_untracked(), Some(kind));
+            assert_eq!(signals.progress.get_untracked(), pending);
+            signals.open_subscription(
+                domain("elsewhere"),
+                RelayName::parse("another").assured("valid relay name"),
+                "graph-search",
+            );
+            assert_eq!(signals.subscription.get_untracked(), draft);
+            assert_eq!(signals.next_subscription_name.get_untracked(), next_name);
+            assert_eq!(signals.captured_domain.get_untracked(), Some(scope));
+            assert_eq!(signals.progress.get_untracked(), pending);
+            assert!(signals.completed(attempt, revision));
+        }
+    });
+}
+
+#[test]
+fn a_pending_create_cannot_move_scope_or_invalidate_its_references() {
+    Owner::new().with(|| {
+        for connected in [true, false] {
+            let signals = CreateSignals::new();
+            let scope = domain("orders");
+            signals.open(
+                CreateKind::Model(ModelKind::Relay),
+                Some(scope.clone()),
+                "trigger",
+            );
+            signals.relay.update(|draft| {
+                draft.name = "orders_in".to_string();
+                draft.select_schema(&node(ModelKind::Schema, "record"));
+            });
+            let draft = signals.relay.get_untracked();
+            let (attempt, revision) = signals.begin_submission(connected);
+            let pending = signals.progress.get_untracked();
+
+            signals.change_scope(Some(domain("elsewhere")));
+
+            assert_eq!(signals.captured_domain.get_untracked(), Some(scope));
+            assert_eq!(signals.relay.get_untracked(), draft);
+            assert_eq!(signals.revision.get_untracked(), revision);
+            assert_eq!(signals.progress.get_untracked(), pending);
+            signals.failed(attempt, revision, "refused".to_string());
+            assert_eq!(
+                signals.progress.get_untracked(),
+                CreateProgress::Failed("refused".to_string())
+            );
+        }
+    });
+}
+
+#[test]
+fn a_new_form_after_a_pending_create_finishes_ignores_the_previous_outcome() {
+    Owner::new().with(|| {
+        let signals = CreateSignals::new();
+        signals.open(CreateKind::Domain, None, "trigger");
+        let (attempt, revision) = signals.begin_submission(true);
+        assert!(signals.completed(attempt, revision));
+
+        signals.open(CreateKind::User, None, "other-trigger");
+        assert_eq!(signals.open.get_untracked(), Some(CreateKind::User));
+        signals.failed(attempt, revision, "late reply".to_string());
+        assert_eq!(signals.progress.get_untracked(), CreateProgress::Editing);
+        assert!(!signals.completed(attempt, revision));
+    });
+}
+
+#[test]
 fn submission_state_changes_only_for_the_active_attempt() {
     Owner::new().with(|| {
         let signals = CreateSignals::new();
@@ -484,6 +604,90 @@ fn choice_states_render_hints_and_failures_with_their_own_presentation() {
         assert!(failed.contains("choice-failed"));
         assert!(failed.contains("role=\"alert\""));
         assert!(failed.contains("Choices could not be loaded"));
+    });
+}
+
+/// Whether a rendered choice group's fieldset, which holds its search, its choices and its retry and
+/// paging buttons, is disabled.
+fn choice_group_disabled(markup: &str) -> bool {
+    let start = markup
+        .find("<fieldset")
+        .assured("a choice group renders as one fieldset");
+    let tag = &markup[start..];
+    let end = tag.find('>').assured("the rendered fieldset tag is closed");
+    tag[..end].contains("disabled")
+}
+
+#[test]
+fn a_pending_attempt_disables_its_choice_controls_until_its_outcome_arrives() {
+    super::super::initialize_test_executor();
+    Owner::new().with(|| {
+        let signals = CreateSignals::new();
+        signals.open(CreateKind::Domain, None, "trigger");
+        let pace = |value, label: &str| Choice {
+            value: ChoiceValue::DomainPace(value),
+            presentation: ChoicePresentation {
+                label: label.to_string(),
+                detail: None,
+                group: None,
+            },
+        };
+        signals
+            .choice_signals(ChoiceControl::DomainPace)
+            .load
+            .set(ChoiceLoad::Ready {
+                choices: vec![
+                    pace(DomainPaceChoice::Unpaced, "UNPACED"),
+                    pace(DomainPaceChoice::Paced, "PACED"),
+                ],
+                page_cursor: Some("more-pace".to_string()),
+            });
+        let request_tx = RwSignal::new(None);
+        let session_generation = RwSignal::new(1);
+        let render = || {
+            ChoiceGroup(
+                ChoiceGroupProps::builder()
+                    .class_name("create-pace-options")
+                    .label("Pace")
+                    .control(ChoiceControl::DomainPace)
+                    .signals(signals)
+                    .request_tx(request_tx)
+                    .session_generation(session_generation)
+                    .build(),
+            )
+            .to_html()
+        };
+
+        let editing = render();
+        assert!(editing.contains("data-value=\"PACED\""));
+        assert!(editing.contains("Load more"));
+        assert!(!choice_group_disabled(&editing));
+
+        let (attempt, revision) = signals.begin_submission(true);
+        assert_eq!(signals.progress.get_untracked(), CreateProgress::Submitting);
+        assert!(choice_group_disabled(&render()));
+
+        signals.connection_lost();
+        assert_eq!(
+            signals.progress.get_untracked(),
+            CreateProgress::QueuedReconnect
+        );
+        assert!(choice_group_disabled(&render()));
+
+        assert!(signals.completed(attempt, revision));
+        assert!(!choice_group_disabled(&render()));
+
+        signals.edit();
+        let (staged, staged_revision) = signals.begin_submission(false);
+        assert!(choice_group_disabled(&render()));
+        signals.queued_transaction(staged, staged_revision, 1);
+        assert!(!choice_group_disabled(&render()));
+
+        signals.edit();
+        let (refused, refused_revision) = signals.begin_submission(true);
+        assert!(choice_group_disabled(&render()));
+        signals.failed(refused, refused_revision, "already exists".to_string());
+        assert!(!choice_group_disabled(&render()));
     });
 }
 

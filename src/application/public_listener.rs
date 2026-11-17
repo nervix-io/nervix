@@ -2,18 +2,16 @@
 //!
 //! Layer: edges.
 //!
-//! - **Owns.** Taking the next connection a public listener accepts, disabling Nagle's algorithm
-//!   on it, and what an accept that failed means.
-//! - **Depends on.** The listening socket, and in a testing build the seam that fails one of its
-//!   accepts.
-//! - **Must not know.** The protocol served on an accepted connection, or how the node stops.
+//! - **Owns.** Accept admission, connection leases, TCP options, capacity refusals and retry pacing.
+//! - **Depends on.** The listening socket, resolved settings, Hyper and the accept-failure seam.
+//! - **Must not know.** Routes, authentication, graph execution or shutdown ordering.
 //!
 //! A public listener that stops requests the node's stop, so a listener that ended on a failed
 //! accept would end the node. None does: a listener stops only when the node closes admission. A
 //! connection its client reset or abandoned before the listener took it fails only itself, and the
 //! listener accepts the next at once. Any other failure, such as the process running out of file
 //! descriptors, is a fault of the node rather than of one connection. The listener reports it and
-//! accepts again, so it takes connections as soon as the node has room for them: the first such
+//! accepts again after its declared retry pause: the first such
 //! failure after the listener last took a connection is reported at `warn` and the ones repeating
 //! it at `debug`, and the connection that ends the run is reported at `info` with how many accepts
 //! failed in it.
@@ -23,13 +21,21 @@
     nervix::layer(edge, reason = "owns the edges boundary declared above")
 )]
 
-use std::{io, net::SocketAddr};
+use std::{convert::Infallible, io, net::SocketAddr, pin::Pin};
 
-use meticulous::OptionExt as _;
-use nervix_primitives::net::{TcpListener, TcpStream};
+use hyper::{Request, body::Incoming, service::service_fn};
+use hyper_util::rt::TokioIo;
+use meticulous::{OptionExt as _, ResultExt as _};
+use nervix_interconnect::is_connection_accept_failure;
+use nervix_primitives::{
+    net::{TcpListener, TcpStream},
+    sync::{Semaphore, StdArc},
+    time::{Sleep, sleep},
+};
 use nervix_recovery::Reported as _;
 use tracing::{debug, info, warn};
 
+use super::{listener_io::ListenerIo, listener_settings::ListenerSettings};
 use crate::ConfiguredFaultInjection;
 #[cfg(feature = "testing")]
 use crate::fault_injection::ListenerAcceptFaults;
@@ -84,6 +90,10 @@ pub(in crate::application) struct PublicListener {
     /// The accepts that failed since the listener last took a connection.
     failed_accepts: u64,
     faults: ListenerAcceptFaults,
+    settings: ListenerSettings,
+    connections: StdArc<Semaphore>,
+    retry: Option<Pin<Box<Sleep>>>,
+    refusal: Option<Pin<Box<dyn Future<Output = ()> + Send>>>,
 }
 
 impl PublicListener {
@@ -91,33 +101,137 @@ impl PublicListener {
         listener: TcpListener,
         kind: PublicListenerKind,
         injection: &ConfiguredFaultInjection,
+        settings: ListenerSettings,
     ) -> Self {
         Self {
             listener,
             kind,
             failed_accepts: 0,
+            settings,
+            connections: StdArc::new(Semaphore::new(
+                usize::try_from(settings.max_connections())
+                    .assured("MaxConnections validation checks native semaphore capacity"),
+            )),
+            retry: None,
+            refusal: None,
             faults: listener_accept_faults(injection),
         }
+    }
+
+    pub(super) fn settings(&self) -> ListenerSettings {
+        self.settings
     }
 
     /// The next connection a client opened to this listener, with the address it came from, once
     /// the listener takes one. A failed accept is reported and the listener accepts again; it
     /// never ends the wait.
-    pub(in crate::application) async fn accept(&mut self) -> (TcpStream, SocketAddr) {
+    pub(in crate::application) async fn accept(&mut self) -> (ListenerIo<TcpStream>, SocketAddr) {
         loop {
             nervix_primitives::task::consume_budget().await;
-            let accepted = self.faults.accept(&self.listener).await;
+            let refusing = self.refusal.is_some();
+            let accepted = nervix_primitives::select! {
+                biased;
+                _ = async {
+                    if let Some(refusal) = self.refusal.as_mut() {
+                        refusal.as_mut().await;
+                    }
+                }, if refusing => {
+                    self.refusal = None;
+                    continue;
+                },
+                accepted = async {
+                    if let Some(retry) = self.retry.as_mut() {
+                        retry.as_mut().await;
+                        self.retry = None;
+                    }
+                    self.faults.accept(&self.listener).await
+                } => accepted,
+            };
             match accepted {
                 Ok((stream, peer)) => {
                     self.took_connection();
                     stream
                         .set_nodelay(true)
                         .reported("disabling Nagle on an accepted connection");
-                    return (stream, peer);
+                    let lease = match StdArc::clone(&self.connections).try_acquire_owned() {
+                        Ok(lease) => lease,
+                        Err(_) => {
+                            debug!(
+                                listener = <&'static str>::from(self.kind),
+                                reason = %super::listener_capacity::InputRefusal::ConnectionCapacity,
+                                "refusing a connection at its declared bound"
+                            );
+                            if matches!(
+                                self.kind,
+                                PublicListenerKind::Http
+                                    | PublicListenerKind::Console
+                                    | PublicListenerKind::Observability
+                            ) {
+                                self.refuse_http_connection(stream);
+                            }
+                            continue;
+                        }
+                    };
+                    if let Err(error) = nervix_primitives::net::configure_tcp_keepalive(
+                        &stream,
+                        self.settings.tcp_keepalive_time(),
+                        self.settings.tcp_keepalive_interval(),
+                        self.settings.tcp_keepalive_retries(),
+                    ) {
+                        warn!(%error, "could not configure an accepted connection's keepalive");
+                        continue;
+                    }
+                    return (
+                        ListenerIo::new(stream, lease, self.settings.idle_timeout()),
+                        peer,
+                    );
                 }
                 Err(error) => self.failed(&error),
             }
         }
+    }
+
+    /// Keep one bounded refusal beside accepts, never a task or an accumulating refusal queue.
+    /// A stalled excess peer cannot delay admitting a healthy connection when capacity returns.
+    fn refuse_http_connection(&mut self, stream: TcpStream) {
+        if self.refusal.is_some() {
+            return;
+        }
+        let settings = self.settings;
+        let refusal = async move {
+            let mut builder = super::listener_io::http_builder(settings);
+            builder.keep_alive(false);
+            let mut connection = builder.serve_connection(
+                TokioIo::new(stream),
+                service_fn(|_: Request<Incoming>| async {
+                    let refusal = super::listener_capacity::InputRefusal::ConnectionCapacity;
+                    let response = super::http_endpoint::text_response(
+                        refusal.status(),
+                        format!("{refusal}\n"),
+                    );
+                    Ok::<_, Infallible>(response)
+                }),
+            );
+            match nervix_primitives::time::timeout(settings.header_timeout(), &mut connection).await
+            {
+                Ok(Ok(())) => {
+                    let parts = connection.into_parts();
+                    let stream = parts.io.into_inner();
+                    drop(parts.read_buf);
+                    super::listener_io::RefusedTransport::new(stream, settings)
+                        .finish()
+                        .await;
+                }
+                Ok(Err(error)) => {
+                    Err::<(), _>(error_stack::Report::new(error))
+                        .reported("sending the listener's connection-capacity refusal");
+                }
+                Err(error) => {
+                    debug!(%error, "an excess connection outlived its refusal deadline");
+                }
+            }
+        };
+        self.refusal = Some(Box::pin(refusal));
     }
 
     fn took_connection(&mut self) {
@@ -135,10 +249,11 @@ impl PublicListener {
 
     fn failed(&mut self, error: &io::Error) {
         let listener: &'static str = self.kind.into();
-        if fails_only_its_connection(error) {
+        if is_connection_accept_failure(error) {
             debug!(listener, %error, "a connection ended before its listener accepted it");
             return;
         }
+        self.retry = Some(Box::pin(sleep(self.settings.accept_retry_delay())));
         self.failed_accepts = self.failed_accepts.checked_add(1).assured(
             "a listener retries an accept at most once per poll, so its failures in one run take \
              centuries to reach u64::MAX",
@@ -158,19 +273,6 @@ impl PublicListener {
             );
         }
     }
-}
-
-/// Whether an accept failed because of the connection it was taking, which its client reset or
-/// abandoned before the listener took it, or because a signal interrupted it, rather than because
-/// of the node.
-fn fails_only_its_connection(error: &io::Error) -> bool {
-    matches!(
-        error.kind(),
-        io::ErrorKind::ConnectionAborted
-            | io::ErrorKind::ConnectionReset
-            | io::ErrorKind::ConnectionRefused
-            | io::ErrorKind::Interrupted
-    )
 }
 
 #[cfg(all(test, feature = "testing"))]
@@ -193,7 +295,12 @@ mod tests {
         let address = socket
             .local_addr()
             .expect("a bound listener has an address");
-        let mut listener = PublicListener::new(socket, PublicListenerKind::Console, &injection);
+        let mut listener = PublicListener::new(
+            socket,
+            PublicListenerKind::Console,
+            &injection,
+            ListenerSettings::default(),
+        );
         injection.fail_next_listener_accept(address);
         let client = TcpStream::connect(address)
             .await
@@ -247,8 +354,12 @@ mod tests {
         let socket = TcpListener::bind("127.0.0.1:0")
             .await
             .expect("a loopback port binds");
-        let mut listener =
-            PublicListener::new(socket, PublicListenerKind::Observability, &injection);
+        let mut listener = PublicListener::new(
+            socket,
+            PublicListenerKind::Observability,
+            &injection,
+            ListenerSettings::default(),
+        );
 
         let logs = CapturedLogs::of(|| {
             listener.failed(&io::Error::from(io::ErrorKind::ConnectionAborted));
@@ -282,7 +393,7 @@ mod tests {
             io::ErrorKind::Interrupted,
         ] {
             assert!(
-                fails_only_its_connection(&io::Error::from(kind)),
+                is_connection_accept_failure(&io::Error::from(kind)),
                 "{kind:?}"
             );
         }
@@ -292,7 +403,7 @@ mod tests {
             io::ErrorKind::PermissionDenied,
         ] {
             assert!(
-                !fails_only_its_connection(&io::Error::from(kind)),
+                !is_connection_accept_failure(&io::Error::from(kind)),
                 "{kind:?}"
             );
         }

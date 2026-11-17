@@ -72,6 +72,8 @@ pub enum StorageClass {
 /// saturated relay or bulk transfer leaves management and command capacity untouched.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum MemoryClass {
+    /// Retained public request input, independent from the workers which decode it.
+    Intake,
     Management,
     Commands,
     Relay,
@@ -100,6 +102,7 @@ impl MemoryClass {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Management => "management",
+            Self::Intake => "intake",
             Self::Commands => "commands",
             Self::Relay => "relay",
             Self::StateRead => "state_read",
@@ -208,6 +211,7 @@ impl ConnectorStorageWorkers {
 /// The transient memory a node divides among its classes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MemoryBudgets {
+    pub intake: ByteUnit,
     pub management: ByteUnit,
     pub commands: ByteUnit,
     pub relay: ByteUnit,
@@ -227,6 +231,7 @@ impl MemoryBudgets {
         // The pattern names every field without a rest pattern, so a class added to the budgets
         // does not compile here until the total counts it.
         let Self {
+            intake,
             management,
             commands,
             relay,
@@ -239,6 +244,7 @@ impl MemoryBudgets {
         } = *self;
         let mut total = 0_u64;
         for budget in [
+            intake,
             management,
             commands,
             relay,
@@ -377,6 +383,7 @@ pub(crate) struct ValidatedConfig {
 }
 
 pub(crate) struct ValidatedBudgets {
+    pub(crate) intake: u32,
     pub(crate) management: u32,
     pub(crate) commands: u32,
     pub(crate) relay: u32,
@@ -514,6 +521,12 @@ impl ExecutionConfig {
         Ok(ValidatedConfig {
             workers: self.workers,
             budgets: ValidatedBudgets {
+                intake: permits(
+                    MemoryClass::Intake.as_str(),
+                    self.budgets.intake,
+                    "request input",
+                    1,
+                )?,
                 management: permits(
                     MemoryClass::Management.as_str(),
                     self.budgets.management,

@@ -11,6 +11,15 @@ parameter is refused where it is written.
 `just test-unit-binary <executable> <filters>` replays a compiled unit-test executable without
 rebuilding it; its evidence applies only to the source inputs that produced that executable.
 
+The materialized-state inspection feature observes exact typed owner rows before saving its
+first cut and before checking that a later publication invalidates its saved continuation.
+Subscription receipt remains independent delivery evidence. Readiness probes preserve the saved
+token and its unit origins; a separate assertion confirms the owner cut changed before the one
+resume attempt expects `stale_continuation`. Both one- and three-node examples keep their
+30-second observation bounds and exact paging, counts and redaction assertions. The native
+publication regression holds the materialized consumer unpolled while the real relay fan-out
+delivers a subscription row, then runs the real state task and checks both inspection identities.
+
 `just test-partition-state-inspection --concurrency 1 --retry 0` selects the eight one- and
 three-node deduplicator/window cases for growing and shrinking a running branch. The native server
 assets, formatter, CLI and report tool are prepared through the usual recipes. Domain-scoped
@@ -1203,7 +1212,7 @@ The CI jobs divide the work at the scenario boundary:
 The justfile reads `rust-toolchain.toml` through Python's standard-library `tomllib`, using the
 Python 3.12 or later runtime already required by repository recipes. CI installs `just` and each
 job's execution tools before running the recipes.
-Rust setup passes the declared `1.99` channel explicitly to the toolchain action, installing
+Rust setup passes the declared `1.100` channel explicitly to the toolchain action, installing
 the name that repository recipes and coverage commands request.
 
 The Check workflow and reusable Bolero workflow fetch Git dependencies through Cargo's Git CLI

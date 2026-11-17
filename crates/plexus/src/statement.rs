@@ -47,6 +47,7 @@ pub fn statement_parser<'src>()
         crate::describe_stream::describe_stream_parser().map(Statement::DescribeRelay),
         crate::describe_window_processor::describe_window_processor_parser()
             .map(Statement::DescribeWindowProcessor),
+        crate::describe_inferencer::describe_inferencer_parser().map(Statement::DescribeInferencer),
         crate::lookup_query::lookup_query_parser().map(Statement::LookupQuery),
         crate::generator::create_generator_parser()
             .map(|create| Statement::Create(create.map_body(Model::Generator).map_body(Box::new))),
@@ -115,6 +116,9 @@ pub fn statement_parser<'src>()
     let administration = boxed_choice!(
         crate::licensing::activate_license_parser().map(Statement::ActivateLicense),
         crate::licensing::refresh_license_parser().map(Statement::RefreshLicense),
+        crate::licensing::release_license_parser().map(Statement::ReleaseLicense),
+        crate::licensing::rotate_license_cluster_key_parser()
+            .map(Statement::RotateLicenseClusterKey),
         crate::cluster_parameters::alter_cluster_parser().map(Statement::AlterCluster),
         crate::placement::alter_placement_parser().map(Statement::AlterPlacement),
         crate::schema::alter_schema_parser().map(Statement::AlterSchema),

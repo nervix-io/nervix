@@ -137,7 +137,7 @@ struct PreparedTransactionCommit {
 
 #[derive(Serialize)]
 struct TransactionPlanningBasisInput<'a> {
-    capabilities: &'a BTreeMap<nervix_models::ClusterNodeName, nervix_models::NodeCapabilityRecord>,
+    records: &'a BTreeMap<nervix_models::ClusterNodeName, nervix_models::CommittedNodeRecord>,
     parameters: Option<&'a nervix_models::ClusterParameterRecord>,
     domain: &'a DomainState,
     models: Vec<&'a Model>,
@@ -183,7 +183,7 @@ fn transaction_planning_basis(
     ordered_models.sort_by_key(|model| model.node_ref());
     let resources = resources.iter().collect();
     let input = TransactionPlanningBasisInput {
-        capabilities: authoritative_inputs.topology().capabilities(),
+        records: authoritative_inputs.topology().records(),
         parameters: authoritative_inputs.parameters(),
         domain,
         models: ordered_models,
@@ -660,6 +660,8 @@ pub(in crate::application) fn transaction_statement_label(statement: &Statement)
         Statement::CreateDomain(_) => "CREATE DOMAIN",
         Statement::ActivateLicense(_) => "ACTIVATE LICENSE",
         Statement::RefreshLicense(_) => "REFRESH LICENSE",
+        Statement::ReleaseLicense(_) => "RELEASE LICENSE",
+        Statement::RotateLicenseClusterKey(_) => "ROTATE LICENSE CLUSTER KEY",
         Statement::CreateUser(_) => "CREATE USER",
         Statement::UploadResource(_) => "UPLOAD RESOURCE",
         Statement::Backup(_) => "BACKUP",
@@ -684,6 +686,7 @@ pub(in crate::application) fn transaction_statement_label(statement: &Statement)
         Statement::DescribeRelay(_)
         | Statement::DescribeDomain(_)
         | Statement::DescribeIngestor(_)
+        | Statement::DescribeInferencer(_)
         | Statement::DescribeResource(_)
         | Statement::DescribeLookup(_)
         | Statement::DescribeEndpoint(_)
@@ -1094,6 +1097,16 @@ impl SessionServiceImpl {
             return Err(Report::new(TransactionPlanningError::RestoreInstallation {
                 domain: domain.clone(),
                 execution: execution.clone(),
+            }));
+        }
+        if let Some(reason) = control.licensing_stop
+            && statements
+                .iter()
+                .any(|statement| matches!(statement, Statement::StartDomain(_)))
+        {
+            return Err(Report::new(TransactionPlanningError::LicensingStop {
+                domain: domain.clone(),
+                reason,
             }));
         }
         let schedule_inputs = self

@@ -101,6 +101,11 @@ mod tests {
                             nervix_arbitrary::Domain::Vocabulary,
                         )
                         .node_connector_host_capabilities(),
+                        listeners: nervix_arbitrary::Arbitrary::new(
+                            &[],
+                            nervix_arbitrary::Domain::Vocabulary,
+                        )
+                        .listener_bounds(),
                         cpu_count: NonZeroU64::new(2),
                         memory_bytes: NonZeroU64::new(8 << 30),
                         receive: crate::PeerReceiveSettings::default().bounds(),

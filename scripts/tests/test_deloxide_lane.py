@@ -331,9 +331,9 @@ class ScriptedProcesses(Processes):
         if arguments[:2] == ["git", "status"]:
             return 0, "", ""
         if arguments == ["rustc", "-vV"]:
-            return 0, "rustc 1.99.0\nhost: x86_64-unknown-linux-gnu\n", ""
+            return 0, "rustc 1.100.0\nhost: x86_64-unknown-linux-gnu\n", ""
         if arguments == ["cargo", "-V"]:
-            return 0, "cargo 1.99.0\n", ""
+            return 0, "cargo 1.100.0\n", ""
         if arguments[:2] == ["bash", "scripts/download_onnxruntime.sh"]:
             return 0, "/opt/onnxruntime/libonnxruntime.so\n", ""
         if arguments[1:2] == ["--list"]:
@@ -586,7 +586,7 @@ class InventoryTests(unittest.TestCase):
         self.assertEqual(sum(workload.examples or 0 for workload in inventory.workloads_of("stress-transaction-retention", "deloxide-stress")), 6)
         self.assertEqual(sum(workload.examples or 0 for workload in inventory.workloads_of("stress-endpoint-acknowledgement", "deloxide-stress")), 10)
         self.assertEqual(sum(workload.examples or 0 for workload in inventory.workloads_of("stress-paced-simulation", "deloxide-stress")), 36)
-        self.assertEqual(sum(workload.examples or 0 for workload in inventory.workloads_of("stress-restore-scenarios", "deloxide-stress-restore")), 131)
+        self.assertEqual(sum(workload.examples or 0 for workload in inventory.workloads_of("stress-restore-scenarios", "deloxide-stress-restore")), 133)
         stress_ids = {workload.id for workload in inventory.workloads.values() if workload.id.startswith("stress.")}
         for path, owner in inventory.owners.items():
             with self.subTest(owner=path):

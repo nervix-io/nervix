@@ -17,7 +17,6 @@ use http_body_util::Full;
 use hyper::{
     Method, Request as HyperRequest, Response as HyperResponse, StatusCode,
     body::{Bytes, Incoming as HyperIncoming},
-    server::conn::http1,
     service::service_fn,
 };
 use hyper_util::rt::TokioIo;
@@ -76,6 +75,7 @@ pub(in crate::application) async fn serve_observability_http(
     mut listener: PublicListener,
     shutdown: CancellationToken,
 ) {
+    let settings = listener.settings();
     let mut connection_tasks = JoinSet::new();
 
     loop {
@@ -84,6 +84,7 @@ pub(in crate::application) async fn serve_observability_http(
             _ = shutdown.cancelled() => {
                 break;
             }
+            _ = connection_tasks.join_next(), if !connection_tasks.is_empty() => continue,
             accepted = listener.accept() => accepted,
         };
         let consensus = consensus.clone();
@@ -91,7 +92,7 @@ pub(in crate::application) async fn serve_observability_http(
         let runtime = runtime.clone();
         connection_tasks.spawn(async move {
             let io = TokioIo::new(stream);
-            if let Err(error) = http1::Builder::new()
+            if let Err(error) = super::listener_io::http_builder(settings)
                 .serve_connection(
                     io,
                     service_fn(move |request| {

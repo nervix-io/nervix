@@ -81,6 +81,21 @@ each current Model once through the registry, with the command work budget check
 It adds no recurring data-plane access or retained map guard; concurrent deletion skips the
 vanished emitter, matching other configuration listings.
 
+`InferencerStateMetricSeries::children` in `src/metrics/inferencer.rs` is a lifecycle-only weak
+cache keyed by the existing `MetricKey`. Unit startup registers all four children at zero;
+branch sessions resolve their recorder once and pass its retained handle to their snapshot writer. Recording bytes,
+initializations and snapshot failures performs no map lookup. The last retained recorder removes
+its exact cache identity and Prometheus labels under one entry guard. Resolving a dead weak entry
+withdraws its labels before registering a replacement; retirement compares weak identities so a
+delayed destructor cannot withdraw that replacement. Entries are bounded by live unit/reporting
+lifetimes, and no concrete branch key is a label or cache key. The standalone warning-cadence
+mutex never nests another guard or crosses a wait.
+
+`DESCRIBE INFERENCER` reads the execution registry once to validate its current unit and pinned
+identity. The guard ends before admission or transport. Its charged, cancellable worker visits one
+immutable replication-routing publication and reads only scalar counts, revisions and confirmed
+replica progress. It does not collect keys or tensor bytes and adds no recurring lookup.
+
 Kafka domain-offset resume clones its committed partition schedule from `RuntimeInner::executions`.
 A normal resume reads it once; accepting an explicit start adds a canonical reread, for at most two
 reads per resume attempt. Each guard ends before persistence, replica waits or native connector I/O.

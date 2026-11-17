@@ -21,7 +21,9 @@ use imbl::{GenericHashMap, shared_ptr::DefaultSharedPtr};
 use nervix_primitives::publication::{ArcSwap, ArcSwapOption};
 
 use super::*;
-use crate::runtime::materialized_state::MaterializedRelayStateRead;
+use crate::runtime::{
+    materialized_state::MaterializedRelayStateRead, observability::RuntimeObservationError,
+};
 
 type Routes = GenericHashMap<
     RuntimeStatePlacement,
@@ -312,6 +314,81 @@ impl Default for StateReplicationRouting {
 }
 
 impl StateReplicationRouting {
+    /// Visit scalar facts only, on the caller's charged worker, without retaining a tensor or key.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(observer, reason = "counts current published inference state")
+    )]
+    pub(in crate::runtime) fn describe_inferencer(
+        &self,
+        target: &DomainNodeUnitRef,
+        expected: Option<nervix_interconnect::RuntimeState>,
+        bytes_per_branch: u64,
+        replicas: Vec<ClusterNodeName>,
+        cancellation: &nervix_execution::Cancellation,
+    ) -> Result<nervix_models::InferencerStateSummary, Report<RuntimeObservationError>> {
+        use nervix_models::{InferencerReplicaProgress, InferencerStateSummary};
+        let mut summary = InferencerStateSummary {
+            branches: 0,
+            state_bytes: 0,
+            published_revision: None,
+            persisted_revision: None,
+            replicas: replicas
+                .into_iter()
+                .map(|node| InferencerReplicaProgress {
+                    node,
+                    replicated_revision: None,
+                })
+                .collect(),
+        };
+        let published = self.current.load();
+        for route in published.routes.values() {
+            cancellation
+                .check()
+                .change_context(RuntimeObservationError::InferencerCancelled)?;
+            let placement = route.placement();
+            if placement.domain != target.entity.domain
+                || placement.kind != target.entity.node.kind
+                || placement.identifier != target.entity.node.identifier
+                || placement.unit != target.unit
+                || Some(placement.state) != expected
+            {
+                continue;
+            }
+            let Some(state) = route.current_state() else {
+                continue;
+            };
+            let ReplicatedState::Inferencer(state) = state.as_ref() else {
+                continue;
+            };
+            // Observe confirmations first. A later publication read can include those revisions;
+            // reading progress after a publication could instead report a newer confirmation.
+            state.replication().with_progress(|progress| {
+                for replica in &mut summary.replicas {
+                    if let Some(revision) = progress.held(&replica.node) {
+                        replica.replicated_revision =
+                            replica.replicated_revision.max(Some(revision));
+                    }
+                }
+            });
+            let persisted = state.generations.last_persisted_lsm();
+            let generation = state.generations.load();
+            summary.published_revision = summary.published_revision.max(Some(generation.revision));
+            summary.persisted_revision = summary.persisted_revision.max(Some(persisted));
+            if generation.value.is_some() {
+                summary.branches = summary
+                    .branches
+                    .checked_add(1)
+                    .ok_or_else(|| Report::new(RuntimeObservationError::InferencerCounts))?;
+                summary.state_bytes = summary
+                    .state_bytes
+                    .checked_add(bytes_per_branch)
+                    .ok_or_else(|| Report::new(RuntimeObservationError::InferencerCounts))?;
+            }
+        }
+        Ok(summary)
+    }
+
     /// Retain current inference owners for a lifecycle cut; no route guard escapes this read.
     #[cfg_attr(
         nervix_lint,

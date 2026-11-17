@@ -156,16 +156,21 @@ first asks for the format, codecs, clients, VHOSTs and endpoints; the resource g
 action; and the execution graph's **PLACE** and **SUBSCRIBE**. The graph actions name what the
 operator wants, so they replace the family's retained draft: **PLACE** starts a corridor whose first
 `FROM` member is the selected item, and **SUBSCRIBE** starts a subscription to the selected relay
-under a newly generated name, `web_console_subscription_<n>`, whose number only grows. Closing the
-dialog returns focus to the control that opened it.
+under a newly generated name, `web_console_subscription_<n>`, whose number only grows. While any
+create attempt is submitting or queued until reconnect, every open action instead restores that
+attempt's form and retained draft, including **PLACE** and **SUBSCRIBE**. Another family's form can
+open after the attempt has its outcome. A pending form opens with **Close** focused, since its
+editable controls are disabled. **Escape** closes the dialog, and closing returns focus to the
+control that opened it.
 
 ### Captured Domains
 
 A domain-owned family captures the console's selected domain the first time it opens and keeps that
 scope for its draft. Domain and user creation are cluster scoped and capture nothing. When the
 console has since selected another domain, the dialog offers **Use current domain**, which moves the
-draft. A move invalidates every reference the draft selected in its old domain: each selection keeps
-its name on screen, is marked as needing a new choice, and fails the draft's `build` until it is
+draft once its attempt is no longer pending. The button is disabled while submitting or queued until
+reconnect. A move invalidates every reference the draft selected in its old domain: each selection
+keeps its name on screen, is marked as needing a new choice, and fails the draft's `build` until it is
 selected again, so a name chosen in one domain never silently names an entity of another. Every
 lookup a domain-owned form sends carries its captured domain as its first dependency; without a
 captured domain a control asks nothing and names the missing scope.
@@ -378,8 +383,6 @@ stateDiagram-v2
     QueuedUntilReconnect --> QueuedInTransaction: recovered outcome
     QueuedUntilReconnect --> Completed: recovered outcome
     QueuedUntilReconnect --> Failed: recovered outcome
-    Submitting --> Editing: search or selection in a choice control
-    QueuedUntilReconnect --> Editing: search or selection in a choice control
     Failed --> Submitting: Create again
     QueuedInTransaction --> Editing: edit
     Completed --> Editing: edit
@@ -387,13 +390,22 @@ stateDiagram-v2
 ```
 
 Each submission is an attempt identified by its number and the draft revision it was built from.
-The form applies an outcome only to its active attempt. Its fields are disabled while that attempt
-is pending; its choice controls stay live, and a search or selection in one is an edit. An edit
-returns the form to **Editing** and drops the attempt, so a late outcome of a superseded attempt
-changes nothing in the form while the transcript still reports it. Create is refused, by the
-disabled button and by the submit handler itself, while the attempt is submitting, waiting for
-reconnection, queued in a transaction or completed. Only an edit or a failure allows another
-attempt, so a repeated click cannot submit the same draft twice.
+The form applies an outcome only to its active attempt. Closing the dialog keeps the pending
+attempt, its progress, its family and its captured domain. Every action that opens a create form
+restores that pending form until its own outcome arrives; it cannot replace the draft or start
+another family's form in the meantime. While that attempt is submitting or queued until reconnect,
+the form's scope-change button, fields and choice controls are disabled, a choice control's search,
+choices, **Load more** and **Retry** included. A selection is an edit of the draft, and a search,
+though it is no draft content, asks again by advancing the draft revision, so neither can run until
+the attempt has its outcome. The draft therefore stays the one the attempt was built from, and the
+form reports that attempt's own outcome. Once the attempt is queued in a transaction, completed or
+failed, the controls are live again. An edit then returns the form to **Editing** and drops the
+attempt. Opening a fresh editable form also retires the previous attempt, so a late outcome changes
+nothing in that form while the transcript still reports it. Create is refused, by the disabled button
+and by the submit handler itself, while
+the attempt is submitting, waiting for reconnection, queued in a transaction or completed. Within
+the open form, only an edit or a failure allows another attempt, so a repeated click cannot submit
+the same draft twice.
 
 An outcome that admits the command into the attached transaction shows **Queued in transaction**
 with its position, and a staged create is never shown as applied. **Completed** appears only for a
@@ -521,11 +533,12 @@ body rules, and the completion walk must stay clean.
 
 - `just test-web-console` runs the console's unit tests. The creation matrix test holds the menu to
   every family. The dialog tests cover canonical queries and masked passwords, discarding replies
-  for an older draft revision or connection, progress changing only for the active attempt, scope
-  changes invalidating references, generated subscription names and an accessible render. The
-  visual form tests cover the forms' controls, choices and submissions, secret masking and the
-  graph's **PLACE** action, and the emitter and processor tests cover their forms and Models. The
-  session loop's tests cover superseded lookups, the request window and reply kinds.
+  for an older draft revision or connection, progress changing only for the active attempt, choice
+  controls disabled while an attempt is pending, scope changes invalidating references, generated
+  subscription names and an accessible render. The visual form tests cover the forms' controls,
+  choices and submissions, secret masking and the graph's **PLACE** action, and the emitter and
+  processor tests cover their forms and Models. The session loop's tests cover superseded lookups,
+  the request window and reply kinds.
 - `just test-placement-members` runs the server's tests of the placement-member rule across
   validation, REPL completion and typed choices, with the configured-choice resolver's tests.
 - `just plexus-completion-walk` fails on any completion branch that accepting the parser's own
@@ -534,7 +547,8 @@ body rules, and the completion walk must stay clean.
 
 ### Representations
 
-These registered Bolero properties qualify the drafts and the wire messages. The [target
+These registered Bolero properties qualify the drafts, the wire messages and the page
+continuations. The [target
 register](./property-testing-and-fuzzing.md#target-and-representation-register) records their
 domains and bounds.
 
@@ -549,6 +563,8 @@ domains and bounds.
 | `console-processor-drafts` | Processor drafts rebuild every complete Model of the nine processor families |
 | `client-requests`, `client-replies` | Suggestion and choice requests and outcomes keep their complete values through the wire codec |
 | `client-processor-choice-request` | A processor's choice request keeps its target and dependencies through the wire codec |
+| `completion-page-continuations`, `choice-page-continuations` | A page continuation keeps its revision, position, query digest and candidate digest through its text, and paging with the continuations a basis issues returns every candidate once and in order |
+| `completion-page-cursors-malformed`, `choice-page-cursors-malformed` | Cursor text continues a page only when it is a continuation that page's basis issued within its candidates, never panics, and never continues a page of another revision, question or candidate set |
 
 The wire crate's tests check that the checked-in conformance corpus, which holds suggestion and
 choice requests and outcomes with every `ChoiceValue` member, is exactly what its encoder writes and
@@ -556,11 +572,12 @@ reads, and the Go and Node probes reproduce the corpus report in the client conf
 
 ### Public Scenarios
 
-- The fifteen `tests/features/web-console/visual_create*.feature` files hold 66 scenarios and 40
+- The fifteen `tests/features/web-console/visual_create*.feature` files hold 66 scenarios and 41
   outlines. Every outline but the schema type matrix runs on one and three nodes.
-  `visual_create_graph.feature` builds a complete graph in one transaction on three nodes, and
+  `visual_create_graph.feature` builds a complete graph in one transaction on three nodes,
   `visual_create_initial_choices.feature` covers forms opened before the console's first domain
-  publication.
+  publication, and `visual_create.feature` holds a create's reply back while its choice controls
+  are used.
 - `connector_presentation.feature` checks that visual connector choices follow the entity
   declarations, on one and three nodes.
 - `plexus_repl.feature` covers REPL completion, connector completion and a full request window.
@@ -568,10 +585,11 @@ reads, and the Go and Node probes reproduce the corpus report in the client conf
   rejection of a cursor inside a character and of page sizes 0 and 101, and
   `tools/cli_session.feature` and the connector declaration features cover CLI and connector
   completion.
-- `just test-visual-window-correlator`, `just test-visual-generator-inferencer-wasm` and
-  `just test-visual-placement-graph` run their feature files with the server's prerequisites; the
-  other files run through `just test-scenarios --input <feature>`. `just coverage-visual-create`
-  measures the Model, language, wire, browser and server owners together.
+- `just test-visual-create`, `just test-visual-window-correlator`,
+  `just test-visual-generator-inferencer-wasm` and `just test-visual-placement-graph` run their
+  feature files with the server's prerequisites; the other files run through
+  `just test-scenarios --input <feature>`. `just coverage-visual-create` measures the Model,
+  language, wire, browser and server owners together.
 
 ### Test Policy
 
@@ -594,6 +612,7 @@ harness.
 
 - The conformance corpus holds 2 of the 66 choice targets, `Ready` outcomes only, and no
   local-directory suggestion.
-- No property generates suggestion or choice page cursors or drives the server's paging.
+- The page-continuation properties drive each page basis directly, not a session: the revision
+  reads around a page and the console's continued requests rest on the public scenarios alone.
 - No scenario sends a choice lookup through a session outside the browser forms.
 - The completion walk exercises the parser, not `SuggestRequest` or its paging.

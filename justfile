@@ -382,6 +382,14 @@ test-scenarios *args: tests-deps test-client-python-api-run
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
     cargo test --package nervix-scenarios --test scenarios -- {{ quote(args) }}
 
+# Node record cases: tags, detected properties and the record's lifecycle on in-process nodes,
+# and the refused start of one server process.
+test-node-record *args: build-deps build-test-cli
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    cargo test --package nervix-scenarios --test scenarios -- --input tests/features/cluster/node_record.feature {{ quote(args) }}
+
 # Exercise fixed window collection and its sampled-sequence tensor consumer.
 test-window-collection-arrays *args: build-deps build-plexus-format build-test-cli build-deadlock-report
     #!/usr/bin/env bash
@@ -479,6 +487,13 @@ test-relay-capability-delivery *args: build-deps build-codec-tools
         --input {{ quote(justfile_directory() / "tests/features/cluster/node_capability_delivery*.feature") }} \
         {{ quote(args) }}
 
+# Public listener bounds use in-process nodes and native HTTP fixtures.
+test-listener-bounds *args: build-deps build-plexus-format build-test-cli build-deadlock-report
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    cargo test --package nervix-scenarios --test scenarios -- --input tests/features/runtime/listener_bounds.feature {{ quote(args) }}
+
 # Exercise domain pause recovery with ordinary assets and the shared native tool graph.
 test-client-wire-pause-recovery *args: build-deps build-codec-tools
     #!/usr/bin/env bash
@@ -575,6 +590,13 @@ test-licensing-free *args: build-deps build-plexus-format build-test-cli build-d
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
     cargo test --package nervix-scenarios --test scenarios -- --input "$(pwd)/tests/features/licensing/*.feature" {{ quote(args) }}
 
+# Ephemeral expiry closes the licensing stop gate; a new activation lifts it.
+test-licensing-expiry *args: build-deps build-plexus-format build-test-cli build-deadlock-report
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    cargo test --package nervix-scenarios --test scenarios -- --input {{ quote(justfile_directory() / "tests/features/licensing/ephemeral_expiry{,}.feature") }} {{ quote(args) }}
+
 # Verify a maintained SSE parser source tree with its dependency-owner regressions.
 test-licensing-parser-source source *args:
     cargo test --manifest-path {{ quote(source / "Cargo.toml") }} --lib {{ quote(args) }}
@@ -647,6 +669,16 @@ test-inferencer-backup *args: build-deps build-test-cli
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
     export NERVIX_TEST_CLI_PATH={{ quote(cargo_target_dir + "/debug/nervix-cli") }}
     cargo test --package nervix-scenarios --test scenarios -- --input {{ quote(justfile_directory() / "tests/features/cluster/inferencer_backup*.feature") }} {{ quote(args) }}
+
+# Inspect inference configuration and state summaries through the public session.
+check-inferencer-describe:
+    cargo check --package nervix-server --features testing --lib
+
+test-inferencer-describe *args: build-deps
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    cargo test --package nervix-scenarios --test scenarios -- --input {{ quote(justfile_directory() / "tests/features/runtime/inferencer_describe*.feature") }} {{ quote(args) }}
 
 # Verify inference resource replacement without traversing unrelated features or build artifacts.
 test-inferencer-rebinding *args: build-deps
@@ -1195,6 +1227,18 @@ test-list-conversions *args: build-deps
     cargo test --package nervix-scenarios --test scenarios -- \
         --input tests/features/runtime/list_conversions.feature "$@"
 
+# Create domains, users and resources through the web console's popup forms on in-process one- and
+# three-node clusters, with rejected, queued, recovered and pending submissions, and with only the
+# in-process server's prerequisites. The input is an absolute glob, so Cucumber reads the feature
+# file instead of walking the checkout; a literal path is no glob and selects nothing.
+[positional-arguments]
+test-visual-create *args: build-web-console wasm-processor-guests download-onnxruntime
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    cargo test --package nervix-scenarios --test scenarios -- \
+        --input "$PWD/tests/features/web-console/visual_create{,}.feature" "$@"
+
 # Create window processors and correlators through the web console's visual forms on in-process
 # one- and three-node clusters, with only the in-process server's prerequisites.
 [positional-arguments]
@@ -1310,9 +1354,23 @@ measure-web-console-debug-strings target_dir=(cargo_target_dir + "/web-console-d
     export CARGO_TARGET_DIR={{ quote(target_dir) }}
     export CARGO_INCREMENTAL=0
     llvm_bin="$(rustc --print sysroot)/lib/rustlib/$(rustc -vV | sed -n 's/^host: //p')/bin"
-    rm -f "${CARGO_TARGET_DIR}"/debug/deps/nervix_web_console-*.rcgu.o
-    cargo rustc --package nervix-web-console --bin nervix-web-console --profile test -- -C save-temps
-    for object in "${CARGO_TARGET_DIR}"/debug/deps/nervix_web_console-*.rcgu.o; do
+    if [[ -d "${CARGO_TARGET_DIR}" ]]; then
+        find "${CARGO_TARGET_DIR}" -type f -name 'nervix_web_console-*.rcgu.o' -delete
+    fi
+    # The objects lie beside the executable among its build unit's results, which Cargo names.
+    executable="$(cargo rustc --package nervix-web-console --bin nervix-web-console --profile test \
+        --message-format=json-render-diagnostics -- -C save-temps | python3 -c '
+    import json
+    import sys
+
+    for line in sys.stdin:
+        message = json.loads(line)
+        if message.get("reason") != "compiler-artifact":
+            continue
+        if message.get("executable"):
+            print(message["executable"])
+    ')"
+    for object in "$(dirname "${executable}")"/nervix_web_console-*.rcgu.o; do
         "${llvm_bin}/llvm-size" -A "${object}" \
             | awk -v object="${object##*/}" '$1 == ".debug_str" { print $2, object }'
     done | sort -rn
@@ -1362,6 +1420,10 @@ test-subscription-rows: tests-deps
     set -euo pipefail
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
     cargo test --features benchmarks,testing --lib subscription_row:: -- --nocapture
+
+# Focused production listener owners, without running the full server unit suite.
+test-listener-owners *args: build-deps
+    cargo test --package nervix-server --features testing --lib {{ args }}
 
 # Type-check one workspace package and all of its targets without building binaries. Extra
 # arguments are forwarded to Cargo, so a server check can add `--features testing`.
@@ -4198,7 +4260,7 @@ test-ratchet-audit *args:
 typed-ratchet-source-build:
     #!/usr/bin/env bash
     set -euo pipefail
-    source_toolchain="1.99"
+    source_toolchain="1.100"
     if [[ -n "${NERVIX_NATIVE_COVERAGE_ATTEMPT:-}" ]]; then
         source_toolchain="nightly-2026-09-17"
     fi
@@ -4300,12 +4362,12 @@ test-typed-ratchet-docs:
 
 # Current API examples compile alongside their compile_fail counterparts on the product toolchain.
 test-typed-ratchet-product-docs:
-    cargo +1.99 test --package nervix-models --doc SettingDefinition
-    cargo +1.99 test --package nervix-primitives --doc expect_lint
-    cargo +1.99 test --package nervix-vm --doc FunctionInjector
-    cargo +1.99 test --package nervix-dns --doc DnsLookupReport
-    cargo +1.99 test --package nervix-recovery --doc Discarded
-    RUSTUP_TOOLCHAIN=1.99 just test-runtime-state-capabilities
+    cargo +1.100 test --package nervix-models --doc SettingDefinition
+    cargo +1.100 test --package nervix-primitives --doc expect_lint
+    cargo +1.100 test --package nervix-vm --doc FunctionInjector
+    cargo +1.100 test --package nervix-dns --doc DnsLookupReport
+    cargo +1.100 test --package nervix-recovery --doc Discarded
+    RUSTUP_TOOLCHAIN=1.100 just test-runtime-state-capabilities
 
 qualify-typed-ratchet-cache: typed-ratchet-build
     #!/usr/bin/env bash
@@ -4319,6 +4381,10 @@ qualify-typed-ratchet-cache: typed-ratchet-build
 test-typed-ratchet-reports:
     CARGO_TARGET_DIR={{ cargo_target_dir }}/typed-ratchet/driver cargo +nightly-2026-09-17 test --manifest-path tools/nervix-lint/Cargo.toml --package nervix-lint-report --lib
 
+# Run one deterministic source-contract regression through its existing report-test build.
+test-typed-source-contract filter:
+    CARGO_TARGET_DIR={{ cargo_target_dir }}/typed-ratchet/driver cargo +nightly-2026-09-17 test --manifest-path tools/nervix-lint/Cargo.toml --package nervix-lint-report --lib -- {{ quote(filter) }} --exact --nocapture
+
 # Focused deterministic tests of the analysis runner and host memory admission.
 test-ratchet-runner *args:
     just ratchet-tests lib {{ args }}
@@ -4326,12 +4392,12 @@ test-ratchet-runner *args:
 
 # Focused local tooling counters for patch review; the existing native producer collects CI.
 coverage-ratchet-runner *args:
-    CARGO_TARGET_DIR={{ cargo_target_dir }}/typed-ratchet/coverage cargo +1.99 llvm-cov test --manifest-path tools/nervix-lint/Cargo.toml --package nervix-ratchet --lib --test wrapper --test audit --test applicability --no-report -- {{ args }}
+    CARGO_TARGET_DIR={{ cargo_target_dir }}/typed-ratchet/coverage cargo +1.100 llvm-cov test --manifest-path tools/nervix-lint/Cargo.toml --package nervix-ratchet --lib --test wrapper --test audit --test applicability --no-report -- {{ args }}
     just coverage-ratchet-report-owner
 
 [private]
 coverage-ratchet-report-owner:
-    CARGO_TARGET_DIR={{ cargo_target_dir }}/typed-ratchet/coverage cargo +1.99 llvm-cov test --manifest-path tools/nervix-lint/Cargo.toml --package nervix-lint-report --lib --no-clean --no-default-ignore-filename-regex --lcov --output-path lcov-workspace.info
+    CARGO_TARGET_DIR={{ cargo_target_dir }}/typed-ratchet/coverage cargo +1.100 llvm-cov test --manifest-path tools/nervix-lint/Cargo.toml --package nervix-lint-report --lib --no-clean --no-default-ignore-filename-regex --lcov --output-path lcov-workspace.info
     # Cached objects name the isolated tooling workspace by its compiler source root.
     sed -i {{ quote("s|^SF:/src/|SF:" + justfile_directory() + "/tools/nervix-lint/|") }} lcov-workspace.info
     pwd -P > coverage-source-root.txt
@@ -4340,7 +4406,7 @@ coverage-ratchet-report-owner:
 ratchet-tests selection *args:
     #!/usr/bin/env bash
     set -euo pipefail
-    runner_toolchain="1.99"
+    runner_toolchain="1.100"
     if [[ -n "${NERVIX_NATIVE_COVERAGE_ATTEMPT:-}" ]]; then
         runner_toolchain="nightly-2026-09-17"
     fi
@@ -4365,7 +4431,7 @@ prepare-ratchet-contracts mode="ordinary": typed-ratchet-build
 build-ratchet-runner:
     #!/usr/bin/env bash
     set -euo pipefail
-    runner_toolchain="1.99"
+    runner_toolchain="1.100"
     if [[ -n "${NERVIX_NATIVE_COVERAGE_ATTEMPT:-}" ]]; then
         runner_toolchain="nightly-2026-09-17"
     fi

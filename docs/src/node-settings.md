@@ -13,9 +13,10 @@ adopt these declarations, and this chapter states the contract that adoption mus
 class API alone publishes no record, commits no parameter, detects no capacity and changes no
 running service. A node publishes, carries and verifies its prerequisites as
 [Prerequisites At Join](#prerequisites-at-join) describes, and its
-[startup preflight](#the-startup-preflight) detects its memory and measures its volumes. Cluster
-parameters have one committed Raft record, seeded at the first bootstrap and changed through
-`ALTER CLUSTER SET`. Every admitted node announces its resolved capability record through Raft.
+[startup preflight](#the-startup-preflight) detects its memory, measures its volumes and detects
+its properties. Cluster parameters have one committed Raft record, seeded at the first bootstrap
+and changed through `ALTER CLUSTER SET`. Every admitted node announces its
+[node record](#the-node-record), which holds its resolved capability claim, through Raft.
 
 Runtime admission and failed committed-runtime installation share the existing half-second retry
 cadence owned by `RuntimeAdmission`. This remains an internal policy constant pending settings
@@ -50,6 +51,99 @@ without a committed capability record receives no placements. If an advertised b
 a peer can refuse an operation with a typed answer so the sender slices it again while retaining
 the row acknowledgement accounting.
 
+## Listener Bounds
+
+Listener settings are local node capabilities. Startup logs the resolved values, and each node's
+committed `DESCRIBE CLUSTER` capability line includes the complete `listeners` record. Changing a
+flag requires restarting that node; it does not change Plexus or the cluster's graph definitions.
+Each public listener enforces its own connection ceiling, independently of placement and leadership.
+
+| Option | Default | Applies to |
+| --- | --- | --- |
+| `--listener-max-connections` | 1,024 | Each public TCP listener, including upgraded WebSockets and TLS handshakes |
+| `--listener-header-bytes` | 16 KiB | HTTP/1 request head and chunked trailers |
+| `--listener-buffer-bytes` | 408 KiB | HTTP/1 read buffer; minimum 8 KiB |
+| `--listener-header-timeout` | 30 s | Complete HTTP/1 request head |
+| `--listener-tls-timeout` | 10 s | HTTPS, console TLS and gRPC TLS handshake |
+| `--listener-idle-timeout` | 60 s | Accepted public I/O without read or write byte progress |
+| `--listener-accept-retry-delay` | 100 ms | Public and interconnect accepts after a node-local failure |
+| `--listener-http-keepalive` | true | HTTP/1 connection reuse |
+| `--http-body-bytes` | 32 MiB | Complete HTTP endpoint payload, including chunked input |
+| `--http-body-copy-bytes` | 64 KiB | Body assembly bytes between cancellation checks |
+| `--http-body-timeout` | 30 s | Complete HTTP input, including bounded assembly |
+| `--http-refusal-drain-timeout` | 5 s | Transport drain after a completed HTTP input refusal |
+| `--websocket-message-bytes` | 64 MiB | Ingest endpoint WebSocket message |
+| `--websocket-frame-bytes` | 16 MiB | Ingest endpoint WebSocket frame |
+| `--grpc-header-bytes` | 16 KiB | HTTP/2 header list |
+| `--grpc-concurrency` | 128 | Concurrent request handlers per gRPC connection |
+| `--grpc-request-timeout` | 120 s | gRPC handler response deadline; an established streaming response keeps its lifetime |
+| `--grpc-max-streams` | 256 | HTTP/2 streams per gRPC connection |
+| `--grpc-keepalive-interval` | 30 s | HTTP/2 server ping interval |
+| `--grpc-keepalive-timeout` | 20 s | HTTP/2 ping acknowledgement budget |
+| `--listener-tcp-keepalive-time` | 60 s | Kernel TCP keepalive idle time |
+| `--listener-tcp-keepalive-interval` | 10 s | Kernel keepalive probe interval |
+| `--listener-tcp-keepalive-retries` | 3 | Kernel unanswered probe count |
+
+Every option has the environment form `NERVIX_` followed by its uppercase name with underscores,
+for example `NERVIX_LISTENER_MAX_CONNECTIONS` and `NERVIX_HTTP_BODY_BYTES`. Counts and byte limits
+are positive and must fit their native protocol/admission representation. Deadlines are positive
+and representable by the monotonic clock. Kernel keepalive durations are whole seconds from 1
+through 32,767; the probe count is from 1 through 127, matching the native socket-option ranges.
+The HTTP/1 header default preserves the transport's 16 KiB trailer ceiling. Request heads also
+fit the configured read-buffer capacity.
+The startup preflight requires the intake pool to hold two body limits plus the declared initial
+read scratch and collection metadata. An explicit inconsistent pair refuses startup before stores
+or listeners open.
+
+Read and write progress both renew idle time. A WebSocket upgrade retains the accepted socket's
+lease and deadline. Connection tasks are reaped while the listener runs; shutdown retains its
+existing admission, grace and terminal-cut order. HTTP listeners keep one bounded refusal
+slot alongside accepts, in addition to admitted connections. At capacity, cleartext HTTP returns 503 with reason
+`listener_connection_capacity` through the same bounded HTTP parser. Receiving its request and
+writing the refusal share one header-timeout budget; its completed transport uses the same bounded
+refusal drain described below. While
+that slot is occupied, further excess connections close without a protocol exchange, and newly
+available admission capacity remains usable. A TLS or gRPC connection is closed before protocol
+admission.
+
+HTTP endpoint bodies use the independent `intake` executor memory class. It accounts retained
+transport backing buffers and collection metadata conservatively, as well as the copy overlap when
+several frames are concatenated. Input contention refuses immediately with 503; it never holds
+relay decode capacity while waiting for relay work. A single data frame keeps its existing shared
+byte buffer. Multi-frame assembly runs through the data CPU class with cancellation checks between
+bounded copies, and the reservation follows the worker and final body until dispatch ends.
+Size is a payload limit; highly fragmented bodies may exhaust the memory ceiling before that size.
+
+The endpoint's public input outcomes are:
+
+| Status | Reason | Meaning |
+| --- | --- | --- |
+| 413 | `http_body_capacity` | The declared length or accumulated chunked payload exceeds the cap |
+| 408 | `http_body_timeout` | The complete body did not arrive by its deadline |
+| 431 | HTTP header capacity | Hyper refuses an oversized request head and closes the connection |
+| 503 | `http_input_memory_capacity` | The intake pool cannot back retained input |
+| 503 | `http_input_worker_capacity` | Accounted body assembly cannot be admitted, expires or finishes cancelled |
+| 400 | `http_body_invalid` | Malformed or interrupted HTTP body framing, including oversized chunked trailers |
+
+The HTTP input completion budget distinguishes phases: expiry while receiving bytes returns 408;
+expiry while the server waits for or performs accounted body assembly returns 503. Assembly
+retains its reservation until the worker actually exits after cancellation.
+
+Input refusals admit no payload to the graph. Hyper completes the response and closes its write
+side before a bounded transport drain discards residual bytes, so an ongoing upload cannot reset
+the connection before its client reads the refusal. The drain reuses the declared read-buffer
+capacity, retains the connection lease, and ends at peer closure, shutdown or
+`http-refusal-drain-timeout`. It does not parse HTTP or decode payloads; this follows the staged
+transport closure in [RFC 9112 §9.6](https://www.rfc-editor.org/rfc/rfc9112.html#section-9.6).
+An unfinished request
+head is closed at its header deadline; it is distinct from the body's 408 response. Existing route,
+quiesce and acknowledgement outcomes retain their own contracts.
+
+Connection-local accept failures retry immediately. A node-local failure such as descriptor
+exhaustion reports the failure and waits the declared accept retry delay before trying again.
+Closing admission cancels that wait. The pause survives a listener future being temporarily dropped
+while its owner reaps another completed connection.
+
 ## Committed Node Capabilities
 
 `--cpu-count` (`NERVIX_CPU_COUNT`) overrides the process's cgroup-aware available parallelism.
@@ -58,12 +152,13 @@ Both overrides must be positive. A failed host query remains `unknown`; memory p
 committed claim use the same resolved measurement. The startup log includes these resolved values
 and the receive bounds. Worker pools, budgets and watermarks retain their own setting owners.
 
-After membership admission, each node submits one incarnation-bound `NodeCapabilityRecord` to the
-current leader. Raft commits it under the node name. Repeating an identical announcement is a
-no-op; a newer incarnation replaces the record, and an earlier or differently configured identical
-incarnation is refused. Departure retains the last claim; `DROP NODE` removes it and fences that
-incarnation. A restarted node waits for its own current claim before activating stored assignments.
-Capability records are absent from the join handshake and gossip.
+After membership admission, each node submits one incarnation-bound capacity claim, a
+`NodeCapabilityRecord`, to the current leader inside its [node record](#the-node-record). Raft
+commits the record under the node name. Repeating an identical announcement is a no-op; a newer
+incarnation replaces the record, and an earlier or differently configured identical incarnation is
+refused. Departure retains the last record; `DROP NODE` removes it and fences that incarnation. A
+restarted node waits for its own current record before activating stored assignments. Node
+records are absent from the join handshake and gossip.
 
 The receiver's local capacity options are:
 
@@ -201,6 +296,100 @@ and remaining strictly greater than that threshold; the threshold cannot be `u64
 Snapshot chunks follow the executor's bulk chunk bound. The replication chapter owns durability,
 whole-transfer deadlines and the explicit maintained OpenRaft configuration.
 
+## The Node Record
+
+The capacity claim is one of three parts of the record Raft commits for every node run:
+
+- **Capabilities**, the sizing settings above, say what the node can carry.
+- **Properties** are facts the node detected about itself at startup: what the machine is. No
+  option overrides them, and a value the node could not detect is recorded as undetected, with
+  its reason.
+- **Tags** say what the operator intends the node for. They come only from `--node-tags`.
+
+One announcement commits all three under the claim's incarnation rules: an identical announcement
+changes nothing, a newer incarnation replaces the whole record, a different record for an
+incarnation that already has one is refused, departure keeps the last record, and `DROP NODE`
+removes it. Raft records the revision, its log index, that committed each record. The records are
+schedule planning inputs beside members, voters and cordons, so a changed record invalidates a
+captured plan. A record travels in neither gossip nor the join handshake, and its change publishes
+no notice.
+
+### Detected Properties
+
+| Property | What it is | Without a detected value |
+| --- | --- | --- |
+| `architecture` | The architecture the binary was built for, such as `x86_64` or `aarch64` | Always detected |
+| `cpu.model` | The CPU model the operating system reports, read through the maintained `sysinfo` crate | `undetected` with the reason |
+| `gpu.count` | The GPUs NVML reports. Nervix loads NVML dynamically from `libnvidia-ml.so.1`; no library or no device is `0` | `0`, with the reason when NVML did not answer |
+| `gpu.models` | The model of each GPU, in device order | `none` |
+| `gpu.memory` | The memory of the smallest GPU, in bytes | `none` |
+| `gpu.driver` | The driver version NVML reports for the node's GPUs | `none` without a GPU; otherwise `undetected` with the reason |
+| `onnx.version` | The version the ONNX Runtime library this process loaded reports | `undetected` with the reason |
+| `onnx.providers` | The execution providers that library reports, in its order | `undetected` with the reason |
+| `onnx.cuda` | Whether the CUDA execution provider registers in this process: its provider library and the CUDA runtime load | `false` with the reason |
+| `cuda.available` | Exactly `gpu.count > 0 AND onnx.cuda` | Never undetected |
+
+CUDA is two facts because a GPU in the chassis says nothing about whether this process's ONNX
+Runtime can use it: the GPU and CPU images load different ONNX Runtime libraries. The CPU count and
+the memory limit are the node's capabilities, which the record already holds; the properties do
+not copy them.
+
+The node detects its properties once, in the [startup preflight](#the-startup-preflight), after
+every check that can refuse it, on its bulk workers: the CPU model, the GPUs and the ONNX Runtime
+each in their own probe, side by side. `--node-detection-timeout` (`NERVIX_NODE_DETECTION_TIMEOUT`,
+a node capability, `30s` by default) bounds how long the preflight waits for them. A probe that has
+not answered by then is recorded as `undetected (detection did not finish within the node detection
+timeout)`, and a probe that never returns keeps its bulk worker until the process exits. Detection
+never refuses the start. The ONNX Runtime probe loads the library every inferencer of the process
+loads, the one `ORT_DYLIB_PATH` names or otherwise `libonnxruntime.so` as the dynamic loader finds
+it; a library that does not load leaves the `onnx` properties undetected with that reason. It then
+uses the one ONNX Runtime environment every inferencer shares and makes one attempt to register the
+CUDA execution provider in a session builder that it then drops; what the registration loaded stays
+loaded, as it would for a session. `the startup preflight passed` logs the resolved properties at `info`.
+
+### Tags
+
+`--node-tags key=value[,key=value...]` (`NERVIX_NODE_TAGS`) gives a node its tags; the option is
+repeatable and comma-separated. A key starts with a lower-case letter or a digit and holds only
+lower-case letters, digits, `.`, `_` and `-`, up to 63 bytes. A value is 1 to 255 bytes of printable
+text without a comma, a control character or a line separator; the first `=` of a tag ends its key,
+so a value may hold another. A node carries at most 64 tags, each key once. These bounds are fixed:
+they keep the record one Raft command, far below the 1 MiB largest-command floor every node accepts.
+The edge validates the tags before any I/O, and a refusal ends the process with status `1`, naming
+the tag and the rule it broke, such as `node tag key 'Pool' must start with a lower-case letter or a
+digit and hold only lower-case letters, digits, '.', '_' and '-'`.
+
+Tags belong to the node's identity, addresses and paths, like `--node-id`, rather than to a
+settings class: they describe the node and bound no policy. No statement reads them into a Model
+or writes them. A node changes its tags by restarting with other values, which announces a new
+record, so a tag change follows the rolling-restart procedure of a capability change.
+
+### In `DESCRIBE CLUSTER`
+
+`DESCRIBE CLUSTER` prints each node's committed record after its prerequisites: the revision that
+committed it and the incarnation it belongs to, or `record: not announced`, then one line per
+property, the undetected ones with their reason, and one `key=value` line per tag in key order, or
+`tags: none`. A departed node's retained record follows its committed capacity claim: the
+capability line and its interconnect, DNS, database and consensus lines.
+
+```text
+  record: revision 41 (incarnation 3)
+  properties:
+    architecture: x86_64
+    cpu.model: AMD EPYC 7763 64-Core Processor
+    gpu.count: 1
+    gpu.models: NVIDIA L4
+    gpu.memory: 24152899584
+    gpu.driver: 550.54.15
+    onnx.version: 1.30.0
+    onnx.providers: CUDAExecutionProvider, CPUExecutionProvider
+    onnx.cuda: true
+    cuda.available: true
+  tags:
+    pool=gpu
+    zone=eu
+```
+
 ## Permanent Cluster Identity
 
 The first leader commits a permanent UUID and signing key for the cluster. `DESCRIBE CLUSTER;`
@@ -245,6 +434,33 @@ already processed creation, Nervix adopts the matching activation through an aut
 `REFRESH LICENSE` runs immediately on the leader, outside domain transactions, and completes when
 the newer signed decision commits or the service or cluster returns a typed refusal.
 
+```plexus
+ROTATE LICENSE CLUSTER KEY;
+RELEASE LICENSE;
+```
+
+`ROTATE LICENSE CLUSTER KEY` preserves the cluster UUID, activation, ephemeral expiry and every
+signed deadline. In activated mode the pending key and exact signed request commit before sending;
+the current key authorizes the request and the pending key proves possession. Only the verified
+rotation completion installs both the next generation and its decision. A lost response replays
+the retained request identity and bytes, including across leadership changes, and a definitive
+service refusal abandons the pending key. Free and released clusters rotate locally without
+service access or provisioned service trust.
+
+`RELEASE LICENSE` commits the free target policy before contacting the service. It returns after
+that local commit; `DESCRIBE LICENSE` reports `mode: released`, `policy: releasing` and
+`release: awaiting service confirmation` while the leader retries notification. Existing grants
+retain their deadlines, reported as the typed `grants_until` timestamp. Confirmation does not
+restart or extend them. Once confirmation arrives and no grant remains, the mode becomes free.
+An expired ephemeral activation refuses release with `Expired`. Activation in released mode
+first finishes any outstanding notification, then creates a new activation with a new lifetime.
+Local rotations remain available during a service outage; the pending release keeps its original
+signing capability until confirmation, even after several rotations and restart.
+
+An administrator transfers an activation through the licensing service. The former cluster's
+next refresh reports `transferred` and targets the free policy; a rebuilt cluster activates with
+its own permanent identity and consumes the freed activation slot.
+
 The service is the compiled deployment `https://licensing.nervix.io`. Plexus and node options
 supply no alternative address or trust anchors. HTTPS uses the node resolver and outward TLS
 policy, HTTP/1.1 or HTTP/2, no redirects and no environment proxy. Activation requires the build's
@@ -271,7 +487,10 @@ each replica verifies apply, and recovery and snapshot installation rebuild veri
 original signed bytes and the independent activation binding. A semantically invalid document
 loads as `degraded`, reports `decision_unverifiable`, grants the free policy and prompts refresh.
 Structural record corruption refuses startup. Revoking a working key prevents new decisions;
-a previously committed decision remains verified with its signing-key-revoked observation.
+a previously committed decision remains verified with its signing-key-revoked observation and
+prompts an immediate refresh. Root-authenticated trust documents commit independently of an
+unacceptable new decision. A supplied root succession authorizes later epochs; an epoch without
+that chain is refused without replacing the committed decision.
 
 Licensing time is committed and monotone. The leader proposes physical observations at deadline
 crossings independently of its refresh attempt. The derived refresh state is `licensed fresh`,
@@ -297,6 +516,37 @@ Reconnects use the declared exponential backoff with full jitter. Polling at `re
 committed deadline crossings run independently of stream setup, reads and reconnect sleeps.
 A blocked or unavailable stream therefore changes notification latency, never signed permission
 or the polling schedule. Stream state and its cursor are process-local and never persisted.
+
+An ephemeral activation ends at its `ephemeral_expires_at`, fixed when the service created it:
+refreshes, restarts and leader changes keep it, and it never moves later. When committed licensing
+time reaches it, the stop gate closes. The gate is derived from the committed activation binding and
+licensing time, never stored as a flag, and does not depend on the decision's verification, so an
+edited or unverifiable document cannot lift it. A persistent activation never closes it.
+
+While the gate is closed:
+
+- `DESCRIBE LICENSE` reports `policy: stopped` and
+  `processing: stopped by licensing: ephemeral activation expired at <instant>`.
+- Admission refuses all new usage with state `stopped`, `CREATE DOMAIN` and the domains a restore
+  would create included. The cluster never falls back to the free policy.
+- The leader stops every running domain through the ordinary `STOP`, which preserves its persisted
+  runtime state. `DESCRIBE DOMAIN` then reports
+  `stopped by licensing: ephemeral activation expired at <instant>` until the domain's next
+  `START`. An `ALTER` or a backup that holds a domain paused when the gate closes still
+  completes, and its pause ends in the licensing stop instead of a resume. A domain another
+  operation holds is stopped once that operation releases it.
+- Planning refuses `START`, a transactional `START` and `RESTORE ... RESUME` with
+  `licensing stopped processing`. Consensus refuses every other change that would make a domain
+  run: resuming a paused domain and writing a domain record that runs. A restore whose gate closed
+  while it applied leaves its domains stopped with the licensing cause, and its report shows them
+  stopped by licensing.
+- Sessions, `DESCRIBE`, `SHOW`, `BACKUP`, `ALTER`, `UPLOAD RESOURCE`, `CREATE USER` and the
+  licensing statements stay available.
+
+Every node announces the closing to its sessions with an Error notice and the lifting with an Info
+notice. Only a new activation lifts the gate: `ACTIVATE LICENSE` is accepted again once the
+ephemeral activation expired, because the service released its capacity at that instant. Domains
+stay stopped until an operator starts them.
 
 Every node answers `DESCRIBE LICENSE` without selecting a domain or redirecting to the leader.
 It reports the mode, policy, public identity, committed time, processing state and quotas. An
@@ -380,12 +630,14 @@ It refuses to start at the first check that fails, exiting with status `1` and
    its own, and nothing the volume already holds is subtracted.
 5. It loads its name resolver, as [Name Resolution](name-resolution.md#resolver-lifetime)
    describes.
+6. Once every check passed, it detects its [properties](#detected-properties), waiting at most its
+   `--node-detection-timeout`. Detection never refuses the start.
 
 Each refusal names the setting or directory it judged, with the values involved:
 
 | Check | Refusal |
 | --- | --- |
-| Memory budgets | `the execution memory budgets of 101.25MiB exceed node memory 32MiB` |
+| Memory budgets | `the execution memory budgets of 229.25MiB exceed node memory 32MiB` |
 | Memory watermark | `memory-high-watermark (4GiB) exceeds memory-limit (3GiB)` |
 | Directories | `the database directory <path> cannot be created`, `the temporary directory <path> is not writable` |
 | Volumes | `the capacity of the volume holding the database directory <path> cannot be read` |
@@ -397,7 +649,7 @@ cluster parameters with fixed defaults, 4 GiB and 16 GiB. A node whose database 
 refuses to start. Provision a larger volume, seed smaller quotas on a new cluster, or change an
 existing cluster's committed quotas through `ALTER CLUSTER SET` before joining it. A node that passes logs
 `the startup preflight passed` at `info` with its memory limit, its memory budgets, the size of both
-volumes and the restore-staging quota it resolved.
+volumes, the restore-staging quota it resolved and the properties it detected.
 [Capacity Planning](capacity-planning.md#what-a-node-needs-to-start) sizes them.
 
 Clock skew is the one environmental check that needs a peer, so a node makes it as it joins, as
@@ -443,6 +695,7 @@ Each pool has `--execution-<pool>-memory-bytes`. With known memory, defaults are
 
 | Pool | Memory fraction | Minimum working set |
 | --- | --- | --- |
+| `intake` | 1/16 | 128 MiB |
 | `management` | 1/128 | 64 KiB |
 | `commands` | 1/32 | 24 MiB |
 | `relay` | 1/16 | Enough for its two admitted operations |
@@ -454,7 +707,7 @@ Each pool has `--execution-<pool>-memory-bytes`. With known memory, defaults are
 | `credentials` | 1/256 | 19 MiB |
 
 Derived pools are capped at the 32-bit byte-permit representation. Explicit values are never
-silently reduced. With unknown memory, defaults are respectively 8, 24, 192, 192, 192, 32, 16,
+silently reduced. With unknown memory, defaults are respectively 128, 8, 24, 192, 192, 192, 32, 16,
 2,048 and 19 MiB. Credentials keeps room for mounted NATS files; PBKDF2's operation charge stays
 64 bytes and its creation policy remains the committed `PASSWORD_ITERATIONS` parameter.
 
@@ -469,8 +722,8 @@ still apply. Peer receive limits derive from these final limits before transport
 `--client-producer-node-bytes` and `--client-consumer-node-bytes` each default to 1/32 of node
 memory, holding at least the default 32 MiB session window, or 128 MiB with unknown memory.
 They reserve node admission independently; committed per-session limits keep their own policy.
-The full startup total counts both capacities as well as all nine executor pools. A 1 GiB node
-uses 427 MiB of executor ceilings plus 64 MiB of node client credit, 491 MiB in total. These are
+The full startup total counts both capacities as well as all ten executor pools. A 1 GiB node
+uses 555 MiB of executor ceilings plus 64 MiB of node client credit, 619 MiB in total. These are
 ceilings, not eagerly allocated buffers; graph state, engines and thread stacks need additional
 headroom. Explicit totals that exceed known memory refuse startup.
 
@@ -607,8 +860,8 @@ on defaults too. Typed reports retain the definition owner's cause without flatt
 
 `nervix-server` reads its command line as one options group per area, each in its own file at the
 server's command-line edge and printed under its own heading by `--help`. One group holds the
-node's identity, listen and advertised addresses, TLS files, name resolution files and storage
-paths. Those are what a node is provisioned with, not settings. Every other group is the
+node's identity, its tags, listen and advertised addresses, TLS files, name resolution files and
+storage paths. Those are what a node is provisioned with, not settings. Every other group is the
 command-line form of one owner's class-typed group: each option is named by its definition's
 `NAME`, has the environment variable `NERVIX_` followed by that name with underscores, and shows
 the default its definition returns. Cluster-parameter help identifies it as a bootstrap default. Durations and byte quantities print in the edge's forms, such as `250ms`,
@@ -648,7 +901,7 @@ describes, defaults included.
 | `--drain-timeout`, `--shutdown-timeout` | node capability | shutdown |
 | `--resource-max-archive-bytes`, `--resource-max-extracted-bytes`, `--resource-max-file-count` | cluster parameter | resources |
 | `--otel-trace-sample-ratio` | node capability | trace export |
-| `--cpu-count`, `--memory-limit` | node capability | capacity |
+| `--cpu-count`, `--memory-limit`, `--node-detection-timeout` | node capability | capacity |
 | `--execution-*`, `--runtime-worker-threads`, `--runtime-max-blocking-threads`, `--runtime-thread-stack-size` | node capability | execution |
 | `--client-producer-node-bytes`, `--client-consumer-node-bytes` | node capability | client admission |
 
@@ -711,7 +964,8 @@ store, binds a listener or starts a task:
   at, and twelve of it, the longest election timeout, fit the milliseconds consensus counts it in.
 - The gossip interval and the clock-skew tolerance are each at least one millisecond, and twenty
   gossip intervals fit a duration.
-- A memory limit, when one is given, is above zero.
+- A memory limit, when one is given, is above zero, and so is the node detection timeout.
+- The node's tags follow the [tag rules](#tags): at most 64, each key once.
 - The drain timeout does not exceed the shutdown timeout, which bounds every drain step. A drain
   timeout equal to it lets the drain use the whole deadline; the defaults leave time for terminal
   teardown after the drain.

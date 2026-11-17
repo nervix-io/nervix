@@ -844,6 +844,7 @@ async fn logical_deadline_cannot_cross_domain_capabilities() {
             start_version: 1,
             last_start: nervix_models::DomainStartPoint::Resume,
             clock: None,
+            stop_cause: None,
         },
         &test_domain_clock_authority(),
     );
@@ -858,6 +859,7 @@ async fn logical_deadline_cannot_cross_domain_capabilities() {
             start_version: 1,
             last_start: nervix_models::DomainStartPoint::Resume,
             clock: None,
+            stop_cause: None,
         },
         &test_domain_clock_authority(),
     );
@@ -957,6 +959,7 @@ async fn due_logical_wait_returns_due_time_and_a_fresh_snapshot() {
             start_version: 4,
             last_start: nervix_models::DomainStartPoint::Resume,
             clock: None,
+            stop_cause: None,
         },
         &test_domain_clock_authority(),
     );

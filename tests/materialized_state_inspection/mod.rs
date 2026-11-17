@@ -5,7 +5,7 @@
 //! - **Depends on.** The scenario world, verified inspection envelopes and Row presentation.
 //! - **Must not know.** Runtime state stores, snapshot encoding or materialized read internals.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use cucumber::{gherkin::Step, then, when};
 use meticulous::{OptionExt as _, ResultExt as _};
@@ -261,12 +261,18 @@ async fn every_node_reports_the_same_materialized_records(
 
 #[derive(Debug, Default)]
 pub(crate) struct Observations {
-    cursor: Option<String>,
+    cursor: Option<SavedContinuation>,
     full_rows: Vec<String>,
     rows: BTreeSet<String>,
     counts: Option<nervix_models::StateInspectionCounts>,
     reader_node: Option<String>,
     remote_baseline: Option<f64>,
+}
+
+#[derive(Debug)]
+struct SavedContinuation {
+    token: String,
+    origins: BTreeMap<nervix_models::Unit, nervix_models::StateInspectionOrigin>,
 }
 
 fn last_state(world: &ScenarioWorld) -> &StateInspection {
@@ -347,11 +353,24 @@ fn save_cursor(world: &mut ScenarioWorld) {
         .clone()
         .assured("the bounded page has a continuation");
     let counts = page.counts;
+    let origins = page
+        .units
+        .iter()
+        .map(|unit| (unit.unit, unit.origin.clone()))
+        .collect();
     let rows = observed_rows(state)
         .iter()
         .map(|row| serde_json::to_string(&values_for_page(row)).assured("bounded observation"))
         .collect();
-    world.inspection_observations.cursor = Some(cursor);
+    tracing::info!(
+        domain = %world.domain,
+        origins = ?origins,
+        "saved state inspection continuation cut"
+    );
+    world.inspection_observations.cursor = Some(SavedContinuation {
+        token: cursor,
+        origins,
+    });
     world.inspection_observations.counts = Some(counts);
     world.inspection_observations.rows = rows;
 }
@@ -360,17 +379,58 @@ fn values_for_page(row: &Value) -> Value {
     serde_json::json!({"branch":row["branch"],"fields":row["fields"]})
 }
 
-#[when(expr = "inspection client {string} resumes relay {string} with the saved continuation")]
-async fn resume(world: &mut ScenarioWorld, client: String, relay: String) {
-    let token = world
+#[then("the materialized inspection cut differs from the saved continuation")]
+fn published_cut_changed(world: &mut ScenarioWorld) {
+    let StateInspectionResult::Page(page) = &last_state(world).result else {
+        panic!("the publication observation returned a page");
+    };
+    let saved = &world
         .inspection_observations
         .cursor
-        .as_deref()
+        .as_ref()
+        .assured("a prior page saved its continuation and unit origins")
+        .origins;
+    assert_eq!(
+        page.units.len(),
+        saved.len(),
+        "the same units are inspected"
+    );
+    let mut changed = false;
+    for unit in &page.units {
+        let previous = saved
+            .get(&unit.unit)
+            .assured("the unit was in the saved cut");
+        tracing::info!(
+            domain = %world.domain,
+            unit = ?unit.unit,
+            saved = ?previous,
+            current = ?unit.origin,
+            "comparing saved and published state inspection cuts"
+        );
+        assert_eq!(
+            unit.origin.node, previous.node,
+            "the same owner serves the updated cut"
+        );
+        changed |= unit.origin.fingerprint != previous.fingerprint;
+    }
+    assert!(
+        changed,
+        "the published row changed the captured cut: saved={saved:?}, current={:?}",
+        page.units
+    );
+}
+
+#[when(expr = "inspection client {string} resumes relay {string} with the saved continuation")]
+async fn resume(world: &mut ScenarioWorld, client: String, relay: String) {
+    let saved = world
+        .inspection_observations
+        .cursor
+        .as_ref()
         .assured("a prior page saved its continuation");
     let query = format!(
         "SHOW RELAY {} MATERIALIZED STATE FOR ALL BRANCHES LIMIT 1 AFTER '{}' FORMAT JSON;",
         expand_placeholders(world, &relay),
-        token.replace('\'', "''")
+        saved.token.replace('\'', "''")
     );
     let client = world
         .transaction_clients
@@ -423,9 +483,17 @@ fn refused(world: &mut ScenarioWorld, expected: String) {
         .last_client_outcome
         .as_ref()
         .assured("a command completed");
+    let saved = world
+        .inspection_observations
+        .cursor
+        .as_ref()
+        .map(|saved| &saved.origins);
     assert!(
         !outcome.succeeded(),
-        "a refused read retains the command failure disposition"
+        "a refused read retains the command failure disposition: expected={expected}, saved={:?}, \
+         current={:?}",
+        saved,
+        outcome.state
     );
     let state = last_state(world);
     let StateInspectionResult::Rejected(reason) = state.result else {

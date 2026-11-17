@@ -15,16 +15,17 @@
 
 use std::time::Duration;
 
-use nervix_arbitrary::Entropy;
+use nervix_arbitrary::{Arbitrary, Domain, Entropy};
 use nervix_consensus::{RaftRetentionBounds, RaftRetentionSettings, RaftTimings};
 use ubyte::ByteUnit;
 
 use super::*;
 use crate::{
     application::{
-        CommandExecutionPolicy, NodeSettings, SchedulingSettings, ShutdownSettings,
+        CommandExecutionPolicy, NodeIdentity, NodeSettings, SchedulingSettings, ShutdownSettings,
         TransactionBounds, TransactionLimits,
         cli_values::{HumanBytes, HumanDuration},
+        test_fixtures::test_args,
     },
     capacity::CapacitySettings,
     cluster::{MembershipSettings, MembershipValues},
@@ -185,6 +186,13 @@ impl<'bytes> GeneratedSettings<'bytes> {
     fn execution(&mut self) -> nervix_execution::ExecutionOverrides {
         let workers = self.execution_workers();
         nervix_execution::ExecutionOverrides {
+            intake_memory_bytes: if self.entropy.flag() {
+                Some(ByteUnit::Byte(
+                    self.entropy.between(1..=u64::from(u32::MAX)),
+                ))
+            } else {
+                None
+            },
             management_memory_bytes: if self.entropy.flag() {
                 Some(ByteUnit::Byte(
                     self.entropy.between(1..=u64::from(u32::MAX)),
@@ -383,8 +391,10 @@ impl<'bytes> GeneratedSettings<'bytes> {
         } else {
             None
         };
-        CapacitySettings::resolve(memory_limit, cpu_count)
-            .assured("a memory limit, when given, is at least one byte")
+        let detection_timeout = self.positive_duration();
+        CapacitySettings::resolve(memory_limit, cpu_count, Some(detection_timeout)).assured(
+            "a memory limit, when given, is at least one byte, and the timeout is positive",
+        )
     }
 
     fn memory_pressure(&mut self) -> MemoryPressureSettings {
@@ -550,6 +560,45 @@ impl<'bytes> GeneratedSettings<'bytes> {
         .assured("generated engine capacities fit bounded counts and milliseconds")
     }
 
+    #[cfg(test)]
+    fn listeners(&mut self) -> crate::application::listener_settings::ListenerSettings {
+        use crate::application::listener_settings::{ListenerOverrides, ListenerSettings};
+        ListenerSettings::resolve(ListenerOverrides {
+            max_connections: Some(
+                u32::try_from(self.entropy.between(1..=1024)).verified("bounded listener count"),
+            ),
+            header_bytes: Some(ByteUnit::Byte(self.entropy.between(8192..=67108864))),
+            buffer_bytes: Some(ByteUnit::Byte(self.entropy.between(8192..=67108864))),
+            header_timeout: Some(Duration::from_secs(self.entropy.between(1..=120))),
+            tls_timeout: Some(Duration::from_secs(self.entropy.between(1..=120))),
+            idle_timeout: Some(Duration::from_secs(self.entropy.between(1..=120))),
+            accept_retry_delay: Some(Duration::from_secs(self.entropy.between(1..=120))),
+            http_keepalive: Some(self.entropy.flag()),
+            http_body_bytes: Some(ByteUnit::Byte(self.entropy.between(8192..=67108864))),
+            http_body_copy_bytes: Some(ByteUnit::Byte(self.entropy.between(8192..=67108864))),
+            http_body_timeout: Some(Duration::from_secs(self.entropy.between(1..=120))),
+            http_refusal_drain_timeout: Some(Duration::from_secs(self.entropy.between(1..=120))),
+            websocket_message_bytes: Some(ByteUnit::Byte(self.entropy.between(8192..=67108864))),
+            websocket_frame_bytes: Some(ByteUnit::Byte(self.entropy.between(8192..=67108864))),
+            grpc_header_bytes: Some(ByteUnit::Byte(self.entropy.between(8192..=67108864))),
+            grpc_concurrency: Some(
+                u32::try_from(self.entropy.between(1..=1024)).verified("bounded listener count"),
+            ),
+            grpc_request_timeout: Some(Duration::from_secs(self.entropy.between(1..=120))),
+            grpc_max_streams: Some(
+                u32::try_from(self.entropy.between(1..=1024)).verified("bounded listener count"),
+            ),
+            grpc_keepalive_interval: Some(Duration::from_secs(self.entropy.between(1..=120))),
+            grpc_keepalive_timeout: Some(Duration::from_secs(self.entropy.between(1..=120))),
+            tcp_keepalive_time: Some(Duration::from_secs(self.entropy.between(1..=120))),
+            tcp_keepalive_interval: Some(Duration::from_secs(self.entropy.between(1..=120))),
+            tcp_keepalive_retries: Some(
+                u32::try_from(self.entropy.between(1..=127)).verified("bounded listener count"),
+            ),
+        })
+        .assured("generated bounded listener inputs satisfy their scalar contracts")
+    }
+
     fn node_settings(&mut self) -> NodeSettings {
         let execution = self.execution();
         let runtime_threads = crate::application::RuntimeThreadOverrides {
@@ -699,6 +748,7 @@ impl<'bytes> GeneratedSettings<'bytes> {
             consensus_operations: self.consensus_operations(),
             node_database: self.database(),
             consensus_database: self.database(),
+            listeners: self.listeners(),
             parameter_seeds: nervix_models::ClusterParameterSeedValues {
                 tls_cipher_suites: Some(tls_cipher_suites),
                 tls_key_exchange_groups: Some(tls_key_exchange_groups),
@@ -731,8 +781,8 @@ fn bolero_node_settings_survive_their_command_line() {
     bolero::check!()
         .with_iterations(256)
         .with_max_len(CASE_BYTES)
-        .for_each(|bytes: &[u8]| {
-            let mut generated = GeneratedSettings::new(bytes);
+        .for_each(|input: &[u8]| {
+            let mut generated = GeneratedSettings::new(input);
             let settings = generated.node_settings();
             let read = settings
                 .with_overrides(&[])
@@ -755,5 +805,20 @@ fn bolero_node_settings_survive_their_command_line() {
                 .parse::<HumanBytes>()
                 .assured("a rendered byte quantity is byte text");
             assert_eq!(read_bytes, HumanBytes(bytes));
+
+            let tags = Arbitrary::new(input, Domain::Vocabulary).node_tags();
+            let rendered = tags.to_string();
+            let mut options = Vec::new();
+            if !tags.is_empty() {
+                options.push(format!("--{}", super::NODE_TAGS_OPTION));
+                options.push(rendered);
+            }
+            let options = options.iter().map(String::as_str).collect::<Vec<_>>();
+            let identity = NodeIdentity::try_from(test_args(&options).node)
+                .assured("generated tags are valid on the command line");
+            assert_eq!(
+                identity.tags, tags,
+                "the node's tags survive their command line"
+            );
         });
 }

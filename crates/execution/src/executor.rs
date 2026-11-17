@@ -41,6 +41,7 @@ struct ExecutorInner {
     bulk_window_memory: MemoryBudget,
     restore_metadata_memory: MemoryBudget,
     credentials_memory: MemoryBudget,
+    intake_memory: MemoryBudget,
 }
 
 /// Everything one class of the executor is currently doing, for metrics and for tests that need a
@@ -65,6 +66,7 @@ pub struct ExecutorSnapshot {
     pub bulk_window_memory: MemoryBudgetSnapshot,
     pub restore_metadata_memory: MemoryBudgetSnapshot,
     pub credentials_memory: MemoryBudgetSnapshot,
+    pub intake_memory: MemoryBudgetSnapshot,
 }
 
 impl ExecutorSnapshot {
@@ -107,9 +109,10 @@ impl ExecutorSnapshot {
     }
 
     /// All independent memory pools, including active and retained materialized reads.
-    pub fn memory_classes(&self) -> [(MemoryClass, MemoryBudgetSnapshot); 9] {
+    pub fn memory_classes(&self) -> [(MemoryClass, MemoryBudgetSnapshot); 10] {
         [
             (MemoryClass::Management, self.management_memory),
+            (MemoryClass::Intake, self.intake_memory),
             (MemoryClass::Commands, self.commands_memory),
             (MemoryClass::Relay, self.relay_memory),
             (MemoryClass::StateRead, self.state_read_memory),
@@ -198,6 +201,7 @@ impl Executor {
                     MemoryClass::Commands,
                     validated.budgets.commands,
                 ),
+                intake_memory: MemoryBudget::new(MemoryClass::Intake, validated.budgets.intake),
                 relay_memory: MemoryBudget::new(MemoryClass::Relay, validated.budgets.relay),
                 state_read_memory: MemoryBudget::new(
                     MemoryClass::StateRead,
@@ -377,6 +381,7 @@ impl Executor {
             bulk_window_memory: self.inner.bulk_window_memory.snapshot(),
             restore_metadata_memory: self.inner.restore_metadata_memory.snapshot(),
             credentials_memory: self.inner.credentials_memory.snapshot(),
+            intake_memory: self.inner.intake_memory.snapshot(),
         }
     }
 
@@ -394,6 +399,7 @@ impl Executor {
     fn budget(&self, class: MemoryClass) -> &MemoryBudget {
         match class {
             MemoryClass::Management => &self.inner.management_memory,
+            MemoryClass::Intake => &self.inner.intake_memory,
             MemoryClass::Commands => &self.inner.commands_memory,
             MemoryClass::Relay => &self.inner.relay_memory,
             MemoryClass::StateRead => &self.inner.state_read_memory,

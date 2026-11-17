@@ -15,6 +15,8 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum AppError {
+    #[error("invalid listener bounds")]
+    InvalidListenerSettings,
     #[error("invalid cluster parameters")]
     InvalidClusterParameters,
     #[error("{parameter} is a first-bootstrap seed; use ALTER CLUSTER SET")]
@@ -122,6 +124,8 @@ pub enum AppError {
     InvalidMembershipSettings,
     #[error("invalid capacity settings")]
     InvalidCapacitySettings,
+    #[error("invalid --node-tags")]
+    InvalidNodeTags,
     #[error("invalid database capacity settings")]
     InvalidDatabaseSettings,
     #[error("invalid DNS settings")]

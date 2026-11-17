@@ -153,6 +153,7 @@ pub enum StatementVariant {
     DescribeReorderer,
     DescribeEmitter,
     DescribeWindowProcessor,
+    DescribeInferencer,
     DescribeWasmProcessor,
     DescribeUdf,
     DescribePlacement,
@@ -172,6 +173,8 @@ pub enum StatementVariant {
     DescribeLicense,
     ActivateLicense,
     RefreshLicense,
+    ReleaseLicense,
+    RotateLicenseClusterKey,
     AlterBranch,
     DescribeBranch,
     AlterCluster,
@@ -230,6 +233,7 @@ impl StatementVariant {
             Statement::DescribeReorderer(_) => Self::DescribeReorderer,
             Statement::DescribeEmitter(_) => Self::DescribeEmitter,
             Statement::DescribeWindowProcessor(_) => Self::DescribeWindowProcessor,
+            Statement::DescribeInferencer(_) => Self::DescribeInferencer,
             Statement::DescribeWasmProcessor(_) => Self::DescribeWasmProcessor,
             Statement::DescribeUdf(_) => Self::DescribeUdf,
             Statement::DescribePlacement(_) => Self::DescribePlacement,
@@ -249,6 +253,8 @@ impl StatementVariant {
             Statement::DescribeLicense(_) => Self::DescribeLicense,
             Statement::ActivateLicense(_) => Self::ActivateLicense,
             Statement::RefreshLicense(_) => Self::RefreshLicense,
+            Statement::ReleaseLicense(_) => Self::ReleaseLicense,
+            Statement::RotateLicenseClusterKey(_) => Self::RotateLicenseClusterKey,
         }
     }
 }
@@ -714,6 +720,11 @@ impl Arbitrary<'_> {
             StatementVariant::DescribeWindowProcessor => {
                 Statement::DescribeWindowProcessor(DescribeWindowProcessor { name: self.name() })
             }
+            StatementVariant::DescribeInferencer => {
+                Statement::DescribeInferencer(nervix_models::DescribeInferencer {
+                    name: self.name(),
+                })
+            }
             StatementVariant::DescribeWasmProcessor => {
                 Statement::DescribeWasmProcessor(DescribeWasmProcessor { name: self.name() })
             }
@@ -812,6 +823,12 @@ impl Arbitrary<'_> {
             }
             StatementVariant::RefreshLicense => {
                 Statement::RefreshLicense(nervix_models::RefreshLicense)
+            }
+            StatementVariant::ReleaseLicense => {
+                Statement::ReleaseLicense(nervix_models::ReleaseLicense)
+            }
+            StatementVariant::RotateLicenseClusterKey => {
+                Statement::RotateLicenseClusterKey(nervix_models::RotateLicenseClusterKey)
             }
         }
     }

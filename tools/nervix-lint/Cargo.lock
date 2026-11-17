@@ -683,6 +683,7 @@ dependencies = [
  "meticulous",
  "nervix-primitives-macros",
  "parking_lot",
+ "socket2",
  "tokio",
  "tokio-stream",
  "tokio-util",

@@ -41,8 +41,7 @@ impl<'a> ArrowRowBatch<'a> {
         }
         let arrow_fields = batch.schema_ref().fields();
         let mut columns = Vec::with_capacity(schema.fields.len());
-        for index in 0..schema.fields.len() {
-            let field = &schema.fields[index];
+        for (index, field) in schema.fields.iter().enumerate() {
             let arrow_field = arrow_fields
                 .get(index)
                 .verified("the Arrow batch has one schema field per column");
