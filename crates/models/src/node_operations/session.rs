@@ -534,6 +534,11 @@ impl SessionCapabilities {
             .assured("a download's capacity never exceeds the validated session lane capacity")
     }
 
+    pub fn notice_channel_capacity(&self) -> usize {
+        usize::try_from(self.notice_capacity().get())
+            .assured("the notice capacity fits the validated portable channel bound")
+    }
+
     pub fn values(&self) -> SessionCapabilityValues {
         SessionCapabilityValues {
             bounds: self.bounds.values(),

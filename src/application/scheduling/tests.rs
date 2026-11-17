@@ -1391,5 +1391,7 @@ fn failover_promotes_live_replica_before_policy_target() {
 }
 
 fn voter_observation_grace() -> Duration {
-    crate::cluster::MembershipSettings::default().gossip_interval() * 20
+    StartupVoterObservations::grace_for(
+        crate::cluster::MembershipSettings::default().gossip_interval(),
+    )
 }

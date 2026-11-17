@@ -104,6 +104,13 @@ pub(in crate::application) struct StartupVoterObservations {
 }
 
 impl StartupVoterObservations {
+    /// The startup grace for a configured gossip interval: twenty gossip rounds.
+    pub(in crate::application) fn grace_for(gossip_interval: Duration) -> Duration {
+        gossip_interval
+            .checked_mul(20)
+            .assured("twenty supported gossip rounds fit a duration")
+    }
+
     pub(in crate::application) fn new(grace: Duration) -> Self {
         Self {
             grace,

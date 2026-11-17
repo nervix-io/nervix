@@ -887,11 +887,8 @@ impl Application {
             .install_control_plane_cadences(&settings.operational.control_plane);
         let membership_interval = settings.operational.control_plane.membership_interval();
         let scheduling_interval = settings.operational.control_plane.scheduling_interval();
-        let voter_observation_grace = settings
-            .membership
-            .gossip_interval()
-            .checked_mul(20)
-            .assured("twenty supported gossip rounds fit a duration");
+        let voter_observation_grace =
+            StartupVoterObservations::grace_for(settings.membership.gossip_interval());
         let health_interval = settings.operational.control_plane.health_probe_interval();
         let resource_interval = settings
             .operational
@@ -1025,10 +1022,7 @@ impl Application {
         certificates
             .register_installation_handler(&interconnect)
             .change_context(AppError::RegisterInterconnectRequestHandler)?;
-        let events = SessionEvents::new(
-            usize::try_from(settings.operational.session.notice_capacity().get())
-                .assured("the notice capacity fits the validated portable channel bound"),
-        );
+        let events = SessionEvents::new(settings.operational.session.notice_channel_capacity());
         let service = SessionServiceImpl {
             inner: Arc::new(SessionServiceInner {
                 raft_timings,
