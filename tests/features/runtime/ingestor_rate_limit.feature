@@ -363,6 +363,51 @@ Feature: Ingestor rate limits
       | 1            |
       | 3            |
 
+  Scenario Outline: A client producer batch whose rows exceed its clause's burst fails processing as rejected and the next batch is delivered
+    Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA order_in (region STRING, order_id STRING, amount I64);
+      CREATE RELAY events SCHEMA order_in UNBRANCHED;
+      CREATE CLIENT PRODUCER INGESTOR burst_limited FROM SCHEMA order_in
+        MODE ACK PARALLEL MAX 4 ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 1s
+        RATE LIMIT 2 OF payload.rows PER 1s BURST 2
+        ON QUIESCE SUSPEND TIMESTAMP NOW
+        TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE SUBSCRIPTION observations TO events;
+      START;
+      """
+    And client "app" is connected to the leader node
+    When client "app" opens producer "orders" on ingestor "burst_limited" expecting fields "region STRING, order_id STRING, amount I64"
+    # Three rows cost more than the burst of two can ever hold, so no wait admits the batch.
+    And producer "orders" submits batch "oversized" with rows
+      | region | order_id | amount |
+      | eu     | o-1      | 1      |
+      | eu     | o-2      | 2      |
+      | eu     | o-3      | 3      |
+    Then batch "oversized" fails processing because "rejected"
+    # The refused batch spent nothing, so the full allowance admits the next one at once.
+    When producer "orders" submits batch "fitting" with rows
+      | region | order_id | amount |
+      | us     | o-4      | 4      |
+    Then batch "fitting" completes
+    And within "30s" the relay subscription receives exactly one payload for each fragment set
+      """
+      "order_id":"o-4"
+      """
+    And within "30s" DESCRIBE INGESTOR "burst_limited" on the leader node contains
+      """
+      nervix_ingestor_rate_limit_rejected_total: 1
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
   Scenario Outline: A payload whose cost exceeds its clause's burst is consumed as a rate_limit rejection and the next one is delivered
     Given Kafka is running
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
