@@ -17,7 +17,7 @@ fn seeded_state() -> StateMachineData {
     let seeded = apply_consensus_command(
         &mut state,
         &ConsensusCommand::SeedClusterParameters {
-            values: ClusterParameterValues::default(),
+            values: Box::new(ClusterParameterValues::default()),
         },
     );
     assert_eq!(seeded.response, ConsensusResponse::Applied);

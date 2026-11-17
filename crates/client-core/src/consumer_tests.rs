@@ -89,6 +89,7 @@ impl AttachedConsumer {
             #[cfg(feature = "arrow")]
             description: description(),
             exchange: Arc::new(ExchangeRequests {
+                limits: nervix_client_wire::SessionLimits::DEFAULT,
                 frames,
                 pending: Arc::new(SyncMutex::new(PendingReplies::new())),
             }),

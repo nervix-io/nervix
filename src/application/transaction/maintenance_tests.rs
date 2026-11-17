@@ -28,7 +28,7 @@ use super::{
         subscription::SessionSubscriptions,
         test_fixtures::{TestService, build_test_service_with_probe},
     },
-    SessionServiceImpl, TRANSACTION_RECOVERY_CONCURRENCY, TransactionLimits,
+    SessionServiceImpl, TransactionLimits,
 };
 use crate::captured_logs::CapturedLogs;
 
@@ -220,8 +220,15 @@ async fn a_failed_commit_resume_reports_its_whole_cause_chain() {
         "the failed commit leaves the transaction committing"
     );
     let transactions = service.inner.consensus.current_transactions().await;
-    let recovery_capacity = u32::try_from(TRANSACTION_RECOVERY_CONCURRENCY)
-        .assured("the recovery concurrency is a small constant");
+    let recovery_capacity = u32::try_from(
+        service
+            .inner
+            .operational
+            .control_plane
+            .transaction_recovery_concurrency()
+            .get(),
+    )
+    .assured("the recovery capability fits semaphore acquisition");
 
     let logs = logged_by(async {
         service.schedule_transaction_recovery(&transactions);

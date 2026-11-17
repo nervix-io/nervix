@@ -31,8 +31,7 @@ use nervix_client_wire::{
     DomainInfo, EncodedFrame, Leadership, OpenIngestorDisposition, ProducerId, Reply, ReplyBody,
     ReplyBodyKind, RequestId, RowSchema, ServerFrame, ServerMessage, SessionLimits,
     SubscribeDisposition, SubscriptionHandle, SubscriptionOpened, TransferAssembly, TransferPart,
-    UnsubscribeDisposition, VerifiedFrame,
-    grpc::{ClientExchangeCodec, EXCHANGE_PATH},
+    UnsubscribeDisposition, VerifiedFrame, grpc::EXCHANGE_PATH,
 };
 use nervix_models::{CommandExecutionReference, RelayName};
 use nervix_primitives::{
@@ -52,7 +51,8 @@ use crate::{
     subscriptions::DesiredSubscriptions,
 };
 
-/// The limits every frame of a client session is held to.
+/// Explicit default policy used by isolated protocol fixtures.
+#[cfg(test)]
 pub(crate) const SESSION_LIMITS: SessionLimits = SessionLimits::DEFAULT;
 
 /// Request frames queued for an exchange before a sender waits for the transport.
@@ -90,7 +90,49 @@ struct QueuedEvent<T> {
     bytes: usize,
 }
 
+#[derive(Clone, Copy)]
+struct QueueByteLimits {
+    total: usize,
+    per_subscription: Option<usize>,
+}
+
+/// A subscription budget is installed once with its exchange generation.
+#[derive(Clone, Copy)]
+enum QueueBudget {
+    Fixed(usize),
+    SessionSubscriptions {
+        retained_frames: std::num::NonZeroUsize,
+        subscriptions: std::num::NonZeroUsize,
+    },
+}
+
+impl QueueBudget {
+    fn resolve(self, limits: &SessionLimits) -> Result<QueueByteLimits, Report<ClientError>> {
+        match self {
+            Self::Fixed(total) => Ok(QueueByteLimits {
+                total,
+                per_subscription: None,
+            }),
+            Self::SessionSubscriptions {
+                retained_frames,
+                subscriptions,
+            } => {
+                let (bytes, total_bytes) = crate::capabilities::subscription_byte_limits(
+                    limits,
+                    retained_frames,
+                    subscriptions,
+                )?;
+                Ok(QueueByteLimits {
+                    total: total_bytes,
+                    per_subscription: Some(bytes),
+                })
+            }
+        }
+    }
+}
+
 struct EventQueueState<T> {
+    byte_limits: Option<QueueByteLimits>,
     generation: Arc<()>,
     events: VecDeque<QueuedEvent<T>>,
     bytes: usize,
@@ -107,7 +149,7 @@ impl<T> EventQueueState<T> {
         bytes: usize,
         policy: &SubscriptionQueuePolicy<T>,
         max_records: usize,
-        max_bytes: usize,
+        limits: QueueByteLimits,
     ) -> bool {
         let key = (policy.key)(&value);
         if self.overflowed_subscriptions.contains(&key) {
@@ -120,9 +162,13 @@ impl<T> EventQueueState<T> {
         let next_subscription_bytes = retained_bytes.checked_add(bytes);
         let next_total_bytes = self.bytes.checked_add(bytes);
         let subscription_fits = records < policy.max_records
-            && next_subscription_bytes.is_some_and(|next| next <= policy.max_bytes);
+            && next_subscription_bytes.is_some_and(|next| {
+                next <= limits.per_subscription.assured(
+                    "subscription queues install a per-subscription budget with their generation",
+                )
+            });
         let total_fits = self.events.len() < max_records
-            && next_total_bytes.is_some_and(|next| next <= max_bytes);
+            && next_total_bytes.is_some_and(|next| next <= limits.total);
         if !subscription_fits || !total_fits {
             let mut retained = VecDeque::new();
             while let Some(event) = self.events.pop_front() {
@@ -198,14 +244,13 @@ struct SubscriptionQueuePolicy<T> {
     key: fn(&T) -> SubscriptionHandle,
     overflow: fn(&T) -> T,
     max_records: usize,
-    max_bytes: usize,
 }
 
 struct EventQueueInner<T> {
     state: SyncMutex<EventQueueState<T>>,
     changed: watch::Sender<()>,
     max_records: usize,
-    max_bytes: usize,
+    budget: QueueBudget,
     subscription: Option<SubscriptionQueuePolicy<T>>,
 }
 
@@ -226,36 +271,52 @@ impl<T> Clone for EventQueue<T> {
 
 impl<T> EventQueue<T> {
     pub(crate) fn new(max_records: usize, max_bytes: usize) -> Self {
-        Self::with_policy(max_records, max_bytes, None)
+        Self::with_policy(max_records, QueueBudget::Fixed(max_bytes), None)
     }
 
     fn with_policy(
         max_records: usize,
-        max_bytes: usize,
+        budget: QueueBudget,
         subscription: Option<SubscriptionQueuePolicy<T>>,
     ) -> Self {
         let (changed, _) = watch::channel(());
         Self {
             inner: Arc::new(EventQueueInner {
                 state: SyncMutex::new(EventQueueState {
+                    byte_limits: match budget {
+                        QueueBudget::Fixed(total) => Some(QueueByteLimits {
+                            total,
+                            per_subscription: None,
+                        }),
+                        QueueBudget::SessionSubscriptions { .. } => None,
+                    },
                     generation: Arc::new(()),
                     events: VecDeque::new(),
                     bytes: 0,
-                    condition: QueueCondition::Delivering,
+                    condition: match budget {
+                        QueueBudget::Fixed(_) => QueueCondition::Delivering,
+                        QueueBudget::SessionSubscriptions { .. } => QueueCondition::Closed,
+                    },
                     subscription_usage: HashMap::default(),
                     overflowed_subscriptions: HashSet::default(),
                     overflow_events: VecDeque::new(),
                 }),
                 changed,
                 max_records,
-                max_bytes,
+                budget,
                 subscription,
             }),
         }
     }
 
-    pub(crate) fn begin(&self, generation: &Arc<()>) {
+    pub(crate) fn begin(
+        &self,
+        generation: &Arc<()>,
+        limits: &SessionLimits,
+    ) -> Result<(), Report<ClientError>> {
+        let byte_limits = self.inner.budget.resolve(limits)?;
         let mut state = self.inner.state.lock();
+        state.byte_limits = Some(byte_limits);
         state.generation = generation.clone();
         state.events.clear();
         state.bytes = 0;
@@ -265,6 +326,7 @@ impl<T> EventQueue<T> {
         state.overflow_events.clear();
         drop(state);
         self.inner.changed.send_replace(());
+        Ok(())
     }
 
     fn close(&self, generation: &Arc<()>) {
@@ -291,21 +353,19 @@ impl<T> EventQueue<T> {
         {
             return false;
         }
+        let limits = state
+            .byte_limits
+            .assured("an active queue has its generation budget installed");
         if let Some(policy) = &self.inner.subscription {
-            let overflowed = state.push_subscription(
-                value,
-                bytes,
-                policy,
-                self.inner.max_records,
-                self.inner.max_bytes,
-            );
+            let overflowed =
+                state.push_subscription(value, bytes, policy, self.inner.max_records, limits);
             drop(state);
             self.inner.changed.send_replace(());
             return overflowed;
         }
         let next_bytes = state.bytes.checked_add(bytes);
         let exceeds_bytes = match next_bytes {
-            Some(next) => next > self.inner.max_bytes,
+            Some(next) => next > limits.total,
             None => true,
         };
         if state.events.len() >= self.inner.max_records || exceeds_bytes {
@@ -389,15 +449,18 @@ impl<T> EventQueue<T> {
 }
 
 impl EventQueue<SubscriptionEvent> {
-    pub(crate) fn for_subscriptions(limits: crate::capabilities::SubscriptionQueueLimits) -> Self {
+    pub(crate) fn for_subscriptions(capabilities: crate::ClientCapabilities) -> Self {
+        let limits = capabilities.subscription_record_limits();
         Self::with_policy(
             limits.total_records,
-            limits.total_bytes,
+            QueueBudget::SessionSubscriptions {
+                retained_frames: capabilities.subscription_retained_frames(),
+                subscriptions: capabilities.subscriptions_retained_in_full(),
+            },
             Some(SubscriptionQueuePolicy {
                 key: |event| event.subscription().clone(),
                 overflow: |event| SubscriptionEvent::ConsumerOverflow(event.subscription().clone()),
                 max_records: limits.records,
-                max_bytes: limits.bytes,
             }),
         )
     }
@@ -423,11 +486,14 @@ pub(crate) struct EventTargets {
 }
 
 impl EventTargets {
-    pub(crate) fn begin_generation(&self) -> Arc<()> {
+    pub(crate) fn begin_generation(
+        &self,
+        limits: &SessionLimits,
+    ) -> Result<Arc<()>, Report<ClientError>> {
         let generation = Arc::new(());
-        self.subscriptions.begin(&generation);
-        self.notices.begin(&generation);
-        generation
+        self.subscriptions.begin(&generation, limits)?;
+        self.notices.begin(&generation, limits)?;
+        Ok(generation)
     }
 
     pub(crate) fn close_generation(&self, generation: &Arc<()>) {
@@ -450,7 +516,7 @@ pub(crate) struct SessionEvents {
 impl SessionEvents {
     pub(crate) fn new(capabilities: crate::ClientCapabilities) -> Self {
         let desired = DesiredSubscriptions::new();
-        let subscriptions = EventQueue::for_subscriptions(capabilities.subscription_limits());
+        let subscriptions = EventQueue::for_subscriptions(capabilities);
         let notices = EventQueue::new(SERVER_NOTICE_CAPACITY, SERVER_NOTICE_BYTES);
         let (leadership, observed_leadership) = watch::channel(None);
         let (domains, observed_domains) = watch::channel(None);
@@ -484,6 +550,7 @@ pub(crate) struct Exchange {
 
 /// What a request needs of the exchange it is sent on.
 pub(crate) struct ExchangeRequests {
+    pub(crate) limits: SessionLimits,
     pub(crate) frames: mpsc::Sender<EncodedFrame<ClientFrame>>,
     /// The waiters of the exchange's requests. The exchange's reader shares the registry: it
     /// completes each waiter as its reply arrives and closes the registry when the exchange ends.
@@ -515,7 +582,7 @@ impl ExchangeRequests {
             request,
         };
         let frame = message
-            .encode(&SESSION_LIMITS)
+            .encode(&self.limits)
             .assured("a cancellation names one request identity, far within the frame limit");
         if self.frames.send(frame).await.is_err() {
             self.pending.lock().close();
@@ -553,34 +620,41 @@ impl Exchange {
         connector: &GrpcConnector,
         emitters: EventTargets,
     ) -> error_stack::Result<Self, ClientError> {
-        let mut client = tonic::client::Grpc::new(channel.clone())
-            .max_decoding_message_size(SESSION_LIMITS.frame_bytes())
-            .max_encoding_message_size(SESSION_LIMITS.frame_bytes());
+        let mut opening_channel = channel.clone();
         let (frames, outbound) = mpsc::channel(REQUEST_FRAME_CAPACITY);
         let mut request = Request::new(ReceiverStream::new(outbound));
         connector.authorize(&mut request);
-        let response = nervix_primitives::time::timeout(connector.connect_timeout(), async {
-            client
-                .ready()
+        let opened = nervix_primitives::time::timeout(connector.connect_timeout(), async {
+            crate::session_open::ready(&mut opening_channel)
                 .await
                 .map_err(|error| Report::new(ClientError::ConnectServer(error)))?;
-            client
-                .streaming(
-                    request,
-                    PathAndQuery::from_static(EXCHANGE_PATH),
-                    ClientExchangeCodec::new(SESSION_LIMITS),
-                )
-                .await
-                .map_err(|status| Report::new(ClientError::StartSession(Box::new(status))))
+            crate::session_open::open::<wire::ClientFrame, wire::ServerFrame>(
+                &mut opening_channel,
+                request,
+                PathAndQuery::from_static(EXCHANGE_PATH),
+                crate::session_open::OutboundBounds::Announced,
+            )
+            .await
+            .map_err(|status| Report::new(ClientError::StartSession(Box::new(status))))
         })
         .await
         .map_err(|_| Report::new(ClientError::SessionOpenDeadline))??;
+        let limits = opened.limits;
         let pending = Arc::new(SyncMutex::new(PendingReplies::new()));
-        let generation = emitters.begin_generation();
-        let reader = ExchangeReader::new(pending.clone(), emitters.clone(), generation.clone());
-        let reader = nervix_primitives::task::spawn(reader.run(response.into_inner()));
+        let generation = emitters.begin_generation(&limits)?;
+        let reader = ExchangeReader::new(
+            pending.clone(),
+            emitters.clone(),
+            generation.clone(),
+            limits,
+        );
+        let reader = nervix_primitives::task::spawn(reader.run(opened.frames));
         Ok(Self {
-            requests: Arc::new(ExchangeRequests { frames, pending }),
+            requests: Arc::new(ExchangeRequests {
+                frames,
+                pending,
+                limits,
+            }),
             reader: Some(reader),
             emitters,
             generation,
@@ -841,6 +915,7 @@ pub(crate) enum ReaderFlow {
 /// Routes the frames of one exchange: each reply to the request that waits for it, each transfer
 /// part into the reply it reassembles, and each unsolicited message to the client's event emitters.
 pub(crate) struct ExchangeReader {
+    limits: SessionLimits,
     pending: Arc<SyncMutex<PendingReplies>>,
     emitters: EventTargets,
     generation: Arc<()>,
@@ -861,8 +936,10 @@ impl ExchangeReader {
         pending: Arc<SyncMutex<PendingReplies>>,
         emitters: EventTargets,
         generation: Arc<()>,
+        limits: SessionLimits,
     ) -> Self {
         Self {
+            limits,
             pending,
             emitters,
             generation,
@@ -997,7 +1074,7 @@ impl ExchangeReader {
         let assembly = self
             .transfers
             .entry(request_id)
-            .or_insert_with(|| TransferAssembly::new(request_id, &SESSION_LIMITS));
+            .or_insert_with(|| TransferAssembly::new(request_id, &self.limits));
         if let Err(violation) = assembly.append(&part) {
             return Self::violated(violation, "reassembling a transferred reply");
         }
@@ -1018,6 +1095,13 @@ impl ExchangeReader {
     /// Delivers an unsolicited message to the client's event emitters.
     async fn publish(&mut self, event: wire::ServerEvent) -> ReaderFlow {
         match event {
+            wire::ServerEvent::SessionOpened(_) => Self::violated(
+                wire::WireDecodeError::UnexpectedMessage {
+                    expected: "ordinary exchange event",
+                    actual: "WebSocket session opening",
+                },
+                "routing an exchange event",
+            ),
             wire::ServerEvent::Notice(notice) => self.notify(ServerEvent::from(notice)),
             wire::ServerEvent::Leadership(observed) => {
                 self.emitters

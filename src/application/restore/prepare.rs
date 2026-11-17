@@ -720,6 +720,9 @@ impl SessionServiceImpl {
                         descriptor,
                         groups,
                         key_schema,
+                        super::branch_state::RestoreAdmissionPolicy::new(
+                            &self.inner.operational.control_plane,
+                        ),
                     )
                     .await
                     .change_context_lazy(|| refusal(&descriptor.entity))?;
@@ -754,6 +757,9 @@ impl SessionServiceImpl {
                         descriptor,
                         groups,
                         window,
+                        super::branch_state::RestoreAdmissionPolicy::new(
+                            &self.inner.operational.control_plane,
+                        ),
                     )
                     .await
                     .change_context_lazy(|| refusal(&descriptor.entity))?;

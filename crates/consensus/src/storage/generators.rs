@@ -2079,7 +2079,7 @@ fn command_of(arbitrary: &mut Arbitrary<'_>, variant: CommandVariant) -> Consens
             observed_at: arbitrary.timestamp(),
         },
         CommandVariant::SeedClusterParameters => ConsensusCommand::SeedClusterParameters {
-            values: arbitrary.cluster_parameter_values(),
+            values: Box::new(arbitrary.cluster_parameter_values()),
         },
         CommandVariant::AlterClusterParameters => ConsensusCommand::AlterClusterParameters {
             reference: arbitrary.execution_reference(),

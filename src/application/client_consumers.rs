@@ -11,7 +11,7 @@
     nervix::layer(edge, reason = "owns the edges boundary declared above")
 )]
 
-use std::{num::NonZeroU64, time::Duration};
+use std::num::NonZeroU64;
 
 use bytes::Bytes;
 use futures_util::StreamExt as _;
@@ -22,8 +22,8 @@ use nervix_interconnect::{
     PoolClass, RequestSubquota, StreamHandlerError, Transport,
 };
 use nervix_models::{
-    ClientConsumerLimits, ClusterNodeName, DomainName, EmitterName, RelayName, SchemaField,
-    Timestamp,
+    AnnouncedLinkHeartbeat, ClientConsumerLimits, ClientLinkCapabilities, ClusterNodeName,
+    DomainName, EmitterName, RelayName, SchemaField, Timestamp,
 };
 use nervix_primitives::{
     stream::wrappers::ReceiverStream,
@@ -44,14 +44,12 @@ use crate::runtime::{
     ClientEmitterResponder, Runtime,
 };
 
-const HEARTBEAT_EACH: Duration = Duration::from_secs(2);
-const PEER_SILENCE: Duration = Duration::from_secs(10);
-const OPEN_DEADLINE: Duration = Duration::from_secs(20);
 const CHUNK_BYTES: usize = 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
 struct OpenConsumerStream {
     serving_node: ClusterNodeName,
+    heartbeat: AnnouncedLinkHeartbeat,
     domain: DomainName,
     emitter: EmitterName,
     expected_fields: Vec<SchemaField>,
@@ -64,8 +62,8 @@ impl InterconnectDuplexRequest for OpenConsumerStream {
     const NAME: &'static str = "client_consumer_stream";
     const CLASS: PoolClass = PoolClass::Relay;
     const SUBQUOTA: RequestSubquota = RequestSubquota::Shared;
-    const SETUP_DEADLINE: nervix_interconnect::RequestDeadline =
-        nervix_interconnect::RequestDeadline::Setup;
+    const SETUP_DEADLINE: nervix_interconnect::DuplexSetupDeadline =
+        nervix_interconnect::DuplexSetupDeadline::ConnectionSetup;
 }
 
 #[derive(Debug, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
@@ -81,7 +79,10 @@ enum ConsumerItem {
 
 #[derive(Debug, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
 enum ConsumerEvent {
-    Opened(ClientEmitterDescription),
+    Opened {
+        description: ClientEmitterDescription,
+        heartbeat: AnnouncedLinkHeartbeat,
+    },
     Refused(ClientEmitterRefusal),
     DeliveryStart {
         identity: [u8; 16],
@@ -147,6 +148,7 @@ impl ConsumerResponder {
 
 #[derive(Clone)]
 pub(in crate::application) struct ClientConsumerRouter {
+    settings: ClientLinkCapabilities,
     runtime: Runtime,
     interconnect: Transport,
     local_node: ClusterNodeName,
@@ -157,8 +159,10 @@ impl ClientConsumerRouter {
         runtime: Runtime,
         interconnect: Transport,
         local_node: ClusterNodeName,
+        settings: ClientLinkCapabilities,
     ) -> Self {
         Self {
+            settings,
             runtime,
             interconnect,
             local_node,
@@ -170,6 +174,7 @@ impl ClientConsumerRouter {
         interconnect: &Transport,
     ) -> error_stack::Result<(), HandlerRegistrationError> {
         let runtime = self.runtime.clone();
+        let settings = self.settings;
         interconnect.register_duplex_handler::<OpenConsumerStream, _, _>(
             move |context, request, items| {
                 let runtime = runtime.clone();
@@ -180,8 +185,13 @@ impl ClientConsumerRouter {
                                 .to_string(),
                         )));
                     }
-                    let (answers, received) = mpsc::channel(64);
-                    nervix_primitives::task::spawn(serve_owner(runtime, request, items, answers));
+                    let (answers, received) = mpsc::channel(
+                        usize::try_from(settings.consumer_answer_capacity().get())
+                            .assured("validated native channel capacity"),
+                    );
+                    nervix_primitives::task::spawn(serve_owner(
+                        runtime, request, items, answers, settings,
+                    ));
                     Ok(DuplexResponses::new(ReceiverStream::new(received).map(Ok)))
                 }
             },
@@ -239,14 +249,16 @@ impl ClientConsumerRouter {
         }
         let opening = OpenConsumerStream {
             serving_node: self.local_node.clone(),
+            heartbeat: self.settings.announced_heartbeat(),
             domain,
             emitter,
             expected_fields,
             limits,
         };
         let started = Instant::now();
-        let stream = nervix_primitives::time::timeout(
-            OPEN_DEADLINE,
+        let deadline = started + self.settings.consumer_open_timeout();
+        let stream = nervix_primitives::time::timeout_at(
+            deadline,
             self.interconnect.open_duplex_stream(owner, opening),
         )
         .await;
@@ -267,7 +279,7 @@ impl ClientConsumerRouter {
             }
         };
         let (sender, mut receiver) = stream;
-        let first = nervix_primitives::time::timeout(OPEN_DEADLINE, receiver.next()).await;
+        let first = nervix_primitives::time::timeout_at(deadline, receiver.next()).await;
         let first = match first {
             Ok(Ok(Some(first))) => first,
             Ok(Ok(None)) => {
@@ -287,8 +299,11 @@ impl ClientConsumerRouter {
                 return Err(EmitterOpenRefusal::EndpointUnavailable);
             }
         };
-        let description = match first {
-            ConsumerEvent::Opened(description) => description,
+        let (description, peer_heartbeat) = match first {
+            ConsumerEvent::Opened {
+                description,
+                heartbeat,
+            } => (description, heartbeat),
             ConsumerEvent::Refused(refusal) => {
                 debug!(
                     %owner,
@@ -313,6 +328,8 @@ impl ClientConsumerRouter {
             incoming,
             deliveries,
             limits.bytes,
+            self.settings,
+            peer_heartbeat,
         ));
         let responder = ConsumerResponder::Forwarded(ForwardedResponder {
             inner: Arc::new(ForwardedInner {
@@ -401,6 +418,7 @@ async fn serve_owner(
     request: OpenConsumerStream,
     mut items: DuplexItems<ConsumerItem>,
     answers: mpsc::Sender<ConsumerEvent>,
+    settings: ClientLinkCapabilities,
 ) {
     let opened = async {
         let grant = runtime
@@ -438,7 +456,10 @@ async fn serve_owner(
         }
     };
     if answers
-        .send(ConsumerEvent::Opened(description))
+        .send(ConsumerEvent::Opened {
+            description,
+            heartbeat: settings.announced_heartbeat(),
+        })
         .await
         .is_err()
     {
@@ -453,7 +474,7 @@ async fn serve_owner(
     let (responder, deliveries) = consumer.split();
     let mut forward =
         nervix_primitives::task::spawn(forward_deliveries(deliveries, answers.clone()));
-    let mut heartbeat = nervix_primitives::time::interval(HEARTBEAT_EACH);
+    let mut heartbeat = nervix_primitives::time::interval(settings.heartbeat_interval());
     heartbeat.set_missed_tick_behavior(nervix_primitives::time::MissedTickBehavior::Skip);
     let mut last_heard = Instant::now();
     let ended = loop {
@@ -470,13 +491,11 @@ async fn serve_owner(
                 Err(_) => break "the stream failed",
             },
             _ = heartbeat.tick() => {
-                if Instant::now().duration_since(last_heard) >= PEER_SILENCE {
-                    break "the serving node fell silent";
-                }
                 if answers.send(ConsumerEvent::Heartbeat).await.is_err() {
                     break "the serving node stopped reading";
                 }
             }
+            () = nervix_primitives::time::sleep_until(last_heard + request.heartbeat.silence_limit()) => break "the serving node fell silent",
             _ = &mut forward => break "the emitter endpoint ended",
         }
     };
@@ -552,8 +571,13 @@ async fn serve_forwarded(
     mut commands: mpsc::UnboundedReceiver<ForwardedCommand>,
     deliveries: mpsc::UnboundedSender<ConsumerDelivery>,
     grant: NonZeroU64,
+    settings: ClientLinkCapabilities,
+    peer_heartbeat: AnnouncedLinkHeartbeat,
 ) {
-    let (outbound, mut queued) = mpsc::channel::<ConsumerItem>(64);
+    let (outbound, mut queued) = mpsc::channel::<ConsumerItem>(
+        usize::try_from(settings.consumer_writer_capacity().get())
+            .assured("validated native writer capacity"),
+    );
     let mut writer = nervix_primitives::task::spawn(async move {
         let mut sender = sender;
         while let Some(item) = queued.recv().await {
@@ -566,7 +590,7 @@ async fn serve_forwarded(
         ahash::HashMap::<u64, oneshot::Sender<Result<(), ClientEmitterRefusal>>>::default();
     let mut next_key = 1_u64;
     let mut assembly: Option<Assembly> = None;
-    let mut heartbeat = nervix_primitives::time::interval(HEARTBEAT_EACH);
+    let mut heartbeat = nervix_primitives::time::interval(settings.heartbeat_interval());
     heartbeat.set_missed_tick_behavior(nervix_primitives::time::MissedTickBehavior::Skip);
     let mut last_heard = Instant::now();
     let ended = loop {
@@ -616,7 +640,7 @@ async fn serve_forwarded(
                     }
                     ConsumerEvent::Ended => break "the emitter endpoint ended",
                     ConsumerEvent::Heartbeat => {},
-                    ConsumerEvent::Opened(_) | ConsumerEvent::Refused(_) => break "the executing node broke the stream contract",
+                    ConsumerEvent::Opened { .. } | ConsumerEvent::Refused(_) => break "the executing node broke the stream contract",
                 }
             }
             command = commands.recv() => match command {
@@ -640,15 +664,13 @@ async fn serve_forwarded(
                 }
             },
             _ = heartbeat.tick() => {
-                if Instant::now().duration_since(last_heard) >= PEER_SILENCE {
-                    break "the executing node fell silent";
-                }
                 if outbound.is_closed() {
                     break "the stream stopped taking items";
                 }
                 outbound.try_send(ConsumerItem::Heartbeat)
                     .discarded("a missed best-effort heartbeat is detected by peer silence");
             }
+            () = nervix_primitives::time::sleep_until(last_heard + peer_heartbeat.silence_limit()) => break "the executing node fell silent",
             _ = &mut writer => break "the stream stopped taking items",
         }
     };

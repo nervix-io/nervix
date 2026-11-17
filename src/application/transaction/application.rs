@@ -14,8 +14,6 @@
     )
 )]
 
-use std::time::Duration;
-
 use error_stack::{Report, ResultExt as _};
 use nervix_consensus::{
     ConsensusError, ConsensusTransactionError, ReplicatedTransaction,
@@ -60,7 +58,13 @@ impl SessionServiceImpl {
                         })
                         .is_err()
                     {
-                        sleep(Duration::from_millis(100)).await;
+                        sleep(
+                            self.inner
+                                .operational
+                                .control_plane
+                                .transaction_application_retry_interval(),
+                        )
+                        .await;
                         return Ok(TransactionApplicationAttempt::Retry);
                     }
                     None
@@ -113,7 +117,13 @@ impl SessionServiceImpl {
                                     })
                                     .is_err()
                                 {
-                                    sleep(Duration::from_millis(100)).await;
+                                    sleep(
+                                        self.inner
+                                            .operational
+                                            .control_plane
+                                            .transaction_application_retry_interval(),
+                                    )
+                                    .await;
                                     return Ok(TransactionApplicationAttempt::Retry);
                                 }
                                 None
@@ -125,7 +135,13 @@ impl SessionServiceImpl {
                                         | RuntimeError::RuntimeRevisionReadiness { .. }
                                 ) =>
                             {
-                                sleep(Duration::from_millis(100)).await;
+                                sleep(
+                                    self.inner
+                                        .operational
+                                        .control_plane
+                                        .transaction_application_retry_interval(),
+                                )
+                                .await;
                                 return Ok(TransactionApplicationAttempt::Retry);
                             }
                             Err(error) => Some(format!(
@@ -437,7 +453,13 @@ impl SessionServiceImpl {
                     .change_context(ConsensusTransactionError::Consensus)
                     .change_context(TransactionCommitError::Proposal));
                 }
-                sleep(Duration::from_millis(100)).await;
+                sleep(
+                    self.inner
+                        .operational
+                        .control_plane
+                        .transaction_application_retry_interval(),
+                )
+                .await;
             }
         }
         Ok(completed)

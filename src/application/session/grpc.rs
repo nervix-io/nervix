@@ -127,10 +127,8 @@ pub(in crate::application) struct SessionGrpcService {
 
 impl SessionGrpcService {
     pub(in crate::application) fn new(service: SessionServiceImpl) -> Self {
-        Self {
-            service,
-            limits: SessionLimits::DEFAULT,
-        }
+        let limits = service.session_limits();
+        Self { service, limits }
     }
 }
 
@@ -216,7 +214,8 @@ impl StreamingService<VerifiedFrame<ClientFrame>> for Exchange {
             let inbound = request
                 .into_inner()
                 .map(move |item| failure_report.inbound_frame(item));
-            let (outbound, frames) = outbound::channel(CancellationToken::new());
+            let (outbound, frames) =
+                outbound::channel(CancellationToken::new(), &service.inner.operational.session);
             let session_service = service.clone();
             service.inner.service_tasks.spawn(async move {
                 session_service
@@ -231,7 +230,9 @@ impl StreamingService<VerifiedFrame<ClientFrame>> for Exchange {
                 .map(Ok)
                 .chain(stream::once(failure).filter_map(failure_status));
             let responses: ExchangeStream = Box::pin(responses);
-            Ok(Response::new(responses))
+            let mut response = Response::new(responses);
+            nervix_client_wire::grpc::limits::write(response.metadata_mut(), limits);
+            Ok(response)
         })
     }
 }
@@ -276,7 +277,7 @@ struct Upload {
 
 impl ClientStreamingService<VerifiedFrame<UploadFrame>> for Upload {
     type Response = EncodedFrame<UploadReplyFrame>;
-    type Future = BoxFuture<Response<EncodedFrame<UploadReplyFrame>>, Status>;
+    type Future = BoxFuture<Response<Self::Response>, Status>;
 
     fn call(&mut self, request: Request<Streaming<VerifiedFrame<UploadFrame>>>) -> Self::Future {
         let service = self.service.clone();
@@ -287,6 +288,11 @@ impl ClientStreamingService<VerifiedFrame<UploadFrame>> for Upload {
                 .authenticate(&service)
                 .await
                 .map_err(GrpcAuthenticationError::status)?;
+            if let Some(refusal) =
+                nervix_client_wire::grpc::limits::offer_refusal(request.metadata(), limits)
+            {
+                return Err(refusal);
+            }
             let reply = service.serve_upload(user, request.into_inner()).await?;
             #[cfg(feature = "testing")]
             if service.loses_installed_upload_reply(&reply) {
@@ -294,12 +300,17 @@ impl ClientStreamingService<VerifiedFrame<UploadFrame>> for Upload {
                     "the reply to an upload call that installed its version was lost",
                 ));
             }
-            match reply.encode(&limits) {
-                Ok(frame) => Ok(Response::new(frame)),
-                Err(error) => Err(Status::internal(format!(
-                    "the upload reply does not fit a frame: {error}"
-                ))),
-            }
+            let frame = match reply.encode(&limits) {
+                Ok(frame) => frame,
+                Err(error) => {
+                    return Err(Status::internal(format!(
+                        "the upload reply does not fit a frame: {error:#}"
+                    )));
+                }
+            };
+            let mut response = Response::new(frame);
+            nervix_client_wire::grpc::limits::write(response.metadata_mut(), limits);
+            Ok(response)
         })
     }
 }
@@ -312,7 +323,7 @@ struct Restore {
 
 impl ClientStreamingService<VerifiedFrame<RestoreFrame>> for Restore {
     type Response = EncodedFrame<RestoreReplyFrame>;
-    type Future = BoxFuture<Response<EncodedFrame<RestoreReplyFrame>>, Status>;
+    type Future = BoxFuture<Response<Self::Response>, Status>;
 
     fn call(&mut self, request: Request<Streaming<VerifiedFrame<RestoreFrame>>>) -> Self::Future {
         let service = self.service.clone();
@@ -323,13 +334,23 @@ impl ClientStreamingService<VerifiedFrame<RestoreFrame>> for Restore {
                 .authenticate(&service)
                 .await
                 .map_err(GrpcAuthenticationError::status)?;
-            let reply = service.serve_restore(user, request.into_inner()).await?;
-            match reply.encode(&limits) {
-                Ok(frame) => Ok(Response::new(frame)),
-                Err(error) => Err(Status::internal(format!(
-                    "the restore reply does not fit a frame: {error}"
-                ))),
+            if let Some(refusal) =
+                nervix_client_wire::grpc::limits::offer_refusal(request.metadata(), limits)
+            {
+                return Err(refusal);
             }
+            let reply = service.serve_restore(user, request.into_inner()).await?;
+            let frame = match reply.encode(&limits) {
+                Ok(frame) => frame,
+                Err(error) => {
+                    return Err(Status::internal(format!(
+                        "the restore reply does not fit a frame: {error:#}"
+                    )));
+                }
+            };
+            let mut response = Response::new(frame);
+            nervix_client_wire::grpc::limits::write(response.metadata_mut(), limits);
+            Ok(response)
         })
     }
 }
@@ -364,11 +385,15 @@ impl ServerStreamingService<VerifiedFrame<BackupDownloadRequestFrame>> for Downl
                 .serve_backup_download(user, request.get_ref(), limits)
                 .await
                 .map_err(|error| {
-                    Status::internal(format!("the download answer does not fit a frame: {error}"))
+                    Status::internal(format!(
+                        "the download answer does not fit a frame: {error:#}"
+                    ))
                 })?;
             let frames = frames.into_stream();
             let responses = DownloadResponse::Frames { frames, admission }.into_stream();
-            Ok(Response::new(responses))
+            let mut response = Response::new(responses);
+            nervix_client_wire::grpc::limits::write(response.metadata_mut(), limits);
+            Ok(response)
         })
     }
 }

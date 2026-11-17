@@ -29,13 +29,14 @@ pub(super) struct ReceiveRestore {
     pub(super) restores: mpsc::Sender<ReceivedRestore>,
 }
 
-impl ClientStreamingService<VerifiedFrame<RestoreFrame>> for ReceiveRestore {
+impl StreamingService<VerifiedFrame<RestoreFrame>> for ReceiveRestore {
     type Response = Vec<u8>;
-    type Future = BoxFuture<Response<Vec<u8>>, Status>;
+    type ResponseStream = AnnouncedAnswers<Self::Response>;
+    type Future = BoxFuture<Response<Self::ResponseStream>, Status>;
 
     fn call(&mut self, request: Request<Streaming<VerifiedFrame<RestoreFrame>>>) -> Self::Future {
         let restores = self.restores.clone();
-        Box::pin(async move {
+        let completion = async move {
             let mut inbound = request.into_inner();
             let first = inbound
                 .message()
@@ -66,8 +67,10 @@ impl ClientStreamingService<VerifiedFrame<RestoreFrame>> for ReceiveRestore {
                 .await
                 .assured("the owner test waits for its restore");
             let answer = answer.await.assured("the owner test answers the restore");
-            Ok(Response::new(answer))
-        })
+            Ok(answer)
+        };
+        let response = announced_answer(completion, limits());
+        Box::pin(async move { Ok(response) })
     }
 }
 

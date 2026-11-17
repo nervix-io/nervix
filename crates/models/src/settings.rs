@@ -10,6 +10,8 @@
 
 use std::{fmt, marker::PhantomData};
 
+pub(crate) mod archive;
+
 mod sealed {
     pub trait Class {}
 }
@@ -176,20 +178,6 @@ impl<D: SettingDefinition> Setting<D> {
 
     pub fn into_value(self) -> D::Value {
         self.value
-    }
-}
-
-impl<D> From<crate::cluster_parameters::value::ParameterSetting<D>> for Setting<D>
-where
-    D: crate::cluster_parameters::value::ParameterDefinition<Context = ()>,
-{
-    /// Preserve the parameter carrier's validation when projecting its setting class.
-    #[inline]
-    fn from(value: crate::cluster_parameters::value::ParameterSetting<D>) -> Self {
-        Self {
-            value: value.value(),
-            definition: PhantomData,
-        }
     }
 }
 

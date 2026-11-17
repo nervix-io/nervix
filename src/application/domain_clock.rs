@@ -50,12 +50,6 @@ use crate::{
     task_shutdown::JoinShutdown,
 };
 
-const DOMAIN_CLOCK_PROGRESS_RETRY_BACKOFF: Duration = Duration::from_millis(200);
-/// How long a leader waits before proposing again an authority reassignment that did not commit.
-/// A newly elected leader refuses writes until its quorum acknowledges it, so the first proposal
-/// it makes on taking over can fail while the next one commits.
-const DOMAIN_CLOCK_AUTHORITY_RETRY_INTERVAL: Duration = Duration::from_millis(200);
-
 /// Whether the leader's latest reconciliation pass committed every authority its selection
 /// requires.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -210,7 +204,7 @@ impl DomainClockProgressDelivery {
                         biased;
                         _ = shutdown.cancelled() => return,
                         _ = target.lifetime.cancelled() => return,
-                        _ = sleep(DOMAIN_CLOCK_PROGRESS_RETRY_BACKOFF) => {}
+                        _ = sleep(service.inner.operational.control_plane.domain_clock_progress_retry_interval()) => {}
                     }
                     retry_pending = true;
                 }
@@ -335,7 +329,7 @@ impl DomainClockAttachmentSender {
                 }
                 nervix_primitives::select! {
                     _ = token.cancelled() => return,
-                    _ = sleep(DOMAIN_CLOCK_PROGRESS_RETRY_BACKOFF) => {}
+                    _ = sleep(service.inner.operational.control_plane.domain_clock_progress_retry_interval()) => {}
                 }
             }
         });
@@ -625,7 +619,7 @@ pub(in crate::application) async fn run_domain_clock_authority_reconciliation(
         }
         // A refused proposal changes nothing this loop observes, so a reassignment that did not
         // commit is proposed again after the retry interval rather than at the next change.
-        let retry = sleep(DOMAIN_CLOCK_AUTHORITY_RETRY_INTERVAL);
+        let retry = sleep(service.inner.raft_timings.heartbeat_interval() * 4 / 5);
         tokio::pin!(retry);
         nervix_primitives::select! {
             _ = shutdown.cancelled() => break,

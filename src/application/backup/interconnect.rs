@@ -202,14 +202,20 @@ impl SessionServiceImpl {
                         .await
                         .map_err(StreamHandlerError::with_cause)?;
                     let length = artifact.length();
-                    let chunks = stream::unfold(Some((reader, artifact)), |state| async move {
-                        let (mut reader, artifact) = state?;
-                        match reader.next_chunk(1024 * 1024).await {
-                            Ok(Some(chunk)) => Some((Ok(chunk), Some((reader, artifact)))),
-                            Ok(None) => None,
-                            Err(error) => Some((Err(StreamHandlerError::with_cause(error)), None)),
-                        }
-                    });
+                    let chunk_bytes = service.inner.runtime.executor().bulk_read_batch_bytes(
+                        std::num::NonZeroU32::new(16).assured("sixteen bulk quanta are positive"),
+                    );
+                    let chunks =
+                        stream::unfold(Some((reader, artifact)), move |state| async move {
+                            let (mut reader, artifact) = state?;
+                            match reader.next_chunk(chunk_bytes).await {
+                                Ok(Some(chunk)) => Some((Ok(chunk), Some((reader, artifact)))),
+                                Ok(None) => None,
+                                Err(error) => {
+                                    Some((Err(StreamHandlerError::with_cause(error)), None))
+                                }
+                            }
+                        });
                     Ok(StreamingResponse::new(length, chunks))
                 }
             },
@@ -357,6 +363,7 @@ impl SessionServiceImpl {
                 &request.domain,
                 request.revision,
                 self.inner.consensus.subscribe_applied(),
+                self.inner.raft_timings.heartbeat_interval() * 20,
             )
             .await?;
             progress.enter(CutPhase::ClusterStateApply);
@@ -445,7 +452,8 @@ impl SessionServiceImpl {
             self.inner.captured_backup_sections.retain(|key, _| {
                 key.coordination != request.coordination || key.domain != request.domain
             });
-            let expires_at = Instant::now() + Duration::from_secs(600);
+            let expires_at =
+                Instant::now() + self.cluster_parameters().command_retry_validity() * 2 / 3;
             for section in staged {
                 self.inner.captured_backup_sections.insert(
                     section.key,
@@ -634,7 +642,8 @@ impl SessionServiceImpl {
                                 next_offset: 0,
                                 writer: Some(writer),
                             })),
-                            expires_at: Instant::now() + Duration::from_secs(600),
+                            expires_at: Instant::now()
+                                + self.cluster_parameters().command_retry_validity() * 2 / 3,
                         },
                     );
                     Ok(())
@@ -764,7 +773,7 @@ impl SessionServiceImpl {
         domain: &DomainName,
     ) -> Result<(), Report<RemoteOperationFailure>> {
         let mut applied = self.inner.consensus.subscribe_applied();
-        nervix_primitives::time::timeout(Duration::from_secs(5), async {
+        nervix_primitives::time::timeout(self.inner.raft_timings.heartbeat_interval() * 20, async {
             loop {
                 nervix_primitives::task::consume_budget().await;
                 if *applied.borrow_and_update() >= authority.generation {
@@ -823,8 +832,9 @@ async fn wait_for_capture_revision(
     domain: &DomainName,
     revision: u64,
     mut applied: watch::Receiver<u64>,
+    budget: Duration,
 ) -> Result<(), Report<RemoteOperationFailure>> {
-    nervix_primitives::time::timeout(Duration::from_secs(5), async {
+    nervix_primitives::time::timeout(budget, async {
         loop {
             nervix_primitives::task::consume_budget().await;
             if *applied.borrow_and_update() >= revision {
@@ -885,7 +895,12 @@ mod tests {
     async fn capture_waits_until_the_selected_revision_is_applied() {
         let domain = DomainName::parse("capture_wait").assured("domain is valid");
         let (sender, applied) = watch::channel(7);
-        let mut capture = Box::pin(wait_for_capture_revision(&domain, 9, applied));
+        let mut capture = Box::pin(wait_for_capture_revision(
+            &domain,
+            9,
+            applied,
+            nervix_consensus::RaftTimings::default().heartbeat_interval() * 20,
+        ));
         assert!(matches!(futures_util::poll!(&mut capture), Poll::Pending));
         sender.send(8).assured("capture retains its receiver");
         assert!(matches!(futures_util::poll!(&mut capture), Poll::Pending));
@@ -900,10 +915,15 @@ mod tests {
         let domain = DomainName::parse("capture_closed").assured("domain is valid");
         let (sender, applied) = watch::channel(7);
         drop(sender);
-        let failure = wait_for_capture_revision(&domain, 9, applied)
-            .await
-            .err()
-            .assured("a closed authority cannot reach the selected revision");
+        let failure = wait_for_capture_revision(
+            &domain,
+            9,
+            applied,
+            nervix_consensus::RaftTimings::default().heartbeat_interval() * 20,
+        )
+        .await
+        .err()
+        .assured("a closed authority cannot reach the selected revision");
         assert!(
             failure
                 .to_string()
@@ -915,10 +935,15 @@ mod tests {
     async fn capture_refuses_when_the_selected_revision_never_applies() {
         let domain = DomainName::parse("capture_deadline").assured("domain is valid");
         let (_sender, applied) = watch::channel(7);
-        let failure = wait_for_capture_revision(&domain, 9, applied)
-            .await
-            .err()
-            .assured("an owner that does not catch up reaches its deadline");
+        let failure = wait_for_capture_revision(
+            &domain,
+            9,
+            applied,
+            nervix_consensus::RaftTimings::default().heartbeat_interval() * 20,
+        )
+        .await
+        .err()
+        .assured("an owner that does not catch up reaches its deadline");
         assert!(failure.to_string().contains("within its deadline"));
     }
 

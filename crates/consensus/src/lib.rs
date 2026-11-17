@@ -494,7 +494,7 @@ pub enum ConsensusCommand {
         decision: Option<Box<ReceivedLicenseDecision>>,
     },
     SeedClusterParameters {
-        values: ClusterParameterValues,
+        values: Box<ClusterParameterValues>,
     },
     AlterClusterParameters {
         reference: nervix_models::CommandExecutionReference,
@@ -6095,7 +6095,7 @@ fn apply_consensus_command_at(
             return licensing::apply(state, command);
         }
         ConsensusCommand::SeedClusterParameters { values } => {
-            return cluster_parameters::seed(state, *values);
+            return cluster_parameters::seed(state, **values);
         }
         ConsensusCommand::AlterClusterParameters { reference, inputs } => {
             return cluster_parameters::apply(state, reference, inputs);

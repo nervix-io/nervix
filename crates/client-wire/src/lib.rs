@@ -56,6 +56,7 @@ mod row;
 mod row_batch;
 mod row_text;
 mod server;
+mod session_opened;
 mod state_inspection;
 mod state_rows;
 mod subscription;
@@ -132,6 +133,7 @@ pub use row::{
     RowLocation, RowSchema,
 };
 pub use server::{Reply, ReplyBody, ReplyBodyKind, ReplyDelivery, ServerEvent, ServerMessage};
+pub use session_opened::{SessionOpened, SessionOpeningError};
 pub use subscription::{
     RowsSkippedCause, SubscriptionDeliveryLost, SubscriptionEndReason, SubscriptionEnded,
     SubscriptionHandle, SubscriptionRows, SubscriptionRowsEncoder, SubscriptionRowsSkipped,

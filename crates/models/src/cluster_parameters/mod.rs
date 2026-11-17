@@ -21,14 +21,13 @@ use rkyv::{
 use serde::{Deserialize, Serialize};
 use strum::EnumIter;
 use thiserror::Error;
-use value::ParameterSetting;
+use value::{ParameterSetting, ParameterValue};
 
 use crate::SettingDefinition;
 #[doc(hidden)]
 pub mod value;
 mod value_archive;
 
-pub(crate) mod archive;
 mod durations;
 mod entity_labels;
 mod limits;
@@ -161,36 +160,17 @@ macro_rules! parameter_cli_text {
     };
 }
 
-// Storage widths preserve each declaration's validated range and public semantic type.
 macro_rules! parameter_storage {
-    ($definition:ident) => {
-        impl value::ParameterDefinition for $definition {
-            type Stored = <Self::Value as value::ParameterValue>::Stored;
-            fn store(value: Self::Value) -> Self::Stored {
-                <Self::Value as value::ParameterValue>::store(value)
-            }
-            fn read(stored: Self::Stored) -> Self::Value {
-                <Self::Value as value::ParameterValue>::read(stored)
-            }
-        }
+    ($value:ty) => {
+        <$value as ParameterValue>::Stored
     };
-    ($definition:ident, $stored:ty) => {
-        impl value::ParameterDefinition for $definition {
-            type Stored = $stored;
-            fn store(value: Self::Value) -> Self::Stored {
-                <$stored>::try_from(value)
-                    .assured("the declaration validates its stored count range")
-            }
-            fn read(stored: Self::Stored) -> Self::Value {
-                u64::from(stored)
-            }
-        }
+    ($value:ty, $stored:ty) => {
+        $stored
     };
 }
 
 macro_rules! parameter_values {
-    ($($field:ident: $definition:ident($value:ty) => $kind:ident $(as $stored:ty)?,)+) => {
-        $(parameter_storage!($definition $(, $stored)?);)+
+    ($($field:ident: $definition:ident($value:ty) => $kind:ident $(<$stored:ty>)?,)+) => {
         /// The complete cluster policy. Each field has one class, default and validation owner.
         #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Archive, RkyvSerialize)]
         #[serde(deny_unknown_fields)]
@@ -198,7 +178,7 @@ macro_rules! parameter_values {
             $(
                 #[serde(with = "value_archive")]
                 #[rkyv(with = value_archive::ValidatedSetting)]
-                $field: ParameterSetting<$definition>,
+                $field: ParameterSetting<$definition, parameter_storage!($value $(, $stored)?)>,
             )+
         }
 
@@ -207,7 +187,7 @@ macro_rules! parameter_values {
                 use serde::de::Error as _;
                 #[derive(Deserialize)]
                 #[serde(deny_unknown_fields)]
-                struct Fields { $(#[serde(with = "value_archive")] $field: ParameterSetting<$definition>,)+ }
+                struct Fields { $(#[serde(with = "value_archive")] $field: ParameterSetting<$definition, parameter_storage!($value $(, $stored)?)>,)+ }
                 let fields = Fields::deserialize(deserializer)?;
                 let values = Self {
                     $($field: fields.$field,)+
@@ -333,6 +313,11 @@ macro_rules! parameter_values {
 }
 
 parameter_values! {
+    forced_recovery_budget: ForcedRecoveryBudget(Duration) => Duration,
+    ownership_handoff_poll_interval: OwnershipHandoffPollInterval(Duration) => Duration,
+    entity_gate_poll_interval: EntityGatePollInterval(Duration) => Duration,
+    domain_drain_poll_interval: DomainDrainPollInterval(Duration) => Duration,
+    runtime_readiness_propagation_bound: RuntimeReadinessPropagationBound(Duration) => Duration,
     licensing_request_timeout: LicensingRequestTimeout(Duration) => Duration,
     licensing_retry_backoff_max: LicensingRetryBackoffMax(Duration) => Duration,
     licensing_stream_idle_timeout: LicensingStreamIdleTimeout(Duration) => Duration,
@@ -343,11 +328,11 @@ parameter_values! {
     transaction_tombstone_retention: TransactionTombstoneRetention(Duration) => Duration,
     command_retry_validity: CommandRetryValidity(Duration) => Duration,
     state_snapshot_interval: StateSnapshotInterval(Duration) => Duration,
-    transaction_max_statements: TransactionMaxStatements(u64) => Count as u32,
+    transaction_max_statements: TransactionMaxStatements(u64) => Count<u32>,
     transaction_max_source_bytes: TransactionMaxSourceBytes(u64) => Bytes,
-    transaction_max_open: TransactionMaxOpen(u64) => Count as u32,
-    command_execution_capacity: CommandExecutionCapacity(u64) => Count as u32,
-    replica_count: ReplicaCount(u64) => Count as u32,
+    transaction_max_open: TransactionMaxOpen(u64) => Count<u32>,
+    command_execution_capacity: CommandExecutionCapacity(u64) => Count<u32>,
+    replica_count: ReplicaCount(u64) => Count<u32>,
     resource_max_archive_bytes: ResourceMaxArchiveBytes(u64) => Bytes,
     resource_max_extracted_bytes: ResourceMaxExtractedBytes(u64) => Bytes,
     resource_max_file_count: ResourceMaxFileCount(u64) => Count,
@@ -355,16 +340,16 @@ parameter_values! {
     entity_labels_max_key_bytes: EntityLabelsMaxKeyBytes(u64) => Bytes,
     entity_labels_max_value_bytes: EntityLabelsMaxValueBytes(u64) => Bytes,
     entity_labels_max_bytes: EntityLabelsMaxBytes(u64) => Bytes,
-    max_batch_messages: MaxBatchMessages(u64) => Count as u32,
+    max_batch_messages: MaxBatchMessages(u64) => Count<u32>,
     client_producer_session_bytes: ClientProducerSessionBytes(u64) => Bytes,
     client_consumer_session_bytes: ClientConsumerSessionBytes(u64) => Bytes,
     udf_code_bytes: UdfCodeBytes(u64) => Bytes,
     http_header_bytes: HttpHeaderBytes(u64) => Bytes,
-    http_header_fields: HttpHeaderFields(u64) => Count,
-    client_batch_rows: ClientBatchRows(u64) => Count as u32,
+    http_header_fields: HttpHeaderFields(u64) => Count<u32>,
+    client_batch_rows: ClientBatchRows(u64) => Count<u32>,
     tls_cipher_suites: TlsCipherSuites(nervix_crypto_policy::TlsCipherSuites) => AlgorithmNames,
     tls_key_exchange_groups: TlsKeyExchangeGroups(nervix_crypto_policy::TlsKeyExchangeGroups) => AlgorithmNames,
-    password_iterations: PasswordIterations(u64) => Count,
+    password_iterations: PasswordIterations(u64) => Count<u32>,
 }
 
 /// One bound shared by the duration declarations and their lossless representation.
@@ -495,8 +480,10 @@ impl ClusterParameterValues {
     /// The validated bounds a host captures together for one HTTP publication.
     pub fn http_header_limits(&self) -> crate::HttpHeaderLimits {
         crate::HttpHeaderLimits::new(
-            self.http_header_bytes.into(),
-            self.http_header_fields.into(),
+            crate::Setting::new(self.http_header_bytes(), &())
+                .assured("the parameter was validated"),
+            crate::Setting::new(self.http_header_fields(), &())
+                .assured("the parameter was validated"),
         )
     }
 }

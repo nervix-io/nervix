@@ -614,7 +614,7 @@ pub trait InterconnectDuplexRequest: RkyvMessage {
     const CLASS: PoolClass;
     const SUBQUOTA: RequestSubquota = RequestSubquota::Shared;
     /// How long opening the stream may take. It is not a bound on the stream's lifetime.
-    const SETUP_DEADLINE: crate::RequestDeadline;
+    const SETUP_DEADLINE: crate::DuplexSetupDeadline;
     const REQUIRES_LIVE_TARGET: bool = true;
 }
 
@@ -1570,7 +1570,11 @@ impl Transport {
         M::DEADLINE.resolve(self.inner.request_timeout(), self.liveness())
     }
     pub fn duplex_setup_deadline<M: InterconnectDuplexRequest>(&self) -> Duration {
-        M::SETUP_DEADLINE.resolve(self.inner.request_timeout(), self.liveness())
+        M::SETUP_DEADLINE.resolve(
+            self.inner.connection_setup_timeout(),
+            self.inner.request_timeout(),
+            self.liveness(),
+        )
     }
 }
 

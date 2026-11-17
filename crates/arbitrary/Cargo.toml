@@ -13,6 +13,7 @@ workspace = true
 meticulous = { workspace = true }
 nervix-licensing-vocabulary = { workspace = true }
 nervix-models = { workspace = true }
+nervix-primitives = { workspace = true }
 nervix-wasm-protocol = { workspace = true }
 rkyv = { workspace = true }
 strum = { workspace = true, features = ["derive"] }

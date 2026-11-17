@@ -170,8 +170,10 @@ impl InterconnectDuplexRequest for OpenAppendStream {
     const NAME: &'static str = "raft_append_stream";
     const CLASS: PoolClass = PoolClass::Replication;
     const SUBQUOTA: RequestSubquota = RequestSubquota::Append;
-    const SETUP_DEADLINE: nervix_interconnect::RequestDeadline =
-        nervix_interconnect::RequestDeadline::Setup;
+    const SETUP_DEADLINE: nervix_interconnect::DuplexSetupDeadline =
+        nervix_interconnect::DuplexSetupDeadline::Request(
+            nervix_interconnect::RequestDeadline::Setup,
+        );
 }
 
 /// What the follower's Raft made of one submitted batch.

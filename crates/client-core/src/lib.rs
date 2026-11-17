@@ -38,6 +38,7 @@ mod outcome;
 mod producer;
 mod restoration;
 mod restore;
+mod session_open;
 mod subscriptions;
 mod upload;
 

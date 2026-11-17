@@ -167,7 +167,9 @@ impl StreamingService<VerifiedFrame<ClientFrame>> for Exchange {
                     }
                 }
             });
-            Ok(Response::new(ReceiverStream::new(receiver)))
+            let mut response = Response::new(ReceiverStream::new(receiver));
+            nervix_client_wire::grpc::limits::write(response.metadata_mut(), limits);
+            Ok(response)
         })
     }
 }
@@ -278,6 +280,11 @@ impl ClientStreamingService<VerifiedFrame<UploadFrame>> for Upload {
     fn call(&mut self, request: Request<Streaming<VerifiedFrame<UploadFrame>>>) -> Self::Future {
         let limits = self.limits;
         Box::pin(async move {
+            if let Some(refusal) =
+                nervix_client_wire::grpc::limits::offer_refusal(request.metadata(), limits)
+            {
+                return Err(refusal);
+            }
             let mut inbound = request.into_inner();
             let Some(first) = inbound.message().await? else {
                 return Err(Status::invalid_argument("an empty upload stream"));
@@ -319,11 +326,13 @@ impl ClientStreamingService<VerifiedFrame<UploadFrame>> for Upload {
                 message: format!("received {} bytes", received.len()),
                 diagnostics: Vec::new(),
             };
-            Ok(Response::new(
+            let mut response = Response::new(
                 reply
                     .encode(&limits)
                     .map_err(|error| Status::internal(error.to_string()))?,
-            ))
+            );
+            nervix_client_wire::grpc::limits::write(response.metadata_mut(), limits);
+            Ok(response)
         })
     }
 }
@@ -686,9 +695,11 @@ async fn an_upload_stream_is_answered_by_one_reply() {
     for chunk in archive.chunks(1500) {
         frames.push(UploadChunk::encode(chunk, &limits).assured("a chunk fits"));
     }
+    let mut request = Request::new(nervix_primitives::stream::iter(frames));
+    nervix_client_wire::grpc::limits::write(request.metadata_mut(), limits);
     let response = client
         .client_streaming(
-            Request::new(nervix_primitives::stream::iter(frames)),
+            request,
             http::uri::PathAndQuery::from_static(UPLOAD_RESOURCE_PATH),
             ClientUploadCodec::new(limits),
         )

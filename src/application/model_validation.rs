@@ -15,6 +15,7 @@
     )
 )]
 
+#[cfg(all(test, not(any(feature = "shuttle", feature = "loom"))))]
 use std::time::Duration;
 
 use ahash::{HashMap, HashSet};
@@ -40,9 +41,6 @@ use super::{
 
 mod client_config;
 pub(in crate::application) use client_config::client_validation_message;
-
-/// How long opening one ONNX model to read its tensor metadata may take before validation gives up.
-const MODEL_INSPECTION_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// The bounded buffer used to read the configured native image sequentially. ONNX Runtime owns
 /// its other allocations; this charge covers the image buffer and admits the bulk job.
@@ -617,7 +615,10 @@ impl SessionServiceImpl {
         path: &std::path::Path,
     ) -> error_stack::Result<(), InferencerBindingValidationError> {
         let model_metadata = match nervix_primitives::time::timeout(
-            MODEL_INSPECTION_TIMEOUT,
+            self.inner
+                .operational
+                .control_plane
+                .model_inspection_timeout(),
             self.inspect_inferencer_model_metadata(processor, path),
         )
         .await
@@ -1157,7 +1158,12 @@ mod tests {
         let model = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("tests/fixtures/onnx/matrix_identity.onnx");
         let result = nervix_primitives::time::timeout(
-            MODEL_INSPECTION_TIMEOUT + Duration::from_secs(2),
+            service
+                .inner
+                .operational
+                .control_plane
+                .model_inspection_timeout()
+                + Duration::from_secs(2),
             service.validate_inferencer_model_metadata(&processor, &model),
         )
         .await

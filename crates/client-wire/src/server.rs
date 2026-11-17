@@ -266,6 +266,7 @@ fn reply_member<T>(member: Option<T>) -> T {
 /// A message the server sends without a request.
 #[derive(Debug, Clone)]
 pub enum ServerEvent {
+    SessionOpened(crate::SessionOpened),
     Notice(ServerNotice),
     Leadership(LeadershipObserved),
     Domains(DomainsObserved),
@@ -297,6 +298,12 @@ impl ServerMessage {
         let decoder = Decoder::new(frame.limits());
         let message = frame.root();
         let event = match message.body_type() {
+            wire::ServerBody::SessionOpened => {
+                ServerEvent::SessionOpened(crate::SessionOpened::decode(
+                    decoder,
+                    server_member(message.body_as_session_opened()),
+                )?)
+            }
             wire::ServerBody::Reply => {
                 let reply = server_member(message.body_as_reply());
                 let request_id =

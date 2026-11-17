@@ -1010,6 +1010,7 @@ mod shuttle_tests {
                 max_batch_rows: 1,
             },
             exchange: Arc::new(ExchangeRequests {
+                limits: nervix_client_wire::SessionLimits::DEFAULT,
                 frames,
                 pending: Arc::new(SyncMutex::new(PendingReplies::new())),
             }),

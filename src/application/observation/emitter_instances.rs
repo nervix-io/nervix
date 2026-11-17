@@ -156,7 +156,7 @@ impl SessionServiceImpl {
                     name: ModelName::from(emitter),
                     unit,
                 },
-                super::DATAFLOW_NODE_STATUS_TIMEOUT,
+                self.coordination_rpc_timeout(),
             )
             .await;
         match response {

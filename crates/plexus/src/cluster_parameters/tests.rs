@@ -240,8 +240,12 @@ fn completion_after_assignments_offers_only_the_parameters_they_leave(
         "TRANSACTION_TOMBSTONE_RETENTION",
     ]
 )]
-#[case::only_the_assigned_keyword_begins_so(
+#[case::domain_family(
     "ALTER CLUSTER SET DOMAIN_DRAIN_TIMEOUT = 13m 49s, DOMAIN",
+    &["DOMAIN_DRAIN_POLL_INTERVAL"]
+)]
+#[case::only_the_assigned_keyword_begins_so(
+    "ALTER CLUSTER SET DOMAIN_DRAIN_TIMEOUT = 13m 49s, DOMAIN_DRAIN_T",
     &[]
 )]
 fn completion_of_a_partial_parameter_offers_the_unassigned_keywords_it_begins(
