@@ -339,11 +339,13 @@ Feature: Ingestor rate limits
       | region | order_id | amount |
       | ap     | o-9      | 9      |
       | ap     | o-10     | 10     |
-    Then batch "first" completes
-    And producer "orders" eventually reports admission "open"
-    # Four rows spend the burst; the allowance returns two rows a second.
-    And batch "second" completes no sooner than "2s" after the recorded rate limit start
-    And batch "third" completes no sooner than "3s" after the recorded rate limit start
+      | ap     | o-11     | 11     |
+      | ap     | o-12     | 12     |
+    Then producer "orders" eventually reports admission "open"
+    # The client delivers each batch from a task of its own, so the three may arrive in any order.
+    # Whichever arrives first spends the burst of four rows, and the allowance returns two rows a
+    # second, so the next four-row batch completes no sooner than 2s and the last no sooner than 4s.
+    And batches "first, second, third" complete no sooner than "0s, 2s, 4s" after the recorded rate limit start, in completion order
     And within "30s" the relay subscription receives exactly one payload for each fragment set
       """
       "order_id":"o-1"
@@ -356,6 +358,8 @@ Feature: Ingestor rate limits
       "order_id":"o-8"
       "order_id":"o-9"
       "order_id":"o-10"
+      "order_id":"o-11"
+      "order_id":"o-12"
       """
 
     Examples:
