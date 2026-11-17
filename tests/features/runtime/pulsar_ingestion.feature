@@ -331,7 +331,7 @@ Feature: Pulsar ingestion
       transient error: fault injector stalled emitter publish
       """
     When the stallable endpoint "pulsar" is paused
-    And the stallable endpoint "pulsar" resets its connections
+    And the stallable endpoint "pulsar" resets its connections and observes a replacement
     And emitter "forwarded_notifications" enters fault mode
     Then within "120s" DESCRIBE INGESTOR "rejected_notifications" on the leader node contains
       """
