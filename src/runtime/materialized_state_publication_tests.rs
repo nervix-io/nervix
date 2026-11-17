@@ -48,6 +48,7 @@ fn key(tenant: &str) -> Option<BranchKey> {
 
 fn row(value: i64, low: i64, high: i64) -> RuntimeRow {
     let schema = compile_schema(&CreateSchema {
+        labels: Default::default(),
         name: SchemaName::parse("profiles").assured("valid fixture schema"),
         fields: [
             ("value", ParseAsType::I64, false, false),

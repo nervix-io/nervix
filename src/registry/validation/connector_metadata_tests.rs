@@ -23,6 +23,7 @@ fn client_arrival_filters_bind_only_the_metadata_the_producer_declares() {
     let ingestor = Arbitrary::new(&[7; 2048], Domain::Plexus)
         .create_ingestor_from(IngestorEntityKind::Client(ClientIngestorEntity::Producer));
     let input = CreateSchema {
+        labels: Default::default(),
         name: named("event"),
         fields: Vec::new(),
     };

@@ -1513,6 +1513,7 @@ mod tests {
             domain.clone(),
             vec![
                 scheduled_model(Model::Schema(CreateSchema {
+                    labels: Default::default(),
                     name: named("payload"),
                     fields: vec![SchemaField {
                         name: named("value"),
@@ -1522,6 +1523,7 @@ mod tests {
                     }],
                 })),
                 scheduled_model(Model::WireJsonSchema(CreateWireSchema {
+                    labels: Default::default(),
                     name: named("payload_wire"),
                     strictness: Default::default(),
                     fields: vec![WireSchemaField {
@@ -1531,6 +1533,7 @@ mod tests {
                     }],
                 })),
                 scheduled_model(Model::Codec(CreateCodec {
+                    labels: Default::default(),
                     name: named("payload_codec"),
                     wire_format: CodecWireFormat::Json {
                         wire_schema: named("payload_wire"),
@@ -1539,6 +1542,7 @@ mod tests {
                     encoding_rules: Vec::new(),
                 })),
                 scheduled_model(Model::Relay(CreateRelay {
+                    labels: Default::default(),
                     name: named("events"),
                     schema: named("payload"),
                     buffer: nonzero!(7usize),
@@ -1546,11 +1550,13 @@ mod tests {
                     materialized_state: Some(MaterializedRelayState::LastByTimestamp),
                 })),
                 scheduled_model(Model::Vhost(CreateVhost {
+                    labels: Default::default(),
                     name: named("edge"),
                     hostnames: vec!["EVENTS.EXAMPLE.COM".to_string()],
                     tls: None,
                 })),
                 scheduled_model(Model::SignalingProtocol(CreateSignalingProtocol {
+                    labels: Default::default(),
                     name: named("handshake"),
                     format: SignalingWireFormat::Json,
                     on_connect: SignalingProtocolOnConnect {
@@ -1561,6 +1567,7 @@ mod tests {
                     },
                 })),
                 scheduled_model(Model::Endpoint(CreateEndpoint {
+                    labels: Default::default(),
                     name: named("receive"),
                     on_vhost: named("edge"),
                     path: "/ingest".to_string(),
@@ -1617,6 +1624,7 @@ mod tests {
 
     fn tenant_schema(name: &str) -> CreateSchema {
         CreateSchema {
+            labels: Default::default(),
             name: named(name),
             fields: vec![SchemaField {
                 name: named("tenant"),
@@ -1629,6 +1637,7 @@ mod tests {
 
     fn tenant_relay(name: &str, branching: RelayBranching) -> Model {
         Model::Relay(CreateRelay {
+            labels: Default::default(),
             name: named(name),
             schema: named("payload"),
             buffer: nonzero!(4usize),
@@ -1640,6 +1649,7 @@ mod tests {
     /// A reingestor copying `incoming` into `outgoing`, whose route leaves its records unbranched.
     fn repartitioning_reingestor() -> Model {
         Model::Reingestor(CreateReingestor {
+            labels: Default::default(),
             name: named("repartition"),
             from: ProcessorInputs::single(named("incoming")),
             output_routes: with_inherit_all(ProcessorOutputs::single(named("outgoing")))
@@ -1724,6 +1734,7 @@ mod tests {
         };
         source.materialized_state = Some(MaterializedRelayState::LastByTimestamp);
         let generator = Model::Generator(CreateGenerator {
+            labels: Default::default(),
             name: named("synth"),
             materialized_relay: source.name.clone(),
             branched_by: BranchSelection::unbranched(),
@@ -1792,6 +1803,7 @@ mod tests {
             [
                 Model::Schema(tenant_schema("payload")),
                 Model::WireJsonSchema(CreateWireSchema {
+                    labels: Default::default(),
                     name: named("payload_wire"),
                     strictness: Default::default(),
                     fields: vec![WireSchemaField {
@@ -1801,6 +1813,7 @@ mod tests {
                     }],
                 }),
                 Model::Codec(CreateCodec {
+                    labels: Default::default(),
                     name: named("payload_codec"),
                     wire_format: CodecWireFormat::Json {
                         wire_schema: named("payload_wire"),
@@ -1809,6 +1822,7 @@ mod tests {
                     encoding_rules: Vec::new(),
                 }),
                 Model::Lookup(CreateLookup {
+                    labels: Default::default(),
                     name: named("tenants"),
                     key_field: named("tenant"),
                     resource: named("tenant_bundle"),
@@ -1865,6 +1879,7 @@ mod tests {
                 scheduled_model(Model::Schema(tenant_schema("payload"))),
                 scheduled_model(Model::Schema(tenant_schema("tenant_key"))),
                 scheduled_model(Model::Branch(CreateBranch {
+                    labels: Default::default(),
                     name: named("by_tenant"),
                     schema: named("tenant_key"),
                     ttl: "5m".to_string(),

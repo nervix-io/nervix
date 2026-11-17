@@ -18,6 +18,7 @@ fn notification_schedule(domain: &DomainName, relay: Option<bool>) -> DomainSche
     if let Some(sensitive) = relay {
         nodes.push(scheduled_model(nervix_models::Model::Schema(
             CreateSchema {
+                labels: Default::default(),
                 name: schema.clone(),
                 fields: vec![nervix_models::SchemaField {
                     name: named("user_id"),
@@ -28,6 +29,7 @@ fn notification_schedule(domain: &DomainName, relay: Option<bool>) -> DomainSche
             },
         )));
         nodes.push(scheduled_model(nervix_models::Model::Relay(CreateRelay {
+            labels: Default::default(),
             name: named("notifications"),
             schema,
             buffer: nonzero!(2usize),
@@ -40,6 +42,7 @@ fn notification_schedule(domain: &DomainName, relay: Option<bool>) -> DomainSche
 
 fn notification_definition(sensitive: bool) -> RelaySubscriptionDefinition {
     let schema = compile_schema(&CreateSchema {
+        labels: Default::default(),
         name: named("notification"),
         fields: vec![nervix_models::SchemaField {
             name: named("user_id"),

@@ -63,10 +63,10 @@ use nervix_bounded_write::{BoundedWrite, BoundedWriter};
 use nervix_columnar_json::{FieldNulls, JsonColumnSpec, JsonColumns, NestedNulls};
 use nervix_jaq::{CompiledJaqProgram, JaqFormatError, JaqNativeFormat, JaqProgramError};
 use nervix_models::{
-    AvroType, CborType, CodecEncodingRule, CodecJaqTransformations, CodecName,
-    CreateAvroWireSchema, CreateCodec, CreateSchema, CreateWireSchema, JsonType, ModelName,
-    ParseAsType, PayloadSizeLimit, RemoteRuntimeElementValue, RemoteRuntimeRecordMetadata,
-    RemoteRuntimeValue, ResolvedCodecWireFormat, Timestamp, WireSchemaStrictness,
+    AvroType, CborType, CodecEncodingRule, CodecJaqTransformations, CodecName, CreateCodec,
+    JsonType, ModelName, ParseAsType, PayloadSizeLimit, RemoteRuntimeElementValue,
+    RemoteRuntimeRecordMetadata, RemoteRuntimeValue, ResolvedCodecWireFormat, Timestamp,
+    WireSchemaStrictness,
 };
 use nervix_primitives::sync::{Arc, StdArc};
 use nervix_wasm::{WasmProcessorField, WasmProcessorSchema, WasmProcessorType};
@@ -3047,7 +3047,8 @@ impl TryFrom<SerializableRuntimeValue> for RuntimeValue {
     }
 }
 
-pub fn compile_schema(schema: &CreateSchema) -> CompiledSchema {
+pub fn compile_schema<'a>(schema: impl Into<nervix_models::SchemaRef<'a>>) -> CompiledSchema {
+    let schema = schema.into();
     let fields = schema
         .fields
         .iter()
@@ -3150,7 +3151,7 @@ pub(crate) fn compile_codec_spec_with_protobuf(
 }
 
 fn compile_json_wire_schema<T: Copy>(
-    schema_def: &CreateWireSchema<T>,
+    schema_def: nervix_models::WireSchemaRef<'_, T>,
     schema: &CompiledSchema,
 ) -> CompiledJsonWireSchema<T> {
     let fields = schema_def
@@ -5029,7 +5030,7 @@ impl CompiledAvroWireSchema {
     /// schema names it, items included, and the position each field is written at.
     fn compile(
         name: &CodecName,
-        schema_def: &CreateAvroWireSchema,
+        schema_def: nervix_models::WireSchemaRef<'_, nervix_models::AvroType>,
     ) -> error_stack::Result<Self, CodecError> {
         let schema =
             AvroSchema::parse(&Self::record_declaration(schema_def)).map_err(|source| {
@@ -5055,9 +5056,11 @@ impl CompiledAvroWireSchema {
 
     /// The record schema in the JSON form the Avro specification declares, an optional field as
     /// the union of `null` and its type with a `null` default.
-    fn record_declaration(schema_def: &CreateAvroWireSchema) -> JsonValue {
+    fn record_declaration(
+        schema_def: nervix_models::WireSchemaRef<'_, nervix_models::AvroType>,
+    ) -> JsonValue {
         let mut fields = Vec::with_capacity(schema_def.fields.len());
-        for field in &schema_def.fields {
+        for field in schema_def.fields {
             let ty = Self::type_declaration(&field.ty);
             let declaration = if field.optional {
                 serde_json::json!({
@@ -5171,6 +5174,7 @@ mod tests {
 
     fn schema() -> CreateSchema {
         CreateSchema {
+            labels: Default::default(),
             name: named("notification"),
             fields: vec![
                 SchemaField {
@@ -5209,6 +5213,7 @@ mod tests {
 
     fn json_wire_schema() -> CreateJsonWireSchema {
         CreateWireSchema {
+            labels: Default::default(),
             name: named("notification_wire"),
             strictness: Default::default(),
             fields: vec![
@@ -5249,6 +5254,7 @@ mod tests {
 
     fn cbor_wire_schema(strictness: WireSchemaStrictness) -> CreateCborWireSchema {
         CreateWireSchema {
+            labels: Default::default(),
             name: named("notification_wire"),
             strictness,
             fields: vec![
@@ -5283,6 +5289,7 @@ mod tests {
 
     fn avro_wire_schema() -> CreateAvroWireSchema {
         CreateWireSchema {
+            labels: Default::default(),
             name: named("notification_avro"),
             strictness: Default::default(),
             fields: vec![
@@ -5317,6 +5324,7 @@ mod tests {
 
     fn optional_schema() -> CreateSchema {
         CreateSchema {
+            labels: Default::default(),
             name: named("optional_notification"),
             fields: vec![
                 SchemaField {
@@ -5337,6 +5345,7 @@ mod tests {
 
     fn optional_json_wire_schema() -> CreateJsonWireSchema {
         CreateWireSchema {
+            labels: Default::default(),
             name: named("optional_notification_wire"),
             strictness: Default::default(),
             fields: vec![
@@ -5362,6 +5371,7 @@ mod tests {
 
     fn optional_avro_wire_schema() -> CreateAvroWireSchema {
         CreateWireSchema {
+            labels: Default::default(),
             name: named("optional_notification_avro"),
             strictness: Default::default(),
             fields: vec![
@@ -5381,6 +5391,7 @@ mod tests {
 
     fn array_schema() -> CreateSchema {
         CreateSchema {
+            labels: Default::default(),
             name: named("metrics"),
             fields: vec![
                 SchemaField {
@@ -5406,6 +5417,7 @@ mod tests {
 
     fn array_json_wire_schema() -> CreateJsonWireSchema {
         CreateWireSchema {
+            labels: Default::default(),
             name: named("metrics_json"),
             strictness: Default::default(),
             fields: vec![
@@ -5425,6 +5437,7 @@ mod tests {
 
     fn array_avro_wire_schema() -> CreateAvroWireSchema {
         CreateWireSchema {
+            labels: Default::default(),
             name: named("metrics_avro"),
             strictness: Default::default(),
             fields: vec![
@@ -5444,6 +5457,7 @@ mod tests {
 
     fn array_codec(name: &str) -> CreateCodec {
         CreateCodec {
+            labels: Default::default(),
             name: named(name),
             wire_format: if name.contains("avro") {
                 CodecWireFormat::Avro {
@@ -5481,6 +5495,7 @@ mod tests {
 
     fn multidimensional_array_schema() -> CreateSchema {
         CreateSchema {
+            labels: Default::default(),
             name: named("shaped_metrics"),
             fields: vec![
                 SchemaField {
@@ -5533,6 +5548,7 @@ mod tests {
 
     fn multidimensional_avro_wire_schema() -> CreateAvroWireSchema {
         CreateWireSchema {
+            labels: Default::default(),
             name: named("shaped_metrics_wire"),
             strictness: Default::default(),
             fields: ["matrix", "samples"]
@@ -5683,6 +5699,7 @@ mod tests {
             });
         }
         CreateSchema {
+            labels: Default::default(),
             name: named("primitive_arrays"),
             fields,
         }
@@ -5690,6 +5707,7 @@ mod tests {
 
     fn primitive_arrays_json_wire_schema() -> CreateJsonWireSchema {
         CreateWireSchema {
+            labels: Default::default(),
             name: named("primitive_arrays_wire"),
             strictness: Default::default(),
             fields: primitive_arrays_schema()
@@ -5739,6 +5757,7 @@ mod tests {
             });
         }
         CreateWireSchema {
+            labels: Default::default(),
             name: named("primitive_arrays_wire"),
             strictness: Default::default(),
             fields,
@@ -5747,6 +5766,7 @@ mod tests {
 
     fn primitive_arrays_codec(name: &str) -> CreateCodec {
         CreateCodec {
+            labels: Default::default(),
             name: named(name),
             wire_format: if name.contains("avro") {
                 CodecWireFormat::Avro {
@@ -5770,6 +5790,7 @@ mod tests {
         on_emitting: Option<&str>,
     ) -> CreateCodec {
         CreateCodec {
+            labels: Default::default(),
             name: named(name),
             wire_format: CodecWireFormat::JaqNative {
                 format,
@@ -5796,21 +5817,24 @@ mod tests {
         fn json_wire_schema(
             &self,
             name: &WireSchemaName,
-        ) -> Result<&CreateJsonWireSchema, Self::Error> {
+        ) -> Result<nervix_models::WireSchemaRef<'_, nervix_models::JsonType>, Self::Error>
+        {
             Err(name.clone())
         }
 
         fn cbor_wire_schema(
             &self,
             name: &WireSchemaName,
-        ) -> Result<&CreateCborWireSchema, Self::Error> {
+        ) -> Result<nervix_models::WireSchemaRef<'_, nervix_models::CborType>, Self::Error>
+        {
             Err(name.clone())
         }
 
         fn avro_wire_schema(
             &self,
             name: &WireSchemaName,
-        ) -> Result<&CreateAvroWireSchema, Self::Error> {
+        ) -> Result<nervix_models::WireSchemaRef<'_, nervix_models::AvroType>, Self::Error>
+        {
             Err(name.clone())
         }
     }
@@ -5828,6 +5852,7 @@ mod tests {
 
     fn protobuf_schema() -> CreateSchema {
         CreateSchema {
+            labels: Default::default(),
             name: named("protobuf_notification"),
             fields: vec![
                 SchemaField {
@@ -5858,6 +5883,7 @@ mod tests {
         on_emitting: Option<&str>,
     ) -> CreateCodec {
         CreateCodec {
+            labels: Default::default(),
             name: named(name),
             wire_format: CodecWireFormat::Protobuf(CodecProtobufConfig {
                 resource: named("proto_bundle"),
@@ -5929,6 +5955,7 @@ mod tests {
 
     fn optional_codec(name: &str) -> CreateCodec {
         CreateCodec {
+            labels: Default::default(),
             name: named(name),
             wire_format: if name.contains("avro") {
                 CodecWireFormat::Avro {
@@ -5946,6 +5973,7 @@ mod tests {
 
     fn codec(name: &str) -> CreateCodec {
         CreateCodec {
+            labels: Default::default(),
             name: named(name),
             wire_format: if name.contains("avro") {
                 CodecWireFormat::Avro {
@@ -5963,6 +5991,7 @@ mod tests {
 
     fn syslog_schema() -> CreateSchema {
         CreateSchema {
+            labels: Default::default(),
             name: named("syslog_event"),
             fields: vec![
                 SchemaField {
@@ -6025,6 +6054,7 @@ mod tests {
 
     fn syslog_codec() -> CreateCodec {
         CreateCodec {
+            labels: Default::default(),
             name: named("syslog_codec"),
             wire_format: CodecWireFormat::Syslog,
             schema: named("syslog_event"),
@@ -6044,6 +6074,7 @@ mod tests {
 
     fn schemaful_cbor_codec(name: &str) -> CreateCodec {
         CreateCodec {
+            labels: Default::default(),
             name: named(name),
             wire_format: CodecWireFormat::Cbor {
                 wire_schema: named("notification_wire"),
@@ -6167,17 +6198,19 @@ mod tests {
                 Self::Json => compile_codec(
                     &codec("json_codec"),
                     schema,
-                    ResolvedCodecWireFormat::Json(&json_wire_schema()),
+                    ResolvedCodecWireFormat::Json((&json_wire_schema()).into()),
                 ),
                 Self::Avro => compile_codec(
                     &codec("avro_codec"),
                     schema,
-                    ResolvedCodecWireFormat::Avro(&avro_wire_schema()),
+                    ResolvedCodecWireFormat::Avro((&avro_wire_schema()).into()),
                 ),
                 Self::SchemafulCbor => compile_codec(
                     &schemaful_cbor_codec("schemaful_cbor_codec"),
                     schema,
-                    ResolvedCodecWireFormat::Cbor(&cbor_wire_schema(WireSchemaStrictness::Strict)),
+                    ResolvedCodecWireFormat::Cbor(
+                        (&cbor_wire_schema(WireSchemaStrictness::Strict)).into(),
+                    ),
                 ),
                 Self::JaqNativeCbor => {
                     let codec = jaq_native_identity_codec(
@@ -6206,7 +6239,7 @@ mod tests {
                 Self::Avro => compile_codec(
                     &array_codec("avro_array_codec"),
                     schema,
-                    ResolvedCodecWireFormat::Avro(&array_avro_wire_schema()),
+                    ResolvedCodecWireFormat::Avro((&array_avro_wire_schema()).into()),
                 ),
                 Self::Cbor => {
                     let codec = jaq_native_identity_codec(
@@ -6265,7 +6298,7 @@ mod tests {
                 Self::Avro => compile_codec(
                     &primitive_arrays_codec("avro_primitive_arrays_codec"),
                     schema,
-                    ResolvedCodecWireFormat::Avro(&primitive_arrays_avro_wire_schema()),
+                    ResolvedCodecWireFormat::Avro((&primitive_arrays_avro_wire_schema()).into()),
                 ),
                 Self::Cbor => {
                     let codec = jaq_native_identity_codec(
@@ -6863,16 +6896,19 @@ mod tests {
             }
         }
         let schema = CreateSchema {
+            labels: Default::default(),
             name: named("avro_value"),
             fields: schema_fields,
         };
         let wire_schema = CreateWireSchema {
+            labels: Default::default(),
             name: named("avro_value_wire"),
             strictness: Default::default(),
             fields: wire_fields,
         };
         compile_codec(
             &CreateCodec {
+                labels: Default::default(),
                 name: named("avro_value_codec"),
                 wire_format: CodecWireFormat::Avro {
                     wire_schema: wire_schema.name.clone(),
@@ -6881,7 +6917,7 @@ mod tests {
                 encoding_rules: Vec::new(),
             },
             Arc::new(compile_schema(&schema)),
-            ResolvedCodecWireFormat::Avro(&wire_schema),
+            ResolvedCodecWireFormat::Avro((&wire_schema).into()),
         )
     }
 
@@ -7151,7 +7187,7 @@ mod tests {
         let json = compile_codec(
             &codec("json_codec"),
             Arc::new(compile_schema(&schema())),
-            ResolvedCodecWireFormat::Json(&json_wire_schema()),
+            ResolvedCodecWireFormat::Json((&json_wire_schema()).into()),
         )
         .expect("codec should compile");
         let error = json
@@ -7240,6 +7276,7 @@ mod tests {
     #[test]
     fn syslog_codec_names_a_schema_field_its_encoding_requires() {
         let schema = CreateSchema {
+            labels: Default::default(),
             name: named("syslog_message_only"),
             fields: vec![SchemaField {
                 name: named("message"),
@@ -7249,6 +7286,7 @@ mod tests {
             }],
         };
         let codec = CreateCodec {
+            labels: Default::default(),
             name: named("syslog_message_only_codec"),
             wire_format: CodecWireFormat::Syslog,
             schema: schema.name.clone(),
@@ -7312,6 +7350,7 @@ mod tests {
         #[case] reason: &str,
     ) {
         let schema = CreateSchema {
+            labels: Default::default(),
             name: named("syslog_contract"),
             fields: fields
                 .into_iter()
@@ -7332,6 +7371,7 @@ mod tests {
             Vec::new()
         };
         let codec = CreateCodec {
+            labels: Default::default(),
             name: named("syslog_contract_codec"),
             wire_format: CodecWireFormat::Syslog,
             schema: schema.name.clone(),
@@ -7417,6 +7457,7 @@ mod tests {
     #[test]
     fn syslog_codec_encodes_rfc5424_with_nilvalues() {
         let schema_model = CreateSchema {
+            labels: Default::default(),
             name: named("syslog_minimal"),
             fields: syslog_schema()
                 .fields
@@ -7586,7 +7627,7 @@ mod tests {
         let compiled_codec = compile_codec(
             &codec("json_codec"),
             compiled_schema.clone(),
-            ResolvedCodecWireFormat::Json(&json_wire_schema()),
+            ResolvedCodecWireFormat::Json((&json_wire_schema()).into()),
         )
         .expect("codec should compile");
         let records = [record(), record_with(7, "acme")];
@@ -7638,7 +7679,7 @@ mod tests {
         let compiled_codec = compile_codec(
             &codec("json_codec"),
             compiled_schema.clone(),
-            ResolvedCodecWireFormat::Json(&json_wire_schema()),
+            ResolvedCodecWireFormat::Json((&json_wire_schema()).into()),
         )
         .expect("codec should compile");
         let rows = [record_with(42, &"a".repeat(4_096)), record_with(42, "b")];
@@ -7672,6 +7713,7 @@ mod tests {
         // The internal field is optional and the wire field required, so only a row holding a
         // null fails to encode, and only once that row is requested.
         let schema_model = CreateSchema {
+            labels: Default::default(),
             name: named("counter"),
             fields: vec![SchemaField {
                 name: named("value"),
@@ -7682,6 +7724,7 @@ mod tests {
         };
         let compiled_schema = Arc::new(compile_schema(&schema_model));
         let codec_model = CreateCodec {
+            labels: Default::default(),
             name: named("counter_avro"),
             wire_format: CodecWireFormat::Avro {
                 wire_schema: named("counter_wire"),
@@ -7690,6 +7733,7 @@ mod tests {
             encoding_rules: Vec::new(),
         };
         let wire_schema = CreateWireSchema {
+            labels: Default::default(),
             name: named("counter_wire"),
             strictness: Default::default(),
             fields: vec![WireSchemaField {
@@ -7701,7 +7745,7 @@ mod tests {
         let compiled_codec = compile_codec(
             &codec_model,
             compiled_schema.clone(),
-            ResolvedCodecWireFormat::Avro(&wire_schema),
+            ResolvedCodecWireFormat::Avro((&wire_schema).into()),
         )
         .expect("codec should compile");
         let batch = compiled_schema
@@ -7736,7 +7780,7 @@ mod tests {
         let compiled_codec = compile_codec(
             &codec("avro_codec"),
             compiled_schema,
-            ResolvedCodecWireFormat::Avro(&wire_schema),
+            ResolvedCodecWireFormat::Avro((&wire_schema).into()),
         )
         .expect("codec should compile");
 
@@ -7758,6 +7802,7 @@ mod tests {
     #[test]
     fn bytes_round_trip_through_json_and_avro_codecs() {
         let schema = CreateSchema {
+            labels: Default::default(),
             name: named("binary_payload"),
             fields: vec![SchemaField {
                 name: named("payload"),
@@ -7768,6 +7813,7 @@ mod tests {
         };
         let compiled_schema = Arc::new(compile_schema(&schema));
         let json_wire = CreateWireSchema {
+            labels: Default::default(),
             name: named("binary_wire"),
             strictness: Default::default(),
             fields: vec![WireSchemaField {
@@ -7777,6 +7823,7 @@ mod tests {
             }],
         };
         let json_model = CreateCodec {
+            labels: Default::default(),
             name: named("binary_json"),
             wire_format: CodecWireFormat::Json {
                 wire_schema: json_wire.name.clone(),
@@ -7790,7 +7837,7 @@ mod tests {
         let json_codec = compile_codec(
             &json_model,
             compiled_schema.clone(),
-            ResolvedCodecWireFormat::Json(&json_wire),
+            ResolvedCodecWireFormat::Json((&json_wire).into()),
         )
         .assured("the string wire field declares BASE64 for the internal BYTES field");
         let decoded =
@@ -7819,6 +7866,7 @@ mod tests {
 
         for avro_type in [AvroType::Bytes, AvroType::String] {
             let avro_wire = CreateWireSchema {
+                labels: Default::default(),
                 name: named("binary_avro_wire"),
                 strictness: Default::default(),
                 fields: vec![WireSchemaField {
@@ -7828,6 +7876,7 @@ mod tests {
                 }],
             };
             let avro_model = CreateCodec {
+                labels: Default::default(),
                 name: named("binary_avro"),
                 wire_format: CodecWireFormat::Avro {
                     wire_schema: avro_wire.name.clone(),
@@ -7845,7 +7894,7 @@ mod tests {
             let avro_codec = compile_codec(
                 &avro_model,
                 compiled_schema.clone(),
-                ResolvedCodecWireFormat::Avro(&avro_wire),
+                ResolvedCodecWireFormat::Avro((&avro_wire).into()),
             )
             .assured("the AVRO BYTES field matches the internal BYTES field");
             let avro_output = avro_codec
@@ -7870,6 +7919,7 @@ mod tests {
     #[test]
     fn json_and_avro_bytes_reject_malformed_base64_without_exposing_payload() {
         let schema = CreateSchema {
+            labels: Default::default(),
             name: named("binary_payload"),
             fields: vec![SchemaField {
                 name: named("payload"),
@@ -7879,6 +7929,7 @@ mod tests {
             }],
         };
         let wire = CreateWireSchema {
+            labels: Default::default(),
             name: named("binary_wire"),
             strictness: Default::default(),
             fields: vec![WireSchemaField {
@@ -7888,6 +7939,7 @@ mod tests {
             }],
         };
         let model = CreateCodec {
+            labels: Default::default(),
             name: named("binary_json"),
             wire_format: CodecWireFormat::Json {
                 wire_schema: wire.name.clone(),
@@ -7901,10 +7953,11 @@ mod tests {
         let codec = compile_codec(
             &model,
             Arc::new(compile_schema(&schema)),
-            ResolvedCodecWireFormat::Json(&wire),
+            ResolvedCodecWireFormat::Json((&wire).into()),
         )
         .assured("the BYTES schemas are compatible");
         let avro_wire = CreateWireSchema {
+            labels: Default::default(),
             name: named("binary_avro_wire"),
             strictness: Default::default(),
             fields: vec![WireSchemaField {
@@ -7923,7 +7976,7 @@ mod tests {
         let avro_codec = compile_codec(
             &avro_model,
             Arc::new(compile_schema(&schema)),
-            ResolvedCodecWireFormat::Avro(&avro_wire),
+            ResolvedCodecWireFormat::Avro((&avro_wire).into()),
         )
         .assured("Avro text declares BASE64 for the BYTES field");
         let avro_schema = AvroSchema::parse_str(
@@ -7953,6 +8006,7 @@ mod tests {
     #[test]
     fn json_bytes_stream_multiple_decode_chunks_into_arrow() {
         let schema = CreateSchema {
+            labels: Default::default(),
             name: named("binary_payload"),
             fields: vec![SchemaField {
                 name: named("payload"),
@@ -7962,6 +8016,7 @@ mod tests {
             }],
         };
         let wire = CreateWireSchema {
+            labels: Default::default(),
             name: named("binary_wire"),
             strictness: Default::default(),
             fields: vec![WireSchemaField {
@@ -7971,6 +8026,7 @@ mod tests {
             }],
         };
         let model = CreateCodec {
+            labels: Default::default(),
             name: named("binary_json"),
             wire_format: CodecWireFormat::Json {
                 wire_schema: wire.name.clone(),
@@ -7984,7 +8040,7 @@ mod tests {
         let codec = compile_codec(
             &model,
             Arc::new(compile_schema(&schema)),
-            ResolvedCodecWireFormat::Json(&wire),
+            ResolvedCodecWireFormat::Json((&wire).into()),
         )
         .assured("the BYTES schemas are compatible");
         let expected = (0_u16..5_000)
@@ -8007,6 +8063,7 @@ mod tests {
     #[test]
     fn bytes_list_elements_round_trip_through_cbor_codec() {
         let schema = CreateSchema {
+            labels: Default::default(),
             name: named("binary_list"),
             fields: vec![SchemaField {
                 name: named("payload"),
@@ -8018,6 +8075,7 @@ mod tests {
             }],
         };
         let wire = CreateWireSchema {
+            labels: Default::default(),
             name: named("binary_list_wire"),
             strictness: Default::default(),
             fields: vec![WireSchemaField {
@@ -8027,6 +8085,7 @@ mod tests {
             }],
         };
         let model = CreateCodec {
+            labels: Default::default(),
             name: named("binary_list_cbor"),
             wire_format: CodecWireFormat::Cbor {
                 wire_schema: wire.name.clone(),
@@ -8037,7 +8096,7 @@ mod tests {
         let codec = compile_codec(
             &model,
             Arc::new(compile_schema(&schema)),
-            ResolvedCodecWireFormat::Cbor(&wire),
+            ResolvedCodecWireFormat::Cbor((&wire).into()),
         )
         .assured("the CBOR array wire field matches a VEC of BYTES");
         let mut payload = Vec::new();
@@ -8117,7 +8176,7 @@ mod tests {
         let compiled_codec = compile_codec(
             &array_codec("json_array_codec"),
             compiled_schema.clone(),
-            ResolvedCodecWireFormat::Json(&array_json_wire_schema()),
+            ResolvedCodecWireFormat::Json((&array_json_wire_schema()).into()),
         )
         .expect("codec should compile");
 
@@ -8164,7 +8223,7 @@ mod tests {
         let codec = compile_codec(
             &array_codec("json_array_codec"),
             schema.clone(),
-            ResolvedCodecWireFormat::Json(&array_json_wire_schema()),
+            ResolvedCodecWireFormat::Json((&array_json_wire_schema()).into()),
         )
         .expect("array codec fixture should compile");
 
@@ -8242,6 +8301,7 @@ mod tests {
         let schema = Arc::new(compile_schema(&multidimensional_array_schema()));
         let codec = compile_codec(
             &CreateCodec {
+                labels: Default::default(),
                 name: named("shaped_metrics_json_codec"),
                 wire_format: CodecWireFormat::Json {
                     wire_schema: named("shaped_metrics_json"),
@@ -8250,18 +8310,22 @@ mod tests {
                 encoding_rules: Vec::new(),
             },
             schema.clone(),
-            ResolvedCodecWireFormat::Json(&CreateWireSchema {
-                name: named("shaped_metrics_json"),
-                strictness: Default::default(),
-                fields: ["matrix", "samples"]
-                    .into_iter()
-                    .map(|name| WireSchemaField {
-                        name: named(name),
-                        ty: JsonType::Array,
-                        optional: false,
-                    })
-                    .collect(),
-            }),
+            ResolvedCodecWireFormat::Json(
+                (&CreateWireSchema {
+                    labels: Default::default(),
+                    name: named("shaped_metrics_json"),
+                    strictness: Default::default(),
+                    fields: ["matrix", "samples"]
+                        .into_iter()
+                        .map(|name| WireSchemaField {
+                            name: named(name),
+                            ty: JsonType::Array,
+                            optional: false,
+                        })
+                        .collect(),
+                })
+                    .into(),
+            ),
         )
         .expect("multidimensional JSON codec should compile");
 
@@ -8319,7 +8383,7 @@ mod tests {
         let codec = compile_codec(
             &array_codec("json_array_codec"),
             schema.clone(),
-            ResolvedCodecWireFormat::Json(&array_json_wire_schema()),
+            ResolvedCodecWireFormat::Json((&array_json_wire_schema()).into()),
         )
         .expect("array codec fixture should compile");
 
@@ -8384,6 +8448,7 @@ mod tests {
     fn avro_codec_roundtrips_multidimensional_fixed_and_variable_array_shapes() {
         let schema = Arc::new(compile_schema(&multidimensional_array_schema()));
         let codec = CreateCodec {
+            labels: Default::default(),
             name: named("shaped_metrics_codec"),
             wire_format: CodecWireFormat::Avro {
                 wire_schema: named("shaped_metrics_wire"),
@@ -8394,7 +8459,7 @@ mod tests {
         let codec = compile_codec(
             &codec,
             schema,
-            ResolvedCodecWireFormat::Avro(&multidimensional_avro_wire_schema()),
+            ResolvedCodecWireFormat::Avro((&multidimensional_avro_wire_schema()).into()),
         )
         .expect("multidimensional Avro codec should compile");
         let expected = multidimensional_array_record();
@@ -8441,7 +8506,7 @@ mod tests {
         let compiled_codec = compile_codec(
             &primitive_arrays_codec("json_primitive_arrays_codec"),
             compiled_schema.clone(),
-            ResolvedCodecWireFormat::Json(&primitive_arrays_json_wire_schema()),
+            ResolvedCodecWireFormat::Json((&primitive_arrays_json_wire_schema()).into()),
         )
         .expect("codec should compile");
 
@@ -8506,7 +8571,7 @@ mod tests {
         let compiled_codec = compile_codec(
             &codec("json_codec"),
             compiled_schema,
-            ResolvedCodecWireFormat::Json(&json_wire_schema()),
+            ResolvedCodecWireFormat::Json((&json_wire_schema()).into()),
         )
         .expect("codec should compile");
 
@@ -8545,6 +8610,7 @@ mod tests {
     #[test]
     fn schemaful_json_preserves_integer_shape_and_range() {
         let schema = CreateSchema {
+            labels: Default::default(),
             name: named("small_integer"),
             fields: vec![SchemaField {
                 name: named("value"),
@@ -8554,6 +8620,7 @@ mod tests {
             }],
         };
         let wire = CreateWireSchema {
+            labels: Default::default(),
             name: named("small_integer_wire"),
             strictness: WireSchemaStrictness::Strict,
             fields: vec![WireSchemaField {
@@ -8564,6 +8631,7 @@ mod tests {
         };
         let codec = compile_codec(
             &CreateCodec {
+                labels: Default::default(),
                 name: named("small_integer_codec"),
                 wire_format: CodecWireFormat::Json {
                     wire_schema: wire.name.clone(),
@@ -8572,7 +8640,7 @@ mod tests {
                 encoding_rules: Vec::new(),
             },
             Arc::new(compile_schema(&schema)),
-            ResolvedCodecWireFormat::Json(&wire),
+            ResolvedCodecWireFormat::Json((&wire).into()),
         )
         .expect("codec should compile");
 
@@ -8656,6 +8724,7 @@ mod tests {
 
         for (internal_type, wire_type, literal, expected) in cases {
             let schema = CreateSchema {
+                labels: Default::default(),
                 name: named("typed_integer"),
                 fields: vec![SchemaField {
                     name: named("value"),
@@ -8665,6 +8734,7 @@ mod tests {
                 }],
             };
             let wire = CreateWireSchema {
+                labels: Default::default(),
                 name: named("typed_integer_wire"),
                 strictness: WireSchemaStrictness::Strict,
                 fields: vec![WireSchemaField {
@@ -8675,6 +8745,7 @@ mod tests {
             };
             let codec = compile_codec(
                 &CreateCodec {
+                    labels: Default::default(),
                     name: named("typed_integer_codec"),
                     wire_format: CodecWireFormat::Json {
                         wire_schema: wire.name.clone(),
@@ -8683,7 +8754,7 @@ mod tests {
                     encoding_rules: Vec::new(),
                 },
                 Arc::new(compile_schema(&schema)),
-                ResolvedCodecWireFormat::Json(&wire),
+                ResolvedCodecWireFormat::Json((&wire).into()),
             )
             .expect("typed integer codec should compile");
             let payload = format!(r#"{{"value":{literal}}}"#);
@@ -8700,9 +8771,9 @@ mod tests {
         let compiled_codec = compile_codec(
             &codec("json_codec"),
             compiled_schema,
-            ResolvedCodecWireFormat::Json(&json_wire_schema_with_strictness(
-                WireSchemaStrictness::Strict,
-            )),
+            ResolvedCodecWireFormat::Json(
+                (&json_wire_schema_with_strictness(WireSchemaStrictness::Strict)).into(),
+            ),
         )
         .expect("codec should compile");
 
@@ -8720,9 +8791,9 @@ mod tests {
         let compiled_codec = compile_codec(
             &codec("json_codec"),
             compiled_schema,
-            ResolvedCodecWireFormat::Json(&json_wire_schema_with_strictness(
-                WireSchemaStrictness::Loose,
-            )),
+            ResolvedCodecWireFormat::Json(
+                (&json_wire_schema_with_strictness(WireSchemaStrictness::Loose)).into(),
+            ),
         )
         .expect("codec should compile");
 
@@ -8741,7 +8812,7 @@ mod tests {
         let compiled_codec = compile_codec(
             &codec("json_codec"),
             compiled_schema.clone(),
-            ResolvedCodecWireFormat::Json(&json_wire_schema()),
+            ResolvedCodecWireFormat::Json((&json_wire_schema()).into()),
         )
         .expect("codec should compile");
         let mut decoder = JsonDecoder::default();
@@ -8787,7 +8858,7 @@ mod tests {
         let compiled_codec = compile_codec(
             &codec("json_codec"),
             compiled_schema.clone(),
-            ResolvedCodecWireFormat::Json(&json_wire_schema()),
+            ResolvedCodecWireFormat::Json((&json_wire_schema()).into()),
         )
         .expect("codec should compile");
         let mut decoder = JsonDecoder::default();
@@ -8834,13 +8905,14 @@ mod tests {
         compile_codec(
             &schemaful_cbor_codec("schemaful_cbor_codec"),
             Arc::new(compile_schema(&schema())),
-            ResolvedCodecWireFormat::Cbor(&cbor_wire_schema(WireSchemaStrictness::Strict)),
+            ResolvedCodecWireFormat::Cbor((&cbor_wire_schema(WireSchemaStrictness::Strict)).into()),
         )
         .expect("codec should compile")
     }
 
     fn one_field_cbor_codec(ty: ParseAsType, wire_type: CborType) -> Arc<CompiledCodec> {
         let schema = CreateSchema {
+            labels: Default::default(),
             name: named("one_value"),
             fields: vec![SchemaField {
                 name: named("value"),
@@ -8850,6 +8922,7 @@ mod tests {
             }],
         };
         let wire = CreateWireSchema {
+            labels: Default::default(),
             name: named("one_value_wire"),
             strictness: WireSchemaStrictness::Strict,
             fields: vec![WireSchemaField {
@@ -8859,6 +8932,7 @@ mod tests {
             }],
         };
         let model = CreateCodec {
+            labels: Default::default(),
             name: named("one_value_codec"),
             wire_format: CodecWireFormat::Cbor {
                 wire_schema: wire.name.clone(),
@@ -8876,7 +8950,7 @@ mod tests {
         compile_codec(
             &model,
             Arc::new(compile_schema(&schema)),
-            ResolvedCodecWireFormat::Cbor(&wire),
+            ResolvedCodecWireFormat::Cbor((&wire).into()),
         )
         .expect("the CBOR type binds the internal field")
     }
@@ -9242,7 +9316,7 @@ mod tests {
         let compiled_codec = compile_codec(
             &schemaful_cbor_codec("schemaful_cbor_codec"),
             compiled_schema,
-            ResolvedCodecWireFormat::Cbor(&cbor_wire_schema(WireSchemaStrictness::Loose)),
+            ResolvedCodecWireFormat::Cbor((&cbor_wire_schema(WireSchemaStrictness::Loose)).into()),
         )
         .expect("codec should compile");
 
@@ -9262,7 +9336,7 @@ mod tests {
         let codec = compile_codec(
             &schemaful_cbor_codec("schemaful_cbor_codec"),
             Arc::new(compile_schema(&schema())),
-            ResolvedCodecWireFormat::Cbor(&cbor_wire_schema(WireSchemaStrictness::Loose)),
+            ResolvedCodecWireFormat::Cbor((&cbor_wire_schema(WireSchemaStrictness::Loose)).into()),
         )
         .expect("the loose codec compiles");
         let mut value = CborValue::serialized(&serde_json::json!({
@@ -9297,7 +9371,7 @@ mod tests {
         let compiled_codec = compile_codec(
             &optional_codec("json_optional_codec"),
             compiled_schema,
-            ResolvedCodecWireFormat::Json(&optional_json_wire_schema()),
+            ResolvedCodecWireFormat::Json((&optional_json_wire_schema()).into()),
         )
         .expect("codec should compile");
 
@@ -9324,6 +9398,7 @@ mod tests {
 
         let schema = optional_schema();
         let wire_schema = CreateCborWireSchema {
+            labels: Default::default(),
             name: named("optional_notification_wire"),
             strictness: Default::default(),
             fields: vec![
@@ -9340,6 +9415,7 @@ mod tests {
             ],
         };
         let codec = CreateCodec {
+            labels: Default::default(),
             name: named("cbor_optional_codec"),
             wire_format: CodecWireFormat::Cbor {
                 wire_schema: wire_schema.name.clone(),
@@ -9350,7 +9426,7 @@ mod tests {
         let compiled_codec = compile_codec(
             &codec,
             Arc::new(compile_schema(&schema)),
-            ResolvedCodecWireFormat::Cbor(&wire_schema),
+            ResolvedCodecWireFormat::Cbor((&wire_schema).into()),
         )
         .expect("codec should compile");
 
@@ -9386,7 +9462,7 @@ mod tests {
         let compiled_codec = compile_codec(
             &optional_codec("json_optional_codec"),
             compiled_schema,
-            ResolvedCodecWireFormat::Json(&optional_json_wire_schema()),
+            ResolvedCodecWireFormat::Json((&optional_json_wire_schema()).into()),
         )
         .expect("codec should compile");
 
@@ -9407,7 +9483,7 @@ mod tests {
         let compiled_codec = compile_codec(
             &optional_codec("avro_optional_codec"),
             compiled_schema,
-            ResolvedCodecWireFormat::Avro(&optional_avro_wire_schema()),
+            ResolvedCodecWireFormat::Avro((&optional_avro_wire_schema()).into()),
         )
         .expect("codec should compile");
 
@@ -9493,7 +9569,7 @@ mod tests {
         let compiled_codec = compile_codec(
             &codec("json_codec"),
             compiled_schema.clone(),
-            ResolvedCodecWireFormat::Json(&json_wire_schema()),
+            ResolvedCodecWireFormat::Json((&json_wire_schema()).into()),
         )
         .expect("codec should compile");
 
@@ -9504,6 +9580,7 @@ mod tests {
         ));
 
         let missing_wire_schema = CreateWireSchema {
+            labels: Default::default(),
             name: named("notification_wire_partial"),
             strictness: WireSchemaStrictness::Loose,
             fields: vec![
@@ -9521,6 +9598,7 @@ mod tests {
         };
         let missing_wire_codec = compile_codec(
             &CreateCodec {
+                labels: Default::default(),
                 name: named("json_partial"),
                 wire_format: CodecWireFormat::Json {
                     wire_schema: named("notification_wire_partial"),
@@ -9529,7 +9607,7 @@ mod tests {
                 encoding_rules: Vec::new(),
             },
             compiled_schema,
-            ResolvedCodecWireFormat::Json(&missing_wire_schema),
+            ResolvedCodecWireFormat::Json((&missing_wire_schema).into()),
         )
         .expect("codec should compile");
 
@@ -10141,7 +10219,7 @@ mod tests {
             &compile_codec(
                 &codec("json_codec"),
                 Arc::new(compile_schema(&schema())),
-                ResolvedCodecWireFormat::Json(&json_wire_schema()),
+                ResolvedCodecWireFormat::Json((&json_wire_schema()).into()),
             )
             .expect("codec should compile"),
             &record(),
@@ -10222,7 +10300,7 @@ mod tests {
         let nested_codec = compile_codec(
             &array_codec("avro_nested_codec"),
             nested,
-            ResolvedCodecWireFormat::Avro(&multidimensional_avro_wire_schema()),
+            ResolvedCodecWireFormat::Avro((&multidimensional_avro_wire_schema()).into()),
         )
         .expect("codec should compile");
         assert_bounded_encoding_is_exact(&nested_codec, &multidimensional_array_record());
@@ -10232,13 +10310,13 @@ mod tests {
                 "json_optional",
                 optional_schema(),
                 RuntimeValue::U32(7),
-                ResolvedCodecWireFormat::Json(&optional_json_wire_schema()),
+                ResolvedCodecWireFormat::Json((&optional_json_wire_schema()).into()),
             ),
             (
                 "avro_optional",
                 optional_avro_schema(),
                 RuntimeValue::I64(7),
-                ResolvedCodecWireFormat::Avro(&optional_avro_wire_schema()),
+                ResolvedCodecWireFormat::Avro((&optional_avro_wire_schema()).into()),
             ),
         ] {
             let codec = compile_codec(
@@ -10269,6 +10347,7 @@ mod tests {
     #[test]
     fn base64_bytes_are_measured_exactly() {
         let schema = CreateSchema {
+            labels: Default::default(),
             name: named("blob_event"),
             fields: vec![SchemaField {
                 name: named("blob"),
@@ -10278,6 +10357,7 @@ mod tests {
             }],
         };
         let wire_schema = CreateWireSchema {
+            labels: Default::default(),
             name: named("blob_wire"),
             strictness: Default::default(),
             fields: vec![WireSchemaField {
@@ -10287,6 +10367,7 @@ mod tests {
             }],
         };
         let codec = CreateCodec {
+            labels: Default::default(),
             name: named("blob_codec"),
             wire_format: CodecWireFormat::Json {
                 wire_schema: named("blob_wire"),
@@ -10300,7 +10381,7 @@ mod tests {
         let compiled = compile_codec(
             &codec,
             Arc::new(compile_schema(&schema)),
-            ResolvedCodecWireFormat::Json(&wire_schema),
+            ResolvedCodecWireFormat::Json((&wire_schema).into()),
         )
         .expect("codec should compile");
         let arrow_schema = compiled.schema.arrow_schema();

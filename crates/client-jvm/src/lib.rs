@@ -77,6 +77,7 @@ mod batches;
 mod clocks;
 mod completion;
 mod endpoints;
+mod entity_labels;
 mod events;
 mod inspection;
 mod sessions;

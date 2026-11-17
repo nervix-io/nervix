@@ -95,10 +95,10 @@ const KEY_INSTALLING: &[u8] = b"installing";
 const KEY_VOTE: &[u8] = b"vote";
 const KEY_COMMITTED: &[u8] = b"committed";
 const KEY_LAST_PURGED: &[u8] = b"last_purged";
-const KEYSPACE_LOGS: &str = "raft_runtime_inherited_topology_logs";
-const KEYSPACE_META: &str = "raft_runtime_inherited_topology_meta";
-const KEYSPACE_STATE_MACHINE: &str = "raft_runtime_inherited_topology_state";
-const KEYSPACE_SNAPSHOT: &str = "raft_runtime_inherited_topology_snapshots";
+const KEYSPACE_LOGS: &str = "raft_runtime_entity_labels_inherited_topology_logs";
+const KEYSPACE_META: &str = "raft_runtime_entity_labels_inherited_topology_meta";
+const KEYSPACE_STATE_MACHINE: &str = "raft_runtime_entity_labels_inherited_topology_state";
+const KEYSPACE_SNAPSHOT: &str = "raft_runtime_entity_labels_inherited_topology_snapshots";
 const KEY_CLUSTER_IDENTITY: &[u8] = b"K";
 const KEY_LICENSING: &[u8] = b"L";
 /// Working memory reserved for ordinary metadata and log storage relative to its operation unit.
@@ -232,7 +232,7 @@ const KEYSPACE_NAMES: [&str; 4] = [
 #[derive(Debug, Clone, Archive, Serialize, Deserialize)]
 #[repr(u8)]
 enum StateEncoding {
-    ClusterState = 40,
+    ClusterState = 41,
 }
 
 #[derive(Debug)]
@@ -422,6 +422,7 @@ impl StateMachineData {
             )?,
         };
         state.resources.check_recovered()?;
+        state.check_recovered_entity_labels()?;
         if let Some(parameters) = state.parameters {
             let required =
                 nervix_models::PasswordCost::try_from(parameters.values.password_iterations())
@@ -451,6 +452,26 @@ impl StateMachineData {
             return Err(io::Error::other(StorageFailure::InvalidState));
         }
         Ok(state)
+    }
+
+    /// Checks every recovered label map under the recovered record's committed policy.
+    fn check_recovered_entity_labels(&self) -> io::Result<()> {
+        if self.schedule.domains.len() != 0 {
+            let parameters = self
+                .parameters
+                .as_ref()
+                .ok_or_else(|| io::Error::other(StorageFailure::InvalidState))?;
+            let limits = nervix_models::EntityLabelLimits::from(&parameters.values);
+            for schedule in self.schedule.domains.values() {
+                for node in schedule.nodes.values() {
+                    node.config
+                        .labels()
+                        .validate(&limits)
+                        .map_err(crate::durable_batch::storage_report_io)?;
+                }
+            }
+        }
+        Ok(())
     }
 
     /// How many keyed records this revision stores, besides its metadata.

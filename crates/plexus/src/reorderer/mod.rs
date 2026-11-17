@@ -38,52 +38,57 @@ fn by_exprs<'src>()
 pub fn create_reorderer_parser<'src>()
 -> impl Parser<'src, &'src [Token], CreateStatement<CreateReorderer>, extra::Err<ParseError<'src>>>
 + Clone {
-    kw(Identifier::Create)
-        .ignore_then(if_not_exists_clause())
-        .then_ignore(kw(Identifier::Reorderer))
-        .then(reorderer_name())
-        .then_ignore(kw(Identifier::From))
-        .then(from_relay_clauses())
-        .then(ack_mode().or_not())
-        .then(filter_where_clause().or_not())
-        .then(by_exprs())
-        .then_ignore(kw(Identifier::Max))
-        .then_ignore(kw(Identifier::Time))
-        .then(duration_lit())
-        .then(branch_selection())
-        .then(materialized_state_dependencies())
-        .then(flushed_processor_outputs())
-        .then_ignore(tok(Token::Semicolon).or_not())
-        .map(
-            |(
-                (
+    crate::labels::finish_creation({
+        kw(Identifier::Create)
+            .ignore_then(if_not_exists_clause())
+            .then_ignore(kw(Identifier::Reorderer))
+            .then(reorderer_name())
+            .then_ignore(kw(Identifier::From))
+            .then(from_relay_clauses())
+            .then(ack_mode().or_not())
+            .then(filter_where_clause().or_not())
+            .then(by_exprs())
+            .then_ignore(kw(Identifier::Max))
+            .then_ignore(kw(Identifier::Time))
+            .then(duration_lit())
+            .then(branch_selection())
+            .then(materialized_state_dependencies())
+            .then(flushed_processor_outputs())
+            .map(
+                |(
                     (
                         (
-                            (((((if_not_exists, name), from_input), mode), filter_where), order_by),
-                            max_time,
+                            (
+                                (
+                                    ((((if_not_exists, name), from_input), mode), filter_where),
+                                    order_by,
+                                ),
+                                max_time,
+                            ),
+                            branched_by,
                         ),
-                        branched_by,
-                    ),
-                    materialized_state,
-                ),
-                outputs,
-            )| {
-                CreateStatement::new(
-                    CreateReorderer {
-                        name,
-                        from: from_input,
-                        output_routes: outputs,
-                        branched_by,
-                        order_by,
-                        max_time,
-                        mode: mode.unwrap_or_default(),
-                        filter_where,
                         materialized_state,
-                    },
-                    if_not_exists,
-                )
-            },
-        )
+                    ),
+                    outputs,
+                )| {
+                    CreateStatement::new(
+                        CreateReorderer {
+                            labels: Default::default(),
+                            name,
+                            from: from_input,
+                            output_routes: outputs,
+                            branched_by,
+                            order_by,
+                            max_time,
+                            mode: mode.unwrap_or_default(),
+                            filter_where,
+                            materialized_state,
+                        },
+                        if_not_exists,
+                    )
+                },
+            )
+    })
 }
 
 pub fn alter_reorderer_parser<'src>()

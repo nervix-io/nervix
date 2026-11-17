@@ -333,6 +333,12 @@ struct Outcome {
 }
 
 impl Outcome {
+    fn entity_labels(&self) -> Option<crate::entity_labels::EntityLabelsInspection> {
+        self.outcome
+            .entity_labels()
+            .map(crate::entity_labels::EntityLabelsInspection::new)
+    }
+
     fn state_inspection(&self) -> Option<crate::inspection::Inspection> {
         self.outcome
             .state_inspection()
@@ -553,6 +559,7 @@ impl Outcome {
     fn register(ruby: &Ruby, module: RModule) -> Result<(), Error> {
         let outcome = crate::class(ruby, module, "Outcome")?;
         outcome.define_method("disposition", method!(Outcome::disposition, 0))?;
+        outcome.define_method("entity_labels", method!(Outcome::entity_labels, 0))?;
         outcome.define_method("state_inspection", method!(Outcome::state_inspection, 0))?;
         outcome.define_method("message", method!(Outcome::message, 0))?;
         outcome.define_method(

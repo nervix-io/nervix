@@ -175,7 +175,7 @@ Feature: Reorderer
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these Plexus commands fail with "expected TO | ; | end of input, found ON"
+    When these Plexus commands fail with "expected TO | LABELS | ; | end of input, found ON"
       """
       CREATE SCHEMA notification (
         tenant STRING,

@@ -129,8 +129,8 @@ func (e *exchange) receive() (*session.ServerMessage, error) {
 	if uint64(len(frame)) > e.frameBytes {
 		return nil, errors.New("a received frame exceeds this session limit")
 	}
-	if len(frame) < 8 || string(frame[4:8]) != "NXSM" {
-		return nil, errors.New("a server frame lacks the NXSM identifier")
+	if len(frame) < 8 || string(frame[4:8]) != "NXEL" {
+		return nil, errors.New("a server frame lacks the NXEL identifier")
 	}
 	return session.GetRootAsServerMessage(frame, 0), nil
 }

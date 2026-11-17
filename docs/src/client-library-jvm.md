@@ -89,6 +89,17 @@ bytes to recover that upload, and prepare the statement again for a different on
 {{#include ../../tests/client_conformance/java/suite/cluster/ClusterTests.java:upload}}
 ```
 
+### Inspect Entity Labels
+
+`outcome.entityLabels()` returns an independently retained `EntityLabelsInspection`, or `null`
+when the command returned no label view. Close that handle when finished. It exposes the exact
+map for either presentation format, a committed revision or an explicit staged preview, and the
+captured policy revision and acceptance limits. Revision values retain all 64 bits.
+
+```java
+{{#include ../../tests/client_conformance/java/suite/cluster/EntityLabelsTests.java:entity_labels}}
+```
+
 ### Inspect Materialized State
 
 `Outcome.stateInspection()` returns an independently retained inspection, or `null` when the

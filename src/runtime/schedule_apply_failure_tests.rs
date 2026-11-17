@@ -39,6 +39,7 @@ fn deduplicating_revision(domain: &DomainName) -> Arc<ExecutionRevision> {
         domain.clone(),
         vec![
             scheduled_model(nervix_models::Model::Schema(CreateSchema {
+                labels: Default::default(),
                 name: event_schema.clone(),
                 fields: vec![SchemaField {
                     name: named("event_id"),
@@ -48,6 +49,7 @@ fn deduplicating_revision(domain: &DomainName) -> Arc<ExecutionRevision> {
                 }],
             })),
             scheduled_model(nervix_models::Model::Relay(CreateRelay {
+                labels: Default::default(),
                 name: named("events"),
                 schema: event_schema.clone(),
                 buffer: nonzero!(2usize),
@@ -55,6 +57,7 @@ fn deduplicating_revision(domain: &DomainName) -> Arc<ExecutionRevision> {
                 materialized_state: None,
             })),
             scheduled_model(nervix_models::Model::Relay(CreateRelay {
+                labels: Default::default(),
                 name: named("unique_events"),
                 schema: event_schema,
                 buffer: nonzero!(2usize),
@@ -62,6 +65,7 @@ fn deduplicating_revision(domain: &DomainName) -> Arc<ExecutionRevision> {
                 materialized_state: None,
             })),
             scheduled_model(nervix_models::Model::Deduplicator(CreateDeduplicator {
+                labels: Default::default(),
                 name: named("deduplicate_events"),
                 from: ProcessorInputs::single(named("events")),
                 output_routes: with_inherit_all(ProcessorOutputs::single(named("unique_events")))
@@ -338,6 +342,7 @@ async fn a_materialized_relay_transition_needs_the_local_cluster_node() {
         &domain,
         vec![
             scheduled_model(nervix_models::Model::Schema(CreateSchema {
+                labels: Default::default(),
                 name: event_schema.clone(),
                 fields: vec![SchemaField {
                     name: named("event_id"),
@@ -347,6 +352,7 @@ async fn a_materialized_relay_transition_needs_the_local_cluster_node() {
                 }],
             })),
             scheduled_model(nervix_models::Model::Relay(CreateRelay {
+                labels: Default::default(),
                 name: named("latest_events"),
                 schema: event_schema,
                 buffer: nonzero!(2usize),
@@ -490,6 +496,7 @@ fn wasm_reset_nodes(processor: &ModelName) -> Vec<ScheduledNode> {
     let schema = named::<SchemaName>("event");
     vec![
         scheduled_model(nervix_models::Model::Schema(CreateSchema {
+            labels: Default::default(),
             name: schema.clone(),
             fields: vec![SchemaField {
                 name: named("value"),
@@ -499,6 +506,7 @@ fn wasm_reset_nodes(processor: &ModelName) -> Vec<ScheduledNode> {
             }],
         })),
         scheduled_model(nervix_models::Model::Relay(CreateRelay {
+            labels: Default::default(),
             name: named("events"),
             schema: schema.clone(),
             buffer: nonzero!(2usize),
@@ -506,6 +514,7 @@ fn wasm_reset_nodes(processor: &ModelName) -> Vec<ScheduledNode> {
             materialized_state: None,
         })),
         scheduled_model(nervix_models::Model::Relay(CreateRelay {
+            labels: Default::default(),
             name: named("filtered"),
             schema,
             buffer: nonzero!(2usize),
@@ -514,6 +523,7 @@ fn wasm_reset_nodes(processor: &ModelName) -> Vec<ScheduledNode> {
         })),
         ScheduledNode::new(
             nervix_models::Model::WasmProcessor(nervix_models::CreateWasmProcessor {
+                labels: Default::default(),
                 name: named(processor.as_str()),
                 from: ProcessorInputs::single(named("events")),
                 output_routes: ProcessorOutputs::single(named("filtered")),
@@ -541,6 +551,7 @@ fn partitioned_wasm_reset_nodes(processor: &ModelName) -> Vec<ScheduledNode> {
     let mut nodes = wasm_reset_nodes(processor);
     let branch = named::<BranchName>("by_value");
     let schema = CreateSchema {
+        labels: Default::default(),
         name: named("event"),
         fields: vec![SchemaField {
             name: named("value"),
@@ -574,6 +585,7 @@ fn partitioned_wasm_reset_nodes(processor: &ModelName) -> Vec<ScheduledNode> {
     }
     nodes.push(scheduled_model(nervix_models::Model::Branch(
         nervix_models::CreateBranch {
+            labels: Default::default(),
             name: branch,
             schema: schema.name,
             ttl: "5m".to_string(),
@@ -717,6 +729,7 @@ async fn a_flush_change_names_the_emitter_whose_task_did_not_take_it() {
 fn emitting_nodes() -> Vec<ScheduledNode> {
     vec![
         scheduled_model(nervix_models::Model::Schema(CreateSchema {
+            labels: Default::default(),
             name: named("event"),
             fields: vec![SchemaField {
                 name: named("seq"),
@@ -726,17 +739,20 @@ fn emitting_nodes() -> Vec<ScheduledNode> {
             }],
         })),
         scheduled_model(nervix_models::Model::Codec(CreateCodec {
+            labels: Default::default(),
             name: named("event_codec"),
             wire_format: CodecWireFormat::Syslog,
             schema: named("event"),
             encoding_rules: Vec::new(),
         })),
         scheduled_model(nervix_models::Model::ClientZeroMq(CreateClientZeroMq {
+            labels: Default::default(),
             name: named("emitter"),
             mount: None,
             config: Vec::new(),
         })),
         scheduled_model(nervix_models::Model::Relay(CreateRelay {
+            labels: Default::default(),
             name: named("events"),
             schema: named("event"),
             buffer: nonzero!(2usize),
@@ -744,6 +760,7 @@ fn emitting_nodes() -> Vec<ScheduledNode> {
             materialized_state: None,
         })),
         scheduled_model(nervix_models::Model::Emitter(CreateEmitter {
+            labels: Default::default(),
             instances: nervix_models::EmitterInstances::ONE,
             name: named("audit"),
             from: ProcessorInputs::single(named("events")),
@@ -928,6 +945,7 @@ async fn a_local_emitter_swap_names_the_input_relay_without_a_boundary() {
 fn tenant_schema_and_relays(relays: &[&str]) -> Vec<ScheduledNode> {
     let mut nodes = vec![scheduled_model(nervix_models::Model::Schema(
         CreateSchema {
+            labels: Default::default(),
             name: named("payload"),
             fields: vec![SchemaField {
                 name: named("tenant"),
@@ -939,6 +957,7 @@ fn tenant_schema_and_relays(relays: &[&str]) -> Vec<ScheduledNode> {
     ))];
     for relay in relays {
         nodes.push(scheduled_model(nervix_models::Model::Relay(CreateRelay {
+            labels: Default::default(),
             name: named(relay),
             schema: named("payload"),
             buffer: nonzero!(4usize),
@@ -954,6 +973,7 @@ fn reingesting_nodes() -> Vec<ScheduledNode> {
     let mut nodes = tenant_schema_and_relays(&["incoming", "outgoing"]);
     nodes.push(scheduled_model(nervix_models::Model::Reingestor(
         CreateReingestor {
+            labels: Default::default(),
             name: named("repartition"),
             from: ProcessorInputs::single(named("incoming")),
             output_routes: with_inherit_all(ProcessorOutputs::single(named("outgoing")))
@@ -1045,6 +1065,7 @@ async fn a_generator_swap_needs_the_installed_execution() {
     let domain = domain("default");
     let mut nodes = tenant_schema_and_relays(&["generated"]);
     nodes.push(scheduled_model(nervix_models::Model::Relay(CreateRelay {
+        labels: Default::default(),
         name: named("notifications"),
         schema: named("payload"),
         buffer: nonzero!(4usize),
@@ -1053,6 +1074,7 @@ async fn a_generator_swap_needs_the_installed_execution() {
     })));
     nodes.push(scheduled_model(nervix_models::Model::Generator(
         CreateGenerator {
+            labels: Default::default(),
             name: named("synth"),
             materialized_relay: named("notifications"),
             branched_by: BranchSelection::unbranched(),

@@ -342,7 +342,7 @@ Feature: Plexus transactions
       """
     Then the last command error contains
       """
-      DESCRIBE TRANSACTION and SHOW TRANSACTIONS must be executed separately
+      DESCRIBE TRANSACTION, SHOW TRANSACTIONS and SHOW LABELS must be executed separately
       """
     When client "owner" fails to execute these Plexus commands
       """

@@ -32,6 +32,7 @@ mod connect_options;
 mod consumer;
 mod delivery;
 mod domain_clock;
+mod entity_labels;
 mod event;
 mod failure;
 mod fields;
@@ -134,8 +135,9 @@ pub use suggestions::{
 #[cfg(test)]
 mod tests;
 
+pub use entity_labels::*;
 pub use inspection::{
     nx_inspection_counts, nx_inspection_free, nx_inspection_json, nx_inspection_row_frame,
     nx_inspection_schema, nx_outcome_inspection,
 };
-pub use nervix_client_host::Inspection;
+pub use nervix_client_host::{EntityLabelViewKind, EntityLabelsInspection, Inspection};

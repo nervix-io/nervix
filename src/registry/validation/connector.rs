@@ -844,6 +844,7 @@ fn validate_sqs_fifo_group_value(
         })
     })?;
     let output_schema = CreateSchema {
+        labels: Default::default(),
         name: SchemaName::parse("fifo_group").map_err(|error| {
             Report::new(RegistryError::InvalidModel {
                 domain: domain.as_str().to_string(),
@@ -970,6 +971,7 @@ pub(in crate::registry) fn validate_http_request_expressions(
         });
     }
     let output_schema = CreateSchema {
+        labels: Default::default(),
         name: SchemaName::parse("http_request")
             .assured("HTTP request schema name is a valid literal"),
         fields,
@@ -1374,6 +1376,7 @@ fn validate_envelope_value(
 impl EnvelopeValue<'_> {
     fn schema(ty: ParseAsType) -> CreateSchema {
         CreateSchema {
+            labels: Default::default(),
             name: SchemaName::parse(ENVELOPE_NAMESPACE).assured("the namespace is a schema name"),
             fields: vec![SchemaField {
                 name: FieldName::parse("value").assured("value is a field name"),

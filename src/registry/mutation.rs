@@ -13,6 +13,7 @@
 )]
 
 use ahash::{HashMap, HashSet};
+use meticulous::ResultExt as _;
 use nervix_models::{
     AlterBranch, AlterDeduplicator, AlterEmitter, AlterGenerator, AlterIngestor, AlterJunction,
     AlterPlacement, AlterReingestor, AlterRelay, AlterReorderer, AlterSchema, AlterWireSchema,
@@ -36,6 +37,7 @@ use crate::registry::{
 #[derive(Debug, Clone)]
 pub(crate) enum RegistryMutation<Version = u64> {
     Create(Box<Model<Version>>),
+    Labels(nervix_models::MutateEntityLabels),
     AlterSchema(AlterSchema),
     AlterWireJsonSchema(AlterWireSchema<JsonType>),
     AlterWireCborSchema(AlterWireSchema<CborType>),
@@ -69,6 +71,7 @@ impl TryFrom<&Statement> for RegistryMutation<RequestedResourceVersion> {
 
     fn try_from(statement: &Statement) -> Result<Self, Self::Error> {
         let mutation = match statement {
+            Statement::MutateEntityLabels(edit) => Self::Labels(edit.clone()),
             Statement::Create(create) => Self::Create(create.body.clone()),
             Statement::AlterSchema(alter) => Self::AlterSchema(alter.clone()),
             Statement::AlterWireJsonSchema(alter) => Self::AlterWireJsonSchema(alter.clone()),
@@ -92,6 +95,25 @@ impl TryFrom<&Statement> for RegistryMutation<RequestedResourceVersion> {
 }
 
 impl RegistryMutation<RequestedResourceVersion> {
+    /// Project accepted statements with the creation semantics their operands retain.
+    pub(crate) fn fold_statement(
+        statement: &Statement,
+        models: &mut ModelIndex<RequestedResourceVersion>,
+    ) {
+        if !statement.is_model_mutation() || matches!(statement, Statement::RebindResource(_)) {
+            return;
+        }
+        if let Statement::Create(create) = statement
+            && create.if_not_exists
+            && models.contains(&create.body.node_ref())
+        {
+            return;
+        }
+        Self::try_from(statement)
+            .assured("every non-rebind model mutation has a registry mutation")
+            .fold_into_models(models);
+    }
+
     /// Pins every resource version this mutation writes through `pin`, which returns the concrete
     /// version a written one resolves to. Only a create binds resources; every other mutation is
     /// carried over unchanged.
@@ -103,6 +125,7 @@ impl RegistryMutation<RequestedResourceVersion> {
             Self::Create(model) => {
                 RegistryMutation::Create(Box::new(model.try_map_resource_versions(pin)?))
             }
+            Self::Labels(edit) => RegistryMutation::Labels(edit),
             Self::AlterSchema(alter) => RegistryMutation::AlterSchema(alter),
             Self::AlterWireJsonSchema(alter) => RegistryMutation::AlterWireJsonSchema(alter),
             Self::AlterWireCborSchema(alter) => RegistryMutation::AlterWireCborSchema(alter),
@@ -127,6 +150,7 @@ impl<Version: Clone> RegistryMutation<Version> {
     pub(in crate::registry) fn target_key(&self) -> NodeRef {
         match self {
             Self::Create(model) => model.node_ref(),
+            Self::Labels(edit) => edit.entity.clone(),
             Self::AlterSchema(alter) => NodeRef::new(ModelKind::Schema, alter.schema.clone()),
             Self::AlterWireJsonSchema(alter) => {
                 NodeRef::new(ModelKind::WireJsonSchema, alter.schema.clone())
@@ -192,6 +216,7 @@ impl<Version: Clone> RegistryMutation<Version> {
     /// name the statement that caused it.
     fn apply_alteration(&self, model: &mut Model<Version>) {
         match (self, model) {
+            (Self::Labels(edit), model) => model.labels_mut().apply(&edit.mutation),
             (Self::AlterSchema(alter), Model::Schema(schema)) => {
                 schema
                     .apply_alter(alter)
@@ -317,10 +342,9 @@ impl PlannedMutations {
     /// node's HTTPS listener presents. The changed set is the batch's own diff, so this walks it
     /// once rather than looking a key up.
     pub(crate) fn changes_vhosts(&self) -> bool {
-        self.quiesce
-            .changed()
-            .iter()
-            .any(|change| change.node.kind == ModelKind::Vhost)
+        self.quiesce.changed().iter().any(|change| {
+            change.node.kind == ModelKind::Vhost && self.configuration_changes(&change.node)
+        })
     }
 
     pub(crate) fn candidate_graph(&self) -> Option<ActiveGraph> {
@@ -352,6 +376,25 @@ impl PlannedMutations {
                 | RegistryPersistMutation::Replace(model) => model,
             })
             .collect()
+    }
+
+    fn configuration_changes(&self, node: &NodeRef) -> bool {
+        match (
+            self.base_models.get(node),
+            self.domain_state.models.get(node),
+        ) {
+            (Some(base), Some(candidate)) => {
+                base.execution_configuration() != candidate.execution_configuration()
+            }
+            _ => true,
+        }
+    }
+
+    /// External validation and UDF preparation follow configuration, never metadata alone.
+    pub(crate) fn execution_changed_models(&self) -> Vec<&Model> {
+        let mut changed = self.changed_models();
+        changed.retain(|model| self.configuration_changes(&model.node_ref()));
+        changed
     }
 
     /// Every model of one kind the batch would leave active, including the models it does not

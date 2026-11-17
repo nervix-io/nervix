@@ -173,6 +173,7 @@ mod tests {
     fn relay(raw: &str, materialized_state: Option<MaterializedRelayState>) -> ScheduledNode {
         ScheduledNode::new(
             Model::Relay(CreateRelay {
+                labels: Default::default(),
                 name: named(raw),
                 schema: named("payment"),
                 buffer: nonzero!(16usize),
@@ -187,6 +188,7 @@ mod tests {
     fn endpoint_ingestor(raw: &str) -> ScheduledNode {
         ScheduledNode::new(
             Model::Ingestor(CreateIngestor {
+                labels: Default::default(),
                 name: named(raw),
                 output_routes: ProcessorOutputs::new(Vec::new()),
                 input: IngestorInput::Transport(TransportIngestorInput {

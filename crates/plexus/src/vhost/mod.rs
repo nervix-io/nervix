@@ -17,35 +17,37 @@ pub fn create_vhost_parser<'src>() -> impl Parser<
     CreateStatement<CreateVhost<RequestedResourceVersion>>,
     extra::Err<ParseError<'src>>,
 > + Clone {
-    kw(Identifier::Create)
-        .ignore_then(if_not_exists_clause())
-        .then_ignore(kw(Identifier::Vhost))
-        .then(vhost_name())
-        .then(
-            hostname_lit()
-                .separated_by(tok(Token::Comma))
-                .at_least(1)
-                .collect::<Vec<_>>(),
-        )
-        .then(
-            kw(Identifier::With)
-                .ignore_then(kw(Identifier::Tls))
-                .ignore_then(resource_ref())
-                .then(resource_version_clause())
-                .map(|(resource, version)| VhostTlsResource { resource, version })
-                .or_not(),
-        )
-        .then_ignore(tok(Token::Semicolon).or_not())
-        .map(|(((if_not_exists, name), hostnames), tls)| {
-            CreateStatement::new(
-                CreateVhost {
-                    name,
-                    hostnames,
-                    tls,
-                },
-                if_not_exists,
+    crate::labels::finish_creation({
+        kw(Identifier::Create)
+            .ignore_then(if_not_exists_clause())
+            .then_ignore(kw(Identifier::Vhost))
+            .then(vhost_name())
+            .then(
+                hostname_lit()
+                    .separated_by(tok(Token::Comma))
+                    .at_least(1)
+                    .collect::<Vec<_>>(),
             )
-        })
+            .then(
+                kw(Identifier::With)
+                    .ignore_then(kw(Identifier::Tls))
+                    .ignore_then(resource_ref())
+                    .then(resource_version_clause())
+                    .map(|(resource, version)| VhostTlsResource { resource, version })
+                    .or_not(),
+            )
+            .map(|(((if_not_exists, name), hostnames), tls)| {
+                CreateStatement::new(
+                    CreateVhost {
+                        labels: Default::default(),
+                        name,
+                        hostnames,
+                        tls,
+                    },
+                    if_not_exists,
+                )
+            })
+    })
 }
 
 pub fn parse_create_vhost_tokens(

@@ -139,7 +139,7 @@ def test_rows_read_in_bulk_as_values_offsets_and_the_frame(
     # ANCHOR_END: read_bulk
     assert amounts == (1 << 40, 0)
     assert tenants == ["beta", "beta"]
-    assert bytes(memoryview(event)[4:8]) == b"NXSM"
+    assert bytes(memoryview(event)[4:8]) == b"NXEL"
     assert bytes(frame) == bytes(memoryview(event))
     completed(session, f"DELETE SUBSCRIPTION {name};")
 

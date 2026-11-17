@@ -86,6 +86,18 @@ bytes to recover that upload, and prepare the statement again for a different on
 {{#include ../../tests/client_conformance/c/suite/contract.h:upload}}
 ```
 
+### Inspect Entity Labels
+
+`nx_outcome_entity_labels` returns an independently owned `nx_entity_labels` after `SHOW LABELS`.
+Release it with `nx_entity_labels_free`. The map's indexed key/value accessors borrow exact UTF-8
+bytes with explicit lengths, including empty values and embedded NUL bytes. The view discriminant
+separates committed revision from staged transaction preview. Policy revision and limits are
+captured with the same read. C++ uses the same handle with its usual RAII owner.
+
+```c
+{{#include ../../tests/client_conformance/c/suite/contract.h:entity_labels}}
+```
+
 ### Read Materialized State
 
 `SHOW RELAY <relay> MATERIALIZED STATE` returns its typed result with the command's outcome.

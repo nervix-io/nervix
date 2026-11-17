@@ -11,6 +11,8 @@
     nervix::layer(vocabulary, reason = "owns the vocabulary boundary declared above")
 )]
 
+mod branching;
+
 use std::{
     num::{NonZeroU64, NonZeroUsize},
     ops::{Deref, DerefMut},
@@ -51,6 +53,8 @@ use crate::{
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
 pub enum Statement {
+    MutateEntityLabels(crate::MutateEntityLabels),
+    ShowLabels(crate::ShowLabels),
     AlterCluster(crate::AlterCluster),
     ActivateLicense(ActivateLicense),
     RefreshLicense(RefreshLicense),
@@ -139,7 +143,8 @@ impl Statement {
 
     pub fn is_model_mutation(&self) -> bool {
         match self {
-            Self::Create(_)
+            Self::MutateEntityLabels(_)
+            | Self::Create(_)
             | Self::AlterSchema(_)
             | Self::AlterWireJsonSchema(_)
             | Self::AlterWireCborSchema(_)
@@ -156,7 +161,8 @@ impl Statement {
             | Self::AlterBranch(_)
             | Self::RebindResource(_)
             | Self::Drop(_) => true,
-            Self::AlterCluster(_)
+            Self::ShowLabels(_)
+            | Self::AlterCluster(_)
             | Self::ActivateLicense(_)
             | Self::RefreshLicense(_)
             | Self::ReleaseLicense(_)
@@ -1225,6 +1231,21 @@ macro_rules! declare_models {
                 }
             }
 
+            pub fn labels(&self) -> &crate::EntityLabels {
+                match self { $(Self::$Variant(model) => &model.labels,)+ }
+            }
+            pub fn labels_mut(&mut self) -> &mut crate::EntityLabels {
+                match self { $(Self::$Variant(model) => &mut model.labels,)+ }
+            }
+
+            /// Borrow ordinary configuration without allocation; metadata is stripped at the plan boundary.
+            pub fn execution_configuration(&self) -> std::borrow::Cow<'_, Self> where Version: Clone {
+                if self.labels().is_empty() { return std::borrow::Cow::Borrowed(self); }
+                let mut configuration = self.clone();
+                *configuration.labels_mut() = crate::EntityLabels::default();
+                std::borrow::Cow::Owned(configuration)
+            }
+
             /// The connector this model configures a client of. Only a client Model is a
             /// client of one.
             pub fn connector_kind(&self) -> Option<ConnectorKind> {
@@ -1263,6 +1284,19 @@ macro_rules! declare_models {
         }
 
         $(declare_models!(@family $family $Variant($Model) => $Kind);)+
+        $(declare_models!(@metadata $Model $(<$Version>)?);)+
+    };
+    (@metadata $Model:ident<$Version:ident>) => {
+        impl<$Version> crate::EntityMetadata for $Model<$Version> {
+            fn labels(&self) -> &crate::EntityLabels { &self.labels }
+            fn labels_mut(&mut self) -> &mut crate::EntityLabels { &mut self.labels }
+        }
+    };
+    (@metadata $Model:ident) => {
+        impl crate::EntityMetadata for $Model {
+            fn labels(&self) -> &crate::EntityLabels { &self.labels }
+            fn labels_mut(&mut self) -> &mut crate::EntityLabels { &mut self.labels }
+        }
     };
     (@map_versions $model:ident, $map:ident) => {
         $model
@@ -1434,6 +1468,7 @@ impl<Version> Model<Version> {
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
 pub struct CreateCodec<Version = u64> {
+    pub labels: crate::EntityLabels,
     pub name: CodecName,
     pub wire_format: CodecWireFormat<Version>,
     pub schema: SchemaName,
@@ -1651,9 +1686,9 @@ impl CodecBatchContainer<'_> {
 /// validation and compilation read the definition their format actually describes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResolvedCodecWireFormat<'a> {
-    Json(&'a CreateJsonWireSchema),
-    Cbor(&'a CreateCborWireSchema),
-    Avro(&'a CreateAvroWireSchema),
+    Json(crate::WireSchemaRef<'a, JsonType>),
+    Cbor(crate::WireSchemaRef<'a, CborType>),
+    Avro(crate::WireSchemaRef<'a, AvroType>),
     Syslog,
     JaqNative {
         format: CodecJaqFormat,
@@ -1671,14 +1706,20 @@ pub trait WireSchemaLookup {
     /// Why a named wire schema could not be produced.
     type Error;
 
-    fn json_wire_schema(&self, name: &WireSchemaName)
-    -> Result<&CreateJsonWireSchema, Self::Error>;
+    fn json_wire_schema(
+        &self,
+        name: &WireSchemaName,
+    ) -> Result<crate::WireSchemaRef<'_, JsonType>, Self::Error>;
 
-    fn cbor_wire_schema(&self, name: &WireSchemaName)
-    -> Result<&CreateCborWireSchema, Self::Error>;
+    fn cbor_wire_schema(
+        &self,
+        name: &WireSchemaName,
+    ) -> Result<crate::WireSchemaRef<'_, CborType>, Self::Error>;
 
-    fn avro_wire_schema(&self, name: &WireSchemaName)
-    -> Result<&CreateAvroWireSchema, Self::Error>;
+    fn avro_wire_schema(
+        &self,
+        name: &WireSchemaName,
+    ) -> Result<crate::WireSchemaRef<'_, AvroType>, Self::Error>;
 }
 
 #[derive(
@@ -1728,6 +1769,7 @@ pub enum CodecEncoding {
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
 pub struct CreateGenerator {
+    pub labels: crate::EntityLabels,
     pub name: GeneratorName,
     pub materialized_relay: RelayName,
     pub branched_by: BranchSelection,
@@ -1879,6 +1921,7 @@ pub enum GeneralErrorPolicy {
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
 pub struct CreateBranch {
+    pub labels: crate::EntityLabels,
     pub name: BranchName,
     pub schema: SchemaName,
     pub ttl: String,
@@ -2051,112 +2094,20 @@ pub enum ResolvedBranching {
     Unbranched,
     AwaitingTopology {
         branch: BranchName,
-        schema: CreateSchema,
+        schema: crate::SchemaDefinition,
     },
     Branched {
         branch: BranchName,
-        schema: CreateSchema,
+        schema: crate::SchemaDefinition,
         partitions: ResolvedBranchPartitions,
     },
-}
-
-impl ResolvedBranching {
-    pub fn unbranched() -> Self {
-        Self::Unbranched
-    }
-
-    pub fn awaiting_topology(branch: BranchName, schema: CreateSchema) -> Self {
-        Self::AwaitingTopology { branch, schema }
-    }
-
-    pub fn is_awaiting_topology(&self) -> bool {
-        matches!(self, Self::AwaitingTopology { .. })
-    }
-
-    pub fn with_partitions(self, partitions: ResolvedBranchPartitions) -> Self {
-        match self {
-            Self::Unbranched => Self::Unbranched,
-            Self::AwaitingTopology { branch, schema } | Self::Branched { branch, schema, .. } => {
-                Self::Branched {
-                    branch,
-                    schema,
-                    partitions,
-                }
-            }
-        }
-    }
-
-    pub fn branched(
-        branch: BranchName,
-        schema: CreateSchema,
-        partitions: ResolvedBranchPartitions,
-    ) -> Self {
-        Self::Branched {
-            branch,
-            schema,
-            partitions,
-        }
-    }
-
-    pub fn branch(&self) -> Option<&BranchName> {
-        match self {
-            Self::Unbranched => None,
-            Self::Branched { branch, .. } | Self::AwaitingTopology { branch, .. } => Some(branch),
-        }
-    }
-
-    /// Whether `other` names the same branch with the same key schema, whatever partition count
-    /// each places keys by: the keys and their values are the same under either count.
-    pub fn same_key_as(&self, other: &Self) -> bool {
-        self.branch() == other.branch() && self.schema() == other.schema()
-    }
-
-    /// The partitions of the branch, when the declaration is branched.
-    pub fn partitions(&self) -> Option<ResolvedBranchPartitions> {
-        match self {
-            Self::Unbranched | Self::AwaitingTopology { .. } => None,
-            Self::Branched { partitions, .. } => Some(*partitions),
-        }
-    }
-
-    /// The units a relay of this declaration is scheduled as: one `Single` unit when it is
-    /// unbranched or its branch has one partition, and one `Partition` unit per partition
-    /// otherwise.
-    pub fn units(&self) -> Vec<Unit> {
-        match self {
-            Self::Unbranched => vec![Unit::SINGLE],
-            Self::AwaitingTopology { .. } => Vec::new(),
-            Self::Branched { partitions, .. } => partitions.units(),
-        }
-    }
-
-    pub fn schema(&self) -> Option<&CreateSchema> {
-        match self {
-            Self::Unbranched => None,
-            Self::Branched { schema, .. } | Self::AwaitingTopology { schema, .. } => Some(schema),
-        }
-    }
-
-    pub fn fields(&self) -> &[crate::SchemaField] {
-        match self {
-            Self::Unbranched => &[],
-            Self::Branched { schema, .. } | Self::AwaitingTopology { schema, .. } => &schema.fields,
-        }
-    }
-
-    pub fn field_names(&self) -> impl Iterator<Item = &FieldName> {
-        self.fields().iter().map(|field| &field.name)
-    }
-
-    pub fn is_unbranched(&self) -> bool {
-        matches!(self, Self::Unbranched)
-    }
 }
 
 #[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
 pub struct CreateIngestor {
+    pub labels: crate::EntityLabels,
     pub name: IngestorName,
     pub output_routes: ProcessorOutputs,
     /// What the ingestor reads, and how what it reads becomes records of its input schema.
@@ -2479,6 +2430,7 @@ pub enum IngestTimestampSource {
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
 pub struct CreateVhost<Version = u64> {
+    pub labels: crate::EntityLabels,
     pub name: VhostName,
     pub hostnames: Vec<String>,
     pub tls: Option<VhostTlsResource<Version>>,
@@ -2496,6 +2448,7 @@ pub struct VhostTlsResource<Version = u64> {
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
 pub struct CreateEndpoint {
+    pub labels: crate::EntityLabels,
     pub name: EndpointName,
     pub on_vhost: VhostName,
     pub path: String,
@@ -2584,6 +2537,7 @@ pub enum EndpointType {
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
 pub struct CreateSignalingProtocol<Version = u64> {
+    pub labels: crate::EntityLabels,
     pub name: SignalingProtocolName,
     pub format: SignalingWireFormat<Version>,
     pub on_connect: SignalingProtocolOnConnect,
@@ -2734,6 +2688,7 @@ pub enum AckWindow {
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
 pub struct CreateRelay {
+    pub labels: crate::EntityLabels,
     pub name: RelayName,
     pub schema: SchemaName,
     #[serde(default = "default_relay_buffer")]
@@ -2885,6 +2840,7 @@ pub enum MaterializedRelayState {
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
 pub struct CreateLookup<Version = u64> {
+    pub labels: crate::EntityLabels,
     pub name: LookupName,
     pub key_field: FieldName,
     pub resource: ResourceName,

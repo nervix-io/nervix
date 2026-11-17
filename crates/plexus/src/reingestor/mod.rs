@@ -28,35 +28,40 @@ use crate::{
 pub fn create_reingestor_parser<'src>()
 -> impl Parser<'src, &'src [Token], CreateStatement<CreateReingestor>, extra::Err<ParseError<'src>>>
 + Clone {
-    kw(Identifier::Create)
-        .ignore_then(if_not_exists_clause())
-        .then_ignore(kw(Identifier::Reingestor))
-        .then(reingestor_name())
-        .then_ignore(kw(Identifier::From))
-        .then(from_relay_clauses())
-        .then(ack_mode().or_not())
-        .then(filter_where_clause().or_not())
-        .then(materialized_state_dependencies())
-        .then(flushed_ingestor_outputs())
-        .then_ignore(tok(Token::Semicolon).or_not())
-        .map(
-            |(
-                (((((if_not_exists, name), from_input), mode), filter_where), materialized_state),
-                outputs,
-            )| {
-                CreateStatement::new(
-                    CreateReingestor {
-                        name,
-                        from: from_input,
-                        output_routes: outputs,
-                        mode: mode.unwrap_or_default(),
-                        filter_where,
+    crate::labels::finish_creation({
+        kw(Identifier::Create)
+            .ignore_then(if_not_exists_clause())
+            .then_ignore(kw(Identifier::Reingestor))
+            .then(reingestor_name())
+            .then_ignore(kw(Identifier::From))
+            .then(from_relay_clauses())
+            .then(ack_mode().or_not())
+            .then(filter_where_clause().or_not())
+            .then(materialized_state_dependencies())
+            .then(flushed_ingestor_outputs())
+            .map(
+                |(
+                    (
+                        ((((if_not_exists, name), from_input), mode), filter_where),
                         materialized_state,
-                    },
-                    if_not_exists,
-                )
-            },
-        )
+                    ),
+                    outputs,
+                )| {
+                    CreateStatement::new(
+                        CreateReingestor {
+                            labels: Default::default(),
+                            name,
+                            from: from_input,
+                            output_routes: outputs,
+                            mode: mode.unwrap_or_default(),
+                            filter_where,
+                            materialized_state,
+                        },
+                        if_not_exists,
+                    )
+                },
+            )
+    })
 }
 
 pub fn alter_reingestor_parser<'src>()

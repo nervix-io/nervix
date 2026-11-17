@@ -24,7 +24,7 @@ use crate::{
         LexedInput, ParseError, ParseFromSourceError, ack_mode, boxed_choice, branch_selection,
         byte_size_lit, duration_lit, explicit_processor_outputs, filter_where_clause,
         from_relay_clauses, if_not_exists_clause, into_parse_error, kw, kw_phrase2, kw_phrase3,
-        lex_input, materialized_state_dependencies, suggest_from, tok, window_processor_name,
+        lex_input, materialized_state_dependencies, suggest_from, window_processor_name,
     },
 };
 
@@ -208,46 +208,48 @@ fn state_limit<'src>()
 pub fn create_window_processor_parser<'src>()
 -> impl Parser<'src, &'src [Token], CreateStatement<CreateWindowProcessor>, extra::Err<ParseError<'src>>>
 + Clone {
-    kw(Identifier::Create)
-        .ignore_then(if_not_exists_clause())
-        .then_ignore(kw_phrase2(Identifier::Window, Identifier::Processor))
-        .then(window_processor_name())
-        .then_ignore(kw(Identifier::From))
-        .then(from_relay_clauses())
-        .then(ack_mode().or_not())
-        .then(filter_where_clause().or_not())
-        .boxed()
-        .then(width_and_step())
-        .map(|(head, (width, step))| ((head, width), step))
-        .boxed()
-        .then(state_limit())
-        .then(branch_selection())
-        .then(materialized_state_dependencies())
-        .then(explicit_processor_outputs())
-        .then_ignore(tok(Token::Semicolon).or_not())
-        .try_map(|(parsed, outputs), _span| {
-            let (parsed, materialized_state) = parsed;
-            let (parsed, branched_by) = parsed;
-            let (parsed, state_limit) = parsed;
-            let ((head, width), step) = parsed;
-            let ((((if_not_exists, name), from_input), mode), filter_where) = head;
-            Ok(CreateStatement::new(
-                CreateWindowProcessor {
-                    name,
-                    from: from_input,
-                    output_routes: outputs,
-                    branched_by,
-                    width,
-                    step,
-                    state_limit,
-                    mode: mode.unwrap_or_default(),
-                    filter_where,
-                    materialized_state,
-                },
-                if_not_exists,
-            ))
-        })
-        .boxed()
+    crate::labels::finish_creation({
+        kw(Identifier::Create)
+            .ignore_then(if_not_exists_clause())
+            .then_ignore(kw_phrase2(Identifier::Window, Identifier::Processor))
+            .then(window_processor_name())
+            .then_ignore(kw(Identifier::From))
+            .then(from_relay_clauses())
+            .then(ack_mode().or_not())
+            .then(filter_where_clause().or_not())
+            .boxed()
+            .then(width_and_step())
+            .map(|(head, (width, step))| ((head, width), step))
+            .boxed()
+            .then(state_limit())
+            .then(branch_selection())
+            .then(materialized_state_dependencies())
+            .then(explicit_processor_outputs())
+            .try_map(|(parsed, outputs), _span| {
+                let (parsed, materialized_state) = parsed;
+                let (parsed, branched_by) = parsed;
+                let (parsed, state_limit) = parsed;
+                let ((head, width), step) = parsed;
+                let ((((if_not_exists, name), from_input), mode), filter_where) = head;
+                Ok(CreateStatement::new(
+                    CreateWindowProcessor {
+                        labels: Default::default(),
+                        name,
+                        from: from_input,
+                        output_routes: outputs,
+                        branched_by,
+                        width,
+                        step,
+                        state_limit,
+                        mode: mode.unwrap_or_default(),
+                        filter_where,
+                        materialized_state,
+                    },
+                    if_not_exists,
+                ))
+            })
+            .boxed()
+    })
 }
 
 pub fn parse_create_window_processor_tokens(
