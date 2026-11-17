@@ -256,6 +256,16 @@ and constructions inside `ALTER`. After `metadata.`, an ingestor offers its decl
 fields. Suggestions come from the grammar at the cursor, so a duration or mode position does
 not offer expression functions.
 
+Codec and relay names follow what the statement can accept, by the same rules the web console's
+forms apply to their choices. After `DECODE USING` only codecs that decode are offered, and after
+`ENCODE USING` only codecs that encode. A relay is offered where it agrees with the relays the
+statement has already named: after `CREATE JUNCTION copy FROM readings,` only relays with the
+schema and branch of `readings` are suggested, and a junction's `TO` and `ON MESSAGE ERROR SEND TO`
+offer only relays on that branch. A correlator's first `RIGHT FROM` relay keeps the branch of its
+`LEFT FROM` relays, and `CREATE GENERATOR synth USING MATERIALIZED STATE` offers only relays with
+materialized state. The first relay of a statement's first `FROM` list offers every relay, since
+the clauses that would narrow it come after it.
+
 Scripts can request the same candidates with `--suggest 'DROP SCHEMA ord' --cursor 15`.
 The cursor is a UTF-8 byte offset; omitting it selects the end of the input. The CLI prints JSON
 containing a status and each candidate's display value, kind, and exact text edit.
@@ -432,10 +442,11 @@ processor state inspections are bounded and carry an opaque continuation. See
 [Inspect Materialized State](./relay.md#inspect-materialized-state) for selector clauses, typed
 counts, row limits and stale-token handling,
 [Inspect Held Rows](./processors.md#inspect-held-rows) for reorderer and correlator rows, and
+[Inspect Carried Inference State](./processors.md#inspect-carried-inference-state) for tensor sections, and
 [WASM State And Recovery](./wasm-state.md#observability) for WASM checkpoint facts. Standalone JSON
 mode accepts `DESCRIBE TRANSACTION`, `SHOW RELAY ... MATERIALIZED STATE`,
 `SHOW REORDERER ... STATE`, `SHOW CORRELATOR ... STATE`, `SHOW DEDUPLICATOR ... STATE`,
-`SHOW WINDOW PROCESSOR ... STATE` and `SHOW WASM PROCESSOR ... STATE` with `FORMAT JSON`.
+`SHOW WINDOW PROCESSOR ... STATE`, `SHOW INFERENCER ... STATE` and `SHOW WASM PROCESSOR ... STATE` with `FORMAT JSON`.
 After a stale-preview `COMMIT` refusal, run `DESCRIBE TRANSACTION` for the
 attached transaction before retrying the commit so the client fences it to the newly reviewed
 planning basis.

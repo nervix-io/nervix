@@ -11,7 +11,7 @@ use error_stack::{Report, ResultExt as _};
 use eventsource_stream::Eventsource as _;
 use futures_util::StreamExt as _;
 use meticulous::{OptionExt as _, ResultExt as _};
-use nervix_consensus::{ClusterLicensingState, LicensingMode};
+use nervix_consensus::LicensingMode;
 use nervix_execution::MemoryClass;
 use nervix_licensing_protocol::{notifications::Notification, requests::Operation};
 use nervix_primitives::{
@@ -19,12 +19,11 @@ use nervix_primitives::{
     time::{sleep, timeout},
 };
 use thiserror::Error;
-use uuid::Uuid;
 
 use super::{
     client::{LicensingClient, LicensingRequestError},
     clock,
-    notifications::{CommittedRevisions, NotificationCursor},
+    notifications::{CommittedRevisions, NotificationCursor, RefreshHint},
 };
 use crate::{
     application::session_service::SessionServiceImpl,
@@ -59,7 +58,7 @@ impl StreamTasks {
         &mut self,
         service: &SessionServiceImpl,
         leading: bool,
-        hints: &watch::Sender<Option<Uuid>>,
+        hints: &watch::Sender<Option<RefreshHint>>,
     ) {
         let desired = if leading {
             let state = service
@@ -119,7 +118,7 @@ impl Drop for Connected {
 }
 
 /// This task is aborted and joined before another tenure/activation starts its stream.
-pub(super) async fn run(service: SessionServiceImpl, hints: watch::Sender<Option<Uuid>>) {
+pub(super) async fn run(service: SessionServiceImpl, hints: watch::Sender<Option<RefreshHint>>) {
     let mut cursor = NotificationCursor::default();
     let mut backoff = service.cluster_parameters().licensing_request_timeout();
     loop {
@@ -143,7 +142,7 @@ pub(super) async fn run(service: SessionServiceImpl, hints: watch::Sender<Option
 
 async fn connect(
     service: &SessionServiceImpl,
-    hints: &watch::Sender<Option<Uuid>>,
+    hints: &watch::Sender<Option<RefreshHint>>,
     cursor: &mut NotificationCursor,
     backoff: &mut Duration,
 ) -> error_stack::Result<(), StreamError> {
@@ -252,11 +251,14 @@ async fn connect(
         else {
             return Err(Report::new(StreamError::Ended));
         };
-        let Some(revisions) = revisions(&committed) else {
+        let Some(revisions) = CommittedRevisions::from_state(&committed) else {
             return Err(Report::new(StreamError::Ended));
         };
-        if cursor.observe(&hint, &revisions) {
-            hints.send_replace(Some(activation_id));
+        if let Some(requirement) = cursor.observe(&hint, &revisions) {
+            hints.send_replace(Some(RefreshHint {
+                activation_id,
+                requirement,
+            }));
         }
     }
     Err(Report::new(StreamError::Ended))
@@ -285,20 +287,3 @@ impl std::fmt::Display for FramingFailure {
     }
 }
 impl std::error::Error for FramingFailure {}
-
-fn revisions(state: &ClusterLicensingState) -> Option<CommittedRevisions> {
-    let LicensingMode::Activated(activation) = &state.record.mode else {
-        return None;
-    };
-    Some(CommittedRevisions {
-        decision_revision: activation.decision.revision,
-        conditions_revision: activation.decision.conditions_revision,
-        trust_serial: state
-            .record
-            .trust
-            .iter()
-            .map(|document| document.serial)
-            .max()
-            .unwrap_or(0),
-    })
-}

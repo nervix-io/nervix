@@ -9,7 +9,7 @@
 use ahash_compile_time::{HashMap, HashMapExt};
 use meticulous::OptionExt as _;
 
-use crate::{Model, ModelKind, ModelName, NodeRef, UniquelyKindedModel};
+use crate::{CreateRelay, Model, ModelKind, ModelName, NodeRef, RelayName, UniquelyKindedModel};
 
 /// The models of one domain, keyed by the node each one configures.
 ///
@@ -77,6 +77,21 @@ impl<Version> ModelIndex<Version> {
     pub fn iter(&self) -> impl Iterator<Item = (&NodeRef, &Model<Version>)> {
         self.by_node.iter()
     }
+
+    /// The relay named `name`, when this index configures one.
+    ///
+    /// A relay binds no resource version, so readers of every `Version` read it the same way.
+    pub fn relay(&self, name: &RelayName) -> Option<&CreateRelay> {
+        let model = self.by_node.get(&NodeRef::new(ModelKind::Relay, name))?;
+        let relay = match model {
+            Model::Relay(relay) => Some(relay),
+            _ => None,
+        };
+        Some(relay.assured(Self::KEYED_BY_MODEL))
+    }
+
+    const KEYED_BY_MODEL: &'static str =
+        "a model index keys every model by the kind the model itself reports";
 }
 
 impl ModelIndex {
@@ -122,9 +137,6 @@ impl ModelIndex {
         let model = self.by_node.get_mut(&NodeRef::new(kind, identifier))?;
         Some(narrow(model).assured(Self::KEYED_BY_MODEL))
     }
-
-    const KEYED_BY_MODEL: &'static str =
-        "a model index keys every model by the kind the model itself reports";
 }
 
 impl<Version> FromIterator<Model<Version>> for ModelIndex<Version> {
@@ -188,6 +200,27 @@ mod tests {
                 )
                 .is_none(),
             "a name shared across kinds resolves per kind"
+        );
+    }
+
+    #[test]
+    fn a_relay_is_read_by_its_name_whatever_version_the_index_binds() {
+        let name = RelayName::parse("events_in").expect("valid relay name");
+        let index = ModelIndex::from_iter([relay("events_in")]);
+        assert_eq!(
+            index.relay(&name).map(|relay| relay.name.as_str()),
+            Some("events_in")
+        );
+
+        let queued = ModelIndex::<crate::RequestedResourceVersion>::from_iter([Model::Schema(
+            CreateSchema {
+                name: SchemaName::parse("events_in").expect("valid schema name"),
+                fields: Vec::new(),
+            },
+        )]);
+        assert!(
+            queued.relay(&name).is_none(),
+            "a schema sharing the relay's name is not a relay"
         );
     }
 

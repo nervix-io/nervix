@@ -101,6 +101,9 @@ Follow those sections for sensitive argument projection, branch selectors, pagin
 between retained rows and window metadata; use each processor's `DESCRIBE` for a count summary.
 For inspections while partitions change, also read [Relay → Changing the partition count](../../../docs/src/relay.md#changing-the-partition-count)
 before interpreting a key's partition or retrying a raced inspection.
+For carried inference tensors, read [Runtime Nodes → Inspect Carried Inference State](../../../docs/src/processors.md#inspect-carried-inference-state)
+before selecting branches, paging STATE entries, interpreting checkpoint progress or deciding
+whether tensor values are visible. Use the shared typed inspection surface in native clients.
 
 For arithmetic on sequences, read [Expression Functions → List Arithmetic](../../../docs/src/filter-map-functions.md#list-arithmetic)
 before choosing a two-list or scalar-broadcast function. Check its exact numeric type, fixed-shape,
@@ -108,8 +111,9 @@ null and message-error rules; scalar operators do not select list arithmetic.
 
 For interactive authoring, the [CLI](https://docs.nervix.io/client-tools-cli.html) and
 [web console](https://docs.nervix.io/client-tools-web-console.html) use the same server completion
-contract. Refer users to those chapters for cursor edits, transaction-aware candidates, and
-completion status messages, and completing multi-word creation heads. For connector expression
+contract. Refer users to those chapters for cursor edits, transaction-aware candidates, codec and
+relay candidates narrowed to what the statement can accept, and completion status messages, and
+completing multi-word creation heads. For connector expression
 completion, including filters, HTTP request expressions, ALTER constructions, metadata fields and
 entity-specific header functions, follow
 the CLI's Completion section.
