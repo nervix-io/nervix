@@ -28,8 +28,10 @@ const TIME_COLUMNS: [&str; 4] = ["received_at", "release_at", "timeout_at", "see
 #[derive(Debug, Default)]
 pub(crate) struct Observations {
     continuation: Option<String>,
+    inference_publications: BTreeMap<(String, String), u64>,
 }
 
+mod inferencer;
 mod partition_moves;
 #[path = "published.rs"]
 mod published;
@@ -42,6 +44,7 @@ struct DisplayedRow {
 
 fn statement_kind(kind: &str) -> &'static str {
     match kind {
+        "inferencer" => "INFERENCER",
         "reorderer" => "REORDERER",
         "correlator" => "CORRELATOR",
         "deduplicator" => "DEDUPLICATOR",
@@ -149,8 +152,11 @@ fn complete_rows(state: &StateInspection) -> Vec<String> {
 }
 
 fn metadata_section(state: &StateInspection, section: &str) -> bool {
-    processor_kind(state) == nervix_models::ModelKind::WindowProcessor
-        && matches!(section, "header" | "accumulators")
+    match processor_kind(state) {
+        nervix_models::ModelKind::WindowProcessor => matches!(section, "header" | "accumulators"),
+        nervix_models::ModelKind::Inferencer => section == "header",
+        _ => false,
+    }
 }
 
 fn sorted(mut rows: Vec<String>) -> Vec<String> {
