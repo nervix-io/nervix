@@ -224,8 +224,19 @@ CREATE REINGESTOR chaos_life_rotate
     FLUSH IMMEDIATE
     ON MESSAGE ERROR LOG;
 
-CREATE KAFKA TOPIC EMITTER chaos_life_rotating_emitter
+CREATE RELAY chaos_life_rotation_delivery SCHEMA chaos_life_record BRANCHED BY chaos_life_branch CAPACITY 1;
+
+CREATE REINGESTOR chaos_life_deliver_rotation
   FROM chaos_life_rotating
+  ATTACHED
+  TO chaos_life_rotation_delivery
+    INHERIT ALL
+    BRANCHED BY chaos_life_branch SET branch_name = message.branch_name
+    FLUSH IMMEDIATE
+    ON MESSAGE ERROR LOG;
+
+CREATE KAFKA TOPIC EMITTER chaos_life_rotating_emitter
+  FROM chaos_life_rotation_delivery
   ATTACHED
   TO chaos_kafka TOPIC 'chaos_life_rotating_output'
     MODE ACK PARALLEL MAX 16 ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s

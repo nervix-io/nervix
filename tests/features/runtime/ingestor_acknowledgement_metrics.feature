@@ -389,7 +389,8 @@ Feature: Ingestor acknowledgement and lifecycle interactions
 
   # The emitter's fault mode fails every tree the ingestor waits on, so each delivery is rejected and
   # requeued until the fault clears. Its stall mode then keeps a later delivery's tree alive,
-  # unconfirmed, until the domain stops the ingestor.
+  # unconfirmed, until the domain stops the ingestor. Other nodes apply STOP afterward, so a
+  # remote emitter cannot resolve that tree by dropping its buffer before the ingestor stops.
   Scenario Outline: A RabbitMQ ingestor counts failed trees and the positions it stopped before confirming on <cluster_size> nodes
     Given RabbitMQ is running
     And HTTP receiver "api" is running
@@ -468,7 +469,9 @@ Feature: Ingestor acknowledgement and lifecycle interactions
       {"user_id":2}
       """
     And RabbitMQ queue "failed_trees_{{test_id}}" eventually has 1 unacknowledged deliveries
-    When these Plexus commands are executed
+    When runtime installation on every node is paused
+    And runtime installation on node "{{ingestor_owner}}" is released
+    And these Plexus commands begin executing in the background
       """
       STOP;
       """
@@ -499,6 +502,12 @@ Feature: Ingestor acknowledgement and lifecycle interactions
       connector="RABBITMQ"
       entity="QUEUE"
       """
+
+    # The owner consumed its released pause while applying STOP. Arm it again so the all-node
+    # release has one control per node; this new pause is released before another install waits.
+    When runtime installation on node "{{ingestor_owner}}" is paused
+    And runtime installation on every node is released
+    Then the background Plexus execution succeeds
 
     Examples:
       | cluster_size |
