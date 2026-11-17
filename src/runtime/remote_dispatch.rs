@@ -23,7 +23,6 @@
 
 use error_stack::ResultExt as _;
 use nervix_interconnect::{RelayGrantRefusal, TransportError};
-use nervix_recovery::Discarded as _;
 
 use super::{
     relay_send_attempts::{
