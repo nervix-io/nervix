@@ -256,6 +256,7 @@ mod tests {
                     offset_mode,
                     instances: nervix_models::IngestorInstances::Count(nonzero!(1u64)),
                     mode: KafkaIngestMode::NoAck,
+                    rate_limits: nervix_models::RateLimits::NONE,
                     quiesce: IngestQuiesceMode::Suspend,
                 })),
                 codec: named("payload_codec"),

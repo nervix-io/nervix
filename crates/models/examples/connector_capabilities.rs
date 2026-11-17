@@ -21,7 +21,7 @@ use nervix_models::{
     EmitterInstancingCapability, EmitterReferenceKind, HeaderModel, IngestorEntityCapabilities,
     IngestorEntityKind, IngestorReferenceKind, LocatorDeclaration, LocatorName, OmittedDeadline,
     OptionDeclaration, OptionForm, OptionPresence, OptionValue, OtelEmitterEntity, OtelValueField,
-    SYSLOG_FRAME_LIMITS, SyslogEmitterEntity, WaitBound,
+    RateLimitDeclaration, SYSLOG_FRAME_LIMITS, SyslogEmitterEntity, WaitBound,
 };
 use serde_json::{Value, json};
 use strum::IntoEnumIterator as _;
@@ -153,6 +153,7 @@ fn ingestor(kind: IngestorEntityKind) -> Value {
         acknowledgement_confirmation,
         delivery,
         quiesce,
+        rate_limit,
         // Read with the entity's alternatives through `kind.locators()` below.
         locator: _,
         options: declared_options,
@@ -184,6 +185,19 @@ fn ingestor(kind: IngestorEntityKind) -> Value {
         .map(|field| format!("metadata.{}: {} OPTIONAL", field.name(), field.ty()))
         .collect();
     let options: Vec<_> = declared_options.iter().map(option).collect();
+    let (held, refused): (Vec<_>, Vec<_>) = delivery
+        .iter()
+        .map(|declared| declared.kind)
+        .partition(|mode| rate_limit.holds(*mode));
+    let rate_limit = json!({
+        "class": match rate_limit {
+            RateLimitDeclaration::Held | RateLimitDeclaration::HeldIn(_) => "held",
+            RateLimitDeclaration::Unheld => "unheld",
+            RateLimitDeclaration::Paced => "paced",
+        },
+        "held": held.iter().map(|mode| mode.phrase()).collect::<Vec<_>>(),
+        "refused": refused.iter().map(|mode| mode.phrase()).collect::<Vec<_>>(),
+    });
     let payload: Vec<_> = payload
         .fields()
         .iter()
@@ -213,7 +227,7 @@ fn ingestor(kind: IngestorEntityKind) -> Value {
         "instancing": instancing.as_ref(), "external_partitions": external_partitions,
         "payload": payload,
         "reference": reference, "locator": locators(&declared_locators), "options": options,
-        "modes": modes, "quiesce": quiesce, "metadata": metadata,
+        "modes": modes, "quiesce": quiesce, "rate_limit": rate_limit, "metadata": metadata,
         "headers": header_model(headers), "every_node": executes_on_every_cluster_node,
         "position": position_class.as_ref(),
         "confirmation": acknowledgement_confirmation.as_ref(),

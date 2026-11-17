@@ -159,6 +159,7 @@ impl UnfoldingDomain {
             handles,
             output_routes,
             filter_where,
+            rate_limit,
             branched_templates,
             metrics,
         } = dependencies;
@@ -192,6 +193,7 @@ impl UnfoldingDomain {
             flush_each_intake: intake.flush_each_intake,
             unacknowledged_admission: intake.admission,
             general_error_policy: plan.ingestor.general_error_policy.clone(),
+            rate_limit,
         })
     }
 

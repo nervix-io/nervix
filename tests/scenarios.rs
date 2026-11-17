@@ -241,6 +241,7 @@ mod inferencer_describe;
 mod ingestion_time;
 mod ingestor_instances;
 mod ingestor_payload;
+mod ingestor_rate_limit;
 mod inherited_partitions;
 mod kafka_metadata;
 mod licensing;
@@ -576,6 +577,9 @@ struct ScenarioWorld {
     /// opens no earlier than the first record that reaches it, so a collection-delay assertion
     /// measures its collected output from this instant.
     first_http_post_at: Option<Instant>,
+    /// The instant a rate-limit scenario recorded before its ingestor could admit a payload, and
+    /// when each payload it then received arrived.
+    rate_limit: ingestor_rate_limit::RateLimitObservation,
     last_command_error: Option<String>,
     last_command_output: Option<String>,
     last_command_disposition: Option<nervix_client_wire::CommandDisposition>,

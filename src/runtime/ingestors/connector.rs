@@ -27,10 +27,10 @@ use nervix_connector::{
     IngestorAcknowledgementOutcome, IngestorAcknowledgementSupport, IngestorBatch,
     IngestorBatchAcknowledgement, IngestorBatchRequest, IngestorCapabilities, IngestorConnector,
     IngestorError, IngestorHost, IngestorHostServices, IngestorIntakeError, IngestorIntakeMessage,
-    IngestorIntakeResult, IngestorMessage, IngestorPlan, IngestorPoll, IngestorReadOutcome,
-    IngestorResume, IngestorResumeOutcome, IngestorSettlement, IngestorSettlementOperation,
-    IngestorSettlementOutcome, IngestorSuspendCause, PacedIngestorConnector, ParsedRetryPolicy,
-    next_retry_delay, physical_time::actual_utc_now,
+    IngestorIntakeResult, IngestorMessage, IngestorPlan, IngestorPoll, IngestorReadBudget,
+    IngestorReadOutcome, IngestorResume, IngestorResumeOutcome, IngestorSettlement,
+    IngestorSettlementOperation, IngestorSettlementOutcome, IngestorSuspendCause,
+    PacedIngestorConnector, ParsedRetryPolicy, next_retry_delay, physical_time::actual_utc_now,
 };
 use nervix_models::{DomainClockPeriod, IngestAcknowledgement, PositionClass};
 use nervix_primitives::sync::CancellationToken;
@@ -57,7 +57,7 @@ use individual_settlement::IndividualBatch;
 
 #[path = "connector_read.rs"]
 mod read;
-use read::{ReadOutcome, read_batch};
+use read::{AllowanceHoldEnd, ReadOutcome, hold_for_allowance, read_batch, wait_for_flush};
 
 #[path = "connector_poll.rs"]
 mod poll;
@@ -423,6 +423,7 @@ impl Runtime {
             handles,
             output_routes,
             filter_where,
+            rate_limit,
             branched_templates,
             metrics,
         } = dependencies;
@@ -456,6 +457,7 @@ impl Runtime {
             flush_each_intake,
             unacknowledged_admission,
             general_error_policy: ingestor.general_error_policy.clone(),
+            rate_limit,
         });
         let run = instance.start(host, shutdown_tx.subscribe());
         let task_domain = domain.clone();
@@ -532,6 +534,8 @@ pub(super) struct RuntimeIngestorHostSpec {
     pub(super) unacknowledged_admission: QueueAdmission,
     /// The ingestor's `ON GENERAL ERROR` policy, which reports the payloads its codec refuses.
     pub(super) general_error_policy: GeneralErrorPolicy,
+    /// The ingestor's `RATE LIMIT` clauses, from which this unit's allowance starts full.
+    pub(super) rate_limit: Option<Arc<BoundRateLimit>>,
 }
 
 pub(super) struct RuntimeIngestorHost {
@@ -565,6 +569,9 @@ pub(super) struct RuntimeIngestorHost {
     /// Consumes the payloads the ingestor's codec refuses, for this host and the endpoint bindings
     /// it hands out.
     decode_rejections: DecodeRejections,
+    /// The `RATE LIMIT` allowance of this execution unit, which admits every payload it reads
+    /// before decoding. Absent for an ingestor that writes no `RATE LIMIT`.
+    allowance: Option<UnitAllowance>,
     /// How long a scenario makes this host wait between learning that a batch was acknowledged
     /// through the graph and letting its ingestor confirm the batch, as a slow transport would.
     confirmation_delay: Option<Duration>,
@@ -607,6 +614,30 @@ impl RuntimeIngestorHost {
                 dispatcher.as_deref().map(RemoteDispatcher::local_node_id),
                 spec.kind,
             );
+        // The unit's allowance starts full when the unit starts, and its counters exist at zero
+        // from then on.
+        let allowance = match spec.rate_limit {
+            Some(bound) => {
+                let counters = spec.runtime.inner.metrics.ingestor_rate_limit_counters(
+                    &spec.domain,
+                    &spec.ingestor,
+                    spec.unit,
+                    dispatcher.as_deref().map(RemoteDispatcher::local_node_id),
+                    spec.kind,
+                );
+                Some(UnitAllowance::start(
+                    bound,
+                    RateLimitReporting {
+                        runtime: spec.runtime.clone(),
+                        domain: spec.domain.clone(),
+                        ingestor: spec.ingestor.clone(),
+                        policy: spec.general_error_policy.clone(),
+                        counters,
+                    },
+                ))
+            }
+            None => None,
+        };
         let decode_rejections = DecodeRejections::new(
             spec.general_error_policy,
             decode_rejections_counter,
@@ -653,6 +684,7 @@ impl RuntimeIngestorHost {
             unacknowledged_admission: spec.unacknowledged_admission,
             interactions,
             decode_rejections,
+            allowance,
             confirmation_delay,
             _failure_observation: failure_observation,
         }
@@ -705,7 +737,175 @@ impl RuntimeIngestorHost {
     }
 }
 
+/// What a unit's allowance decided on one payload it costs.
+enum PayloadAdmission {
+    /// The allowance admitted the payload, which the host takes in.
+    Admitted,
+    /// The payload was consumed as a rate-limit rejection.
+    Rejected,
+    /// The allowance has no room for the payload before this instant.
+    HoldUntil(Instant),
+}
+
+/// The metadata rows of `messages`, which a `RATE LIMIT` allowance costs them by.
+fn metadata_rows<'a>(messages: &[IngestorIntakeMessage<'a>]) -> Vec<IngestMetadataRow<'a>> {
+    messages.iter().map(|message| message.metadata).collect()
+}
+
+/// Joins the acknowledgement of a run the host took in to the acknowledgement of the runs of the
+/// same batch before it.
+fn join_run(
+    acknowledgement: &mut Option<RuntimeBatchAcknowledgement>,
+    run: RuntimeBatchAcknowledgement,
+) {
+    match acknowledgement {
+        Some(earlier) => earlier.join(run),
+        None => *acknowledgement = Some(run),
+    }
+}
+
 impl RuntimeIngestorHost {
+    /// Takes in an unacknowledged run of payloads under the quiesce decision in force now.
+    async fn take_in_unacknowledged(
+        &mut self,
+        messages: Vec<IngestorIntakeMessage<'_>>,
+    ) -> IngestorIntakeResult<()> {
+        // The decision the batch is taken in under. A batch that waits for the node's extension
+        // workers is decided again once a newer one arrives.
+        let decided = self.quiesce.observation();
+        if self.buffered_intake && decided.is_quiesced() {
+            return self.retain_unacknowledged(messages).await;
+        }
+        self.dispatch_unacknowledged(messages, decided).await
+    }
+
+    /// Takes in an acknowledged run of payloads under the quiesce decision in force now, and
+    /// returns the acknowledgement of what it dispatched.
+    async fn take_in_acknowledged(
+        &mut self,
+        messages: Vec<IngestorIntakeMessage<'_>>,
+    ) -> IngestorIntakeResult<RuntimeBatchAcknowledgement> {
+        let quiesced = self.quiesce.observation().is_quiesced();
+        if self.buffered_intake && quiesced {
+            return self.retain_acknowledged(messages).await;
+        }
+        self.dispatch_acknowledged(messages).await
+    }
+
+    /// The charges of a payload `cost` describes, or `None` once the payload it names by `metadata`
+    /// was consumed as a rate-limit rejection.
+    fn charges_or_reject(
+        &self,
+        cost: PayloadCost,
+        metadata: &IngestMetadataRow<'_>,
+    ) -> Option<Vec<nervix_rate_limit::Charge>> {
+        match cost {
+            PayloadCost::Charges(charges) => Some(charges),
+            PayloadCost::Rejected { clause, cause } => {
+                self.reject_rate_limited(clause, cause, metadata);
+                None
+            }
+        }
+    }
+
+    /// Admits the payload `metadata` names, which costs `charges`, through this unit's allowance.
+    fn admit_or_reject(
+        &mut self,
+        charges: &[nervix_rate_limit::Charge],
+        metadata: &IngestMetadataRow<'_>,
+    ) -> IngestorIntakeResult<PayloadAdmission> {
+        let allowance = self
+            .allowance
+            .as_mut()
+            .verified("only an ingestor with a RATE LIMIT allowance costs its payloads");
+        let decision = allowance
+            .admit(charges)
+            .change_context(IngestorIntakeError::RateLimit)?;
+        match decision {
+            AllowanceDecision::Admitted => Ok(PayloadAdmission::Admitted),
+            AllowanceDecision::WaitUntil(until) => Ok(PayloadAdmission::HoldUntil(until)),
+            AllowanceDecision::AboveBurst {
+                clause,
+                cost,
+                burst,
+            } => {
+                self.reject_rate_limited(
+                    clause,
+                    RateLimitRejectionCause::AboveBurst { cost, burst },
+                    metadata,
+                );
+                Ok(PayloadAdmission::Rejected)
+            }
+        }
+    }
+
+    /// Consumes the payload `metadata` names as the rejection of the clause at `clause`, from 1.
+    fn reject_rate_limited(
+        &self,
+        clause: usize,
+        cause: RateLimitRejectionCause,
+        metadata: &IngestMetadataRow<'_>,
+    ) {
+        let allowance = self
+            .allowance
+            .as_ref()
+            .verified("only an ingestor with a RATE LIMIT allowance costs its payloads");
+        allowance.reject(&RateLimitRejection::new(
+            clause,
+            cause,
+            metadata,
+            actual_utc_now(),
+        ));
+    }
+
+    /// Holds this intake back until `until`, when the unit's allowance has room for the payload
+    /// it holds back again, and counts the hold. The open ingest group is flushed whenever its
+    /// cadence falls due meanwhile. A stop ends the hold and the intake: nothing the host had not
+    /// yet taken in is dispatched.
+    async fn hold_intake(&mut self, until: Instant) -> IngestorIntakeResult<()> {
+        let started = Instant::now();
+        if let Some(allowance) = &self.allowance {
+            allowance.record_hold_started();
+        }
+        let ended = loop {
+            nervix_primitives::task::consume_budget().await;
+            // A stop an earlier wait already saw on this receiver changes it no more.
+            if *self.delivery_stop.borrow() {
+                break Err(Report::new(IngestorIntakeError::Stopped));
+            }
+            let next_flush = self.collector.next_flush();
+            let delivery_stop = &mut self.delivery_stop;
+            let interrupted = async {
+                nervix_primitives::select! {
+                    changed = delivery_stop.changed() => changed.is_err(),
+                    () = wait_for_flush(next_flush) => false,
+                }
+            };
+            // The deadline is the boundary's timer; once it passes, the caller asks the
+            // allowance again.
+            let Ok(stopped) = timeout_at(until, interrupted).await else {
+                break Ok(());
+            };
+            if stopped {
+                break Err(Report::new(IngestorIntakeError::Stopped));
+            }
+            // The stop signal changed, which the next turn reads, or the open group's flush fell
+            // due, which a flush that finds nothing due leaves as it is.
+            if self
+                .collector
+                .next_flush()
+                .is_some_and(|due| due <= Instant::now())
+                && let Err(error) = self.flush().await
+            {
+                break Err(error);
+            }
+        };
+        if let Some(allowance) = &self.allowance {
+            allowance.record_hold_ended(started.elapsed());
+        }
+        ended
+    }
+
     /// Unacknowledged input the quiesce control decides on as one payload, which it buffers,
     /// drops, or lets dispatch: input read while the ingestor is quiesced, or a batch whose
     /// decision changed while it waited for the node's extension workers.
@@ -1171,24 +1371,106 @@ impl IngestorHostServices for RuntimeIngestorHost {
         &mut self,
         messages: Vec<IngestorIntakeMessage<'_>>,
     ) -> IngestorIntakeResult<()> {
-        // The decision the batch is taken in under. A batch that waits for the node's extension
-        // workers is decided again once a newer one arrives.
-        let decided = self.quiesce.observation();
-        if self.buffered_intake && decided.is_quiesced() {
-            return self.retain_unacknowledged(messages).await;
+        let costs = match &self.allowance {
+            Some(allowance) => {
+                let run = ProgramRun {
+                    executor: self.runtime.executor(),
+                    now: actual_utc_now(),
+                };
+                allowance
+                    .costs(run, &metadata_rows(&messages), None)
+                    .await
+                    .change_context(IngestorIntakeError::RateLimit)?
+            }
+            None => return self.take_in_unacknowledged(messages).await,
+        };
+        let mut run = Vec::with_capacity(messages.len());
+        for (message, cost) in messages.into_iter().zip(costs) {
+            nervix_primitives::task::consume_budget().await;
+            let Some(charges) = self.charges_or_reject(cost, &message.metadata) else {
+                continue;
+            };
+            loop {
+                nervix_primitives::task::consume_budget().await;
+                match self.admit_or_reject(&charges, &message.metadata)? {
+                    PayloadAdmission::Admitted => {
+                        run.push(message);
+                        break;
+                    }
+                    PayloadAdmission::Rejected => break,
+                    PayloadAdmission::HoldUntil(until) => {
+                        // What the allowance admitted goes on before the hold, so a payload never
+                        // waits for the allowance of the payloads behind it.
+                        if !run.is_empty() {
+                            self.take_in_unacknowledged(std::mem::take(&mut run))
+                                .await?;
+                        }
+                        self.hold_intake(until).await?;
+                    }
+                }
+            }
         }
-        self.dispatch_unacknowledged(messages, decided).await
+        if run.is_empty() {
+            return Ok(());
+        }
+        self.take_in_unacknowledged(run).await
     }
 
     async fn intake_acknowledged(
         &mut self,
         messages: Vec<IngestorIntakeMessage<'_>>,
     ) -> IngestorIntakeResult<IngestorBatchAcknowledgement> {
-        let quiesced = self.quiesce.observation().is_quiesced();
-        let acknowledgement = if self.buffered_intake && quiesced {
-            self.retain_acknowledged(messages).await?
-        } else {
-            self.dispatch_acknowledged(messages).await?
+        let costs = match &self.allowance {
+            Some(allowance) => {
+                let run = ProgramRun {
+                    executor: self.runtime.executor(),
+                    now: actual_utc_now(),
+                };
+                allowance
+                    .costs(run, &metadata_rows(&messages), None)
+                    .await
+                    .change_context(IngestorIntakeError::RateLimit)?
+            }
+            None => {
+                let acknowledgement = self.take_in_acknowledged(messages).await?;
+                return Ok(IngestorBatchAcknowledgement::new(acknowledgement));
+            }
+        };
+        let mut acknowledgement: Option<RuntimeBatchAcknowledgement> = None;
+        let mut run = Vec::with_capacity(messages.len());
+        for (message, cost) in messages.into_iter().zip(costs) {
+            nervix_primitives::task::consume_budget().await;
+            let Some(charges) = self.charges_or_reject(cost, &message.metadata) else {
+                continue;
+            };
+            loop {
+                nervix_primitives::task::consume_budget().await;
+                match self.admit_or_reject(&charges, &message.metadata)? {
+                    PayloadAdmission::Admitted => {
+                        run.push(message);
+                        break;
+                    }
+                    PayloadAdmission::Rejected => break,
+                    PayloadAdmission::HoldUntil(until) => {
+                        // What the allowance admitted is dispatched before the hold, and its roots
+                        // join the batch's acknowledgement, which arms its ACK TIMEOUT only once
+                        // the last payload was admitted and taken in.
+                        if !run.is_empty() {
+                            let taken = self.take_in_acknowledged(std::mem::take(&mut run)).await?;
+                            join_run(&mut acknowledgement, taken);
+                        }
+                        self.hold_intake(until).await?;
+                    }
+                }
+            }
+        }
+        if !run.is_empty() {
+            let taken = self.take_in_acknowledged(run).await?;
+            join_run(&mut acknowledgement, taken);
+        }
+        let acknowledgement = match acknowledgement {
+            Some(acknowledgement) => acknowledgement,
+            None => self.batch_acknowledgement(BatchRoots::new(&self.ack_root_trackers, 0)),
         };
         Ok(IngestorBatchAcknowledgement::new(acknowledgement))
     }
@@ -1341,6 +1623,25 @@ impl IngestorHostServices for RuntimeIngestorHost {
         self.interactions
             .oversized_payloads
             .inc_by(payloads.get().arch_into());
+    }
+
+    fn read_budget(&mut self, window: NonZeroUsize) -> IngestorReadBudget {
+        match &self.allowance {
+            Some(allowance) => allowance.read_budget(window),
+            None => IngestorReadBudget::Take(window),
+        }
+    }
+
+    fn record_rate_limit_hold_started(&self) {
+        if let Some(allowance) = &self.allowance {
+            allowance.record_hold_started();
+        }
+    }
+
+    fn record_rate_limit_hold_ended(&self, held: Duration) {
+        if let Some(allowance) = &self.allowance {
+            allowance.record_hold_ended(held);
+        }
     }
 
     fn record_unconfirmed_stop(&self, positions: usize) {
@@ -1969,7 +2270,21 @@ pub(super) async fn run_ingestor_instance_with_retry<C>(
             host.mark_ready();
         }
 
-        let request = batch_request(acknowledgement, unacknowledged_poll_batch);
+        // The read takes no more than the unit's RATE LIMIT allowance admits now, and none while
+        // it admits nothing, so the transport keeps what the allowance cannot admit yet.
+        let window = batch_request(acknowledgement, unacknowledged_poll_batch);
+        let request = match host.read_budget(window.max_messages) {
+            IngestorReadBudget::Take(max_messages) => IngestorBatchRequest {
+                max_messages,
+                ..window
+            },
+            IngestorReadBudget::WaitUntil(until) => {
+                match hold_for_allowance(&mut host, &mut shutdown, until).await {
+                    AllowanceHoldEnd::Returned | AllowanceHoldEnd::Restarting => continue,
+                    AllowanceHoldEnd::Stopping => break,
+                }
+            }
+        };
         let read = read_batch(&mut connector, &mut host, &mut shutdown, request).await;
         let end = read.end;
         let messages = match read.into_outcome(&host) {
@@ -2122,6 +2437,10 @@ where
         IngestorAckPolicy::None => {
             let intake = host.intake_unacknowledged(intake_messages).await;
             if let Err(error) = intake {
+                if error.current_context().stopped() {
+                    host.record_unconfirmed_stop(positions.len());
+                    return BatchDisposition::Shutdown;
+                }
                 host.report_error(format!("{error:#}"));
                 return BatchDisposition::Accepted;
             }
@@ -2133,6 +2452,10 @@ where
             let acknowledgement = match intake {
                 Ok(acknowledgement) => acknowledgement,
                 Err(error) => {
+                    if error.current_context().stopped() {
+                        host.record_unconfirmed_stop(positions.len());
+                        return BatchDisposition::Shutdown;
+                    }
                     host.report_error(format!("{error:#}"));
                     return reject_batch(connector, host, settlement, positions).await;
                 }

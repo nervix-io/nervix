@@ -12,10 +12,12 @@
 # line writes it.
 #
 # A change that declares a new capability registers the scenario that observes it in the same
-# change; one that renames or moves a registered scenario updates its entry. Quiesce modes and
-# header access are not capabilities here: the host owns how a source is quiesced, the registry
-# checks a program's header access against the declaration, and the generated conformance tests
-# hold the grammar to both.
+# change; one that renames or moves a registered scenario updates its entry. Quiesce modes, header
+# access and `RATE LIMIT` are not capabilities here: the host owns how a source is quiesced and how
+# it is held back for an allowance, which a connector sees only as the size of the reads it is asked
+# for, the registry checks a program's header access against the declaration, and the generated
+# conformance tests hold the grammar to all three. `tests/features/runtime/ingestor_rate_limit.feature`
+# observes the host's admission, holds and read budget through the public interface.
 
 [[capability]]
 capability = "EVENT published_without_subscribers"

@@ -713,6 +713,9 @@ pub struct IngestorDescribeEnvelope {
     pub reconnect_wait_millis: Option<u64>,
     pub kafka_domain_offsets: Option<KafkaDomainOffsetDescribeEnvelope>,
     pub client_producers: Option<ClientProducersDescribeEnvelope>,
+    /// What the unit's `RATE LIMIT` allowance held back and rejected on the node that executes it,
+    /// for an ingestor whose running plan writes one.
+    pub rate_limit: Option<IngestorRateLimitDescribeEnvelope>,
     pub metrics: Vec<String>,
 }
 
@@ -743,6 +746,20 @@ pub enum TransportPositionEnvelope {
     Syslog {
         peer: SocketAddr,
     },
+}
+
+/// What one ingestor unit's `RATE LIMIT` allowance held back and rejected on the node that executes
+/// the unit.
+#[derive(Debug, Clone, Copy, Archive, Serialize, Deserialize, PartialEq, Eq)]
+pub struct IngestorRateLimitDescribeEnvelope {
+    /// How many times the unit held its source back.
+    pub held_total: u64,
+    /// How long it held its source back, in milliseconds of the physical clock.
+    pub hold_millis_total: u64,
+    /// Payloads consumed because they cost more than a clause's burst.
+    pub rejected_total: u64,
+    /// Payloads consumed because a clause's measure failed on them.
+    pub program_rejections_total: u64,
 }
 
 /// The producers attached to a client ingestor on the node that executes it.

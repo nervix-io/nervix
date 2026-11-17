@@ -116,6 +116,15 @@ impl RuntimeBatchAcknowledgement {
         }
     }
 
+    /// Adds the roots of `run`, a later run of the same batch, which the host took in once its
+    /// `RATE LIMIT` allowance had room for it, so that this acknowledgement waits on every run.
+    /// Neither acknowledgement has been waited on: the host joins the runs before it hands the
+    /// batch's acknowledgement to its ingestor.
+    pub(super) fn join(&mut self, run: Self) {
+        let Self { unsettled, .. } = run;
+        self.unsettled.extend(unsettled);
+    }
+
     /// Waits until `completion` reports its root's terminal outcome. Progress the root reports
     /// restarts the wait, so `timeout` bounds how long the root may stay silent.
     async fn settle(mut completion: AckCompletion, timeout: Duration) -> SettledRoot {

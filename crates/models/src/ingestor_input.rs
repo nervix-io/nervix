@@ -25,8 +25,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     ClientIngestorEntity, ClientProducerIngestor, CodecName, IngestAcknowledgement,
-    IngestQuiesceMode, IngestorDeclaration, IngestorEntity, IngestorEntityKind, ModelKind,
-    ModelName,
+    IngestDeliveryKind, IngestQuiesceMode, IngestorDeclaration, IngestorEntity, IngestorEntityKind,
+    ModelKind, ModelName, RateLimitRefusal, RateLimits,
 };
 
 /// The only quiesce mode a client ingestor honors: admission stops and the producer keeps its
@@ -186,5 +186,33 @@ impl IngestorInput {
             Self::Transport(input) => Some(input.source.acknowledgement()),
             Self::Client(_) => None,
         }
+    }
+
+    /// The delivery mode this input's statement names, as its entity declares the modes.
+    pub fn delivery_kind(&self) -> IngestDeliveryKind {
+        match self {
+            Self::Transport(input) => input.source.acknowledgement().kind(),
+            Self::Client(source) => source.mode.kind(),
+        }
+    }
+
+    /// The `RATE LIMIT` clauses this input's body writes, in order.
+    pub fn rate_limits(&self) -> &RateLimits {
+        match self {
+            Self::Transport(input) => input.source.rate_limits(),
+            Self::Client(source) => &source.rate_limits,
+        }
+    }
+
+    /// The refusal of the `RATE LIMIT` this input's body writes, where its entity cannot hold its
+    /// source back in the delivery mode it names. A body that writes none meets no refusal.
+    pub fn rate_limit_refusal(&self) -> Option<RateLimitRefusal> {
+        if self.rate_limits().is_empty() {
+            return None;
+        }
+        self.entity_kind()
+            .capabilities()
+            .rate_limit
+            .refusal(self.entity_kind(), self.delivery_kind())
     }
 }

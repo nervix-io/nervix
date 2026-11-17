@@ -247,6 +247,11 @@ For intake parallelism, read [Ingestors → Instancing](../../../docs/src/ingest
 Check the entity's instancing capability, Pulsar subscription type, Kafka offset mode and constructing
 routes before setting a count or following branch partitions. Use `DESCRIBE INGESTOR` to verify
 the planned instance placement.
+To cap how fast an ingestor takes from its source, read
+[Ingestors → Rate Limits](../../../docs/src/ingestors.md#rate-limits) first: write `RATE LIMIT`
+clauses between `MODE` and `ON QUIESCE` only for an entity and mode its table says holds the source
+back, remember that each instance keeps its own allowance, and give an `OF` measure an exact,
+required `U64` over payload facts, metadata and headers.
 For payload sizes, client batch row counts or peer-address keys, read
 [Ingestors → Payload Facts](../../../docs/src/ingestors.md#payload-facts) and the entity's declaration
 in `Connector Capabilities`. Every ingestor exposes required `payload.bytes: U64`; only

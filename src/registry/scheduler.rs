@@ -1712,6 +1712,7 @@ mod tests {
             IngestorEntity::Syslog(SyslogIngestor::Listener(SyslogListenerIngestor {
                 client: named("syslog_listener"),
                 mode: nervix_models::SyslogIngestMode::NoAck,
+                rate_limits: nervix_models::RateLimits::NONE,
                 quiesce: nervix_models::IngestQuiesceMode::Suspend,
             }));
         models.push(syslog_client("syslog_listener"));

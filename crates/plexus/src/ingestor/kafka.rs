@@ -15,22 +15,28 @@
 
 use chumsky::prelude::*;
 use nervix_models::{
-    KafkaConsumerGroupName, KafkaIngestMode, KafkaOffsetMode, KafkaTopicIngestor,
-    KafkaTopicIngestorChange, KafkaTopicName,
+    IngestDeliveryKind, KafkaConsumerGroupName, KafkaIngestMode, KafkaOffsetMode,
+    KafkaTopicIngestor, KafkaTopicIngestorChange, KafkaTopicName,
 };
 
 use super::delivery::{
-    ParallelAck, SequentialAck, ack_parallel, ack_sequential, no_ack, optional_instances,
-    start_position, suspend_only_quiesce_clause,
+    NamedDelivery, ParallelAck, SequentialAck, ack_parallel, ack_sequential, no_ack,
+    optional_instances, rate_limits_after, start_position, suspend_only_quiesce_clause,
 };
 use crate::{
     lexer::{Identifier, Token},
     parser_support::{ParseError, client_ref, external_name, kw, kw_phrase2},
 };
 
+impl NamedDelivery for KafkaIngestMode {
+    fn delivery_kind(&self) -> IngestDeliveryKind {
+        self.acknowledgement().kind()
+    }
+}
+
 /// `FROM <client> TOPIC '<topic>'
 /// OFFSET BY DOMAIN|CONSUMER GROUP '<group>' START AT EARLIEST|LATEST
-/// [INSTANCES <n>] MODE … ON QUIESCE SUSPEND`.
+/// [INSTANCES <n>] MODE … [RATE LIMIT …] ON QUIESCE SUSPEND`.
 pub(super) fn topic_body<'src>()
 -> impl Parser<'src, &'src [Token], KafkaTopicIngestor, extra::Err<ParseError<'src>>> + Clone {
     client_ref()
@@ -39,16 +45,19 @@ pub(super) fn topic_body<'src>()
         .then(offset_mode())
         .then(optional_instances::<KafkaTopicIngestor>())
         .then_ignore(kw(Identifier::Mode))
-        .then(mode())
+        .then(mode().then_with_ctx(rate_limits_after::<KafkaTopicIngestor, KafkaIngestMode>()))
         .then(suspend_only_quiesce_clause())
         .map(
-            |(((((client, topic), offset_mode), instances), mode), quiesce)| KafkaTopicIngestor {
-                client,
-                topic,
-                offset_mode,
-                instances,
-                mode,
-                quiesce,
+            |(((((client, topic), offset_mode), instances), (mode, rate_limits)), quiesce)| {
+                KafkaTopicIngestor {
+                    client,
+                    topic,
+                    offset_mode,
+                    instances,
+                    mode,
+                    rate_limits,
+                    quiesce,
+                }
             },
         )
         .boxed()

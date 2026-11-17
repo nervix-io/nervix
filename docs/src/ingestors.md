@@ -197,6 +197,118 @@ connector, the positions an ingestor stopped before its transport confirmed them
 ingestor currently has a transient failure. A node that stops gracefully waits for its ingestors' outstanding confirmations before it
 closes them; see [Shutdown And Recovery](shutdown.md#connector-contracts).
 
+## Rate Limits
+
+An ingestor that holds its source back can cap how fast it takes from it. Each `RATE LIMIT` clause
+declares one allowance, written after the `MODE` body and before `ON QUIESCE`; a body may write
+several, and a payload is admitted only once every clause can pay for it:
+
+```plexus
+CREATE KAFKA TOPIC INGESTOR orders FROM broker TOPIC 'orders' OFFSET BY DOMAIN
+    MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 1s MAX 30s
+    RATE LIMIT 100 PER 1s BURST 20
+    RATE LIMIT 16MiB OF payload.bytes PER 1s BURST 64MiB
+    ON QUIESCE SUSPEND
+    DECODE USING orders_codec
+    TO order_events UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
+    ON GENERAL ERROR LOG;
+```
+
+`RATE LIMIT <count> [OF <measure>] PER <duration> BURST <count>` refills `count` units every
+`PER` period, evenly spread over it, and holds at most `BURST` units, which is also the most a quiet
+ingestor takes at once. Both counts are positive whole numbers or byte sizes such as `16MiB`, a size
+being that many units. The count may not exceed the period in nanoseconds, the refill interval is
+rounded up to a whole nanosecond so the allowance never admits faster than written, the burst is at
+most 4,294,967,295 units, and the time the burst takes to refill must stay below 2^63 nanoseconds.
+`CREATE` and `ALTER` refuse a clause outside these bounds. Without `OF`, every payload costs one
+unit. With
+`OF`, a payload costs the value its measure computes, which must be an exact, required `U64`:
+
+- `OF payload.bytes` charges the payload's size before it is decoded, read directly. A
+  `CLIENT PRODUCER` ingestor also reads `payload.rows`, the rows of the submitted batch.
+- Any other measure is an expression over what a payload carries before its codec decodes it: its
+  [payload facts](#payload-facts), its `metadata` fields and its headers where the entity has them.
+  It calls only deterministic functions, uses no aggregate, and reads no decoded field, so it runs
+  once for each read, over all of its payloads, before any of them is decoded.
+
+A payload that costs more than a clause's `BURST` can never be admitted, and one whose measure
+fails, through an arithmetic error, a missing value or a metadata field without a value of its
+declared type, cannot be costed. Either is consumed rather than presented again, which would only
+meet the same refusal: it is reported as a message error with operation `rate_limit` under the
+ingestor's `ON GENERAL ERROR` policy, which `LOG` publishes as an event naming the clause, the
+payload's transport position where it has one and, for a failed measure, why it failed, and it is
+counted in `nervix_ingestor_rate_limit_rejected_total` or
+`nervix_ingestor_rate_limit_program_rejections_total`. A payload that costs nothing in a clause,
+such as an empty one under `OF payload.bytes`, passes that clause without waiting.
+
+Every execution unit keeps its own allowance on the node that runs it: each instance of an
+ingestor that declares `INSTANCES`, and the one execution of a `CLIENT PRODUCER` ingestor, whose
+producers all share it. An allowance starts full when its unit starts, after an alteration restarts
+the unit or when the unit moves to another node, and nothing of it is stored. Its waits are on the
+node's physical clock, not the domain clock, so a paced or stopped domain clock changes nothing.
+
+While an allowance has no room, the ingestor takes nothing more from its transport, which keeps what
+the allowance cannot admit yet:
+
+- A read takes no more messages than the clauses without `OF` admit now, and no read starts while
+  any clause has no room for a single unit. The ingestor holds its loop until the allowance
+  returns, flushing its open ingest group on its cadence meanwhile.
+- A clause with `OF` charges each payload once the read returned. A payload it cannot admit yet
+  waits in the host before it is decoded, while the payloads admitted before it go on.
+- `ACK TIMEOUT` starts when a payload is admitted, so no hold times an acknowledgement out.
+- A quiesce change or a stop ends a hold before a read at once. A stop that meets a payload waiting
+  for the allowance leaves its position unconfirmed, so its transport presents it again by its own
+  redelivery contract. A payload that `BUFFER` retains was admitted when it arrived, so replaying it
+  charges nothing again.
+- A `CLIENT PRODUCER` batch waits for the allowance in the ingestor's admission worker, the batches
+  behind it wait in the endpoint's queue, and producers are told admission stays open, since sending
+  again would not help. A batch no allowance can ever admit is answered `processing_failed` with
+  cause `rejected`.
+
+A held transport keeps what it holds within its own bounds, as under any other hold of the loop;
+see [When The Extension Workers Are Full](#when-the-extension-workers-are-full). A `SYSLOG
+LISTENER` stays bound: TCP and TLS senders wait once its frame queue is full, while the kernel drops
+UDP datagrams beyond the socket's receive buffer. Under `OFFSET BY CONSUMER GROUP`, a Kafka consumer
+polls nothing while it is held. A hold longer than
+its `max.poll.interval.ms`, librdkafka's default five minutes, makes it leave its group until it
+reads again, and the group gives its partitions to other members meanwhile; keep that setting above
+the longest hold, which is one period divided by the count for a clause without `OF`, and up to the
+time the burst takes to refill for a clause with `OF`.
+
+An entity accepts `RATE LIMIT` only in the delivery modes in which it holds its source back. One
+whose transport or peers push every message the moment it arrives, or a polling entity whose
+`EVERY` cadence already decides how often it reads, refuses the clause where it is written, naming
+why, such as `RABBITMQ QUEUE ingestors in MODE NO ACK cannot hold their source back, so they take
+no RATE LIMIT` or `PROMETHEUS QUERY ingestors read on their EVERY cadence, so they take no RATE
+LIMIT`:
+
+<!-- connector-matrix:rate-limit:start -->
+| Entity | Takes `RATE LIMIT` in | Refuses it in | Why |
+| --- | --- | --- | --- |
+| `CLIENT PRODUCER` | `ACK SEQUENTIAL`, `ACK PARALLEL` | None | In every mode the table lists, the transport keeps what the host has not taken, within its own bounds, so the ingestor reads no more than its allowance admits and waits while it admits nothing. |
+| `HTTP REQUEST` | None | `NO ACK` | The entity reads on its `EVERY` cadence, which already decides how often it reads. |
+| `HTTP ENDPOINT` | None | `NO ACK`, `ACK` | The transport or its peers push every message the moment it arrives, so the ingestor cannot hold them back without losing them. |
+| `KAFKA TOPIC` | `NO ACK`, `ACK SEQUENTIAL`, `ACK PARALLEL` | None | In every mode the table lists, the transport keeps what the host has not taken, within its own bounds, so the ingestor reads no more than its allowance admits and waits while it admits nothing. |
+| `PULSAR TOPIC` | `NO ACK`, `ACK SEQUENTIAL`, `ACK PARALLEL` | None | In every mode the table lists, the transport keeps what the host has not taken, within its own bounds, so the ingestor reads no more than its allowance admits and waits while it admits nothing. |
+| `MQTT TOPIC` | `ACK SEQUENTIAL`, `ACK PARALLEL` | `NO ACK` | In every mode the table lists, the transport keeps what the host has not taken, within its own bounds, so the ingestor reads no more than its allowance admits and waits while it admits nothing. |
+| `NATS SUBJECT` | None | `NO ACK` | The transport or its peers push every message the moment it arrives, so the ingestor cannot hold them back without losing them. |
+| `NATS STREAM` | `ACK SEQUENTIAL`, `ACK PARALLEL` | None | In every mode the table lists, the transport keeps what the host has not taken, within its own bounds, so the ingestor reads no more than its allowance admits and waits while it admits nothing. |
+| `RABBITMQ QUEUE` | `ACK SEQUENTIAL`, `ACK PARALLEL` | `NO ACK` | In every mode the table lists, the transport keeps what the host has not taken, within its own bounds, so the ingestor reads no more than its allowance admits and waits while it admits nothing. |
+| `REDIS PUBSUB` | None | `NO ACK` | The transport or its peers push every message the moment it arrives, so the ingestor cannot hold them back without losing them. |
+| `PROMETHEUS QUERY` | None | `NO ACK` | The entity reads on its `EVERY` cadence, which already decides how often it reads. |
+| `ZEROMQ PULL` | `NO ACK` | None | In every mode the table lists, the transport keeps what the host has not taken, within its own bounds, so the ingestor reads no more than its allowance admits and waits while it admits nothing. |
+| `SQS QUEUE` | `ACK SEQUENTIAL`, `ACK PARALLEL` | None | In every mode the table lists, the transport keeps what the host has not taken, within its own bounds, so the ingestor reads no more than its allowance admits and waits while it admits nothing. |
+| `WEBSOCKETS CONNECTION` | None | `NO ACK` | The transport or its peers push every message the moment it arrives, so the ingestor cannot hold them back without losing them. |
+| `WEBSOCKETS ENDPOINT` | None | `NO ACK`, `ACK` | The transport or its peers push every message the moment it arrives, so the ingestor cannot hold them back without losing them. |
+| `SYSLOG LISTENER` | `NO ACK` | None | In every mode the table lists, the transport keeps what the host has not taken, within its own bounds, so the ingestor reads no more than its allowance admits and waits while it admits nothing. |
+<!-- connector-matrix:rate-limit:end -->
+
+`DESCRIBE INGESTOR` lists each clause as a `rate limit:` line in written order, and `SHOW CREATE`
+writes them back after the mode. For a unit whose ingestor writes `RATE LIMIT`, its `source:`
+section counts the times the unit held its source back, how long it held it, and its rejections and
+program rejections, as the `nervix_ingestor_rate_limit_*` families do; see
+[Ingestor Rate Limits](metrics-and-observability.md#ingestor-rate-limits).
+
 ## Altering Ingestors
 
 `ALTER` names the connector and entity of the stored ingestor in its head and applies one or more
@@ -210,6 +322,8 @@ ALTER <CONNECTOR> <ENTITY> INGESTOR <ingestor>
   | SET <option>
   | DROP <option>
   | SET MODE <delivery mode>
+  | SET RATE LIMIT <clause> [RATE LIMIT <clause> ...]
+  | DROP RATE LIMIT
   | SET START AT EARLIEST | LATEST
   | SET QUIESCE <quiesce body>
   | SET DECODE USING <codec>
@@ -263,6 +377,12 @@ change one part of the stored body and keep the rest of it as it was:
   `DROP`. `INSTANCES` changes only through `SET FROM`.
 - `SET MODE` writes one of the delivery modes the entity declares, with its complete policy.
   Completion offers exactly those modes, and any other is refused where it is written.
+- `SET RATE LIMIT` replaces every [`RATE LIMIT`](#rate-limits) clause the body writes with the
+  complete sequence it writes, in order, and `DROP RATE LIMIT` removes them all. Both exist only
+  under a head whose entity holds its source back in some delivery mode; any other head refuses
+  them, naming why, as `CREATE` does. A clause the stored mode cannot honor is refused once every
+  operation has applied, so a `RABBITMQ QUEUE` ingestor that moves to `NO ACK` writes `DROP RATE
+  LIMIT, SET MODE NO ACK` in one statement.
 - `SET START AT` changes where a `KAFKA TOPIC` consumer group or an owned `PULSAR TOPIC`
   subscription starts a partition it holds no position for; see [Kafka](#kafka) and
   [Pulsar](#pulsar).
@@ -902,6 +1022,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Instancing | single |
 | External partitions | No enumerable external partition set. |
 | Quiesce (complete bodies after ON QUIESCE) | SUSPEND |
+| RATE LIMIT | Accepted in `ACK SEQUENTIAL`, `ACK PARALLEL`. |
 | Metadata | metadata.user: STRING OPTIONAL |
 | Payload facts | payload.bytes: U64<br>payload.rows: U64 |
 | Every live node | no; scheduled owner |
@@ -1148,6 +1269,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Instancing | single |
 | External partitions | No enumerable external partition set. |
 | Quiesce (complete bodies after ON QUIESCE) | SUSPEND<br>BUFFER MAX SIZE 64MiB ON OVERFLOW DROP OLDEST |
+| RATE LIMIT | Refused: the entity reads on its `EVERY` cadence. |
 | Metadata | metadata.status: U16 OPTIONAL<br>metadata.polled_at: DATETIME OPTIONAL |
 | Payload facts | payload.bytes: U64 |
 | Every live node | no; scheduled owner |
@@ -1413,6 +1535,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Instancing | per_partition |
 | External partitions | Enumerable; native coordinate from metadata.partition |
 | Quiesce (complete bodies after ON QUIESCE) | SUSPEND |
+| RATE LIMIT | Accepted in `NO ACK`, `ACK SEQUENTIAL`, `ACK PARALLEL`. |
 | Metadata | metadata.topic: STRING OPTIONAL<br>metadata.partition: I32 OPTIONAL<br>metadata.offset: I64 OPTIONAL<br>metadata.key: BYTES OPTIONAL<br>metadata.timestamp: DATETIME OPTIONAL<br>metadata.timestamp_type: STRING OPTIONAL<br>metadata.tombstone: BOOL OPTIONAL |
 | Payload facts | payload.bytes: U64 |
 | Every live node | no; scheduled owner |
@@ -1655,6 +1778,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Instancing | per_partition |
 | External partitions | Enumerable; native coordinate from metadata.partition |
 | Quiesce (complete bodies after ON QUIESCE) | SUSPEND |
+| RATE LIMIT | Accepted in `NO ACK`, `ACK SEQUENTIAL`, `ACK PARALLEL`. |
 | Metadata | metadata.topic: STRING OPTIONAL<br>metadata.message_id: STRING OPTIONAL<br>metadata.publish_time: DATETIME OPTIONAL<br>metadata.event_time: DATETIME OPTIONAL<br>metadata.key: STRING OPTIONAL<br>metadata.ordering_key: BYTES OPTIONAL<br>metadata.producer_name: STRING OPTIONAL<br>metadata.sequence_id: I64 OPTIONAL<br>metadata.redelivery_count: I64 OPTIONAL<br>metadata.partition: I32 OPTIONAL |
 | Payload facts | payload.bytes: U64 |
 | Every live node | no; scheduled owner |
@@ -1925,6 +2049,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Instancing | per_partition |
 | External partitions | No enumerable external partition set. |
 | Quiesce (complete bodies after ON QUIESCE) | SUSPEND |
+| RATE LIMIT | Accepted in `ACK SEQUENTIAL`, `ACK PARALLEL`; refused in `NO ACK`. |
 | Metadata | metadata.exchange: STRING OPTIONAL<br>metadata.routing_key: STRING OPTIONAL<br>metadata.delivery_tag: U64 OPTIONAL<br>metadata.redelivered: BOOL OPTIONAL<br>metadata.content_type: STRING OPTIONAL<br>metadata.content_encoding: STRING OPTIONAL<br>metadata.message_id: STRING OPTIONAL<br>metadata.correlation_id: STRING OPTIONAL<br>metadata.reply_to: STRING OPTIONAL<br>metadata.type: STRING OPTIONAL<br>metadata.app_id: STRING OPTIONAL<br>metadata.user_id: STRING OPTIONAL<br>metadata.priority: U8 OPTIONAL<br>metadata.expiration: STRING OPTIONAL<br>metadata.timestamp: DATETIME OPTIONAL |
 | Payload facts | payload.bytes: U64 |
 | Every live node | no; scheduled owner |
@@ -2094,6 +2219,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Instancing | single |
 | External partitions | No enumerable external partition set. |
 | Quiesce (complete bodies after ON QUIESCE) | BUFFER MAX SIZE 64MiB ON OVERFLOW DROP OLDEST<br>DROP |
+| RATE LIMIT | Refused in every mode: the entity cannot hold its source back. |
 | Metadata | metadata.channel: STRING OPTIONAL<br>metadata.pattern: STRING OPTIONAL |
 | Payload facts | payload.bytes: U64 |
 | Every live node | no; scheduled owner |
@@ -2230,6 +2356,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Instancing | per_partition |
 | External partitions | No enumerable external partition set. |
 | Quiesce (complete bodies after ON QUIESCE) | SUSPEND (requires SESSION PERSISTENT and QOS 1 or 2)<br>BUFFER MAX SIZE 64MiB ON OVERFLOW DROP OLDEST<br>DROP |
+| RATE LIMIT | Accepted in `ACK SEQUENTIAL`, `ACK PARALLEL`; refused in `NO ACK`. |
 | Metadata | metadata.topic: STRING OPTIONAL<br>metadata.retain: BOOL OPTIONAL<br>metadata.qos: U8 OPTIONAL<br>metadata.duplicate: BOOL OPTIONAL<br>metadata.content_type: STRING OPTIONAL<br>metadata.response_topic: STRING OPTIONAL<br>metadata.correlation_data: BYTES OPTIONAL<br>metadata.message_expiry: U32 OPTIONAL |
 | Payload facts | payload.bytes: U64 |
 | Every live node | no; scheduled owner |
@@ -2505,6 +2632,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Instancing | per_partition |
 | External partitions | No enumerable external partition set. |
 | Quiesce (complete bodies after ON QUIESCE) | BUFFER MAX SIZE 64MiB ON OVERFLOW DROP OLDEST<br>DROP |
+| RATE LIMIT | Refused in every mode: the entity cannot hold its source back. |
 | Metadata | metadata.subject: STRING OPTIONAL<br>metadata.reply: STRING OPTIONAL |
 | Payload facts | payload.bytes: U64 |
 | Every live node | no; scheduled owner |
@@ -2592,6 +2720,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Instancing | single |
 | External partitions | No enumerable external partition set. |
 | Quiesce (complete bodies after ON QUIESCE) | SUSPEND<br>BUFFER MAX SIZE 64MiB ON OVERFLOW DROP OLDEST<br>DROP |
+| RATE LIMIT | Accepted in `ACK SEQUENTIAL`, `ACK PARALLEL`. |
 | Metadata | metadata.subject: STRING OPTIONAL<br>metadata.reply: STRING OPTIONAL<br>metadata.stream: STRING OPTIONAL<br>metadata.consumer: STRING OPTIONAL<br>metadata.sequence: U64 OPTIONAL<br>metadata.timestamp: DATETIME OPTIONAL<br>metadata.delivered: U64 OPTIONAL |
 | Payload facts | payload.bytes: U64 |
 | Every live node | no; scheduled owner |
@@ -2692,6 +2821,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Instancing | single |
 | External partitions | No enumerable external partition set. |
 | Quiesce (complete bodies after ON QUIESCE) | SUSPEND<br>BUFFER MAX SIZE 64MiB ON OVERFLOW DROP OLDEST<br>DROP |
+| RATE LIMIT | Accepted in `NO ACK`. |
 | Metadata | Not offered: The driver exposes no peer identity on receive. Only frame 0 is ingested, with no broker position or typed transport metadata namespace. |
 | Payload facts | payload.bytes: U64 |
 | Every live node | no; scheduled owner |
@@ -2777,6 +2907,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Instancing | single |
 | External partitions | No enumerable external partition set. |
 | Quiesce (complete bodies after ON QUIESCE) | SUSPEND<br>BUFFER MAX SIZE 64MiB ON OVERFLOW DROP OLDEST<br>DROP |
+| RATE LIMIT | Accepted in `NO ACK`. |
 | Metadata | metadata.peer_addr: STRING OPTIONAL<br>metadata.transport: STRING OPTIONAL<br>metadata.tls_peer: STRING OPTIONAL<br>metadata.remote_ip: STRING OPTIONAL |
 | Payload facts | payload.bytes: U64 |
 | Every live node | yes |
@@ -2833,6 +2964,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Instancing | per_partition |
 | External partitions | No enumerable external partition set. |
 | Quiesce (complete bodies after ON QUIESCE) | SUSPEND |
+| RATE LIMIT | Accepted in `ACK SEQUENTIAL`, `ACK PARALLEL`. |
 | Metadata | metadata.message_id: STRING OPTIONAL<br>metadata.sent_at: DATETIME OPTIONAL<br>metadata.receive_count: U32 OPTIONAL<br>metadata.first_received_at: DATETIME OPTIONAL<br>metadata.group_id: STRING OPTIONAL<br>metadata.deduplication_id: STRING OPTIONAL<br>metadata.sequence_number: STRING OPTIONAL<br>metadata.sender_id: STRING OPTIONAL |
 | Payload facts | payload.bytes: U64 |
 | Every live node | no; scheduled owner |
@@ -2985,6 +3117,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Instancing | single |
 | External partitions | No enumerable external partition set. |
 | Quiesce (complete bodies after ON QUIESCE) | SUSPEND<br>BUFFER MAX SIZE 64MiB ON OVERFLOW DROP OLDEST |
+| RATE LIMIT | Refused: the entity reads on its `EVERY` cadence. |
 | Metadata | metadata.query: STRING OPTIONAL<br>metadata.evaluated_at: DATETIME OPTIONAL |
 | Payload facts | payload.bytes: U64 |
 | Every live node | no; scheduled owner |
@@ -3216,6 +3349,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Instancing | single |
 | External partitions | No enumerable external partition set. |
 | Quiesce (complete bodies after ON QUIESCE) | REJECT RETRY AFTER 5s<br>BUFFER MAX SIZE 64MiB |
+| RATE LIMIT | Refused in every mode: the entity cannot hold its source back. |
 | Metadata | metadata.method: STRING OPTIONAL<br>metadata.path: STRING OPTIONAL<br>metadata.query: STRING OPTIONAL<br>metadata.remote_addr: STRING OPTIONAL<br>metadata.host: STRING OPTIONAL<br>metadata.remote_ip: STRING OPTIONAL |
 | Payload facts | payload.bytes: U64 |
 | Every live node | yes |
@@ -3255,6 +3389,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Instancing | single |
 | External partitions | No enumerable external partition set. |
 | Quiesce (complete bodies after ON QUIESCE) | REJECT RETRY AFTER 5s<br>BUFFER MAX SIZE 64MiB |
+| RATE LIMIT | Refused in every mode: the entity cannot hold its source back. |
 | Metadata | metadata.frame_type: STRING OPTIONAL<br>metadata.remote_addr: STRING OPTIONAL<br>metadata.path: STRING OPTIONAL<br>metadata.remote_ip: STRING OPTIONAL |
 | Payload facts | payload.bytes: U64 |
 | Every live node | yes |
@@ -3478,6 +3613,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Instancing | single |
 | External partitions | No enumerable external partition set. |
 | Quiesce (complete bodies after ON QUIESCE) | BUFFER MAX SIZE 64MiB ON OVERFLOW DROP OLDEST<br>DROP |
+| RATE LIMIT | Refused in every mode: the entity cannot hold its source back. |
 | Metadata | metadata.frame_type: STRING OPTIONAL |
 | Payload facts | payload.bytes: U64 |
 | Every live node | no; scheduled owner |

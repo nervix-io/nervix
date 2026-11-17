@@ -524,17 +524,20 @@ status, keeping the start version, start mode, clock, schedule and incremental s
 
 The current emitter Models carry explicit key expressions, source-partition routing and
 expression-only SQS FIFO groups. The dedicated database owns exactly four current keyspaces:
-`raft_runtime_entity_labels_inherited_topology_logs`, `raft_runtime_entity_labels_inherited_topology_meta`, `raft_runtime_entity_labels_inherited_topology_state`, and
-`raft_runtime_entity_labels_inherited_topology_snapshots`. Opening it validates the complete keyspace namespace before reading
-any records. The committed cluster-parameter record stores ordered typed TLS cipher suites and
-key-exchange groups; recovery validates their complete pair before returning that record.
-The record also carries the coherent remote acknowledgement group, payload unfold policy,
-node runtime capacities, local shutdown budgets and listener bounds. Parameter durations use validated, lossless
-seconds/nanoseconds projections so ordinary Raft records keep their inline footprint bound.
+`raft_runtime_entity_labels_inherited_topology_ratelimit_logs`,
+`raft_runtime_entity_labels_inherited_topology_ratelimit_meta`,
+`raft_runtime_entity_labels_inherited_topology_ratelimit_state`, and
+`raft_runtime_entity_labels_inherited_topology_ratelimit_snapshots`. Opening it validates the
+complete keyspace namespace before reading any records. The committed cluster-parameter record
+stores ordered typed TLS cipher suites and key-exchange groups. Recovery validates their complete
+pair before returning the record. The parameters also carry the coherent remote acknowledgement
+group and payload unfold policy. Their durations use validated, lossless seconds and nanoseconds
+projections so ordinary Raft records keep their inline footprint bound. Admitted node capabilities
+carry runtime capacities, local shutdown budgets and listener bounds.
 This namespace also includes durable cluster identity rotation and activation release operations.
-It identifies the current Model shape, including the stored transaction statement
-layout with `DESCRIBE INFERENCER`, `SHOW WASM PROCESSOR ... STATE`, `SHOW INFERENCER ... STATE` and a `DESCRIBE WASM PROCESSOR` that names only its
-processor, and the separate JSON
+It identifies the current Model and stored transaction statement layouts, including
+`DESCRIBE INFERENCER`, `SHOW WASM PROCESSOR ... STATE`, `SHOW INFERENCER ... STATE`,
+a `DESCRIBE WASM PROCESSOR` that names only its processor, and the separate JSON
 and CBOR wire type enums (CBOR has six types), AVRO representation types whose arrays declare their item type, explicit `BASE64` codec encoding, a Pulsar
 subscription's required type, an owned Pulsar subscription's required start position, a Kafka
 consumer group's required start position, the serialized Sentry platform field, an ingestor's
@@ -542,15 +545,15 @@ consumer group's required start position, the serialized Sentry platform field, 
 count an SQS QUEUE ingestor's `ACK PARALLEL MAX` declares, the session and quality of service an
 MQTT TOPIC ingestor writes beside its delivery mode, the quality of service an MQTT TOPIC emitter
 writes beside its publishing mode, its retained-publication flag and MQTT 5 property mappings, a
-`REDIS PUBSUB` ingestor's `CHANNEL` or `PATTERN` subscription, an emitter's `INSTANCES`
-declaration,
+`REDIS PUBSUB` ingestor's `CHANNEL` or `PATTERN` subscription, the ordered `RATE LIMIT` clauses
+an ingestor body writes, an emitter's `INSTANCES` declaration,
 whether a polled HTTP request's header holds a literal or names a client secret, the endpoint kind
 whose signaling data exists only on its WebSockets variant, the branch partition count every
 resolved branch declaration of the committed schedule carries, and the partition epoch the
 committed schedule records for every branch whose count changed. It identifies
 the current statement shape as well, which the statements a transaction keeps are stored in:
 `ALTER BRANCH` and `DESCRIBE INFERENCER` among those statements, an `ALTER INGESTOR` or `ALTER EMITTER` operation that
-changes one part of its entity's body, an envelope clause or the properties, or one part of a
+changes one part of its entity's body (`SET RATE LIMIT` and `DROP RATE LIMIT` among them), an envelope clause or the properties, or one part of a
 construction where it stands, including the typed `payload` expression scope and a
 `RESET WASM PROCESSOR ... STATE` that names its processor and scope and takes its domain from
 the transaction, as the step effect and commit plan step keep it too. The database also stores

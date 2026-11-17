@@ -232,6 +232,8 @@ impl IngestorDeclaration for RedisPubSubIngestor {
         delivery: &[DeclaredDelivery::NO_ACK],
         // Redis has no retained Pub/Sub backlog. Intake must keep reading and buffer or drop.
         quiesce: &[DeclaredQuiesce::BUFFER, DeclaredQuiesce::DROP],
+        // Redis sends every Pub/Sub message the moment it is published and keeps none.
+        rate_limit: crate::RateLimitDeclaration::Unheld,
         locator: Some(CHANNEL_LOCATOR),
         options: &[],
         bounds: REDIS_INGESTOR_BOUNDS,

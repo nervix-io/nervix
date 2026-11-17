@@ -212,6 +212,8 @@ pub struct MqttTopicIngestor {
     pub session: MqttSession,
     pub qos: MqttQos,
     pub mode: MqttIngestMode,
+    /// The `RATE LIMIT` clauses the body writes after its delivery mode, in order.
+    pub rate_limits: crate::RateLimits,
     pub quiesce: IngestQuiesceMode,
 }
 
@@ -443,6 +445,12 @@ impl IngestorDeclaration for MqttTopicIngestor {
             DeclaredQuiesce::BUFFER,
             DeclaredQuiesce::DROP,
         ],
+        // The broker keeps what an acknowledging session has not acknowledged and sends no more
+        // than its window; without acknowledgements it sends every message the moment it arrives.
+        rate_limit: crate::RateLimitDeclaration::HeldIn(&[
+            crate::IngestDeliveryKind::AckSequential,
+            crate::IngestDeliveryKind::AckParallel,
+        ]),
         locator: Some(LocatorDeclaration {
             keywords: "TOPIC",
             name: LocatorName::External(MqttTopicFilter::DECLARATION),
@@ -506,6 +514,14 @@ impl IngestorEntityBody for MqttTopicIngestor {
 
     fn quiesce_mut(&mut self) -> &mut IngestQuiesceMode {
         &mut self.quiesce
+    }
+
+    fn rate_limits(&self) -> &crate::RateLimits {
+        &self.rate_limits
+    }
+
+    fn rate_limits_mut(&mut self) -> Option<&mut crate::RateLimits> {
+        Some(&mut self.rate_limits)
     }
 
     fn acknowledgement(&self) -> IngestAcknowledgement<'_> {

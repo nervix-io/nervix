@@ -92,6 +92,8 @@ pub struct RabbitMqQueueIngestor {
     pub queue: RabbitMqQueueName,
     pub instances: crate::IngestorInstances,
     pub mode: RabbitMqIngestMode,
+    /// The `RATE LIMIT` clauses the body writes after its delivery mode, in order.
+    pub rate_limits: crate::RateLimits,
     pub quiesce: IngestQuiesceMode,
 }
 
@@ -260,6 +262,12 @@ impl IngestorDeclaration for RabbitMqQueueIngestor {
             DeclaredDelivery::ACK_PARALLEL,
         ],
         quiesce: &[DeclaredQuiesce::SUSPEND],
+        // An acknowledging consumer is sent at most its prefetch window of unacknowledged messages;
+        // one that acknowledges nothing is sent every message the moment it is queued.
+        rate_limit: crate::RateLimitDeclaration::HeldIn(&[
+            crate::IngestDeliveryKind::AckSequential,
+            crate::IngestDeliveryKind::AckParallel,
+        ]),
         locator: Some(LocatorDeclaration {
             keywords: "QUEUE",
             name: LocatorName::External(RabbitMqQueueName::DECLARATION),
@@ -288,6 +296,14 @@ impl IngestorEntityBody for RabbitMqQueueIngestor {
 
     fn quiesce_mut(&mut self) -> &mut IngestQuiesceMode {
         &mut self.quiesce
+    }
+
+    fn rate_limits(&self) -> &crate::RateLimits {
+        &self.rate_limits
+    }
+
+    fn rate_limits_mut(&mut self) -> Option<&mut crate::RateLimits> {
+        Some(&mut self.rate_limits)
     }
 
     fn acknowledgement(&self) -> IngestAcknowledgement<'_> {

@@ -8407,6 +8407,7 @@ dependencies = [
  "nervix-models",
  "nervix-plexus",
  "nervix-primitives",
+ "nervix-rate-limit",
  "nervix-recovery",
  "nervix-roto",
  "nervix-simd-kernels",

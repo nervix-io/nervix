@@ -8,7 +8,8 @@ use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_primitives::time::Instant;
 
 use super::{
-    Admission, Charge, Clause, ClauseGeneration, KeyFingerprint, KeyedOptions, Limiter, Quota,
+    Admission, AdmissionError, Charge, Clause, ClauseGeneration, KeyFingerprint, KeyedOptions,
+    Limiter, Quota, UnitCapacity,
 };
 
 fn quota(count: u64, nanos: u64, burst: u64) -> Quota {
@@ -558,6 +559,91 @@ fn bolero_quota_bounds_match_wide_integer_arithmetic() {
         });
 }
 
+/// Reads the next byte of a Bolero input, or zero once it ends.
+fn next_byte(bytes: &mut std::slice::Iter<'_, u8>) -> u8 {
+    match bytes.next() {
+        Some(byte) => *byte,
+        None => 0,
+    }
+}
+
+#[test]
+fn bolero_unit_capacity_is_exactly_what_admission_takes_before_it_waits() {
+    bolero::check!()
+        .with_iterations(256)
+        .with_max_len(64)
+        .for_each(|input: &[u8]| {
+            let mut bytes = input.iter();
+            let clauses = usize::from(next_byte(&mut bytes) % 3) + 1;
+            let mut declared = Vec::with_capacity(clauses);
+            for _ in 0..clauses {
+                let count = u64::from(next_byte(&mut bytes) % 8) + 1;
+                let period = count + u64::from(next_byte(&mut bytes) % 200);
+                let burst = u64::from(next_byte(&mut bytes) % 8) + 1;
+                declared.push(Clause::direct(quota(count, period, burst)));
+            }
+            let epoch = Instant::now();
+            let mut limiter = Limiter::new(declared, epoch);
+            let every: Vec<usize> = (0..clauses).collect();
+            let charges = vec![Charge::Direct(cost(1)); clauses];
+            let mut offset = Duration::ZERO;
+            for _ in 0..8 {
+                let step = Duration::from_nanos(u64::from(next_byte(&mut bytes) % 64));
+                offset = offset
+                    .checked_add(step)
+                    .assured("eight steps of at most 63 ns stay far within a Duration");
+                let now = epoch
+                    .checked_add(offset)
+                    .assured("half a microsecond after the monotonic reading is within its range");
+                let capacity = limiter
+                    .unit_capacity_at(&every, now)
+                    .assured("every clause is direct and the clock only moves forward");
+                let mut admitted = 0_u32;
+                let first_wait = loop {
+                    let admission = limiter
+                        .admit_at(&charges, now)
+                        .assured("one unit of every direct clause is a valid charge");
+                    match admission {
+                        Admission::Admitted => {
+                            admitted = admitted
+                                .checked_add(1)
+                                .assured("a clause admits at most its burst of eight at once");
+                            assert!(admitted <= 8, "admitted beyond every burst");
+                        }
+                        Admission::WaitUntil(until) => break until,
+                        refused => {
+                            panic!("a unit charge of direct clauses was refused: {refused:?}")
+                        }
+                    }
+                };
+                match capacity {
+                    UnitCapacity::Available(units) => assert_eq!(
+                        units.get(),
+                        admitted,
+                        "the capacity is the payloads admitted before one waits"
+                    ),
+                    UnitCapacity::ExhaustedUntil(until) => {
+                        assert_eq!(admitted, 0, "an exhausted allowance admitted a payload");
+                        assert_eq!(
+                            until, first_wait,
+                            "the capacity returns when admission does"
+                        );
+                    }
+                }
+                assert!(first_wait > now, "a wait ends after the instant that asked");
+                // Asking again at the named instant admits a payload, as the read budget's hold
+                // expects when it wakes there.
+                if next_byte(&mut bytes).is_multiple_of(2) {
+                    offset = first_wait.duration_since(epoch);
+                    let admission = limiter
+                        .admit_at(&charges, first_wait)
+                        .assured("one unit of every direct clause is a valid charge");
+                    assert_eq!(admission, Admission::Admitted, "the named instant admits");
+                }
+            }
+        });
+}
+
 #[test]
 fn bolero_utc_generations_preserve_all_fields_at_the_same_anchor() {
     use chrono::{TimeZone as _, Utc};
@@ -626,4 +712,162 @@ fn bolero_utc_generations_preserve_all_fields_at_the_same_anchor() {
                 generation
             );
         });
+}
+
+/// Admits one-unit payloads at `now` until one waits, returning how many were admitted and the
+/// instant the next one waits for.
+fn admit_units_until_wait(limiter: &mut Limiter, now: Instant) -> (u32, Instant) {
+    let charges = vec![Charge::Direct(cost(1)); limiter.clauses.len()];
+    let mut admitted = 0_u32;
+    loop {
+        match limiter
+            .admit_at(&charges, now)
+            .assured("valid one-unit charges")
+        {
+            Admission::Admitted => {
+                admitted = admitted
+                    .checked_add(1)
+                    .assured("a test burst is far below u32::MAX");
+            }
+            Admission::WaitUntil(until) => return (admitted, until),
+            other => {
+                panic!("a one-unit payload within every burst is admitted or waits: {other:?}")
+            }
+        }
+    }
+}
+
+#[test]
+fn unit_capacity_is_exactly_what_admission_takes_before_it_waits() {
+    for (count, nanos, burst) in [(1, 10, 1), (1, 10, 4), (3, 10, 2), (7, 1000, 5), (2, 3, 3)] {
+        let start = Instant::now();
+        let mut limiter = Limiter::new(vec![Clause::direct(quota(count, nanos, burst))], start);
+        for elapsed in [0_u64, 1, 4, 10, 25, 1000] {
+            let now = start + Duration::from_nanos(elapsed);
+            let capacity = limiter
+                .unit_capacity_at(&[0], now)
+                .assured("a direct clause");
+            let (admitted, waits_until) = admit_units_until_wait(&mut limiter, now);
+            match capacity {
+                UnitCapacity::Available(units) => assert_eq!(
+                    units.get(),
+                    admitted,
+                    "quota {count}/{nanos}ns burst {burst} at {elapsed}ns"
+                ),
+                UnitCapacity::ExhaustedUntil(until) => {
+                    assert_eq!(admitted, 0, "an exhausted clause admits nothing");
+                    assert_eq!(
+                        until, waits_until,
+                        "it names the instant admission waits for"
+                    );
+                }
+            }
+            assert_eq!(
+                limiter.unit_capacity_at(&[0], now).assured("same clock"),
+                UnitCapacity::ExhaustedUntil(waits_until),
+                "after taking the capacity, the next payload waits until the reported instant"
+            );
+        }
+    }
+}
+
+#[test]
+fn unit_capacity_takes_the_smallest_room_and_the_latest_return_and_charges_nothing() {
+    let now = Instant::now();
+    let mut limiter = Limiter::new(
+        vec![
+            Clause::direct(quota(1, 10, 3)),
+            Clause::direct(quota(1, 40, 2)),
+        ],
+        now,
+    );
+    let before = limiter.generation(now).assured("same clock");
+    assert_eq!(
+        limiter
+            .unit_capacity_at(&[0, 1], now)
+            .assured("direct clauses"),
+        UnitCapacity::Available(cost(2))
+    );
+    assert_eq!(
+        limiter.unit_capacity_at(&[0], now).assured("direct clause"),
+        UnitCapacity::Available(cost(3))
+    );
+    assert_eq!(limiter.generation(now).assured("same clock"), before);
+    let (admitted, _) = admit_units_until_wait(&mut limiter, now);
+    assert_eq!(admitted, 2);
+    assert_eq!(
+        limiter
+            .unit_capacity_at(&[0, 1], now)
+            .assured("direct clauses"),
+        UnitCapacity::ExhaustedUntil(now + Duration::from_nanos(40)),
+        "the slower clause returns last"
+    );
+}
+
+#[test]
+fn unit_capacity_refuses_a_keyed_or_missing_clause() {
+    let now = Instant::now();
+    let keys = KeyedOptions::new(
+        Duration::from_secs(1),
+        4,
+        NonZeroUsize::new(1).assured("positive shard count"),
+    )
+    .assured("valid keyed options");
+    let limiter = Limiter::new(
+        vec![
+            Clause::direct(quota(1, 10, 1)),
+            Clause::keyed(quota(1, 10, 1), keys),
+        ],
+        now,
+    );
+    assert_eq!(
+        limiter
+            .unit_capacity_at(&[1], now)
+            .err()
+            .assured("a keyed clause has no unit capacity")
+            .current_context(),
+        &AdmissionError::ChargeKind { clause: 1 }
+    );
+    assert_eq!(
+        limiter
+            .unit_capacity_at(&[2], now)
+            .err()
+            .assured("the limiter has no third clause")
+            .current_context(),
+        &AdmissionError::ChargeCount
+    );
+}
+
+#[test]
+fn a_free_charge_neither_spends_nor_holds_back_its_clause() {
+    let now = Instant::now();
+    let mut limiter = Limiter::new(
+        vec![
+            Clause::direct(quota(1, 10, 1)),
+            Clause::direct(quota(1, 10, 1)),
+        ],
+        now,
+    );
+    let first = [Charge::Direct(cost(1)), Charge::Free];
+    assert_eq!(
+        limiter.admit_at(&first, now).assured("valid charges"),
+        Admission::Admitted
+    );
+    let before = limiter.generation(now).assured("same clock");
+    let free_in_the_spent_clause = [Charge::Free, Charge::Direct(cost(1))];
+    assert_eq!(
+        limiter
+            .admit_at(&free_in_the_spent_clause, now)
+            .assured("valid charges"),
+        Admission::Admitted,
+        "the first clause is spent, but a free charge passes it"
+    );
+    assert_ne!(limiter.generation(now).assured("same clock"), before);
+    assert_eq!(
+        limiter
+            .admit_at(&[Charge::Free, Charge::Free], now)
+            .assured("valid charges"),
+        Admission::Admitted,
+        "a payload free in every clause is admitted although both are spent"
+    );
 }

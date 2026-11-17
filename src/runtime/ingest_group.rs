@@ -347,6 +347,9 @@ pub(super) struct IngestorDependencies {
     pub(super) handles: IngestTaskHandles,
     pub(super) output_routes: Arc<BoundIngestorRoutes>,
     pub(super) filter_where: Option<CompiledProgramWithMaterializedInterest>,
+    /// Its `RATE LIMIT` clauses compiled for this node, which each execution unit's allowance
+    /// charges. Absent for an ingestor that writes none.
+    pub(super) rate_limit: Option<Arc<BoundRateLimit>>,
     pub(super) branched_templates: HashMap<RelayName, IngestorRouteTemplate>,
     pub(super) metrics: MessageMetricsHandle,
 }
@@ -419,9 +422,9 @@ pub(super) struct ClientBatchDispatch<'a> {
 }
 
 /// The authenticated producer identity shared by every row of an admitted client batch.
-struct ClientBatchMetadata<'a> {
-    user: &'a UserName,
-    payload_bytes: usize,
+pub(super) struct ClientBatchMetadata<'a> {
+    pub(super) user: &'a UserName,
+    pub(super) payload_bytes: usize,
 }
 
 impl IngestMessageMetadata for ClientBatchMetadata<'_> {

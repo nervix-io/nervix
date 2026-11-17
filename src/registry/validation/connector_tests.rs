@@ -1271,6 +1271,7 @@ fn mqtt_instances_greater_than_one_are_valid() {
                             session: MqttSession::Clean,
                             qos: MqttQos::Qos0,
                             mode: MqttIngestMode::NoAck,
+                            rate_limits: nervix_models::RateLimits::NONE,
                             quiesce: nervix_models::IngestQuiesceMode::Drop,
                         })),
                         codec: CodecName::parse("event_codec").expect("valid identifier"),
@@ -1352,6 +1353,7 @@ fn ingestor_timestamp_field_must_use_rfc3339_schema_type() {
                             },
                             instances: nervix_models::IngestorInstances::Count(nonzero!(1u64)),
                             mode: KafkaIngestMode::NoAck,
+                            rate_limits: nervix_models::RateLimits::NONE,
                             quiesce: nervix_models::IngestQuiesceMode::Suspend,
                         })),
                         codec: CodecName::parse("event_codec").expect("valid identifier"),
@@ -1385,6 +1387,7 @@ fn client_ingestor(mode: nervix_models::ClientIngestMode) -> Model {
         input: nervix_models::IngestorInput::Client(nervix_models::ClientProducerIngestor {
             schema: SchemaName::parse("event_schema").expect("valid identifier"),
             mode,
+            rate_limits: nervix_models::RateLimits::NONE,
         }),
         timestamp_source: None,
         general_error_policy: GeneralErrorPolicy::Log,
@@ -1634,6 +1637,7 @@ fn mqtt_source(session: MqttSession, qos: MqttQos, mode: MqttIngestMode) -> Inge
         session,
         qos,
         mode,
+        rate_limits: nervix_models::RateLimits::NONE,
         quiesce: nervix_models::IngestQuiesceMode::Drop,
     }))
 }
@@ -1865,6 +1869,7 @@ fn ingestor_route_validation_accepts_explicit_projection() {
                                         1u64
                                     )),
                                     mode: KafkaIngestMode::NoAck,
+                                    rate_limits: nervix_models::RateLimits::NONE,
                                     quiesce: nervix_models::IngestQuiesceMode::Suspend,
                                 },
                             )),
@@ -1954,6 +1959,7 @@ fn ingestor_filter_map_compile_errors_are_reported_on_leader() {
                             },
                             instances: nervix_models::IngestorInstances::Count(nonzero!(1u64)),
                             mode: KafkaIngestMode::NoAck,
+                            rate_limits: nervix_models::RateLimits::NONE,
                             quiesce: nervix_models::IngestQuiesceMode::Suspend,
                         })),
                         codec: CodecName::parse("event_codec").expect("valid identifier"),
@@ -2053,6 +2059,7 @@ fn ingestor_inherit_all_except_rejects_required_uninitialized_field() {
                             },
                             instances: nervix_models::IngestorInstances::Count(nonzero!(1u64)),
                             mode: KafkaIngestMode::NoAck,
+                            rate_limits: nervix_models::RateLimits::NONE,
                             quiesce: nervix_models::IngestQuiesceMode::Suspend,
                         })),
                         codec: CodecName::parse("event_codec").expect("valid identifier"),
@@ -2320,6 +2327,7 @@ fn a_syslog_ingestor_rejects_a_client_of_another_connector() {
                             source: IngestorEntity::from(SyslogListenerIngestor {
                                 client: named("collector"),
                                 mode: nervix_models::SyslogIngestMode::NoAck,
+                                rate_limits: nervix_models::RateLimits::NONE,
                                 quiesce: nervix_models::IngestQuiesceMode::Drop,
                             }),
                             codec: named("event_codec"),
