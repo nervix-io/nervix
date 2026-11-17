@@ -4007,6 +4007,21 @@ A membership-quota refusal is carried in the leader's typed admission verdict fo
 The joining node's existing supervision reports it and stops the refused newcomer. Licensing never
 removes a committed member, and a returning member does not consume another quota slot.
 
+### Licensing Stop Gate Refusals
+
+While the [stop gate](node-settings.md#cluster-licensing) is closed, every refusal carries the typed
+`LicensingStopReason`, which renders `ephemeral activation expired at <instant>`. Admission refuses
+all usage with refusal state `stopped`. Planning refuses a direct `START` before lifecycle
+admission, a transactional `START` as `TransactionPlanningError::LicensingStop` naming the domain,
+and `RESTORE ... RESUME` as `RestoreRefusal::LicensingStop`, each with
+`licensing stopped processing` and its reason. The client receives a definitive failure. Consensus
+refuses a change that would run a domain with `ConsensusConflict::LicensingStop`, and a
+transaction's `START` step with `TransactionMutationError::LicensingStop`; neither changes state.
+Model-pause recovery that the gate refuses keeps the command's paused-domain refusal. An `ALTER` or
+a backup whose resume the gate refuses is not failed by it: the operation ends its pause with the
+licensing stop under its own mutation lease, and only a failure of that stop is reported, as
+`DomainAlterError::LicensingStop` above the consensus report.
+
 ## Startup Execution Capacity
 
 [Execution Capabilities](node-settings.md#execution-capabilities) resolves local overrides against

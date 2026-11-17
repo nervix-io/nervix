@@ -494,7 +494,11 @@ the same fingerprint as every other consensus and prerequisite shape.
 
 The current fingerprint also fences signed licensing activation and decision commands, retained trust documents, committed licensing time and transaction refusals projected without executable Models. These consensus request and snapshot shapes share the contract with emitter instance identities.
 
-The fingerprint also covers bounded entity labels on configuration Models and the typed label edits retained in transactions, with their committed acceptance limits. It identifies the combined label, inferencer-description and listener-capability contract; metadata-only edits preserve the execution and state identities those reports observe.
+It also fences the licensing stop gate: the stop cause a `StopDomain` command carries and a domain
+record retains, the typed `LicensingStop` refusal of a change that would run a domain, the
+transaction refusal of a `START` step under the gate, and the `stopped` admission refusal state.
+
+The fingerprint also covers bounded entity labels on configuration Models and the typed label edits retained in transactions, with their committed acceptance limits. It identifies the combined label, inferencer-description, listener-capability, licensing stop-gate and node-record contract; metadata-only edits preserve the execution and state identities those reports observe.
 
 All nodes in a running cluster use one current wire contract. A fixed fingerprint covers the set of
 supported operations and their encoded shapes. It is one of the prerequisites every hello carries,
@@ -507,6 +511,8 @@ commands and snapshots. Its private key travels only over the authenticated inte
 identity observation and backup source metadata use their separate public projections.
 The current fingerprint includes the conditional orphaned model-pause recovery command, its exact
 mutation lease, typed recovery reply and typed mutation-fence and restore-installation conflicts.
+It also covers the node record announcement: the `consensus.announce_node_record` request and the
+Raft command that commit a node's capacity claim, detected properties and tags as one record.
 The subscription-interest visibility request includes the advertisement version, and its current
 wire fingerprint fences that request shape during connection setup.
 

@@ -113,6 +113,7 @@ impl RelayInteractionBenchmark {
                 start_version: 0,
                 last_start: DomainStartPoint::Resume,
                 clock: None,
+                stop_cause: None,
             },
             &DomainClockAuthority::initial(),
         );

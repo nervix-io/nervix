@@ -6,10 +6,11 @@ One CI job builds the scenario suite and the unit tests in the same target direc
 dependencies compile once and the jobs that run them need no compiler or cache. `just
 test-coverage-binaries` keeps Cargo's messages in `target/unit-tests/cargo-messages.jsonl`, and
 `plan` reads the test executables from them into `target/unit-tests/programs.json`. `pack` writes
-those executables, every other object `cargo llvm-cov report` reads and the generated inputs a test
-reads into one archive, the objects without their debug information as `scripts/scenario_shards.py`
-stores them, and `unpack` restores it into a checkout of the same revision and path, with the checks
-`scripts/scenario_shards.py` makes for the scenario suite.
+those executables, every other object `cargo llvm-cov report` reads with the fingerprints of their
+build units, and the generated inputs a test reads into one archive, the objects without their debug
+information as `scripts/scenario_shards.py` stores them, and `unpack` restores it into a checkout of
+the same revision and path, with the checks `scripts/scenario_shards.py` makes for the scenario
+suite.
 
 The scenario suite's own executable stays out: the shards run it, and it is the largest object in
 the directory. The pack therefore takes every other object the target directory holds, which is the
@@ -190,20 +191,20 @@ def pack(root: Path, archive: Path) -> shards.Manifest:
         root,
         archive,
         MANIFEST,
-        [*kept, *shards.generated_inputs(root),
+        [*kept, *shards.unit_fingerprints(root, kept), *shards.generated_inputs(root),
          *(path for path in host_inputs if path.as_posix() not in held), PROGRAMS],
         stripped=[*kept, *ruby],
     )
 
 
 def library_path(root: Path) -> str:
-    """The loader's path `cargo test` gives a test executable: the build's directories, then the
-    toolchain's, then what the environment held."""
+    """The loader's path `cargo test` gives a test executable: the build's profile directory, then
+    the toolchain's libraries, then what the environment held."""
     completed = subprocess.run(
         ["rustc", "--print", "target-libdir"], cwd=root, check=True, capture_output=True, text=True
     )
     debug = root / shards.COVERAGE_DEBUG
-    directories = [str(debug / "deps"), str(debug), completed.stdout.strip()]
+    directories = [str(debug), completed.stdout.strip()]
     inherited = os.environ.get("LD_LIBRARY_PATH")
     if inherited:
         directories.append(inherited)

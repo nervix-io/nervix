@@ -31,6 +31,7 @@ fn domain_state(status: DomainStatus) -> ControlDomainState {
         start_version: 0,
         last_start: DomainStartPoint::Resume,
         clock: None,
+        stop_cause: None,
     }
 }
 

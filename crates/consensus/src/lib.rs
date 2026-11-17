@@ -46,11 +46,11 @@ use nervix_interconnect::{HandlerRegistrationError, Transport};
 use nervix_models::{
     AdmissionVerdict, AdmissionVerdicts, ClusterNodeIdentity, ClusterNodeIncarnation,
     ClusterNodeName, ClusterParameterRecord, ClusterParameterValues, ClusterSchedule,
-    CoordinationIdentity, DomainClockAuthority, DomainClockState, DomainName, DomainSchedule,
-    DomainStartPoint, DomainState, DomainStatus, NodeCapabilityRecord, NodeEndpoint,
-    NodePrerequisites, NodeServiceUrl, PrerequisiteMismatch, ResourceId, ResourceName,
-    ResourceNodeStatus, ResourceUpload, ResourceUploadKey, ResourceVersion, ResourceVersionStatus,
-    Statement, TransactionImpactReport, UserName,
+    CommittedNodeRecord, CoordinationIdentity, DomainClockAuthority, DomainClockState, DomainName,
+    DomainSchedule, DomainStartPoint, DomainState, DomainStatus, NodeCapabilityRecord,
+    NodeEndpoint, NodePrerequisites, NodeRecord, NodeServiceUrl, PrerequisiteMismatch, ResourceId,
+    ResourceName, ResourceNodeStatus, ResourceUpload, ResourceUploadKey, ResourceVersion,
+    ResourceVersionStatus, Statement, TransactionImpactReport, UserName,
 };
 use nervix_primitives::{
     sync::{
@@ -109,7 +109,7 @@ pub use licensing::{
     StoredDecisionOperation, StoredLicenseTransitions, StoredTrustDocument,
     VerifiedLicenseDecision,
 };
-mod node_capabilities;
+mod node_records;
 #[cfg(any(test, feature = "testing"))]
 pub use append_submission_fault::AppendSubmissionFailure;
 use append_submission_fault::AppendSubmissionFault;
@@ -326,12 +326,13 @@ pub struct ScheduleTopologyInputs {
     members: PlanningInputSet<ClusterNodeName>,
     voters: PlanningInputSet<ClusterNodeName>,
     cordoned: PlanningInputSet<ClusterNodeName>,
-    capabilities: BTreeMap<ClusterNodeName, NodeCapabilityRecord>,
+    records: BTreeMap<ClusterNodeName, CommittedNodeRecord>,
 }
 
 impl ScheduleTopologyInputs {
-    pub fn capabilities(&self) -> &BTreeMap<ClusterNodeName, NodeCapabilityRecord> {
-        &self.capabilities
+    /// The committed record of every member that has one.
+    pub fn records(&self) -> &BTreeMap<ClusterNodeName, CommittedNodeRecord> {
+        &self.records
     }
     pub fn members(&self) -> &[ClusterNodeName] {
         self.members.as_slice()
@@ -427,14 +428,16 @@ pub struct TransactionControlSnapshot {
     pub resources: ResourceVersionStatus,
     /// The restore whose incomplete state generation prevents this domain from starting.
     pub restore_installation: Option<nervix_models::CommandExecutionReference>,
+    /// The closed licensing stop gate, which prevents every domain from starting.
+    pub licensing_stop: Option<nervix_models::LicensingStopReason>,
 }
 
 #[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
 pub enum ConsensusCommand {
-    AnnounceNodeCapabilities {
-        record: Box<NodeCapabilityRecord>,
+    AnnounceNodeRecord {
+        record: Box<NodeRecord>,
     },
     InstallClusterIdentity {
         identity: Box<ClusterIdentityRecord>,
@@ -560,6 +563,7 @@ pub enum ConsensusCommand {
     StopDomain {
         domain_id: DomainName,
         mutation: Option<Box<DomainMutationLease>>,
+        cause: nervix_models::DomainStopCause,
     },
     PauseDomain {
         domain_id: DomainName,
@@ -741,10 +745,16 @@ pub enum ConsensusConflict {
         #[source]
         refusal: nervix_licensing_vocabulary::LicensingRefusal,
     },
-    #[error("the capability claim's node has not joined the committed membership")]
-    CapabilityNodeNotAdmitted,
-    #[error("the capability claim's incarnation is fenced or already has a different claim")]
-    CapabilityIncarnationFenced,
+    /// The closed licensing stop gate refuses every change that would make a domain run.
+    #[error("licensing stopped processing")]
+    LicensingStop {
+        #[source]
+        reason: nervix_models::LicensingStopReason,
+    },
+    #[error("the node record's node has not joined the committed membership")]
+    NodeRecordNotAdmitted,
+    #[error("the node record's incarnation is fenced or already has a different record")]
+    NodeRecordIncarnationFenced,
     #[error("cluster parameters or models changed while planning ALTER CLUSTER SET")]
     ClusterParameterInputsChanged,
     #[error("cluster parameters have not been seeded")]
@@ -828,8 +838,8 @@ pub struct AppliedLogPosition {
 impl std::fmt::Display for ConsensusCommand {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::AnnounceNodeCapabilities { record } => {
-                write!(f, "announce-node-capabilities:{}", record.identity)
+            Self::AnnounceNodeRecord { record } => {
+                write!(f, "announce-node-record:{}", record.identity())
             }
             Self::InstallClusterIdentity { .. } => f.write_str("install-cluster-identity"),
             Self::ActivateLicense { .. } => f.write_str("activate-license"),
@@ -1629,7 +1639,7 @@ struct StateMachineData {
     resources: ResourceRecords,
     cordoned_node_ids: Records<ClusterNodeName, ()>,
     node_admission_fences: Records<ClusterNodeName, ClusterNodeIncarnation>,
-    node_capabilities: Records<ClusterNodeName, NodeCapabilityRecord>,
+    node_records: Records<ClusterNodeName, CommittedNodeRecord>,
     domain_mutations: Records<DomainName, DomainMutationLease>,
     domain_restore_installations: Records<DomainName, restore::DomainRestoreInstallation>,
     transactions: Records<String, ReplicatedTransaction>,
@@ -1678,10 +1688,10 @@ impl StateMachineData {
             .cloned()
             .collect();
         ScheduleTopologyInputs {
-            capabilities: membership
+            records: membership
                 .nodes()
                 .filter_map(|(node, _)| {
-                    self.node_capabilities
+                    self.node_records
                         .get(node)
                         .map(|record| (node.clone(), record.clone()))
                 })
@@ -1703,6 +1713,19 @@ impl StateMachineData {
             resources: self.domain_resource_planning_inputs(domain),
             schedule: self.schedule.domain(domain).cloned().map(Box::new),
             topology: self.schedule_topology_inputs(),
+        }
+    }
+
+    /// Every input a transaction of `domain` is planned and checked against, from this one state.
+    fn transaction_control(&self, domain: &DomainName) -> TransactionControlSnapshot {
+        TransactionControlSnapshot {
+            planning_inputs: self.domain_planning_inputs(domain),
+            resources: (&self.resources).into(),
+            restore_installation: self
+                .domain_restore_installations
+                .get(domain)
+                .map(|installation| installation.execution().clone()),
+            licensing_stop: self.licensing_stop(),
         }
     }
 
@@ -1749,6 +1772,7 @@ impl StateMachineData {
             return false;
         };
         domain.status = DomainStatus::Running;
+        domain.stop_cause = None;
         domain.start_version = domain
             .start_version
             .checked_add(1)
@@ -1765,12 +1789,15 @@ impl StateMachineData {
         true
     }
 
-    fn commit_domain_stop(&mut self, domain_id: &DomainName) -> bool {
+    fn commit_domain_stop(
+        &mut self,
+        domain_id: &DomainName,
+        cause: nervix_models::DomainStopCause,
+    ) -> bool {
         let Some(domain) = self.domains.get_mut(domain_id) else {
             return false;
         };
-        domain.status = DomainStatus::Stopped;
-        domain.clock = None;
+        domain.record_stop(cause);
         let paced = domain.config.pace.is_paced();
 
         if paced {
@@ -2036,10 +2063,10 @@ enum SnapshotTransferError {
 
 #[derive(Debug, Error)]
 pub enum ConsensusError {
-    #[error("the current leader has not committed this node's capability announcement")]
-    CapabilityAnnouncementPending,
-    #[error("the capability announcement does not name its authenticated sender")]
-    CapabilitySenderMismatch,
+    #[error("the current leader has not committed this node's record announcement")]
+    NodeRecordAnnouncementPending,
+    #[error("the node record announcement does not name its authenticated sender")]
+    NodeRecordSenderMismatch,
     #[error("cluster identity operation failed")]
     ClusterIdentity,
     #[error("consensus storage failed")]
@@ -2135,7 +2162,8 @@ impl ConsensusError {
             Self::Conflict(
                 ConsensusConflict::LicensingQuota { .. }
                 | ConsensusConflict::LicenseDecision { .. }
-                | ConsensusConflict::ClusterKeyRotation { .. },
+                | ConsensusConflict::ClusterKeyRotation { .. }
+                | ConsensusConflict::LicensingStop { .. },
             ) => format!("{report:#}"),
             Self::Storage => match report.downcast_ref::<io::Error>() {
                 Some(source) => format!("consensus storage failed: {source}"),
@@ -2906,7 +2934,7 @@ impl Consensus {
     }
 
     fn register_protocol_handlers(&self) -> Result<(), Report<HandlerRegistrationError>> {
-        self.register_capability_announcement_handler()?;
+        self.register_node_record_announcement_handler()?;
         let receiver = self.protocol_receiver();
         self.inner
             .interconnect
@@ -3255,15 +3283,7 @@ impl Observer {
         &self,
         domain: &DomainName,
     ) -> TransactionControlSnapshot {
-        let state = self.inner.store.inner.state();
-        TransactionControlSnapshot {
-            planning_inputs: state.domain_planning_inputs(domain),
-            resources: (&state.resources).into(),
-            restore_installation: state
-                .domain_restore_installations
-                .get(domain)
-                .map(|installation| installation.execution().clone()),
-        }
+        self.inner.store.inner.state().transaction_control(domain)
     }
     pub async fn current_revision(&self) -> u64 {
         let state = self.inner.store.inner.state();
@@ -3764,6 +3784,10 @@ impl Proposer {
                     ConsensusConflict::ClusterKeyRotation { reason: cause } => {
                         Report::new(*cause).change_context(ConsensusError::Conflict(reason))
                     }
+                    // The typed licensing stop reason stays beneath the fixed conflict outcome.
+                    ConsensusConflict::LicensingStop { reason: cause } => {
+                        Report::new(*cause).change_context(ConsensusError::Conflict(reason))
+                    }
                     _ => Report::new(ConsensusError::Conflict(reason)),
                 };
                 Err(report)
@@ -4093,12 +4117,14 @@ impl Proposer {
         &self,
         domain_id: DomainName,
         mutation: Option<&DomainMutationLease>,
+        cause: nervix_models::DomainStopCause,
     ) -> error_stack::Result<(), ConsensusError> {
         let response = self
             .inner
             .client_write(ConsensusCommand::StopDomain {
                 domain_id,
                 mutation: mutation.cloned().map(Box::new),
+                cause,
             })
             .await?;
         Self::applied_response(response.data)
@@ -6011,7 +6037,7 @@ fn validate_domain_planning_inputs(
         return Err(Report::new(DomainPlanningInputConflict::Voters(domain)));
     }
     if current.topology.cordoned != expected.topology.cordoned
-        || current.topology.capabilities != expected.topology.capabilities
+        || current.topology.records != expected.topology.records
     {
         return Err(Report::new(DomainPlanningInputConflict::Eligibility(
             domain,
@@ -6040,8 +6066,8 @@ fn apply_consensus_command_at(
 ) -> AppliedConsensusCommand {
     let mut changes = StateMachineChanges::default();
     match command {
-        ConsensusCommand::AnnounceNodeCapabilities { record } => {
-            return node_capabilities::announce(state, record);
+        ConsensusCommand::AnnounceNodeRecord { record } => {
+            return node_records::announce(state, record);
         }
         ConsensusCommand::InstallClusterIdentity { identity } => {
             return cluster_identity::install(state, identity);
@@ -6319,6 +6345,13 @@ fn apply_consensus_command_at(
             {
                 return AppliedConsensusCommand::conflict(reason.to_string());
             }
+            if domain.status != DomainStatus::Stopped
+                && let Some(reason) = state.licensing_stop()
+            {
+                return AppliedConsensusCommand::conflict(ConsensusConflict::LicensingStop {
+                    reason,
+                });
+            }
             if let Err(reason) = validate_domain_mutation(state, &domain.id, mutation.as_deref()) {
                 return AppliedConsensusCommand::conflict(reason.to_string());
             }
@@ -6342,6 +6375,11 @@ fn apply_consensus_command_at(
             if let Err(reason) = restore::validate_restored_domain_start(state, domain_id) {
                 return AppliedConsensusCommand::conflict(reason.to_string());
             }
+            if let Some(reason) = state.licensing_stop() {
+                return AppliedConsensusCommand::conflict(ConsensusConflict::LicensingStop {
+                    reason,
+                });
+            }
             if let Err(reason) = validate_domain_mutation(state, domain_id, mutation.as_deref()) {
                 return AppliedConsensusCommand::conflict(reason.to_string());
             }
@@ -6350,11 +6388,12 @@ fn apply_consensus_command_at(
         ConsensusCommand::StopDomain {
             domain_id,
             mutation,
+            cause,
         } => {
             if let Err(reason) = validate_domain_mutation(state, domain_id, mutation.as_deref()) {
                 return AppliedConsensusCommand::conflict(reason.to_string());
             }
-            changes.domains_changed = state.commit_domain_stop(domain_id);
+            changes.domains_changed = state.commit_domain_stop(domain_id, *cause);
         }
         ConsensusCommand::PauseDomain {
             domain_id,
@@ -6376,6 +6415,16 @@ fn apply_consensus_command_at(
         } => {
             if let Err(reason) = restore::validate_restored_domain_start(state, domain_id) {
                 return AppliedConsensusCommand::conflict(reason.to_string());
+            }
+            if state
+                .domains
+                .get(domain_id)
+                .is_some_and(|domain| domain.status == DomainStatus::Paused)
+                && let Some(reason) = state.licensing_stop()
+            {
+                return AppliedConsensusCommand::conflict(ConsensusConflict::LicensingStop {
+                    reason,
+                });
             }
             if let Err(reason) = validate_domain_mutation(state, domain_id, mutation.as_deref()) {
                 return AppliedConsensusCommand::conflict(reason.to_string());
@@ -6578,10 +6627,10 @@ fn apply_consensus_command_at(
             }
         }
         ConsensusCommand::FenceNodeAdmission { identity } => {
-            if let Some(record) = state.node_capabilities.get(identity.node_id())
-                && record.identity.incarnation() <= identity.incarnation()
+            if let Some(committed) = state.node_records.get(identity.node_id())
+                && committed.record.identity().incarnation() <= identity.incarnation()
             {
-                state.node_capabilities.remove(identity.node_id());
+                state.node_records.remove(identity.node_id());
             }
             let replace = match state.node_admission_fences.get(identity.node_id()) {
                 Some(incarnation) => *incarnation < identity.incarnation(),
@@ -7523,6 +7572,14 @@ fn validate_transaction_step_effect(
             reason: reason.to_string(),
         }));
     }
+    if matches!(effect, TransactionStepEffect::StartDomain { .. })
+        && let Some(reason) = state.licensing_stop()
+    {
+        return Err(Report::new(TransactionMutationError::LicensingStop {
+            id: transaction.id.clone(),
+            reason,
+        }));
+    }
     match validate_domain_planning_inputs(state, effect.inputs()) {
         Err(reason) => Err(Report::new(TransactionMutationError::StepConflict {
             id: transaction.id.clone(),
@@ -7603,7 +7660,8 @@ fn apply_transaction_step_effect(
                 state.commit_domain_start(inputs.domain(), start, clock, authority);
         }
         TransactionStepEffect::StopDomain { inputs } => {
-            changes.domains_changed = state.commit_domain_stop(inputs.domain());
+            changes.domains_changed =
+                state.commit_domain_stop(inputs.domain(), nervix_models::DomainStopCause::Operator);
         }
         TransactionStepEffect::CreateResourceCatalog { identifier, .. } => {
             state.resources.ensure_catalog(domain, identifier);
@@ -8410,6 +8468,7 @@ mod tests {
             start_version: 7,
             last_start: DomainStartPoint::Resume,
             clock: None,
+            stop_cause: None,
         }
     }
 
@@ -9205,6 +9264,7 @@ mod tests {
             &ConsensusCommand::StopDomain {
                 domain_id: domain_id.clone(),
                 mutation: None,
+                cause: nervix_models::DomainStopCause::Operator,
             },
         );
         let stopped = state
@@ -9278,6 +9338,7 @@ mod tests {
             &ConsensusCommand::StopDomain {
                 domain_id: domain_id.clone(),
                 mutation: None,
+                cause: nervix_models::DomainStopCause::Operator,
             },
         );
         let mut changes = StateMachineChanges::default();

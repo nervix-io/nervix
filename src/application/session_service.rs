@@ -126,6 +126,13 @@ impl SessionEvents {
         self.publish(NoticeLevel::Warning, kind, message);
     }
 
+    /// Offer, as `kind` at `Error` level, a condition its owner already recorded in its own log
+    /// line, such as the licensing stop gate closing; unlike `report_error`, it reports no failure
+    /// this node recovered from and logs nothing itself.
+    pub(in crate::application) fn relay_error(&self, kind: NoticeKind, message: String) {
+        self.publish(NoticeLevel::Error, kind, message);
+    }
+
     fn publish(&self, level: NoticeLevel, kind: NoticeKind, message: String) {
         let notice = ServerNotice {
             level,

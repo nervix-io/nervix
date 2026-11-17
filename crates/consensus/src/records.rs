@@ -173,9 +173,9 @@ impl StoredUnder<DomainName> for DomainSchedule {
     }
 }
 
-impl StoredUnder<nervix_models::ClusterNodeName> for nervix_models::NodeCapabilityRecord {
+impl StoredUnder<nervix_models::ClusterNodeName> for nervix_models::CommittedNodeRecord {
     fn is_stored_under(&self, node: &nervix_models::ClusterNodeName) -> bool {
-        self.identity.node_id() == node
+        self.record.identity().node_id() == node
     }
 }
 

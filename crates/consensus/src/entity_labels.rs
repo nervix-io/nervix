@@ -104,14 +104,7 @@ fn capture_transaction(
         }
     };
     Ok(EntityLabelTransactionSnapshot {
-        control: crate::TransactionControlSnapshot {
-            planning_inputs: state.domain_planning_inputs(domain),
-            resources: (&state.resources).into(),
-            restore_installation: state
-                .domain_restore_installations
-                .get(domain)
-                .map(|installation| installation.execution().clone()),
-        },
+        control: state.transaction_control(domain),
         transaction,
         policy,
         revision: revision(&state),

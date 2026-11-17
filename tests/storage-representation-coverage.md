@@ -61,7 +61,7 @@ datetimes or bytes. JSON, CBOR and AVRO retain their own wire type enums; CBOR c
 native representation types, and an AVRO array nests its item type, arrays included, to a
 bounded depth. The Model/archive, registry and consensus properties preserve those complete
 values, including inferencer state bindings and their initial expressions.
-The `NERVIX LABELS   ` registry signature and `raft_entity_licensing_policy_` consensus namespace
+The `NERVIX LABELS   ` registry signature and `raft_entity_labels_stopgate_node_` consensus namespace
 identify the current Model layout before decoding.
 
 `ALTER INGESTOR` and `ALTER EMITTER` statement generators draw, for every entity, each change its
@@ -70,7 +70,7 @@ Kafka's and Pulsar's `SET START AT`, a declared quiesce mode and `SET CLIENT` wh
 or writes through a client. They mix them with the shared operations, the in-place construction
 changes of a route or an emitter, and an emitter's envelope clauses and properties. The
 Model/archive, consensus and canonical Plexus properties preserve the complete operations in order,
-and the `raft_entity_licensing_policy_` consensus namespace identifies the statement layout the
+and the `raft_entity_labels_stopgate_node_` consensus namespace identifies the statement layout the
 transactions it keeps are stored in before decoding.
 
 The complete cluster-parameter record uses each declaration's validated inline storage. Its six
@@ -78,7 +78,7 @@ The complete cluster-parameter record uses each declaration's validated inline s
 entity-label limits retain their full 64-bit range. The direct parameter property compares complete
 archive and JSON round trips; consensus state and log properties recover every field through their
 production storage codecs. The
-`raft_entity_licensing_policy_` namespace and `ClusterState` encoding 35 identify this current archive layout.
+`raft_entity_labels_stopgate_node_` namespace and `ClusterState` encoding 36 identify this current archive layout.
 
 `RESET WASM PROCESSOR ... STATE` statement generators draw a processor and an unbranched,
 all-branches or concrete-branch scope; the statement takes its domain from the transaction that
@@ -122,10 +122,10 @@ contain synthetic data and describe the current shapes.
 | Label mutation sequences | `entity-label-mutations` | The complete map equals an independently updated string map after every merge or idempotent removal |
 | Malformed current label maps | `entity-label-decoding` | Current archived invalid-key bytes and invalid or duplicate JSON assignments are refused; the complete valid archive remains unchanged |
 | Committed cluster parameters | `cluster-parameters` | Every class-typed parameter value, duration nanosecond, byte limit, count and revision identity survives validated archive and JSON round trips with complete equality |
-| Committed node capability records and their typed announcement messages | `node-capability-records` | Complete node name, incarnation, explicit unknown or positive CPU and memory measurements, transport/DNS/database/consensus policy, engine/connector host capacities and all four positive receive bounds survive canonical durable encoding; current announcement requests and every publication outcome survive the same validated archive codec |
+| Committed node records and their typed announcement messages | `node-records` | Complete commit revision, node name, incarnation, explicit unknown or positive CPU and memory measurements, transport/DNS/database/consensus policy, engine/connector host capacities, all four positive receive bounds, every detected and undetected property outcome and tags at their bounds survive canonical durable encoding; current announcement requests and every publication outcome survive the same validated archive codec |
 | Domain schedule units in control-plane storage | `scheduled-units` | The complete schedule, including each unit kind, full-width ordinal, primary, assigned nodes and ownership state, survives archive encoding unchanged |
 | Execution revision built from a scheduled domain | `execution-revision-units` | Every declared partition retains its placement and the handoff fingerprint changes with it; moving one unit names that exact unit in the reassignment and preserves every sibling |
-| Consensus state records: unit-keyed schedules, domains with their clock mappings and authorities, users, resource versions, node statuses, capability claims and uploads, cordons, admission fences, mutation leases, restore installations, transactions, commit plans, impact reports, command executions and the metadata with its retry fence and required cluster parameters | `consensus-state-records` | The recovered `StateMachineData` equals the stored one, records, derived indexes and metadata alike, for a revision written into an empty keyspace and for a second revision written as the changes from it, with records replaced and removed |
+| Consensus state records: unit-keyed schedules, domains with their clock mappings and authorities, users, resource versions, node statuses, node records and uploads, cordons, admission fences, mutation leases, restore installations, transactions, commit plans, impact reports, command executions and the metadata with its retry fence and required cluster parameters | `consensus-state-records` | The recovered `StateMachineData` equals the stored one, records, derived indexes and metadata alike, for a revision written into an empty keyspace and for a second revision written as the changes from it, with records replaced and removed |
 | Damaged consensus state | `consensus-state-corruption` | Recovery fails with `StorageFailure::InvalidState`, or recovers a state in which every record that names its key is stored under it, each resource version has at most one upload, and every transaction counts its pending and completed operations and numbers a failing one within those it accepted, and which stores and recovers again unchanged |
 | Raft votes, log positions, log entries of every command, conditional orphaned-pause recovery replies and typed refusal causes, current state metadata, snapshot manifests, log keys, section keys and sections | `consensus-raft-records` | Complete equality through the storage codec and its conversions; a log key names its entry's index and a section key its section |
 | Malformed Raft records | `consensus-raft-records-malformed` | Arbitrary bytes fail with the typed storage failure, or decode to a value that stores back to the same record |

@@ -245,12 +245,10 @@ impl LicensingRecord {
         if &activation.binding != binding {
             return Err(Report::new(LicenseDecisionError::Binding));
         }
+        // The release establishes its own licensing time, and an activation the stop gate's
+        // predicate has expired by then cannot be released.
         let released_at = released_at.max(self.licensing_time);
-        if activation
-            .binding
-            .ephemeral_expires_at
-            .is_some_and(|until| released_at >= until)
-        {
+        if activation.binding.expiry_stop(released_at).is_some() {
             return Err(Report::new(LicenseDecisionError::Expired));
         }
         let mut transitions = Vec::new();

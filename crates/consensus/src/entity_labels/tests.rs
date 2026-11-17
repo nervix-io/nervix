@@ -1,7 +1,8 @@
 //! Coherent metadata snapshot tests over the production publication reader.
 //!
 //! Layer: test harness.
-//! - **Owns.** Exact map/revision/policy coherence and retained-read independence.
+//! - **Owns.** Exact map/revision/policy coherence, the staged view's control snapshot and
+//!   retained-read independence.
 //! - **Depends on.** The production capture function and the selected publication lock.
 //! - **Must not know.** Sessions, display parsing, transport or execution tasks.
 
@@ -112,6 +113,35 @@ fn a_retained_view_keeps_its_exact_revision_and_policy_after_publication() {
     assert_coherent(&after);
     assert_eq!(before.labels().get("owner"), Some("Operations"));
     assert_eq!(after.labels().get("owner"), Some("Platform"));
+}
+
+/// The staged view plans its candidate against the control snapshot a commit is checked against,
+/// so a licensing stop gate closed by committed time reaches the preview as it reaches the commit.
+#[test]
+fn a_staged_label_view_captures_the_committed_licensing_stop_gate() {
+    let domain = DomainName::parse("tenant").assured("fixture domain is valid");
+    let owner = nervix_models::UserName::parse("operator").assured("fixture owner is valid");
+    let mut state = crate::licensing::stop_gate_tests::ephemeral_state();
+    state.parameters = Some(ClusterParameterRecord {
+        revision: NonZeroU64::MIN,
+        values: ClusterParameterValues::default(),
+    });
+    let activity = crate::TransactionActivity::from_timeout(
+        nervix_models::Timestamp::from_unix_nanos(1),
+        std::time::Duration::from_secs(60),
+    );
+    state.transactions.insert(
+        "tx".to_owned(),
+        ReplicatedTransaction::open("tx".to_owned(), domain.clone(), owner, activity),
+    );
+    let applied = RwLock::new(state.clone());
+    let open = capture_transaction(&applied, &domain, "tx").assured("the transaction is open");
+    assert_eq!(open.control.licensing_stop, None);
+
+    let reason = crate::licensing::stop_gate_tests::pass_expiry(&mut state);
+    *applied.write() = state;
+    let closed = capture_transaction(&applied, &domain, "tx").assured("the transaction is open");
+    assert_eq!(closed.control.licensing_stop, Some(reason));
 }
 
 #[cfg(feature = "shuttle")]

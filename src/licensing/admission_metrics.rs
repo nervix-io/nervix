@@ -21,6 +21,8 @@ pub(super) struct AdmissionMetrics {
     domains: IntCounter,
     lapsed_nodes: IntCounter,
     lapsed_domains: IntCounter,
+    stopped_nodes: IntCounter,
+    stopped_domains: IntCounter,
 }
 
 impl AdmissionMetrics {
@@ -47,6 +49,9 @@ impl AdmissionMetrics {
                 .with_label_values(&[QuotaName::ClusterDomains.as_str(), "lapsed"]),
             nodes: family.with_label_values(&[QuotaName::ClusterNodes.as_str(), "over_limit"]),
             domains: family.with_label_values(&[QuotaName::ClusterDomains.as_str(), "over_limit"]),
+            stopped_nodes: family.with_label_values(&[QuotaName::ClusterNodes.as_str(), "stopped"]),
+            stopped_domains: family
+                .with_label_values(&[QuotaName::ClusterDomains.as_str(), "stopped"]),
         }
     }
 
@@ -63,6 +68,12 @@ impl AdmissionMetrics {
             }
             (QuotaName::ClusterDomains, nervix_licensing_vocabulary::AdmissionState::Lapsed) => {
                 self.lapsed_domains.inc()
+            }
+            (QuotaName::ClusterNodes, nervix_licensing_vocabulary::AdmissionState::Stopped) => {
+                self.stopped_nodes.inc()
+            }
+            (QuotaName::ClusterDomains, nervix_licensing_vocabulary::AdmissionState::Stopped) => {
+                self.stopped_domains.inc()
             }
         }
     }
