@@ -35,6 +35,7 @@ mod connector;
 mod construction_alteration;
 mod database_settings;
 mod domain_clock;
+mod domain_stop;
 mod duration_text;
 mod emitter;
 mod emitter_batch;
@@ -55,6 +56,7 @@ mod names;
 mod node_capabilities;
 pub use database_settings::*;
 mod node_endpoint;
+mod node_record;
 mod node_ref;
 mod partition_epoch;
 mod password_credential;
@@ -256,6 +258,7 @@ pub use domain_clock::{
     DomainClockObservedState, DomainClockPeriod, DomainClockProgress, DomainClockSkew,
     DomainClockState, DomainClockTickObservation, DomainTimeRate, PacedDomainClock,
 };
+pub use domain_stop::DomainStopCause;
 pub use duration_text::{DurationTextError, parse_duration_text};
 pub use emitter::{
     AckMode, AlterEmitter, AlterEmitterError, AlterEmitterOperation, CreateEmitter,
@@ -309,6 +312,13 @@ pub use node_capabilities::{
 };
 pub use node_endpoint::{
     NodeEndpoint, NodeEndpointParseError, NodeServiceUrl, NodeServiceUrlParseError,
+};
+pub use node_record::{
+    CommittedNodeRecord, CudaProviderRegistration, Detected, ExecutionProviders, GpuDevice,
+    GpuDevices, GpuInventory, MAX_NODE_TAGS, MAX_PROPERTY_LIST_ITEMS, MAX_PROPERTY_TEXT_BYTES,
+    MAX_TAG_KEY_BYTES, MAX_TAG_VALUE_BYTES, NodeProperties, NodeRecord, NodeTag, NodeTagError,
+    NodeTags, OnnxRuntime, OnnxRuntimeDetection, PropertyText, PropertyValueError, TagKey,
+    TagValue, UndetectedReason,
 };
 pub use node_ref::{DomainNodeRef, NodeRef};
 pub use partition_epoch::{BranchPartitionEpoch, PartitionEpochNumber, PartitionTransition};
@@ -450,8 +460,8 @@ pub use window_model_digest::WindowModelDigest;
 mod licensing;
 pub use licensing::{
     ActivateLicense, LicensingConnectionState, LicensingConnectivity,
-    LicensingConnectivityPublication, LicensingTransportFailure, RefreshLicense, ReleaseLicense,
-    RotateLicenseClusterKey,
+    LicensingConnectivityPublication, LicensingStopReason, LicensingTransportFailure,
+    RefreshLicense, ReleaseLicense, RotateLicenseClusterKey,
 };
 
 /// The existing host's single relay admission budget. The runtime settings owner adopts this

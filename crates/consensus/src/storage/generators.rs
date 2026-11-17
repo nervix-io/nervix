@@ -64,10 +64,10 @@ const QUEUED: usize = 3;
 /// The most consecutive statements one generated commit step applies.
 const STEP_STATEMENTS: usize = 3;
 
-pub(super) fn node_capability_record(
+pub(super) fn committed_node_record(
     arbitrary: &mut Arbitrary<'_>,
-) -> nervix_models::NodeCapabilityRecord {
-    arbitrary.node_capability_record()
+) -> nervix_models::CommittedNodeRecord {
+    arbitrary.committed_node_record()
 }
 
 /// A Raft log position under any term and leader.
@@ -258,16 +258,16 @@ fn schedule_topology_inputs(arbitrary: &mut Arbitrary<'_>) -> ScheduleTopologyIn
         }
     }
     ScheduleTopologyInputs {
-        capabilities: members
+        records: members
             .iter()
             .filter_map(|node| {
                 if arbitrary.entropy().flag() {
-                    let mut record = node_capability_record(arbitrary);
-                    record.identity = nervix_models::ClusterNodeIdentity::new(
+                    let mut committed = committed_node_record(arbitrary);
+                    committed.record.claim.identity = nervix_models::ClusterNodeIdentity::new(
                         node.clone(),
-                        record.identity.incarnation(),
+                        committed.record.identity().incarnation(),
                     );
-                    Some((node.clone(), record))
+                    Some((node.clone(), committed))
                 } else {
                     None
                 }
@@ -1125,6 +1125,7 @@ fn create_domain_effect(arbitrary: &mut Arbitrary<'_>) -> CommandExecutionEffect
             start_version: 0,
             last_start: DomainStartPoint::Resume,
             clock: None,
+            stop_cause: None,
             ..found
         }
     };
@@ -1472,10 +1473,10 @@ pub(super) fn state_machine(arbitrary: &mut Arbitrary<'_>) -> StateMachineData {
     state.raise_password_work(cost);
     state.resources = resource_records(arbitrary);
     for _ in 0..arbitrary.entropy().count(RECORDS) {
-        let record = node_capability_record(arbitrary);
+        let committed = committed_node_record(arbitrary);
         state
-            .node_capabilities
-            .insert(record.identity.node_id().clone(), record);
+            .node_records
+            .insert(committed.record.identity().node_id().clone(), committed);
     }
     for _ in 0..arbitrary.entropy().count(RECORDS) {
         let node = arbitrary.rule_name::<ClusterNodeName>();
@@ -1599,6 +1600,7 @@ fn restore_step_effect(
             let state = DomainState {
                 status: DomainStatus::Stopped,
                 clock: None,
+                stop_cause: None,
                 ..archived
             };
             let resources = arbitrary.records(restored_resource);
@@ -1843,7 +1845,7 @@ fn complete_application_command(arbitrary: &mut Arbitrary<'_>) -> ConsensusComma
 /// as any other and a coverage check can name each one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, strum::EnumIter)]
 enum CommandVariant {
-    AnnounceNodeCapabilities,
+    AnnounceNodeRecord,
     InstallClusterIdentity,
     BeginClusterKeyRotation,
     PrepareClusterKeyRotationRequest,
@@ -1905,7 +1907,7 @@ impl CommandVariant {
     /// [`command`] is taught to build it.
     fn of(command: &ConsensusCommand) -> Self {
         match command {
-            ConsensusCommand::AnnounceNodeCapabilities { .. } => Self::AnnounceNodeCapabilities,
+            ConsensusCommand::AnnounceNodeRecord { .. } => Self::AnnounceNodeRecord,
             ConsensusCommand::InstallClusterIdentity { .. } => Self::InstallClusterIdentity,
             ConsensusCommand::BeginClusterKeyRotation { .. } => Self::BeginClusterKeyRotation,
             ConsensusCommand::PrepareClusterKeyRotationRequest { .. } => {
@@ -2002,8 +2004,8 @@ pub(super) fn command(arbitrary: &mut Arbitrary<'_>) -> ConsensusCommand {
 /// lifecycle step with the reports and plans it carries.
 fn command_of(arbitrary: &mut Arbitrary<'_>, variant: CommandVariant) -> ConsensusCommand {
     match variant {
-        CommandVariant::AnnounceNodeCapabilities => ConsensusCommand::AnnounceNodeCapabilities {
-            record: Box::new(node_capability_record(arbitrary)),
+        CommandVariant::AnnounceNodeRecord => ConsensusCommand::AnnounceNodeRecord {
+            record: Box::new(arbitrary.node_record()),
         },
         CommandVariant::InstallClusterIdentity => ConsensusCommand::InstallClusterIdentity {
             identity: Box::new(crate::cluster_identity::tests::identity(arbitrary)),
@@ -2162,6 +2164,7 @@ fn command_of(arbitrary: &mut Arbitrary<'_>, variant: CommandVariant) -> Consens
         CommandVariant::StopDomain => ConsensusCommand::StopDomain {
             domain_id: arbitrary.rule_name(),
             mutation: optional_lease(arbitrary),
+            cause: arbitrary.stop_cause(),
         },
         CommandVariant::PauseDomain => ConsensusCommand::PauseDomain {
             domain_id: arbitrary.rule_name(),
@@ -2279,8 +2282,11 @@ pub(super) fn entry(arbitrary: &mut Arbitrary<'_>) -> EntryOf<TypeConfig> {
     openraft::Entry { log_id, payload }
 }
 
-/// How many seeded inputs a coverage check draws its values from.
-const SEEDS: u64 = 256;
+/// How many seeded inputs a coverage check draws its values from. The rarest record of a revision,
+/// the archive a finished `BACKUP` command recorded, comes from about one command execution in a
+/// hundred, so this many seeds reach it about sixteen times and the check does not depend on how
+/// much entropy the families drawn before it consume.
+const SEEDS: u64 = 1024;
 
 /// How many bytes one seeded input of the command check holds: as many as the longest input the
 /// properties read.
@@ -2289,10 +2295,11 @@ const COMMAND_BYTES: usize = 4096;
 /// How many commands the command check builds from one seeded input.
 const COMMANDS_PER_SEED: usize = 4;
 
-/// How many bytes one seeded input of the record check holds. A complete revision, with every
-/// family drawn before the bytes run out, reads about 38 KiB on average, so this leaves room for
-/// the families drawn last.
-const REVISION_BYTES: usize = 64 * 1024;
+/// How many bytes one seeded input of the record check holds. A complete revision reads about
+/// 42 KiB on average, but about one in five reads past 64 KiB, and a revision whose bytes run out
+/// draws the families drawn last, command executions among them, empty. This leaves room for them
+/// in all but a few revisions.
+const REVISION_BYTES: usize = 128 * 1024;
 
 /// `length` bytes that differ from seed to seed: the BLAKE3 output stream of the seed, which
 /// spreads the late choices of a value between seeds as evenly as the first.

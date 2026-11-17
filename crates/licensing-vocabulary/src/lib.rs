@@ -312,6 +312,8 @@ pub enum AdmissionState {
     WithinGrace,
     OverLimit,
     Lapsed,
+    /// The licensing stop gate is closed: no new usage of any quota is admitted.
+    Stopped,
 }
 impl AdmissionState {
     pub const fn as_str(self) -> &'static str {
@@ -319,6 +321,7 @@ impl AdmissionState {
             Self::WithinGrace => "within_grace",
             Self::OverLimit => "over_limit",
             Self::Lapsed => "lapsed",
+            Self::Stopped => "stopped",
         }
     }
 }

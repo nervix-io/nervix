@@ -20,11 +20,12 @@ use admission_metrics::AdmissionMetrics;
 use meticulous::OptionExt as _;
 use nervix_consensus::{LicensingSnapshot, Observer};
 pub use nervix_licensing_vocabulary::{LicensingRefusal, Quota, QuotaConstraint, QuotaName};
+pub use nervix_models::LicensingStopReason;
 use nervix_primitives::{
     publication::{ArcSwap, Guard},
     sync::{Arc, CancellationToken, StdArc},
 };
-pub use policy::{CapabilityName, CapabilityVerdict, LicensingPolicy, StopReason};
+pub use policy::{CapabilityName, CapabilityVerdict, LicensingPolicy};
 
 use crate::{ConfiguredFaultInjection, metrics::RuntimeMetrics};
 
@@ -136,7 +137,7 @@ impl PolicyHandle {
     pub fn quota(&self, name: QuotaName) -> Quota {
         self.current().quota(name)
     }
-    pub fn processing_stop(&self) -> Option<StopReason> {
+    pub fn processing_stop(&self) -> Option<LicensingStopReason> {
         self.current().processing_stop()
     }
 
