@@ -1,7 +1,8 @@
 //! The resolved capacity claim of one concrete node run.
 //!
 //! Layer: vocabulary.
-//! - **Owns.** CPU and memory capacity, transport, DNS, database, consensus, engine and connector host limits, peer receive bounds and the incarnation-bound claim.
+//! - **Owns.** CPU and memory capacity, transport, DNS, database, consensus, engine and connector
+//!   host limits, peer receive bounds and the incarnation-bound claim the node record holds.
 //! - **Depends on.** Node identities and serialization primitives.
 //! - **Must not know.** Detection, consensus, transport or placement policy.
 
@@ -242,7 +243,8 @@ impl NodeCapabilities {
     }
 }
 
-/// One record per node name, replaced by a newer run and retained after departure until DROP NODE.
+/// The capacity claim of one node run: who the run is and what it can carry. Peers adopt its receive
+/// bounds; the [node record](crate::NodeRecord) holds it beside the run's properties and tags.
 #[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]

@@ -23,6 +23,7 @@ pub(crate) mod mqtt_publish_filter;
 pub(crate) mod nats_endpoint;
 pub(crate) mod nats_observer;
 pub(crate) mod node_bound_address;
+pub(crate) mod node_detection;
 pub(crate) mod node_execution;
 pub(crate) mod node_liveness;
 pub(crate) mod node_startup;

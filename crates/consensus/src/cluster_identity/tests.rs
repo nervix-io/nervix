@@ -28,7 +28,7 @@ const KEY_MATERIAL: [&[u8]; 3] = [
     include_bytes!("test_data/pending-test-key.pk8"),
 ];
 
-fn key(index: usize) -> ClusterKey {
+pub(super) fn key(index: usize) -> ClusterKey {
     let private = KEY_MATERIAL[index];
     let signer =
         DocumentSigner::from_pkcs8(private).assured("the public test key has the P-256 profile");
@@ -68,8 +68,13 @@ pub(crate) fn identity(arbitrary: &mut Arbitrary<'_>) -> ClusterIdentityRecord {
     let uid = std::array::from_fn(|_| arbitrary.entropy().byte());
     let created_at = arbitrary.timestamp();
     let first_generation = if retired { 2 } else { 1 };
-    let generation = arbitrary.entropy().between(first_generation..=u64::MAX);
-    ClusterIdentityRecord {
+    let last_generation = if pending { u64::MAX - 1 } else { u64::MAX };
+    let generation = arbitrary
+        .entropy()
+        .between(first_generation..=last_generation);
+    let retired_request_id = Uuid::from_bytes(std::array::from_fn(|_| arbitrary.entropy().byte()));
+    let pending_request_id = Uuid::from_bytes(std::array::from_fn(|_| arbitrary.entropy().byte()));
+    let mut record = ClusterIdentityRecord {
         cluster_uid: uuid::Builder::from_random_bytes(uid).into_uuid(),
         created_at,
         key_generation: NonZeroU64::new(generation).verified("the draw starts at one or two"),
@@ -77,21 +82,151 @@ pub(crate) fn identity(arbitrary: &mut Arbitrary<'_>) -> ClusterIdentityRecord {
         current_key: key(indices[0]),
         retired_key: if retired {
             Some(RetiredClusterKey {
+                reference: reference(retired_request_id),
                 key: key(indices[1]),
                 retired_at: arbitrary.timestamp(),
+                request_id: retired_request_id,
             })
         } else {
             None
         },
         pending_key: if pending {
             Some(PendingClusterKey {
+                reference: reference(pending_request_id),
                 key: key(indices[2]),
                 requested_at: arbitrary.timestamp(),
+                generation: NonZeroU64::new(
+                    generation
+                        .checked_add(1)
+                        .verified("pending generations leave room for their checked increment"),
+                )
+                .verified("the increment is nonzero"),
+                request_id: pending_request_id,
+                prepared: None,
             })
         } else {
             None
         },
+    };
+    if pending && arbitrary.entropy().flag() {
+        let rotation = record
+            .pending_key
+            .as_ref()
+            .verified("the pending branch constructed a key");
+        let prepared = rotation_request(
+            &record,
+            rotation,
+            uuid::Uuid::from_u128(7),
+            1,
+            1,
+            record.created_at,
+            url::Url::parse("https://licensing.nervix.io").assured("fixed HTTPS fixture"),
+        );
+        record
+            .pending_key
+            .as_mut()
+            .verified("pending key retained")
+            .prepared = Some(prepared);
     }
+    record
+}
+
+pub(crate) fn pending(arbitrary: &mut Arbitrary<'_>) -> PendingClusterKey {
+    let reference = reference(Uuid::from_u128(2));
+    PendingClusterKey {
+        reference,
+        key: key(2),
+        requested_at: arbitrary.timestamp(),
+        generation: NonZeroU64::new(arbitrary.entropy().between(2..=u64::MAX))
+            .verified("draw begins at two"),
+        request_id: Uuid::from_bytes(std::array::from_fn(|_| arbitrary.entropy().byte())),
+        prepared: None,
+    }
+}
+
+pub(crate) fn rotation_candidate(
+    record: &ClusterIdentityRecord,
+    request_id: Uuid,
+) -> PendingClusterKey {
+    let index = if record.current_key == key(0) { 1 } else { 0 };
+    PendingClusterKey {
+        reference: reference(request_id),
+        key: key(index),
+        requested_at: record.created_at,
+        generation: NonZeroU64::new(record.key_generation.get() + 1)
+            .verified("fixture leaves a generation"),
+        request_id,
+        prepared: None,
+    }
+}
+
+pub(crate) fn rotation_request(
+    record: &ClusterIdentityRecord,
+    pending: &PendingClusterKey,
+    activation_id: Uuid,
+    decision_revision: u64,
+    conditions_revision: u64,
+    licensing_time: Timestamp,
+    service: url::Url,
+) -> crate::PreparedLicensingRequest {
+    use nervix_licensing_protocol::requests::*;
+    let limits = nervix_licensing_protocol::test_fixture::limits();
+    let common = RequestCommon {
+        protocol: 1,
+        request_id: pending.request_id,
+        challenge: Secret::new("retained-proof-challenge".to_owned()),
+        sent_at: licensing_time
+            .min(Timestamp::from_unix_nanos(i64::MAX - 1))
+            .into_datetime(),
+        aud: service,
+        cluster_uid: record.cluster_uid,
+        display_name: "cluster λ".to_owned(),
+        client: ClientDescription {
+            product: ClientProduct::NervixServer,
+            version: "0.1.0-dev".to_owned(),
+        },
+        key_generation: record.key_generation.get(),
+        trust_held: TrustHeld {
+            working_keys: Vec::new(),
+            revocation_serials: Vec::new(),
+            succession_serials: Vec::new(),
+        },
+    };
+    let signer = DocumentSigner::from_pkcs8(&pending.key.private_pkcs8.0)
+        .assured("pending fixture key signs");
+    let proof = signer
+        .sign(
+            &KeyRotationProof {
+                challenge: common.challenge.clone(),
+                cluster_uid: common.cluster_uid,
+                activation_id,
+                new_kid: pending.key.kid.clone(),
+            },
+            limits,
+        )
+        .assured("bounded fixture possession proof signs");
+    let request = Request::RotateKey {
+        common,
+        activation_id,
+        state: CommittedState {
+            applied_decision_revision: decision_revision,
+            applied_conditions_revision: conditions_revision,
+            licensing_time: licensing_time.into_datetime(),
+        },
+        new_key: pending.key.public_jwk.clone(),
+        proof,
+    };
+    let signer = DocumentSigner::from_pkcs8(&record.current_key.private_pkcs8.0)
+        .assured("current fixture key signs");
+    let body = signer
+        .sign(&request, limits)
+        .assured("bounded fixture rotation signs");
+    let expires_at = licensing_time
+        .min(Timestamp::from_unix_nanos(i64::MAX - 1))
+        .checked_add(std::time::Duration::from_nanos(1))
+        .unwrap_or(Timestamp::from_unix_nanos(i64::MAX));
+    crate::PreparedLicensingRequest::new(body, expires_at, limits)
+        .assured("bounded fixture request fits")
 }
 
 #[test]
@@ -278,4 +413,9 @@ fn bolero_cluster_identity_record_preserves_all_keys_and_metadata() {
                 .assured("the complete current record deserializes and validates");
             assert_eq!(restored, record);
         });
+}
+
+pub(crate) fn reference(id: Uuid) -> nervix_models::CommandExecutionReference {
+    nervix_models::CommandExecutionReference::parse(id.to_string())
+        .assured("UUID text is a valid command reference")
 }
