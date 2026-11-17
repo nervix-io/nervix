@@ -76,7 +76,7 @@ impl SignedFixture {
             )
             .assured("fixture decision matches independent identity")
     }
-    fn state(&self) -> StateMachineData {
+    pub(super) fn state(&self) -> StateMachineData {
         let mut state = StateMachineData {
             licensing_environment: Arc::new(self.environment.clone()),
             ..StateMachineData::default()

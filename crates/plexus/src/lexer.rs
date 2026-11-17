@@ -146,6 +146,8 @@ pub enum Identifier {
     Cluster,
     Activate,
     Refresh,
+    Release,
+    Rotate,
     Ephemeral,
     License,
     Status,

@@ -145,6 +145,8 @@ impl Service {
             .route("/v1/challenges", post(request))
             .route("/v1/activations", post(request))
             .route("/v1/activations/{id}/refresh", post(request))
+            .route("/v1/activations/{id}/key", post(request))
+            .route("/v1/activations/{id}/release", post(request))
             .route(
                 "/v1/activations/{id}/events",
                 get(model::notifications::events),

@@ -5720,9 +5720,14 @@ impl AcknowledgedHttpPublisher {
             .map_err(io::Error::other)
     }
 
-    /// Wait through explicit pre-admission refusals, then require a completed graph ACK.
-    /// A failed or ambiguous admitted attempt is returned to the caller without replay.
-    pub(crate) async fn publish_after_admission_refusals(&self, payload: &str) -> io::Result<()> {
+    /// Populate an idempotent LAST-by-key fixture, requiring a completed graph ACK.
+    /// Explicit admission or processing rejections may replay the same keys and values: a
+    /// rejected batch can have partially materialized, and replacing those values is intentional.
+    /// Transport ambiguity and every other terminal outcome remain failures.
+    pub(crate) async fn populate_idempotent_materialized_batch(
+        &self,
+        payload: &str,
+    ) -> io::Result<()> {
         nervix_primitives::time::timeout(self.wait, async {
             loop {
                 nervix_primitives::task::consume_budget().await;
@@ -5740,14 +5745,21 @@ impl AcknowledgedHttpPublisher {
                 {
                     return Ok(());
                 }
-                if status != reqwest::StatusCode::SERVICE_UNAVAILABLE
-                    || outcome["outcome"] != "not_admitted"
-                {
+                let retryable = outcome["outcome"] == "not_admitted"
+                    || outcome
+                        == serde_json::json!({
+                            "outcome": "processing_failed", "cause": "rejected"
+                        });
+                if status != reqwest::StatusCode::SERVICE_UNAVAILABLE || !retryable {
                     return Err(io::Error::other(format!(
                         "the post received {status} {outcome} instead of its completed graph \
                          acknowledgement"
                     )));
                 }
+                eprintln!(
+                    "idempotent materialized population received {status} {outcome}; replaying \
+                     the same keys and values within the original request budget"
+                );
                 let delay = match retry_after {
                     Some(value) => Duration::from_secs(
                         value

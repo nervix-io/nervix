@@ -53,8 +53,6 @@ Feature: Verification of licensing decisions
       | 3            | signature        |
       | 1            | unauthorized_key |
       | 3            | unauthorized_key |
-      | 1            | revoked_key      |
-      | 3            | revoked_key      |
       | 1            | cluster          |
       | 3            | cluster          |
       | 1            | key              |
@@ -71,3 +69,18 @@ Feature: Verification of licensing decisions
       | 3            | service          |
       | 1            | request          |
       | 3            | request          |
+
+  Scenario Outline: A revoked-key response retains the decision and marks its signing key on <cluster_size> nodes
+    Given an HTTPS licensing test service is available
+    And a <cluster_size> node nervix cluster is started
+    When a persistent license is activated through the running quorum
+    Then the committed license decision is saved as placeholder "accepted_license"
+    Given the next licensing response has "revoked_key" tampering
+    When an explicit license refresh is refused by decision verification
+    Then the committed license decision matches placeholder "accepted_license" with a revoked signing key
+    And the licensing request outcome "rejected_by_cluster" was reported
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |

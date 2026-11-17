@@ -48,7 +48,7 @@ async fn distinct_materialized_rows(
         }
         let payload = serde_json::to_string(&rows).assured("the fixture has JSON scalar fields");
         publisher
-            .publish_after_admission_refusals(&payload)
+            .populate_idempotent_materialized_batch(&payload)
             .await
             .unwrap_or_else(|error| {
                 panic!("materialized fixture batch {next}..{end} was not acknowledged: {error}")

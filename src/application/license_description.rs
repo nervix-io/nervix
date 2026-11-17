@@ -45,9 +45,32 @@ impl SessionServiceImpl {
         observation: nervix_models::LicensingConnectivity,
         reported: &str,
     ) {
-        let nervix_consensus::LicensingMode::Activated(activation) = &initialized.record.mode
-        else {
-            return;
+        let activation = match &initialized.record.mode {
+            nervix_consensus::LicensingMode::Free { .. } => return,
+            nervix_consensus::LicensingMode::Activated(activation) => activation.as_ref(),
+            nervix_consensus::LicensingMode::Released(release) => {
+                columns.push((
+                    "release",
+                    StdArc::new(StringArray::from(vec![if release.awaiting() {
+                        "awaiting service confirmation"
+                    } else {
+                        "confirmed"
+                    }])),
+                ));
+                columns.push((
+                    "released_at",
+                    StdArc::new(TimestampNanosecondArray::from(vec![
+                        release.released_at.unix_nanos(),
+                    ])),
+                ));
+                if let Some(until) = release.grants_until {
+                    columns.push((
+                        "grants_until",
+                        StdArc::new(TimestampNanosecondArray::from(vec![until.unix_nanos()])),
+                    ));
+                }
+                &release.activation
+            }
         };
 
         let environment = self.inner.licensing_test_support.environment(
@@ -232,8 +255,9 @@ impl SessionServiceImpl {
                 let identity = &initialized.identity;
                 let uid = identity.cluster_uid.to_string();
                 let mode = match &initialized.record.mode {
-                    nervix_consensus::LicensingMode::Free => "free",
+                    nervix_consensus::LicensingMode::Free { .. } => "free",
                     nervix_consensus::LicensingMode::Activated(_) => "activated",
+                    nervix_consensus::LicensingMode::Released(_) => "released",
                 };
                 let processing = match policy.processing_stop() {
                     None => "running",

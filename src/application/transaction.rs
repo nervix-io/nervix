@@ -660,6 +660,8 @@ pub(in crate::application) fn transaction_statement_label(statement: &Statement)
         Statement::CreateDomain(_) => "CREATE DOMAIN",
         Statement::ActivateLicense(_) => "ACTIVATE LICENSE",
         Statement::RefreshLicense(_) => "REFRESH LICENSE",
+        Statement::ReleaseLicense(_) => "RELEASE LICENSE",
+        Statement::RotateLicenseClusterKey(_) => "ROTATE LICENSE CLUSTER KEY",
         Statement::CreateUser(_) => "CREATE USER",
         Statement::UploadResource(_) => "UPLOAD RESOURCE",
         Statement::Backup(_) => "BACKUP",
