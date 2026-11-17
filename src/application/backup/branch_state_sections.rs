@@ -351,9 +351,10 @@ fn capture_key(request: &CaptureDomainStateRequest, path: SectionPath) -> Captur
 }
 
 /// A typed runtime branch key as the archive's independent field values.
-fn archive_branch(key: Option<Vec<nervix_models::RemoteRuntimeField>>) -> Option<Vec<StateField>> {
-    let fields = key?;
-    Some(fields.into_iter().map(StateField::from_remote).collect())
+fn archive_branch(
+    key: nervix_models::RemoteBranchKey,
+) -> nervix_models::BranchKeyFields<StateField> {
+    key.map_fields(StateField::from_remote)
 }
 
 fn archive_accumulator(accumulator: WindowAccumulatorState) -> WindowAccumulatorRecord {

@@ -274,6 +274,7 @@ mod tests {
                 ("producer_name".to_owned(), DataType::Utf8, true),
                 ("sequence_id".to_owned(), DataType::Int64, true),
                 ("redelivery_count".to_owned(), DataType::Int64, true),
+                ("partition".to_owned(), DataType::Int32, true),
             ])
         );
         assert_eq!(

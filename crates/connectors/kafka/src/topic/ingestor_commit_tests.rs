@@ -79,6 +79,7 @@ pub(super) fn plan(
             group_id: GROUP.to_string(),
             commit,
             start_at: IngestStartPosition::Earliest,
+            committed_partitions: None,
         },
     }
 }
@@ -232,7 +233,7 @@ async fn a_commit_its_coordinator_does_not_answer_fails_at_its_deadline_and_hold
         .broker_round_trip_time(1, HELD_ROUND_TRIP)
         .assured("the mock cluster delays the answers of a broker it has");
     for _attempt in 0..2 {
-        let request = GroupCommitRequest::acknowledged(&first_positions)
+        let request = GroupCommitRequest::positions(&first_positions)
             .assured("the read position is a valid offset");
         let committed = commits
             .commit(&ingestor.control, &ingestor.consumer, GROUP, request)
@@ -257,7 +258,7 @@ async fn a_commit_its_coordinator_does_not_answer_fails_at_its_deadline_and_hold
         .broker_round_trip_time(1, Duration::ZERO)
         .assured("the mock cluster releases the answers of a broker it has");
     commits.deadline = READ_DEADLINE;
-    let request = GroupCommitRequest::acknowledged(&second_positions)
+    let request = GroupCommitRequest::positions(&second_positions)
         .assured("the read position is a valid offset");
     commits
         .commit(&ingestor.control, &ingestor.consumer, GROUP, request)

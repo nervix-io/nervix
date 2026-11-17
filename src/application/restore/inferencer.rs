@@ -81,7 +81,7 @@ pub(super) async fn prepare_inferencer_checkpoint(
     {
         return Err(Report::new(InferencerRestoreError::Shapes));
     }
-    let branch = BranchKey::from_remote_key(remote_branch_key(descriptor.branch.as_ref()))
+    let branch = BranchKey::from_remote_key(remote_branch_key(&descriptor.branch))
         .change_context(InferencerRestoreError::Branch)?;
     if branch.as_ref().map(BranchKey::fingerprint) != descriptor.branch_fingerprint {
         return Err(Report::new(InferencerRestoreError::Branch));

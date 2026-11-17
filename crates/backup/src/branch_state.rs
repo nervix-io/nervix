@@ -51,7 +51,7 @@ pub struct DeduplicatorStateDescriptor {
     pub unit: Unit,
     pub schema: SchemaFingerprint,
     pub branch_fingerprint: Option<BranchKeyFingerprint>,
-    pub branch: Option<Vec<StateField>>,
+    pub branch: nervix_models::BranchKeyFields<StateField>,
     pub revision: u64,
     pub keys: u64,
     pub groups: u32,
@@ -72,7 +72,7 @@ pub struct WindowStateDescriptor {
     /// The window processor model the state was built under.
     pub model: WindowModelDigest,
     pub branch_fingerprint: Option<BranchKeyFingerprint>,
-    pub branch: Option<Vec<StateField>>,
+    pub branch: nervix_models::BranchKeyFields<StateField>,
     pub revision: u64,
     /// The branch lifetime the window belongs to; zero is never a lifetime.
     pub incarnation: u64,
@@ -111,7 +111,7 @@ struct DeduplicatorDescriptorWire {
     unit: crate::wire::UnitWire,
     schema: [u8; 32],
     branch_fingerprint: Option<[u8; 32]>,
-    branch: Option<Vec<StateField>>,
+    branch: nervix_models::BranchKeyFields<StateField>,
     revision: u64,
     keys: u64,
     groups: u32,
@@ -125,7 +125,7 @@ struct WindowDescriptorWire {
     schema: [u8; 32],
     model: [u8; 32],
     branch_fingerprint: Option<[u8; 32]>,
-    branch: Option<Vec<StateField>>,
+    branch: nervix_models::BranchKeyFields<StateField>,
     revision: u64,
     incarnation: u64,
     first_sequence: Option<u64>,
@@ -157,7 +157,7 @@ struct DelayedRemovalWire {
 
 impl ArchiveRecord for DeduplicatorStateDescriptor {
     const KIND: RecordKind = RecordKind::DeduplicatorStateDescriptor;
-    const VERSION: u16 = 4;
+    const VERSION: u16 = 5;
 
     fn encode(&self) -> Result<Vec<u8>, Report<ArchiveWriteError>> {
         encode_record(
@@ -184,7 +184,7 @@ impl ArchiveRecord for DeduplicatorStateDescriptor {
         let wire: DeduplicatorDescriptorWire =
             decode_record(path, Self::KIND, Self::VERSION, bytes)?;
         validate_branch(path, &wire.branch)?;
-        if wire.branch.is_some() != wire.branch_fingerprint.is_some() {
+        if wire.branch.is_branched() != wire.branch_fingerprint.is_some() {
             return Err(invalid(path, "deduplicator branch fingerprint"));
         }
         validate_group_count(path, wire.keys, wire.groups, "deduplicator group count")?;
@@ -204,7 +204,7 @@ impl ArchiveRecord for DeduplicatorStateDescriptor {
 
 impl ArchiveRecord for WindowStateDescriptor {
     const KIND: RecordKind = RecordKind::WindowStateDescriptor;
-    const VERSION: u16 = 4;
+    const VERSION: u16 = 5;
 
     fn encode(&self) -> Result<Vec<u8>, Report<ArchiveWriteError>> {
         let mut rows = Vec::with_capacity(self.rows.len());
@@ -246,7 +246,7 @@ impl ArchiveRecord for WindowStateDescriptor {
     fn decode(path: &str, bytes: &[u8]) -> Result<Self, Report<ArchiveReadError>> {
         let wire: WindowDescriptorWire = decode_record(path, Self::KIND, Self::VERSION, bytes)?;
         validate_branch(path, &wire.branch)?;
-        if wire.branch.is_some() != wire.branch_fingerprint.is_some() {
+        if wire.branch.is_branched() != wire.branch_fingerprint.is_some() {
             return Err(invalid(path, "window branch fingerprint"));
         }
         if wire.incarnation == 0 {
@@ -441,7 +441,7 @@ mod tests {
             schema: SchemaFingerprint::from_digest([1; 32]),
             model: WindowModelDigest::from_digest([2; 32]),
             branch_fingerprint: None,
-            branch: None,
+            branch: nervix_models::BranchKeyFields::Unbranched,
             revision: 4,
             incarnation: 1,
             first_sequence: None,

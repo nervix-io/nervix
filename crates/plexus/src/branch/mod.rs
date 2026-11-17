@@ -27,16 +27,22 @@ fn max_instances<'src>()
         .map(|max_instances| BranchEviction::Lru { max_instances })
 }
 
-/// `PARTITIONS n`: the number of independently placed parts of a branch, written after its TTL
-/// on `CREATE BRANCH` and after `SET` on `ALTER BRANCH`.
+/// Direct counts and discovered or grouped external partitions, shared by CREATE and ALTER.
 fn branch_partitions<'src>()
 -> impl Parser<'src, &'src [Token], BranchPartitions, extra::Err<ParseError<'src>>> + Clone {
-    kw(Identifier::Partitions)
-        .ignore_then(nonzero_u16_value(
-            "partition_count",
-            "PARTITIONS must be greater than 0",
-        ))
-        .map(BranchPartitions::Direct)
+    let count = nonzero_u16_value("partition_count", "PARTITIONS must be greater than 0");
+    kw(Identifier::Partitions).ignore_then(choice((
+        kw(Identifier::Inherited).to(BranchPartitions::Inherited),
+        count
+            .then(kw(Identifier::Inherited).or_not())
+            .map(|(count, inherited)| {
+                if inherited.is_some() {
+                    BranchPartitions::InheritedGrouped(count)
+                } else {
+                    BranchPartitions::Direct(count)
+                }
+            }),
+    )))
 }
 
 pub fn create_branch_parser<'src>()
@@ -187,6 +193,66 @@ mod tests {
     }
 
     #[test]
+    fn parses_inherited_partition_declarations_and_their_canonical_forms() {
+        for (body, expected, canonical) in [
+            ("inherited", BranchPartitions::Inherited, "INHERITED"),
+            (
+                "4 inherited",
+                BranchPartitions::InheritedGrouped(nonzero!(4u16)),
+                "4 INHERITED",
+            ),
+            (
+                "65535 INHERITED",
+                BranchPartitions::InheritedGrouped(NonZeroU16::MAX),
+                "65535 INHERITED",
+            ),
+        ] {
+            let text =
+                format!("CREATE BRANCH by_tenant SCHEMA tenant_branch TTL 5m PARTITIONS {body};");
+            let parsed = parse_create_branch(&text).expect("the inherited declaration is valid");
+            assert_eq!(parsed.partitions, expected);
+            assert_eq!(
+                parsed
+                    .to_canonical_plexus()
+                    .expect("the declaration renders"),
+                format!(
+                    "CREATE BRANCH by_tenant SCHEMA tenant_branch TTL 5m PARTITIONS {canonical};"
+                )
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_malformed_inherited_partition_declarations() {
+        for body in [
+            "0 INHERITED",
+            "65536 INHERITED",
+            "INHERITED 4",
+            "4 INHERITED INHERITED",
+        ] {
+            let text =
+                format!("CREATE BRANCH by_tenant SCHEMA tenant_branch TTL 5m PARTITIONS {body};");
+            assert!(parse_create_branch(&text).is_err(), "{text}");
+        }
+    }
+
+    #[test]
+    fn parses_inherited_partition_alterations() {
+        for (body, expected) in [
+            ("inherited", BranchPartitions::Inherited),
+            (
+                "4 inherited",
+                BranchPartitions::InheritedGrouped(nonzero!(4u16)),
+            ),
+        ] {
+            let parsed =
+                parse_alter_branch(&format!("ALTER BRANCH by_tenant SET PARTITIONS {body};"))
+                    .expect("ALTER shares the complete partition declaration grammar");
+            assert_eq!(parsed.requested_partitions(), Some(expected));
+        }
+    }
+
+    #[test]
     fn parses_create_branch_partitions_before_eviction() {
         let input = "CREATE BRANCH by_tenant SCHEMA tenant_branch TTL 5m PARTITIONS 4 MAX \
                      INSTANCES 10 EVICT LRU;";
@@ -300,7 +366,30 @@ mod tests {
     fn suggests_the_partition_count_after_partitions() {
         let input = "CREATE BRANCH by_tenant SCHEMA tenant_branch TTL 5m PARTITIONS ";
         let suggestions = suggest_create_branch(input, input.len());
-        assert_eq!(suggestions, vec!["partition_count".to_string()]);
+        assert!(suggestions.contains(&"partition_count".to_string()));
+        assert!(suggestions.contains(&"INHERITED".to_string()));
+    }
+
+    #[test]
+    fn suggests_inherited_after_a_count_and_keeps_the_completed_clause_closed() {
+        for prefix in [
+            "CREATE BRANCH by_tenant SCHEMA tenant_branch TTL 5m PARTITIONS 4 I",
+            "ALTER BRANCH by_tenant SET PARTITIONS 4 I",
+        ] {
+            let suggestions = if prefix.starts_with("CREATE") {
+                suggest_create_branch(prefix, prefix.len())
+            } else {
+                suggest_alter_branch(prefix, prefix.len())
+            };
+            assert!(
+                suggestions.contains(&"INHERITED".to_string()),
+                "{suggestions:?}"
+            );
+        }
+        let complete = "CREATE BRANCH by_tenant SCHEMA tenant_branch TTL 5m PARTITIONS INHERITED ";
+        let suggestions = suggest_create_branch(complete, complete.len());
+        assert!(!suggestions.contains(&"partition_count".to_string()));
+        assert!(!suggestions.contains(&"INHERITED".to_string()));
     }
 
     #[test]
@@ -373,6 +462,7 @@ mod tests {
     fn suggests_the_partition_count_after_set_partitions() {
         let input = "ALTER BRANCH by_tenant SET PARTITIONS ";
         let suggestions = suggest_alter_branch(input, input.len());
-        assert_eq!(suggestions, vec!["partition_count".to_string()]);
+        assert!(suggestions.contains(&"partition_count".to_string()));
+        assert!(suggestions.contains(&"INHERITED".to_string()));
     }
 }

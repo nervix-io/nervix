@@ -228,14 +228,9 @@ impl ExactValue {
     }
 
     /// A whole branch key, field by field in its order.
-    fn key(key: &Option<Vec<RemoteRuntimeField>>) -> Option<Vec<(String, Self)>> {
-        let fields = key.as_ref()?;
-        Some(
-            fields
-                .iter()
-                .map(|field| (field.name.clone(), Self::of(&field.value)))
-                .collect(),
-        )
+    fn key(key: &nervix_models::RemoteBranchKey) -> nervix_models::BranchKeyFields<(String, Self)> {
+        key.clone()
+            .map_fields(|field| (field.name, Self::of(&field.value)))
     }
 }
 
@@ -459,9 +454,9 @@ fn registration(arbitrary: &mut Arbitrary<'_>) -> RemoteAckRegistration {
 /// A branch key as the wire carries it, or none. The wire carries whatever a peer wrote, so a
 /// field may hold any name, any datetime text and any float bit pattern; the receiving runtime
 /// validates the key against what a concrete branch is.
-fn branch_key(arbitrary: &mut Arbitrary<'_>) -> Option<Vec<RemoteRuntimeField>> {
+fn branch_key(arbitrary: &mut Arbitrary<'_>) -> nervix_models::RemoteBranchKey {
     if !arbitrary.entropy().flag() {
-        return None;
+        return nervix_models::RemoteBranchKey::Unbranched;
     }
     let count = arbitrary.entropy().count(KEY_FIELDS);
     let mut fields = Vec::with_capacity(count);
@@ -471,7 +466,23 @@ fn branch_key(arbitrary: &mut Arbitrary<'_>) -> Option<Vec<RemoteRuntimeField>> 
             value: remote_value(arbitrary, VALUE_DEPTH),
         });
     }
-    Some(fields)
+    if arbitrary.entropy().flag() {
+        nervix_models::RemoteBranchKey::Direct(fields.into())
+    } else {
+        nervix_models::RemoteBranchKey::Inherited(Box::new(
+            nervix_models::InheritedRemoteBranchKey {
+                fields: fields.into(),
+                origin: nervix_models::InheritedPartitionOrigin {
+                    unit: arbitrary.unit(),
+                    partition: nervix_models::ExternalPartition::new(
+                        u32::try_from(arbitrary.entropy().up_to(u64::from(u32::MAX)))
+                            .verified("the draw is within u32"),
+                    ),
+                    epoch: nervix_models::PartitionEpochNumber::new(arbitrary.positive_u64()),
+                },
+            },
+        ))
+    }
 }
 
 fn remote_value(arbitrary: &mut Arbitrary<'_>, depth: u8) -> RemoteRuntimeValue {
@@ -845,7 +856,7 @@ fn a_grant_request_refused_for_a_registrar_frees_the_registrations_read_before_i
             domain: DomainName::parse("orders").assured("a literal domain name"),
             relay: RelayName::parse("accepted").assured("a literal relay name"),
             unit: nervix_models::Unit::SINGLE,
-            key: None,
+            key: nervix_models::RemoteBranchKey::Unbranched,
             metadata: Vec::new(),
             acks: vec![
                 Some(registered_by(1, "registrar-read-before-the-refused-one")),

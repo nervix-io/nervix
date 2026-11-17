@@ -135,7 +135,7 @@ where
         let kind = BranchLifecycleRecord::KIND;
         let mut nested = 0;
         for branch in self.branches.clone() {
-            let Some(fields) = &branch.key else {
+            let Some(fields) = branch.key.fields() else {
                 continue;
             };
             let Some(key) = fields_scratch(fields) else {
@@ -632,7 +632,7 @@ mod tests {
         let mut branches = Vec::new();
         for (incarnation, key) in (1..).zip(keys) {
             branches.push(BranchLifecycleEntry {
-                key: Some(key),
+                key: nervix_models::BranchKeyFields::Direct(key.into()),
                 last_ingestion: nervix_models::Timestamp::from_unix_nanos(incarnation),
                 incarnation: incarnation.cast_unsigned(),
             });

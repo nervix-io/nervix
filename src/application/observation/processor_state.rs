@@ -14,7 +14,7 @@
 )]
 
 use arrow_array::RecordBatch;
-use error_stack::Report;
+use error_stack::{Report, ResultExt as _};
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_client_wire::{
     RowBranch, RowSchema, SessionLimits, StateInspection, StateInspectionPage,
@@ -40,7 +40,7 @@ use super::inspection_pages::{
     resume_position,
 };
 use crate::{
-    application::{command_result::CommandResult, session_service::SessionServiceImpl},
+    application::{AppError, command_result::CommandResult, session_service::SessionServiceImpl},
     client_row::{ArrowRowBatch, write_runtime_value},
     runtime::{
         BranchKey, ProcessorStatePageBounds, ProcessorStatePageError, ProcessorStateSelection,
@@ -53,7 +53,7 @@ use crate::{
 };
 
 mod inferencer;
-mod partition;
+pub(super) mod partition;
 
 /// One section of a processor's state before the owner appends its own columns: which section it
 /// is, the payload fields its rows carry, and, for a reorderer, whether each order key carries
@@ -69,7 +69,7 @@ struct SectionLayout {
 struct ProcessorLayout {
     node: ScheduledNode,
     sections: Vec<SectionLayout>,
-    moving_partitions: Option<nervix_models::BranchPartitions>,
+    moving_partitions: Option<nervix_models::ResolvedBranchPartitions>,
     _metadata: Option<nervix_execution::Reservation>,
 }
 
@@ -213,7 +213,10 @@ fn relay_schema_fields(
 
 fn branch_fields(node: &ScheduledNode) -> Vec<SchemaField> {
     match &node.resolved_branching {
-        Some(ResolvedBranching::Branched { schema, .. }) => schema.fields.clone(),
+        Some(
+            ResolvedBranching::Branched { schema, .. }
+            | ResolvedBranching::AwaitingTopology { schema, .. },
+        ) => schema.fields.clone(),
         Some(ResolvedBranching::Unbranched) | None => Vec::new(),
     }
 }
@@ -701,7 +704,8 @@ impl SessionServiceImpl {
         let selection = resolve_selection(show, branching)?;
         let branch = match branching {
             ResolvedBranching::Unbranched => None,
-            ResolvedBranching::Branched { branch, schema, .. } => Some(
+            ResolvedBranching::Branched { branch, schema, .. }
+            | ResolvedBranching::AwaitingTopology { branch, schema } => Some(
                 RowBranch::new(branch.clone(), schema.fields.clone()).map_err(|error| {
                     inspection_refusal(error, StateInspectionRejection::NotReady)
                 })?,
@@ -820,7 +824,7 @@ impl SessionServiceImpl {
             };
             let page = self.processor_unit_page(request, &plan).await?;
             if let Some(partitions) = &partitions {
-                partitions.validate(**unit, page.descriptor.partition_catalog.as_ref())?;
+                partitions.validate(**unit, &page.descriptor.partition_catalog)?;
             }
             let replicas = unit_replicas(&plan.layout.node, placement, &owner);
             let descriptor = &page.descriptor;
@@ -1144,6 +1148,23 @@ impl SessionServiceImpl {
             sections,
             _memory: page.memory,
         })
+    }
+
+    /// Answer the processor state pages other nodes request from this one.
+    pub(in crate::application) fn register_processor_inspection_interconnect_handler(
+        &self,
+    ) -> error_stack::Result<(), AppError> {
+        let processor_inspection_service = self.clone();
+        self.inner
+            .interconnect
+            .register_stream_handler::<nervix_interconnect::ReadProcessorStatePage, _, _>(
+                move |_context, request| {
+                    let service = processor_inspection_service.clone();
+                    async move { service.stream_processor_inspection_page(request).await }
+                },
+            )
+            .change_context(AppError::RegisterInterconnectRequestHandler)?;
+        Ok(())
     }
 
     pub(in crate::application) async fn stream_processor_inspection_page(

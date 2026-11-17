@@ -24,7 +24,7 @@ use meticulous::OptionExt as _;
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
 
-use crate::{BranchPartitions, Unit};
+use crate::{ResolvedBranchPartitions, Unit};
 
 /// The number of a branch's partition epoch: one for the count the branch was created with, and one
 /// more for each committed change of that count.
@@ -86,7 +86,7 @@ impl fmt::Display for PartitionEpochNumber {
 pub struct BranchPartitionEpoch {
     pub number: PartitionEpochNumber,
     /// The count this epoch places keys by.
-    pub partitions: BranchPartitions,
+    pub partitions: ResolvedBranchPartitions,
     /// Present while keys placed under the previous count may still lie outside their partition
     /// under this one.
     pub transition: Option<PartitionTransition>,
@@ -97,13 +97,17 @@ pub struct BranchPartitionEpoch {
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
 pub struct PartitionTransition {
-    pub previous: BranchPartitions,
+    pub previous: ResolvedBranchPartitions,
 }
 
 impl BranchPartitionEpoch {
     /// The epoch a committed change from `from` to `to` begins after `current`: the branch's
     /// recorded epoch, or none while it keeps the count it was created with.
-    pub fn changed(current: Option<&Self>, from: BranchPartitions, to: BranchPartitions) -> Self {
+    pub fn changed(
+        current: Option<&Self>,
+        from: ResolvedBranchPartitions,
+        to: ResolvedBranchPartitions,
+    ) -> Self {
         let number = match current {
             Some(current) => current.number.next(),
             None => PartitionEpochNumber::FIRST.next(),
@@ -117,7 +121,7 @@ impl BranchPartitionEpoch {
 
     /// The epoch a committed change to `to` begins after `current` for a branch none of whose
     /// entities keeps state per key, so no key has anything to move and no transition is needed.
-    pub fn settled_change(current: Option<&Self>, to: BranchPartitions) -> Self {
+    pub fn settled_change(current: Option<&Self>, to: ResolvedBranchPartitions) -> Self {
         let number = match current {
             Some(current) => current.number.next(),
             None => PartitionEpochNumber::FIRST.next(),

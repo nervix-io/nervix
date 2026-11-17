@@ -310,6 +310,7 @@ fn source_declaration(kind: IngestorEntityKind) -> IngestorDeclaration {
                 ("producer_name", IngestorMetadataType::String),
                 ("sequence_id", IngestorMetadataType::I64),
                 ("redelivery_count", IngestorMetadataType::I64),
+                ("partition", IngestorMetadataType::I32),
             ],
             every_node: false,
             reference: IngestorReferenceKind::Client(ConnectorKind::Pulsar),

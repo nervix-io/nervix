@@ -59,6 +59,11 @@ impl SectionPath {
         Self(format!("{}/models.plexus", domain_directory(domain)))
     }
 
+    /// The committed inherited topology, including state-bearing epochs and holding units.
+    pub fn domain_partitions(domain: &DomainName) -> Self {
+        Self(format!("{}/partitions.rkyv", domain_directory(domain)))
+    }
+
     /// The catalog metadata of one resource version.
     pub fn resource_version_record(
         domain: &DomainName,

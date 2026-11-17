@@ -26,7 +26,7 @@ struct Page {
 pub(super) fn build(
     branches: Vec<CapturedBranch>,
     plan: &InferencerStatePlan,
-    catalog: Option<BTreeSet<BranchKeyFingerprint>>,
+    catalog: nervix_models::StateInspectionKeyCatalog,
     after: Option<(Option<BranchKeyFingerprint>, u64)>,
     bounds: ProcessorStatePageBounds,
     memory: Reservation,
@@ -208,7 +208,7 @@ impl Page {
         mut self,
         branches: usize,
         after: Option<(Option<BranchKeyFingerprint>, u64)>,
-        catalog: Option<BTreeSet<BranchKeyFingerprint>>,
+        catalog: nervix_models::StateInspectionKeyCatalog,
         cancellation: &Cancellation,
     ) -> ReadResult<ProcessorStatePage> {
         if self.start > self.counts.rows || after.is_some_and(|(key, _)| key != self.previous) {

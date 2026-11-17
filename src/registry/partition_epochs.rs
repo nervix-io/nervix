@@ -17,8 +17,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use nervix_models::{
-    BranchName, BranchPartitionEpoch, BranchPartitions, DomainSchedule, Model, ModelKind,
-    ModelName, NodeRef, Unit,
+    BranchName, BranchPartitionEpoch, DomainSchedule, Model, ModelKind, ModelName, NodeRef,
+    PartitionEpochNumber, PartitionTopology, ResolvedBranchPartitions, Unit,
 };
 
 use crate::registry::graph::ActiveNode;
@@ -29,16 +29,37 @@ use crate::registry::graph::ActiveNode;
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct PartitionEpochs {
     epochs: BTreeMap<BranchName, BranchPartitionEpoch>,
+    retained: BTreeMap<BranchName, BTreeSet<Unit>>,
 }
 
 impl PartitionEpochs {
+    /// Reinstates captured epochs only for the layouts the restored graph actually declares.
+    pub(crate) fn restored(
+        snapshot: &nervix_models::PartitionTopologySnapshot,
+        declared: &BTreeMap<BranchName, ResolvedBranchPartitions>,
+    ) -> Option<Self> {
+        if snapshot
+            .epochs
+            .iter()
+            .any(|(branch, epoch)| declared.get(branch) != Some(&epoch.partitions))
+        {
+            return None;
+        }
+        Some(Self {
+            epochs: snapshot.epochs.clone(),
+            retained: snapshot.holding_units.clone(),
+        })
+    }
+
     /// Decides the epoch of every branch `declared` names against `existing`, the schedule in
     /// force, or none for a domain that has no schedule yet. A changed branch in `keyed`, whose
     /// entities keep state per key, begins a transition from its previous count; any other changed
     /// branch begins its next epoch settled, since none of its keys has state to move.
     pub(crate) fn decide(
         existing: Option<&DomainSchedule>,
-        declared: &BTreeMap<BranchName, BranchPartitions>,
+        declared: &BTreeMap<BranchName, ResolvedBranchPartitions>,
+        topology: &PartitionTopology,
+        changed_sources: &BTreeSet<BranchName>,
         keyed: &BTreeSet<BranchName>,
     ) -> Self {
         let mut epochs = BTreeMap::new();
@@ -54,8 +75,22 @@ impl PartitionEpochs {
             };
             let decided = match in_force {
                 // A branch the schedule in force does not declare begins with its first count.
+                None if partitions.is_inherited() => Some(BranchPartitionEpoch {
+                    number: PartitionEpochNumber::FIRST,
+                    partitions: *partitions,
+                    transition: None,
+                }),
                 None => None,
-                Some(count) if count == *partitions => recorded.cloned(),
+                Some(count)
+                    if count == *partitions
+                        && !changed_sources.contains(branch)
+                        && existing.is_none_or(|schedule| {
+                            schedule.partition_topology.branches.get(branch)
+                                == topology.branches.get(branch)
+                        }) =>
+                {
+                    recorded.cloned()
+                }
                 Some(count) if keyed.contains(branch) => {
                     Some(BranchPartitionEpoch::changed(recorded, count, *partitions))
                 }
@@ -65,11 +100,36 @@ impl PartitionEpochs {
                 epochs.insert(branch.clone(), decided);
             }
         }
-        Self { epochs }
+        let mut retained = BTreeMap::new();
+        for (branch, epoch) in &epochs {
+            if epoch.transition.is_none() {
+                continue;
+            }
+            let mut units = epoch.holding_units().into_iter().collect::<BTreeSet<_>>();
+            if let Some(existing) = existing {
+                for node in existing.nodes.values() {
+                    if node.keeps_state_per_key() && node.partition_branch() == Some(branch) {
+                        units.extend(
+                            node.units
+                                .keys()
+                                .copied()
+                                .filter(|unit| !epoch.partitions.schedules(*unit)),
+                        );
+                    }
+                }
+            }
+            if !units.is_empty() {
+                retained.insert(branch.clone(), units);
+            }
+        }
+        Self { epochs, retained }
     }
 
     /// The units every node `branch` branches keeps scheduled beyond its current count's units.
     pub(crate) fn holding_units(&self, branch: &BranchName) -> Vec<Unit> {
+        if let Some(units) = self.retained.get(branch) {
+            return units.iter().copied().collect();
+        }
         match self.epochs.get(branch) {
             Some(epoch) => epoch.holding_units(),
             None => Vec::new(),
@@ -99,12 +159,18 @@ impl PartitionEpochs {
 fn scheduled_branch_partitions(
     schedule: &DomainSchedule,
     branch: &BranchName,
-) -> Option<BranchPartitions> {
+) -> Option<ResolvedBranchPartitions> {
     let node = schedule
         .nodes
         .get(&NodeRef::new(ModelKind::Branch, ModelName::from(branch)))?;
     match node.config.as_ref() {
-        Model::Branch(declaration) => Some(declaration.partitions),
+        Model::Branch(declaration) => declaration.partitions.direct_layout().or_else(|| {
+            schedule
+                .partition_topology
+                .branches
+                .get(branch)
+                .map(|layout| layout.partitions())
+        }),
         _ => None,
     }
 }
@@ -121,8 +187,8 @@ mod tests {
 
     use super::*;
 
-    fn partitions(count: u16) -> BranchPartitions {
-        BranchPartitions::Direct(NonZeroU16::new(count).assured("test counts are positive"))
+    fn partitions(count: u16) -> ResolvedBranchPartitions {
+        ResolvedBranchPartitions::Direct(NonZeroU16::new(count).assured("test counts are positive"))
     }
 
     fn branch(name: &str) -> BranchName {
@@ -135,7 +201,9 @@ mod tests {
             schema: nervix_models::SchemaName::parse("tenant_key")
                 .assured("test schema names are valid"),
             ttl: "5m".to_string(),
-            partitions: partitions(count),
+            partitions: nervix_models::BranchPartitions::Direct(
+                NonZeroU16::new(count).assured("positive test count"),
+            ),
             eviction: None,
         };
         let node = ScheduledNode::new(
@@ -149,7 +217,7 @@ mod tests {
         )
     }
 
-    fn declared(name: &str, count: u16) -> BTreeMap<BranchName, BranchPartitions> {
+    fn declared(name: &str, count: u16) -> BTreeMap<BranchName, ResolvedBranchPartitions> {
         BTreeMap::from([(branch(name), partitions(count))])
     }
 
@@ -160,8 +228,13 @@ mod tests {
     #[test]
     fn a_branch_without_keyed_state_begins_its_next_epoch_settled() {
         let existing = schedule_declaring("by_tenant", 8);
-        let decided =
-            PartitionEpochs::decide(Some(&existing), &declared("by_tenant", 4), &BTreeSet::new());
+        let decided = PartitionEpochs::decide(
+            Some(&existing),
+            &declared("by_tenant", 4),
+            &PartitionTopology::default(),
+            &BTreeSet::new(),
+            &BTreeSet::new(),
+        );
         let epoch = decided
             .epochs
             .get(&branch("by_tenant"))
@@ -174,7 +247,13 @@ mod tests {
 
     #[test]
     fn a_branch_without_a_schedule_in_force_records_no_epoch() {
-        let decided = PartitionEpochs::decide(None, &declared("by_tenant", 4), &keyed());
+        let decided = PartitionEpochs::decide(
+            None,
+            &declared("by_tenant", 4),
+            &PartitionTopology::default(),
+            &BTreeSet::new(),
+            &keyed(),
+        );
         assert_eq!(decided.epochs.get(&branch("by_tenant")), None);
         assert!(decided.holding_units(&branch("by_tenant")).is_empty());
     }
@@ -182,14 +261,26 @@ mod tests {
     #[test]
     fn an_unchanged_count_keeps_the_branch_in_its_first_epoch() {
         let existing = schedule_declaring("by_tenant", 4);
-        let decided = PartitionEpochs::decide(Some(&existing), &declared("by_tenant", 4), &keyed());
+        let decided = PartitionEpochs::decide(
+            Some(&existing),
+            &declared("by_tenant", 4),
+            &PartitionTopology::default(),
+            &BTreeSet::new(),
+            &keyed(),
+        );
         assert_eq!(decided.epochs.get(&branch("by_tenant")), None);
     }
 
     #[test]
     fn a_growing_count_begins_epoch_two_without_holding_units() {
         let existing = schedule_declaring("by_tenant", 4);
-        let decided = PartitionEpochs::decide(Some(&existing), &declared("by_tenant", 8), &keyed());
+        let decided = PartitionEpochs::decide(
+            Some(&existing),
+            &declared("by_tenant", 8),
+            &PartitionTopology::default(),
+            &BTreeSet::new(),
+            &keyed(),
+        );
         let epoch = decided
             .epochs
             .get(&branch("by_tenant"))
@@ -208,7 +299,13 @@ mod tests {
     #[test]
     fn a_shrinking_count_holds_the_units_the_new_count_drops() {
         let existing = schedule_declaring("by_tenant", 8);
-        let decided = PartitionEpochs::decide(Some(&existing), &declared("by_tenant", 4), &keyed());
+        let decided = PartitionEpochs::decide(
+            Some(&existing),
+            &declared("by_tenant", 4),
+            &PartitionTopology::default(),
+            &BTreeSet::new(),
+            &keyed(),
+        );
         assert_eq!(
             decided.holding_units(&branch("by_tenant")),
             vec![
@@ -224,14 +321,26 @@ mod tests {
     fn growing_from_one_partition_holds_the_single_unit_and_shrinking_to_one_holds_every_partition()
     {
         let existing = schedule_declaring("by_tenant", 1);
-        let grown = PartitionEpochs::decide(Some(&existing), &declared("by_tenant", 3), &keyed());
+        let grown = PartitionEpochs::decide(
+            Some(&existing),
+            &declared("by_tenant", 3),
+            &PartitionTopology::default(),
+            &BTreeSet::new(),
+            &keyed(),
+        );
         assert_eq!(
             grown.holding_units(&branch("by_tenant")),
             vec![Unit::SINGLE]
         );
 
         let existing = schedule_declaring("by_tenant", 3);
-        let shrunk = PartitionEpochs::decide(Some(&existing), &declared("by_tenant", 1), &keyed());
+        let shrunk = PartitionEpochs::decide(
+            Some(&existing),
+            &declared("by_tenant", 1),
+            &PartitionTopology::default(),
+            &BTreeSet::new(),
+            &keyed(),
+        );
         assert_eq!(
             shrunk.holding_units(&branch("by_tenant")),
             vec![Unit::partition(0), Unit::partition(1), Unit::partition(2)]
@@ -249,13 +358,24 @@ mod tests {
                 transition: None,
             },
         );
-        let kept = PartitionEpochs::decide(Some(&existing), &declared("by_tenant", 8), &keyed());
+        let kept = PartitionEpochs::decide(
+            Some(&existing),
+            &declared("by_tenant", 8),
+            &PartitionTopology::default(),
+            &BTreeSet::new(),
+            &keyed(),
+        );
         assert_eq!(
             kept.epochs.get(&branch("by_tenant")),
             existing.partition_epochs.get(&branch("by_tenant"))
         );
-        let advanced =
-            PartitionEpochs::decide(Some(&existing), &declared("by_tenant", 16), &keyed());
+        let advanced = PartitionEpochs::decide(
+            Some(&existing),
+            &declared("by_tenant", 16),
+            &PartitionTopology::default(),
+            &BTreeSet::new(),
+            &keyed(),
+        );
         let epoch = advanced
             .epochs
             .get(&branch("by_tenant"))
@@ -276,7 +396,13 @@ mod tests {
             branch("by_tenant"),
             BranchPartitionEpoch::changed(None, partitions(4), partitions(8)),
         );
-        let kept = PartitionEpochs::decide(Some(&existing), &declared("by_tenant", 8), &keyed());
+        let kept = PartitionEpochs::decide(
+            Some(&existing),
+            &declared("by_tenant", 8),
+            &PartitionTopology::default(),
+            &BTreeSet::new(),
+            &keyed(),
+        );
         assert_eq!(
             kept.epochs.get(&branch("by_tenant")),
             existing.partition_epochs.get(&branch("by_tenant"))

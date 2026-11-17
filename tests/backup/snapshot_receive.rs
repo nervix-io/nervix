@@ -11,7 +11,7 @@
 
 use nervix_backup::DescribedRuntimeState;
 use nervix_interconnect::{RuntimeState, StatePlacementEnvelope};
-use nervix_models::ModelKind;
+use nervix_models::{BranchKeyFields, ModelKind};
 
 use super::*;
 
@@ -40,13 +40,10 @@ async fn restored_inferencer_replicas(world: &mut ScenarioWorld, file: String, i
                     kind: ModelKind::Inferencer,
                     identifier: descriptor.entity.clone(),
                     unit: descriptor.unit,
-                    branch_key: descriptor.branch.as_ref().map(|fields| {
-                        fields
-                            .iter()
-                            .cloned()
-                            .map(nervix_backup::StateField::into_remote)
-                            .collect()
-                    }),
+                    branch_key: descriptor
+                        .branch
+                        .clone()
+                        .map_fields(nervix_backup::StateField::into_remote),
                 },
                 descriptor.revision,
             ));
@@ -113,10 +110,10 @@ async fn snapshot_receive_admission(world: &mut ScenarioWorld, file: String, nod
                 descriptor.keys, 2,
                 "both interleaved rows survive in each branch"
             );
-            let branch = descriptor
-                .branch
-                .clone()
-                .assured("the fixture state is branched");
+            assert!(
+                descriptor.branch.is_branched(),
+                "the fixture state is branched"
+            );
             placements.push(StatePlacementEnvelope {
                 domain: descriptor.domain.clone(),
                 state: RuntimeState::Deduplicator {
@@ -125,12 +122,10 @@ async fn snapshot_receive_admission(world: &mut ScenarioWorld, file: String, nod
                 kind: ModelKind::Deduplicator,
                 identifier: descriptor.entity.clone(),
                 unit: descriptor.unit,
-                branch_key: Some(
-                    branch
-                        .into_iter()
-                        .map(nervix_backup::StateField::into_remote)
-                        .collect(),
-                ),
+                branch_key: descriptor
+                    .branch
+                    .clone()
+                    .map_fields(nervix_backup::StateField::into_remote),
             });
         }
     }
@@ -199,7 +194,7 @@ async fn inferencer_replica_checkpoints(
         kind: ModelKind::Inferencer,
         identifier: lifecycle.entity,
         unit: lifecycle.unit,
-        branch_key: None,
+        branch_key: BranchKeyFields::Unbranched,
     };
     world
         .cluster()
@@ -248,7 +243,7 @@ async fn inferencer_branch_evicted(
             })
             .flat_map(|lifecycle| &lifecycle.branches)
             .any(|branch| {
-                branch.key.as_ref().is_some_and(|key| {
+                branch.key.fields().is_some_and(|key| {
                     key.iter().any(|field| {
                         field.name == "tenant"
                             && field.value == nervix_backup::StateValue::String(tenant.clone())

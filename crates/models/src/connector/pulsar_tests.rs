@@ -138,6 +138,7 @@ fn topic_declares_message_properties_and_typed_metadata() {
         crate::IngestorMetadataField::new("producer_name", crate::IngestorMetadataType::String),
         crate::IngestorMetadataField::new("sequence_id", crate::IngestorMetadataType::I64),
         crate::IngestorMetadataField::new("redelivery_count", crate::IngestorMetadataType::I64),
+        crate::IngestorMetadataField::new("partition", crate::IngestorMetadataType::I32),
     ]);
     assert_eq!(ingest.metadata, EXPECTED);
     assert!(emit.options.is_empty());
@@ -206,8 +207,10 @@ fn only_the_types_that_read_through_one_consumer_refuse_more_instances(
     ingestor.instances =
         crate::IngestorInstances::Count(NonZeroU64::new(2).assured("two is greater than zero"));
     assert_eq!(ingestor.instances_fit_subscription(), !one_consumer);
+    // Per-partition reading opens one consumer per partition topic, so it fits every type; the
+    // registry requires an inherited branch for the types that read through one consumer.
     ingestor.instances = crate::IngestorInstances::PerPartition;
-    assert_eq!(ingestor.instances_fit_subscription(), !one_consumer);
+    assert!(ingestor.instances_fit_subscription());
 }
 
 #[test]

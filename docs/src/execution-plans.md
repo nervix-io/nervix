@@ -122,6 +122,14 @@ both use the same schedule-to-revision planning boundary.
 | Emitters | Typed emitter and optional connector client or codec, ordered source relays and predicates, construction, request, ordering and envelope expressions, flush, batching, ACK, and error policies | Resolve local mounts and schemas, bind programs, register local or remote consumers, and open the emitter |
 | Message errors | Source and optional partial-output schemas, target relay and branch, route flush contract, and ordered `SET` program | Bind once for the installed revision; execute it for failed records using their captured state |
 
+Inherited entrypoint routes carry a typed projection of the source's committed external set,
+branch layout and epoch, together with the declared immutable partition metadata field. Binding
+prepares that projection once. Record admission reads the transport coordinate and constructs its
+origin witness; it never evaluates an expression to choose the inherited partition. Per-partition
+reader assignments use the same committed inverse grouping as placement. An awaiting topology
+has no execution units, and a topology update swaps the affected entities without rebuilding the
+domain.
+
 Emitter key plans retain the admitted `STRING` or `BYTES` expression constraint and the source's
 resolved branch contract. Binding preserves the exact inferred type and branch sensitivity;
 execution encodes only a string key's UTF-8 bytes. `PARTITION FROM BRANCH` retains the source

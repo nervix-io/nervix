@@ -81,7 +81,7 @@ pub(in crate::registry) fn unplaced_schedule(models: Vec<Model>) -> ScheduledNod
                     ResolvedBranching::branched(
                         branch_name.clone(),
                         schema.clone(),
-                        nervix_models::BranchPartitions::ONE,
+                        nervix_models::ResolvedBranchPartitions::ONE,
                     )
                 }
             };
@@ -104,7 +104,13 @@ pub(in crate::registry) fn planned_entrypoints(
     let nodes = unplaced_schedule(models);
     let activation = DomainActivationPlan::from_scheduled_nodes(&domain, &nodes)
         .expect("the fixture surfaces resolve");
-    EntrypointPlans::from_scheduled_nodes(&domain, &nodes, &activation)
+    EntrypointPlans::from_scheduled_nodes(
+        &domain,
+        &nodes,
+        &activation,
+        &nervix_models::PartitionTopology::default(),
+        &std::collections::BTreeMap::new(),
+    )
 }
 
 /// A predicate whose `to_unix` call names a unit that function does not count in, which lowering
