@@ -41,6 +41,7 @@ async fn then_failed_append_setup_is_observed(
     let budget = crate::parse_duration_text(&bound).expect("a valid observation bound");
     timeout(budget, async {
         loop {
+            nervix_primitives::task::consume_budget().await;
             if observation
                 .attempts_at_start
                 .iter()
