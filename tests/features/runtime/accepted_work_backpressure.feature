@@ -261,7 +261,10 @@ Feature: Accepted work waits for internal worker room
       [{"tenant":"alpha","id":"a2","value":2},{"tenant":"beta","id":"b2","value":20},
        {"tenant":"alpha","id":"a1028","value":1028},{"tenant":"beta","id":"b1028","value":10280}]
       """
-    Then within "120s" accepted-work window rows 3 through 1028 arrive exactly once
+    # The 2,052 rows cross four stateful processors as single-row batches, with every program on
+    # the data class. Under a shard's parallel load a three-node attempt legitimately needs
+    # minutes, and the rows still arrive exactly once, so this wait is generous.
+    Then within "600s" accepted-work window rows 3 through 1028 arrive exactly once
     And the relay subscription does not receive a payload within "100ms"
     And the active session observes no server error containing "{{domain}}" within "100ms"
 
@@ -269,24 +272,42 @@ Feature: Accepted work waits for internal worker room
     Examples:
       | cluster_size | kind         | processor     |
       | 1            | deduplicator | unique_events |
+
+    # A three-node attempt does about 116 CPU-seconds of work, 5.4 cores on an idle host, so it
+    # declares the 24-slot pool's largest weight.
+    @accepted_stateful_keys @slots_6
+    Examples:
+      | cluster_size | kind         | processor     |
       | 3            | deduplicator | unique_events |
 
     @accepted_stateful_order
     Examples:
       | cluster_size | kind      | processor      |
       | 1            | reorderer | ordered_events |
+
+    @accepted_stateful_order @slots_6
+    Examples:
+      | cluster_size | kind      | processor      |
       | 3            | reorderer | ordered_events |
 
     @accepted_stateful_window
     Examples:
       | cluster_size | kind   | processor |
       | 1            | window | windows   |
+
+    @accepted_stateful_window @slots_6
+    Examples:
+      | cluster_size | kind   | processor |
       | 3            | window | windows   |
 
     @accepted_stateful_correlation
     Examples:
       | cluster_size | kind       | processor |
       | 1            | correlator | pairs     |
+
+    @accepted_stateful_correlation @slots_6
+    Examples:
+      | cluster_size | kind       | processor |
       | 3            | correlator | pairs     |
 
   @accepted_stateful_model

@@ -35,7 +35,8 @@ use crate::{
     PoolClass, RequestError, RequestSubquota, TransportError,
     observation::TransferDirection,
     request::{
-        RequestAdmission, StreamPreconditionDeadline, StreamRequestEnvelope, StreamingResponse,
+        RequestAdmission, StreamOpeningFailure, StreamPreconditionDeadline, StreamRequestEnvelope,
+        StreamingResponse,
     },
     wire,
 };
@@ -285,7 +286,17 @@ impl TransportState {
         };
         let handled = match handled {
             Ok(handled) => handled,
-            Err(error) => {
+            Err(StreamOpeningFailure::Operation { kind, report }) => {
+                super::body::send_operation_error(
+                    &mut respond,
+                    kind,
+                    &format!("{report:#}"),
+                    self.options.progress_timeout,
+                )
+                .await?;
+                return Ok(());
+            }
+            Err(StreamOpeningFailure::Request(error)) => {
                 send_static_error(
                     &mut respond,
                     error.status(),

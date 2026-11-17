@@ -266,6 +266,7 @@ def options(arguments: list[str]) -> argparse.Namespace:
     parser.add_argument("--sensors", type=int, default=3)
     parser.add_argument("--burst", type=int, default=1)
     parser.add_argument("--invalid-every", type=int, default=0)
+    parser.add_argument("--invalid-from-generation", type=int, default=1)
     parser.add_argument("--consumers", type=int, default=1)
     parser.add_argument("--consumer-delay", type=duration_argument, default=0)
     parser.add_argument("--consumer-leave-after", type=int)
@@ -279,7 +280,8 @@ def options(arguments: list[str]) -> argparse.Namespace:
     parser.add_argument("--follow-generations", action="store_true")
     parser.add_argument("--deadline", type=duration_argument, default=600_000_000_000)
     settings = parser.parse_args(arguments)
-    for option in ("sensors", "burst", "consumers", "credit_batches", "credit_bytes"):
+    for option in ("sensors", "burst", "consumers", "credit_batches", "credit_bytes",
+                   "invalid_from_generation"):
         if getattr(settings, option) < 1:
             raise ConfigurationError(f"--{option.replace('_', '-')} must be at least one")
     for option in ("ticks", "invalid_every"):
@@ -498,7 +500,7 @@ class EffectStore:
             self.condition.notify_all()
             return True
 
-    def pending_notices(self, reading_ids: list[str]) -> list[str]:
+    def pending_effects(self, reading_ids: list[str]) -> list[str]:
         """Completed readings without an observed effect still await their rejection notice.
 
         A normal reading effect precedes its acknowledgement; an error route acknowledges the
@@ -508,27 +510,25 @@ class EffectStore:
             return [reading_id for reading_id in reading_ids
                     if reading_id not in self.readings and reading_id not in self.rejections]
 
-    def await_rejections(self, reading_ids: list[str], until: float,
-                         stopping: Callable[[], bool]) -> None:
-        """Waits until the store holds the rejection notice of every reading in `reading_ids`, or
-        `until` passes or `stopping` reports an application failure. A notice still missing then
-        reaches a later run."""
+    def await_effects(self, reading_ids: list[str], until: float,
+                      stopping: Callable[[], bool]) -> int:
+        """Waits for either effect of every completed reading and returns the count still missing
+        when the deadline passes or the application fails."""
         reported = False
         with self.condition:
             while True:
-                if stopping():
-                    return
                 outstanding = sum(1 for reading_id in reading_ids
-                                  if reading_id not in self.rejections)
-                if outstanding == 0:
-                    return
+                                  if reading_id not in self.readings
+                                  and reading_id not in self.rejections)
+                if outstanding == 0 or stopping():
+                    return outstanding
                 if not reported:
-                    line(f"WAITING notices outstanding={outstanding}")
+                    line(f"WAITING effects outstanding={outstanding}")
                     reported = True
                 remaining = until - time.monotonic()
                 if remaining <= 0:
-                    line(f"NOTICES missing={outstanding}")
-                    return
+                    line(f"EFFECTS missing={outstanding}")
+                    return outstanding
                 self.condition.wait(min(remaining, 0.2))
 
 
@@ -1089,9 +1089,9 @@ class Run:
         self.refused: ConfigurationError | None = None
         self.ledger: Ledger | None = None
         self.effects: EffectStore | None = None
-        # Completed readings still absent from the effect store. An error route acknowledges
-        # publication before its notice is delivered, including when a center expires in transit.
-        self.awaited_notices: list[str] = []
+        # Error routes acknowledge publication before their emitter delivers the notice. Await
+        # every completed reading's actual effect, including an unexpected window rejection.
+        self.awaited_effects: list[str] = []
 
     # The generation the consumers follow.
 
@@ -1329,7 +1329,7 @@ class Run:
              planned: int) -> list[Reading]:
         every = self.settings.invalid_every
         stale = None
-        if every and planned % every == 0:
+        if generation >= self.settings.invalid_from_generation and every and planned % every == 0:
             stale = window.earliest - window.skew - 1
         readings = []
         for sensor in range(self.settings.sensors):
@@ -1437,9 +1437,9 @@ class Run:
             self.credit.notify_all()
         if kind == "completed":
             assert self.effects is not None
-            pending = self.effects.pending_notices(reading_ids)
+            pending = self.effects.pending_effects(reading_ids)
             with self.credit:
-                self.awaited_notices.extend(pending)
+                self.awaited_effects.extend(pending)
         assert self.ledger is not None
         try:
             self.ledger.outcome(reading_ids, kind, cause)
@@ -1544,9 +1544,8 @@ class Run:
                  f"occurred_at={rfc3339(reading.occurred_at)}")
         return admissible
 
-    def settle_outcomes(self) -> int:
-        """Waits for every outcome still outstanding, and then for the rejection notices of the
-        completed batches, up to the deadline. Returns how many outcomes never came."""
+    def settle_outcomes(self) -> tuple[int, int]:
+        """Waits for outstanding outcomes and completed readings' effects under one deadline."""
         until = time.monotonic() + self.settings.deadline / 1e9
         missing = 0
         for thread in self.outcomes:
@@ -1558,12 +1557,13 @@ class Run:
                     break
                 thread.join(min(remaining, OPEN_RETRY_DELAY))
         with self.credit:
-            awaited = list(self.awaited_notices)
-            self.awaited_notices.clear()
+            awaited = self.awaited_effects
+            self.awaited_effects = []
         assert self.effects is not None
-        self.effects.await_rejections(awaited, until, lambda: self.refused is not None)
+        missing_effects = self.effects.await_effects(awaited, until,
+                                                   lambda: self.refused is not None)
         self.check_refusal()
-        return missing
+        return missing, missing_effects
 
     def inspect(self) -> None:
         """Inspects the ingestor and the output emitter on the session at an interval."""
@@ -1649,7 +1649,7 @@ class Run:
             self.replay(unresolved, grid)
             self.simulate(grid)
         self.check_refusal()
-        missing = self.settle_outcomes()
+        missing, missing_effects = self.settle_outcomes()
         self.close_producer()
         self.stopped.set()
         for consumer_loop in self.consumer_loops:
@@ -1671,6 +1671,10 @@ class Run:
             return 2
         if missing:
             error_line(f"{missing} submissions still had no outcome "
+                       f"{duration_text(self.settings.deadline)} after the run stopped submitting")
+            return 1
+        if missing_effects:
+            error_line(f"{missing_effects} completed readings still had no effect "
                        f"{duration_text(self.settings.deadline)} after the run stopped submitting")
             return 1
         return 0 if self.counters.all_completed() else 3

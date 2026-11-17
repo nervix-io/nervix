@@ -135,8 +135,7 @@ Feature: Paced simulation drivers
       """
       START AT NOW TIME RATE 1.0;
       """
-    # NOW admits delayed sends while the producer and consumer bindings still fence their generation.
-    And the <driver> paced simulation driver runs through node "node-1" with arguments "--ticks 300 --sensors 2 --follow-generations --timestamps now"
+    And the <driver> paced simulation driver runs through node "node-1" with arguments "--ticks 300 --sensors 2 --follow-generations --invalid-every 3 --invalid-from-generation 2"
     Then within "60s" the paced simulation driver prints a line starting with "OUTCOME tick="
     When these Plexus commands are executed on the leader node
       """
@@ -150,10 +149,11 @@ Feature: Paced simulation drivers
     Then within "60s" the paced simulation driver prints a line starting with "REOPENED generation=2"
     And within "180s" the paced simulation driver finishes with the status its outcomes imply
     And the paced simulation driver reports
-      | generations       | 2 |
-      | duplicates        | 0 |
-      | rejection_notices | 0 |
+      | generations       | 2    |
+      | duplicates        | 0    |
+      | rejection_notices | >= 1 |
     And every completed paced simulation reading has exactly one effect from its own generation
+    And the paced simulation records readings and window rejections in generation 2
     And the paced simulation ledger submits no reading of generation 1 after generation 2 begins
 
     Examples:

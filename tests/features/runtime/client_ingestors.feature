@@ -468,6 +468,7 @@ Feature: Client ingestors
     And producer "orders" submits batch "b1" with rows
       | region | order_id | amount | card   |
       | eu     | o-1      | 1      | 4111-1 |
+    # Establish the first two admissions before the third task waits for credit.
     Then producer "orders" holds batches "b1"
     When producer "orders" submits batch "b2" with rows
       | region | order_id | amount | card   |

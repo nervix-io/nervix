@@ -35,8 +35,8 @@ use std::time::Duration;
 use error_stack::{Report, ResultExt as _};
 use futures_util::stream;
 use nervix_interconnect::{
-    InterconnectStreamRequest as _, RemoteOperationFailure, RemoteOperationSubject, RequestError,
-    StreamHandlerError, StreamingResponse,
+    InterconnectStreamRequest as _, RemoteOperationFailure, RemoteOperationFailureKind,
+    RemoteOperationSubject, RequestError, StreamHandlerError, StreamingResponse,
 };
 use nervix_models::ClusterNodeName;
 use nervix_primitives::time::{Instant, timeout_at};
@@ -133,6 +133,34 @@ pub(in crate::runtime) enum MaterializedSnapshotExchangeError {
 }
 
 impl MaterializedSnapshotExchangeError {
+    fn from_stream_opening(
+        error: Report<RequestError>,
+        target: &ClusterNodeName,
+        placement: &RuntimeStatePlacement,
+    ) -> Report<Self> {
+        let subject = RemoteOperationSubject::state(&placement.to_remote());
+        let failure = match error.downcast_ref::<RemoteOperationFailureKind>() {
+            Some(RemoteOperationFailureKind::Rejected) => RemoteOperationFailure::rejected(subject),
+            Some(RemoteOperationFailureKind::Unavailable) => {
+                RemoteOperationFailure::unavailable(subject)
+            }
+            Some(RemoteOperationFailureKind::NotReady) => {
+                RemoteOperationFailure::not_ready(subject)
+            }
+            Some(RemoteOperationFailureKind::Failed) | None => {
+                return error.change_context(Self::OpenTransfer {
+                    target: target.clone(),
+                    placement: placement.clone(),
+                });
+            }
+        };
+        error.change_context(Self::RemoteFailure {
+            target: target.clone(),
+            placement: placement.clone(),
+            failure,
+        })
+    }
+
     fn opening_timeout(
         target: &ClusterNodeName,
         placement: &RuntimeStatePlacement,
@@ -230,11 +258,16 @@ impl Runtime {
             None => None,
         };
         let Some(state) = state else {
-            return Err(Report::new(StreamHandlerError::new(format!(
-                "this node is not currently assigned materialized state for {} '{}'",
-                placement.kind.as_str(),
-                placement.identifier.as_str()
-            ))));
+            let subject = RemoteOperationSubject::state(&placement.to_remote());
+            return Err(
+                Report::new(RemoteOperationFailure::unavailable(subject)).change_context(
+                    StreamHandlerError::new(format!(
+                        "this node is not currently assigned materialized state for {} '{}'",
+                        placement.kind.as_str(),
+                        placement.identifier.as_str()
+                    )),
+                ),
+            );
         };
         let Some(sealed) = state.sealed_at(request.revision) else {
             return Err(Report::new(StreamHandlerError::PreconditionChanged));
@@ -382,11 +415,10 @@ impl Runtime {
             Ok(body) => (envelope, body),
             Err(error) => {
                 let Some(deadline) = error.current_context().stream_precondition_deadline() else {
-                    return Err(error.change_context(
-                        MaterializedSnapshotExchangeError::OpenTransfer {
-                            target: target_node_id.clone(),
-                            placement: placement.clone(),
-                        },
+                    return Err(MaterializedSnapshotExchangeError::from_stream_opening(
+                        error,
+                        target_node_id,
+                        placement,
                     ));
                 };
                 let timeout = dispatcher
@@ -399,6 +431,7 @@ impl Runtime {
                 let retry = timeout_at(
                     deadline,
                     Box::pin(async {
+                        let mut refused_revision = envelope.revision;
                         loop {
                             nervix_primitives::task::consume_budget().await;
                             if Instant::now() >= deadline {
@@ -423,6 +456,20 @@ impl Runtime {
                                     },
                                 ));
                             };
+                            if envelope.revision == refused_revision {
+                                // The producer has not published a replacement for the refused
+                                // generation. Preserve the materialized dependency's WAIT/SKIP
+                                // policy instead of turning temporary absence into a record error.
+                                return Err(Report::new(
+                                    MaterializedSnapshotExchangeError::RemoteFailure {
+                                        target: target_node_id.clone(),
+                                        placement: placement.clone(),
+                                        failure: RemoteOperationFailure::not_ready(
+                                            RemoteOperationSubject::state(&placement.to_remote()),
+                                        ),
+                                    },
+                                ));
+                            }
                             match dispatcher
                                 .request_stream(
                                     target_node_id,
@@ -438,14 +485,18 @@ impl Runtime {
                                     if error
                                         .current_context()
                                         .stream_precondition_deadline()
-                                        .is_some() => {}
+                                        .is_some() =>
+                                {
+                                    refused_revision = envelope.revision;
+                                }
                                 Err(error) => {
-                                    return Err(error.change_context(
-                                        MaterializedSnapshotExchangeError::OpenTransfer {
-                                            target: target_node_id.clone(),
-                                            placement: placement.clone(),
-                                        },
-                                    ));
+                                    return Err(
+                                        MaterializedSnapshotExchangeError::from_stream_opening(
+                                            error,
+                                            target_node_id,
+                                            placement,
+                                        ),
+                                    );
                                 }
                             }
                         }

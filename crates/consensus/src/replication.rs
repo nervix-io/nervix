@@ -195,9 +195,8 @@ where
         let Some(first) = input.next().await else {
             return Ok(Box::pin(futures_util::stream::empty()));
         };
-        // Initial management probes also attempt setup, after the caller's retry gate.
         self.append_stream_open_recorder
-            .record_append_stream_attempt(&self.target);
+            .record_replication_attempt(&self.target);
         if !first.entries.is_empty() {
             return self.open_replication_data(first, input, None).await;
         }
@@ -238,6 +237,8 @@ where
     {
         self.connectivity.check().map_err(unreachable_err)?;
         let setup = async {
+            self.append_stream_open_recorder
+                .record_append_stream_attempt(&self.target);
             if let Some(previous) = &first.prev_log_id
                 && Some(previous) != confirmed_prefix.as_ref()
             {

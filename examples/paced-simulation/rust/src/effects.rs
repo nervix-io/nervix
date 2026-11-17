@@ -83,7 +83,7 @@ pub(crate) struct EffectStore {
     file: File,
     readings: HashSet<String>,
     rejections: HashSet<String>,
-    /// How many rejection notices the store holds, for a run that waits for some.
+    /// The number of rejection notices recorded, for a run draining completed readings.
     notices: watch::Sender<usize>,
 }
 
@@ -138,14 +138,14 @@ impl EffectStore {
         self.notices.subscribe()
     }
 
-    /// Whether the store holds the rejection notice of `reading_id`.
-    pub(crate) fn has_rejection(&self, reading_id: &str) -> bool {
-        self.rejections.contains(reading_id)
+    /// Whether either effect of `reading_id` has been recorded.
+    pub(crate) fn has_effect(&self, reading_id: &str) -> bool {
+        self.readings.contains(reading_id) || self.rejections.contains(reading_id)
     }
 
     /// Completed readings without an observed effect still await their rejection notice.
     /// A reading effect precedes its ACK; an error route ACKs publication before delivery.
-    pub(crate) fn pending_notices(&self, reading_ids: &[String]) -> Vec<String> {
+    pub(crate) fn pending_effects(&self, reading_ids: &[String]) -> Vec<String> {
         reading_ids
             .iter()
             .filter(|reading_id| {
@@ -296,7 +296,7 @@ mod tests {
     }
 
     #[nervix_primitives::test]
-    async fn completed_readings_retain_only_notices_not_observed_in_the_store() {
+    async fn completed_readings_retain_only_effects_not_observed_in_the_store() {
         let directory = tempfile::tempdir().assured("a test can create a directory");
         let path = directory.path().join("effects.jsonl");
         let mut store = EffectStore::open(&path).await.assured("the store opens");
@@ -317,10 +317,38 @@ mod tests {
             .await
             .assured("the rejection is recorded");
         let readings = ["late", "applied", "noticed"].map(str::to_string);
-        assert_eq!(store.pending_notices(&readings), ["late"]);
+        assert_eq!(store.pending_effects(&readings), ["late"]);
         drop(store);
         let reopened = EffectStore::open(&path).await.assured("the store reopens");
-        assert_eq!(reopened.pending_notices(&readings), ["late"]);
+        assert_eq!(reopened.pending_effects(&readings), ["late"]);
+    }
+
+    #[nervix_primitives::test]
+    async fn completed_readings_can_be_found_in_either_effect_set() {
+        let directory = tempfile::tempdir().assured("a test can create a directory");
+        let mut store = EffectStore::open(&directory.path().join("effects.jsonl"))
+            .await
+            .assured("the store opens");
+        let notices = store.notices();
+        store
+            .reading(&observed("g1-t4-s0-0"), 1)
+            .await
+            .assured("the store appends");
+        assert!(store.has_effect("g1-t4-s0-0"));
+        let notice = RejectionNotice {
+            reading_id: "g1-t5-s0-0".to_string(),
+            occurred_at: Timestamp::from_unix_nanos(400),
+            error_code: "window".to_string(),
+            error_message: "outside".to_string(),
+        };
+        store
+            .rejection(&notice, 1)
+            .await
+            .assured("the store appends");
+        assert!(store.has_effect("g1-t5-s0-0"));
+        assert!(!store.has_effect("g1-t6-s0-0"));
+        assert!(notices.has_changed().assured("the store keeps its sender"));
+        assert_eq!(*notices.borrow(), 1);
     }
 
     #[nervix_primitives::test]

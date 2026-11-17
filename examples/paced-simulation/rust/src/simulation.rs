@@ -122,6 +122,14 @@ enum RunError {
         outstanding: u64,
         deadline: Duration,
     },
+    #[error(
+        "{outstanding} completed readings still had no effect {} after the run stopped submitting",
+        clock::duration_text(*.deadline)
+    )]
+    EffectDeadline {
+        outstanding: u64,
+        deadline: Duration,
+    },
 }
 
 impl RunError {
@@ -133,9 +141,11 @@ impl RunError {
             | Self::Clock
             | Self::Consumer
             | Self::Producer => Finish::Configuration,
-            Self::Ledger | Self::Effects | Self::Batch { .. } | Self::Deadline { .. } => {
-                Finish::Failed
-            }
+            Self::Ledger
+            | Self::Effects
+            | Self::Batch { .. }
+            | Self::Deadline { .. }
+            | Self::EffectDeadline { .. } => Finish::Failed,
         }
     }
 }
@@ -420,6 +430,12 @@ struct Submission {
     id: SubmissionId,
 }
 
+/// The terminal observations a run still lacks after its final drain.
+struct Settlement {
+    outcomes: u64,
+    effects: u64,
+}
+
 /// The planner: it steps through the tick centers of the generation it runs in and submits each
 /// tick's readings.
 struct Planner {
@@ -435,9 +451,9 @@ struct Planner {
     /// The generation the consumers follow.
     generations: watch::Sender<u64>,
     outcomes: Vec<JoinHandle<()>>,
-    /// Completed readings still absent from the effect store. An error route acknowledges
-    /// publication before delivery, including when a center expires in transit.
-    awaited_notices: Arc<SyncMutex<Vec<String>>>,
+    /// Every completed reading needs either effect before consumers stop. An error route
+    /// acknowledges publication before the rejection emitter delivers its notice.
+    awaited_effects: Arc<SyncMutex<Vec<String>>>,
     effects: Arc<Mutex<EffectStore>>,
     /// Ends the planning, when the application is interrupted or a consumer could not open.
     planning: CancellationToken,
@@ -589,10 +605,11 @@ impl Planner {
         window: &DomainAdmissionWindow,
         planned: u64,
     ) -> Vec<Reading> {
-        let invalid = match self.settings.invalid_every {
-            Some(every) => planned.is_multiple_of(every.get()),
-            None => false,
-        };
+        let invalid = self.generation >= self.settings.invalid_from_generation.get()
+            && match self.settings.invalid_every {
+                Some(every) => planned.is_multiple_of(every.get()),
+                None => false,
+            };
         let before_window = if invalid {
             before_the_window(window)
         } else {
@@ -780,7 +797,7 @@ impl Planner {
                 ledger: self.ledger.clone(),
                 counters: self.counters.clone(),
                 credit: self.credit.clone(),
-                awaited_notices: self.awaited_notices.clone(),
+                awaited_effects: self.awaited_effects.clone(),
                 effects: self.effects.clone(),
             },
         ));
@@ -954,9 +971,9 @@ impl Planner {
         admissible
     }
 
-    /// Waits for every outcome still outstanding, and then for the rejection notices of the
-    /// completed batches, up to `deadline`. Returns how many outcomes never came.
-    async fn settle(&mut self, deadline: Duration) -> u64 {
+    /// Waits for outstanding outcomes and either effect of every completed reading, sharing
+    /// one deadline between both waits. Returns the observations that never came.
+    async fn settle(&mut self, deadline: Duration) -> Settlement {
         let until = Instant::now() + deadline;
         let mut missing: u64 = 0;
         for task in std::mem::take(&mut self.outcomes) {
@@ -970,14 +987,19 @@ impl Planner {
                     .assured("a run submits far fewer than 2^64 batches");
             }
         }
-        let awaited = std::mem::take(&mut *self.awaited_notices.lock());
-        self.await_notices(awaited, until).await;
-        missing
+        let awaited = std::mem::take(&mut *self.awaited_effects.lock());
+        let effects = self.await_effects(awaited, until).await;
+        Settlement {
+            outcomes: missing,
+            effects,
+        }
     }
 
-    /// Keeps the consumers running until the effect store holds the rejection notice of every
-    /// reading in `awaited`, or `until` passes. A notice still missing then reaches a later run.
-    async fn await_notices(&self, awaited: Vec<String>, until: Instant) {
+    /// Keeps consumers running until the store holds either effect of every reading in
+    /// `awaited`, or the shared deadline passes. Returns how many effects are still missing.
+    async fn await_effects(&self, awaited: Vec<String>, until: Instant) -> u64 {
+        // Normal effects precede their output ACK and therefore the completed outcome.
+        // Rejection publication can complete before the rejection emitter delivers its notice.
         let mut notices = self.effects.lock().await.notices();
         let mut reported = false;
         loop {
@@ -987,7 +1009,7 @@ impl Planner {
             {
                 let store = self.effects.lock().await;
                 for reading_id in &awaited {
-                    if !store.has_rejection(reading_id) {
+                    if !store.has_effect(reading_id) {
                         outstanding = outstanding
                             .checked_add(1)
                             .assured("a run stamps far fewer than 2^64 readings");
@@ -995,16 +1017,16 @@ impl Planner {
                 }
             }
             if outstanding == 0 {
-                return;
+                return 0;
             }
             if !reported {
-                report::line(format!("WAITING notices outstanding={outstanding}"));
+                report::line(format!("WAITING effects outstanding={outstanding}"));
                 reported = true;
             }
             let changed = nervix_primitives::time::timeout_at(until, notices.changed()).await;
             if !matches!(changed, Ok(Ok(()))) {
-                report::line(format!("NOTICES missing={outstanding}"));
-                return;
+                report::line(format!("EFFECTS missing={outstanding}"));
+                return outstanding;
             }
         }
     }
@@ -1026,7 +1048,7 @@ struct Awaiting {
     ledger: Arc<Ledger>,
     counters: Arc<Counters>,
     credit: Arc<Credit>,
-    awaited_notices: Arc<SyncMutex<Vec<String>>>,
+    awaited_effects: Arc<SyncMutex<Vec<String>>>,
     effects: Arc<Mutex<EffectStore>>,
 }
 
@@ -1046,8 +1068,8 @@ async fn await_outcome(submission: Submission, awaiting: Awaiting) {
     awaiting.credit.release(bytes);
     let (kind, cause) = outcome_of(&outcome);
     if kind == OutcomeKind::Completed {
-        let pending = awaiting.effects.lock().await.pending_notices(&reading_ids);
-        awaiting.awaited_notices.lock().extend(pending);
+        let pending = awaiting.effects.lock().await.pending_effects(&reading_ids);
+        awaiting.awaited_effects.lock().extend(pending);
     }
     let count = u64::try_from(reading_ids.len()).assured("a batch's row count fits u64");
     if let Err(error) = awaiting.ledger.outcome(reading_ids, kind, cause).await {
@@ -1368,7 +1390,7 @@ async fn simulate(settings: Settings) -> Result<Finish, Report<RunError>> {
         grid: TickGrid::of(generation, &paced),
         generations,
         outcomes: Vec::new(),
-        awaited_notices: Arc::new(SyncMutex::new(Vec::new())),
+        awaited_effects: Arc::new(SyncMutex::new(Vec::new())),
         effects: shared.effects.clone(),
         planning,
     };
@@ -1440,9 +1462,15 @@ async fn simulate(settings: Settings) -> Result<Finish, Report<RunError>> {
     if let Some(error) = refusal {
         return Err(error.change_context(RunError::Consumer));
     }
-    if missing > 0 {
+    if missing.outcomes > 0 {
         return Err(Report::new(RunError::Deadline {
-            outstanding: missing,
+            outstanding: missing.outcomes,
+            deadline: planner.settings.deadline,
+        }));
+    }
+    if missing.effects > 0 {
+        return Err(Report::new(RunError::EffectDeadline {
+            outstanding: missing.effects,
             deadline: planner.settings.deadline,
         }));
     }

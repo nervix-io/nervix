@@ -3,6 +3,8 @@
 
 # shellcheck source=instance-owners.sh
 source "${script_dir}/instance-owners.sh"
+# shellcheck source=connector-metrics.sh
+source "${script_dir}/connector-metrics.sh"
 # shellcheck source=outward-tls.sh
 source "${script_dir}/outward-tls.sh"
 
@@ -175,11 +177,17 @@ run_crash() {
         -f "${fixture_generator}" >"${artifact_dir}/fixtures/input.ndjson"
     [[ "$(wc -l <"${artifact_dir}/fixtures/input.ndjson")" -eq "${record_count}" ]] \
         || crash_fail controller 'crash fixture generation was incomplete'
+    if [[ "${connector_metrics}" == true ]]; then
+        connector_metric_initial "${crash_dir}" || return 1
+    fi
     compose up --detach --no-deps load observer
     wait_for 'independent load, observer and broker' 30 check_support_containers
     wait_for 'source traffic started' 30 topic_progressed chaos_input 0
     wait_for 'emitter traffic started' 60 topic_progressed chaos_output 0
     wait_for 'initial cross-node traffic metrics' 60 initial_remote_path_ready
+    if [[ "${connector_metrics}" == true ]]; then
+        connector_metric_prefix_settled "${crash_dir}" || return 1
+    fi
     local host
     for host in "${node_hosts[@]}"; do
         cp "${artifact_dir}/public/metrics-${host}.txt" \
@@ -197,6 +205,10 @@ run_crash() {
         observe_crash_target "${crash_dir}/before"
     local selected_node="${target_node}"
     local selected_host="${target_host}"
+    if [[ "${connector_metrics}" == true && "${selected_node}" != "${connector_metrics_initial_node}" ]]; then
+        crash_fail observation 'the connector owner changed before its observed fault'
+        return 1
+    fi
     cli_host="${node_hosts[0]}"
     control_attempt chaos_canary_before "${cli_host}" "${crash_dir}"
     [[ "$(jq -r '.outcome' "${crash_dir}/control-chaos_canary_before.json")" == acknowledged ]] \
@@ -331,9 +343,15 @@ run_crash() {
         output_after_placement="$(topic_end_offset chaos_output)"
         [[ "${output_after_placement}" =~ ^[0-9]+$ ]] \
             || crash_fail product 'emitter offset unavailable during owner recovery'
+        if [[ "${connector_metrics}" == true ]]; then
+            connector_metric_replacement "${crash_dir}" || return 1
+        fi
         wait_for 'emitter traffic resumed during outage' 60 \
             topic_progressed chaos_output "${output_after_placement}"
         delivery_resume_ms="$(( $(epoch_ms) - kill_requested_ms ))"
+        if [[ "${connector_metrics}" == true ]]; then
+            connector_metric_replacement_progress "${crash_dir}" || return 1
+        fi
     fi
     if outward_tls_qualified; then
         outward_tls_finish_commit "${crash_dir}" "${container_id}" "${kill_requested_ms}"
@@ -380,6 +398,9 @@ run_crash() {
     local settled_ms="$(( $(epoch_ms) - start_requested_ms ))"
     check_support_containers
     check_other_nodes ""
+    if [[ "${connector_metrics}" == true ]]; then
+        connector_metric_restart_input || return 1
+    fi
     wait_for 'output progressed after restart' 90 \
         topic_progressed chaos_output "${output_while_stopped}"
     if [[ "${node_count}" == 1 ]]; then
