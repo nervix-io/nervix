@@ -643,10 +643,10 @@ mod tests {
                     cluster_nodes: &nodes,
                     replica_count: 0,
                     existing: None,
-                    #[cfg(feature = "testing")]
-                    scheduler_mode: SchedulerMode::Sticky,
                     capabilities: &capabilities,
                 },
+                #[cfg(feature = "testing")]
+                SchedulerMode::Sticky,
                 &topology,
                 None,
             )
@@ -694,10 +694,10 @@ mod tests {
                     cluster_nodes: &nodes,
                     replica_count: 0,
                     existing: Some(&schedule),
-                    #[cfg(feature = "testing")]
-                    scheduler_mode: SchedulerMode::Sticky,
                     capabilities: &capabilities,
                 },
+                #[cfg(feature = "testing")]
+                SchedulerMode::Sticky,
                 &grown,
                 None,
             )

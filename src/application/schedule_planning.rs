@@ -196,10 +196,10 @@ impl DomainSchedulePlanningSnapshot {
                         cluster_nodes: &self.cluster_nodes,
                         replica_count: self.replica_count,
                         existing: current,
-                        #[cfg(feature = "testing")]
-                        scheduler_mode: self.mode.scheduler_mode(),
                         capabilities: &self.capabilities,
                     },
+                    #[cfg(feature = "testing")]
+                    self.mode.scheduler_mode(),
                     topology,
                     restored,
                 )?;

@@ -60,8 +60,6 @@ pub(crate) struct DomainSchedulingInputs<'a> {
     pub cluster_nodes: &'a [ClusterNodeName],
     pub replica_count: usize,
     pub existing: Option<&'a DomainSchedule>,
-    #[cfg(feature = "testing")]
-    pub scheduler_mode: SchedulerMode,
     pub capabilities: &'a BTreeMap<ClusterNodeName, NodeCapabilities>,
 }
 
@@ -624,10 +622,10 @@ impl ActiveGraph {
                 cluster_nodes,
                 replica_count,
                 existing,
-                #[cfg(feature = "testing")]
-                scheduler_mode,
                 capabilities,
             },
+            #[cfg(feature = "testing")]
+            scheduler_mode,
             topology,
             None,
         )
@@ -637,6 +635,7 @@ impl ActiveGraph {
     pub(crate) fn schedule_for_domain_with_topology(
         &self,
         inputs: DomainSchedulingInputs<'_>,
+        #[cfg(feature = "testing")] scheduler_mode: SchedulerMode,
         topology: &PartitionTopology,
         restored: Option<&nervix_models::PartitionTopologySnapshot>,
     ) -> Result<DomainSchedule, Report<RegistryError>> {
@@ -671,12 +670,20 @@ impl ActiveGraph {
                 &graph.branches_with_keyed_state(),
             ),
         };
-        Ok(graph.schedule_resolved_for_domain(inputs, topology, epochs, restored.is_some()))
+        Ok(graph.schedule_resolved_for_domain(
+            inputs,
+            #[cfg(feature = "testing")]
+            scheduler_mode,
+            topology,
+            epochs,
+            restored.is_some(),
+        ))
     }
 
     fn schedule_resolved_for_domain(
         &self,
         inputs: DomainSchedulingInputs<'_>,
+        #[cfg(feature = "testing")] scheduler_mode: SchedulerMode,
         topology: &PartitionTopology,
         epochs: PartitionEpochs,
         restored: bool,
@@ -686,8 +693,6 @@ impl ActiveGraph {
             cluster_nodes,
             replica_count,
             existing,
-            #[cfg(feature = "testing")]
-            scheduler_mode,
             capabilities,
         } = inputs;
         let cluster_nodes = SortedSet::from_unsorted(
