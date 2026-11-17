@@ -33,6 +33,7 @@ futures-util = { workspace = true }
 imbl = { workspace = true }
 indexmap = { workspace = true }
 meticulous = { workspace = true }
+nervix-bounded-write = { workspace = true }
 nervix-crypto = { workspace = true }
 nervix-execution = { workspace = true }
 nervix-interconnect = { workspace = true }

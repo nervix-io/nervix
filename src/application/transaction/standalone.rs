@@ -613,8 +613,11 @@ impl SessionServiceImpl {
                 )))
             }
             Err(error) => {
-                if let ConsensusError::Conflict(ConsensusConflict::RestoreInstallation { .. }) =
-                    error.current_context()
+                // Neither gate lets the pause resume; the command keeps its paused-domain refusal.
+                if let ConsensusError::Conflict(
+                    ConsensusConflict::RestoreInstallation { .. }
+                    | ConsensusConflict::LicensingStop { .. },
+                ) = error.current_context()
                 {
                     return Ok(StandalonePauseRecovery::RetainRefusal);
                 }

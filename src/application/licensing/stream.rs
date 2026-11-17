@@ -19,6 +19,7 @@ use nervix_primitives::{
     time::{sleep, timeout},
 };
 use thiserror::Error;
+use uuid::Uuid;
 
 use super::{
     client::{LicensingClient, LicensingRequestError},
@@ -58,7 +59,7 @@ impl StreamTasks {
         &mut self,
         service: &SessionServiceImpl,
         leading: bool,
-        hints: &watch::Sender<()>,
+        hints: &watch::Sender<Option<Uuid>>,
     ) {
         let desired = if leading {
             let state = service
@@ -73,7 +74,7 @@ impl StreamTasks {
                         activation_id: activation.binding.activation_id,
                         key_generation: state.identity.key_generation,
                     }),
-                    LicensingMode::Free => None,
+                    LicensingMode::Free { .. } | LicensingMode::Released(_) => None,
                 },
                 None => None,
             }
@@ -118,7 +119,7 @@ impl Drop for Connected {
 }
 
 /// This task is aborted and joined before another tenure/activation starts its stream.
-pub(super) async fn run(service: SessionServiceImpl, hints: watch::Sender<()>) {
+pub(super) async fn run(service: SessionServiceImpl, hints: watch::Sender<Option<Uuid>>) {
     let mut cursor = NotificationCursor::default();
     let mut backoff = service.cluster_parameters().licensing_request_timeout();
     loop {
@@ -142,7 +143,7 @@ pub(super) async fn run(service: SessionServiceImpl, hints: watch::Sender<()>) {
 
 async fn connect(
     service: &SessionServiceImpl,
-    hints: &watch::Sender<()>,
+    hints: &watch::Sender<Option<Uuid>>,
     cursor: &mut NotificationCursor,
     backoff: &mut Duration,
 ) -> error_stack::Result<(), StreamError> {
@@ -155,6 +156,10 @@ async fn connect(
     else {
         return Err(Report::new(StreamError::Ended));
     };
+    let LicensingMode::Activated(activation) = &initialized.record.mode else {
+        return Err(Report::new(StreamError::Ended));
+    };
+    let activation_id = activation.binding.activation_id;
     let client = LicensingClient::new(service)
         .await
         .change_context(StreamError::Read)?;
@@ -251,7 +256,7 @@ async fn connect(
             return Err(Report::new(StreamError::Ended));
         };
         if cursor.observe(&hint, &revisions) {
-            hints.send_replace(());
+            hints.send_replace(Some(activation_id));
         }
     }
     Err(Report::new(StreamError::Ended))

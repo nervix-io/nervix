@@ -259,6 +259,14 @@ pub enum CommandExecutionEffect {
         source: String,
         statement: Box<Statement>,
     },
+    RotateLicenseClusterKey {
+        identity: Box<crate::ClusterIdentity>,
+        outcome: Option<LicensingCommandOutcome>,
+    },
+    ReleaseLicense {
+        binding: Box<crate::ActivationBinding>,
+        outcome: Option<LicensingCommandOutcome>,
+    },
     ActivateLicense {
         binding: Box<crate::ActivationBinding>,
         decision: Box<crate::ReceivedLicenseDecision>,
@@ -274,6 +282,97 @@ pub enum CommandExecutionEffect {
     },
     /// A restore, with the steps it has applied so far.
     Restore(Box<RestoreExecution>),
+}
+
+/// A licensing effect records its result atomically with the state change, before response storage.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    Archive,
+    RkyvSerialize,
+    RkyvDeserialize,
+)]
+pub enum LicensingCommandOutcome {
+    Applied,
+    Refused {
+        code: nervix_licensing_vocabulary::ProblemCode,
+    },
+}
+
+impl crate::StateMachineData {
+    /// Finalization cannot outrun a pending rotation or contradict its committed operation result.
+    /// Returning the applying record lets the existing command recovery path derive that result.
+    pub(crate) fn licensing_command_can_finish(
+        &self,
+        execution: &CommandExecution,
+        result: &CommandExecutionResult,
+    ) -> bool {
+        match execution.effect() {
+            Some(CommandExecutionEffect::RotateLicenseClusterKey { outcome: None, .. }) => self
+                .cluster_identity
+                .as_ref()
+                .is_none_or(|identity| !identity.rotation_is_pending_for(&execution.reference)),
+            Some(
+                CommandExecutionEffect::RotateLicenseClusterKey {
+                    outcome: Some(outcome),
+                    ..
+                }
+                | CommandExecutionEffect::ReleaseLicense {
+                    outcome: Some(outcome),
+                    ..
+                },
+            ) => match outcome {
+                LicensingCommandOutcome::Applied => matches!(
+                    &result.disposition,
+                    CommandExecutionDisposition::Completed {
+                        already_existed: false
+                    }
+                ),
+                LicensingCommandOutcome::Refused { .. } => {
+                    matches!(&result.disposition, CommandExecutionDisposition::Failed)
+                }
+            },
+            _ => true,
+        }
+    }
+
+    pub(crate) fn licensing_command_outcome(
+        &self,
+        reference: &CommandExecutionReference,
+    ) -> Option<LicensingCommandOutcome> {
+        match self.command_executions.get(reference)?.effect()? {
+            CommandExecutionEffect::RotateLicenseClusterKey { outcome, .. }
+            | CommandExecutionEffect::ReleaseLicense { outcome, .. } => *outcome,
+            _ => None,
+        }
+    }
+
+    pub(crate) fn record_licensing_command_outcome(
+        &mut self,
+        reference: &CommandExecutionReference,
+        result: LicensingCommandOutcome,
+    ) {
+        let Some(mut execution) = self.command_executions.get(reference).cloned() else {
+            return;
+        };
+        let CommandExecutionState::Applying { effect, .. } = &mut execution.state else {
+            return;
+        };
+        let (CommandExecutionEffect::RotateLicenseClusterKey { outcome, .. }
+        | CommandExecutionEffect::ReleaseLicense { outcome, .. }) = effect.as_mut()
+        else {
+            return;
+        };
+        if outcome.is_none() {
+            *outcome = Some(result);
+            self.command_executions.replace(execution);
+        }
+    }
 }
 
 #[derive(
@@ -480,6 +579,8 @@ impl CommandExecution {
                 | CommandExecutionEffect::Transaction { .. }
                 | CommandExecutionEffect::Statement { .. }
                 | CommandExecutionEffect::CreateUser { .. }
+                | CommandExecutionEffect::RotateLicenseClusterKey { .. }
+                | CommandExecutionEffect::ReleaseLicense { .. }
                 | CommandExecutionEffect::ActivateLicense { .. }
                 | CommandExecutionEffect::DropNode { .. }
                 | CommandExecutionEffect::Restore(_),
@@ -499,6 +600,8 @@ impl CommandExecution {
                 | CommandExecutionEffect::TransactionRequest(_)
                 | CommandExecutionEffect::Statement { .. }
                 | CommandExecutionEffect::CreateUser { .. }
+                | CommandExecutionEffect::RotateLicenseClusterKey { .. }
+                | CommandExecutionEffect::ReleaseLicense { .. }
                 | CommandExecutionEffect::ActivateLicense { .. }
                 | CommandExecutionEffect::DropNode { .. },
             )
@@ -531,6 +634,8 @@ impl CommandExecution {
                 | CommandExecutionEffect::Transaction { .. }
                 | CommandExecutionEffect::Statement { .. }
                 | CommandExecutionEffect::CreateUser { .. }
+                | CommandExecutionEffect::RotateLicenseClusterKey { .. }
+                | CommandExecutionEffect::ReleaseLicense { .. }
                 | CommandExecutionEffect::ActivateLicense { .. }
                 | CommandExecutionEffect::DropNode { .. }
                 | CommandExecutionEffect::Restore(_) => None,
@@ -557,6 +662,8 @@ impl CommandExecution {
                 | CommandExecutionEffect::TransactionRequest(_)
                 | CommandExecutionEffect::Statement { .. }
                 | CommandExecutionEffect::DropNode { .. }
+                | CommandExecutionEffect::RotateLicenseClusterKey { .. }
+                | CommandExecutionEffect::ReleaseLicense { .. }
                 | CommandExecutionEffect::ActivateLicense { .. }
                 | CommandExecutionEffect::Restore(_) => None,
             },
@@ -655,6 +762,8 @@ impl CommandExecution {
             | CommandExecutionEffect::Transaction { .. }
             | CommandExecutionEffect::Statement { .. }
             | CommandExecutionEffect::DropNode { .. }
+            | CommandExecutionEffect::RotateLicenseClusterKey { .. }
+            | CommandExecutionEffect::ReleaseLicense { .. }
             | CommandExecutionEffect::ActivateLicense { .. }
             | CommandExecutionEffect::Restore(_) => CommandExecutionRequestEvidence::Statement,
         };

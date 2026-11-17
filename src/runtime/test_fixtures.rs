@@ -435,6 +435,7 @@ pub(super) fn paced_domain_state(raw: &str) -> DomainState {
         start_version: 0,
         last_start: nervix_models::DomainStartPoint::Resume,
         clock: None,
+        stop_cause: None,
     }
 }
 
@@ -448,6 +449,7 @@ pub(super) fn unpaced_domain_state(raw: &str) -> DomainState {
         start_version: 0,
         last_start: nervix_models::DomainStartPoint::Resume,
         clock: None,
+        stop_cause: None,
     }
 }
 

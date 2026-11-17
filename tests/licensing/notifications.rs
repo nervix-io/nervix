@@ -14,6 +14,41 @@ use nervix_primitives::time::{sleep, timeout};
 
 use super::{STATUS_WAIT_BUDGET, ScenarioWorld, current_license, public_license_timestamp};
 
+#[given("the next licensing rotation response is delayed")]
+async fn delay_rotation(world: &mut ScenarioWorld) {
+    world
+        .licensing_service
+        .as_ref()
+        .verified("fixture started")
+        .configure(|model| {
+            model.script(nervix_licensing_test_service::Fault::Delay(
+                Duration::from_secs(5),
+            ));
+        })
+        .await;
+}
+
+#[then("the licensing rotation request has reached the service")]
+async fn rotation_started(world: &mut ScenarioWorld) {
+    let service = world.licensing_service.as_ref().verified("fixture started");
+    timeout(STATUS_WAIT_BUDGET, async {
+        loop {
+            nervix_primitives::task::consume_budget().await;
+            if service.requests().await.iter().any(|request| {
+                matches!(
+                    request,
+                    nervix_licensing_protocol::requests::Request::RotateKey { .. }
+                )
+            }) {
+                break;
+            }
+            sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .assured("the delayed response leaves an admitted rotation in flight");
+}
+
 #[given(expr = "the licensing notification stream is {string}")]
 #[when(expr = "the licensing notification stream is {string}")]
 async fn stream_mode(world: &mut ScenarioWorld, mode: String) {

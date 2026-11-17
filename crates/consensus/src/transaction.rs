@@ -1479,6 +1479,11 @@ pub enum TransactionMutationError {
     EffectMismatch { id: String },
     #[error("transaction '{id}' commit step conflicted with replicated state: {reason}")]
     StepConflict { id: String, reason: String },
+    #[error("transaction '{id}' cannot start its domain: licensing stopped processing: {reason}")]
+    LicensingStop {
+        id: String,
+        reason: nervix_models::LicensingStopReason,
+    },
     #[error("transaction '{id}' cannot mutate domain '{domain}' while it is owned by {owner}")]
     DomainMutationConflict {
         id: String,

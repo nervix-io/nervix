@@ -122,6 +122,10 @@ Important runtime consequences:
 - `START AT NOW` reinitializes paced time and domain-owned ingestor offsets from current wall clock
 - `STOP` preserves persisted runtime state
 - `START` clears materialized relay state for the active domain before new execution proceeds
+- When an ephemeral activation expires, the leader stops every running domain the same way, and
+  `DESCRIBE DOMAIN` reports `stopped by licensing: <reason>` until the next `START`, which is
+  refused while the licensing stop gate stays closed (see
+  [Cluster Licensing](node-settings.md#cluster-licensing))
 
 Successful lifecycle commands are completion boundaries. `START` returns after every current live
 node has prepared the same revision and every configured listener and assigned ingestor has completed

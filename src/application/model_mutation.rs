@@ -2513,6 +2513,12 @@ impl SessionServiceImpl {
             Statement::ActivateLicense(_) => {
                 command_error("ACTIVATE LICENSE requires durable command admission".to_owned())
             }
+            Statement::ReleaseLicense(_) => {
+                command_error("RELEASE LICENSE requires durable command admission".to_owned())
+            }
+            Statement::RotateLicenseClusterKey(_) => command_error(
+                "ROTATE LICENSE CLUSTER KEY requires durable command admission".to_owned(),
+            ),
             Statement::AlterCluster(_) => {
                 command_error("ALTER CLUSTER SET requires durable command admission".to_string())
             }

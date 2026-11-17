@@ -133,6 +133,7 @@ const SETTING_NAMES: [&str; 150] = [
     "interconnect-bulk-receive-window",
     "cpu-count",
     "memory-limit",
+    "node-detection-timeout",
     "execution-control-cpu-workers",
     "execution-control-cpu-pending-jobs",
     "execution-credentials-cpu-workers",

@@ -112,7 +112,7 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: "1.99"
+          toolchain: "1.100"
           components: clippy
           targets: wasm32-unknown-unknown
 
@@ -323,7 +323,7 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: "1.99"
+          toolchain: "1.100"
           components: llvm-tools
 
       - name: Install cargo tools
@@ -467,7 +467,7 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: "1.99"
+          toolchain: "1.100"
           targets: wasm32-unknown-unknown
 
       - name: Install cargo tools
@@ -667,7 +667,7 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: "1.99"
+          toolchain: "1.100"
           targets: wasm32-unknown-unknown
           components: clippy, llvm-tools
 
@@ -840,7 +840,7 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: "1.99"
+          toolchain: "1.100"
           targets: wasm32-unknown-unknown
 
       - name: Install cargo tools
@@ -1128,7 +1128,7 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: "1.99"
+          toolchain: "1.100"
           targets: wasm32-unknown-unknown
           components: clippy, llvm-tools
 
@@ -1267,7 +1267,7 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: "1.99"
+          toolchain: "1.100"
 
       - name: Install just
         uses: taiki-e/install-action@v2
@@ -1581,7 +1581,7 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: "1.99"
+          toolchain: "1.100"
           targets: wasm32-unknown-unknown
 
       - name: Install cargo tools
@@ -1805,7 +1805,7 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: "1.99"
+          toolchain: "1.100"
           targets: wasm32-unknown-unknown
           components: clippy, llvm-tools
 
@@ -2205,7 +2205,7 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: "1.99"
+          toolchain: "1.100"
           targets: wasm32-unknown-unknown
 
       - name: Install cargo tools
@@ -2407,7 +2407,7 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: "1.99"
+          toolchain: "1.100"
           targets: wasm32-unknown-unknown
 
       - name: Install cargo tools
@@ -2582,7 +2582,7 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: "1.99"
+          toolchain: "1.100"
           targets: wasm32-unknown-unknown
 
       - name: Install cargo tools
@@ -2739,7 +2739,7 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: "1.99"
+          toolchain: "1.100"
           targets: wasm32-unknown-unknown
 
       - name: Install cargo tools

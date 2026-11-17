@@ -1042,6 +1042,13 @@ pub(crate) struct CreateCommandContext {
 }
 
 #[derive(Clone, Copy)]
+struct CreateAttempt {
+    number: u64,
+    draft_revision: u64,
+    kind: CreateKind,
+}
+
+#[derive(Clone, Copy)]
 pub(crate) struct CreateSignals {
     open: RwSignal<Option<CreateKind>>,
     return_focus: RwSignal<Option<String>>,
@@ -1049,7 +1056,7 @@ pub(crate) struct CreateSignals {
     captured_scopes: RwSignal<BTreeMap<CreateKind, Option<DomainName>>>,
     revision: RwSignal<u64>,
     next_attempt: RwSignal<u64>,
-    active_attempt: RwSignal<Option<(u64, u64)>>,
+    active_attempt: RwSignal<Option<CreateAttempt>>,
     progress: RwSignal<CreateProgress>,
     validation: RwSignal<Option<String>>,
     domain: RwSignal<DomainDraft>,
@@ -1177,6 +1184,9 @@ impl CreateSignals {
         domain: Option<DomainName>,
         return_focus: &'static str,
     ) {
+        if self.reopen_pending(return_focus) {
+            return;
+        }
         if kind.domain_scoped() {
             let captured = match self.captured_scopes.get_untracked().get(&kind) {
                 Some(captured) => captured.clone(),
@@ -1193,9 +1203,24 @@ impl CreateSignals {
         }
         self.return_focus.set(Some(return_focus.to_string()));
         self.progress.set(CreateProgress::Editing);
+        self.active_attempt.set(None);
         self.validation.set(None);
         self.open.set(Some(kind));
         self.advance_revision();
+    }
+
+    /// Every create entry point restores the pending form before it can replace any draft.
+    fn reopen_pending(self, return_focus: &'static str) -> bool {
+        if !self.progress.get_untracked().is_pending() {
+            return false;
+        }
+        let attempt = self.active_attempt.get_untracked().verified(
+            "begin_submission retains the attempt before marking it pending, until an edit",
+        );
+        self.return_focus.set(Some(return_focus.to_string()));
+        self.open.set(Some(attempt.kind));
+        self.advance_revision();
+        true
     }
 
     /// Opens a new corridor placement draft whose first `FROM` member is `member`, in `domain`, as
@@ -1207,6 +1232,9 @@ impl CreateSignals {
         member: ModelName,
         return_focus: &'static str,
     ) {
+        if self.reopen_pending(return_focus) {
+            return;
+        }
         let kind = CreateKind::Model(ModelKind::Placement);
         self.placement.set(PlacementDraft::starting_from(member));
         self.captured_scopes.update(|scopes| {
@@ -1224,6 +1252,9 @@ impl CreateSignals {
         relay: RelayName,
         return_focus: &'static str,
     ) {
+        if self.reopen_pending(return_focus) {
+            return;
+        }
         let name = self.generate_subscription_name();
         self.subscription
             .set(SubscriptionDraft::for_relay(name, relay));
@@ -1270,6 +1301,9 @@ impl CreateSignals {
     /// Moves the open draft to `domain`. References the draft selected in its previous domain stay
     /// visible but must be selected again before the draft completes.
     fn change_scope(self, domain: Option<DomainName>) {
+        if self.progress.get_untracked().is_pending() {
+            return;
+        }
         let Some(kind) = self.open.get_untracked() else {
             return;
         };
@@ -1367,6 +1401,10 @@ impl CreateSignals {
     }
 
     pub(crate) fn begin_submission(self, connected: bool) -> (u64, u64) {
+        let kind = self
+            .open
+            .get_untracked()
+            .verified("only an open create form begins a submission");
         self.next_attempt.update(|attempt| {
             *attempt = attempt
                 .checked_add(1)
@@ -1374,7 +1412,11 @@ impl CreateSignals {
         });
         let attempt = self.next_attempt.get_untracked();
         let revision = self.revision.get_untracked();
-        self.active_attempt.set(Some((attempt, revision)));
+        self.active_attempt.set(Some(CreateAttempt {
+            number: attempt,
+            draft_revision: revision,
+            kind,
+        }));
         self.progress.set(if connected {
             CreateProgress::Submitting
         } else {
@@ -1383,8 +1425,14 @@ impl CreateSignals {
         (attempt, revision)
     }
 
+    fn is_active_attempt(self, attempt: u64, revision: u64) -> bool {
+        self.active_attempt
+            .get_untracked()
+            .is_some_and(|active| active.number == attempt && active.draft_revision == revision)
+    }
+
     pub(crate) fn queued_reconnect(self, attempt: u64, revision: u64) {
-        if self.active_attempt.get_untracked() == Some((attempt, revision)) {
+        if self.is_active_attempt(attempt, revision) {
             self.progress.set(CreateProgress::QueuedReconnect);
         }
     }
@@ -1396,7 +1444,7 @@ impl CreateSignals {
     }
 
     pub(crate) fn completed(self, attempt: u64, revision: u64) -> bool {
-        if self.active_attempt.get_untracked() != Some((attempt, revision)) {
+        if !self.is_active_attempt(attempt, revision) {
             return false;
         }
         self.progress.set(CreateProgress::Completed);
@@ -1404,14 +1452,14 @@ impl CreateSignals {
     }
 
     pub(crate) fn queued_transaction(self, attempt: u64, revision: u64, position: usize) {
-        if self.active_attempt.get_untracked() == Some((attempt, revision)) {
+        if self.is_active_attempt(attempt, revision) {
             self.progress
                 .set(CreateProgress::QueuedTransaction { position });
         }
     }
 
     pub(crate) fn failed(self, attempt: u64, revision: u64, reason: String) {
-        if self.active_attempt.get_untracked() == Some((attempt, revision)) {
+        if self.is_active_attempt(attempt, revision) {
             self.progress.set(CreateProgress::Failed(reason));
         }
     }
@@ -2330,11 +2378,18 @@ pub(crate) fn CreateDialog(
     submit: impl Fn(CreateSubmission, u64, u64) + Copy + Send + Sync + 'static,
 ) -> impl IntoView {
     let name_input = NodeRef::<leptos::html::Input>::new();
+    let close_button = NodeRef::<leptos::html::Button>::new();
     Effect::new(move |_| {
-        let open = signals.open.get();
-        if open.is_some()
-            && let Some(input) = name_input.get()
-        {
+        if signals.open.get().is_none() {
+            return;
+        }
+        if signals.progress.get_untracked().is_pending() {
+            if let Some(button) = close_button.get() {
+                button
+                    .focus()
+                    .discarded("the pending create dialog keeps its enabled Close control");
+            }
+        } else if let Some(input) = name_input.get() {
             input
                 .focus()
                 .discarded("the create name input may already hold focus");
@@ -2415,7 +2470,7 @@ pub(crate) fn CreateDialog(
                                 format!("Create {label}")
                             }}</h2>
                         </div>
-                        <button class="dialog-close create-close" type="button" title="Close" aria-label="Close create dialog" on:click=move |_| signals.close()>"×"</button>
+                        <button node_ref=close_button class="dialog-close create-close" type="button" title="Close" aria-label="Close create dialog" on:click=move |_| signals.close()>"×"</button>
                     </header>
                     <form novalidate on:submit=submit_form>
                         <div class="create-scope-row">
@@ -2431,6 +2486,7 @@ pub(crate) fn CreateDialog(
                                 <button
                                     class="create-scope-change"
                                     type="button"
+                                    disabled=move || signals.progress.get().is_pending()
                                     on:click=move |_| {
                                         signals.change_scope(active_domain.get_untracked());
                                     }

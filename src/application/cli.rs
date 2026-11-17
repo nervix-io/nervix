@@ -48,7 +48,7 @@ pub use self::{
     execution::ExecutionArgs,
     membership::MembershipArgs,
     memory_pressure::MemoryPressureArgs,
-    node::NodeArgs,
+    node::{NODE_TAGS_OPTION, NodeArgs},
     operational::OperationalArgs,
     resources::ResourceArgs,
     runtime::RuntimeArgs,

@@ -64,10 +64,10 @@ const QUEUED: usize = 3;
 /// The most consecutive statements one generated commit step applies.
 const STEP_STATEMENTS: usize = 3;
 
-pub(super) fn node_capability_record(
+pub(super) fn committed_node_record(
     arbitrary: &mut Arbitrary<'_>,
-) -> nervix_models::NodeCapabilityRecord {
-    arbitrary.node_capability_record()
+) -> nervix_models::CommittedNodeRecord {
+    arbitrary.committed_node_record()
 }
 
 /// A Raft log position under any term and leader.
@@ -258,16 +258,16 @@ fn schedule_topology_inputs(arbitrary: &mut Arbitrary<'_>) -> ScheduleTopologyIn
         }
     }
     ScheduleTopologyInputs {
-        capabilities: members
+        records: members
             .iter()
             .filter_map(|node| {
                 if arbitrary.entropy().flag() {
-                    let mut record = node_capability_record(arbitrary);
-                    record.identity = nervix_models::ClusterNodeIdentity::new(
+                    let mut committed = committed_node_record(arbitrary);
+                    committed.record.claim.identity = nervix_models::ClusterNodeIdentity::new(
                         node.clone(),
-                        record.identity.incarnation(),
+                        committed.record.identity().incarnation(),
                     );
-                    Some((node.clone(), record))
+                    Some((node.clone(), committed))
                 } else {
                     None
                 }
@@ -1125,6 +1125,7 @@ fn create_domain_effect(arbitrary: &mut Arbitrary<'_>) -> CommandExecutionEffect
             start_version: 0,
             last_start: DomainStartPoint::Resume,
             clock: None,
+            stop_cause: None,
             ..found
         }
     };
@@ -1144,7 +1145,7 @@ fn command_execution_effect(
     arbitrary: &mut Arbitrary<'_>,
     reference: &CommandExecutionReference,
 ) -> CommandExecutionEffect {
-    match arbitrary.entropy().byte() % 9 {
+    match arbitrary.entropy().byte() % 11 {
         7 => CommandExecutionEffect::AlterCluster {
             changes: arbitrary.cluster_parameter_values().assignments(),
             applied: optional(arbitrary, Arbitrary::cluster_parameter_record).map(Box::new),
@@ -1176,6 +1177,14 @@ fn command_execution_effect(
         5 => CommandExecutionEffect::DropNode {
             identity: arbitrary.node_identity(),
             member_at_admission: arbitrary.entropy().flag(),
+        },
+        9 => CommandExecutionEffect::RotateLicenseClusterKey {
+            outcome: optional(arbitrary, licensing_command_outcome),
+            identity: Box::new(crate::cluster_identity::tests::identity(arbitrary).public()),
+        },
+        10 => CommandExecutionEffect::ReleaseLicense {
+            outcome: optional(arbitrary, licensing_command_outcome),
+            binding: Box::new(crate::licensing::tests::activation_binding(arbitrary)),
         },
         8 => CommandExecutionEffect::ActivateLicense {
             binding: Box::new(crate::licensing::tests::activation_binding(arbitrary)),
@@ -1358,6 +1367,8 @@ fn command_execution_result(
         CommandExecutionEffect::CreateDomain { .. }
         | CommandExecutionEffect::AlterCluster { .. }
         | CommandExecutionEffect::CreateUser { .. }
+        | CommandExecutionEffect::RotateLicenseClusterKey { .. }
+        | CommandExecutionEffect::ReleaseLicense { .. }
         | CommandExecutionEffect::ActivateLicense { .. }
         | CommandExecutionEffect::DropNode { .. } => {}
     }
@@ -1462,10 +1473,10 @@ pub(super) fn state_machine(arbitrary: &mut Arbitrary<'_>) -> StateMachineData {
     state.raise_password_work(cost);
     state.resources = resource_records(arbitrary);
     for _ in 0..arbitrary.entropy().count(RECORDS) {
-        let record = node_capability_record(arbitrary);
+        let committed = committed_node_record(arbitrary);
         state
-            .node_capabilities
-            .insert(record.identity.node_id().clone(), record);
+            .node_records
+            .insert(committed.record.identity().node_id().clone(), committed);
     }
     for _ in 0..arbitrary.entropy().count(RECORDS) {
         let node = arbitrary.rule_name::<ClusterNodeName>();
@@ -1589,6 +1600,7 @@ fn restore_step_effect(
             let state = DomainState {
                 status: DomainStatus::Stopped,
                 clock: None,
+                stop_cause: None,
                 ..archived
             };
             let resources = arbitrary.records(restored_resource);
@@ -1833,8 +1845,16 @@ fn complete_application_command(arbitrary: &mut Arbitrary<'_>) -> ConsensusComma
 /// as any other and a coverage check can name each one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, strum::EnumIter)]
 enum CommandVariant {
-    AnnounceNodeCapabilities,
+    AnnounceNodeRecord,
     InstallClusterIdentity,
+    BeginClusterKeyRotation,
+    PrepareClusterKeyRotationRequest,
+    CompleteClusterKeyRotation,
+    AbandonClusterKeyRotation,
+    ReleaseLicense,
+    PrepareLicenseReleaseRequest,
+    ConfirmRelease,
+
     ActivateLicense,
     ApplyLicenseDecision,
     InstallTrustDocuments,
@@ -1887,8 +1907,19 @@ impl CommandVariant {
     /// [`command`] is taught to build it.
     fn of(command: &ConsensusCommand) -> Self {
         match command {
-            ConsensusCommand::AnnounceNodeCapabilities { .. } => Self::AnnounceNodeCapabilities,
+            ConsensusCommand::AnnounceNodeRecord { .. } => Self::AnnounceNodeRecord,
             ConsensusCommand::InstallClusterIdentity { .. } => Self::InstallClusterIdentity,
+            ConsensusCommand::BeginClusterKeyRotation { .. } => Self::BeginClusterKeyRotation,
+            ConsensusCommand::PrepareClusterKeyRotationRequest { .. } => {
+                Self::PrepareClusterKeyRotationRequest
+            }
+            ConsensusCommand::CompleteClusterKeyRotation { .. } => Self::CompleteClusterKeyRotation,
+            ConsensusCommand::AbandonClusterKeyRotation { .. } => Self::AbandonClusterKeyRotation,
+            ConsensusCommand::ReleaseLicense { .. } => Self::ReleaseLicense,
+            ConsensusCommand::PrepareLicenseReleaseRequest { .. } => {
+                Self::PrepareLicenseReleaseRequest
+            }
+            ConsensusCommand::ConfirmRelease { .. } => Self::ConfirmRelease,
             ConsensusCommand::ActivateLicense { .. } => Self::ActivateLicense,
             ConsensusCommand::ApplyLicenseDecision { .. } => Self::ApplyLicenseDecision,
             ConsensusCommand::InstallTrustDocuments { .. } => Self::InstallTrustDocuments,
@@ -1973,11 +2004,54 @@ pub(super) fn command(arbitrary: &mut Arbitrary<'_>) -> ConsensusCommand {
 /// lifecycle step with the reports and plans it carries.
 fn command_of(arbitrary: &mut Arbitrary<'_>, variant: CommandVariant) -> ConsensusCommand {
     match variant {
-        CommandVariant::AnnounceNodeCapabilities => ConsensusCommand::AnnounceNodeCapabilities {
-            record: Box::new(node_capability_record(arbitrary)),
+        CommandVariant::AnnounceNodeRecord => ConsensusCommand::AnnounceNodeRecord {
+            record: Box::new(arbitrary.node_record()),
         },
         CommandVariant::InstallClusterIdentity => ConsensusCommand::InstallClusterIdentity {
             identity: Box::new(crate::cluster_identity::tests::identity(arbitrary)),
+        },
+        CommandVariant::BeginClusterKeyRotation => ConsensusCommand::BeginClusterKeyRotation {
+            identity: Box::new(crate::cluster_identity::tests::identity(arbitrary).public()),
+            pending_key: Box::new(crate::cluster_identity::tests::pending(arbitrary)),
+        },
+        CommandVariant::PrepareClusterKeyRotationRequest => {
+            ConsensusCommand::PrepareClusterKeyRotationRequest {
+                request_id: uuid::Uuid::from_bytes(std::array::from_fn(|_| {
+                    arbitrary.entropy().byte()
+                })),
+                request: Box::new(crate::licensing::tests::prepared_request(arbitrary)),
+            }
+        }
+        CommandVariant::CompleteClusterKeyRotation => {
+            ConsensusCommand::CompleteClusterKeyRotation {
+                request_id: uuid::Uuid::from_bytes(std::array::from_fn(|_| {
+                    arbitrary.entropy().byte()
+                })),
+                decision: Box::new(crate::licensing::tests::received_decision(arbitrary)),
+            }
+        }
+        CommandVariant::AbandonClusterKeyRotation => ConsensusCommand::AbandonClusterKeyRotation {
+            reference: arbitrary.retry_reference(),
+            code: nervix_licensing_vocabulary::ProblemCode::ProofInvalid,
+            request_id: uuid::Uuid::from_bytes(std::array::from_fn(|_| arbitrary.entropy().byte())),
+        },
+        CommandVariant::ReleaseLicense => ConsensusCommand::ReleaseLicense {
+            reference: arbitrary.retry_reference(),
+            binding: Box::new(crate::licensing::tests::activation_binding(arbitrary)),
+            request_id: uuid::Uuid::from_bytes(std::array::from_fn(|_| arbitrary.entropy().byte())),
+            released_at: arbitrary.timestamp(),
+        },
+        CommandVariant::PrepareLicenseReleaseRequest => {
+            ConsensusCommand::PrepareLicenseReleaseRequest {
+                request_id: uuid::Uuid::from_bytes(std::array::from_fn(|_| {
+                    arbitrary.entropy().byte()
+                })),
+                request: Box::new(crate::licensing::tests::prepared_request(arbitrary)),
+            }
+        }
+        CommandVariant::ConfirmRelease => ConsensusCommand::ConfirmRelease {
+            request_id: uuid::Uuid::from_bytes(std::array::from_fn(|_| arbitrary.entropy().byte())),
+            decision: optional(arbitrary, crate::licensing::tests::received_decision).map(Box::new),
         },
         CommandVariant::ActivateLicense => ConsensusCommand::ActivateLicense {
             binding: Box::new(crate::licensing::tests::activation_binding(arbitrary)),
@@ -2090,6 +2164,7 @@ fn command_of(arbitrary: &mut Arbitrary<'_>, variant: CommandVariant) -> Consens
         CommandVariant::StopDomain => ConsensusCommand::StopDomain {
             domain_id: arbitrary.rule_name(),
             mutation: optional_lease(arbitrary),
+            cause: arbitrary.stop_cause(),
         },
         CommandVariant::PauseDomain => ConsensusCommand::PauseDomain {
             domain_id: arbitrary.rule_name(),
@@ -2207,8 +2282,11 @@ pub(super) fn entry(arbitrary: &mut Arbitrary<'_>) -> EntryOf<TypeConfig> {
     openraft::Entry { log_id, payload }
 }
 
-/// How many seeded inputs a coverage check draws its values from.
-const SEEDS: u64 = 256;
+/// How many seeded inputs a coverage check draws its values from. The rarest record of a revision,
+/// the archive a finished `BACKUP` command recorded, comes from about one command execution in a
+/// hundred, so this many seeds reach it about sixteen times and the check does not depend on how
+/// much entropy the families drawn before it consume.
+const SEEDS: u64 = 1024;
 
 /// How many bytes one seeded input of the command check holds: as many as the longest input the
 /// properties read.
@@ -2217,10 +2295,11 @@ const COMMAND_BYTES: usize = 4096;
 /// How many commands the command check builds from one seeded input.
 const COMMANDS_PER_SEED: usize = 4;
 
-/// How many bytes one seeded input of the record check holds. A complete revision, with every
-/// family drawn before the bytes run out, reads about 38 KiB on average, so this leaves room for
-/// the families drawn last.
-const REVISION_BYTES: usize = 64 * 1024;
+/// How many bytes one seeded input of the record check holds. A complete revision reads about
+/// 42 KiB on average, but about one in five reads past 64 KiB, and a revision whose bytes run out
+/// draws the families drawn last, command executions among them, empty. This leaves room for them
+/// in all but a few revisions.
+const REVISION_BYTES: usize = 128 * 1024;
 
 /// `length` bytes that differ from seed to seed: the BLAKE3 output stream of the seed, which
 /// spreads the late choices of a value between seeds as evenly as the first.
@@ -2235,7 +2314,7 @@ fn seeded_bytes(seed: u64, length: usize) -> Vec<u8> {
 
 /// Every variant and shape of the transaction, commit plan, report and command execution records
 /// [`state_machine`] promises to reach, as [`RecordWalk`] names them.
-const EXPECTED_RECORDS: [&str; 48] = [
+const EXPECTED_RECORDS: [&str; 50] = [
     "ReplicatedTransaction::session",
     "ReplicatedTransaction::command",
     "ReplicatedTransaction::latest_preview",
@@ -2270,6 +2349,8 @@ const EXPECTED_RECORDS: [&str; 48] = [
     "CommandExecutionEffect::Statement",
     "CommandExecutionEffect::CreateUser",
     "CommandExecutionEffect::ActivateLicense",
+    "CommandExecutionEffect::RotateLicenseClusterKey",
+    "CommandExecutionEffect::ReleaseLicense",
     "CommandExecutionEffect::DropNode",
     "CommandExecutionEffect::Restore",
     "RestoreExecution::completed_steps",
@@ -2451,6 +2532,12 @@ impl RecordWalk {
             CommandExecutionEffect::ActivateLicense { .. } => {
                 self.see("CommandExecutionEffect::ActivateLicense");
             }
+            CommandExecutionEffect::RotateLicenseClusterKey { .. } => {
+                self.see("CommandExecutionEffect::RotateLicenseClusterKey")
+            }
+            CommandExecutionEffect::ReleaseLicense { .. } => {
+                self.see("CommandExecutionEffect::ReleaseLicense")
+            }
             CommandExecutionEffect::CreateUser { .. } => {
                 self.see("CommandExecutionEffect::CreateUser");
             }
@@ -2540,4 +2627,14 @@ fn every_record_variant_is_generated_across_seeds() {
         unexpected.is_empty(),
         "generated but not expected: {unexpected:?}"
     );
+}
+
+fn licensing_command_outcome(arbitrary: &mut Arbitrary<'_>) -> crate::LicensingCommandOutcome {
+    if arbitrary.entropy().flag() {
+        crate::LicensingCommandOutcome::Applied
+    } else {
+        crate::LicensingCommandOutcome::Refused {
+            code: nervix_licensing_vocabulary::ProblemCode::ProofInvalid,
+        }
+    }
 }
