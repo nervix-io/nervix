@@ -75,6 +75,10 @@ pub(super) enum ReadEvent {
     CountedOversized(NonZeroUsize),
     Suspended,
     Closed,
+    /// The host's `RATE LIMIT` allowance had no room, so the loop's read waited.
+    HeldBack,
+    /// A hold of the loop for the allowance ended.
+    HoldEnded,
 }
 
 /// The ordered log the gathering ingestor and the recording host share.
@@ -130,7 +134,9 @@ pub(super) fn assert_every_taken_position_taken_in_first(events: &[ReadEvent]) {
             ReadEvent::Cancelled
             | ReadEvent::Acknowledged(_)
             | ReadEvent::Flushed
-            | ReadEvent::CountedOversized(_) => {}
+            | ReadEvent::CountedOversized(_)
+            | ReadEvent::HeldBack
+            | ReadEvent::HoldEnded => {}
         }
     }
     assert_eq!(
@@ -332,6 +338,54 @@ impl HostControl {
         *self.suspended.lock() = true;
         self.quiesce_changed.notify_one();
     }
+
+    /// Tells the loop its quiesce state changed in a way that leaves it reading, as a `BUFFER`
+    /// engagement or a release does.
+    pub(super) fn change_quiesce(&self) {
+        self.quiesce_changed.notify_one();
+    }
+}
+
+/// A `RATE LIMIT` allowance whose room the test decides: spent until the test returns it.
+pub(super) struct ScriptedAllowance {
+    spent: Mutex<bool>,
+    /// How long after each ask the spent allowance names for its return.
+    hold: Duration,
+    /// The loop asked for its budget while the allowance was spent.
+    pub(super) held_back: Notify,
+}
+
+impl ScriptedAllowance {
+    /// A spent allowance that names the instant `hold` after each ask as its return.
+    pub(super) fn spent(hold: Duration) -> Self {
+        Self {
+            spent: Mutex::new(true),
+            hold,
+            held_back: Notify::new(),
+        }
+    }
+
+    /// Gives the allowance room again. The hold ends when its deadline passes, which the test's
+    /// clock decides.
+    pub(super) fn return_room(&self) {
+        *self.spent.lock() = false;
+    }
+
+    fn budget(
+        &self,
+        window: NonZeroUsize,
+        events: &ReadLog,
+    ) -> nervix_connector::IngestorReadBudget {
+        if !*self.spent.lock() {
+            return nervix_connector::IngestorReadBudget::Take(window);
+        }
+        events.record(ReadEvent::HeldBack);
+        self.held_back.notify_one();
+        let until = Instant::now()
+            .checked_add(self.hold)
+            .assured("the tests hold for at most an hour, far within the clock's range");
+        nervix_connector::IngestorReadBudget::WaitUntil(until)
+    }
 }
 
 struct ImmediateAck;
@@ -351,6 +405,7 @@ pub(super) struct RecordingHost {
     flush_every: Option<Duration>,
     flush_due: Option<Instant>,
     reported_errors: Arc<Mutex<Vec<String>>>,
+    allowance: Option<Arc<ScriptedAllowance>>,
 }
 
 impl RecordingHost {
@@ -361,7 +416,14 @@ impl RecordingHost {
             flush_every: None,
             flush_due: None,
             reported_errors: Arc::new(Mutex::new(Vec::new())),
+            allowance: None,
         }
+    }
+
+    /// The host of an ingestor whose `RATE LIMIT` allowance `allowance` sizes every read.
+    pub(super) fn with_allowance(mut self, allowance: Arc<ScriptedAllowance>) -> Self {
+        self.allowance = Some(allowance);
+        self
     }
 
     fn take_in(&mut self, messages: &[IngestorIntakeMessage<'_>]) {
@@ -473,6 +535,15 @@ impl IngestorHostServices for RecordingHost {
     }
     fn record_unconfirmed_stop(&self, positions: usize) {
         panic!("a test graph that acknowledges at once left {positions} positions unconfirmed");
+    }
+    fn read_budget(&mut self, window: NonZeroUsize) -> nervix_connector::IngestorReadBudget {
+        match &self.allowance {
+            Some(allowance) => allowance.budget(window, &self.events),
+            None => nervix_connector::IngestorReadBudget::Take(window),
+        }
+    }
+    fn record_rate_limit_hold_ended(&self, _held: Duration) {
+        self.events.record(ReadEvent::HoldEnded);
     }
 }
 
@@ -620,6 +691,91 @@ async fn a_stop_during_a_read_takes_in_what_the_ingestor_gathered_before_closing
     );
     assert_every_taken_position_taken_in_first(&events);
     assert!(observers.reported_errors.lock().is_empty());
+}
+
+#[nervix_primitives::test]
+async fn a_spent_allowance_holds_the_read_back_through_a_quiesce_change_until_the_ingestor_stops() {
+    let Fixture {
+        connector,
+        host,
+        observers,
+    } = Fixture::new();
+    // Far beyond the test: only a quiesce change or the stop can end the hold.
+    let allowance = Arc::new(ScriptedAllowance::spent(Duration::from_secs(3600)));
+    let running = RunningLoop::start(
+        connector,
+        host.with_allowance(allowance.clone()),
+        gathering_policy(1),
+    );
+    observers.send(1).await;
+    reach(
+        allowance.held_back.notified(),
+        "the loop holds its read back",
+    )
+    .await;
+    observers.control.change_quiesce();
+    reach(
+        allowance.held_back.notified(),
+        "the loop asks its budget again after the quiesce change",
+    )
+    .await;
+    running.stop().await;
+
+    let events = observers.events();
+    assert_eq!(
+        events,
+        [
+            ReadEvent::HeldBack,
+            ReadEvent::HoldEnded,
+            ReadEvent::HeldBack,
+            ReadEvent::HoldEnded,
+            ReadEvent::Closed,
+        ],
+        "a spent allowance reads nothing, and the quiesce change and the stop each end a hold"
+    );
+    assert!(observers.reported_errors.lock().is_empty());
+}
+
+#[nervix_primitives::test]
+async fn a_returned_allowance_ends_the_hold_at_its_deadline_and_the_loop_reads() {
+    let Fixture {
+        connector,
+        host,
+        observers,
+    } = Fixture::new();
+    let allowance = Arc::new(ScriptedAllowance::spent(Duration::from_millis(20)));
+    let running = RunningLoop::start(
+        connector,
+        host.with_allowance(allowance.clone()),
+        gathering_policy(1),
+    );
+    observers.send(1).await;
+    reach(
+        allowance.held_back.notified(),
+        "the loop holds its read back",
+    )
+    .await;
+    allowance.return_room();
+    reach(
+        observers.signals.took.notified(),
+        "the loop reads once the hold's deadline passed and the allowance has room",
+    )
+    .await;
+    running.stop().await;
+
+    let events = observers.events();
+    let first_read = events
+        .iter()
+        .position(|event| *event == ReadEvent::Took(1))
+        .assured("the loop read the waiting message");
+    assert!(
+        events[..first_read]
+            .iter()
+            .all(|event| matches!(event, ReadEvent::HeldBack | ReadEvent::HoldEnded)),
+        "nothing was read while the allowance was spent: {events:?}"
+    );
+    assert!(events.contains(&ReadEvent::TookIn(vec![1])), "{events:?}");
+    assert_every_taken_position_taken_in_first(&events);
 }
 
 #[nervix_primitives::test]

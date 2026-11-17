@@ -379,7 +379,7 @@ Feature: Web console visual ingestor creation
       | 3            |
 
   @visual_ingestor_pulsar
-  Scenario Outline: A visually created Pulsar ingestor declares its creation position and type and delivers
+  Scenario Outline: A visually created Pulsar ingestor declares its creation position, type and rate limit and delivers
     Given Pulsar is running
     And a <cluster_size> node nervix cluster is started
     And the active domain is "{{domain}}"
@@ -406,6 +406,9 @@ Feature: Web console visual ingestor creation
     And selector ".create-ingestor-subscription" is filled with "visual_{{test_id}}"
     And selector ".create-ingestor-instances" is filled with "1"
     And selector ".create-ingestor-mode [data-mode='no-ack']" is clicked
+    And selector ".create-ingestor-rate-limits-add" is clicked
+    And selector ".create-ingestor-rate-limit-count" is filled with "100"
+    And selector ".create-ingestor-rate-limit-period" is filled with "1s"
     And selector ".create-ingestor-quiesce [data-quiesce='suspend']" is clicked
     And selector ".create-ingestor-codec .create-choice-search" is filled with "visual_pulsar_codec"
     Then selector ".create-ingestor-codec [data-value='visual_pulsar_codec']" exists
@@ -420,12 +423,16 @@ Feature: Web console visual ingestor creation
     And selector ".create-ingestor-route .create-ingestor-message-error [data-error='log']" is clicked
     And selector ".create-ingestor-general-error [data-error='log']" is clicked
     And selector ".create-submit" is clicked
+    Then selector ".create-validation" contains "RATE LIMIT 1: enter a positive BURST count or byte size"
+    When selector ".create-ingestor-rate-limit-burst" is filled with "100"
+    And selector ".create-submit" is clicked
     Then selector ".create-validation" contains "owns the subscription"
     When selector ".create-ingestor-subscription-ownership [data-choice='OWNED BY INGESTOR START AT <start_position>']" is clicked
     And selector ".create-submit" is clicked
     Then selector ".create-validation" contains "subscription's TYPE"
     When selector ".create-ingestor-subscription-type [data-choice='<type>']" is clicked
     Then selector ".create-preview" contains "SUBSCRIPTION 'visual_{{test_id}}' OWNED BY INGESTOR START AT <start_position> TYPE <type>"
+    And selector ".create-preview" contains "MODE NO ACK RATE LIMIT 100 PER 1s BURST 100 ON QUIESCE SUSPEND"
     When selector ".create-submit" is clicked
     Then selector ".create-status" contains "Completed"
     When selector ".create-close" is clicked

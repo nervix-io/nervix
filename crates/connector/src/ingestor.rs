@@ -145,8 +145,23 @@ pub struct IngestorPlan<P> {
 /// How many messages the host asks a connector to poll together.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct IngestorBatchRequest {
+    /// The most messages the read takes from its transport: the room the delivery mode's window
+    /// leaves, lowered to the host's [read budget](IngestorReadBudget) where a `RATE LIMIT`
+    /// allowance admits fewer now. A read never takes more, so an on-demand transport keeps every
+    /// message the allowance could not admit yet, and a gathering read stops once it holds this
+    /// many.
     pub max_messages: NonZeroUsize,
     pub batch_timeout: Option<Duration>,
+}
+
+/// How much the host's next read may take from its transport, by the `RATE LIMIT` allowance of
+/// the execution unit it reads for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IngestorReadBudget {
+    /// The read may take up to this many messages.
+    Take(NonZeroUsize),
+    /// The allowance admits no payload before this instant, so the host takes nothing until then.
+    WaitUntil(Instant),
 }
 
 /// One ingestor poll result.
@@ -418,6 +433,26 @@ pub enum IngestorIntakeError {
     Dispatch,
     #[error("failed to flush an ingestor batch")]
     Flush,
+    /// The `RATE LIMIT` allowance could not cost or admit the batch's payloads, because their
+    /// measures could not be evaluated. No payload of the batch the allowance had not admitted was
+    /// taken in.
+    #[error("failed to admit an ingestor batch through its RATE LIMIT allowance")]
+    RateLimit,
+    /// The ingestor stopped while a payload of the batch waited for its `RATE LIMIT` allowance.
+    /// Nothing the host had not yet taken in was dispatched, and the batch's positions stay
+    /// unconfirmed, so its transport presents them again by its own redelivery contract.
+    #[error("the ingestor stopped while its batch waited for its RATE LIMIT allowance")]
+    Stopped,
+}
+
+impl IngestorIntakeError {
+    /// Whether the intake ended because the ingestor stopped, which is no failure to report.
+    pub fn stopped(&self) -> bool {
+        match self {
+            Self::Stopped => true,
+            Self::Retain | Self::Dispatch | Self::Flush | Self::RateLimit => false,
+        }
+    }
 }
 
 pub type IngestorIntakeResult<T> = Result<T, Report<IngestorIntakeError>>;
@@ -597,6 +632,16 @@ pub trait IngestorHostServices: crate::ConnectorEventProvider + Send + 'static {
     /// Reports that the ingestor stopped before its transport confirmed `positions` it had read,
     /// which the transport presents again by its own redelivery contract.
     fn record_unconfirmed_stop(&self, positions: usize);
+    /// The budget of the next read, given the `window` of messages its delivery mode leaves room
+    /// for. A host whose ingestor writes no `RATE LIMIT` lets the read take the whole window.
+    fn read_budget(&mut self, window: NonZeroUsize) -> IngestorReadBudget {
+        IngestorReadBudget::Take(window)
+    }
+    /// Counts one hold of the transport for the `RATE LIMIT` allowance as it starts, so a long
+    /// hold is visible while it lasts.
+    fn record_rate_limit_hold_started(&self) {}
+    /// Observes how long one hold of the transport for the allowance lasted, once it ended.
+    fn record_rate_limit_hold_ended(&self, _held: Duration) {}
 }
 
 /// Task-local host services an ingestor loop drives without exposing a runtime type.
@@ -730,6 +775,18 @@ impl IngestorHost {
 
     pub fn record_oversized_payloads(&self, payloads: NonZeroUsize) {
         self.services.record_oversized_payloads(payloads);
+    }
+
+    pub fn read_budget(&mut self, window: NonZeroUsize) -> IngestorReadBudget {
+        self.services.read_budget(window)
+    }
+
+    pub fn record_rate_limit_hold_started(&self) {
+        self.services.record_rate_limit_hold_started();
+    }
+
+    pub fn record_rate_limit_hold_ended(&self, held: Duration) {
+        self.services.record_rate_limit_hold_ended(held);
     }
 
     pub fn record_unconfirmed_stop(&self, positions: usize) {

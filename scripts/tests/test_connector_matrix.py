@@ -20,6 +20,7 @@ def declarations():
             "locator": "TOPIC 'orders' (kafka_topic)", "options": [],
             "modes": ["NO ACK", "ACK SEQUENTIAL ACK TIMEOUT 5s"],
             "quiesce": ["SUSPEND"], "metadata": ["metadata.offset: I64 OPTIONAL"],
+            "rate_limit": {"class": "held", "held": ["NO ACK", "ACK SEQUENTIAL"], "refused": []},
             "payload": ["payload.bytes: U64"],
             "headers": {"layout": "ordered_repeats", "names": "exact",
                         "layout_meaning": "every header in the order it was written",
@@ -326,12 +327,13 @@ class ConnectorMatrixTests(unittest.TestCase):
     def test_all_manual_regions_and_acknowledgement_membership_follow_the_export(self):
         surface = declarations()
         policy = {"position": {"replayable": "Positions can be replayed."},
-                  "confirmation": {"answered": "The transport answered."}}
+                  "confirmation": {"answered": "The transport answered."},
+                  "rate_limit": {"held": "The transport keeps what the host has not taken."}}
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             (root / "docs/src").mkdir(parents=True)
             for path, names in {
-                "ingestors.md": ["ingest-kafka-topic", "instancing", "ingest-headers"],
+                "ingestors.md": ["ingest-kafka-topic", "instancing", "rate-limit", "ingest-headers"],
                 "emitters.md": ["emit-kafka-topic", "emit-headers"],
                 "connector-contract.md": ["position", "confirmation", "headers"],
             }.items():
@@ -349,9 +351,26 @@ class ConnectorMatrixTests(unittest.TestCase):
             self.assertIn("| `KAFKA TOPIC` | `ordered_repeats`, exact names | every header in the "
                           "order it was written; a name matches only itself |",
                           output["docs/src/emitters.md"])
+            self.assertIn("| `KAFKA TOPIC` | `NO ACK`, `ACK SEQUENTIAL` | None | The transport keeps "
+                          "what the host has not taken. |", output["docs/src/ingestors.md"])
+            policy["rate_limit"]["unheld"] = "Not declared by this export."
+            with self.assertRaisesRegex(ValueError, "rate_limit"):
+                matrix.documents(root, surface, reasons(), policy)
+            del policy["rate_limit"]["unheld"]
             policy["confirmation"]["undeclared"] = "Not declared by this export."
             with self.assertRaisesRegex(ValueError, "confirmation"):
                 matrix.documents(root, surface, reasons(), policy)
+
+    def test_rate_limit_text_states_where_the_declaration_takes_the_clause(self):
+        self.assertEqual(matrix.rate_limit_text({"class": "held", "held": ["NO ACK"], "refused": []}),
+                         "Accepted in `NO ACK`.")
+        self.assertEqual(
+            matrix.rate_limit_text({"class": "held", "held": ["ACK SEQUENTIAL"], "refused": ["NO ACK"]}),
+            "Accepted in `ACK SEQUENTIAL`; refused in `NO ACK`.")
+        self.assertEqual(matrix.rate_limit_text({"class": "unheld", "held": [], "refused": ["NO ACK"]}),
+                         "Refused in every mode: the entity cannot hold its source back.")
+        self.assertEqual(matrix.rate_limit_text({"class": "paced", "held": [], "refused": ["NO ACK"]}),
+                         "Refused: the entity reads on its `EVERY` cadence.")
 
 
 if __name__ == "__main__":

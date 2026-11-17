@@ -38,6 +38,7 @@ mod partition_epochs;
 mod partition_topology;
 mod placement;
 mod processor_plan;
+mod rate_limit_plan;
 mod reingestor_plan;
 mod relocation;
 mod resource_plan;
@@ -119,6 +120,10 @@ pub(crate) use processor_plan::{
 };
 #[cfg(test)]
 pub(crate) use processor_plan::{PlannedModel, branched_node_specs_from_models};
+pub(crate) use rate_limit_plan::{
+    IngestorRateLimitPlan, LoweredMeasure, RateLimitCharge, RateLimitClauseIssue,
+    RateLimitClausePlan, clause_quota,
+};
 pub(crate) use reingestor_plan::{ReingestorInputPlan, ReingestorPlan};
 pub(crate) use relocation::{RelocationCoverage, RelocationMemberReason, RelocationUnit};
 pub(crate) use resource_plan::{

@@ -1251,6 +1251,64 @@ async fn then_batch_completed_after_receiver_request(
     );
 }
 
+/// One batch's completion, measured from the recorded rate limit start.
+#[derive(Debug)]
+struct RankedCompletion {
+    batch: String,
+    after_start: Duration,
+}
+
+/// The Rust client delivers each batch from a task of its own, so batches submitted together may
+/// reach the ingestor in any order, and the allowance bounds the n-th batch to complete, whichever
+/// it is. The client records each outcome when it arrives, which load only delays, so the gap from
+/// the instant the scenario recorded before submitting can only grow on a busy host.
+#[then(
+    expr = "batches {string} complete no sooner than {string} after the recorded rate limit \
+            start, in completion order"
+)]
+async fn then_batches_complete_in_rank_after_rate_limit_start(
+    world: &mut ScenarioWorld,
+    batches: String,
+    minimum_gaps: String,
+) {
+    let started_at = world.rate_limit.started_at();
+    let mut minimums = Vec::new();
+    for minimum in minimum_gaps.split(',') {
+        let minimum =
+            parse_duration_text(minimum.trim()).expect("the step names valid minimum gaps");
+        minimums.push(minimum);
+    }
+    let mut completions = Vec::new();
+    for batch in batches.split(',').map(str::trim) {
+        let answered = answered(world, batch).await;
+        assert_eq!(
+            answered.outcome.class, "completed",
+            "batch '{batch}' did not complete: {:?}",
+            answered.outcome
+        );
+        completions.push(RankedCompletion {
+            batch: batch.to_owned(),
+            after_start: answered.at.duration_since(started_at),
+        });
+    }
+    assert_eq!(
+        completions.len(),
+        minimums.len(),
+        "the step names one minimum gap for each batch"
+    );
+    completions.sort_by_key(|completion| completion.after_start);
+    for (place, (completion, minimum)) in (1_usize..).zip(completions.iter().zip(&minimums)) {
+        assert!(
+            completion.after_start >= *minimum,
+            "the batch completing in place {place} ('{}') completed {:?} after the recorded rate \
+             limit start, sooner than the allowance permits ({minimum:?}); completions: \
+             {completions:?}",
+            completion.batch,
+            completion.after_start
+        );
+    }
+}
+
 /// Stops waiting for a batch the Rust client submits. A batch still waiting for credit is never
 /// sent; one the producer already holds stays with it.
 #[when(expr = "the wait for batch {string} is cancelled")]

@@ -55,6 +55,8 @@ pub enum MessageErrorOperation {
     Publish,
     /// A source payload its ingestor's codec refused.
     Decode,
+    /// A source payload its ingestor's `RATE LIMIT` can never admit, or whose measure failed.
+    RateLimit,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

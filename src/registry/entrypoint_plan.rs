@@ -51,6 +51,8 @@ pub(crate) enum EntrypointPlanError {
     InvalidUnitDeclaration { ingestor: IngestorName },
     #[error("ingestor '{ingestor}' has invalid upgrade headers")]
     InvalidWebsocketsUpgradeHeaders { ingestor: IngestorName },
+    #[error("ingestor '{ingestor}' has a RATE LIMIT clause that declares no allowance")]
+    InvalidRateLimit { ingestor: IngestorName },
     #[error("scheduled {kind:?} '{node}' is configured as another node")]
     NodeIdentityMismatch { kind: ModelKind, node: ModelName },
     #[error("ingestor '{ingestor}' reads missing {kind:?} '{reference}'")]

@@ -355,6 +355,7 @@ fn scheduled_node_execution_uses_primary_except_for_server_listener_ingestors() 
                 source: IngestorEntity::Syslog(SyslogIngestor::Listener(SyslogListenerIngestor {
                     client: named("syslog_listener"),
                     mode: SyslogIngestMode::NoAck,
+                    rate_limits: crate::RateLimits::NONE,
                     quiesce: IngestQuiesceMode::Suspend,
                 })),
                 codec: named("codec"),

@@ -185,6 +185,10 @@ Nervix records these raw metric families:
   dropped because its separate 64-outcome read-ahead quota was full. The driver counts each drop
   immediately, including during a downstream acknowledgement wait; see
   [MQTT ingestor connections](./connector-contract.md#mqtt-ingestor-connections)
+- `nervix_ingestor_rate_limit_held_total`, `nervix_ingestor_rate_limit_hold_seconds_total`,
+  `nervix_ingestor_rate_limit_rejected_total` and
+  `nervix_ingestor_rate_limit_program_rejections_total`: what an ingestor unit's `RATE LIMIT`
+  allowance held back and rejected; see [Ingestor Rate Limits](#ingestor-rate-limits)
 - `nervix_session_subscriptions`: open session subscriptions the node delivers from a relay. The
   node advertises interest in the relay to the cluster exactly while this is above zero, and the
   series stays at `0` once the relay's last subscription on the node closes
@@ -1066,6 +1070,26 @@ they exclude the graph wait. A broker ingestor's transient failure clears once i
 confirms an acknowledgement again; a paced ingestor's clears once a poll or resume succeeds.
 Recording touches retained atomic children, with no label resolution or registry access, and
 changes no delivery, retry or error policy.
+
+### Ingestor Rate Limits
+
+An execution unit whose ingestor writes [`RATE LIMIT`](./ingestors.md#rate-limits) resolves four
+families with the six identity labels of the read families when it starts, so each series exists at
+zero before the first hold or rejection, and withdraws them with the unit's other series. A unit
+whose ingestor writes no `RATE LIMIT` has none of them.
+
+| Family | Type | Meaning |
+| --- | --- | --- |
+| `nervix_ingestor_rate_limit_held_total` | Counter | Every time the unit held its source back because its allowance had no room: before a read, or for a payload already read whose measured cost did not fit yet. A hold counts as it starts, so a long one is visible while it lasts. |
+| `nervix_ingestor_rate_limit_hold_seconds_total` | Counter | The seconds those holds lasted on the node's physical clock, added as each ends, a hold that a quiesce change or a stop ended included. |
+| `nervix_ingestor_rate_limit_rejected_total` | Counter | Payloads consumed because they cost more than a clause's `BURST`, each reported with operation `rate_limit` under the ingestor's `ON GENERAL ERROR` policy. |
+| `nervix_ingestor_rate_limit_program_rejections_total` | Counter | Payloads consumed because a clause's measure failed on them, reported the same way. |
+
+`DESCRIBE INGESTOR` writes each of the unit's clauses as a `rate limit:` line after its `mode:`
+line and, in its `source:` section, the four values under their family names, the hold seconds
+to the millisecond. Like the other ingestor families they are process-local: an allowance starts
+full in a unit's next task or on another node, and its counters start where that node's series
+stand.
 
 ## Listener Capacity Observations
 

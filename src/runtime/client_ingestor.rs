@@ -26,6 +26,12 @@
 //! batch, gives it one tracked ACK root, and dispatches it through the ingestor's filter and
 //! routes. The window bounds how many admitted batches may await their acknowledgement across
 //! every producer, so attaching another producer never widens it.
+//!
+//! An ingestor that writes `RATE LIMIT` gives its execution one allowance, which the admission
+//! worker owns and charges for every batch before decoding it, whichever producer sent it. A batch
+//! the allowance has no room for waits in the worker, the batches behind it wait in the endpoint's
+//! queue, and producers are told admission is open throughout, since sending again would not help.
+//! A batch no allowance can ever admit is answered `processing_failed` with cause `rejected`.
 
 #![cfg_attr(
     nervix_lint,
@@ -44,7 +50,7 @@ use std::num::NonZeroU32;
 use bytes::Bytes;
 use futures_util::{future::BoxFuture, stream::FuturesUnordered};
 use indexmap::IndexMap;
-use nervix_connector::physical_time::actual_utc_now;
+use nervix_connector::{IngestMetadataRow, physical_time::actual_utc_now};
 use nervix_models::{
     ClientAttachmentId, ClientEndpointContract, ClientOutcomeUncertainty, ClientProcessingFailure,
     ClientProducerAdmission, ClientProducerDescription, ClientProducerEndReason,
@@ -54,7 +60,7 @@ use nervix_models::{
 use nervix_primitives::sync::atomic::AtomicU64;
 
 use super::*;
-use crate::runtime_schema::ClientBatchLimits;
+use crate::runtime_schema::{ClientBatchLimits, IpcMessages};
 
 /// The most bytes of a failure's description a producer is told, so an outcome stays one small
 /// frame whatever failed downstream.
@@ -766,10 +772,36 @@ impl Runtime {
             handles,
             output_routes,
             filter_where,
+            rate_limit,
             branched_templates,
             metrics,
         } = dependencies;
         let domain = &ingestor.domain;
+        // The execution's allowance starts full when the execution starts, and its counters exist
+        // at zero from then on.
+        let allowance = match rate_limit {
+            Some(bound) => {
+                let dispatcher = self.inner.remote_dispatcher.load();
+                let counters = self.inner.metrics.ingestor_rate_limit_counters(
+                    domain,
+                    &ingestor.name,
+                    Unit::SINGLE,
+                    dispatcher.as_deref().map(RemoteDispatcher::local_node_id),
+                    ingestor.declared_input.entity_kind(),
+                );
+                Some(UnitAllowance::start(
+                    bound,
+                    RateLimitReporting {
+                        runtime: self.clone(),
+                        domain: domain.clone(),
+                        ingestor: ingestor.name.clone(),
+                        policy: ingestor.general_error_policy.clone(),
+                        counters,
+                    },
+                ))
+            }
+            None => None,
+        };
         let branched_runtime = self.start_branched_entrypoint_runtimes(
             domain,
             &ModelName::from(&ingestor.name),
@@ -813,6 +845,7 @@ impl Runtime {
         // intake watch's first report and before any admission report of the new worker.
         let worker = AdmissionWorker {
             intake,
+            allowance,
             mailbox: WorkerMailbox {
                 jobs: job_receiver,
                 reports: commands.clone(),
@@ -1803,7 +1836,22 @@ async fn watch_client_intake(
 /// The task that admits the batches one execution's endpoint hands over, one at a time.
 struct AdmissionWorker {
     intake: ClientIntake,
+    /// The execution's `RATE LIMIT` allowance, which every batch pays before it is decoded. Absent
+    /// for an ingestor that writes no `RATE LIMIT`.
+    allowance: Option<UnitAllowance>,
     mailbox: WorkerMailbox,
+}
+
+/// What the allowance decided on one batch.
+enum BatchAllowance {
+    /// The allowance admitted the batch, which the worker validates and dispatches.
+    Admitted,
+    /// No allowance can ever admit the batch, which is consumed as this rejection.
+    Rejected(RateLimitRejection),
+    /// The worker answers the batch with this refusal without charging it.
+    Refused(ClientSubmissionRefusal),
+    /// The execution stopped while the batch waited for the allowance.
+    Stopped,
 }
 
 impl AdmissionWorker {
@@ -1817,7 +1865,22 @@ impl AdmissionWorker {
             };
             let attachment = job.attachment;
             let submission = job.submission;
-            let result = self.intake.admit(job).await;
+            let allowance = self.wait_for_allowance(&job).await;
+            let stopped = matches!(allowance, BatchAllowance::Stopped);
+            let result = match allowance {
+                BatchAllowance::Admitted => self.intake.admit(job).await,
+                BatchAllowance::Rejected(rejection) => self.consume_rejected(&rejection),
+                BatchAllowance::Refused(refusal) => AdmissionResult::Refused {
+                    refusal,
+                    detail: None,
+                },
+                // Nothing of the batch was dispatched, so its producer sends it again once the
+                // ingestor runs again, as it does a batch the stopping worker never took.
+                BatchAllowance::Stopped => AdmissionResult::Refused {
+                    refusal: ClientSubmissionRefusal::Suspended,
+                    detail: None,
+                },
+            };
             let reported = self.mailbox.report(AdmissionReport {
                 attachment,
                 submission,
@@ -1826,6 +1889,147 @@ impl AdmissionWorker {
             if !reported {
                 return;
             }
+            if stopped {
+                self.mailbox.refuse_untaken_jobs();
+                return;
+            }
+        }
+    }
+
+    /// Holds the batch `job` carries until the execution's allowance admits it, costing it once
+    /// before it is decoded, in its encoded bytes, its rows and its producer's identity.
+    ///
+    /// A batch whose framing its decoder refuses is not charged: decoding refuses it with nothing
+    /// dispatched. The wait is on the boundary's timer, and the allowance is asked again when it
+    /// ends. A stop ends the wait; a quiesce does not, and the fence the worker checks once the
+    /// batch is admitted refuses it if a quiesce engaged meanwhile.
+    async fn wait_for_allowance(&mut self, job: &AdmissionJob) -> BatchAllowance {
+        let Some(allowance) = self.allowance.as_mut() else {
+            return BatchAllowance::Admitted;
+        };
+        let max_rows = NonZeroUsize::new(job.max_batch_rows.get().arch_into())
+            .assured("an attachment grants a positive row limit");
+        let Ok(scanned) = IpcMessages::new(&job.body).scan(Some(max_rows)) else {
+            return BatchAllowance::Admitted;
+        };
+        let Ok(rows) = usize::try_from(scanned.rows) else {
+            return BatchAllowance::Admitted;
+        };
+        let fields = ClientBatchMetadata {
+            user: &job.user,
+            payload_bytes: job.body.len(),
+        };
+        let metadata = IngestMetadataRow::headers(&nervix_connector::NoIngestHeaders, &fields);
+        let run = ProgramRun {
+            executor: self.intake.runtime.executor(),
+            now: actual_utc_now(),
+        };
+        let costs = allowance.costs(run, &[metadata], Some(rows)).await;
+        let cost = match costs {
+            Ok(mut costs) => costs
+                .pop()
+                .verified("the allowance costs every payload it is given"),
+            Err(error) => {
+                debug!(
+                    domain = self.intake.domain.as_str(),
+                    ingestor = self.intake.ingestor.as_str(),
+                    error = %format_args!("{error:#}"),
+                    "a client batch could not be costed for its RATE LIMIT allowance"
+                );
+                return BatchAllowance::Refused(ClientSubmissionRefusal::Busy);
+            }
+        };
+        let charges = match cost {
+            PayloadCost::Charges(charges) => charges,
+            PayloadCost::Rejected { clause, cause } => {
+                return BatchAllowance::Rejected(RateLimitRejection::new(
+                    clause,
+                    cause,
+                    &metadata,
+                    actual_utc_now(),
+                ));
+            }
+        };
+        let mut held_since: Option<Instant> = None;
+        let decided = loop {
+            nervix_primitives::task::consume_budget().await;
+            let decision = match allowance.admit(&charges) {
+                Ok(decision) => decision,
+                Err(error) => {
+                    debug!(
+                        domain = self.intake.domain.as_str(),
+                        ingestor = self.intake.ingestor.as_str(),
+                        error = %format_args!("{error:#}"),
+                        "a client batch could not be admitted through its RATE LIMIT allowance"
+                    );
+                    break BatchAllowance::Refused(ClientSubmissionRefusal::Busy);
+                }
+            };
+            let until = match decision {
+                AllowanceDecision::Admitted => break BatchAllowance::Admitted,
+                AllowanceDecision::AboveBurst {
+                    clause,
+                    cost,
+                    burst,
+                } => {
+                    break BatchAllowance::Rejected(RateLimitRejection::new(
+                        clause,
+                        RateLimitRejectionCause::AboveBurst { cost, burst },
+                        &metadata,
+                        actual_utc_now(),
+                    ));
+                }
+                AllowanceDecision::WaitUntil(until) => until,
+            };
+            if held_since.is_none() {
+                held_since = Some(Instant::now());
+                allowance.record_hold_started();
+            }
+            // A stop an earlier wait already saw on this receiver changes it no more.
+            if *self.mailbox.shutdown.borrow() {
+                break BatchAllowance::Stopped;
+            }
+            // The deadline is the boundary's timer; once it passes, the allowance is asked again.
+            let changed = timeout_at(until, self.mailbox.shutdown.changed()).await;
+            if let Ok(changed) = changed
+                && (changed.is_err() || *self.mailbox.shutdown.borrow())
+            {
+                break BatchAllowance::Stopped;
+            }
+        };
+        if let Some(started) = held_since {
+            allowance.record_hold_ended(started.elapsed());
+        }
+        decided
+    }
+
+    /// Consumes a batch no allowance can ever admit: reports it under the ingestor's general error
+    /// policy, counts it, and answers it `processing_failed` with cause `rejected` through an ACK
+    /// root that fails at once. Under a quiesce the batch is refused instead and charged nothing,
+    /// since its producer sends it again once admission reopens.
+    fn consume_rejected(&self, rejection: &RateLimitRejection) -> AdmissionResult {
+        let (root, completion) = match self
+            .intake
+            .quiesce
+            .track_client_batch(&self.intake.trackers)
+        {
+            Ok(tracked) => tracked,
+            Err(refusal) => {
+                return AdmissionResult::Refused {
+                    refusal,
+                    detail: None,
+                };
+            }
+        };
+        let allowance = self
+            .allowance
+            .as_ref()
+            .verified("only an execution with a RATE LIMIT allowance rejects a batch through it");
+        allowance.reject(rejection);
+        root.no_ack(format!("rate limit rejection {rejection}"));
+        AdmissionResult::Admitted {
+            completion,
+            ack_timeout: self.intake.ack_timeout,
         }
     }
 }

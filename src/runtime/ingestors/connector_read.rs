@@ -1,10 +1,13 @@
-//! The broker loop's read of one batch, which the host may interrupt but never abandons.
+//! The broker loop's read of one batch, which the host may interrupt but never abandons, and the
+//! hold before it while the unit's `RATE LIMIT` allowance has no room.
 //!
 //! Layer: data plane.
 //!
 //! - **Owns.** Waiting on one broker read, flushing the ingest group while the read waits,
 //!   cancelling the read when a quiesce change or a stop needs the loop back, and telling the loop
-//!   how the read ended, which decides whether a retry delay still applies after it.
+//!   how the read ended, which decides whether a retry delay still applies after it. Holding the
+//!   loop back before a read until the allowance returns, on the boundary's timer, with the same
+//!   flush, quiesce and stop handling.
 //! - **Depends on.** The connector ingestor contract and the flush, quiesce and stop signals of the
 //!   ingestor host.
 //! - **Must not know.** A broker driver, or how the loop takes in a batch and settles its
@@ -167,7 +170,68 @@ where
     BrokerRead { batch, end }
 }
 
-async fn wait_for_flush(deadline: Option<Instant>) {
+/// How a hold before a read ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum AllowanceHoldEnd {
+    /// The allowance returns now. The loop starts its next turn, which asks for its budget again.
+    Returned,
+    /// The ingestor's quiesce state changed, or its stop signal changed without stopping it. The
+    /// loop starts its next turn at once, which observes the new state and holds again while the
+    /// allowance still has no room.
+    Restarting,
+    /// The ingestor stops.
+    Stopping,
+}
+
+/// What ended one wait of a hold before the allowance returned.
+enum HoldInterruption {
+    Flush,
+    Restart,
+    Stop,
+}
+
+/// Holds the loop back before its next read until `until`, when the unit's `RATE LIMIT` allowance
+/// has room for a payload again, so the transport keeps what the allowance cannot admit yet.
+///
+/// The hold is a deadline on the boundary's timer, after which the loop asks its budget again. A
+/// flush that falls due meanwhile needs nothing from the ingestor, so the host flushes and keeps
+/// holding. A quiesce change or a stop needs the loop back and ends the hold. The host counts every
+/// hold and how long it lasted.
+pub(super) async fn hold_for_allowance(
+    host: &mut IngestorHost,
+    shutdown: &mut watch::Receiver<bool>,
+    until: Instant,
+) -> AllowanceHoldEnd {
+    let started = Instant::now();
+    host.record_rate_limit_hold_started();
+    let end = loop {
+        nervix_primitives::task::consume_budget().await;
+        let next_flush = host.next_flush();
+        let interrupted = async {
+            nervix_primitives::select! {
+                changed = shutdown.changed() => {
+                    if changed.is_err() || *shutdown.borrow() {
+                        HoldInterruption::Stop
+                    } else {
+                        HoldInterruption::Restart
+                    }
+                }
+                () = host.wait_for_quiesce_change() => HoldInterruption::Restart,
+                () = wait_for_flush(next_flush) => HoldInterruption::Flush,
+            }
+        };
+        match timeout_at(until, interrupted).await {
+            Err(_) => break AllowanceHoldEnd::Returned,
+            Ok(HoldInterruption::Restart) => break AllowanceHoldEnd::Restarting,
+            Ok(HoldInterruption::Stop) => break AllowanceHoldEnd::Stopping,
+            Ok(HoldInterruption::Flush) => flush_for_lifecycle(host).await,
+        }
+    };
+    host.record_rate_limit_hold_ended(started.elapsed());
+    end
+}
+
+pub(super) async fn wait_for_flush(deadline: Option<Instant>) {
     match deadline {
         Some(deadline) => sleep_until(deadline).await,
         None => future::pending().await,

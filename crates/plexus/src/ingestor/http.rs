@@ -17,11 +17,11 @@
 use chumsky::prelude::*;
 use nervix_models::{
     HttpEndpointIngestor, HttpEndpointIngestorChange, HttpRequestHeader, HttpRequestHeaderValue,
-    HttpRequestIngestMode, HttpRequestIngestor, HttpRequestIngestorChange,
+    HttpRequestIngestMode, HttpRequestIngestor, HttpRequestIngestorChange, IngestDeliveryKind,
 };
 
 use super::{
-    delivery::{no_ack, polling_quiesce_clause},
+    delivery::{no_ack, polling_quiesce_clause, rate_limits_in},
     endpoint::{self, EndpointIntake, intake},
 };
 use crate::{
@@ -73,6 +73,9 @@ pub(super) fn request_body<'src>()
         .then(domain_clock_period_lit())
         .then_ignore(kw(Identifier::Mode))
         .then(no_ack().to(HttpRequestIngestMode::NoAck))
+        .then_ignore(rate_limits_in::<HttpRequestIngestor>(
+            IngestDeliveryKind::NoAck,
+        ))
         .then(polling_quiesce_clause())
         .map(
             |((((((client, method), headers), max_body_size), every), mode), quiesce)| {
@@ -93,7 +96,7 @@ pub(super) fn request_body<'src>()
 /// The body of an ingestor of an HTTP endpoint this cluster serves.
 pub(super) fn endpoint_body<'src>()
 -> impl Parser<'src, &'src [Token], HttpEndpointIngestor, extra::Err<ParseError<'src>>> + Clone {
-    intake().map(
+    intake::<HttpEndpointIngestor>().map(
         |EndpointIntake {
              endpoint,
              mode,

@@ -23,7 +23,7 @@ use super::{
     event_target_textarea_value, event_target_value,
     ingestor_draft::TimestampDraft,
     ingestor_route_editor::IngestorRouteEditor,
-    ingestor_source_draft::{IngestorEntityDraft, RequestHeaderDraft},
+    ingestor_source_draft::{IngestorEntityDraft, RateLimitDraft, RequestHeaderDraft},
 };
 
 #[derive(Clone, Copy)]
@@ -515,7 +515,81 @@ fn IngestorSourceEditor(
     .into_any()
 }
 
-/// The ingestor's delivery mode, its acknowledgement fields and its quiesce policy.
+/// One text input of a `RATE LIMIT` row, bound to the part `part` selects.
+#[component]
+fn RateLimitPartEditor(
+    signals: CreateSignals,
+    index: usize,
+    label: &'static str,
+    class_name: &'static str,
+    part: fn(&mut RateLimitDraft) -> &mut String,
+) -> impl IntoView {
+    let pending = move || signals.progress.get().is_pending();
+    view! {
+        <label class="create-field"><span>{label}</span>
+            <input class=class_name type="text" autocomplete="off" disabled=pending
+                prop:value=move || {
+                    let mut rows = signals.ingestor.get().source.rate_limits;
+                    match rows.get_mut(index) {
+                        Some(row) => part(row).clone(),
+                        None => String::new(),
+                    }
+                }
+                on:input=move |event| {
+                    let value = event_target_value(&event);
+                    signals.ingestor.update(|draft| {
+                        if let Some(row) = draft.source.rate_limits.get_mut(index) {
+                            *part(row) = value;
+                        }
+                    });
+                    signals.edit();
+                } />
+        </label>
+    }
+}
+
+/// The ordered `RATE LIMIT` rows of an entity that holds its source back. A row can be added only
+/// while the chosen delivery mode holds the source back; rows a mode cannot honor are refused with
+/// the declaration's reason when the form is checked.
+#[component]
+fn RateLimitsEditor(signals: CreateSignals) -> impl IntoView {
+    let pending = move || signals.progress.get().is_pending();
+    view! {
+        <fieldset class="create-field create-ingestor-rate-limits" data-option="RATE LIMIT">
+            <legend>"RATE LIMIT · optional allowances, each a count OF an optional measure PER a period with a BURST"</legend>
+            <For each=move || { (0..signals.ingestor.get().source.rate_limits.len()).collect::<Vec<_>>() }
+                key=|index| *index
+                children=move |index| view! {
+                    <div class="create-field-row">
+                        <RateLimitPartEditor signals=signals index=index label="Count"
+                            class_name="create-ingestor-rate-limit-count" part=|row| &mut row.count />
+                        <RateLimitPartEditor signals=signals index=index label="OF measure (optional)"
+                            class_name="create-ingestor-rate-limit-measure" part=|row| &mut row.measure />
+                        <RateLimitPartEditor signals=signals index=index label="PER"
+                            class_name="create-ingestor-rate-limit-period" part=|row| &mut row.period />
+                        <RateLimitPartEditor signals=signals index=index label="BURST"
+                            class_name="create-ingestor-rate-limit-burst" part=|row| &mut row.burst />
+                        <button type="button" class="create-ingestor-rate-limit-remove" disabled=pending
+                            on:click=move |_| {
+                                signals.ingestor.update(|draft| {
+                                    if index < draft.source.rate_limits.len() { draft.source.rate_limits.remove(index); }
+                                });
+                                signals.edit();
+                            }>"Remove"</button>
+                    </div>
+                } />
+            <button type="button" class="create-ingestor-rate-limits-add"
+                disabled=move || pending() || !signals.ingestor.get().source.rate_limits_enabled()
+                on:click=move |_| {
+                    signals.ingestor.update(|draft| draft.source.rate_limits.push(RateLimitDraft::default()));
+                    signals.edit();
+                }>"Add RATE LIMIT"</button>
+        </fieldset>
+    }
+}
+
+/// The ingestor's delivery mode, its acknowledgement fields, its `RATE LIMIT` rows and its quiesce
+/// policy.
 #[component]
 fn IngestorDeliveryEditor(signals: CreateSignals) -> impl IntoView {
     let pending = move || signals.progress.get().is_pending();
@@ -561,6 +635,9 @@ fn IngestorDeliveryEditor(signals: CreateSignals) -> impl IntoView {
                 <SourceFieldEditor signals=signals field=IngestorField::RetryBackoff />
                 <SourceFieldEditor signals=signals field=IngestorField::RetryMax />
             </Show>
+        </Show>
+        <Show when=move || signals.ingestor.get().source.offers_rate_limits() fallback=|| ()>
+            <RateLimitsEditor signals=signals />
         </Show>
         <Show when=move || !signals.ingestor.get().source.available_quiesce().is_empty() fallback=|| ()>
             <fieldset class="create-field create-ingestor-quiesce">

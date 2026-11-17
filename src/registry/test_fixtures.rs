@@ -562,6 +562,7 @@ pub(in crate::registry) fn ingestor_statement(
                         max_backoff: "5s".to_string(),
                     },
                 },
+                rate_limits: nervix_models::RateLimits::NONE,
                 quiesce: nervix_models::IngestQuiesceMode::Suspend,
             })),
             codec: named(codec),

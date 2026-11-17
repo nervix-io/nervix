@@ -4,7 +4,9 @@
 //! - **Owns.** Controlled ingestor dispatch and quiesce interleavings for the host loops, the
 //!   interleavings of a stop or a suspension of intake with a broker read that gathers a batch,
 //!   the interleavings of a lost broker connection with the broker loop's acknowledgements and
-//!   rejections, and the interleavings of a drain's observation with a batch's confirmation.
+//!   rejections, the interleavings of a drain's observation with a batch's confirmation, and the
+//!   interleavings of a quiesce change or a stop with the broker loop's hold while its `RATE LIMIT`
+//!   allowance is spent.
 //! - **Depends on.** The production ingestor loops, ingestor contract, quiesce control, the runtime's
 //!   batch acknowledgement and confirmed ACK roots, the gathering doubles of the read tests, the
 //!   connection-bound doubles of the reconnect tests and Shuttle.
@@ -18,15 +20,18 @@
 use nervix_connector::{IngestMetadataRow, IngestorReadCancellation};
 use nervix_connector_fake::{FakeIngestor as ChannelIngestor, FakeMessage as ChannelMessage};
 use nervix_model_harness::shuttle::{check_pct, check_random};
-use nervix_primitives::sync::{StdArc, mpsc, oneshot, watch};
 // The dispatch count is a record: an unmodeled atomic is not a Shuttle scheduling point, so it
 // changes in the same scheduling step as the dispatch it counts.
 use nervix_primitives::unmodeled::sync::atomic::{AtomicUsize, Ordering};
+use nervix_primitives::{
+    sync::{StdArc, mpsc, oneshot, watch},
+    time::{clear_triggers, trigger_timeouts},
+};
 
 use super::{
     read_tests::{
         GatheringIngestor, HostControl, IngestorSignals, ReadEvent, ReadLog, RecordingHost,
-        assert_every_taken_position_taken_in_first, gathering_policy,
+        ScriptedAllowance, assert_every_taken_position_taken_in_first, gathering_policy,
     },
     reconnect_tests::{
         RedeliveringBroker, RedeliveringIngestor, RedeliveryHost, sequential_policy,
@@ -507,6 +512,124 @@ fn shuttle_an_interrupted_broker_read_hands_the_host_every_message_it_took() {
     ] {
         check_random(move || interrupted_gathering(cause), 500);
         check_pct(move || interrupted_gathering(cause), 500, 3);
+    }
+}
+
+/// What meets the broker loop's hold while its `RATE LIMIT` allowance is spent.
+#[derive(Clone, Copy, Debug)]
+enum HoldMeets {
+    /// A quiesce change that leaves the loop reading, after which the allowance returns.
+    QuiesceChange,
+    /// The ingestor's stop.
+    Stop,
+}
+
+/// The label of the task whose hold the check's clock ends at its deadline.
+#[derive(Clone, Debug)]
+struct AllowanceDeadline;
+
+/// A broker ingestor whose transport holds a message from the start, read for a host whose
+/// allowance is spent, and a quiesce change or a stop that meets the loop's hold at any point.
+///
+/// The loop takes nothing from its transport while the allowance is spent. A quiesce change brings
+/// the loop back for a new turn, which asks its budget again and holds again; once the allowance
+/// returns and the hold's deadline passes, the loop reads the waiting message. A stop ends the hold
+/// and the loop without a read, and without waiting for the deadline.
+fn spent_allowance_hold(meets: HoldMeets) {
+    // Timeout triggers are thread-local rather than per execution, so every execution starts
+    // without the trigger an earlier one registered.
+    clear_triggers();
+    shuttle::future::block_on(async move {
+        shuttle::current::set_label_for_task(shuttle::current::me(), AllowanceDeadline);
+        let (transport, receiver) = mpsc::channel(2);
+        transport
+            .send(1)
+            .await
+            .assured("the check holds the receiver until the loop takes it");
+        let events = ReadLog::new();
+        let signals = Arc::new(IngestorSignals::new());
+        let control = Arc::new(HostControl::new());
+        // Far beyond any check: only the check's clock ends a hold at its deadline.
+        let allowance = Arc::new(ScriptedAllowance::spent(Duration::from_secs(3600)));
+        let (shutdown, shutdown_rx) = watch::channel(false);
+        let check = nervix_primitives::task::spawn({
+            let signals = signals.clone();
+            let control = control.clone();
+            let allowance = allowance.clone();
+            async move {
+                allowance.held_back.notified().await;
+                if let HoldMeets::QuiesceChange = meets {
+                    control.change_quiesce();
+                    // The new turn asks its budget again and holds again.
+                    allowance.held_back.notified().await;
+                    allowance.return_room();
+                    trigger_timeouts(|labels| labels.get::<AllowanceDeadline>().is_some());
+                    signals.took.notified().await;
+                }
+                shutdown.send_replace(true);
+                // The transport stays open until the loop stops, so only the stop ends a read.
+                transport
+            }
+        });
+        run_ingestor_instance_with_retry(
+            GatheringIngestor::new(receiver, events.clone(), signals.clone()),
+            IngestorHost::new(
+                RecordingHost::new(events.clone(), control.clone()).with_allowance(allowance),
+            ),
+            gathering_policy(1),
+            shutdown_rx,
+            nervix_connector::RetryBackoffSettings::default(),
+        )
+        .await;
+        let _transport = check
+            .await
+            .assured("the check task ends once it stopped the ingestor");
+
+        let events = events.events();
+        let first_read = events
+            .iter()
+            .position(|event| matches!(event, ReadEvent::Took(_)));
+        let holds = events
+            .iter()
+            .filter(|event| matches!(event, ReadEvent::HoldEnded))
+            .count();
+        match meets {
+            HoldMeets::QuiesceChange => {
+                let first_read = first_read.assured("the loop reads once the allowance returns");
+                let held_back = events[..first_read]
+                    .iter()
+                    .filter(|event| matches!(event, ReadEvent::HeldBack))
+                    .count();
+                assert_eq!(
+                    held_back, 2,
+                    "the loop held back before the quiesce change and again after it: {events:?}"
+                );
+                assert!(
+                    events[first_read..]
+                        .iter()
+                        .all(|event| !matches!(event, ReadEvent::HeldBack)),
+                    "the returned allowance holds nothing back: {events:?}"
+                );
+                assert_eq!(holds, 2, "each hold ended once: {events:?}");
+                assert!(
+                    events.contains(&ReadEvent::TookIn(vec![1])),
+                    "the waiting message reached the host: {events:?}"
+                );
+            }
+            HoldMeets::Stop => {
+                assert_eq!(first_read, None, "a stopped loop read nothing: {events:?}");
+                assert_eq!(holds, 1, "the stop ended the one hold: {events:?}");
+            }
+        }
+    });
+}
+
+#[test]
+fn shuttle_a_spent_allowance_holds_the_broker_loop_back_through_a_quiesce_until_it_returns_or_the_ingestor_stops()
+ {
+    for meets in [HoldMeets::QuiesceChange, HoldMeets::Stop] {
+        check_random(move || spent_allowance_hold(meets), 500);
+        check_pct(move || spent_allowance_hold(meets), 500, 3);
     }
 }
 

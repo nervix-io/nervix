@@ -14,12 +14,13 @@
 
 use chumsky::prelude::*;
 use nervix_models::{
-    RabbitMqIngestMode, RabbitMqQueueIngestor, RabbitMqQueueIngestorChange, RabbitMqQueueName,
+    IngestDeliveryKind, RabbitMqIngestMode, RabbitMqQueueIngestor, RabbitMqQueueIngestorChange,
+    RabbitMqQueueName,
 };
 
 use super::delivery::{
-    ParallelAck, SequentialAck, ack_parallel, ack_sequential, no_ack, optional_instances,
-    suspend_only_quiesce_clause,
+    NamedDelivery, ParallelAck, SequentialAck, ack_parallel, ack_sequential, no_ack,
+    optional_instances, rate_limits_after, suspend_only_quiesce_clause,
 };
 use crate::{
     lexer::{Identifier, Token},
@@ -65,6 +66,14 @@ fn mode<'src>()
     choice((parallel, sequential, no_ack().to(RabbitMqIngestMode::NoAck)))
 }
 
+impl NamedDelivery for RabbitMqIngestMode {
+    fn delivery_kind(&self) -> IngestDeliveryKind {
+        self.acknowledgement().kind()
+    }
+}
+
+/// `FROM <client> QUEUE '<queue>' [INSTANCES <n>] MODE … [RATE LIMIT …] ON QUIESCE SUSPEND`, whose
+/// `RATE LIMIT` an acknowledging mode alone takes.
 pub(super) fn queue_body<'src>()
 -> impl Parser<'src, &'src [Token], RabbitMqQueueIngestor, extra::Err<ParseError<'src>>> + Clone {
     client_ref()
@@ -72,15 +81,20 @@ pub(super) fn queue_body<'src>()
         .then(external_name::<RabbitMqQueueName>())
         .then(optional_instances::<RabbitMqQueueIngestor>())
         .then_ignore(kw(Identifier::Mode))
-        .then(mode())
+        .then(
+            mode().then_with_ctx(rate_limits_after::<RabbitMqQueueIngestor, RabbitMqIngestMode>()),
+        )
         .then(suspend_only_quiesce_clause())
         .map(
-            |((((client, queue), instances), mode), quiesce)| RabbitMqQueueIngestor {
-                client,
-                queue,
-                instances,
-                mode,
-                quiesce,
+            |((((client, queue), instances), (mode, rate_limits)), quiesce)| {
+                RabbitMqQueueIngestor {
+                    client,
+                    queue,
+                    instances,
+                    mode,
+                    rate_limits,
+                    quiesce,
+                }
             },
         )
         .boxed()

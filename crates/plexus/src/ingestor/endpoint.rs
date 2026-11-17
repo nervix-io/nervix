@@ -14,9 +14,13 @@
 )]
 
 use chumsky::prelude::*;
-use nervix_models::{EndpointIngestMode, EndpointName, IngestQuiesceMode};
+use nervix_models::{
+    EndpointIngestMode, EndpointName, IngestDeliveryKind, IngestQuiesceMode, IngestorEntityModel,
+};
 
-use super::delivery::{endpoint_ack_quiesce_clause, endpoint_quiesce_clause, no_ack};
+use super::delivery::{
+    endpoint_ack_quiesce_clause, endpoint_quiesce_clause, no_ack, rate_limits_in,
+};
 use crate::{
     lexer::{Identifier, Token},
     parser_support::{ParseError, ack_timeout, endpoint_ref, kw, nonzero_u64_value},
@@ -55,12 +59,18 @@ pub(super) fn mode<'src>()
     choice((no_ack().to(EndpointIngestMode::NoAck), acknowledged_mode()))
 }
 
-pub(super) fn intake<'src>()
+/// The body of the endpoint intake of the entity `S`: its endpoint, its delivery mode, and the
+/// quiesce clause that mode can honor. Clients send whenever they choose, so a `RATE LIMIT` after
+/// either mode is refused as its entity declares.
+pub(super) fn intake<'src, S: IngestorEntityModel>()
 -> impl Parser<'src, &'src [Token], EndpointIntake, extra::Err<ParseError<'src>>> + Clone {
     let unacknowledged = no_ack()
         .to(EndpointIngestMode::NoAck)
+        .then_ignore(rate_limits_in::<S>(IngestDeliveryKind::NoAck))
         .then(endpoint_quiesce_clause());
-    let acknowledged = acknowledged_mode().then(endpoint_ack_quiesce_clause());
+    let acknowledged = acknowledged_mode()
+        .then_ignore(rate_limits_in::<S>(IngestDeliveryKind::AckRequest))
+        .then(endpoint_ack_quiesce_clause());
     endpoint_ref()
         .then_ignore(kw(Identifier::Mode))
         .then(choice((unacknowledged, acknowledged)))

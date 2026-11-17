@@ -47,6 +47,37 @@ use crate::{
     runtime::{DecodeRejection, IngestorDescribe as RuntimeIngestorDescribe, TransportPosition},
 };
 
+/// The `source:` lines of an ingestor unit's rate-limit counters, in the families' own names.
+fn format_rate_limit_counter_lines(
+    totals: &crate::runtime::IngestorRateLimitTotals,
+) -> [String; 4] {
+    [
+        format!(
+            "nervix_ingestor_rate_limit_held_total: {}",
+            totals.held_total
+        ),
+        format!(
+            "nervix_ingestor_rate_limit_hold_seconds_total: {}",
+            format_millis_as_seconds(totals.hold_millis_total)
+        ),
+        format!(
+            "nervix_ingestor_rate_limit_rejected_total: {}",
+            totals.rejected_total
+        ),
+        format!(
+            "nervix_ingestor_rate_limit_program_rejections_total: {}",
+            totals.program_rejections_total
+        ),
+    ]
+}
+
+/// Milliseconds as seconds with their three decimals, as a seconds counter reads.
+fn format_millis_as_seconds(millis: u64) -> String {
+    let seconds = millis / 1000;
+    let fraction = millis % 1000;
+    format!("{seconds}.{fraction:03}")
+}
+
 pub(in crate::application) fn runtime_ingestor_describe_to_envelope(
     summary: RuntimeIngestorDescribe,
     metrics: Vec<String>,
@@ -86,6 +117,14 @@ pub(in crate::application) fn runtime_ingestor_describe_to_envelope(
                 outstanding_batches: gauges.outstanding_batches,
                 outstanding_bytes: gauges.outstanding_bytes,
                 admitted_batches: gauges.admitted_batches,
+            }
+        }),
+        rate_limit: summary.rate_limit.map(|totals| {
+            nervix_interconnect::IngestorRateLimitDescribeEnvelope {
+                held_total: totals.held_total,
+                hold_millis_total: totals.hold_millis_total,
+                rejected_total: totals.rejected_total,
+                program_rejections_total: totals.program_rejections_total,
             }
         }),
         metrics,
@@ -135,6 +174,14 @@ pub(in crate::application) fn runtime_ingestor_describe_from_envelope(
                     admitted_batches: producers.admitted_batches,
                 }
             }),
+            rate_limit: summary
+                .rate_limit
+                .map(|totals| crate::runtime::IngestorRateLimitTotals {
+                    held_total: totals.held_total,
+                    hold_millis_total: totals.hold_millis_total,
+                    rejected_total: totals.rejected_total,
+                    program_rejections_total: totals.program_rejections_total,
+                }),
         },
         summary.metrics,
     )
@@ -311,7 +358,7 @@ pub(in crate::application) fn format_ingestor_describe_output(
             summary.ready
         ));
     }
-    lines.extend(ingestor.input.entity_presentation().describe_lines());
+    lines.extend(ingestor.input.entity_presentation().describe_lines()?);
     lines.push("batch: none".to_owned());
     let mut flush = Vec::new();
     let mut errors = vec![
@@ -418,6 +465,9 @@ pub(in crate::application) fn format_ingestor_describe_output(
             summary.oversized_payloads_total
         ),
     ]);
+    if let Some(totals) = &summary.rate_limit {
+        lines.extend(format_rate_limit_counter_lines(totals));
+    }
     lines.extend(
         summary
             .source_metrics
@@ -1060,7 +1110,7 @@ pub(in crate::application) fn format_emitter_describe_output(
             .connector
             .entity_presentation()?
             .with_envelope(&emitter.envelope)?
-            .describe_lines(),
+            .describe_lines()?,
     );
     lines.push(match &emitter.batch {
         Some(batch) => format!("batch: {batch}"),
@@ -1787,6 +1837,7 @@ mod tests {
             reconnect_wait_millis: None,
             kafka_domain_offsets: None,
             client_producers: None,
+            rate_limit: None,
         };
         let written = "1KiB"
             .parse()
@@ -1871,6 +1922,7 @@ mod tests {
             SyslogListenerIngestor {
                 client: named("syslog_listener"),
                 mode: SyslogIngestMode::NoAck,
+                rate_limits: nervix_models::RateLimits::NONE,
                 quiesce: IngestQuiesceMode::Suspend,
             }
             .into(),

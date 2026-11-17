@@ -14,11 +14,11 @@
 
 use chumsky::prelude::*;
 use nervix_models::{
-    RedisChannelName, RedisChannelPattern, RedisPubSubIngestMode, RedisPubSubIngestor,
-    RedisPubSubIngestorChange, RedisSubscriptionTarget,
+    IngestDeliveryKind, RedisChannelName, RedisChannelPattern, RedisPubSubIngestMode,
+    RedisPubSubIngestor, RedisPubSubIngestorChange, RedisSubscriptionTarget,
 };
 
-use super::delivery::{no_ack, push_quiesce_clause};
+use super::delivery::{no_ack, push_quiesce_clause, rate_limits_in};
 use crate::{
     lexer::{Identifier, Token},
     parser_support::{ParseError, client_ref, external_name, kw},
@@ -31,6 +31,9 @@ pub(super) fn pubsub_body<'src>()
         .then(subscription())
         .then_ignore(kw(Identifier::Mode))
         .then(no_ack().to(RedisPubSubIngestMode::NoAck))
+        .then_ignore(rate_limits_in::<RedisPubSubIngestor>(
+            IngestDeliveryKind::NoAck,
+        ))
         .then(push_quiesce_clause())
         .map(
             |(((client, subscription), mode), quiesce)| RedisPubSubIngestor {

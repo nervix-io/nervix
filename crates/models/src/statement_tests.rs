@@ -511,6 +511,7 @@ fn client_producer_alter_sets_its_source_and_honors_only_suspension() {
         input: crate::IngestorInput::Client(ClientProducerIngestor {
             schema: named("order"),
             mode: mode.clone(),
+            rate_limits: crate::RateLimits::NONE,
         }),
         timestamp_source: None,
         general_error_policy: GeneralErrorPolicy::Log,
@@ -519,6 +520,7 @@ fn client_producer_alter_sets_its_source_and_honors_only_suspension() {
     let replacement = ClientProducerIngestor {
         schema: named("order_next"),
         mode,
+        rate_limits: crate::RateLimits::NONE,
     };
 
     let mut candidate = base.clone();

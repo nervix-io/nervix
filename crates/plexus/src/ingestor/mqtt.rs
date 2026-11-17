@@ -20,8 +20,9 @@ use nervix_models::{
 };
 
 use super::delivery::{
-    ParallelAck, SequentialAck, ack_parallel, ack_sequential, no_ack, optional_instances,
-    quiesce_buffer_parser, quiesce_drop_parser, quiesce_suspend_parser,
+    NamedDelivery, ParallelAck, SequentialAck, ack_parallel, ack_sequential, no_ack,
+    optional_instances, quiesce_buffer_parser, quiesce_drop_parser, quiesce_suspend_parser,
+    rate_limits_after,
 };
 use crate::{
     lexer::{Identifier, Token, Word},
@@ -75,6 +76,14 @@ impl MqttSubscription {
             requires: declared.requires,
             met: ChoiceRequirement::all_met(declared.requires, &|option| choices.chosen(option)),
         }
+    }
+}
+
+/// An acknowledging subscription's broker keeps what the client has not acknowledged, so the
+/// `MQTT TOPIC` declaration decides by the mode whether a `RATE LIMIT` may follow it.
+impl NamedDelivery for MqttSubscription {
+    fn delivery_kind(&self) -> IngestDeliveryKind {
+        self.mode.acknowledgement().kind()
     }
 }
 
@@ -278,14 +287,17 @@ fn quiesce_clause<'src>()
     with_subscription_context(kw_phrase2(Identifier::On, Identifier::Quiesce)).ignore_then(body)
 }
 
-/// `FROM <client> TOPIC '<filter>' [INSTANCES <n>] SESSION … QOS … MODE … ON QUIESCE …`.
+/// `FROM <client> TOPIC '<filter>' [INSTANCES <n>] SESSION … QOS … MODE … [RATE LIMIT …]
+/// ON QUIESCE …`.
 pub(super) fn topic_body<'src>()
 -> impl Parser<'src, &'src [Token], MqttTopicIngestor, extra::Err<ParseError<'src>>> + Clone {
     client_ref()
         .then_ignore(kw(Identifier::Topic))
         .then(external_name::<MqttTopicFilter>())
         .then(optional_instances::<MqttTopicIngestor>())
-        .then(subscription().then_with_ctx(quiesce_clause()))
+        .then(subscription().then_with_ctx(
+            rate_limits_after::<MqttTopicIngestor, MqttSubscription>().then(quiesce_clause()),
+        ))
         .map(
             |(
                 ((client, topic), instances),
@@ -294,7 +306,7 @@ pub(super) fn topic_body<'src>()
                         choices: MqttSubscriptionChoices { session, qos },
                         mode,
                     },
-                    quiesce,
+                    (rate_limits, quiesce),
                 ),
             )| MqttTopicIngestor {
                 client,
@@ -303,6 +315,7 @@ pub(super) fn topic_body<'src>()
                 session,
                 qos,
                 mode,
+                rate_limits,
                 quiesce,
             },
         )

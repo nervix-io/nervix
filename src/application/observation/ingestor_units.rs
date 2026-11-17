@@ -79,6 +79,7 @@ impl SessionServiceImpl {
                 reconnect_wait_millis: None,
                 kafka_domain_offsets: None,
                 client_producers: None,
+                rate_limit: None,
             };
             let metrics = self
                 .inner

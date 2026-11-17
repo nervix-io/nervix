@@ -52,6 +52,8 @@ pub struct ClientProducerIngestor {
     /// The internal schema every submitted batch matches exactly, before route construction.
     pub schema: SchemaName,
     pub mode: ClientIngestMode,
+    /// The `RATE LIMIT` clauses the body writes after its delivery mode, in order.
+    pub rate_limits: crate::RateLimits,
 }
 
 /// How many submitted batches may await their acknowledgement across every producer of one
@@ -147,6 +149,8 @@ impl IngestorDeclaration for ClientProducerIngestor {
         acknowledgement_confirmation: AcknowledgementConfirmation::None,
         delivery: &[DeclaredDelivery::ACK_SEQUENTIAL, CLIENT_ACK_PARALLEL],
         quiesce: &[DeclaredQuiesce::SUSPEND],
+        // A producer's batches wait in its queue, and it submits no more than its credit.
+        rate_limit: crate::RateLimitDeclaration::Held,
         locator: None,
         options: &[],
         bounds: PRODUCER_BOUNDS,
@@ -265,6 +269,10 @@ impl AlteredIngestorEntity for ClientProducerIngestor {
     /// A client ingestor names the schema its producers write, and reads through no client.
     fn client_of_mut(_input: &mut IngestorInput) -> Option<&mut ClientName> {
         None
+    }
+
+    fn rate_limits_of_mut(input: &mut IngestorInput) -> Option<&mut crate::RateLimits> {
+        Some(&mut Self::entity_of_mut(input).rate_limits)
     }
 }
 

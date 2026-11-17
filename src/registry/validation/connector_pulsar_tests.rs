@@ -47,6 +47,7 @@ fn a_pulsar_subscription_type_that_reads_through_one_consumer_refuses_more_insta
             },
             instances: nervix_models::IngestorInstances::Count(instances),
             mode: PulsarIngestMode::NoAck,
+            rate_limits: nervix_models::RateLimits::NONE,
             quiesce: IngestQuiesceMode::Suspend,
         }));
         let validated = validate_ingestor_source(&domain, &identifier, &ingestor);

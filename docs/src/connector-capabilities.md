@@ -24,6 +24,7 @@ Client CONFIG keys below come from the same declaration used by validation, comp
 | Instancing | single |  |
 | External partitions | No enumerable external partition set. |  |
 | Quiesce (complete bodies after ON QUIESCE) | SUSPEND |  |
+| RATE LIMIT | Accepted in `ACK SEQUENTIAL`, `ACK PARALLEL`. |  |
 | Metadata | metadata.user: STRING OPTIONAL |  |
 | Payload facts | payload.bytes: U64<br>payload.rows: U64 |  |
 | Every live node | no; scheduled owner |  |
@@ -48,6 +49,7 @@ Client CONFIG keys below come from the same declaration used by validation, comp
 | Instancing | single |  |
 | External partitions | No enumerable external partition set. |  |
 | Quiesce (complete bodies after ON QUIESCE) | SUSPEND<br>BUFFER MAX SIZE 64MiB ON OVERFLOW DROP OLDEST |  |
+| RATE LIMIT | Refused: the entity reads on its `EVERY` cadence. |  |
 | Metadata | metadata.status: U16 OPTIONAL<br>metadata.polled_at: DATETIME OPTIONAL |  |
 | Payload facts | payload.bytes: U64 |  |
 | Every live node | no; scheduled owner |  |
@@ -72,6 +74,7 @@ Client CONFIG keys below come from the same declaration used by validation, comp
 | Instancing | single |  |
 | External partitions | No enumerable external partition set. |  |
 | Quiesce (complete bodies after ON QUIESCE) | REJECT RETRY AFTER 5s<br>BUFFER MAX SIZE 64MiB |  |
+| RATE LIMIT | Refused in every mode: the entity cannot hold its source back. |  |
 | Metadata | metadata.method: STRING OPTIONAL<br>metadata.path: STRING OPTIONAL<br>metadata.query: STRING OPTIONAL<br>metadata.remote_addr: STRING OPTIONAL<br>metadata.host: STRING OPTIONAL<br>metadata.remote_ip: STRING OPTIONAL |  |
 | Payload facts | payload.bytes: U64 |  |
 | Every live node | yes |  |
@@ -96,6 +99,7 @@ Client CONFIG keys below come from the same declaration used by validation, comp
 | Instancing | per_partition |  |
 | External partitions | Enumerable; native coordinate from metadata.partition |  |
 | Quiesce (complete bodies after ON QUIESCE) | SUSPEND |  |
+| RATE LIMIT | Accepted in `NO ACK`, `ACK SEQUENTIAL`, `ACK PARALLEL`. |  |
 | Metadata | metadata.topic: STRING OPTIONAL<br>metadata.partition: I32 OPTIONAL<br>metadata.offset: I64 OPTIONAL<br>metadata.key: BYTES OPTIONAL<br>metadata.timestamp: DATETIME OPTIONAL<br>metadata.timestamp_type: STRING OPTIONAL<br>metadata.tombstone: BOOL OPTIONAL |  |
 | Payload facts | payload.bytes: U64 |  |
 | Every live node | no; scheduled owner |  |
@@ -120,6 +124,7 @@ Client CONFIG keys below come from the same declaration used by validation, comp
 | Instancing | per_partition |  |
 | External partitions | Enumerable; native coordinate from metadata.partition |  |
 | Quiesce (complete bodies after ON QUIESCE) | SUSPEND |  |
+| RATE LIMIT | Accepted in `NO ACK`, `ACK SEQUENTIAL`, `ACK PARALLEL`. |  |
 | Metadata | metadata.topic: STRING OPTIONAL<br>metadata.message_id: STRING OPTIONAL<br>metadata.publish_time: DATETIME OPTIONAL<br>metadata.event_time: DATETIME OPTIONAL<br>metadata.key: STRING OPTIONAL<br>metadata.ordering_key: BYTES OPTIONAL<br>metadata.producer_name: STRING OPTIONAL<br>metadata.sequence_id: I64 OPTIONAL<br>metadata.redelivery_count: I64 OPTIONAL<br>metadata.partition: I32 OPTIONAL |  |
 | Payload facts | payload.bytes: U64 |  |
 | Every live node | no; scheduled owner |  |
@@ -144,6 +149,7 @@ Client CONFIG keys below come from the same declaration used by validation, comp
 | Instancing | per_partition |  |
 | External partitions | No enumerable external partition set. |  |
 | Quiesce (complete bodies after ON QUIESCE) | SUSPEND (requires SESSION PERSISTENT and QOS 1 or 2)<br>BUFFER MAX SIZE 64MiB ON OVERFLOW DROP OLDEST<br>DROP |  |
+| RATE LIMIT | Accepted in `ACK SEQUENTIAL`, `ACK PARALLEL`; refused in `NO ACK`. |  |
 | Metadata | metadata.topic: STRING OPTIONAL<br>metadata.retain: BOOL OPTIONAL<br>metadata.qos: U8 OPTIONAL<br>metadata.duplicate: BOOL OPTIONAL<br>metadata.content_type: STRING OPTIONAL<br>metadata.response_topic: STRING OPTIONAL<br>metadata.correlation_data: BYTES OPTIONAL<br>metadata.message_expiry: U32 OPTIONAL |  |
 | Payload facts | payload.bytes: U64 |  |
 | Every live node | no; scheduled owner |  |
@@ -168,6 +174,7 @@ Client CONFIG keys below come from the same declaration used by validation, comp
 | Instancing | per_partition |  |
 | External partitions | No enumerable external partition set. |  |
 | Quiesce (complete bodies after ON QUIESCE) | BUFFER MAX SIZE 64MiB ON OVERFLOW DROP OLDEST<br>DROP |  |
+| RATE LIMIT | Refused in every mode: the entity cannot hold its source back. |  |
 | Metadata | metadata.subject: STRING OPTIONAL<br>metadata.reply: STRING OPTIONAL |  |
 | Payload facts | payload.bytes: U64 |  |
 | Every live node | no; scheduled owner |  |
@@ -192,6 +199,7 @@ Client CONFIG keys below come from the same declaration used by validation, comp
 | Instancing | single |  |
 | External partitions | No enumerable external partition set. |  |
 | Quiesce (complete bodies after ON QUIESCE) | SUSPEND<br>BUFFER MAX SIZE 64MiB ON OVERFLOW DROP OLDEST<br>DROP |  |
+| RATE LIMIT | Accepted in `ACK SEQUENTIAL`, `ACK PARALLEL`. |  |
 | Metadata | metadata.subject: STRING OPTIONAL<br>metadata.reply: STRING OPTIONAL<br>metadata.stream: STRING OPTIONAL<br>metadata.consumer: STRING OPTIONAL<br>metadata.sequence: U64 OPTIONAL<br>metadata.timestamp: DATETIME OPTIONAL<br>metadata.delivered: U64 OPTIONAL |  |
 | Payload facts | payload.bytes: U64 |  |
 | Every live node | no; scheduled owner |  |
@@ -216,6 +224,7 @@ Client CONFIG keys below come from the same declaration used by validation, comp
 | Instancing | per_partition |  |
 | External partitions | No enumerable external partition set. |  |
 | Quiesce (complete bodies after ON QUIESCE) | SUSPEND |  |
+| RATE LIMIT | Accepted in `ACK SEQUENTIAL`, `ACK PARALLEL`; refused in `NO ACK`. |  |
 | Metadata | metadata.exchange: STRING OPTIONAL<br>metadata.routing_key: STRING OPTIONAL<br>metadata.delivery_tag: U64 OPTIONAL<br>metadata.redelivered: BOOL OPTIONAL<br>metadata.content_type: STRING OPTIONAL<br>metadata.content_encoding: STRING OPTIONAL<br>metadata.message_id: STRING OPTIONAL<br>metadata.correlation_id: STRING OPTIONAL<br>metadata.reply_to: STRING OPTIONAL<br>metadata.type: STRING OPTIONAL<br>metadata.app_id: STRING OPTIONAL<br>metadata.user_id: STRING OPTIONAL<br>metadata.priority: U8 OPTIONAL<br>metadata.expiration: STRING OPTIONAL<br>metadata.timestamp: DATETIME OPTIONAL |  |
 | Payload facts | payload.bytes: U64 |  |
 | Every live node | no; scheduled owner |  |
@@ -240,6 +249,7 @@ Client CONFIG keys below come from the same declaration used by validation, comp
 | Instancing | single |  |
 | External partitions | No enumerable external partition set. |  |
 | Quiesce (complete bodies after ON QUIESCE) | BUFFER MAX SIZE 64MiB ON OVERFLOW DROP OLDEST<br>DROP |  |
+| RATE LIMIT | Refused in every mode: the entity cannot hold its source back. |  |
 | Metadata | metadata.channel: STRING OPTIONAL<br>metadata.pattern: STRING OPTIONAL |  |
 | Payload facts | payload.bytes: U64 |  |
 | Every live node | no; scheduled owner |  |
@@ -264,6 +274,7 @@ Client CONFIG keys below come from the same declaration used by validation, comp
 | Instancing | single |  |
 | External partitions | No enumerable external partition set. |  |
 | Quiesce (complete bodies after ON QUIESCE) | SUSPEND<br>BUFFER MAX SIZE 64MiB ON OVERFLOW DROP OLDEST |  |
+| RATE LIMIT | Refused: the entity reads on its `EVERY` cadence. |  |
 | Metadata | metadata.query: STRING OPTIONAL<br>metadata.evaluated_at: DATETIME OPTIONAL |  |
 | Payload facts | payload.bytes: U64 |  |
 | Every live node | no; scheduled owner |  |
@@ -288,6 +299,7 @@ Client CONFIG keys below come from the same declaration used by validation, comp
 | Instancing | single |  |
 | External partitions | No enumerable external partition set. |  |
 | Quiesce (complete bodies after ON QUIESCE) | SUSPEND<br>BUFFER MAX SIZE 64MiB ON OVERFLOW DROP OLDEST<br>DROP |  |
+| RATE LIMIT | Accepted in `NO ACK`. |  |
 | Metadata | Not offered: The driver exposes no peer identity on receive. Only frame 0 is ingested, with no broker position or typed transport metadata namespace. |  |
 | Payload facts | payload.bytes: U64 |  |
 | Every live node | no; scheduled owner |  |
@@ -312,6 +324,7 @@ Client CONFIG keys below come from the same declaration used by validation, comp
 | Instancing | per_partition |  |
 | External partitions | No enumerable external partition set. |  |
 | Quiesce (complete bodies after ON QUIESCE) | SUSPEND |  |
+| RATE LIMIT | Accepted in `ACK SEQUENTIAL`, `ACK PARALLEL`. |  |
 | Metadata | metadata.message_id: STRING OPTIONAL<br>metadata.sent_at: DATETIME OPTIONAL<br>metadata.receive_count: U32 OPTIONAL<br>metadata.first_received_at: DATETIME OPTIONAL<br>metadata.group_id: STRING OPTIONAL<br>metadata.deduplication_id: STRING OPTIONAL<br>metadata.sequence_number: STRING OPTIONAL<br>metadata.sender_id: STRING OPTIONAL |  |
 | Payload facts | payload.bytes: U64 |  |
 | Every live node | no; scheduled owner |  |
@@ -336,6 +349,7 @@ Client CONFIG keys below come from the same declaration used by validation, comp
 | Instancing | single |  |
 | External partitions | No enumerable external partition set. |  |
 | Quiesce (complete bodies after ON QUIESCE) | BUFFER MAX SIZE 64MiB ON OVERFLOW DROP OLDEST<br>DROP |  |
+| RATE LIMIT | Refused in every mode: the entity cannot hold its source back. |  |
 | Metadata | metadata.frame_type: STRING OPTIONAL |  |
 | Payload facts | payload.bytes: U64 |  |
 | Every live node | no; scheduled owner |  |
@@ -360,6 +374,7 @@ Client CONFIG keys below come from the same declaration used by validation, comp
 | Instancing | single |  |
 | External partitions | No enumerable external partition set. |  |
 | Quiesce (complete bodies after ON QUIESCE) | REJECT RETRY AFTER 5s<br>BUFFER MAX SIZE 64MiB |  |
+| RATE LIMIT | Refused in every mode: the entity cannot hold its source back. |  |
 | Metadata | metadata.frame_type: STRING OPTIONAL<br>metadata.remote_addr: STRING OPTIONAL<br>metadata.path: STRING OPTIONAL<br>metadata.remote_ip: STRING OPTIONAL |  |
 | Payload facts | payload.bytes: U64 |  |
 | Every live node | yes |  |
@@ -384,6 +399,7 @@ Client CONFIG keys below come from the same declaration used by validation, comp
 | Instancing | single |  |
 | External partitions | No enumerable external partition set. |  |
 | Quiesce (complete bodies after ON QUIESCE) | SUSPEND<br>BUFFER MAX SIZE 64MiB ON OVERFLOW DROP OLDEST<br>DROP |  |
+| RATE LIMIT | Accepted in `NO ACK`. |  |
 | Metadata | metadata.peer_addr: STRING OPTIONAL<br>metadata.transport: STRING OPTIONAL<br>metadata.tls_peer: STRING OPTIONAL<br>metadata.remote_ip: STRING OPTIONAL |  |
 | Payload facts | payload.bytes: U64 |  |
 | Every live node | yes |  |

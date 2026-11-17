@@ -12,26 +12,34 @@
 )]
 
 use chumsky::prelude::*;
-use nervix_models::{ZeroMqIngestMode, ZeroMqPullIngestor, ZeroMqPullIngestorChange};
+use nervix_models::{
+    IngestDeliveryKind, ZeroMqIngestMode, ZeroMqPullIngestor, ZeroMqPullIngestorChange,
+};
 
-use super::delivery::{flexible_quiesce_clause, no_ack};
+use super::delivery::{flexible_quiesce_clause, no_ack, rate_limits_in};
 use crate::{
     lexer::{Identifier, Token},
     parser_support::{ParseError, client_ref, kw},
 };
 
-/// `FROM <client> MODE NO ACK ON QUIESCE SUSPEND|BUFFER …|DROP`.
+/// `FROM <client> MODE NO ACK [RATE LIMIT …] ON QUIESCE SUSPEND|BUFFER …|DROP`.
 pub(super) fn pull_body<'src>()
 -> impl Parser<'src, &'src [Token], ZeroMqPullIngestor, extra::Err<ParseError<'src>>> + Clone {
     client_ref()
         .then_ignore(kw(Identifier::Mode))
         .then(no_ack().to(ZeroMqIngestMode::NoAck))
+        .then(rate_limits_in::<ZeroMqPullIngestor>(
+            IngestDeliveryKind::NoAck,
+        ))
         .then(flexible_quiesce_clause())
-        .map(|((client, mode), quiesce)| ZeroMqPullIngestor {
-            client,
-            mode,
-            quiesce,
-        })
+        .map(
+            |(((client, mode), rate_limits), quiesce)| ZeroMqPullIngestor {
+                client,
+                mode,
+                rate_limits,
+                quiesce,
+            },
+        )
         .boxed()
 }
 

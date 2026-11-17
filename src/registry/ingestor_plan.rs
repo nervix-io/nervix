@@ -87,6 +87,9 @@ pub(crate) struct IngestorSpec {
     pub(crate) routes: Vec<PlannedEntryRoute>,
     pub(crate) timestamp_source: Option<IngestTimestampSource>,
     pub(crate) filter_where: Option<LoweredFilter>,
+    /// The allowances of its `RATE LIMIT` clauses and the charge a payload pays in each, in the
+    /// order its body writes them; empty for an ingestor that writes none.
+    pub(crate) rate_limit: crate::registry::IngestorRateLimitPlan,
     pub(crate) declared_input: DeclaredIngestorInput,
     /// The ingestor's node-wide `ON GENERAL ERROR` policy, which also reports the payloads its
     /// codec refuses.
@@ -632,6 +635,10 @@ impl IngestorStartPlan {
             )?),
             None => None,
         };
+        let rate_limit = crate::registry::IngestorRateLimitPlan::decide(&ingestor.input)
+            .change_context_lazy(|| EntrypointPlanError::InvalidRateLimit {
+                ingestor: ingestor.name.clone(),
+            })?;
         let ingestor = IngestorSpec {
             domain: domain.clone(),
             name: ingestor.name.clone(),
@@ -639,6 +646,7 @@ impl IngestorStartPlan {
             routes,
             timestamp_source: ingestor.timestamp_source.clone(),
             filter_where,
+            rate_limit,
             declared_input: DeclaredIngestorInput {
                 entity: ingestor.input.entity_kind(),
                 quiesce: ingestor.input.quiesce().clone(),
@@ -1431,6 +1439,7 @@ mod tests {
                 },
                 instances: nervix_models::IngestorInstances::Count(nonzero!(1u64)),
                 mode: KafkaIngestMode::NoAck,
+                rate_limits: nervix_models::RateLimits::NONE,
                 quiesce: IngestQuiesceMode::Suspend,
             })),
             source_model: Model::ClientKafka(CreateClientKafka {
@@ -1464,6 +1473,7 @@ mod tests {
                 subscription: pulsar_subscription(),
                 instances: nervix_models::IngestorInstances::Count(nonzero!(1u64)),
                 mode: PulsarIngestMode::NoAck,
+                rate_limits: nervix_models::RateLimits::NONE,
                 quiesce: IngestQuiesceMode::Suspend,
             })),
             source_model: Model::ClientPulsar(CreateClientPulsar {
@@ -1496,6 +1506,7 @@ mod tests {
                 session: MqttSession::Clean,
                 qos: MqttQos::Qos0,
                 mode: MqttIngestMode::NoAck,
+                rate_limits: nervix_models::RateLimits::NONE,
                 quiesce: IngestQuiesceMode::Drop,
             })),
             source_model: Model::ClientMqtt(CreateClientMqtt {
@@ -1562,6 +1573,7 @@ mod tests {
                 queue: named("events"),
                 instances: nervix_models::IngestorInstances::Count(nonzero!(1u64)),
                 mode: rabbitmq_mode(),
+                rate_limits: nervix_models::RateLimits::NONE,
                 quiesce: IngestQuiesceMode::Suspend,
             })),
             source_model: Model::ClientRabbitMq(CreateClientRabbitMq {
@@ -1643,6 +1655,7 @@ mod tests {
             source: IngestorEntity::ZeroMq(ZeroMqIngestor::Pull(ZeroMqPullIngestor {
                 client: named("upstream"),
                 mode: nervix_models::ZeroMqIngestMode::NoAck,
+                rate_limits: nervix_models::RateLimits::NONE,
                 quiesce: IngestQuiesceMode::Suspend,
             })),
             source_model: Model::ClientZeroMq(CreateClientZeroMq {
@@ -1675,6 +1688,7 @@ mod tests {
                 queue: named("events"),
                 instances: nervix_models::IngestorInstances::Count(nonzero!(1u64)),
                 mode: sqs_mode(),
+                rate_limits: nervix_models::RateLimits::NONE,
                 quiesce: IngestQuiesceMode::Suspend,
             })),
             source_model: Model::ClientSqs(CreateClientSqs {
@@ -1755,6 +1769,7 @@ mod tests {
             source: IngestorEntity::Syslog(SyslogIngestor::Listener(SyslogListenerIngestor {
                 client: named("upstream"),
                 mode: nervix_models::SyslogIngestMode::NoAck,
+                rate_limits: nervix_models::RateLimits::NONE,
                 quiesce: IngestQuiesceMode::Suspend,
             })),
             source_model: Model::ClientSyslog(CreateClientSyslog {
@@ -1950,6 +1965,7 @@ mod tests {
             offset_mode: KafkaOffsetMode::Domain,
             instances: nervix_models::IngestorInstances::Count(nonzero!(2u64)),
             mode: KafkaIngestMode::NoAck,
+            rate_limits: nervix_models::RateLimits::NONE,
             quiesce: IngestQuiesceMode::Suspend,
         }));
         let domain = named::<DomainName>("sales");
@@ -2162,6 +2178,7 @@ mod tests {
                         max_backoff: max_backoff.to_string(),
                     },
                 },
+                rate_limits: nervix_models::RateLimits::NONE,
             }),
             timestamp_source: None,
             general_error_policy: GeneralErrorPolicy::Log,

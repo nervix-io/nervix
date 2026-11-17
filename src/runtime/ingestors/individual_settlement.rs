@@ -20,6 +20,9 @@ enum DeliveryOutcome {
         acknowledgement: IngestorBatchAcknowledgement,
     },
     IntakeRefused,
+    /// The ingestor stopped before the host took the delivery in, while an earlier delivery of the
+    /// batch waited for its `RATE LIMIT` allowance.
+    Stopped,
 }
 
 struct SettledDelivery {
@@ -60,6 +63,7 @@ where
                 .collect(),
             waits: FuturesUnordered::new(),
         };
+        let deliveries = messages.len();
         for (index, message) in messages.into_iter().enumerate() {
             nervix_primitives::task::consume_budget().await;
             let intake = IngestorIntakeMessage {
@@ -67,6 +71,19 @@ where
                 metadata: message.metadata(),
             };
             match host.intake_acknowledged(vec![intake]).await {
+                Err(error) if error.current_context().stopped() => {
+                    // This delivery and every one after it stay unconfirmed, so their transport
+                    // presents them again.
+                    for stopped in index..deliveries {
+                        batch.waits.push(Box::pin(async move {
+                            SettledDelivery {
+                                index: stopped,
+                                outcome: DeliveryOutcome::Stopped,
+                            }
+                        }));
+                    }
+                    break;
+                }
                 Ok(mut acknowledgement) => {
                     batch.waits.push(Box::pin(async move {
                         let outcome = acknowledgement.wait(timeout).await;
@@ -135,6 +152,13 @@ where
                         drop(acknowledgement);
                     }
                     DeliveryOutcome::IntakeRefused => {}
+                    DeliveryOutcome::Stopped => {
+                        let outstanding = positions.len().checked_add(self.waits.len()).assured(
+                            "retained positions and pending waits partition the original batch",
+                        );
+                        host.record_unconfirmed_stop(outstanding);
+                        return BatchDisposition::Shutdown;
+                    }
                 }
                 continue;
             }
@@ -175,6 +199,13 @@ where
                 }
                 DeliveryOutcome::IntakeRefused => {
                     reject_batch(connector, host, settlement, vec![position]).await
+                }
+                DeliveryOutcome::Stopped => {
+                    let outstanding = self.waits.len().checked_add(1).assured(
+                        "the completed wait plus pending waits fit the original batch length",
+                    );
+                    host.record_unconfirmed_stop(outstanding);
+                    return BatchDisposition::Shutdown;
                 }
             };
             match disposition {

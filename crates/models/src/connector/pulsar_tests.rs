@@ -199,6 +199,7 @@ fn only_the_types_that_read_through_one_consumer_refuse_more_instances(
         },
         instances: crate::IngestorInstances::Count(NonZeroU64::MIN),
         mode: PulsarIngestMode::NoAck,
+        rate_limits: crate::RateLimits::NONE,
         quiesce: IngestQuiesceMode::Suspend,
     };
     assert!(ingestor.instances_fit_subscription());

@@ -178,6 +178,20 @@ macro_rules! connector_ingestors {
                 }
             }
 
+            fn rate_limits(&self) -> &$crate::RateLimits {
+                match self {
+                    $(Self::$Variant(entity) => $crate::IngestorEntityBody::rate_limits(entity),)+
+                }
+            }
+
+            fn rate_limits_mut(&mut self) -> Option<&mut $crate::RateLimits> {
+                match self {
+                    $(Self::$Variant(entity) => {
+                        $crate::IngestorEntityBody::rate_limits_mut(entity)
+                    })+
+                }
+            }
+
             fn acknowledgement(&self) -> $crate::IngestAcknowledgement<'_> {
                 match self {
                     $(Self::$Variant(entity) => $crate::IngestorEntityBody::acknowledgement(entity),)+
@@ -315,6 +329,12 @@ macro_rules! connector_ingestors {
 
                 fn client_of_mut(input: &mut $crate::IngestorInput) -> Option<&mut $crate::ClientName> {
                     $crate::IngestorEntityBody::client_mut(Self::entity_of_mut(input))
+                }
+
+                fn rate_limits_of_mut(
+                    input: &mut $crate::IngestorInput,
+                ) -> Option<&mut $crate::RateLimits> {
+                    $crate::IngestorEntityBody::rate_limits_mut(Self::entity_of_mut(input))
                 }
             }
         )+
