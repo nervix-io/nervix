@@ -38,8 +38,11 @@ pub(super) struct RetiredBinding {
 }
 
 impl HeldActivation {
+    /// Whether the activation occupies a slot at `at`: an active one until its ephemeral expiry,
+    /// which releases its capacity at that instant (specification §7.4, §7.6), and a released or
+    /// transferred one until its retained capacity ends.
     pub(super) fn holds_capacity(&self, at: DateTime<Utc>) -> bool {
-        self.decision.status == DecisionStatus::Active
+        (self.decision.status == DecisionStatus::Active && !self.expired(at))
             || self.capacity_until.is_some_and(|until| until > at)
     }
 }

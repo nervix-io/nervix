@@ -124,6 +124,8 @@ pub enum AppError {
     InvalidMembershipSettings,
     #[error("invalid capacity settings")]
     InvalidCapacitySettings,
+    #[error("invalid --node-tags")]
+    InvalidNodeTags,
     #[error("invalid database capacity settings")]
     InvalidDatabaseSettings,
     #[error("invalid DNS settings")]

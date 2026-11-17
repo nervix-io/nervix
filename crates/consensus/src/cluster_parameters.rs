@@ -37,7 +37,7 @@ fn inputs(state: &StateMachineData) -> Option<ClusterParameterPlanningInputs> {
                 .membership()
                 .nodes()
                 .filter_map(|(node, _)| {
-                    let record = state.node_capabilities.get(node)?;
+                    let record = &state.node_records.get(node)?.record.claim;
                     let admitted = state
                         .node_admission_fences
                         .get(node)
@@ -187,6 +187,19 @@ mod tests {
         state
     }
 
+    fn committed_capability(
+        claim: nervix_models::NodeCapabilityRecord,
+    ) -> nervix_models::CommittedNodeRecord {
+        let mut arbitrary =
+            nervix_arbitrary::Arbitrary::new(&[], nervix_arbitrary::Domain::Vocabulary);
+        let mut record = arbitrary.node_record();
+        record.claim = claim;
+        nervix_models::CommittedNodeRecord {
+            revision: 1,
+            record,
+        }
+    }
+
     #[test]
     fn deadline_validation_captures_only_admitted_capability_incarnations() {
         let mut state = seeded();
@@ -199,11 +212,13 @@ mod tests {
         record.identity = nervix_models::ClusterNodeIdentity::new(current.clone(), incarnation);
         record.capabilities.shutdown = nervix_models::ShutdownSettings::default().capabilities();
         state
-            .node_capabilities
-            .insert(current.clone(), record.clone());
+            .node_records
+            .insert(current.clone(), committed_capability(record.clone()));
         record.identity = nervix_models::ClusterNodeIdentity::new(departed.clone(), incarnation);
         record.capabilities.shutdown.drain_timeout = Duration::from_secs(1);
-        state.node_capabilities.insert(departed.clone(), record);
+        state
+            .node_records
+            .insert(departed.clone(), committed_capability(record));
         let nodes = BTreeMap::from([(current.clone(), BasicNode::new("localhost:9000"))]);
         let membership = openraft::Membership::new(vec![nodes.keys().cloned().collect()], nodes)
             .assured("one admitted member");
@@ -224,7 +239,7 @@ mod tests {
                 .capabilities
                 .is_empty()
         );
-        assert_eq!(state.node_capabilities.len(), 2, "history remains retained");
+        assert_eq!(state.node_records.len(), 2, "history remains retained");
     }
 
     fn admit(state: &mut StateMachineData, name: &str, seconds: u64) -> CommandExecutionReference {

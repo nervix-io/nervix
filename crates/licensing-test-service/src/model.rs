@@ -97,6 +97,16 @@ struct HeldActivation {
     capacity_until: Option<DateTime<Utc>>,
 }
 
+impl HeldActivation {
+    /// An ephemeral activation is expired from its fixed expiry on (specification §7.6): it
+    /// releases its capacity at that instant and a refresh answers with status `expired`.
+    fn expired(&self, now: DateTime<Utc>) -> bool {
+        self.binding
+            .ephemeral_expires_at
+            .is_some_and(|expires_at| now >= expires_at)
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 struct RequestIdentity {
     cluster: Uuid,
@@ -237,6 +247,19 @@ impl Model {
     }
     pub fn activation_count(&self) -> usize {
         self.activations.len()
+    }
+    /// Whether the held activation is expired at the service's current time.
+    pub fn activation_expired(&self, activation_id: Uuid) -> Option<bool> {
+        self.activations
+            .get(&activation_id)
+            .map(|held| held.expired(self.now))
+    }
+    /// The activations of `kind` that still occupy capacity at the service's current time.
+    pub fn occupied_activations(&self, kind: ActivationKind) -> usize {
+        self.activations
+            .values()
+            .filter(|held| held.binding.kind == kind && held.holds_capacity(self.now))
+            .count()
     }
 
     pub(crate) fn answer(&mut self, path: &str, bytes: &[u8]) -> (Response, Option<Fault>) {
@@ -444,10 +467,12 @@ impl Model {
         if license_key != &self.license_key {
             return Err(ProblemKind::LicenseKeyInvalid);
         }
-        // This scenario inventory has a fixed MAX_ENTRIES bound; it is never a product lookup.
+        // This scenario inventory has a fixed MAX_ENTRIES bound; it is never a product lookup. An
+        // expired activation no longer binds its cluster, which may activate again.
         if let Some(activation) = self.activations.values().find(|activation| {
             activation.binding.cluster_uid == common.cluster_uid
                 && activation.decision.status == DecisionStatus::Active
+                && !activation.expired(self.now)
         }) {
             return Err(ProblemKind::AlreadyActivated {
                 activation_id: activation.binding.activation_id,
@@ -474,13 +499,8 @@ impl Model {
             .get(quota_name)
             .and_then(ConditionValue::known)
             .assured("validated plan has activation quota");
-        let count = u64::try_from(
-            self.activations
-                .values()
-                .filter(|held| held.binding.kind == *kind && held.holds_capacity(self.now))
-                .count(),
-        )
-        .assured("fixture activation bound fits u64");
+        let count = u64::try_from(self.occupied_activations(*kind))
+            .assured("fixture activation bound fits u64");
         if !quota.admits(
             count
                 .checked_add(1)
@@ -503,7 +523,7 @@ impl Model {
                 ActivationKind::Ephemeral => Some(self.at(EPHEMERAL_LIFETIME)),
             },
         };
-        let decision = self.decision(binding.clone(), common.request_id, 1);
+        let decision = self.decision(binding.clone(), common.request_id, 1, None);
         self.activations.insert(
             activation_id,
             HeldActivation {
@@ -541,7 +561,8 @@ impl Model {
             .decision_revision
             .checked_add(1)
             .assured("fixture revisions are bounded");
-        let mut decision = self.decision(binding, common.request_id, revision);
+        let previous = held.decision.conditions.clone();
+        let mut decision = self.decision(binding, common.request_id, revision, Some(&previous));
         if let Some(usage) = self.transition_usage {
             use nervix_licensing_protocol::impact::*;
             decision.transitions = held.decision.transitions.clone();
@@ -669,7 +690,37 @@ impl Model {
         timing::RefreshTiming::bounded_at(self.now, &self.plan.operating, condition)
     }
 
-    fn decision(&self, binding: Activation, request: Uuid, revision: u64) -> Decision {
+    /// The conditions revision a decision carries. A plan change moves every activation to the
+    /// plan's revision. Any other change of what an activation resolves to, such as the empty
+    /// usage of an expired ephemeral activation, takes the activation's next revision, as the
+    /// licensing service does, and unchanged conditions keep the activation's revision.
+    fn conditions_revision(
+        &self,
+        previous: Option<&DecisionConditions>,
+        resolved: &Conditions,
+    ) -> u64 {
+        let Some(previous) = previous else {
+            return self.conditions_revision;
+        };
+        if self.conditions_revision > previous.conditions_revision {
+            return self.conditions_revision;
+        }
+        if previous.usage == resolved.usage && previous.operating == resolved.operating {
+            return previous.conditions_revision;
+        }
+        previous
+            .conditions_revision
+            .checked_add(1)
+            .assured("a bounded scenario cannot exhaust revisions")
+    }
+
+    fn decision(
+        &self,
+        binding: Activation,
+        request: Uuid,
+        revision: u64,
+        previous: Option<&DecisionConditions>,
+    ) -> Decision {
         let term_starts_at = self
             .now
             .checked_sub_signed(TimeDelta::days(1))
@@ -722,7 +773,7 @@ impl Model {
             },
             status: resolved.status(),
             conditions: DecisionConditions {
-                conditions_revision: self.conditions_revision,
+                conditions_revision: self.conditions_revision(previous, resolved.values()),
                 usage: resolved.values().usage.clone(),
                 operating: resolved.values().operating.clone(),
             },

@@ -42,7 +42,7 @@ const SETTINGS_HEADINGS: [&str; 18] = [
 ];
 
 /// Every setting the settings groups declare, by the name its definition gives it.
-const SETTING_NAMES: [&str; 174] = [
+const SETTING_NAMES: [&str; 175] = [
     "runtime-delivery-capacity",
     "runtime-ingest-group-max-rows",
     "runtime-ingest-group-idle-flush",
@@ -158,6 +158,7 @@ const SETTING_NAMES: [&str; 174] = [
     "interconnect-bulk-receive-window",
     "cpu-count",
     "memory-limit",
+    "node-detection-timeout",
     "execution-control-cpu-workers",
     "execution-control-cpu-pending-jobs",
     "execution-credentials-cpu-workers",

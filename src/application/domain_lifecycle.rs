@@ -19,15 +19,15 @@
 use std::time::Duration;
 
 use error_stack::{Report, ResultExt as _};
-use nervix_consensus::{ConsensusError, DomainMutationLease};
+use nervix_consensus::{ConsensusConflict, ConsensusError, DomainMutationLease};
 use nervix_interconnect::{
     DomainDrainStatusEnvelope, RemoteOperationFailure,
     backup::{BackupDrainAction, BackupDrainStatus, BackupDrainStatusRequest},
 };
 use nervix_models::{
     ClusterNodeName, CoordinationIdentity, CreateDomain, CreateStatement, DomainClockState,
-    DomainName, DomainStartPoint, DomainState, DomainStatus, QuiesceLevel, StartDomain, StopDomain,
-    TimestampError,
+    DomainName, DomainStartPoint, DomainState, DomainStatus, DomainStopCause, QuiesceLevel,
+    StartDomain, StopDomain, TimestampError,
 };
 use nervix_primitives::time::{Instant, interval};
 use thiserror::Error;
@@ -94,6 +94,10 @@ pub(in crate::application) enum DomainAlterError {
     /// The consensus report of the resume is beneath.
     #[error("failed to resume domain '{domain}' after model alteration")]
     ResumeDomain { domain: DomainName },
+    /// The licensing stop gate refused the resume, and the licensing stop that ends the pause
+    /// instead failed. The consensus report of the stop is beneath.
+    #[error("failed to stop domain '{domain}' for licensing after model alteration")]
+    LicensingStop { domain: DomainName },
     /// The runtime's report of the cluster state it could not apply is beneath.
     #[error("failed to restore ingestion in domain '{domain}' after model alteration")]
     RestoreIngestion { domain: DomainName },
@@ -677,11 +681,36 @@ impl SessionServiceImpl {
                 },
             ));
         }
-        let resumed = self
+        let resumed = match self
             .inner
             .consensus
             .resume_domain(domain.clone(), mutation)
-            .await;
+            .await
+        {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                if let ConsensusError::Conflict(ConsensusConflict::LicensingStop { reason }) =
+                    error.current_context()
+                {
+                    // The licensing stop gate closed while this operation held the domain paused,
+                    // so the domain may not run again. Its pause ends in the licensing stop the
+                    // leader would make once the lease is released, under this same lease, and
+                    // the operation completes with the domain stopped until an operator starts it.
+                    let cause = DomainStopCause::Licensing(*reason);
+                    self.inner
+                        .consensus
+                        .stop_domain(domain.clone(), mutation, cause)
+                        .await
+                        .change_context_lazy(|| DomainAlterError::LicensingStop {
+                            domain: domain.clone(),
+                        })
+                } else {
+                    Err(error.change_context(DomainAlterError::ResumeDomain {
+                        domain: domain.clone(),
+                    }))
+                }
+            }
+        };
         #[cfg(feature = "testing")]
         if resumed.is_err() {
             Box::pin(self.inner.runtime.pause_domain_resume_if_armed(
@@ -691,9 +720,7 @@ impl SessionServiceImpl {
             ))
             .await;
         }
-        resumed.change_context_lazy(|| DomainAlterError::ResumeDomain {
-            domain: domain.clone(),
-        })?;
+        resumed?;
         self.apply_current_cluster_state()
             .await
             .change_context_lazy(|| DomainAlterError::RestoreIngestion {
@@ -734,7 +761,7 @@ impl SessionServiceImpl {
         if let Err(error) = self
             .inner
             .consensus
-            .stop_domain(domain_id.clone(), None)
+            .stop_domain(domain_id.clone(), None, DomainStopCause::Operator)
             .await
         {
             failures.push(format!("stopping it again failed: {error}"));
@@ -831,6 +858,7 @@ impl SessionServiceImpl {
             start_version: 0,
             last_start: DomainStartPoint::Resume,
             clock: None,
+            stop_cause: None,
         };
         match self
             .inner
@@ -925,6 +953,14 @@ impl SessionServiceImpl {
                 domain_id.as_str()
             ));
         }
+        // Refused before a clock authority is chosen or the start is resolved; consensus refuses
+        // the start again under the gate it commits against.
+        if let Some(reason) = self.committed_licensing_stop() {
+            return command_error(format!(
+                "domain '{}' cannot start: licensing stopped processing: {reason}",
+                domain_id.as_str()
+            ));
+        }
         let authority = if domain.config.pace.is_paced() {
             let Some(authority) = self.selected_domain_clock_authority(domain_id).await else {
                 return command_error(format!(
@@ -1001,7 +1037,7 @@ impl SessionServiceImpl {
         match self
             .inner
             .consensus
-            .stop_domain(domain_id.clone(), None)
+            .stop_domain(domain_id.clone(), None, DomainStopCause::Operator)
             .await
         {
             Ok(()) => {
@@ -1274,6 +1310,7 @@ mod tests {
             start_version: 0,
             last_start: DomainStartPoint::Resume,
             clock: None,
+            stop_cause: None,
         };
 
         let first = service

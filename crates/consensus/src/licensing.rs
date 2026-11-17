@@ -28,6 +28,8 @@ pub use release::{
 };
 pub use request::PreparedLicensingRequest;
 #[cfg(test)]
+pub(crate) mod stop_gate_tests;
+#[cfg(test)]
 pub(crate) mod tests;
 #[cfg(test)]
 pub(crate) mod verification_tests;
@@ -140,6 +142,24 @@ impl LicensingRecord {
         }
         Ok(())
     }
+
+    /// The stop gate (specification §10.7): an activated ephemeral binding whose fixed expiry the
+    /// committed licensing time has reached. It reads the independent binding and never the
+    /// decision's verification, so an edited or unverifiable document cannot lift it, and it is
+    /// derived on every read rather than stored.
+    pub fn processing_stop(&self) -> Option<nervix_models::LicensingStopReason> {
+        let LicensingMode::Activated(activation) = &self.mode else {
+            return None;
+        };
+        activation.binding.expiry_stop(self.licensing_time)
+    }
+}
+
+impl crate::StateMachineData {
+    /// The committed stop gate, closed only while an installed licensing record closes it.
+    pub(crate) fn licensing_stop(&self) -> Option<nervix_models::LicensingStopReason> {
+        self.licensing.as_ref()?.processing_stop()
+    }
 }
 
 /// Bootstrap absence is one state; an installed identity always has its licensing record.
@@ -190,6 +210,16 @@ pub(super) fn admit_domain(
     quota: nervix_licensing_vocabulary::Quota,
 ) -> error_stack::Result<(), nervix_licensing_vocabulary::LicensingRefusal> {
     use nervix_licensing_vocabulary::{QuotaConstraint, QuotaName};
+    if state.licensing_stop().is_some() {
+        let domains = u64::try_from(state.domains.len()).assured("materialized domains fit u64");
+        return Err(Report::new(nervix_licensing_vocabulary::LicensingRefusal {
+            state: nervix_licensing_vocabulary::AdmissionState::Stopped,
+            condition: QuotaName::ClusterDomains,
+            limit: domains,
+            current_usage: domains,
+            requested: 1,
+        }));
+    }
     if let (Some(record), Some(Ok(verified))) = (&state.licensing, &state.licensing_verification)
         && let LicensingMode::Activated(_) = &record.mode
         && verified
