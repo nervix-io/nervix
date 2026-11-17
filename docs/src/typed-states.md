@@ -379,8 +379,8 @@ complete unsigned 64-bit range. Duration settings preserve their declared range 
 precision in eight bytes. Decoding validates the same declaration before publishing a parameter
 value.
 
-Consensus's `raft_entity_labels_inferencer_pages_` keyspaces and current
-`ClusterState` metadata encoding, 37, identify its stored shapes, including the partition count of every resolved
+Consensus's `raft_entity_labels_licensing_transitions_` keyspaces and current
+`ClusterState` metadata encoding, 38, identify its stored shapes, including the partition count of every resolved
 branch declaration in the committed schedule, the partition epoch the schedule records for each
 branch whose count changed, and the statements a transaction keeps, including per-entity
 `ALTER INGESTOR` and `ALTER EMITTER` operations, `SHOW INFERENCER ... STATE` and a `RESET WASM PROCESSOR ... STATE` that takes
@@ -1463,6 +1463,13 @@ bootstrap and both are present after the first identity installation. The record
 licensing time, original trust documents with their typed identities, and Free, Activated or
 Released mode. Released mode carries its independent binding, confirmation state, original signing
 capability while confirmation is pending, operation identity and unextended grant deadlines.
+Activated mode holds transitions keyed by their stable identity. Each grant carries either a pending
+acknowledgement with the introducing decision's immutable offline bound or an acknowledged signed
+copy. Its original protected member names are captured once; refresh cannot turn a newcomer into a
+replacement. Signed acknowledgements replace the corresponding copy and can extend a deadline;
+ordinary refreshes preserve pending bounds and starts. Target quota and temporary replacement
+allowance remain separate in the published policy.
+
 Pending cluster rotation belongs to the identity record and carries its target generation and
 exact retained signed request. Completion installs the key and bound decision in one atomic apply.
 The original command effect retains an atomic applied or typed refusal outcome, so later operations

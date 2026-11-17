@@ -498,7 +498,7 @@ It also fences the licensing stop gate: the stop cause a `StopDomain` command ca
 record retains, the typed `LicensingStop` refusal of a change that would run a domain, the
 transaction refusal of a `START` step under the gate, and the `stopped` admission refusal state.
 
-The fingerprint also covers bounded entity labels on configuration Models and the typed label edits retained in transactions, with their committed acceptance limits. It identifies the combined label, inferencer-description, inferencer state page, listener-capability, licensing stop-gate and node-record contract; metadata-only edits preserve the execution and state identities those reports observe.
+The fingerprint also covers bounded entity labels on configuration Models and the typed label edits retained in transactions, with their committed acceptance limits. It identifies the combined label, inferencer-description, inferencer state page, listener-capability, licensing stop-gate, licensing transition and node-record contract; metadata-only edits preserve the execution and state identities those reports observe.
 
 All nodes in a running cluster use one current wire contract. A fixed fingerprint covers the set of
 supported operations and their encoded shapes. It is one of the prerequisites every hello carries,
