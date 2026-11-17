@@ -100,9 +100,18 @@ impl EffectiveUsage<'_> {
                     continue;
                 }
                 let additional = affected.additional_allowance()?;
-                allowance = allowance
-                    .checked_add(additional)
-                    .ok_or_else(|| Report::new(ImpactError::Allowance))?;
+                // The final sum is capped by a u64 usage ceiling. Saturating the intermediate
+                // sum is exact for that cap, including overlapping signed full-width grants.
+                #[cfg_attr(
+                    nervix_lint,
+                    expect(
+                        nervix::clamped_arithmetic,
+                        reason = "the final u64 usage ceiling caps this sum, so intermediate \
+                                  saturation preserves the exact capped allowance"
+                    )
+                )]
+                let capped = allowance.saturating_add(additional);
+                allowance = capped;
                 ceiling = ceiling.max(affected.usage);
             }
         }
@@ -144,7 +153,8 @@ pub enum ImpactError {
 }
 
 /// Existing grants are retained by the caller. Only the newly affected amount below the previous
-/// target receives a new deadline; reassessing the same conditions revision yields no transition.
+/// target receives a new deadline. Repeating a decision revision yields no transition; a tick or
+/// release may change the target without inventing another signed conditions revision.
 pub fn assess_impact(
     current: EffectiveUsage<'_>,
     target: ImpactTarget<'_>,
@@ -156,7 +166,9 @@ pub fn assess_impact(
     let ImpactTarget::Usage(target) = target else {
         return Ok(Vec::new());
     };
-    if context.from_conditions_revision == context.to_conditions_revision {
+    if context.from_conditions_revision == context.to_conditions_revision
+        && matches!(context.trigger, TransitionTrigger::Decision { .. })
+    {
         return Ok(Vec::new());
     }
     let mut affected = Vec::new();
