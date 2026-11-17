@@ -23,6 +23,7 @@
 
 use error_stack::ResultExt as _;
 use nervix_interconnect::{RelayGrantRefusal, TransportError};
+use nervix_recovery::Discarded as _;
 
 use super::{
     relay_send_attempts::{
@@ -559,7 +560,10 @@ impl RemoteDispatcher {
         }
         // No body was granted. Retain this payload and its ACKs under the held channel gate.
         // A fresh channel starts at zero, so it can need no further reopening attempt.
-        drop(error);
+        Err::<(), _>(error).discarded(
+            "the unopened channel admitted no body; its one fresh-channel attempt supplies the \
+             outcome",
+        );
         branch_channel.reopen_delivery_channel();
         payload.delivery = branch_channel.next_delivery();
         self.dispatch_admitted_relay_attempt(
