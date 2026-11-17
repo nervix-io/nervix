@@ -363,6 +363,7 @@ Feature: Stalled peers
       | 1            |
       | 3            |
 
+  @slots_8
   Scenario Outline: A Syslog collector whose server stops reading is reported within timeout_ms
     Given a <cluster_size> node nervix cluster is started
     And a silent endpoint "syslog_peer" is listening

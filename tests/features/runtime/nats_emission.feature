@@ -191,7 +191,7 @@ Feature: NATS emission
       | 1            |
       | 3            |
 
-  @nats_core_connection_loss @deloxide_stress
+  @slots_8 @nats_core_connection_loss @deloxide_stress
   Scenario Outline: A core NATS write retries every record through connection loss
     Given NATS is running
     And a NATS endpoint the scenario controls is configured
@@ -252,7 +252,7 @@ Feature: NATS emission
       | 1            |
       | 3            |
 
-  @nats_core_connection_loss @nats_core_stop_connection_loss @deloxide_stress
+  @slots_8 @nats_core_connection_loss @nats_core_stop_connection_loss @deloxide_stress
   Scenario Outline: Nervix reports a core NATS connection change during STOP
     Given NATS is running
     And a NATS endpoint the scenario controls is configured
