@@ -1780,6 +1780,7 @@ pub(in crate::registry) fn validate_ingestor_rate_limit_measures(
 /// The one exact, required, non-sensitive `U64` field a measure writes.
 fn measure_schema() -> CreateSchema {
     CreateSchema {
+        labels: Default::default(),
         name: SchemaName::parse(crate::registry::LoweredMeasure::NAMESPACE)
             .assured("the measure namespace is a schema name"),
         fields: vec![SchemaField {
