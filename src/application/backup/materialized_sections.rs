@@ -125,9 +125,8 @@ impl SessionServiceImpl {
                         let identities = captured.records()[range]
                             .iter()
                             .map(|record| MaterializedRecordIdentity {
-                                branch: BranchKey::to_remote_key(&record.branch).map(|fields| {
-                                    fields.into_iter().map(StateField::from_remote).collect()
-                                }),
+                                branch: BranchKey::to_remote_key(&record.branch)
+                                    .map_fields(StateField::from_remote),
                                 watermarks: record.row.metadata().to_remote(),
                             })
                             .collect();

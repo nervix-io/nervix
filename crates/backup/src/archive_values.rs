@@ -150,6 +150,7 @@ impl State {
 pub(super) struct DomainValues {
     pub capture: DomainCapture,
     pub record: DomainRecord,
+    pub partitions: Option<crate::PartitionTopologyRecord>,
     pub models: String,
     pub resources: Vec<Resource>,
     pub state: Vec<State>,
@@ -373,11 +374,12 @@ impl<'a> Values<'a> {
         let mut branches = Vec::new();
         let count = self.0.entropy().count(4);
         for index in 0..count {
-            let mut descriptor = Descriptors(self.0.clone()).descriptor(true);
-            let fields = descriptor
+            let descriptor = Descriptors(self.0.clone()).descriptor(true);
+            let (fields, origin) = descriptor
                 .branch
-                .as_mut()
+                .into_parts()
                 .assured("a branched descriptor has fields");
+            let mut fields = fields.into_vec();
             fields.push(crate::StateField {
                 name: "zz_identity".into(),
                 value: crate::StateValue::U64(
@@ -385,7 +387,7 @@ impl<'a> Values<'a> {
                 ),
             });
             branches.push(BranchLifecycleEntry {
-                key: descriptor.branch,
+                key: nervix_models::BranchKeyFields::branched(fields.into(), origin),
                 last_ingestion: self.timestamp(),
                 incarnation: self.0.positive_u64().get(),
             });
@@ -459,6 +461,17 @@ impl<'a> Values<'a> {
                 SectionPath::domain_record(&domain),
                 &record,
             ));
+            let partitions = self
+                .0
+                .entropy()
+                .flag()
+                .then(|| crate::partitioning::tests::generated(&mut self.0, domain.clone()));
+            if let Some(partitions) = &partitions {
+                sections.push(Section::record(
+                    SectionPath::domain_partitions(&domain),
+                    partitions,
+                ));
+            }
             sections.push(Section::new(
                 SectionPath::domain_models(&domain),
                 SectionContent::Plexus,
@@ -502,14 +515,17 @@ impl<'a> Values<'a> {
                     if branch != 0 {
                         descriptor.branch_fingerprint =
                             Some(BranchKeyFingerprint::new([branch; 32]));
-                        descriptor
+                        let (fields, origin) = descriptor
                             .branch
-                            .as_mut()
-                            .assured("a branched descriptor has fields")
-                            .push(crate::StateField {
-                                name: "zz_identity".into(),
-                                value: crate::StateValue::U8(branch),
-                            });
+                            .into_parts()
+                            .assured("a branched descriptor has fields");
+                        let mut fields = fields.into_vec();
+                        fields.push(crate::StateField {
+                            name: "zz_identity".into(),
+                            value: crate::StateValue::U8(branch),
+                        });
+                        descriptor.branch =
+                            nervix_models::BranchKeyFields::branched(fields.into(), origin);
                     }
                     state.push(State::Wasm {
                         descriptor,
@@ -535,6 +551,7 @@ impl<'a> Values<'a> {
             domains.push(DomainValues {
                 capture,
                 record,
+                partitions,
                 models,
                 resources: versions,
                 state,

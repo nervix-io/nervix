@@ -518,8 +518,8 @@ status, keeping the start version, start mode, clock, schedule and incremental s
 
 The current emitter Models carry explicit key expressions, source-partition routing and
 expression-only SQS FIFO groups. The dedicated database owns exactly four current keyspaces:
-`raft_licensing_transitions_inferencer_pages_operational_logs`, `raft_licensing_transitions_inferencer_pages_operational_meta`, `raft_licensing_transitions_inferencer_pages_operational_state`, and
-`raft_licensing_transitions_inferencer_pages_operational_snapshots`. Opening it validates the complete keyspace namespace before
+`raft_licensing_transitions_inferencer_pages_operational_inherited_topology_logs`, `raft_licensing_transitions_inferencer_pages_operational_inherited_topology_meta`, `raft_licensing_transitions_inferencer_pages_operational_inherited_topology_state`, and
+`raft_licensing_transitions_inferencer_pages_operational_inherited_topology_snapshots`. Opening it validates the complete keyspace namespace before
 reading any records. The committed cluster-parameter record stores ordered typed TLS cipher
 suites and key-exchange groups; recovery validates their complete pair before returning that
 record. This namespace identifies the current Model shape, including the statement
@@ -548,7 +548,7 @@ committed node records under record-family tag `C`, each with the revision that 
 incarnation-bound capacity claim, including transport, DNS, database, consensus, engine, connector
 host, operational and listener capacities, its detected properties and its tags. The boxed node record
 announcement keeps unrelated command variants within the inline payload-size bound. Its state metadata
-requires the current `ClusterState` encoding, 38, including the cluster identity reference,
+requires the current `ClusterState` encoding, 39, including the cluster identity reference,
 committed cluster parameters, the durable restore installation gate and the unit-keyed committed
 schedule in which a relay of a partitioned branch is scheduled as one unit per partition.
 The current shape also requires inferencer state bindings and their initial expressions,

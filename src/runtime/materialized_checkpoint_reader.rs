@@ -23,7 +23,7 @@
 use error_stack::{Report, ResultExt as _};
 use meticulous::ResultExt as _;
 use nervix_execution::{ChargedBytes, CpuClass, Executor, MemoryClass, Reservation};
-use nervix_models::{RemoteRuntimeField, RemoteRuntimeRecordMetadata};
+use nervix_models::RemoteRuntimeRecordMetadata;
 
 use super::{
     MaterializedSnapshotError, SealedRecordIdentities, SealedSectionKind, SealedSnapshotHeader,
@@ -43,7 +43,7 @@ pub(crate) struct MaterializedCheckpointReader {
 }
 
 pub(crate) struct MaterializedCheckpointGroup {
-    pub(crate) identities: Vec<(Option<Vec<RemoteRuntimeField>>, RemoteRuntimeRecordMetadata)>,
+    pub(crate) identities: Vec<(nervix_models::RemoteBranchKey, RemoteRuntimeRecordMetadata)>,
     pub(crate) columns: ChargedBytes,
     pub(crate) _metadata: Reservation,
 }

@@ -179,6 +179,21 @@ impl RelayStateRun {
     /// Records the activity of `key` at `now`, evicting the least recently active branches past the
     /// relay's `MAX INSTANCES`.
     async fn track(&mut self, key: &Option<BranchKey>, now: Timestamp) -> ControlFlow<()> {
+        if (key
+            .as_ref()
+            .is_some_and(|key| key.external_partition().is_some())
+            || self.moves.is_some())
+            && self
+                .branches
+                .stored_key(key)
+                .is_some_and(|stored| !BranchKey::same_origin(stored, key))
+        {
+            if let Err(error) = self.state.rebind_key(key) {
+                self.runtime.events().report_error(format!("{error:#}"));
+                return ControlFlow::Break(());
+            }
+            self.branches.replace_key(key.clone());
+        }
         self.branches
             .get_or_try_create_with(key.clone(), now, |_, _| {
                 Ok::<(), std::convert::Infallible>(())

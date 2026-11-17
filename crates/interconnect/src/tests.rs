@@ -1524,7 +1524,7 @@ async fn relay_terminal_capacity_is_held_until_the_application_finishes() {
         domain: DomainName::parse("test").expect("test domain should be valid"),
         relay: RelayName::parse("relay").expect("test relay should be valid"),
         unit: nervix_models::Unit::SINGLE,
-        key: None,
+        key: nervix_models::RemoteBranchKey::Unbranched,
         batch_ipc: Executor::default()
             .try_charge_owned(MemoryClass::Relay, vec![1])
             .expect("the test relay body should fit its budget"),
@@ -1661,7 +1661,7 @@ async fn the_next_relay_on_a_channel_is_granted_before_the_outcome_of_the_one_be
         domain: DomainName::parse("test").expect("test domain should be valid"),
         relay: RelayName::parse("relay").expect("test relay should be valid"),
         unit: nervix_models::Unit::SINGLE,
-        key: None,
+        key: nervix_models::RemoteBranchKey::Unbranched,
         batch_ipc: Executor::default()
             .try_charge_owned(MemoryClass::Relay, vec![1])
             .expect("the test relay body should fit its budget"),
@@ -1771,7 +1771,7 @@ async fn a_relay_grant_that_skips_its_channels_next_position_is_refused_out_of_o
         domain: DomainName::parse("test").expect("test domain should be valid"),
         relay: RelayName::parse("relay").expect("test relay should be valid"),
         unit: nervix_models::Unit::SINGLE,
-        key: None,
+        key: nervix_models::RemoteBranchKey::Unbranched,
         batch_ipc: Executor::default()
             .try_charge_owned(MemoryClass::Relay, vec![1])
             .expect("the test relay body should fit its budget"),
@@ -1839,7 +1839,7 @@ async fn a_grant_refused_for_relay_memory_is_granted_once_room_returns() {
         domain: DomainName::parse("test").expect("test domain should be valid"),
         relay: RelayName::parse("relay").expect("test relay should be valid"),
         unit: nervix_models::Unit::SINGLE,
-        key: None,
+        key: nervix_models::RemoteBranchKey::Unbranched,
         batch_ipc: Executor::default()
             .try_charge_owned(MemoryClass::Relay, vec![1])
             .expect("the test relay body should fit its budget"),
@@ -1980,7 +1980,7 @@ async fn terminal_relay_outcome_waits_for_application_queue_capacity() {
                 domain: DomainName::parse("test").expect("test domain should be valid"),
                 relay: RelayName::parse("relay").expect("test relay should be valid"),
                 unit: nervix_models::Unit::SINGLE,
-                key: None,
+                key: nervix_models::RemoteBranchKey::Unbranched,
                 batch_ipc: Executor::default()
                     .try_charge_owned(MemoryClass::Relay, vec![1])
                     .expect("the test relay body should fit its budget"),
@@ -2076,7 +2076,7 @@ async fn confirmed_cancellation_fences_attempt_before_grant_arrives() {
                 domain: DomainName::parse("test").expect("test domain should be valid"),
                 relay: RelayName::parse("relay").expect("test relay should be valid"),
                 unit: nervix_models::Unit::SINGLE,
-                key: None,
+                key: nervix_models::RemoteBranchKey::Unbranched,
                 batch_ipc: Executor::default()
                     .try_charge_owned(MemoryClass::Relay, vec![1])
                     .expect("the test relay body should fit its budget"),
@@ -2124,7 +2124,7 @@ async fn cancelled_relay_admission_can_never_reach_runtime() {
         domain: DomainName::parse("test").expect("test domain should be valid"),
         relay: RelayName::parse("relay").expect("test relay should be valid"),
         unit: nervix_models::Unit::SINGLE,
-        key: None,
+        key: nervix_models::RemoteBranchKey::Unbranched,
         batch_ipc: Executor::default()
             .try_charge_owned(MemoryClass::Relay, vec![1])
             .expect("the test relay body should fit its budget"),
@@ -2201,7 +2201,7 @@ async fn cancelled_relay_admission_can_never_reach_runtime() {
         domain: DomainName::parse("test").expect("test domain should be valid"),
         relay: RelayName::parse("relay").expect("test relay should be valid"),
         unit: nervix_models::Unit::SINGLE,
-        key: None,
+        key: nervix_models::RemoteBranchKey::Unbranched,
         batch_ipc: Executor::default()
             .try_charge_owned(MemoryClass::Relay, vec![1])
             .expect("the test relay body should fit its budget"),
@@ -2242,7 +2242,7 @@ async fn cancelled_relay_admission_can_never_reach_runtime() {
         domain: DomainName::parse("test").expect("test domain should be valid"),
         relay: RelayName::parse("relay").expect("test relay should be valid"),
         unit: nervix_models::Unit::SINGLE,
-        key: None,
+        key: nervix_models::RemoteBranchKey::Unbranched,
         batch_ipc: Executor::default()
             .try_charge_owned(MemoryClass::Relay, vec![1])
             .expect("the test relay body should fit its budget"),
@@ -2291,7 +2291,7 @@ async fn same_epoch_retry_of_admitted_relay_does_not_enqueue_twice() {
         domain: DomainName::parse("test").expect("test domain should be valid"),
         relay: RelayName::parse("relay").expect("test relay should be valid"),
         unit: nervix_models::Unit::SINGLE,
-        key: None,
+        key: nervix_models::RemoteBranchKey::Unbranched,
         batch_ipc: Executor::default()
             .try_charge_owned(MemoryClass::Relay, vec![1])
             .expect("the test relay body should fit its budget"),
@@ -2389,7 +2389,7 @@ async fn an_outcome_addressed_to_an_earlier_registrar_run_leaves_the_current_adm
                 domain: DomainName::parse("test").expect("test domain should be valid"),
                 relay: RelayName::parse("relay").expect("test relay should be valid"),
                 unit: nervix_models::Unit::SINGLE,
-                key: None,
+                key: nervix_models::RemoteBranchKey::Unbranched,
                 batch_ipc: Executor::default()
                     .try_charge_owned(MemoryClass::Relay, vec![1])
                     .expect("the test relay body should fit its budget"),
@@ -2484,7 +2484,7 @@ async fn receiver_process_restart_makes_unresolved_relay_indeterminate() {
                 domain: DomainName::parse("test").expect("test domain should be valid"),
                 relay: RelayName::parse("relay").expect("test relay should be valid"),
                 unit: nervix_models::Unit::SINGLE,
-                key: None,
+                key: nervix_models::RemoteBranchKey::Unbranched,
                 batch_ipc: Executor::default()
                     .try_charge_owned(MemoryClass::Relay, vec![1])
                     .expect("the test relay body should fit its budget"),
@@ -2565,7 +2565,7 @@ async fn reserved_relay_work_reports_progress_before_runtime_admission() {
                 domain: DomainName::parse("test").expect("test domain should be valid"),
                 relay: RelayName::parse("relay").expect("test relay should be valid"),
                 unit: nervix_models::Unit::SINGLE,
-                key: None,
+                key: nervix_models::RemoteBranchKey::Unbranched,
                 batch_ipc: Executor::default()
                     .try_charge_owned(MemoryClass::Relay, vec![1])
                     .expect("the test relay body should fit its budget"),

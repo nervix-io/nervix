@@ -20,7 +20,7 @@ use std::{collections::BTreeMap, num::NonZeroUsize, time::Duration};
 
 use arrow_schema::Schema;
 use error_stack::{Report, ResultExt as _};
-use meticulous::OptionExt as _;
+use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::{
     AckMode, Assignment, BranchName, CodecName, CreateIngestor, CreateReingestor, ErrorPolicies,
     Expression, FlushPolicy, GeneralErrorPolicy, IngestorName, MessageErrorOperation,
@@ -153,6 +153,13 @@ pub(crate) enum EntrypointPlanError {
     InvalidBranchConstruction {
         kind: ModelKind,
         node: ModelName,
+        relay: RelayName,
+    },
+    #[error(
+        "ingestor '{ingestor}' has no external partition position for inherited relay '{relay}'"
+    )]
+    MissingExternalPosition {
+        ingestor: nervix_models::IngestorName,
         relay: RelayName,
     },
 }
@@ -360,6 +367,22 @@ pub(crate) enum PlannedRouteBranch {
         retention: RouteBranchRetention,
         program: LoweredBranchConstruction,
     },
+    Inherited(Box<PlannedInheritedBranch>),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct InheritedBranchProjection {
+    pub(crate) field: nervix_models::IngestorMetadataField,
+    pub(crate) epoch: nervix_models::PartitionEpochNumber,
+    pub(crate) partitions: Option<nervix_models::InheritedPartitionLayout>,
+    pub(crate) source: Option<nervix_models::ExternalPartitionSet>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct PlannedInheritedBranch {
+    pub(crate) retention: RouteBranchRetention,
+    pub(crate) program: LoweredBranchConstruction,
+    pub(crate) projection: InheritedBranchProjection,
 }
 
 impl PlannedRouteBranch {
@@ -369,6 +392,7 @@ impl PlannedRouteBranch {
         match self {
             Self::Unbranched => None,
             Self::Preserved(retention) | Self::Constructed { retention, .. } => Some(retention),
+            Self::Inherited(branch) => Some(&branch.retention),
         }
     }
 }
@@ -457,6 +481,10 @@ impl EntrypointRouteContext<'_> {
                     branch: relay_branch,
                     schema: branch_schema,
                     ..
+                }
+                | ResolvedBranching::AwaitingTopology {
+                    branch: relay_branch,
+                    schema: branch_schema,
                 },
             ) if branch == relay_branch => {
                 let retention = RouteBranchRetention::of(relay, branch);
@@ -522,6 +550,8 @@ impl EntrypointPlans {
         domain: &nervix_models::DomainName,
         nodes: &ScheduledNodes,
         activation: &DomainActivationPlan,
+        topology: &nervix_models::PartitionTopology,
+        epochs: &BTreeMap<BranchName, nervix_models::BranchPartitionEpoch>,
     ) -> Result<Self, Report<EntrypointPlanError>> {
         let routes = EntrypointRouteContext { activation };
         let mut plans = Self::default();
@@ -544,12 +574,11 @@ impl EntrypointPlans {
                             reference: source_ref,
                         }));
                     };
-                    let first_unit = *node
-                        .units
-                        .keys()
-                        .next()
-                        .assured("every scheduled node has a unit");
-                    let plan = IngestorStartPlan::decide(
+                    let Some(first_unit) = node.units.keys().next().copied() else {
+                        // An inherited declaration has no intake lifetime before topology exists.
+                        continue;
+                    };
+                    let mut plan = IngestorStartPlan::decide(
                         domain,
                         node,
                         first_unit,
@@ -557,11 +586,104 @@ impl EntrypointPlans {
                         source.config.as_ref(),
                         &routes,
                     )?;
+                    plan.suspended = topology.suspended.contains(&ingestor.name);
+                    let mut resolved_routes = Vec::with_capacity(plan.ingestor.routes.len());
+                    for mut route in plan.ingestor.routes {
+                        let relay = activation
+                            .relays
+                            .get(&route.relay)
+                            .verified("route planning resolved the relay");
+                        if relay.branching.is_awaiting_topology()
+                            || relay
+                                .branching
+                                .partitions()
+                                .is_some_and(|layout| layout.is_inherited())
+                        {
+                            route.branch = match route.branch {
+                                PlannedRouteBranch::Constructed { retention, program } => {
+                                    let nervix_models::IngestorExternalPartitions::Enumerated(
+                                        field,
+                                    ) = ingestor
+                                        .input
+                                        .entity_kind()
+                                        .capabilities()
+                                        .external_partitions
+                                    else {
+                                        return Err(Report::new(
+                                            EntrypointPlanError::MissingExternalPosition {
+                                                ingestor: ingestor.name.clone(),
+                                                relay: route.relay,
+                                            },
+                                        ));
+                                    };
+                                    let epoch = match epochs.get(&retention.branch) {
+                                        Some(epoch) => epoch.number,
+                                        None => nervix_models::PartitionEpochNumber::FIRST,
+                                    };
+                                    let partitions =
+                                        topology.branches.get(&retention.branch).copied();
+                                    PlannedRouteBranch::Inherited(Box::new(
+                                        PlannedInheritedBranch {
+                                            retention,
+                                            program,
+                                            projection: InheritedBranchProjection {
+                                                field,
+                                                epoch,
+                                                partitions,
+                                                source: topology
+                                                    .sources
+                                                    .get(&ingestor.name)
+                                                    .and_then(|source| source.partitions),
+                                            },
+                                        },
+                                    ))
+                                }
+                                branch => branch,
+                            };
+                        }
+                        resolved_routes.push(route);
+                    }
+                    plan.ingestor.routes = resolved_routes;
                     for unit in node.units.keys() {
-                        plans.ingestors.insert(
-                            NodeUnitRef::new(node.identity(), *unit),
-                            Arc::new(plan.for_unit(*unit, node)),
-                        );
+                        let mut plan = plan.for_unit(*unit, node);
+                        if let super::ingestor_plan::IngestorInputPlan::Transport(transport) =
+                            &mut plan.input
+                            && let Some(observation) = topology.sources.get(&ingestor.name)
+                            && let Some(partitions) = observation.partitions
+                        {
+                            match &mut transport.source {
+                                super::ingestor_plan::IngestorConnectorPlan::Kafka(
+                                    super::ingestor_plan::KafkaIngestorStartPlan::Topic(source),
+                                ) => source.committed_partitions = Some(partitions),
+                                super::ingestor_plan::IngestorConnectorPlan::Pulsar(
+                                    super::ingestor_plan::PulsarIngestorStartPlan::Topic(source),
+                                ) => {
+                                    source.assignment = Some(
+                                        if ingestor.input.instances()
+                                            == Some(nervix_models::IngestorInstances::PerPartition)
+                                        {
+                                            nervix_models::ExternalPartitionRead::Assigned(
+                                                nervix_models::ExternalPartitionAssignment {
+                                                    partitions,
+                                                    readers: std::num::NonZeroU64::new(
+                                                        u64::try_from(node.units.len())
+                                                            .verified("a unit count fits u64"),
+                                                    )
+                                                    .verified("this loop has at least one unit"),
+                                                    epoch: observation.epoch,
+                                                },
+                                            )
+                                        } else {
+                                            nervix_models::ExternalPartitionRead::All(partitions)
+                                        },
+                                    );
+                                }
+                                _ => {}
+                            }
+                        }
+                        plans
+                            .ingestors
+                            .insert(NodeUnitRef::new(node.identity(), *unit), Arc::new(plan));
                     }
                 }
                 Model::Reingestor(reingestor) => {
@@ -619,7 +741,6 @@ impl EntrypointPlans {
 mod tests {
     use std::num::NonZeroU64;
 
-    use meticulous::ResultExt as _;
     use nervix_models::{
         AssignmentTarget, AssignmentTargetScope, BranchEviction, CreateBranch, FieldReference,
         FieldScope, ProcessorInputs, ProcessorOutputs,
@@ -937,8 +1058,14 @@ mod tests {
         let activation = DomainActivationPlan::from_scheduled_nodes(&domain, &nodes)
             .assured("the fixture surfaces resolve");
 
-        let error = EntrypointPlans::from_scheduled_nodes(&domain, &nodes, &activation)
-            .expect_err("the node is configured under another name");
+        let error = EntrypointPlans::from_scheduled_nodes(
+            &domain,
+            &nodes,
+            &activation,
+            &nervix_models::PartitionTopology::default(),
+            &BTreeMap::new(),
+        )
+        .expect_err("the node is configured under another name");
 
         assert_eq!(
             error.current_context(),

@@ -19,7 +19,7 @@ use nervix_execution::{
     WorkerCounts,
 };
 use nervix_models::{ClientConfigEntry, KafkaTopicName};
-use nervix_primitives::sync::{oneshot, watch};
+use nervix_primitives::sync::oneshot;
 use rdkafka::{mocking::MockCluster, producer::DefaultProducerContext, types::RDKafkaRespErr};
 
 use super::{
@@ -138,7 +138,7 @@ async fn cancelling_a_commit_keeps_its_request_in_flight() {
     broker
         .broker_round_trip_time(1, Duration::from_secs(3600))
         .assured("the test broker can hold its replies");
-    let request = GroupCommitRequest::acknowledged(&positions)
+    let request = GroupCommitRequest::positions(&positions)
         .assured("the delivered record has a valid next offset");
     let mut commit = Box::pin(ingestor.commits.commit(
         &ingestor.control,
@@ -183,7 +183,6 @@ async fn domain_ingestor(
     broker: &MockCluster<'static, DefaultProducerContext>,
     executor: Executor,
 ) -> KafkaTopicIngestor {
-    let (_rebalance, receiver) = watch::channel(1);
     let plan = KafkaTopicIngestorPlan {
         settings: crate::KafkaTopicIngestorSettings::default(),
         executor,
@@ -201,7 +200,6 @@ async fn domain_ingestor(
         offset_mode: KafkaTopicIngestorOffsetMode::Domain {
             group_id: "metadata-worker-yield".to_string(),
             offsets: KafkaDomainOffsetHost::new(UnreachedOffsets),
-            rebalance: receiver,
         },
     };
     KafkaTopicIngestor::open(&plan, 0)

@@ -10,7 +10,7 @@
     nervix::layer(harness, reason = "tests the received-message boundary")
 )]
 
-use meticulous::{OptionExt as _, ResultExt as _};
+use meticulous::OptionExt as _;
 use nervix_connector::{
     RetainedIngestHeaders, RetainedIngestMetadata, RetainedIngestMetadataValue as Value,
 };
@@ -24,6 +24,54 @@ use pulsar::{
 use super::*;
 
 const MAX_MILLIS: u64 = 9_223_372_036_854;
+
+#[test]
+fn a_child_topic_supplies_its_coordinate_without_changing_its_acknowledgement_id() {
+    for (topic, native, expected) in [
+        ("persistent://tenant/namespace/orders-partition-7", None, 7),
+        (
+            "persistent://tenant/namespace/orders-partition-13",
+            Some(-1),
+            13,
+        ),
+        (
+            "persistent://tenant/namespace/orders-partition-7",
+            Some(7),
+            7,
+        ),
+        ("persistent://tenant/namespace/orders", None, -1),
+    ] {
+        let id = MessageIdData {
+            ledger_id: 3,
+            entry_id: 4,
+            partition: native,
+            ..Default::default()
+        };
+        let source = PulsarMessage::new(
+            topic,
+            MessageData {
+                id: id.clone(),
+                batch_size: None,
+            },
+            Payload {
+                metadata: MessageMetadata {
+                    producer_name: "producer".into(),
+                    sequence_id: 1,
+                    publish_time: 1,
+                    ..Default::default()
+                },
+                data: vec![1],
+            },
+            None,
+        );
+        let message = PulsarTopicIngestorMessage::try_from(source)
+            .assured("this native message has valid metadata");
+        let retained = RetainedIngestMetadata::capture(message.metadata().fields);
+        assert_eq!(retained.values().last(), Some(&Value::I32(expected)));
+        assert_eq!(message.position().message_id, id);
+        assert_eq!(message.position().topic, topic);
+    }
+}
 
 #[derive(Debug, bolero::TypeGenerator)]
 struct GeneratedInstant {
@@ -164,6 +212,7 @@ impl GeneratedMessage {
                 Value::String(self.producer.text.clone()),
                 Value::I64(self.sequence),
                 redelivery_count,
+                Value::I32(id.partition.unwrap_or(-1)),
             ]
         );
         assert_eq!(RetainedIngestMetadata::capture(&retained), retained);

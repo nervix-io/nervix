@@ -541,6 +541,14 @@ pub enum AcknowledgementConfirmation {
     None,
 }
 
+/// Whether an entity exposes an enumerable external partition set and the immutable metadata
+/// field its connector fills from the transport position.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IngestorExternalPartitions {
+    None,
+    Enumerated(crate::IngestorMetadataField),
+}
+
 /// What every ingestor of one entity declares, whatever its statement says: everything a statement
 /// can say about it, and what it does with what a statement says.
 ///
@@ -553,6 +561,8 @@ pub struct IngestorEntityCapabilities {
     pub events: crate::DeclaredEvents,
     /// The instancing forms its intake can honor.
     pub instancing: IngestorInstancingCapability,
+    /// External partition provenance available to inherited branch routes.
+    pub external_partitions: IngestorExternalPartitions,
     /// How its messages carry the transport headers that `read_header` and `read_headers` read,
     /// or `None` where they carry none.
     pub headers: Option<HeaderModel>,
@@ -618,6 +628,9 @@ impl IngestorEntityCapabilities {
     /// stalled peer within each deadline key its waits name.
     pub fn runtime_capabilities(&self) -> Vec<RuntimeCapability> {
         let mut capabilities = Vec::new();
+        if let IngestorExternalPartitions::Enumerated(_) = self.external_partitions {
+            capabilities.push(RuntimeCapability::InheritedPartitions);
+        }
         for delivery in self.delivery {
             capabilities.push(RuntimeCapability::Delivery(delivery.kind));
         }

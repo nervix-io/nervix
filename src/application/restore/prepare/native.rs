@@ -85,12 +85,10 @@ impl VerifiedArchive {
                                 .branches
                                 .iter()
                                 .map(|entry| BackupBranchLifecycleEntry {
-                                    key: entry.key.clone().map(|fields| {
-                                        fields
-                                            .into_iter()
-                                            .map(|field| field.into_remote())
-                                            .collect()
-                                    }),
+                                    key: entry
+                                        .key
+                                        .clone()
+                                        .map_fields(nervix_backup::StateField::into_remote),
                                     last_ingestion: entry.last_ingestion,
                                     incarnation: entry.incarnation,
                                 }),

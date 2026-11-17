@@ -1757,7 +1757,7 @@ existing receiver whose `borrow` leaves a subsequent `changed` able to see an in
 
 ### Partition transitions and key claims
 
-A committed change of a branch's partition count begins the branch's next partition epoch. The
+A committed change of a direct branch's partition count begins the branch's next partition epoch. The
 activation is an entity-level swap of every entity the branch reaches: its relays, the processors
 it divides into units, and every producer into and consumer of its relays. The swap's gate drains
 and force-flushes those entities first, so no unit holds pending work for a key when producers start
@@ -1833,6 +1833,45 @@ claims, runs or applies the input it parked in arrival order, since a key no uni
 where it waits, withdraws its holdings and refuses later claim steps as not ready; each holding
 unit, which holds nothing, ends with its placement tasks. A count change while a transition lasts
 is refused, so every key has exactly one unit that may hold it outside its partition.
+
+Inherited branches commit the observed external set, grouping, epoch and instance placement as one
+schedule. The leader captures the source configurations and its tenure before observing the broker;
+consensus refuses a publication whose captured inputs or tenure no longer apply. Unknown discovery
+starts no branch units. Count disagreement suspends the constructing readers and reports their
+general error. A successful topology change uses the entity swap and offset-transfer path rather
+than rebuilding the domain. Before publication the cluster entity gate suspends intake, drains
+admitted roots and demanded-key claims, and freezes each moved unit's native handoff cut. Captured
+inputs, placement eligibility and leader tenure are revalidated after preparation. The gate stays
+held through cluster-wide schedule installation and ownership activation; cancellation delegates
+release and preparation cleanup to the existing gate and handoff owners. Idle retained keys do not
+hold the drain. Kafka observation uses the leader's configured inspection cadence. The
+production-owner check
+`shuttle_partition_observation_and_instance_assignment_publish_one_epoch` races two publishers and
+reads the resulting set, grouping, epoch and assignment together.
+
+An inherited key carries an immutable external coordinate, observed epoch and actual unit while
+its fingerprint continues to identify its fields. Replacing the registry's key witness preserves
+the slot's incarnation, activity and retention rank; previously captured keys retain their original
+origin. A later topology change may arrive before the preceding key moves finish, so claims read
+the current and retained holding units, choose the newest origin witness and refuse an ambiguous
+equal-epoch copy. Materialized reads bind those publications at installation. Restores retain the
+captured topology, epochs, holding units and intake units before discovery resumes, and checkpoint
+inspection and WASM lifetimes use the actual unit rather than hashing inherited fields.
+
+A Kafka consumer group may discover a new partition before the branch commits it. The inherited
+reader holds one unadmitted position, pauses that partition and restores its exact unread offset
+through the bounded control owner. It waits for the broker to confirm that offset before ending
+the reader, so a replacement using `START AT LATEST` cannot skip the retained record. The native
+mock-broker regression exercises both acknowledgement and driver-cadence policies. Domain-offset
+readers instead assign only the partitions in their committed set; regrouping transfers their
+authoritative next offsets before replacement readers consume.
+
+The registered `scenario.inherited-*` and `stress.inherited-*` workload families cover Kafka and
+Pulsar reader lifecycles, growth, regrouping, shared readers, count agreement and topology restore
+beside their existing tracked lifecycle, offset and installation locks. The restore family also
+enters the restore-stress selection. Broker I/O, async discovery and immutable origin publication
+remain outside Deloxide's lock detector; real-broker scenarios, the publication Shuttle check and
+the registered representation properties provide their complementary evidence.
 
 ## Ordering Fences
 

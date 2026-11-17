@@ -695,7 +695,7 @@ impl<'bytes> GeneratedSettings<'bytes> {
                         .assured("percentages fit u8"),
                 ),
                 kafka_assignment_retry: Some(self.cluster_duration()),
-                kafka_partition_watch_interval: Some(self.cluster_duration()),
+                partition_topology_poll_interval: Some(self.cluster_duration()),
                 syslog_queue_capacity: std::num::NonZeroUsize::new(
                     usize::try_from(self.entropy.boundary_biased(1..=128))
                         .assured("bounded queue fits usize"),

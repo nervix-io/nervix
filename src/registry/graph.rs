@@ -45,6 +45,7 @@ pub(crate) struct ActiveGraph {
     pub(in crate::registry) graph: DiGraph<ActiveNode, EdgeKind>,
     pub(in crate::registry) indices: HashMap<NodeRef, NodeIndex>,
     pub(in crate::registry) placement: PlacementAnalysis,
+    pub(in crate::registry) has_inherited_partitions: bool,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -75,7 +76,16 @@ impl ActiveGraph {
             .values()
             .map(|node| node.config.as_ref().clone())
             .collect::<ModelIndex>();
-        DomainState::build(&schedule.domain, &models).map(|state| state.graph)
+        let state = DomainState::build(&schedule.domain, &models)?;
+        state
+            .graph
+            .resolve_partition_topology(
+                &schedule.domain,
+                &schedule.partition_topology,
+                Some(schedule),
+                None,
+            )
+            .map(std::borrow::Cow::into_owned)
     }
 
     pub(in crate::registry) fn placement_plan(&self) -> PlacementPlan {
@@ -101,14 +111,99 @@ impl ActiveGraph {
         branches
     }
 
-    /// The partition count every branch this graph declares places its keys by.
+    /// Resolve observation-dependent units before placement; direct graphs keep their existing
+    /// graph and allocation path. Installed intake units remain until a replacement can be placed.
+    pub(in crate::registry) fn resolve_partition_topology<'a>(
+        &'a self,
+        domain: &DomainName,
+        topology: &nervix_models::PartitionTopology,
+        existing: Option<&DomainSchedule>,
+        restored: Option<&nervix_models::PartitionTopologySnapshot>,
+    ) -> Result<std::borrow::Cow<'a, Self>, Report<RegistryError>> {
+        if !self.has_inherited_partitions {
+            return Ok(std::borrow::Cow::Borrowed(self));
+        }
+        let mut resolved = self.clone();
+        for node in resolved.graph.node_weights_mut() {
+            let identity = node.node_ref();
+            if let Some(branching) = &node.resolved_branching
+                && let Some(branch) = branching.branch()
+            {
+                if let Some(layout) = topology.branches.get(branch) {
+                    node.resolved_branching =
+                        Some(branching.clone().with_partitions(layout.partitions()));
+                } else if branching.is_awaiting_topology()
+                    && let Some(epoch) = restored.and_then(|snapshot| snapshot.epochs.get(branch))
+                {
+                    node.resolved_branching =
+                        Some(branching.clone().with_partitions(epoch.partitions));
+                } else if branching.is_awaiting_topology()
+                    && let Some(previous) =
+                        existing.and_then(|schedule| schedule.nodes.get(&identity))
+                    && let Some(previous) = &previous.resolved_branching
+                    && previous.same_key_as(branching)
+                    && let Some(partitions) = previous.partitions()
+                {
+                    // Discovery suspends new intake while the installed key state keeps its exact
+                    // previous execution layout. No inherited count is invented for it.
+                    node.resolved_branching = Some(branching.clone().with_partitions(partitions));
+                }
+            }
+            if let (Some(units), Model::Ingestor(ingestor)) =
+                (&mut node.ingestor_units, node.config.as_ref())
+            {
+                units.resolve_topology(
+                    domain,
+                    &ingestor.name,
+                    topology,
+                    existing.and_then(|schedule| schedule.nodes.get(&identity)),
+                    restored
+                        .and_then(|snapshot| snapshot.intake_units.get(&ingestor.name))
+                        .copied(),
+                )?;
+            }
+            if let Some(units) = &mut node.emitter_units {
+                units.resolve_topology(topology);
+            }
+        }
+        resolved
+            .placement
+            .refresh_units(domain, &resolved.indices, &resolved.graph)?;
+        Ok(std::borrow::Cow::Owned(resolved))
+    }
+
+    /// The current operational layout of every declaration that has a resolved count.
     pub(in crate::registry) fn branch_partitions(
         &self,
-    ) -> std::collections::BTreeMap<BranchName, nervix_models::BranchPartitions> {
+        topology: &nervix_models::PartitionTopology,
+        existing: Option<&DomainSchedule>,
+    ) -> std::collections::BTreeMap<BranchName, nervix_models::ResolvedBranchPartitions> {
         let mut partitions = std::collections::BTreeMap::new();
         for node in self.graph.node_weights() {
-            if let Model::Branch(declaration) = node.config.as_ref() {
-                partitions.insert(declaration.name.clone(), declaration.partitions);
+            let Model::Branch(declaration) = node.config.as_ref() else {
+                continue;
+            };
+            let layout = if let Some(layout) = declaration.partitions.direct_layout() {
+                Some(layout)
+            } else if let Some(layout) = topology.branches.get(&declaration.name) {
+                Some(layout.partitions())
+            } else if let Some(existing) = existing
+                && let Some(prior) = existing.nodes.get(&node.node_ref())
+                && let Model::Branch(branch) = prior.config.as_ref()
+            {
+                branch.partitions.direct_layout()
+            } else {
+                None
+            };
+            if let Some(layout) = layout {
+                partitions.insert(declaration.name.clone(), layout);
+            }
+        }
+        for node in self.graph.node_weights() {
+            if let Some(branching) = &node.resolved_branching
+                && let (Some(branch), Some(layout)) = (branching.branch(), branching.partitions())
+            {
+                partitions.entry(branch.clone()).or_insert(layout);
             }
         }
         partitions

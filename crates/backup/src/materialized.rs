@@ -46,7 +46,7 @@ pub struct MaterializedRelayDescriptor {
 /// Scalar identity beside one Arrow row; no payload is represented as row values here.
 #[derive(Debug, Clone, PartialEq, Eq, Archive, Serialize, Deserialize)]
 pub struct MaterializedRecordIdentity {
-    pub branch: Option<Vec<StateField>>,
+    pub branch: nervix_models::BranchKeyFields<StateField>,
     pub watermarks: RemoteRuntimeRecordMetadata,
 }
 
@@ -137,7 +137,7 @@ impl ArchiveRecord for MaterializedRelayDescriptor {
 
 impl ArchiveRecord for MaterializedIdentitiesRecord {
     const KIND: RecordKind = RecordKind::MaterializedIdentities;
-    const VERSION: u16 = 4;
+    const VERSION: u16 = 5;
 
     fn encode(&self) -> Result<Vec<u8>, Report<ArchiveWriteError>> {
         let bytes = encode_record(
@@ -243,18 +243,42 @@ mod tests {
                         let low = arbitrary.entropy().any_i64();
                         let high = arbitrary.entropy().any_i64();
                         let branch = if arbitrary.entropy().flag() {
-                            Some(vec![StateField {
-                                name: "tenant".into(),
-                                value: crate::StateValue::Array(vec![
-                                    crate::StateValue::String(arbitrary.string()),
-                                    crate::StateValue::Vec(vec![
-                                        crate::StateValue::U8(arbitrary.entropy().byte()),
-                                        crate::StateValue::F64Bits(arbitrary.entropy().any_u64()),
+                            nervix_models::BranchKeyFields::Direct(
+                                vec![StateField {
+                                    name: "tenant".into(),
+                                    value: crate::StateValue::Array(vec![
+                                        crate::StateValue::String(arbitrary.string()),
+                                        crate::StateValue::Vec(vec![
+                                            crate::StateValue::U8(arbitrary.entropy().byte()),
+                                            crate::StateValue::F64Bits(
+                                                arbitrary.entropy().any_u64(),
+                                            ),
+                                        ]),
                                     ]),
-                                ]),
-                            }])
+                                }]
+                                .into(),
+                            )
                         } else {
-                            None
+                            nervix_models::BranchKeyFields::Unbranched
+                        };
+                        let branch = if branch.is_branched() && arbitrary.entropy().flag() {
+                            let (fields, _) = branch
+                                .into_parts()
+                                .assured("a branched identity has fields");
+                            nervix_models::BranchKeyFields::branched(
+                                fields,
+                                Some(nervix_models::InheritedPartitionOrigin {
+                                    partition: nervix_models::ExternalPartition::new(u32::from(
+                                        arbitrary.entropy().byte(),
+                                    )),
+                                    epoch: nervix_models::PartitionEpochNumber::new(
+                                        arbitrary.positive_u64(),
+                                    ),
+                                    unit: arbitrary.unit(),
+                                }),
+                            )
+                        } else {
+                            branch
                         };
                         identities.push(MaterializedRecordIdentity {
                             branch,
@@ -305,8 +329,11 @@ mod tests {
                         .checked_add(rows)
                         .verified("at most four groups of eight rows are restored");
                     for identity in decoded.identities {
-                        for field in identity.branch.into_iter().flatten() {
-                            assert_eq!(StateField::from_remote(field.clone().into_remote()), field);
+                        for field in identity.branch.fields().into_iter().flatten() {
+                            assert_eq!(
+                                StateField::from_remote(field.clone().into_remote()),
+                                *field
+                            );
                         }
                     }
                 }
@@ -362,11 +389,14 @@ mod tests {
         .assured("the current malformed count encodes");
         assert!(MaterializedRelayDescriptor::decode("descriptor.rkyv", &bytes).is_err());
         for branch in [
-            Some(Vec::new()),
-            Some(vec![StateField {
-                name: String::new(),
-                value: crate::StateValue::U8(1),
-            }]),
+            nervix_models::BranchKeyFields::Direct(Vec::new().into()),
+            nervix_models::BranchKeyFields::Direct(
+                vec![StateField {
+                    name: String::new(),
+                    value: crate::StateValue::U8(1),
+                }]
+                .into(),
+            ),
         ] {
             let record = IdentitiesWire {
                 unit: nervix_models::Unit::SINGLE.into(),
