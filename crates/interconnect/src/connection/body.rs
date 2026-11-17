@@ -16,7 +16,59 @@ use nervix_execution::{
 use nervix_primitives::time::timeout;
 
 use super::BODY_CHUNK_BYTES;
-use crate::{PoolClass, TransportError, request::RemoteRequestFailure, wire::FreeRoom};
+use crate::{
+    PoolClass, RemoteOperationFailureKind, TransportError, operation::OPERATION_FAILURE_HEADER,
+    request::RemoteRequestFailure, wire::FreeRoom,
+};
+
+/// Read a refused opening under its body and progress bounds, retaining a reported operation
+/// outcome. Protocol and transport errors do not carry an operation outcome.
+pub(super) async fn read_error_response(
+    executor: &Executor,
+    class: PoolClass,
+    limit: u64,
+    progress_timeout: Duration,
+    response: Response<RecvStream>,
+) -> Report<TransportError> {
+    let status = response.status();
+    let kind = match response.headers().get(OPERATION_FAILURE_HEADER) {
+        Some(value) => {
+            let text = match value.to_str() {
+                Ok(text) => text,
+                Err(error) => {
+                    return TransportError::with_cause(Report::new(error), TransportError::Decode);
+                }
+            };
+            match text.parse::<RemoteOperationFailureKind>() {
+                Ok(kind) => Some(kind),
+                Err(error) => {
+                    return TransportError::with_cause(Report::new(error), TransportError::Decode);
+                }
+            }
+        }
+        None => None,
+    };
+    let message = match read_body(
+        executor,
+        class.memory_class(),
+        limit,
+        progress_timeout,
+        response.into_body(),
+    )
+    .await
+    {
+        Ok(message) => message,
+        Err(error) => return error,
+    };
+    let error = Report::new(TransportError::RemoteRejected {
+        status: status.as_u16(),
+        message: String::from_utf8_lossy(message.as_ref()).into_owned(),
+    });
+    match kind {
+        Some(kind) => error.attach(kind),
+        None => error,
+    }
+}
 
 /// Answer an opening decode's admission refusal before the response stream is established.
 /// Other decoder failures retain their transport report and its original failure behavior.
@@ -150,9 +202,50 @@ pub(super) async fn send_static_error(
     message: &str,
     progress_timeout: Duration,
 ) -> Result<(), Report<TransportError>> {
-    let response = Response::builder()
-        .status(status)
-        .version(Version::HTTP_2)
+    send_error_response(respond, status, message, progress_timeout, |response| {
+        response
+    })
+    .await
+}
+
+/// Supplement the full diagnostic with its typed operation outcome. Successful streams retain
+/// their framing, and sending an outcome adds no execution admission to the refusal path.
+pub(super) async fn send_operation_error(
+    respond: &mut server::SendResponse<Bytes>,
+    kind: RemoteOperationFailureKind,
+    message: &str,
+    progress_timeout: Duration,
+) -> Result<(), Report<TransportError>> {
+    let status = match kind {
+        RemoteOperationFailureKind::Rejected => StatusCode::CONFLICT,
+        RemoteOperationFailureKind::Unavailable => StatusCode::NOT_FOUND,
+        RemoteOperationFailureKind::NotReady => StatusCode::TOO_EARLY,
+        RemoteOperationFailureKind::Failed => StatusCode::INTERNAL_SERVER_ERROR,
+    };
+    send_error_response(respond, status, message, progress_timeout, |response| {
+        response.header(OPERATION_FAILURE_HEADER, kind.as_ref())
+    })
+    .await
+}
+
+#[cfg_attr(
+    nervix_lint,
+    nervix::dispatch(
+        reason = "the private callers supply one synchronous HTTP response-header construction \
+                  before the bounded body write"
+    )
+)]
+async fn send_error_response<F>(
+    respond: &mut server::SendResponse<Bytes>,
+    status: StatusCode,
+    message: &str,
+    progress_timeout: Duration,
+    headers: F,
+) -> Result<(), Report<TransportError>>
+where
+    F: FnOnce(http::response::Builder) -> http::response::Builder,
+{
+    let response = headers(Response::builder().status(status).version(Version::HTTP_2))
         .body(())
         .map_err(|error| TransportError::with_cause(Report::new(error), TransportError::Http))?;
     let mut stream = respond

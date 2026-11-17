@@ -4,7 +4,8 @@
 //! - **Owns.** The invariants a read holds while the host cancels it at any point of a batch that
 //!   a broker task delivers publishes into: every publish the broker delivered reaches the host
 //!   exactly once and in order, from the read or from the connection's next read, and a batch
-//!   that is not full ends only because the host cancelled it, unless its batch timeout passed.
+//!   that is not full ends only because the host cancelled it, unless its batch timeout passed;
+//!   and a cancelled setup wait leaves its owned exchange intact until completion or close.
 //! - **Depends on.** The ingestor's read and its publish seam, an unbounded channel as the
 //!   connection's read-ahead, the model harness's Shuttle runner, and the task labels and timeout
 //!   triggers of Shuttle's Tokio.
@@ -25,15 +26,20 @@ use nervix_connector::{
 };
 use nervix_model_harness::shuttle::check_interleavings;
 use nervix_primitives::{
-    sync::{Arc, mpsc},
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+        mpsc, oneshot,
+    },
     task::JoinHandle,
     time::{clear_triggers, trigger_timeouts},
 };
+use nervix_recovery::Discarded as _;
 use rumqttc::{Publish, QoS};
 
 use super::{
     GatherPublishOutcome, MqttTopicIngestor, MqttTopicIngestorError, MqttTopicIngestorMessage,
-    MqttTopicIngestorResult, PublishRead, PublishReadOutcome,
+    MqttTopicIngestorResult, PublishRead, PublishReadOutcome, SubscriptionSetup,
 };
 
 const CHECK_TASK_JOINS: &str =
@@ -208,4 +214,82 @@ fn shuttle_a_cancelled_read_hands_over_every_publish_the_broker_delivered() {
 #[test]
 fn shuttle_a_read_whose_batch_timeout_races_the_cancellation_hands_over_every_publish() {
     check_interleavings(|| a_cancelled_read_hands_over_every_publish_the_broker_delivered(2, true));
+}
+
+/// The completion stands for one pending protocol exchange, not a simulated broker. The real
+/// socket checks cover refusal/grant bytes and queued publishes. This checks the production
+/// setup owner's lifetime when caller cancellation races completion or terminal close.
+#[test]
+fn shuttle_cancelled_subscription_setup_retains_its_owned_completion() {
+    for close_pending in [false, true] {
+        check_interleavings(move || {
+            shuttle::future::block_on(async move {
+                struct CompletionLifetime(Arc<AtomicUsize>);
+                impl Drop for CompletionLifetime {
+                    fn drop(&mut self) {
+                        self.0.fetch_add(1, Ordering::SeqCst);
+                    }
+                }
+                let dropped = Arc::new(AtomicUsize::new(0));
+                let lifetime = CompletionLifetime(dropped.clone());
+                let (finish, finished) = oneshot::channel::<()>();
+                let (cancel, mut cancelled) = oneshot::channel::<()>();
+                let mut setup = SubscriptionSetup::new(async move {
+                    let _lifetime = lifetime;
+                    finished
+                        .await
+                        .assured("the completion controller stays present");
+                    Err(Report::new(MqttTopicIngestorError::SubscriptionRefused))
+                });
+                let finisher = nervix_primitives::task::spawn(async move {
+                    finish
+                        .send(())
+                        .discarded("terminal close can end the pending exchange first");
+                });
+                let canceller = nervix_primitives::task::spawn(async move {
+                    cancel
+                        .send(())
+                        .assured("the cancellation receiver stays until the controller joins");
+                });
+                let outcome = {
+                    let mut wait = std::pin::pin!(setup.wait());
+                    nervix_primitives::select! {
+                        biased;
+                        cancellation = &mut cancelled => {
+                            cancellation.assured("the cancellation controller stays present");
+                            None
+                        },
+                        outcome = &mut wait => Some(outcome),
+                    }
+                };
+                if let Some(outcome) = outcome {
+                    assert!(outcome.is_err(), "the scripted completion is a refusal");
+                    assert_eq!(dropped.load(Ordering::SeqCst), 1);
+                    drop(setup);
+                } else {
+                    assert_eq!(
+                        dropped.load(Ordering::SeqCst),
+                        0,
+                        "cancelling the borrowed wait must retain its exchange"
+                    );
+                    if close_pending {
+                        drop(setup);
+                    } else {
+                        assert!(
+                            setup.wait().await.is_err(),
+                            "the retained exchange still reports its refusal"
+                        );
+                        drop(setup);
+                    }
+                }
+                finisher.await.assured(CHECK_TASK_JOINS);
+                canceller.await.assured(CHECK_TASK_JOINS);
+                assert_eq!(
+                    dropped.load(Ordering::SeqCst),
+                    1,
+                    "completion or terminal close ends the exchange exactly once"
+                );
+            });
+        });
+    }
 }

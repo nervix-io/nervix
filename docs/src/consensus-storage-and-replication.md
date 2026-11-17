@@ -287,7 +287,11 @@ scenario sends opaque TLS bytes through a bounded test proxy at 32768 bytes per 
 the applied domain backlog within its assertion bound and the bytes carried by the paced path.
 Append stream openings observe actual data-stream setup; initial empty probes do not open those
 streams. A data-setup attempt includes its prefix check, even when that check fails before a stream
-can open. Native transport regressions cover finite probes, the transition to data, ordered empty
+can open. The separate replication-attempt observation counts one caller input after its first
+request passes the caller's retry gate, including a management probe refused before data admission.
+Ended input counts no attempt. The departed-follower scenario uses that observation for its nonzero
+attempt and retry-delay assertions; data-attempt and data-opening observations retain their separate
+meaning. Native transport regressions cover finite probes, the transition to data, ordered empty
 commit updates, rejected probes and a batch the stream cannot submit after an answered one. The
 public catch-up scenarios retain their stream-count and
 time assertions and change no product deadline.
@@ -357,8 +361,10 @@ mismatch when it cannot run beside a voter. It refuses the run of a voter that c
 older voter's run the same way, without changing the membership.
 [Prerequisites At Join](node-settings.md#prerequisites-at-join) describes the verdicts the leader
 publishes and what a refused node does. Each membership reconciliation gives a blocking learner
-catch-up attempt ten seconds. Promotion to voter is proposed only after that attempt reports the
-learner caught up; the membership change has its own ten-second bound. A catch-up timeout leaves
+catch-up attempt ten seconds. Promotion to voter is proposed only after the learner has confirmed
+a replicated log prefix and the attempt reports it within the configured catch-up lag allowance.
+An absent replication match never satisfies that allowance, even on a short log. The membership
+change has its own ten-second bound. A catch-up timeout leaves
 the node a learner. A failed reconciliation records `raft membership reconciliation failed`, and
 the one-second reconciliation loop tries again while ordinary replication continues.
 

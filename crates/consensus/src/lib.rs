@@ -126,6 +126,7 @@ mod domain_pause_recovery;
 mod durable_batch;
 mod leadership;
 mod lease_refusal;
+mod membership_admission;
 mod membership_interruption;
 #[cfg(feature = "testing")]
 pub use membership_interruption::InterruptedMembership;
@@ -2426,6 +2427,7 @@ struct ConsensusTestProbeState {
 #[cfg(feature = "testing")]
 #[derive(Debug, Default)]
 struct AppendStreamCounts {
+    replication_attempts: u64,
     attempts: u64,
     opened: u64,
 }
@@ -2490,6 +2492,15 @@ impl ConsensusTestProbe {
         }
     }
 
+    /// Caller-gated replication inputs, including initial management probes that fail before data.
+    pub fn replication_attempt_count(&self, target: &ClusterNodeName) -> u64 {
+        let counts = self.inner.append_stream_counts.lock();
+        match counts.get(target) {
+            Some(count) => count.replication_attempts,
+            None => 0,
+        }
+    }
+
     pub fn block_connectivity(&self) {
         self.inner.connectivity.block();
     }
@@ -2534,9 +2545,19 @@ impl ConsensusTestProbe {
             .checked_add(1)
             .verified("a bounded fixture cannot exhaust its append-stream attempt counter");
     }
+
+    fn record_replication_attempt(&self, target: &ClusterNodeName) {
+        let mut counts = self.inner.append_stream_counts.lock();
+        let count = counts.entry(target.clone()).or_default();
+        count.replication_attempts = count
+            .replication_attempts
+            .checked_add(1)
+            .verified("a bounded fixture cannot exhaust its replication attempt counter");
+    }
 }
 
 trait AppendStreamOpenRecorder: Clone + Send + Sync + 'static {
+    fn record_replication_attempt(&self, _target: &ClusterNodeName) {}
     fn record_append_stream_open(&self, target: &ClusterNodeName);
     fn record_append_stream_attempt(&self, target: &ClusterNodeName);
     fn connectivity_fault(&self) -> ConnectivityFault;
@@ -2569,6 +2590,10 @@ impl AppendStreamOpenRecorder for () {
 
 #[cfg(feature = "testing")]
 impl AppendStreamOpenRecorder for ConsensusTestProbe {
+    fn record_replication_attempt(&self, target: &ClusterNodeName) {
+        ConsensusTestProbe::record_replication_attempt(self, target);
+    }
+
     fn append_submission_fault(&self, target: &ClusterNodeName) -> AppendSubmissionFault {
         self.inner.append_submission_fault.for_target(target)
     }
@@ -4775,10 +4800,10 @@ impl Administrator {
                         let proposed_under = self.inner.leader_tenure();
                         let admission = timeout(
                             *self.inner.operations.membership_mutation_timeout.value(),
-                            self.inner.raft.add_learner(
+                            membership_admission::catch_up_learner(
+                                &self.inner.raft,
                                 node_id,
-                                BasicNode::new(endpoint.to_string()),
-                                true,
+                                endpoint.to_string(),
                             ),
                         )
                         .await;
@@ -9390,7 +9415,7 @@ mod tests {
         }
     }
 
-    fn temp_database() -> Database {
+    pub(super) fn temp_database() -> Database {
         let dir = tempdir().expect("tempdir");
         Database::builder(dir.keep())
             .open()

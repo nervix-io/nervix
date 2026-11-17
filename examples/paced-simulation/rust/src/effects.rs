@@ -83,7 +83,7 @@ pub(crate) struct EffectStore {
     file: File,
     readings: HashSet<String>,
     rejections: HashSet<String>,
-    /// How many rejection notices the store holds, for a run that waits for some.
+    /// The number of rejection notices recorded, for a run draining completed readings.
     notices: watch::Sender<usize>,
 }
 
@@ -138,9 +138,9 @@ impl EffectStore {
         self.notices.subscribe()
     }
 
-    /// Whether the store holds the rejection notice of `reading_id`.
-    pub(crate) fn has_rejection(&self, reading_id: &str) -> bool {
-        self.rejections.contains(reading_id)
+    /// Whether either effect of `reading_id` has been recorded.
+    pub(crate) fn has_effect(&self, reading_id: &str) -> bool {
+        self.readings.contains(reading_id) || self.rejections.contains(reading_id)
     }
 
     /// Applies a delivered reading unless it was applied before.
@@ -281,6 +281,34 @@ mod tests {
             .assured("the store is readable");
         assert_eq!(text.lines().count(), 3);
         assert!(text.contains("\"occurred_at\":\"1970-01-01T00:00:00.000000400Z\""));
+    }
+
+    #[nervix_primitives::test]
+    async fn completed_readings_can_be_found_in_either_effect_set() {
+        let directory = tempfile::tempdir().assured("a test can create a directory");
+        let mut store = EffectStore::open(&directory.path().join("effects.jsonl"))
+            .await
+            .assured("the store opens");
+        let notices = store.notices();
+        store
+            .reading(&observed("g1-t4-s0-0"), 1)
+            .await
+            .assured("the store appends");
+        assert!(store.has_effect("g1-t4-s0-0"));
+        let notice = RejectionNotice {
+            reading_id: "g1-t5-s0-0".to_string(),
+            occurred_at: Timestamp::from_unix_nanos(400),
+            error_code: "window".to_string(),
+            error_message: "outside".to_string(),
+        };
+        store
+            .rejection(&notice, 1)
+            .await
+            .assured("the store appends");
+        assert!(store.has_effect("g1-t5-s0-0"));
+        assert!(!store.has_effect("g1-t6-s0-0"));
+        assert!(notices.has_changed().assured("the store keeps its sender"));
+        assert_eq!(*notices.borrow(), 1);
     }
 
     #[nervix_primitives::test]

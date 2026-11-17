@@ -86,6 +86,7 @@ Bolero obligation, and none of those discharges a suite.
 | `verify-*.sh` | The external verifiers: ledgers, load pacing, Docker events, and crash, pause, partition, degraded-link, recovery, restart, drain, state, clock, mixed, endpoint, lifetimes, outward TLS and diagnostic evidence |
 | `outward-tls.sh`, `tls-probe.py`, `tls-probe-openssl.cnf` | The three-node leader crash's outward TLS observations, the restricted TLS probe that runs inside the pinned Python image, and the probe's OpenSSL configuration |
 | `continuous-load.sh`, `observe-nodes.sh`, `observe-clock.sh` | The paced producer, the listener observer and the domain-clock observer, each running inside a container |
+| `connector-metrics.sh`, `connector_metrics.py` | The held input boundary and maintained-parser evidence checks for fresh connector counters and progress after an owner crash |
 | `endpoint-client.py` | The [endpoints](#endpoints) scenario's HTTP and WebSocket client, which runs inside the pinned Python image and writes its ledger of attempts to its log |
 | `binding_client.py`, `binding_evidence.py`, `binding-scenario.sh`, `binding-image.sh`, `install_binding.py` | The binding endpoint scenario's Python-package producer/consumer, its exact effect and settlement verdict, fault coordination, source/wheel identity checks and offline image preparation |
 | `docker-event-recording.sh` | The run's live Docker event recording and its marker windows |
@@ -266,6 +267,9 @@ A run needs a Linux Docker host with the following.
   `--foreground` and `--kill-after`; `awk`, `sed`, `grep`, `sort`, `wc` and `date`. A run refuses
   to start without them, as a setup error.
 - **jq 1.8 or later.** The verifiers use jq 1.8's grammar, which jq 1.7 refuses to compile.
+- **Prepared metric parser for `--connector-metrics`.** `just prepare-chaos-metrics` installs the
+  hash-pinned official Prometheus Python client into `target/chaos-metrics` before execution.
+  The selected run checks its verifier controls within 60 seconds before starting the cluster.
   `just chaos run`, `just chaos replay`, a suite run and `just chaos self-test` stop at once with a
   setup error that names an older jq. Listing, planning, reporting and cleaning up a suite work with
   jq 1.7.
@@ -1456,6 +1460,44 @@ and make no TLS observation.
 election and placement are `null` where the fault does not require them. The exact ledger accepts
 replay duplicates.
 
+#### Connector Metric Observations
+
+The owner-crash cases also accept `--connector-metrics` on three nodes. Prepare their maintained
+Prometheus parser before starting a run:
+
+```bash
+just test-chaos-connector-metrics
+just chaos run ingestor-owner-crash --image nervix:debian --connector-metrics
+just chaos run emitter-owner-crash --image nervix:debian --connector-metrics
+```
+
+This selection observes an idle initial owner, releases a bounded prefix of at most eight records,
+and waits for its output and Kafka consumer-group confirmation before the fault. The existing load
+gate holds further input. Once the proven crash has placed the connector on a survivor, its
+process-local counters must exist at zero before the gate opens. The same physical owner's
+counters must then advance: payloads, bytes and acknowledged trees for an ingestor; successful
+publish attempts and duration observations for an emitter. The emitter check also requires every
+bounded publish/commit outcome child to be registered. The Kafka fixture's one indexed ingestor
+unit is attributed to `instance="0"`, and its default single emitter unit to `instance="-"`.
+Samples of a numbered emitter instance cannot supply that single unit's counters.
+The ordinary owner-crash cases retain their
+continuous load throughout the fault.
+
+The ingestor metric suite entry uses three records: one settled before the fault, one held until
+the replacement's zero observation and one held until the restarted node and cluster have recovered.
+Both metric cases retain this final input so the existing post-restart delivery check remains
+meaningful and the producer stays active through recovery. This exercises the smallest supported
+three-stage fixture. The emitter entry retains the default record count and its larger settled
+prefix.
+
+Each observation retains the raw `/metrics` scrape, the owner-routed `DESCRIBE` section and a
+machine-readable verdict under `crash/connector-metrics/`. Missing children, duplicate samples,
+another owner, expanded identity labels, invalid counter values, a nonzero fresh-owner counter,
+another instance, counter resets and absent progress fail qualification. Totals from the
+crashed process never supply the survivor's progress. The run manifest records
+`connector_metrics: true`. Parser
+preparation happens before execution; a run builds and installs nothing.
+
 ### Pause And Resume
 
 ```bash
@@ -2089,7 +2131,14 @@ paths, each with its own attached Kafka emitter and output topic:
   six-second windows: their count, bounds and sum, an `APPROX_COUNT_DISTINCT` of the index modulo 3,
   and an `APPROX_QUANTILE` median. A window that computes sketches takes duration bounds.
 - **The reingestor `chaos_life_rotate`.** It moves every record onto the LRU-bounded branches, which
-  four branches keep evicting.
+  four branches keep evicting. A second attached reingestor crosses from that relay to
+  `chaos_life_rotation_delivery` under the existing sixteen-instance branch declaration before the
+  external emitter. The exact delivery oracle thus tests the rotating relay while the emitter
+  retains pending publication under its own stable branch lifetime. Directly sharing the two-instance
+  branch with the emitter would also exercise intentional emitter-buffer retirement: its NoACK
+  can replay an ingestor's other successful paths before any injected fault. Dedicated emitter
+  lifecycle scenarios cover that discard contract; this fixture retains its strict pre-fault
+  exact-count, window, field and eviction assertions, its 500ms traffic cadence and its deadlines.
 
 Four pipelines have their own ingestors, which the run produces to directly:
 
@@ -2832,7 +2881,7 @@ Each entry is one `just chaos run` command with its arguments, a budget in minut
 which is the unit one CI job runs. An entry may also carry a note. The suite's `ci_reserve_minutes`
 is 21.
 
-The `smoke` suite runs in five shards:
+The `smoke` suite runs in six shards:
 
 | Shard | Entry | Command | Budget (min) |
 | ---: | --- | --- | ---: |
@@ -2847,6 +2896,8 @@ The `smoke` suite runs in five shards:
 | 5 | `binding-endpoints-3-owner-stop` | `binding-endpoints --nodes 3 --fault owner-stop` | 12 |
 | 5 | `binding-endpoints-3-owner-crash` | `binding-endpoints --nodes 3 --fault owner-crash` | 12 |
 | 5 | `binding-endpoints-1-cluster-restart` | `binding-endpoints --nodes 1 --fault cluster-restart` | 12 |
+| 6 | `ingestor-metrics-owner-crash` | `ingestor-owner-crash --connector-metrics --nodes 3 --records 3` | 10 |
+| 6 | `emitter-metrics-owner-crash` | `emitter-owner-crash --connector-metrics --nodes 3` | 10 |
 
 The `intake-recovery` suite selects two existing recovery entries on one shard. It checks spread
 ingestor ownership after a node crash and persisted state after a single-node cluster restart.
@@ -2859,7 +2910,7 @@ as the larger suites. Select `intake-recovery` in a manual Chaos workflow run, o
 | 1 | `ingestor-instances-owner-crash` | `ingestor-instances-owner-crash` | 7 |
 | 1 | `stateful-1-cluster-restart` | `stateful --nodes 1 --fault cluster-restart` | 22 |
 
-The `soak` suite runs every delivered scenario, topology, case, profile and fault, in sixteen shards:
+The `soak` suite runs every delivered scenario, topology, case, profile and fault, in seventeen shards:
 
 | Shard | Entries, with budgets in minutes |
 | ---: | --- |
@@ -2879,6 +2930,7 @@ The `soak` suite runs every delivered scenario, topology, case, profile and faul
 | 14 | `lifetimes-3-owner-crash`, `lifetimes-3-owner-partition`, `lifetimes-3-cluster-restart` 25 each |
 | 15 | `stateful-partitions-3-owner-crash` 25 |
 | 16 | `binding-endpoints-1` 10; `binding-endpoints-3-owner-stop`, `binding-endpoints-3-owner-crash`, `binding-endpoints-1-cluster-restart` 12 each |
+| 17 | `ingestor-metrics-owner-crash`, `emitter-metrics-owner-crash` 10 each |
 
 A few soak entries need explanation:
 

@@ -91,6 +91,9 @@ For using the authenticated producer identity in arrival filters and routes, rea
 For typed state inspection in Python, Ruby or JVM applications, read that host guide's
 `Inspect Materialized State` section for page/refusal metadata, opaque continuation and retained
 schema/frame lifetimes before suggesting application code.
+For a runnable paced graph and its Rust or Python application, read
+[Paced Simulation Drivers](../../../docs/src/paced-simulation-drivers.md) for generation changes,
+deliberate rejection inputs, application effects and the final drain before suggesting driver options.
 
 For deduplicator keys and retained window state, read [Runtime Nodes → Inspect Remembered Keys](../../../docs/src/processors.md#inspect-remembered-keys)
 and [Inspect Retained Window State](../../../docs/src/processors.md#inspect-retained-window-state).

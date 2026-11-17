@@ -35,7 +35,8 @@ use std::time::Duration;
 use error_stack::{Report, ResultExt as _};
 use futures_util::stream;
 use nervix_interconnect::{
-    RemoteOperationFailure, RemoteOperationSubject, StreamHandlerError, StreamingResponse,
+    RemoteOperationFailure, RemoteOperationFailureKind, RemoteOperationSubject, RequestError,
+    StreamHandlerError, StreamingResponse,
 };
 use nervix_models::ClusterNodeName;
 use thiserror::Error;
@@ -126,6 +127,34 @@ pub(in crate::runtime) enum MaterializedSnapshotExchangeError {
 }
 
 impl MaterializedSnapshotExchangeError {
+    fn from_stream_opening(
+        error: Report<RequestError>,
+        target: &ClusterNodeName,
+        placement: &RuntimeStatePlacement,
+    ) -> Report<Self> {
+        let subject = RemoteOperationSubject::state(&placement.to_remote());
+        let failure = match error.downcast_ref::<RemoteOperationFailureKind>() {
+            Some(RemoteOperationFailureKind::Rejected) => RemoteOperationFailure::rejected(subject),
+            Some(RemoteOperationFailureKind::Unavailable) => {
+                RemoteOperationFailure::unavailable(subject)
+            }
+            Some(RemoteOperationFailureKind::NotReady) => {
+                RemoteOperationFailure::not_ready(subject)
+            }
+            Some(RemoteOperationFailureKind::Failed) | None => {
+                return error.change_context(Self::OpenTransfer {
+                    target: target.clone(),
+                    placement: placement.clone(),
+                });
+            }
+        };
+        error.change_context(Self::RemoteFailure {
+            target: target.clone(),
+            placement: placement.clone(),
+            failure,
+        })
+    }
+
     /// Whether the requested state is between assignments rather than having failed to read.
     ///
     /// A reader can observe the committed destination just before that destination activates its
@@ -207,18 +236,29 @@ impl Runtime {
             None => None,
         };
         let Some(state) = state else {
-            return Err(Report::new(StreamHandlerError::new(format!(
-                "this node is not currently assigned materialized state for {} '{}'",
-                placement.kind.as_str(),
-                placement.identifier.as_str()
-            ))));
+            let subject = RemoteOperationSubject::state(&placement.to_remote());
+            return Err(
+                Report::new(RemoteOperationFailure::unavailable(subject)).change_context(
+                    StreamHandlerError::new(format!(
+                        "this node is not currently assigned materialized state for {} '{}'",
+                        placement.kind.as_str(),
+                        placement.identifier.as_str()
+                    )),
+                ),
+            );
         };
         let Some(sealed) = state.sealed_at(request.revision) else {
-            return Err(Report::new(StreamHandlerError::new(format!(
-                "materialized relay '{}' no longer holds the sealed generation at revision {}",
-                placement.identifier.as_str(),
-                request.revision
-            ))));
+            let subject = RemoteOperationSubject::state(&placement.to_remote());
+            return Err(
+                Report::new(RemoteOperationFailure::not_ready(subject)).change_context(
+                    StreamHandlerError::new(format!(
+                        "materialized relay '{}' no longer holds the sealed generation at \
+                         revision {}",
+                        placement.identifier.as_str(),
+                        request.revision
+                    )),
+                ),
+            );
         };
         let chunk_bytes = self.inner.executor.limits().bulk_chunk_bytes.as_u64();
         let length = sealed.descriptor.length;
@@ -355,9 +395,12 @@ impl Runtime {
                 },
             )
             .await
-            .change_context_lazy(|| MaterializedSnapshotExchangeError::OpenTransfer {
-                target: target_node_id.clone(),
-                placement: placement.clone(),
+            .map_err(|error| {
+                MaterializedSnapshotExchangeError::from_stream_opening(
+                    error,
+                    target_node_id,
+                    placement,
+                )
             })?;
         if body.content_length() != envelope.length {
             return Err(Report::new(

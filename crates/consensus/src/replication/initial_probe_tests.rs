@@ -18,7 +18,7 @@ use nervix_models::{ClusterNodeName, PrerequisiteTimings};
 use nervix_primitives::sync::{
     Arc,
     atomic::{AtomicUsize, Ordering},
-    mpsc,
+    mpsc, oneshot,
 };
 use openraft::{
     Entry, EntryPayload, Vote,
@@ -35,11 +35,16 @@ use crate::{
 
 #[derive(Clone, Default)]
 struct ProbeRecorder {
+    replication_attempts: Arc<AtomicUsize>,
     attempts: Arc<AtomicUsize>,
     opened: Arc<AtomicUsize>,
 }
 
 impl AppendStreamOpenRecorder for ProbeRecorder {
+    fn record_replication_attempt(&self, _target: &ClusterNodeName) {
+        self.replication_attempts.fetch_add(1, Ordering::Relaxed);
+    }
+
     fn record_append_stream_attempt(&self, _target: &ClusterNodeName) {
         self.attempts.fetch_add(1, Ordering::Relaxed);
     }
@@ -55,6 +60,57 @@ impl AppendStreamOpenRecorder for ProbeRecorder {
     fn lease_refusal(&self) -> LeaseRefusal {
         LeaseRefusal::default()
     }
+}
+
+#[nervix_primitives::test]
+async fn a_failed_management_probe_records_a_caller_gated_replication_attempt() {
+    let mut peer = probe_peer(wire::AppendEntriesResponseRecord::Success).await;
+    peer.client
+        .interconnect
+        .replace_live_nodes(&BTreeSet::from([peer.client.local_node_id.clone()]));
+    let recorder = peer.client.append_stream_open_recorder.clone();
+    let request = peer.empty_request(None);
+    let (release, gate) = oneshot::channel();
+    let input = stream::once(async move {
+        gate.await
+            .assured("the test releases the caller's input gate");
+        request
+    })
+    .boxed();
+    let mut attempt = Box::pin(
+        peer.client
+            .stream_append(input, RPCOption::new(Duration::from_millis(250))),
+    );
+    assert!(futures_util::poll!(&mut attempt).is_pending());
+    assert_eq!(recorder.replication_attempts.load(Ordering::Relaxed), 0);
+    release.send(()).assured("the caller still holds its input");
+    assert!(
+        attempt.await.is_err(),
+        "the departed peer refuses the probe"
+    );
+    assert_eq!(recorder.replication_attempts.load(Ordering::Relaxed), 1);
+    assert_eq!(recorder.attempts.load(Ordering::Relaxed), 0);
+    assert_eq!(recorder.opened.load(Ordering::Relaxed), 0);
+    assert_eq!(peer.management_calls.load(Ordering::Relaxed), 0);
+    peer.close().await;
+}
+
+#[nervix_primitives::test]
+async fn an_ended_input_records_no_replication_attempt() {
+    let mut peer = probe_peer(wire::AppendEntriesResponseRecord::Success).await;
+    let recorder = peer.client.append_stream_open_recorder.clone();
+    let mut answers = peer
+        .client
+        .stream_append(stream::empty(), RPCOption::new(Duration::from_millis(250)))
+        .await
+        .assured("ended caller input needs no transport");
+    assert!(answers.next().await.is_none());
+    assert_eq!(recorder.replication_attempts.load(Ordering::Relaxed), 0);
+    assert_eq!(recorder.attempts.load(Ordering::Relaxed), 0);
+    assert_eq!(recorder.opened.load(Ordering::Relaxed), 0);
+    assert_eq!(peer.management_calls.load(Ordering::Relaxed), 0);
+    drop(answers);
+    peer.close().await;
 }
 
 struct ProbePeer {

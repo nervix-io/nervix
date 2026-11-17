@@ -2,7 +2,7 @@
   "ci_reserve_minutes": 21,
   "suites": {
     "smoke": {
-      "description": "Three-node baseline, a leader crash with its restart, the recovery from an isolated follower's partition, endpoint intake on one node and through a three-node owner crash, the lifetimes workloads through a three-node owner crash, and the Python binding through graceful stop, crash and restart",
+      "description": "Three-node baseline, a leader crash with its restart, connector counters across ingestor and emitter owner crashes, the recovery from an isolated follower's partition, endpoint intake on one node and through a three-node owner crash, the lifetimes workloads through a three-node owner crash, and the Python binding through graceful stop, crash and restart",
       "entries": [
         {
           "id": "stateful-partitions-3-owner-crash",
@@ -69,6 +69,18 @@
           "shard": 5,
           "budget_minutes": 12,
           "run": ["binding-endpoints", "--nodes", "1", "--fault", "cluster-restart"]
+        },
+        {
+          "id": "ingestor-metrics-owner-crash",
+          "shard": 6,
+          "budget_minutes": 10,
+          "run": ["ingestor-owner-crash", "--connector-metrics", "--nodes", "3", "--records", "3"]
+        },
+        {
+          "id": "emitter-metrics-owner-crash",
+          "shard": 6,
+          "budget_minutes": 10,
+          "run": ["emitter-owner-crash", "--connector-metrics", "--nodes", "3"]
         }
       ]
     },
@@ -557,6 +569,18 @@
           "shard": 16,
           "budget_minutes": 12,
           "run": ["binding-endpoints", "--nodes", "1", "--fault", "cluster-restart"]
+        },
+        {
+          "id": "ingestor-metrics-owner-crash",
+          "shard": 17,
+          "budget_minutes": 10,
+          "run": ["ingestor-owner-crash", "--connector-metrics", "--nodes", "3", "--records", "3"]
+        },
+        {
+          "id": "emitter-metrics-owner-crash",
+          "shard": 17,
+          "budget_minutes": 10,
+          "run": ["emitter-owner-crash", "--connector-metrics", "--nodes", "3"]
         }
       ]
     }
