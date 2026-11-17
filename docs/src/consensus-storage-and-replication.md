@@ -521,13 +521,12 @@ status, keeping the start version, start mode, clock, schedule and incremental s
 
 The current emitter Models carry explicit key expressions, source-partition routing and
 expression-only SQS FIFO groups. The dedicated database owns exactly four current keyspaces:
-`raft_licensing_operations_inferencer_wasm_inspection_listener_bounds_stopgate_node_logs`, `raft_licensing_operations_inferencer_wasm_inspection_listener_bounds_stopgate_node_meta`, `raft_licensing_operations_inferencer_wasm_inspection_listener_bounds_stopgate_node_state`, and
-`raft_licensing_operations_inferencer_wasm_inspection_listener_bounds_stopgate_node_snapshots`. Opening it validates the complete keyspace namespace before
+`raft_inferencer_pages_logs`, `raft_inferencer_pages_meta`, `raft_inferencer_pages_state`, and
+`raft_inferencer_pages_snapshots`. Opening it validates the complete keyspace namespace before
 reading any records. The committed cluster-parameter record stores ordered typed TLS cipher
 suites and key-exchange groups; recovery validates their complete pair before returning that
 record. This namespace identifies the current Model shape, including the statement
-layout of the transactions it keeps, with `DESCRIBE INFERENCER` and
-`SHOW WASM PROCESSOR ... STATE` among the reads and a
+layout of the transactions it keeps, with `DESCRIBE INFERENCER`, `SHOW WASM PROCESSOR ... STATE` and `SHOW INFERENCER ... STATE` among the reads and a
 `DESCRIBE WASM PROCESSOR` that names only its processor, the separate JSON
 and CBOR wire type enums (CBOR has six types), AVRO representation types whose arrays declare their item type, explicit `BASE64` codec encoding, a Pulsar
 subscription's required type, an owned Pulsar subscription's required start position, a Kafka
@@ -552,7 +551,7 @@ committed node records under record-family tag `C`, each with the revision that 
 incarnation-bound capacity claim, including transport, DNS, database, consensus, engine, connector
 host and listener capacities, its detected properties and its tags. The boxed node record
 announcement keeps unrelated command variants within the inline payload-size bound. Its state metadata
-requires the current `ClusterState` encoding, 35, including the cluster identity reference,
+requires the current `ClusterState` encoding, 36, including the cluster identity reference,
 committed cluster parameters, the durable restore installation gate and the unit-keyed committed
 schedule in which a relay of a partitioned branch is scheduled as one unit per partition.
 The current shape also requires inferencer state bindings and their initial expressions,

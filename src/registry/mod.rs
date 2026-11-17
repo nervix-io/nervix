@@ -110,12 +110,10 @@ pub(crate) use placement::{
 pub(crate) use processor_plan::{
     BranchedNodeSpecs, BranchedProcessorNodeSpec, BranchedProcessorOperationSpec,
     BranchedProcessorOutputSpec, BranchedProcessorOutputsSpec, BranchedProcessorSpec,
-    InferencerStatePlan,
+    InferencerStatePlan, InferencerStatePortPlan,
 };
 #[cfg(test)]
-pub(crate) use processor_plan::{
-    InferencerStatePortPlan, PlannedModel, branched_node_specs_from_models,
-};
+pub(crate) use processor_plan::{PlannedModel, branched_node_specs_from_models};
 pub(crate) use reingestor_plan::{ReingestorInputPlan, ReingestorPlan};
 pub(crate) use relocation::{RelocationCoverage, RelocationMemberReason, RelocationUnit};
 pub(crate) use resource_plan::{

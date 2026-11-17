@@ -26,7 +26,6 @@ use nervix_primitives::sync::StdArc;
 
 use super::{
     MaterializedGenerationRecord, RestoredMaterializedSnapshot, SealedSource,
-    processor_state_inspection::MAX_PROCESSOR_SECTIONS,
     state_inspection_read::MaterializedInspectionPage,
 };
 use crate::runtime_schema::RuntimeRecordBatch;
@@ -485,11 +484,15 @@ fn processor_page_rows(
         None => 0,
     };
     let count = descriptor.offset.checked_sub(start).ok_or_else(framing)?;
+    let section_bound = match request.processor.kind {
+        nervix_models::ModelKind::Inferencer => payload.len(),
+        _ => ProcessorStateSection::FIXED_SECTION_COUNT,
+    };
     if count > request.max_rows
         || (request.max_rows == 0 && !descriptor.runs.is_empty())
         || descriptor.more != (descriptor.offset < descriptor.counts.rows)
         || descriptor.offset > descriptor.counts.rows
-        || descriptor.sections.len() > MAX_PROCESSOR_SECTIONS
+        || descriptor.sections.len() > section_bound
     {
         return Err(framing());
     }
@@ -503,11 +506,9 @@ fn processor_page_rows(
     let mut section_rows = vec![0_u64; descriptor.sections.len()];
     let mut returned = 0_u64;
     for run in &descriptor.runs {
-        // At most MAX_PROCESSOR_SECTIONS sections, checked above.
-        let Some(index) = descriptor
-            .sections
-            .iter()
-            .position(|section| section.section == run.section)
+        let Some(index) = run
+            .section
+            .index_in(&descriptor.sections, |section| section.section)
         else {
             return Err(framing());
         };

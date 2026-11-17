@@ -304,6 +304,22 @@ models, including the session's queued changes. In an ingestor construction expr
 `read_header` and `read_headers` are offered only when the selected ingestor supports header reads.
 In an emitter `INVOKE` expression, `write_header` is offered only when the selected emitter supports
 header writes.
+A codec reference after `DECODE USING`, in an ingestor or a hash map, offers only codecs that
+decode, and after `ENCODE USING` only codecs that encode. A relay reference offers the relays that
+agree with the relays its statement names before the cursor, by the rules the matching structured
+choices apply. A processor's further input shares the first input's schema and exact branch
+declaration. Its message-error relays, and the route relays of a processor that keeps its input's
+branch, share that branch declaration, and its materialized-state relay shares it and has
+materialized state. A correlator side's further relays share that side's first relay's schema and
+branch declaration. Its first right relay and its timeout relays share the first left relay's
+branch declaration, since a correlator's branch declaration covers both sides, and validation then
+checks that a timeout relay's schema provides the fields of the side's records. A generator's
+materialized relay has materialized state, on any branch declaration, since the generator declares
+its own branch after it. An emitter's further input shares the first input's schema, and its
+materialized-state and message-error relays share the branch declaration every input has. An
+ingestor's message-error relay is unbranched. Any other relay position, such as a statement's
+first input, a reingestor's route relay or a processor's or emitter's relay in an `ALTER`
+statement, offers every relay.
 
 Each suggestion carries a display value, a kind, and a text edit with UTF-8 byte start and end
 offsets and replacement text. Clients apply that edit to the original input; they do not infer the
@@ -420,7 +436,8 @@ Ingestor controls additionally ask for an ingestor reference by connector and en
 codec, relays with exact branch declarations, and fields of a selected branch's key schema. Each
 ingestor target requires a domain and returns what its entity reads through: clients of its
 connector, or for `HTTP ENDPOINT` and `WEBSOCKETS ENDPOINT` the endpoints of that `TYPE`. The
-ingestor codec target requires a domain and filters out codecs without decoding.
+decoding-codec target, which ingestor and hash-map controls ask, requires a domain and filters out
+codecs without decoding.
 An unbranched relay target requires a domain and also supplies ingestor error relay choices, while
 a branched relay target requires a domain then a branch model reference. Branch fields require the
 same pair. Decoded fields and output fields use the existing codec-field and relay-field targets.
