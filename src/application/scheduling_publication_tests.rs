@@ -86,7 +86,10 @@ async fn schedule_publication_keeps_the_basis_it_prepared() {
         .consensus
         .domain_planning_inputs(&domain)
         .await;
-    let prepared = service.prepare_domain_schedule(inputs, None).await;
+    let prepared = service
+        .prepare_domain_schedule(inputs, None)
+        .await
+        .assured("the empty graph has no unresolved topology");
     assert!(prepared.inputs.schedule().is_some());
     assert!(prepared.schedule.is_none());
 

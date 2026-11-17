@@ -208,6 +208,13 @@ path = "crates/consensus/src/restore.rs"
 reason = "Test participants exercise this owner concurrently outside a node executor; model participants use the selected scheduler."
 
 [[permission]]
+bound = "Two spawned model threads per execution publish one observation and one reconfiguration while the caller samples three times; both threads join before the at-most-256-schedule DFS check advances or ends."
+items = ["thread::spawn"]
+owner = "Consensus inherited-topology publication and assignment check."
+path = "crates/consensus/src/planning_parameter_fence_tests.rs"
+reason = "The selected model threads contend on the production applied-mutation owner outside a node executor; no product thread is created."
+
+[[permission]]
 bound = "Each Shuttle case starts at most two finite participants and joins both before returning; exploration uses the registered runner bounds."
 items = ["thread::spawn"]
 owner = "Conditional orphaned domain pause recovery checks."

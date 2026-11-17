@@ -651,6 +651,7 @@ kind = "cucumber"
 package = "nervix-scenarios"
 selections = ["deloxide", "deloxide-order"]
 tags = [
+  "@inherited_partition_lifecycle",
   "@inferencer_state_inspection",
   "@joint_membership_recovery",
   "@client_restore_codec_native",
@@ -4028,6 +4029,19 @@ workloads = [
 [[owner]]
 path = "crates/connectors/kafka/src/topic/ingestor_rejection.rs"
 workloads = [
+  "scenario.inherited-kafka-readers",
+  "stress.inherited-kafka-readers",
+  "scenario.inherited-growth",
+  "stress.inherited-growth",
+  "scenario.inherited-regroup",
+  "stress.inherited-regroup",
+  "scenario.inherited-shared-readers",
+  "stress.inherited-shared-readers",
+  "scenario.inherited-count-agreement",
+  "stress.inherited-count-agreement",
+  "scenario.inherited-topology-restore",
+  "stress.inherited-topology-restore",
+
   "scenario.shutdown-kafka-refused-commit",
   "stress.shutdown-kafka-refused-commit",
 ]
@@ -4035,6 +4049,21 @@ workloads = [
 [[owner]]
 path = "crates/consensus/src/lib.rs"
 workloads = [
+  "scenario.inherited-kafka-readers",
+  "stress.inherited-kafka-readers",
+  "scenario.inherited-pulsar-readers",
+  "stress.inherited-pulsar-readers",
+  "scenario.inherited-growth",
+  "stress.inherited-growth",
+  "scenario.inherited-regroup",
+  "stress.inherited-regroup",
+  "scenario.inherited-shared-readers",
+  "stress.inherited-shared-readers",
+  "scenario.inherited-count-agreement",
+  "stress.inherited-count-agreement",
+  "scenario.inherited-topology-restore",
+  "stress.inherited-topology-restore",
+
   "scenario.password-credentials",
   "stress.password-credentials",
   "scenario.command-transaction-retention",
@@ -4080,6 +4109,21 @@ workloads = [
 [[owner]]
 path = "crates/consensus/src/storage.rs"
 workloads = [
+  "scenario.inherited-kafka-readers",
+  "stress.inherited-kafka-readers",
+  "scenario.inherited-pulsar-readers",
+  "stress.inherited-pulsar-readers",
+  "scenario.inherited-growth",
+  "stress.inherited-growth",
+  "scenario.inherited-regroup",
+  "stress.inherited-regroup",
+  "scenario.inherited-shared-readers",
+  "stress.inherited-shared-readers",
+  "scenario.inherited-count-agreement",
+  "stress.inherited-count-agreement",
+  "scenario.inherited-topology-restore",
+  "stress.inherited-topology-restore",
+
   "scenario.password-credentials",
   "stress.password-credentials",
   "scenario.materialized-bulk-overlap",
@@ -4179,6 +4223,11 @@ workloads = [
 [[owner]]
 path = "src/application/model_mutation.rs"
 workloads = [
+  "scenario.inherited-regroup",
+  "stress.inherited-regroup",
+  "scenario.inherited-topology-restore",
+  "stress.inherited-topology-restore",
+
   "scenario.command-orphaned-pause",
   "stress.command-orphaned-pause",
   "scenario.syslog-suspend-handoff",
@@ -4476,6 +4525,21 @@ workloads = [
 [[owner]]
 path = "src/registry/storage.rs"
 workloads = [
+  "scenario.inherited-kafka-readers",
+  "stress.inherited-kafka-readers",
+  "scenario.inherited-pulsar-readers",
+  "stress.inherited-pulsar-readers",
+  "scenario.inherited-growth",
+  "stress.inherited-growth",
+  "scenario.inherited-regroup",
+  "stress.inherited-regroup",
+  "scenario.inherited-shared-readers",
+  "stress.inherited-shared-readers",
+  "scenario.inherited-count-agreement",
+  "stress.inherited-count-agreement",
+  "scenario.inherited-topology-restore",
+  "stress.inherited-topology-restore",
+
   "parameters.request-header-cap",
   "parameters.live",
   "parameters.restart",
@@ -4585,6 +4649,21 @@ workloads = [
 [[owner]]
 path = "src/runtime/branch_runtime.rs"
 workloads = [
+  "scenario.inherited-kafka-readers",
+  "stress.inherited-kafka-readers",
+  "scenario.inherited-pulsar-readers",
+  "stress.inherited-pulsar-readers",
+  "scenario.inherited-growth",
+  "stress.inherited-growth",
+  "scenario.inherited-regroup",
+  "stress.inherited-regroup",
+  "scenario.inherited-shared-readers",
+  "stress.inherited-shared-readers",
+  "scenario.inherited-count-agreement",
+  "stress.inherited-count-agreement",
+  "scenario.inherited-topology-restore",
+  "stress.inherited-topology-restore",
+
   "scenario.ingestor-instance-01",
   "stress.ingestor-instance-01",
   "scenario.ingestor-instance-02",
@@ -4834,6 +4913,9 @@ path = "src/runtime/materialized_state.rs"
 workloads = [
   "scenario.runtime-settings-materialized-capacity",
   "stress.runtime-settings-materialized-capacity",
+  "scenario.inherited-topology-restore",
+  "stress.inherited-topology-restore",
+
   "scenario.relay-partition-state-failover",
   "stress.relay-partition-state-failover",
   "scenario.restore-publication-coordinator",
@@ -4860,6 +4942,11 @@ workloads = ["scenario.diagnostic-nodes", "stress.diagnostic-nodes"]
 [[owner]]
 path = "src/runtime/processor_branch_task.rs"
 workloads = [
+  "scenario.inherited-growth",
+  "stress.inherited-growth",
+  "scenario.inherited-topology-restore",
+  "stress.inherited-topology-restore",
+
   "scenario.processor-partitions-deduplicator",
   "stress.processor-partitions-deduplicator",
   "scenario.processor-partitions-generator",
@@ -4890,6 +4977,21 @@ workloads = [
 [[owner]]
 path = "src/runtime/relay_boundary.rs"
 workloads = [
+  "scenario.inherited-kafka-readers",
+  "stress.inherited-kafka-readers",
+  "scenario.inherited-pulsar-readers",
+  "stress.inherited-pulsar-readers",
+  "scenario.inherited-growth",
+  "stress.inherited-growth",
+  "scenario.inherited-regroup",
+  "stress.inherited-regroup",
+  "scenario.inherited-shared-readers",
+  "stress.inherited-shared-readers",
+  "scenario.inherited-count-agreement",
+  "stress.inherited-count-agreement",
+  "scenario.inherited-topology-restore",
+  "stress.inherited-topology-restore",
+
   "scenario.processor-partitions-deduplicator",
   "stress.processor-partitions-deduplicator",
   "scenario.processor-partitions-generator",
@@ -6917,6 +7019,146 @@ invariant = "A lost terminal ACK expires under the captured short policy and seq
 invocation = "stress-scenarios"
 scenario = "A committed silence policy expires a lost forwarded acknowledgement sooner"
 selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Production source-instance lifecycle, branch runtime and ACK owners, schedule publication and native checkpoint transfer; restore additionally traverses captured materialized rows and epoch/provenance installation. Broker I/O, async observation and routing publications are outside detector evidence."
+examples = 6
+feature = "tests/features/runtime/inherited_partitions.feature"
+id = "scenario.inherited-kafka-readers"
+invariant = "The committed external layout and its exact-unit readers retain key identity, acknowledged native next offsets and state through lifecycle changes without a tracked deadlock."
+invocation = "scenarios"
+scenario = "A Kafka domain-offset reader runs one instance with each <partitioning> partition"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: Production source-instance lifecycle, branch runtime and ACK owners, schedule publication and native checkpoint transfer; restore additionally traverses captured materialized rows and epoch/provenance installation. Broker I/O, async observation and routing publications are outside detector evidence."
+examples = 6
+feature = "tests/features/runtime/inherited_partitions.feature"
+id = "stress.inherited-kafka-readers"
+invariant = "The committed external layout and its exact-unit readers retain key identity, acknowledged native next offsets and state through lifecycle changes without a tracked deadlock."
+invocation = "stress-scenarios"
+scenario = "A Kafka domain-offset reader runs one instance with each <partitioning> partition"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Production source-instance lifecycle, branch runtime and ACK owners, schedule publication and native checkpoint transfer; restore additionally traverses captured materialized rows and epoch/provenance installation. Broker I/O, async observation and routing publications are outside detector evidence."
+examples = 4
+feature = "tests/features/runtime/inherited_partitions.feature"
+id = "scenario.inherited-pulsar-readers"
+invariant = "The committed external layout and its exact-unit readers retain key identity, acknowledged native next offsets and state through lifecycle changes without a tracked deadlock."
+invocation = "scenarios"
+scenario = "A Pulsar <subscription_type> reader follows the inherited partition topics"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: Production source-instance lifecycle, branch runtime and ACK owners, schedule publication and native checkpoint transfer; restore additionally traverses captured materialized rows and epoch/provenance installation. Broker I/O, async observation and routing publications are outside detector evidence."
+examples = 4
+feature = "tests/features/runtime/inherited_partitions.feature"
+id = "stress.inherited-pulsar-readers"
+invariant = "The committed external layout and its exact-unit readers retain key identity, acknowledged native next offsets and state through lifecycle changes without a tracked deadlock."
+invocation = "stress-scenarios"
+scenario = "A Pulsar <subscription_type> reader follows the inherited partition topics"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Production source-instance lifecycle, branch runtime and ACK owners, schedule publication and native checkpoint transfer; restore additionally traverses captured materialized rows and epoch/provenance installation. Broker I/O, async observation and routing publications are outside detector evidence."
+examples = 6
+feature = "tests/features/runtime/inherited_partitions.feature"
+id = "scenario.inherited-growth"
+invariant = "The committed external layout and its exact-unit readers retain key identity, acknowledged native next offsets and state through lifecycle changes without a tracked deadlock."
+invocation = "scenarios"
+scenario = "A growing Kafka topology preserves keyed state when a producer moves a key to a new shard"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: Production source-instance lifecycle, branch runtime and ACK owners, schedule publication and native checkpoint transfer; restore additionally traverses captured materialized rows and epoch/provenance installation. Broker I/O, async observation and routing publications are outside detector evidence."
+examples = 6
+feature = "tests/features/runtime/inherited_partitions.feature"
+id = "stress.inherited-growth"
+invariant = "The committed external layout and its exact-unit readers retain key identity, acknowledged native next offsets and state through lifecycle changes without a tracked deadlock."
+invocation = "stress-scenarios"
+scenario = "A growing Kafka topology preserves keyed state when a producer moves a key to a new shard"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Production source-instance lifecycle, branch runtime and ACK owners, schedule publication and native checkpoint transfer; restore additionally traverses captured materialized rows and epoch/provenance installation. Broker I/O, async observation and routing publications are outside detector evidence."
+examples = 2
+feature = "tests/features/runtime/inherited_partitions.feature"
+id = "scenario.inherited-regroup"
+invariant = "The committed external layout and its exact-unit readers retain key identity, acknowledged native next offsets and state through lifecycle changes without a tracked deadlock."
+invocation = "scenarios"
+scenario = "Regrouping Kafka shards transfers committed next offsets before replacement readers consume"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: Production source-instance lifecycle, branch runtime and ACK owners, schedule publication and native checkpoint transfer; restore additionally traverses captured materialized rows and epoch/provenance installation. Broker I/O, async observation and routing publications are outside detector evidence."
+examples = 2
+feature = "tests/features/runtime/inherited_partitions.feature"
+id = "stress.inherited-regroup"
+invariant = "The committed external layout and its exact-unit readers retain key identity, acknowledged native next offsets and state through lifecycle changes without a tracked deadlock."
+invocation = "stress-scenarios"
+scenario = "Regrouping Kafka shards transfers committed next offsets before replacement readers consume"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Production source-instance lifecycle, branch runtime and ACK owners, schedule publication and native checkpoint transfer; restore additionally traverses captured materialized rows and epoch/provenance installation. Broker I/O, async observation and routing publications are outside detector evidence."
+examples = 4
+feature = "tests/features/runtime/inherited_partitions_shared.feature"
+id = "scenario.inherited-shared-readers"
+invariant = "The committed external layout and its exact-unit readers retain key identity, acknowledged native next offsets and state through lifecycle changes without a tracked deadlock."
+invocation = "scenarios"
+scenario = "A fixed <broker> reader count inherits native partitions and hops to their owners"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: Production source-instance lifecycle, branch runtime and ACK owners, schedule publication and native checkpoint transfer; restore additionally traverses captured materialized rows and epoch/provenance installation. Broker I/O, async observation and routing publications are outside detector evidence."
+examples = 4
+feature = "tests/features/runtime/inherited_partitions_shared.feature"
+id = "stress.inherited-shared-readers"
+invariant = "The committed external layout and its exact-unit readers retain key identity, acknowledged native next offsets and state through lifecycle changes without a tracked deadlock."
+invocation = "stress-scenarios"
+scenario = "A fixed <broker> reader count inherits native partitions and hops to their owners"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Production source-instance lifecycle, branch runtime and ACK owners, schedule publication and native checkpoint transfer; restore additionally traverses captured materialized rows and epoch/provenance installation. Broker I/O, async observation and routing publications are outside detector evidence."
+examples = 2
+feature = "tests/features/runtime/inherited_partitions_mismatch.feature"
+id = "scenario.inherited-count-agreement"
+invariant = "The committed external layout and its exact-unit readers retain key identity, acknowledged native next offsets and state through lifecycle changes without a tracked deadlock."
+invocation = "scenarios"
+scenario = "Unequal Kafka co-producers suspend until their native partition counts agree"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: Production source-instance lifecycle, branch runtime and ACK owners, schedule publication and native checkpoint transfer; restore additionally traverses captured materialized rows and epoch/provenance installation. Broker I/O, async observation and routing publications are outside detector evidence."
+examples = 2
+feature = "tests/features/runtime/inherited_partitions_mismatch.feature"
+id = "stress.inherited-count-agreement"
+invariant = "The committed external layout and its exact-unit readers retain key identity, acknowledged native next offsets and state through lifecycle changes without a tracked deadlock."
+invocation = "stress-scenarios"
+scenario = "Unequal Kafka co-producers suspend until their native partition counts agree"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Production source-instance lifecycle, branch runtime and ACK owners, schedule publication and native checkpoint transfer; restore additionally traverses captured materialized rows and epoch/provenance installation. Broker I/O, async observation and routing publications are outside detector evidence."
+examples = 2
+feature = "tests/features/runtime/inherited_partitions_restore.feature"
+id = "scenario.inherited-topology-restore"
+invariant = "The committed external layout and its exact-unit readers retain key identity, acknowledged native next offsets and state through lifecycle changes without a tracked deadlock."
+invocation = "scenarios"
+scenario = "An inherited topology archive restores epochs, exact key origins and next offsets"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: Production source-instance lifecycle, branch runtime and ACK owners, schedule publication and native checkpoint transfer; restore additionally traverses captured materialized rows and epoch/provenance installation. Broker I/O, async observation and routing publications are outside detector evidence."
+examples = 2
+feature = "tests/features/runtime/inherited_partitions_restore.feature"
+id = "stress.inherited-topology-restore"
+invariant = "The committed external layout and its exact-unit readers retain key identity, acknowledged native next offsets and state through lifecycle changes without a tracked deadlock."
+invocation = "stress-restore-scenarios"
+scenario = "An inherited topology archive restores epochs, exact key origins and next offsets"
+selections = ["deloxide-stress-restore"]
 
 [[workload]]
 coverage = "Inference inspection captures replica confirmations through the existing checkpoint replication progress lock while retaining immutable native publications. Tensor publication, Arrow copying, async admission and transport are outside Deloxide; this workload claims only the progress lock acquisition and the state-store installation locks."

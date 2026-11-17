@@ -69,10 +69,12 @@ impl Runtime {
                     .snapshot_bytes()
                     .change_context(ProcessorStatePageError::Admission)?;
                 let mut captured = Vec::new();
-                let mut catalog = selection
-                    .partition_exclusions
-                    .as_ref()
-                    .map(|_| BTreeSet::new());
+                // A read during repartitioning asks for every key this unit holds, with the
+                // inherited origin of each, so the reader can place keys the transition moves.
+                let mut catalog = match &selection.partition_exclusions {
+                    Some(_) => nervix_models::StateInspectionKeyCatalog::requested(),
+                    None => nervix_models::StateInspectionKeyCatalog::Unrequested,
+                };
                 runtime
                     .inner
                     .state_replication_routing
@@ -98,7 +100,7 @@ impl Runtime {
                             return Ok(());
                         }
                         if let Some(key) = &placement.branch_key {
-                            if let Some(catalog) = &mut catalog {
+                            if catalog.is_requested() {
                                 // Charge a sparse BTree node before inserting a fingerprint.
                                 let bytes =
                                     u64::try_from(std::mem::size_of::<BranchKeyFingerprint>())
@@ -108,7 +110,7 @@ impl Runtime {
                                             Report::new(ProcessorStatePageError::Admission)
                                         })?;
                                 reserve(&mut memory, bytes)?;
-                                catalog.insert(key.fingerprint());
+                                catalog.insert(key.fingerprint(), key.inherited_origin());
                             }
                             if let Some(excluded) = &selection.partition_exclusions
                                 && excluded.contains(&key.fingerprint())

@@ -94,7 +94,7 @@ impl WasmStateResetPreparation {
         processor: &ModelName,
         request: CommandExecutionReference,
         scope: WasmStateResetScope,
-        branch_key: Option<Vec<RemoteRuntimeField>>,
+        branch_key: nervix_models::RemoteBranchKey,
         published: bool,
         reason: nervix_models::WasmStateResetReason,
     ) -> error_stack::Result<Self, WasmStateResetRuntimeError> {
@@ -258,9 +258,9 @@ impl BranchInstanceTemplate {
 impl Runtime {
     pub(crate) fn wasm_state_reset_branch_scope(
         processor: &ModelName,
-        fields: Vec<RemoteRuntimeField>,
+        fields: nervix_models::RemoteBranchKey,
     ) -> error_stack::Result<WasmStateResetScope, WasmStateResetRuntimeError> {
-        let branch = BranchKey::from_remote_key(Some(fields)).change_context_lazy(|| {
+        let branch = BranchKey::from_remote_key(fields).change_context_lazy(|| {
             WasmStateResetRuntimeError::InvalidBranchKey {
                 processor: processor.clone(),
             }

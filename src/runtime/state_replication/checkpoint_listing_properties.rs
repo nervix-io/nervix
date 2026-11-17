@@ -130,10 +130,11 @@ impl<'a> Listings<'a> {
             }
         };
         if in_removals {
-            page.removed.push(Some(key));
+            page.removed
+                .push(nervix_models::RemoteBranchKey::Direct(key.into()));
         } else {
             page.revised.push(BranchCheckpointRevision {
-                branch_key: Some(key),
+                branch_key: nervix_models::RemoteBranchKey::Direct((key).into()),
                 state: self.state(),
                 lsm: self.number(),
             });
@@ -270,7 +271,7 @@ fn owner_listing_value_and_cursor_boundaries() {
                 epoch: u64::MAX,
                 sequence: u64::MAX,
             },
-            removed: vec![None, key.clone()],
+            removed: vec![nervix_models::RemoteBranchKey::Unbranched, key.clone()],
             revised: vec![
                 BranchCheckpointRevision {
                     branch_key: key.clone(),
@@ -282,7 +283,7 @@ fn owner_listing_value_and_cursor_boundaries() {
                     lsm: u64::MAX,
                 },
                 BranchCheckpointRevision {
-                    branch_key: None,
+                    branch_key: nervix_models::RemoteBranchKey::Unbranched,
                     state: RuntimeState::WindowProcessor {
                         schema: SchemaFingerprint::from_digest([0; 32]),
                     },

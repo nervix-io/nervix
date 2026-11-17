@@ -202,3 +202,82 @@ fn branch_eviction_cancels_and_reopens_relay_channel_generations() {
     );
     assert_eq!(reopened_delivery.sequence, 0);
 }
+
+#[nervix_primitives::test]
+async fn partition_drains_count_their_own_transit_and_queues_while_the_domain_keeps_the_aggregate()
+{
+    let runtime = Runtime::default();
+    let domain = domain("default");
+    let relay = named::<RelayName>("orders");
+    let partitioning = RelayPartitioning::of_partitions(
+        nervix_models::ResolvedBranchPartitions::Direct(nonzero!(2u16)),
+    );
+    let services = RelayBoundaryServices::new(
+        RelayBoundaryFanout::branch_collapse_with_capacity(nonzero!(2usize)),
+        0,
+        0,
+        Vec::new(),
+        None,
+        RelayBranchPresences::fresh(partitioning),
+        Arc::new(crate::runtime_ack::AckRootTracker::default()),
+    );
+    runtime.inner.relay_boundary_fanouts.insert(
+        DomainNodeRef::node_in(domain.clone(), ModelKind::Relay, relay.clone()),
+        services.fanout.clone(),
+    );
+    let first = Unit::partition(0);
+    let second = Unit::partition(1);
+    let (mut receiver, _buffer) =
+        services.activate_owner_buffer(second, relay_metrics(&runtime, &domain, &relay));
+    let status = |unit| {
+        runtime.entity_drain_status(
+            &domain,
+            std::slice::from_ref(&relay),
+            &nervix_models::EntityGateTargets::Units(vec![NodeUnitRef::new(
+                NodeRef::new(ModelKind::Relay, &relay),
+                unit,
+            )]),
+            EntityGatePurpose::OwnershipHandoff,
+        )
+    };
+    services
+        .enqueue_owner_batch(&quiesce_test_batch(), second)
+        .await
+        .assured("the owner buffer admits one batch");
+    assert!(status(first).is_drained());
+    assert_eq!(status(second).buffered_relay_batches, 1);
+    assert_eq!(services.fanout.outstanding_work_len(), 1);
+    assert!(matches!(receiver.try_recv(), RelayTryRecv::Batch(_)));
+    let completion = services.begin_owner_batch_completion(second);
+    assert_eq!(
+        status(second).buffered_relay_batches,
+        1,
+        "dequeue never hides a batch still being handed on"
+    );
+    drop(completion);
+    assert!(status(second).is_drained());
+    assert_eq!(services.fanout.outstanding_work_len(), 0);
+
+    let _common = services.add_local_runtime_consumer(AckMode::Detached);
+    let mut scoped = services.add_local_unit_runtime_consumer(AckMode::Detached, second);
+    services
+        .dispatch_local_runtime_consumers(
+            RuntimeConsumerDispatch::Owner,
+            second,
+            &quiesce_test_batch(),
+        )
+        .await
+        .assured("the second partition reaches its own and common consumers");
+    assert!(status(first).is_drained());
+    assert_eq!(status(second).buffered_relay_batches, 1);
+    assert!(matches!(scoped.try_recv(), RelayTryRecv::Batch(_)));
+    assert!(
+        status(second).is_drained(),
+        "a common consumer keeps its own lifecycle"
+    );
+    assert_eq!(
+        services.fanout.outstanding_work_len(),
+        1,
+        "the whole-domain drain still sees the common consumer's batch"
+    );
+}

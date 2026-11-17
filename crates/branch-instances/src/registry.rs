@@ -13,7 +13,7 @@
 
 use std::{hash::Hash, num::NonZeroUsize, time::Duration};
 
-use indexmap::IndexMap;
+use indexmap::{IndexMap, map::MutableKeys as _};
 use meticulous::OptionExt as _;
 use nervix_models::Timestamp;
 use nervix_primitives::sync::Arc;
@@ -98,6 +98,25 @@ where
 
     pub fn contains_key(&self, key: &K) -> bool {
         self.entries.contains_key(key)
+    }
+
+    pub fn stored_key(&self, key: &K) -> Option<&K> {
+        self.entries.get_key_value(key).map(|(key, _)| key)
+    }
+
+    /// Replace metadata of an equal key without changing its identity, lifetime or LRU rank.
+    /// Captured snapshots retain their immutable key values. This advances the lifecycle revision.
+    pub fn replace_key(&mut self, key: K) -> bool {
+        let Some(index) = self.entries.get_index_of(&key) else {
+            return false;
+        };
+        let (stored, _) = self
+            .entries
+            .get_index_mut2(index)
+            .verified("the key was just found in this registry");
+        *stored = key;
+        self.bump_version();
+        true
     }
 
     /// The state of one branch, without refreshing its activity or its place in the eviction order.
@@ -317,6 +336,76 @@ mod tests {
     };
 
     use super::BranchInstanceRegistry;
+
+    #[derive(Clone, Debug)]
+    struct KeyWitness {
+        identity: u8,
+        origin: u8,
+    }
+    impl PartialEq for KeyWitness {
+        fn eq(&self, other: &Self) -> bool {
+            self.identity == other.identity
+        }
+    }
+    impl Eq for KeyWitness {}
+    impl std::hash::Hash for KeyWitness {
+        fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+            std::hash::Hash::hash(&self.identity, state);
+        }
+    }
+
+    #[test]
+    fn replacing_a_key_witness_preserves_incarnation_activity_rank_and_captured_metadata() {
+        let mut registry = BranchInstanceRegistry::new();
+        let key = KeyWitness {
+            identity: 1,
+            origin: 7,
+        };
+        let state = registry
+            .get_or_create_with(key.clone(), timestamp(1, 0), |_| 41)
+            .state;
+        registry.get_or_create_with(
+            KeyWitness {
+                identity: 2,
+                origin: 2,
+            },
+            timestamp(2, 0),
+            |_| 42,
+        );
+        let before = registry.snapshot_entries();
+        let version = registry.version();
+        let replacement = KeyWitness {
+            identity: 1,
+            origin: 13,
+        };
+        assert!(registry.replace_key(replacement.clone()));
+        let after = registry.snapshot_entries();
+        assert!(registry.version() > version);
+        assert_eq!(before[0].key.origin, 7);
+        assert_eq!(after[0].key.origin, 13);
+        assert_eq!(before[0].incarnation, after[0].incarnation);
+        assert_eq!(before[0].last_ingestion, after[0].last_ingestion);
+        assert_eq!(
+            after
+                .iter()
+                .map(|entry| entry.key.identity)
+                .collect::<Vec<_>>(),
+            [1, 2]
+        );
+        assert!(Arc::ptr_eq(
+            &state,
+            &registry
+                .get(&replacement)
+                .assured("the equal identity remains live")
+        ));
+        assert_eq!(
+            registry
+                .stored_key(&key)
+                .assured("the identity is indexed")
+                .origin,
+            13
+        );
+    }
 
     #[derive(Debug)]
     struct DropCounter(Arc<AtomicUsize>);

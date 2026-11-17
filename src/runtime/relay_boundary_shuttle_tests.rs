@@ -25,7 +25,7 @@ fn shuttle_a_detached_consumer_joins_during_attached_backpressure() {
         || {
             shuttle::future::block_on(async {
                 let partitioned = RelayPartitioning::of_partitions(
-                    nervix_models::BranchPartitions::Direct(nonzero!(2u16)),
+                    nervix_models::ResolvedBranchPartitions::Direct(nonzero!(2u16)),
                 );
                 for partitioning in [RelayPartitioning::Whole, partitioned] {
                     nervix_primitives::task::consume_budget().await;
@@ -37,6 +37,9 @@ fn shuttle_a_detached_consumer_joins_during_attached_backpressure() {
                             }
                             RelayPartitioning::Partitioned(_) => {
                                 RelayBoundaryFanout::branch_collapse_with_capacity(nonzero!(1usize))
+                            }
+                            RelayPartitioning::AwaitingTopology => {
+                                panic!("the model selects whole or resolved direct partitions")
                             }
                         };
                         let services = Arc::new(RelayBoundaryServices::new(
@@ -111,7 +114,7 @@ fn shuttle_a_partition_handoff_fences_its_delivery_and_materialized_reads_while_
         || {
             shuttle::future::block_on(async {
                 let partitioning = RelayPartitioning::of_partitions(
-                    nervix_models::BranchPartitions::Direct(nonzero!(2u16)),
+                    nervix_models::ResolvedBranchPartitions::Direct(nonzero!(2u16)),
                 );
                 let services = Arc::new(RelayBoundaryServices::new(
                     RelayBoundaryFanout::branch_collapse_with_capacity(nonzero!(1usize)),
@@ -269,7 +272,7 @@ fn shuttle_emitter_instances_receive_only_their_partitions_while_a_sibling_moves
     check_dfs(
         || {
             shuttle::future::block_on(async {
-                let partitions = nervix_models::BranchPartitions::Direct(nonzero!(4u16));
+                let partitions = nervix_models::ResolvedBranchPartitions::Direct(nonzero!(4u16));
                 let services = Arc::new(RelayBoundaryServices::new(
                     RelayBoundaryFanout::branch_collapse_with_capacity(nonzero!(1usize)),
                     0,

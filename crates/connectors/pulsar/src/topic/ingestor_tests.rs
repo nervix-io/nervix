@@ -576,6 +576,8 @@ async fn plan(
         .await
         .expect("the loopback broker serves the client's handshake");
     PulsarTopicIngestorPlan {
+        assigned_topics: None,
+        assignment: None,
         client,
         topic: TOPIC.to_string(),
         subscription: subscription(ownership),
@@ -605,6 +607,7 @@ fn removal_settings<'a>(
     topic: &'a PulsarTopicName,
 ) -> PulsarTopicIngestorSettings<'a> {
     PulsarTopicIngestorSettings {
+        assignment: None,
         config,
         topic,
         subscription: subscription(PulsarSubscriptionOwnership::Ingestor {

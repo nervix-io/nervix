@@ -156,7 +156,7 @@ async fn a_commit_refused_after_its_ingestor_was_dropped_destroys_the_consumer_o
         .assured("the ingestor accepts its group and broker configuration");
     let full = FullConnectorQueue::fill(&executor).await;
     let before = executor.snapshot().connector_storage;
-    let request = GroupCommitRequest::acknowledged(&[KafkaOffsetPosition {
+    let request = GroupCommitRequest::positions(&[KafkaOffsetPosition {
         topic: "orders".to_string(),
         partition: 0,
         offset: 1,
@@ -214,7 +214,7 @@ async fn a_commit_answered_after_its_ingestor_was_dropped_keeps_the_consumer_unt
         .broker_round_trip_time(1, HELD_ROUND_TRIP)
         .assured("the test broker can hold its replies");
     let before = executor.snapshot().connector_storage;
-    let request = GroupCommitRequest::acknowledged(&positions)
+    let request = GroupCommitRequest::positions(&positions)
         .assured("the delivered record has a valid next offset");
     let mut commit = Box::pin(ingestor.commits.commit(
         &ingestor.control,

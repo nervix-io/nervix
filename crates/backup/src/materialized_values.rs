@@ -98,19 +98,21 @@ impl Values<'_> {
             let mut identities = Vec::new();
             for row in 0..rows {
                 let branch = if shape == 1 {
-                    None
+                    nervix_models::BranchKeyFields::Unbranched
                 } else {
-                    let mut branch = Descriptors(self.0.clone())
+                    let (branch, origin) = Descriptors(self.0.clone())
                         .descriptor(true)
                         .branch
+                        .into_parts()
                         .assured("a generated branched descriptor has a key");
+                    let mut branch = branch.into_vec();
                     branch.push(StateField {
                         name: "zz_identity".into(),
                         value: StateValue::U8(
                             u8::try_from(index * 3 + row).assured("the bounded row identity fits"),
                         ),
                     });
-                    Some(branch)
+                    nervix_models::BranchKeyFields::branched(branch.into(), origin)
                 };
                 let low = self.timestamp();
                 let high = self.timestamp();

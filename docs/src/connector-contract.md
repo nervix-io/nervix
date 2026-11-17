@@ -995,6 +995,17 @@ Every ingestor and emitter also declares its `DeclaredEvents`, a closed set of t
 declaration, including an empty set. Event names are observations, not Plexus options or driver
 error strings.
 
+An ingestor with enumerable external partitions declares that capability and the typed native
+metadata field that carries its coordinate. Inherited branch construction consumes this
+declaration; it cannot obtain a partition from an expression or manufacture an unobserved count.
+The control plane observes source topology and commits the coherent set, grouping and epoch
+before the host installs its connector plans. A connector executes that committed read set and
+decides nothing about branch placement. A preserving route carries the key's immutable origin.
+
+Readers whose brokers manage assignments still admit only the installed external set. Any retained
+unadmitted native position has its capacity and overflow declared with the entity's other buffers;
+pausing, seeking and subscription changes retain the normal bounded control-execution contract.
+
 The declaration crosses each boundary once, without becoming runtime graph policy:
 
 | Reader | What it takes from the declaration |

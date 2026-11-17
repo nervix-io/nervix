@@ -1068,18 +1068,22 @@ impl Runtime {
                                 .clone()
                                 .assured("the schedule resolves every relay branch declaration"),
                         );
-                        let publication =
-                            self.materialized_relay_publication(domain, &relay, &spec);
+                        let owners = RelayOwnerRoutes::new(desired_node.unit_execution_nodes());
+                        let publication = self.materialized_relay_publication(
+                            domain,
+                            &relay,
+                            &spec,
+                            Some(&owners),
+                        );
                         execution
                             .materialized_stream_specs
                             .insert(relay.clone(), spec);
                         execution
                             .materialized_stream_reads
                             .insert(relay.clone(), publication);
-                        execution.materialized_stream_owner_nodes.insert(
-                            RelayName::from(&entity.identifier),
-                            RelayOwnerRoutes::new(desired_node.unit_execution_nodes()),
-                        );
+                        execution
+                            .materialized_stream_owner_nodes
+                            .insert(RelayName::from(&entity.identifier), owners);
                     } else {
                         execution
                             .materialized_stream_specs

@@ -99,7 +99,7 @@ impl PublishedPage {
             }
         }
         Ok(ProcessorStatePage {
-            partition_catalog: None,
+            partition_catalog: nervix_models::StateInspectionKeyCatalog::Unrequested,
             fingerprint: page.digest.finish(),
             generation: page.generation,
             counts: page.counts,

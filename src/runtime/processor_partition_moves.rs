@@ -111,6 +111,10 @@ pub(super) struct HolderKeyRequest {
 
 /// What a claim task reports back to its claimant unit's supervisor.
 pub(super) enum ClaimProgress {
+    Located {
+        key: BranchKey,
+        result: error_stack::Result<Option<Unit>, PartitionClaimError>,
+    },
     /// The catalog every peer unit answered, or why a peer did not answer.
     CatalogRead(error_stack::Result<ReadCatalog, PartitionClaimError>),
     /// The claim of `key` installed its state here, found it held nowhere, or failed.
@@ -183,10 +187,11 @@ impl ProcessorPartitionMoves {
             &transition,
             entries.iter().map(|entry| &entry.key),
         );
+        let claimant = PartitionClaimant::for_transition(capacity, &transition);
         Self {
             transition,
             entity,
-            claimant: PartitionClaimant::new(capacity),
+            claimant,
             holdings,
             commands,
             retries: ClaimRetries::new(),
@@ -219,7 +224,13 @@ impl ProcessorPartitionMoves {
         input: ProcessorBranchInput,
     ) -> Option<ProcessorBranchInput> {
         let key = input.batch.key.clone();
-        if instances.contains_key(&key) {
+        if instances.contains_key(&key)
+            && (!self.transition.needs_key_lookup() || !self.holdings.needs_confirmation(&key))
+        {
+            if self.transition.needs_key_lookup() {
+                self.holdings.confirmed_here(&key);
+                self.publish();
+            }
             return Some(input);
         }
         let Some(concrete) = key.clone() else {
@@ -235,6 +246,12 @@ impl ProcessorPartitionMoves {
                 start: ClaimStart::Nothing,
             } => None,
             ClaimAdmission::Parked {
+                start: ClaimStart::Locate,
+            } => {
+                self.spawn_locate(runtime, domain, parked);
+                None
+            }
+            ClaimAdmission::Parked {
                 start: ClaimStart::CatalogRead,
             } => {
                 self.spawn_catalog_read(runtime, domain);
@@ -248,6 +265,28 @@ impl ProcessorPartitionMoves {
                 None
             }
         }
+    }
+
+    fn spawn_locate(&self, runtime: &Runtime, domain: &DomainName, key: BranchKey) {
+        let runtime = runtime.clone();
+        let domain = domain.clone();
+        let entity = self.entity.clone();
+        let transition = self.transition.clone();
+        let commands = self.commands.clone();
+        nervix_primitives::task::spawn(async move {
+            let result = nervix_primitives::expect_lint!(
+                nervix::lifecycle_call,
+                "the claimant locates this key once per epoch, again only after a failed attempt",
+                runtime.locate_partition_key(&domain, &entity, &transition, &key)
+            )
+            .await;
+            commands
+                .send(ProcessorNodeCommand::PartitionClaim(
+                    ClaimProgress::Located { key, result },
+                ))
+                .await
+                .means_shutdown("processor unit awaiting a demanded key location");
+        });
     }
 
     fn spawn_catalog_read(&self, runtime: &Runtime, domain: &DomainName) {
@@ -355,6 +394,7 @@ impl ProcessorPartitionMoves {
         let now = nervix_primitives::time::Instant::now();
         for step in self.retries.take_due(now) {
             match step {
+                RetryStep::Locate { key } => self.spawn_locate(runtime, domain, key),
                 RetryStep::CatalogRead => {
                     if self.claimant.restart_catalog_read() {
                         self.spawn_catalog_read(runtime, domain);
@@ -395,6 +435,55 @@ impl ProcessorPartitionMoves {
         let domain = &context.domain;
         let mut released = Vec::new();
         match progress {
+            ClaimProgress::Located {
+                key,
+                result: Ok(holder),
+            } => {
+                if holder == Some(self.transition.unit) {
+                    let retained = match instances.get(&Some(key.clone())) {
+                        Some(slot) => match slot.as_ref() {
+                            ProcessorBranchSlot::Released(released) => {
+                                Some((released.incarnation, released.last_activity))
+                            }
+                            ProcessorBranchSlot::Live(_) => None,
+                        },
+                        None => None,
+                    };
+                    if let Some((incarnation, last_activity)) = retained
+                        && let Err(error) = install_claimed_branch(
+                            context,
+                            template,
+                            instances,
+                            &key,
+                            incarnation,
+                            last_activity,
+                        )
+                        .await
+                    {
+                        warn!(error = %format_args!("{error:#}"), "a retained branch could not resume after origin confirmation");
+                        self.retry_later(RetryStep::Locate { key });
+                        return released;
+                    }
+                }
+                let holder = holder.filter(|holder| *holder != self.transition.unit);
+                match self.claimant.located(key, holder) {
+                    CatalogResolution::Begin { key, inputs } => {
+                        self.holdings.confirmed_here(&Some(key));
+                        released.extend(inputs);
+                    }
+                    CatalogResolution::Claim { key, holder } => {
+                        self.spawn_claim(runtime, domain, template, key, holder)
+                    }
+                }
+                self.publish();
+            }
+            ClaimProgress::Located {
+                key,
+                result: Err(error),
+            } => {
+                warn!(domain = domain.as_str(), processor = template.owner.node.identifier.as_str(), error = %format_args!("{error:#}"), "demanded partition key lookup failed");
+                self.retry_later(RetryStep::Locate { key });
+            }
             ClaimProgress::CatalogRead(Ok(catalog)) => {
                 for resolution in self.claimant.catalog_read(catalog.holders()) {
                     match resolution {
@@ -444,6 +533,7 @@ impl ProcessorPartitionMoves {
                 {
                     Ok(()) => {
                         released.extend(self.claimant.claim_settled(&key));
+                        self.holdings.confirmed_here(&Some(key.clone()));
                         self.holdings.claimed_one();
                         self.publish();
                         self.spawn_forget(runtime, domain, key, holder);

@@ -104,7 +104,7 @@ struct CapturedPage {
     branches: Vec<CapturedBranch>,
     plan: ReadPlan,
     memory: Reservation,
-    partition_catalog: Option<BTreeSet<nervix_models::BranchKeyFingerprint>>,
+    partition_catalog: nervix_models::StateInspectionKeyCatalog,
 }
 
 impl CapturedPage {
@@ -118,7 +118,7 @@ impl CapturedPage {
         branches.sort_by(|left, right| BranchKey::canonical_order(&left.key, &right.key));
         let partition_catalog = match excluded {
             Some(excluded) => {
-                let mut catalog = BTreeSet::new();
+                let mut catalog = nervix_models::StateInspectionKeyCatalog::requested();
                 for branch in &branches {
                     cancellation
                         .check()
@@ -132,16 +132,16 @@ impl CapturedPage {
                         .checked_mul(16)
                         .ok_or_else(|| Report::new(ProcessorStatePageError::Admission))?;
                         reserve_bytes(&mut memory, bytes)?;
-                        catalog.insert(key.fingerprint());
+                        catalog.insert(key.fingerprint(), key.inherited_origin());
                     }
                 }
                 branches.retain(|branch| match &branch.key {
                     Some(key) => !excluded.contains(&key.fingerprint()),
                     None => true,
                 });
-                Some(catalog)
+                catalog
             }
-            None => None,
+            None => nervix_models::StateInspectionKeyCatalog::Unrequested,
         };
         Ok(Self {
             branches,
@@ -419,7 +419,10 @@ mod tests {
             .await
             .assured("the bounded capture completes")
             .assured("one copy can be excluded");
-        assert_eq!(captured.partition_catalog.as_ref(), Some(&expected_catalog));
+        assert_eq!(
+            captured.partition_catalog,
+            nervix_models::StateInspectionKeyCatalog::Direct(expected_catalog)
+        );
         assert_eq!(captured.branches.len(), 1);
         assert_eq!(captured.branches[0].key.as_ref(), Some(&key("eta")));
         let CapturedState::Keys(selected) = &captured.branches[0].state else {

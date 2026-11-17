@@ -291,7 +291,7 @@ async fn a_payload_for_a_relay_this_node_has_not_instantiated_names_its_domain_a
         domain: target.clone(),
         relay: relay.clone(),
         unit: Unit::SINGLE,
-        key: None,
+        key: nervix_models::RemoteBranchKey::Unbranched,
         batch_ipc: batch_ipc.clone(),
         metadata: Vec::new(),
         acks: Vec::new(),

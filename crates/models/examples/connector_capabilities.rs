@@ -141,6 +141,7 @@ fn requirements(requirements: &[ChoiceRequirement]) -> String {
 
 fn ingestor(kind: IngestorEntityKind) -> Value {
     let IngestorEntityCapabilities {
+        external_partitions,
         events,
         instancing,
         headers,
@@ -157,6 +158,12 @@ fn ingestor(kind: IngestorEntityKind) -> Value {
         options: declared_options,
         bounds: declared_bounds,
     } = kind.capabilities();
+    let external_partitions = match external_partitions {
+        nervix_models::IngestorExternalPartitions::None => Value::Null,
+        nervix_models::IngestorExternalPartitions::Enumerated(field) => json!({
+            "metadata": field.name(), "type": field.ty().to_string(),
+        }),
+    };
     let reference = match source_reference {
         IngestorReferenceKind::Client(connector) => format!("{connector} client"),
         IngestorReferenceKind::Endpoint(endpoint) => format!("{endpoint:?} endpoint"),
@@ -203,7 +210,7 @@ fn ingestor(kind: IngestorEntityKind) -> Value {
     );
     json!({
         "entity": kind.phrase(), "connector": kind.connector().keyword(), "events": events,
-        "instancing": instancing.as_ref(),
+        "instancing": instancing.as_ref(), "external_partitions": external_partitions,
         "payload": payload,
         "reference": reference, "locator": locators(&declared_locators), "options": options,
         "modes": modes, "quiesce": quiesce, "metadata": metadata,

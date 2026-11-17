@@ -71,7 +71,7 @@ const SETTING_NAMES: [&str; 176] = [
     "connector-retry-multiplier",
     "connector-retry-jitter-percent",
     "kafka-domain-assignment-retry",
-    "kafka-partition-watch-interval",
+    "partition-topology-poll-interval",
     "syslog-intake-queue-capacity",
     "syslog-read-chunk-bytes",
     "wasm-stack-bytes",

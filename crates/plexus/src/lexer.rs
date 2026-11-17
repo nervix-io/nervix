@@ -405,6 +405,7 @@ pub enum Identifier {
     Set,
     Replace,
     Inherit,
+    Inherited,
     Except,
     Leak,
     Invoke,

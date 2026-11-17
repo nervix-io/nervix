@@ -20,11 +20,11 @@ use error_stack::{Report, ResultExt as _};
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_connector::RecordEnvelope;
 use nervix_models::{
-    AckMode, Assignment, AssignmentTarget, BranchPartitions, CodecName, CreateEmitter,
-    CreateSchema, EmitterInstances, EmitterName, EnvelopeClauseForm, EnvelopeClauseKind,
-    EnvelopeValueType, ErrorPolicies, Expression, FieldName, FlushPolicy, HeaderValues,
-    InputCollectPolicy, MaterializedStateDependency, Model, ModelKind, ModelName, NodeRef,
-    PropertyDeclaration, RelayName, ResolvedBranching, RouteConstruction, ScheduledNodes,
+    AckMode, Assignment, AssignmentTarget, CodecName, CreateEmitter, CreateSchema,
+    EmitterInstances, EmitterName, EnvelopeClauseForm, EnvelopeClauseKind, EnvelopeValueType,
+    ErrorPolicies, Expression, FieldName, FlushPolicy, HeaderValues, InputCollectPolicy,
+    MaterializedStateDependency, Model, ModelKind, ModelName, NodeRef, PropertyDeclaration,
+    RelayName, ResolvedBranchPartitions, ResolvedBranching, RouteConstruction, ScheduledNodes,
     SchemaField, SchemaName, Unit, UnitKind, parse_duration_text,
 };
 use nervix_primitives::sync::{Arc, StdArc};
@@ -102,7 +102,7 @@ pub(crate) struct EmitterInputPlan {
     pub(crate) relay: RelayName,
     pub(crate) from_where: Option<LoweredFilter>,
     pub(crate) retention: PlannedRelayRetention,
-    pub(crate) partitions: Option<BranchPartitions>,
+    pub(crate) partitions: Option<ResolvedBranchPartitions>,
 }
 
 /// The route's frontend program and the boundary between inherited and declared SET operations.
@@ -167,22 +167,30 @@ pub(crate) struct EmitterEnvelopePlan {
 }
 
 /// The units an emitter runs as, and so which units of an input relay each of them reads.
+/// An absent count awaits topology; one is the single unit, and a larger count names instances.
+/// The nonzero niche keeps resolved and waiting plans the size of one `u64`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum EmitterUnitPlan {
-    /// One `single` unit, which reads every unit of every input relay.
-    Single,
-    /// `Instance(0..count)`: instance `i` reads the units of each input relay that
-    /// [`BranchPartitions::units_served_by`] names for it.
-    Instances { count: NonZeroU64 },
+pub(crate) struct EmitterUnitPlan {
+    count: Option<NonZeroU64>,
 }
 
 impl EmitterUnitPlan {
+    const AWAITING_TOPOLOGY: Self = Self { count: None };
+    const SINGLE: Self = Self {
+        count: Some(NonZeroU64::MIN),
+    };
+
+    const fn instances(count: NonZeroU64) -> Self {
+        Self { count: Some(count) }
+    }
+
     /// Every unit the emitter runs as, in unit order, or `None` when its count reaches beyond
     /// the execution-unit range.
     pub(crate) fn units(self) -> Option<Vec<Unit>> {
-        match self {
-            Self::Single => Some(vec![Unit::SINGLE]),
-            Self::Instances { count } => {
+        match self.count {
+            None => Some(Vec::new()),
+            Some(count) if count.get() == 1 => Some(vec![Unit::SINGLE]),
+            Some(count) => {
                 let mut units = Vec::new();
                 for index in 0..count.get() {
                     let Ok(unit) = Unit::try_instance(index) else {
@@ -199,15 +207,17 @@ impl EmitterUnitPlan {
     pub(crate) fn input_units(
         self,
         unit: Unit,
-        partitions: Option<BranchPartitions>,
+        partitions: Option<ResolvedBranchPartitions>,
     ) -> EmitterInputUnits {
-        let Self::Instances { count } = self else {
-            return EmitterInputUnits::WholeRelay;
+        let count = match self.count {
+            None => return EmitterInputUnits::Units(Vec::new()),
+            Some(count) if count.get() == 1 => return EmitterInputUnits::WholeRelay,
+            Some(count) => count,
         };
         let UnitKind::Instance(instance) = unit.kind() else {
             return EmitterInputUnits::Units(Vec::new());
         };
-        let partitions = partitions.unwrap_or(BranchPartitions::ONE);
+        let partitions = partitions.unwrap_or(ResolvedBranchPartitions::ONE);
         EmitterInputUnits::Units(partitions.units_served_by(instance, count))
     }
 
@@ -228,9 +238,10 @@ impl EmitterUnitPlan {
 }
 
 /// The planned inputs of an emitter and the Arrow schema they share.
-struct DecidedInputs {
+struct DecidedInputs<'a> {
     inputs: Vec<EmitterInputPlan>,
     schema: StdArc<arrow_schema::Schema>,
+    branching: &'a ResolvedBranching,
 }
 
 /// The units of one input relay that one unit of an emitter reads.
@@ -279,16 +290,16 @@ impl EmitterExecutionPlan {
 
     /// The planned inputs of `emitter` in written order, with their source filters, and the
     /// schema they share.
-    fn decide_inputs(
+    fn decide_inputs<'a>(
         emitter: &CreateEmitter,
-        activation: &DomainActivationPlan,
-    ) -> error_stack::Result<DecidedInputs, EmitterExecutionPlanError> {
+        activation: &'a DomainActivationPlan,
+    ) -> error_stack::Result<DecidedInputs<'a>, EmitterExecutionPlanError> {
         let mut source_filters = BTreeMap::new();
         for source_filter in emitter.from.where_clauses() {
             source_filters.insert(&source_filter.relay, &source_filter.where_clause);
         }
         let mut inputs = Vec::with_capacity(emitter.from.relays().len());
-        let mut input_schema = None;
+        let mut first_input = None;
         for relay in emitter.from.relays() {
             let planned = activation.relays.get(relay).ok_or_else(|| {
                 Report::new(EmitterExecutionPlanError::MissingRelay {
@@ -296,8 +307,8 @@ impl EmitterExecutionPlan {
                     relay: relay.clone(),
                 })
             })?;
-            if input_schema.is_none() {
-                input_schema = Some(planned.schema.arrow_schema());
+            if first_input.is_none() {
+                first_input = Some(planned);
             }
             let from_where = match source_filters.get(relay) {
                 Some(expression) => Some(LoweredFilter::input(expression).change_context(
@@ -315,12 +326,16 @@ impl EmitterExecutionPlan {
                 partitions: planned.branching.partitions(),
             });
         }
-        let schema = input_schema.ok_or_else(|| {
+        let first_input = first_input.ok_or_else(|| {
             Report::new(EmitterExecutionPlanError::MissingInput {
                 emitter: emitter.name.clone(),
             })
         })?;
-        Ok(DecidedInputs { inputs, schema })
+        Ok(DecidedInputs {
+            inputs,
+            schema: first_input.schema.arrow_schema(),
+            branching: &first_input.branching,
+        })
     }
 
     /// The unit plan the scheduled `units` of `emitter` form, refused unless they are exactly the
@@ -328,25 +343,29 @@ impl EmitterExecutionPlan {
     fn decide_units<'a>(
         emitter: &CreateEmitter,
         units: impl Iterator<Item = &'a Unit>,
-        inputs: &[EmitterInputPlan],
+        branching: &ResolvedBranching,
     ) -> error_stack::Result<EmitterUnitPlan, EmitterExecutionPlanError> {
-        let declared = match emitter.instances {
-            EmitterInstances::Count(count) => count,
-            EmitterInstances::PerPartition => {
-                // Validation admitted PER PARTITION only over inputs that share one branch.
-                let mut partitions = BranchPartitions::ONE;
-                if let Some(input) = inputs.first()
-                    && let Some(shared) = input.partitions
-                {
-                    partitions = shared;
-                }
-                NonZeroU64::from(partitions.count())
-            }
-        };
-        let plan = if declared.get() == 1 {
-            EmitterUnitPlan::Single
+        let plan = if emitter.instances == EmitterInstances::PerPartition
+            && branching.is_awaiting_topology()
+        {
+            EmitterUnitPlan::AWAITING_TOPOLOGY
         } else {
-            EmitterUnitPlan::Instances { count: declared }
+            let declared = match emitter.instances {
+                EmitterInstances::Count(count) => count,
+                EmitterInstances::PerPartition => {
+                    let partitions = branching.partitions().ok_or_else(|| {
+                        Report::new(EmitterExecutionPlanError::UnitDeclaration {
+                            emitter: emitter.name.clone(),
+                        })
+                    })?;
+                    NonZeroU64::from(partitions.count())
+                }
+            };
+            if declared.get() == 1 {
+                EmitterUnitPlan::SINGLE
+            } else {
+                EmitterUnitPlan::instances(declared)
+            }
         };
         let mut scheduled = Vec::new();
         for unit in units {
@@ -396,6 +415,7 @@ impl EmitterExecutionPlan {
         let DecidedInputs {
             inputs,
             schema: input_schema,
+            branching,
         } = Self::decide_inputs(emitter, activation)?;
         let scheduled = nodes
             .get(&NodeRef::new(ModelKind::Emitter, &emitter.name))
@@ -404,7 +424,7 @@ impl EmitterExecutionPlan {
                     emitter: emitter.name.clone(),
                 })
             })?;
-        let units = Self::decide_units(emitter, scheduled.units.keys(), &inputs)?;
+        let units = Self::decide_units(emitter, scheduled.units.keys(), branching)?;
         let codec = emitter.body.codec().cloned();
         let output_schema = match emitter.connector.as_ref() {
             nervix_models::EmitterEntity::Client(nervix_models::ClientEmitter::Consumer(
@@ -931,13 +951,29 @@ mod tests {
         Unit::partition(index)
     }
 
-    fn partitions(count: u16) -> BranchPartitions {
-        BranchPartitions::Direct(
+    fn partitions(count: u16) -> ResolvedBranchPartitions {
+        ResolvedBranchPartitions::Direct(
             std::num::NonZeroU16::new(count).assured("the fixture counts are nonzero"),
         )
     }
 
-    fn input(relay: &str, partitions: Option<BranchPartitions>) -> EmitterInputPlan {
+    fn key_schema() -> CreateSchema {
+        CreateSchema {
+            name: named("tenant_key"),
+            fields: vec![SchemaField {
+                name: named("tenant"),
+                ty: nervix_models::ParseAsType::String,
+                optional: false,
+                sensitive: false,
+            }],
+        }
+    }
+
+    fn branching(partitions: ResolvedBranchPartitions) -> ResolvedBranching {
+        ResolvedBranching::branched(named("by_tenant"), key_schema(), partitions)
+    }
+
+    fn input(relay: &str, partitions: Option<ResolvedBranchPartitions>) -> EmitterInputPlan {
         EmitterInputPlan {
             relay: named(relay),
             from_where: None,
@@ -967,14 +1003,14 @@ mod tests {
 
     #[test]
     fn scheduled_units_must_be_exactly_the_declared_instances() {
-        let four = [input("input_relay", Some(partitions(4)))];
+        let four = branching(partitions(4));
         let single = EmitterExecutionPlan::decide_units(
             &instanced(EmitterInstances::ONE),
             [Unit::SINGLE].iter(),
             &four,
         )
         .expect("a default emitter runs as its single unit");
-        assert_eq!(single, EmitterUnitPlan::Single);
+        assert_eq!(single, EmitterUnitPlan::SINGLE);
 
         let counted = [instance(0), instance(1), instance(2)];
         assert_eq!(
@@ -984,9 +1020,7 @@ mod tests {
                 &four,
             )
             .expect("three scheduled instances match INSTANCES 3"),
-            EmitterUnitPlan::Instances {
-                count: nonzero!(3u64)
-            }
+            EmitterUnitPlan::instances(nonzero!(3u64))
         );
         let per_partition = [instance(0), instance(1), instance(2), instance(3)];
         assert_eq!(
@@ -996,18 +1030,16 @@ mod tests {
                 &four,
             )
             .expect("one instance per partition of the shared branch"),
-            EmitterUnitPlan::Instances {
-                count: nonzero!(4u64)
-            }
+            EmitterUnitPlan::instances(nonzero!(4u64))
         );
         assert_eq!(
             EmitterExecutionPlan::decide_units(
                 &instanced(EmitterInstances::PerPartition),
                 [Unit::SINGLE].iter(),
-                &[input("input_relay", Some(BranchPartitions::ONE))],
+                &branching(ResolvedBranchPartitions::ONE),
             )
             .expect("one partition runs as the single unit"),
-            EmitterUnitPlan::Single
+            EmitterUnitPlan::SINGLE
         );
 
         for scheduled in [
@@ -1030,10 +1062,34 @@ mod tests {
     }
 
     #[test]
+    fn an_emitter_awaiting_inherited_topology_has_no_running_units() {
+        let branching = ResolvedBranching::awaiting_topology(named("by_tenant"), key_schema());
+        let emitter = instanced(EmitterInstances::PerPartition);
+        let plan = EmitterExecutionPlan::decide_units(&emitter, [].iter(), &branching)
+            .expect("an unresolved inherited branch has no execution units");
+        assert_eq!(plan, EmitterUnitPlan::AWAITING_TOPOLOGY);
+        assert_eq!(
+            std::mem::size_of::<EmitterUnitPlan>(),
+            std::mem::size_of::<u64>()
+        );
+        assert_eq!(plan.units(), Some(Vec::new()));
+        assert_eq!(
+            plan.input_units(Unit::SINGLE, None),
+            EmitterInputUnits::Units(Vec::new())
+        );
+        for units in [vec![Unit::SINGLE], vec![instance(0)]] {
+            let error = EmitterExecutionPlan::decide_units(&emitter, units.iter(), &branching)
+                .expect_err("an unresolved branch cannot invent an execution unit");
+            assert!(matches!(
+                error.current_context(),
+                EmitterExecutionPlanError::UnitDeclaration { .. }
+            ));
+        }
+    }
+
+    #[test]
     fn each_instance_reads_the_partitions_congruent_to_its_index_and_a_single_unit_reads_all() {
-        let plan = EmitterUnitPlan::Instances {
-            count: nonzero!(3u64),
-        };
+        let plan = EmitterUnitPlan::instances(nonzero!(3u64));
         let inputs = [
             input("events", Some(partitions(4))),
             input("more_events", Some(partitions(4))),
@@ -1057,18 +1113,16 @@ mod tests {
             Some(vec![instance(0), instance(1), instance(2)])
         );
         assert_eq!(
-            EmitterUnitPlan::Single.input_units(Unit::SINGLE, Some(partitions(4))),
+            EmitterUnitPlan::SINGLE.input_units(Unit::SINGLE, Some(partitions(4))),
             EmitterInputUnits::WholeRelay
         );
-        assert!(!EmitterUnitPlan::Single.is_idle(Unit::SINGLE, &inputs));
-        assert_eq!(EmitterUnitPlan::Single.units(), Some(vec![Unit::SINGLE]));
+        assert!(!EmitterUnitPlan::SINGLE.is_idle(Unit::SINGLE, &inputs));
+        assert_eq!(EmitterUnitPlan::SINGLE.units(), Some(vec![Unit::SINGLE]));
     }
 
     #[test]
     fn instances_beyond_the_partitions_they_could_serve_are_idle() {
-        let plan = EmitterUnitPlan::Instances {
-            count: nonzero!(6u64),
-        };
+        let plan = EmitterUnitPlan::instances(nonzero!(6u64));
         let partitioned = [input("events", Some(partitions(4)))];
         for index in 0..4 {
             assert!(!plan.is_idle(instance(index), &partitioned));
