@@ -463,12 +463,16 @@ Feature: Client ingestors
       """
       ATTACH DOMAIN CLOCK;
       """
+    # Establish the two held submissions before the third task competes for credit.
+    # Independently spawned submit tasks can acquire credit in a different order.
     And producer "orders" submits batch "b1" with rows
       | region | order_id | amount | card   |
       | eu     | o-1      | 1      | 4111-1 |
+    And producer "orders" holds batches "b1"
     And producer "orders" submits batch "b2" with rows
       | region | order_id | amount | card   |
       | us     | o-2      | 2      | 4111-2 |
+    And producer "orders" holds batches "b1, b2"
     And producer "orders" submits batch "b3" with rows
       | region | order_id | amount | card   |
       | eu     | o-3      | 3      | 4111-3 |
