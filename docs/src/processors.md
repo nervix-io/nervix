@@ -7,6 +7,18 @@ graph edges; expressions use language-defined scopes instead of relay-qualified 
 
 ## Shared input and branch contracts
 
+An internal worker class at capacity backpressures accepted input. The branch keeps its records,
+acknowledgements and processor state while waiting for a place, and takes no more input meanwhile.
+The wait produces no error-policy outcome or retry, including for `NO ACK` sources and detached
+consumers. The same rule covers branch input preparation, expression programs, inference session
+setup and model runs, and WASM input and output processing. Active waits renew the held
+acknowledgements, including other rows retained by a reorderer or correlator; parked window
+acknowledgements and an HTTP endpoint's absolute ACK deadline retain their existing meaning.
+Normal evaluation failures keep their
+existing handling. Stop, eviction and ownership teardown bound the wait with their existing
+deadlines; logical timers due during a wait run in order afterwards. See
+[VM Execution Bounds](vm-functions.md#scheduling-and-execution-bounds).
+
 Ordinary multi-source processors require every `FROM` relay to reference the same declared schema
 Model. Merely having structurally equal schemas is not enough. The relays must also use the same
 exact named branch, or all be unbranched.

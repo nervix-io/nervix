@@ -494,8 +494,8 @@ pub(super) async fn compute_lookup_hash_map_columns(
             },
             None,
         )?;
-        let result = execute_program_with_selection_in_context(
-            executor,
+        let result = execute_accepted_program_with_selection_in_context(
+            executor.accepted_work(),
             &call.key_program,
             &vm_batch,
             &VmExecutionContext {

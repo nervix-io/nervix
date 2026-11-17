@@ -1261,6 +1261,43 @@ impl BranchedEntrypointBatch {
 /// acknowledgements the failure preserves.
 pub(super) type PreparedBranch = Result<RelayRecordBatch, IngestGroupFailure<Vec<AckSet>>>;
 
+/// The input's existing failure-preservation copy, with renewal presence learned while cloning.
+/// Both admission waits can then check the same obligation without scanning every row again.
+struct BranchInputAcknowledgements {
+    acks: Vec<AckSet>,
+    needs_keepalive: bool,
+}
+
+impl BranchInputAcknowledgements {
+    fn cloned(source: &[AckSet]) -> Self {
+        let mut needs_keepalive = false;
+        let mut acks = Vec::with_capacity(source.len());
+        for source_acks in source {
+            let cloned_acks = source_acks.clone();
+            needs_keepalive |= !cloned_acks.is_empty();
+            acks.push(cloned_acks);
+        }
+        Self {
+            acks,
+            needs_keepalive,
+        }
+    }
+
+    fn into_vec(self) -> Vec<AckSet> {
+        self.acks
+    }
+}
+
+impl AcknowledgementKeepalive for BranchInputAcknowledgements {
+    fn needs_keepalive(&self) -> bool {
+        self.needs_keepalive
+    }
+
+    fn keep_alive(&self) {
+        self.acks.as_slice().keep_alive();
+    }
+}
+
 /// Builds one input's route batch, plans its output branches, and filters a batch for each, as one
 /// job on the node's data workers.
 ///
@@ -1275,44 +1312,51 @@ pub(super) async fn prepare_branched_entrypoint_input(
     input: BranchedEntrypointInput,
     ack_boundary: BranchInstanceAckBoundary,
 ) -> Result<Vec<PreparedBranch>, IngestGroupFailure<Vec<AckSet>>> {
-    let acks = input.acks.clone();
+    let acks = BranchInputAcknowledgements::cloned(&input.acks);
     let decoded_limit = executor.limits().relay_decoded_bytes.as_u64();
     let charge = match input.batch.estimated_bytes().checked_mul(2) {
         Some(bytes) => bytes.min(decoded_limit),
         None => decoded_limit,
     };
-    let reservation = match executor.reserve(MemoryClass::Relay, charge).await {
+    let reservation = match acks
+        .keep_alive_while_pending(executor.reserve(MemoryClass::Relay, charge))
+        .await
+    {
         Ok(reservation) => reservation,
         Err(error) => {
             return Err(IngestGroupFailure::new(
                 error.change_context(IngestGroupError::Execution {
                     operation: IngestGroupAdmittedOperation::PrepareBranchInput,
                 }),
-                acks,
+                acks.into_vec(),
             ));
         }
     };
-    let prepared = executor
-        .run_cpu(CpuClass::Data, reservation, move |_charge, cancellation| {
-            let batch = BranchedEntrypointBatch::from_inputs(vec![input])?;
-            let selections = match batch.branch_selections() {
-                Ok(selections) => selections,
-                Err(error) => return Err(IngestGroupFailure::new(error, batch.acks.clone())),
-            };
-            let mut branches = Vec::with_capacity(selections.len());
-            for selection in selections {
-                if let Err(cancelled) = cancellation.check() {
-                    return Err(IngestGroupFailure::new(
-                        Report::new(cancelled).change_context(IngestGroupError::Execution {
-                            operation: IngestGroupAdmittedOperation::PrepareBranchInput,
-                        }),
-                        batch.acks.clone(),
-                    ));
+    let prepared = acks
+        .keep_alive_while_pending(executor.accepted_work().run_cpu(
+            CpuClass::Data,
+            reservation,
+            move |_charge, cancellation| {
+                let batch = BranchedEntrypointBatch::from_inputs(vec![input])?;
+                let selections = match batch.branch_selections() {
+                    Ok(selections) => selections,
+                    Err(error) => return Err(IngestGroupFailure::new(error, batch.acks.clone())),
+                };
+                let mut branches = Vec::with_capacity(selections.len());
+                for selection in selections {
+                    if let Err(cancelled) = cancellation.check() {
+                        return Err(IngestGroupFailure::new(
+                            Report::new(cancelled).change_context(IngestGroupError::Execution {
+                                operation: IngestGroupAdmittedOperation::PrepareBranchInput,
+                            }),
+                            batch.acks.clone(),
+                        ));
+                    }
+                    branches.push(batch.filter_branch(selection, ack_boundary));
                 }
-                branches.push(batch.filter_branch(selection, ack_boundary));
-            }
-            Ok(branches)
-        })
+                Ok(branches)
+            },
+        ))
         .await;
     match prepared {
         Ok(prepared) => prepared,
@@ -1320,7 +1364,7 @@ pub(super) async fn prepare_branched_entrypoint_input(
             error.change_context(IngestGroupError::Execution {
                 operation: IngestGroupAdmittedOperation::PrepareBranchInput,
             }),
-            acks,
+            acks.into_vec(),
         )),
     }
 }
@@ -1664,22 +1708,25 @@ impl Runtime {
                     ingestor: ingestor.clone(),
                 })?;
             let keys = vec![None; rows.len()];
-            let outcomes = evaluate_filter_map_on_batch(
-                self.executor(),
-                filter_where,
-                FilterMapOutcomeInputs {
-                    carrier: &rows.batch,
-                    record_metadata: &rows.record_metadata,
-                    keys: &keys,
-                    filter_map_metadata: rows.metadata_rows(),
-                    side_inputs: &side_inputs,
-                },
-                execution_now,
-            )
-            .await
-            .change_context(IngestGroupError::FilterWhere {
-                ingestor: ingestor.clone(),
-            })?;
+            let outcomes = rows
+                .acks
+                .as_slice()
+                .keep_alive_while_pending(evaluate_filter_map_on_batch(
+                    self.executor(),
+                    filter_where,
+                    FilterMapOutcomeInputs {
+                        carrier: &rows.batch,
+                        record_metadata: &rows.record_metadata,
+                        keys: &keys,
+                        filter_map_metadata: rows.metadata_rows(),
+                        side_inputs: &side_inputs,
+                    },
+                    execution_now,
+                ))
+                .await
+                .change_context(IngestGroupError::FilterWhere {
+                    ingestor: ingestor.clone(),
+                })?;
             let mut keep = BooleanBufferBuilder::new(rows.len());
             let mut transformed = Vec::new();
             for (row, outcome) in outcomes.into_iter().enumerate() {
@@ -1859,23 +1906,26 @@ impl Runtime {
                     relay: output.relay.clone(),
                 })?;
             let keys = vec![None; rows.len()];
-            let outcomes = evaluate_filter_map_on_batch(
-                self.executor(),
-                &output.program,
-                FilterMapOutcomeInputs {
-                    carrier: &rows.batch,
-                    record_metadata: &rows.record_metadata,
-                    keys: &keys,
-                    filter_map_metadata: rows.metadata_rows(),
-                    side_inputs: &side_inputs,
-                },
-                execution_now,
-            )
-            .await
-            .change_context(IngestGroupError::RouteProgram {
-                ingestor: ingestor.clone(),
-                relay: output.relay.clone(),
-            })?;
+            let outcomes = rows
+                .acks
+                .as_slice()
+                .keep_alive_while_pending(evaluate_filter_map_on_batch(
+                    self.executor(),
+                    &output.program,
+                    FilterMapOutcomeInputs {
+                        carrier: &rows.batch,
+                        record_metadata: &rows.record_metadata,
+                        keys: &keys,
+                        filter_map_metadata: rows.metadata_rows(),
+                        side_inputs: &side_inputs,
+                    },
+                    execution_now,
+                ))
+                .await
+                .change_context(IngestGroupError::RouteProgram {
+                    ingestor: ingestor.clone(),
+                    relay: output.relay.clone(),
+                })?;
             let mut route_keys = (0..rows.len()).map(|_| None).collect::<Vec<_>>();
             let mut branch_state_snapshot = HashMap::default();
             if let Some((branch_program, partition_field)) = output.branch.construction() {
@@ -1953,23 +2003,26 @@ impl Runtime {
                         }
                         None => None,
                     };
-                    let evaluated = evaluate_output_branch_program(
-                        ProgramRun {
-                            executor: self.executor(),
-                            now: execution_now,
-                        },
-                        branch_program,
-                        &input_batch,
-                        &output_batch,
-                        &input_keys,
-                        &side_inputs,
-                        external_partitions.as_deref(),
-                    )
-                    .await
-                    .change_context(IngestGroupError::BranchProgram {
-                        ingestor: ingestor.clone(),
-                        relay: output.relay.clone(),
-                    })?;
+                    let evaluated = rows
+                        .acks
+                        .as_slice()
+                        .keep_alive_while_pending(evaluate_output_branch_program(
+                            ProgramRun {
+                                executor: self.executor(),
+                                now: execution_now,
+                            },
+                            branch_program,
+                            &input_batch,
+                            &output_batch,
+                            &input_keys,
+                            &side_inputs,
+                            external_partitions.as_deref(),
+                        ))
+                        .await
+                        .change_context(IngestGroupError::BranchProgram {
+                            ingestor: ingestor.clone(),
+                            relay: output.relay.clone(),
+                        })?;
                     for (row, key) in input_rows.into_iter().zip(evaluated) {
                         route_keys[row] = Some(key.map(Some));
                     }
