@@ -88,6 +88,7 @@ impl UnfoldingDomain {
             start_endpoint_ingestor(runtime, &domain, &ingestor, unfolding_wire_format()).await;
         let subscriber = RelaySubscriptionDefinition::new(
             Arc::new(compile_schema(&CreateSchema {
+                labels: Default::default(),
                 name: named("event"),
                 fields: vec![SchemaField {
                     name: named("user_id"),

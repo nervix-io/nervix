@@ -33,6 +33,7 @@ fn wasm_output_type_failure_keeps_the_vm_cause() {
     let source: RelayName = named("source");
     let output = output_with_construction("SET value = \"text\"");
     let schema = CreateSchema {
+        labels: Default::default(),
         name: named("mapped_schema"),
         fields: vec![nervix_models::SchemaField {
             name: named("value"),
@@ -67,6 +68,7 @@ fn window_route_where_type_failure_keeps_the_vm_cause() {
     let identifier: ModelName = named("window_values");
     let output = output_with_construction("WHERE output.value");
     let schema = CreateSchema {
+        labels: Default::default(),
         name: named("mapped_schema"),
         fields: vec![nervix_models::SchemaField {
             name: named("value"),

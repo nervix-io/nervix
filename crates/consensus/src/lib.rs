@@ -195,6 +195,8 @@ use domain_mutation::DomainMutationAdmission;
 #[cfg(any(test, feature = "testing"))]
 pub use storage_fault::{StorageBoundary, StorageFault, StoragePause};
 use transaction_report::TransactionReportRecords;
+mod entity_labels;
+pub use entity_labels::{EntityLabelReadError, EntityLabelTransactionSnapshot};
 mod wire;
 
 pub use transaction::{
@@ -493,7 +495,7 @@ pub enum ConsensusCommand {
         decision: Option<Box<ReceivedLicenseDecision>>,
     },
     SeedClusterParameters {
-        values: ClusterParameterValues,
+        values: Box<ClusterParameterValues>,
     },
     AlterClusterParameters {
         reference: nervix_models::CommandExecutionReference,
@@ -819,6 +821,7 @@ impl AuthenticationInput {
 pub struct ConfigurationCapture {
     /// The log entry the capture reflects.
     pub applied: AppliedLogPosition,
+    pub parameters: Option<ClusterParameterRecord>,
     pub domains: BTreeMap<DomainName, DomainState>,
     /// Every domain's Models, as its schedule places them.
     pub schedule: ClusterSchedule,
@@ -1712,6 +1715,19 @@ impl StateMachineData {
             resources: self.domain_resource_planning_inputs(domain),
             schedule: self.schedule.domain(domain).cloned().map(Box::new),
             topology: self.schedule_topology_inputs(),
+        }
+    }
+
+    /// Every input a transaction of `domain` is planned and checked against, from this one state.
+    fn transaction_control(&self, domain: &DomainName) -> TransactionControlSnapshot {
+        TransactionControlSnapshot {
+            planning_inputs: self.domain_planning_inputs(domain),
+            resources: (&self.resources).into(),
+            restore_installation: self
+                .domain_restore_installations
+                .get(domain)
+                .map(|installation| installation.execution().clone()),
+            licensing_stop: self.licensing_stop(),
         }
     }
 
@@ -3293,16 +3309,7 @@ impl Observer {
         &self,
         domain: &DomainName,
     ) -> TransactionControlSnapshot {
-        let state = self.inner.store.inner.state();
-        TransactionControlSnapshot {
-            planning_inputs: state.domain_planning_inputs(domain),
-            resources: (&state.resources).into(),
-            restore_installation: state
-                .domain_restore_installations
-                .get(domain)
-                .map(|installation| installation.execution().clone()),
-            licensing_stop: state.licensing_stop(),
-        }
+        self.inner.store.inner.state().transaction_control(domain)
     }
     pub async fn current_revision(&self) -> u64 {
         let state = self.inner.store.inner.state();
@@ -3553,6 +3560,7 @@ impl Observer {
                 term: applied.leader_id.term,
                 index: applied.index,
             },
+            parameters: state.parameters,
             domains: (&state.domains).into(),
             schedule: (&state.schedule).into(),
             users: (&state.users).into(),
@@ -6115,7 +6123,7 @@ fn apply_consensus_command_at(
             return licensing::apply(state, command);
         }
         ConsensusCommand::SeedClusterParameters { values } => {
-            return cluster_parameters::seed(state, *values);
+            return cluster_parameters::seed(state, **values);
         }
         ConsensusCommand::AlterClusterParameters { reference, inputs } => {
             return cluster_parameters::apply(state, reference, inputs);
@@ -10544,6 +10552,7 @@ mod tests {
 
     fn vhost_schedule(raw: &str, tls_version: u64) -> DomainSchedule {
         let vhost = nervix_models::Model::Vhost(nervix_models::CreateVhost {
+            labels: Default::default(),
             name: nervix_models::VhostName::try_from("edge").expect("valid vhost name"),
             hostnames: vec!["edge.example.com".to_string()],
             tls: Some(nervix_models::VhostTlsResource {

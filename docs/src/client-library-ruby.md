@@ -98,6 +98,17 @@ different one.
 {{#include ../../tests/client_conformance/ruby/suite/cluster/commands_test.rb:upload}}
 ```
 
+### Inspect Entity Labels
+
+`outcome.entity_labels` retains a typed, bounded metadata snapshot independently of the outcome.
+The exact string map is available for either presentation format. `EntityLabelViewKind` separates
+a committed revision from a staged transaction preview; the captured policy revision and limits
+describe the acceptance policy used by the read.
+
+```ruby
+{{#include ../../tests/client_conformance/ruby/suite/cluster/entity_labels_test.rb:entity_labels}}
+```
+
 ### Inspect Materialized State
 
 `outcome.state_inspection` returns an independently retained inspection, or `nil` when the

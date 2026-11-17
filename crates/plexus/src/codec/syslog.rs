@@ -25,6 +25,7 @@ pub(super) fn create<'src>()
         .ignore_then(codec_name())
         .then(target_schema())
         .map(|(name, schema)| CreateCodec {
+            labels: Default::default(),
             name,
             wire_format: CodecWireFormat::Syslog,
             schema,

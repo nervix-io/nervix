@@ -127,7 +127,7 @@ Feature: Cross-language client conformance
         ENCODE at AS RFC3339, raw AS BASE64;
       CREATE SCHEMA tenant_key ( tenant STRING );
       CREATE BRANCH by_tenant SCHEMA tenant_key TTL 5m <partition_clause>;
-      CREATE RELAY typed_rows SCHEMA typed_row BRANCHED BY by_tenant;
+      CREATE RELAY typed_rows SCHEMA typed_row BRANCHED BY by_tenant LABELS { 'probe' = ' retained Δ ' };
       CREATE VHOST edge conformance-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT typed_ingress ON edge PATH '/typed';
       CREATE HTTP ENDPOINT INGESTOR typed_ingestor

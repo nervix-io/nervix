@@ -373,12 +373,24 @@ fn manifest_of(scope: ArchiveScope, sections: Vec<SectionEntry>) -> BackupManife
     let domains = match &scope {
         ArchiveScope::Cluster => vec![
             DomainCapture {
+                entity_label_policy: nervix_models::EntityLabelPolicy {
+                    revision: std::num::NonZeroU64::MIN,
+                    limits: nervix_models::EntityLabelLimits::from(
+                        &nervix_models::ClusterParameterValues::default(),
+                    ),
+                },
                 domain: domain("prod"),
                 revision: 42,
                 raft_log: RaftLogPosition { term: 3, index: 42 },
                 cut: nervix_models::BackupCut::ConfigurationOnly,
             },
             DomainCapture {
+                entity_label_policy: nervix_models::EntityLabelPolicy {
+                    revision: std::num::NonZeroU64::MIN,
+                    limits: nervix_models::EntityLabelLimits::from(
+                        &nervix_models::ClusterParameterValues::default(),
+                    ),
+                },
                 domain: domain("staging"),
                 revision: 42,
                 raft_log: RaftLogPosition { term: 3, index: 42 },
@@ -386,6 +398,12 @@ fn manifest_of(scope: ArchiveScope, sections: Vec<SectionEntry>) -> BackupManife
             },
         ],
         ArchiveScope::Domain(name) => vec![DomainCapture {
+            entity_label_policy: nervix_models::EntityLabelPolicy {
+                revision: std::num::NonZeroU64::MIN,
+                limits: nervix_models::EntityLabelLimits::from(
+                    &nervix_models::ClusterParameterValues::default(),
+                ),
+            },
             domain: name.clone(),
             revision: 7,
             raft_log: RaftLogPosition { term: 1, index: 7 },

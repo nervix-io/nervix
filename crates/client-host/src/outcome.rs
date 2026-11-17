@@ -112,6 +112,14 @@ impl Outcome {
             .map(crate::Inspection::new)
     }
 
+    pub fn entity_labels(&self) -> Option<crate::EntityLabelsInspection> {
+        self.outcome
+            .entity_labels
+            .as_deref()
+            .cloned()
+            .map(crate::EntityLabelsInspection::new)
+    }
+
     pub fn command(&self) -> &CommandOutcome {
         &self.outcome
     }

@@ -56,7 +56,14 @@ fn commit(storage: &ModelStorage, records: &BTreeMap<Vec<u8>, StoredModelRecord>
     }
     for (domain, models) in &domains {
         storage
-            .commit_batch(domain, models, &HashSet::default())
+            .commit_batch(
+                domain,
+                models,
+                &HashSet::default(),
+                &nervix_models::EntityLabelLimits::from(
+                    &nervix_models::ClusterParameterValues::default(),
+                ),
+            )
             .assured("a bounded batch of generated Models commits");
     }
 }
@@ -240,8 +247,13 @@ fn bolero_corrupt_registry_records_fail_typed_or_list_canonically() {
                 let key = encode_key(&record.domain, record.model.kind(), record.model.name())
                     .assured("a listed record's domain and Model name encode as a key");
                 keys.push(key);
-                let stored = serialize_value(&record.model)
-                    .assured("a listed Model encodes through the registry owner");
+                let stored = serialize_value(
+                    &record.model,
+                    &nervix_models::EntityLabelLimits::from(
+                        &nervix_models::ClusterParameterValues::default(),
+                    ),
+                )
+                .assured("a listed Model encodes through the registry owner");
                 let restored = deserialize_value(&stored)
                     .assured("a listed Model decodes from its own encoding");
                 assert_eq!(restored, record.model);
@@ -255,6 +267,7 @@ fn a_model_archive_refusing_its_second_schema_field_frees_the_first() {
     let name =
         |value| nervix_models::FieldName::parse(value).assured("a fixture field name is valid");
     let model = Model::Schema(nervix_models::CreateSchema {
+        labels: Default::default(),
         name: nervix_models::SchemaName::parse("events")
             .assured("the fixture schema name is valid"),
         fields: vec![
@@ -272,7 +285,11 @@ fn a_model_archive_refusing_its_second_schema_field_frees_the_first() {
             },
         ],
     });
-    let mut encoded = serialize_value(&model).assured("the current model archives");
+    let mut encoded = serialize_value(
+        &model,
+        &nervix_models::EntityLabelLimits::from(&nervix_models::ClusterParameterValues::default()),
+    )
+    .assured("the current model archives");
     let target = b"second_field";
     let occurrences = encoded
         .windows(target.len())
@@ -289,8 +306,8 @@ fn a_model_archive_refusing_its_second_schema_field_frees_the_first() {
     encoded[start + 6] = b'!';
 
     let archive = encoded
-        .strip_prefix(MODEL_ARCHIVE_HEADER)
-        .assured("the archive keeps its header");
+        .get(MODEL_ARCHIVE_PREFIX_BYTES..)
+        .assured("the archive keeps its complete current prefix");
     let mut aligned = rkyv::util::AlignedVec::<16>::with_capacity(archive.len());
     aligned.extend_from_slice(archive);
     rkyv::access::<rkyv::Archived<Model>, rkyv::rancor::Error>(&aligned)
@@ -316,6 +333,7 @@ fn listed_after_rewriting_the_key(
     let storage = open_storage(directory.path());
     let domain = DomainName::parse("readings").assured("the fixture domain follows the name rule");
     let model = Model::Schema(nervix_models::CreateSchema {
+        labels: Default::default(),
         name: nervix_models::SchemaName::parse("events")
             .assured("the fixture schema name follows the name rule"),
         fields: Vec::new(),
@@ -323,7 +341,11 @@ fn listed_after_rewriting_the_key(
     let mut key = encode_key(&domain, model.kind(), model.name())
         .assured("the fixture domain and name encode as a key");
     rewrite(&mut key);
-    let value = serialize_value(&model).assured("the fixture schema encodes");
+    let value = serialize_value(
+        &model,
+        &nervix_models::EntityLabelLimits::from(&nervix_models::ClusterParameterValues::default()),
+    )
+    .assured("the fixture schema encodes");
     storage
         .index
         .insert(key, value)

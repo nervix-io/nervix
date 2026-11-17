@@ -490,7 +490,7 @@ fn raw_rows(
             body: Some(message.as_union_value()),
         },
     );
-    finish_raw(builder, root, "NXSM")
+    finish_raw(builder, root, "NXEL")
 }
 
 fn one_cell_rows(
@@ -872,7 +872,7 @@ fn schema_reply(
             body: Some(reply.as_union_value()),
         },
     );
-    finish_raw(builder, root, "NXSM")
+    finish_raw(builder, root, "NXEL")
 }
 
 fn scalar_type(

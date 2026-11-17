@@ -371,37 +371,40 @@ fn create_wire_schema_parser<'src, T, P>(
 + Clone
 where
     T: Clone + 'src,
+    CreateWireSchema<T>: nervix_models::EntityMetadata,
     P: Parser<'src, &'src [Token], T, extra::Err<ParseError<'src>>> + Clone + 'src,
 {
-    let fields = wire_schema_field(native_type)
-        .separated_by(tok(Token::Comma))
-        .allow_trailing()
-        .at_least(1)
-        .collect::<Vec<_>>()
-        .delimited_by(tok(Token::LParen), tok(Token::RParen));
+    crate::labels::finish_creation({
+        let fields = wire_schema_field(native_type)
+            .separated_by(tok(Token::Comma))
+            .allow_trailing()
+            .at_least(1)
+            .collect::<Vec<_>>()
+            .delimited_by(tok(Token::LParen), tok(Token::RParen));
 
-    let wire_schema_header = kw_phrase3(Identifier::Wire, format_kw, Identifier::Schema);
+        let wire_schema_header = kw_phrase3(Identifier::Wire, format_kw, Identifier::Schema);
 
-    kw(Identifier::Create)
-        .ignore_then(if_not_exists_clause())
-        .then_ignore(wire_schema_header)
-        .then(wire_schema_name())
-        .then_ignore(kw(Identifier::Mode))
-        .then(wire_schema_mode())
-        .boxed()
-        .then(fields)
-        .then_ignore(tok(Token::Semicolon).or_not())
-        .map(|(((if_not_exists, name), strictness), fields)| {
-            CreateStatement::new(
-                CreateWireSchema {
-                    name,
-                    strictness,
-                    fields,
-                },
-                if_not_exists,
-            )
-        })
-        .boxed()
+        kw(Identifier::Create)
+            .ignore_then(if_not_exists_clause())
+            .then_ignore(wire_schema_header)
+            .then(wire_schema_name())
+            .then_ignore(kw(Identifier::Mode))
+            .then(wire_schema_mode())
+            .boxed()
+            .then(fields)
+            .map(|(((if_not_exists, name), strictness), fields)| {
+                CreateStatement::new(
+                    CreateWireSchema {
+                        labels: Default::default(),
+                        name,
+                        strictness,
+                        fields,
+                    },
+                    if_not_exists,
+                )
+            })
+            .boxed()
+    })
 }
 
 pub fn create_json_wire_schema_parser<'src>()
@@ -440,24 +443,32 @@ pub fn create_wire_schema_parser_any<'src>()
 pub fn create_schema_parser<'src>()
 -> impl Parser<'src, &'src [Token], CreateStatement<CreateSchema>, extra::Err<ParseError<'src>>> + Clone
 {
-    let fields = internal_schema_field()
-        .separated_by(tok(Token::Comma))
-        .allow_trailing()
-        .at_least(1)
-        .collect::<Vec<_>>()
-        .delimited_by(tok(Token::LParen), tok(Token::RParen));
+    crate::labels::finish_creation({
+        let fields = internal_schema_field()
+            .separated_by(tok(Token::Comma))
+            .allow_trailing()
+            .at_least(1)
+            .collect::<Vec<_>>()
+            .delimited_by(tok(Token::LParen), tok(Token::RParen));
 
-    kw(Identifier::Create)
-        .ignore_then(if_not_exists_clause())
-        .then_ignore(kw(Identifier::Schema))
-        .then(schema_name())
-        .boxed()
-        .then(fields)
-        .then_ignore(tok(Token::Semicolon).or_not())
-        .map(|((if_not_exists, name), fields)| {
-            CreateStatement::new(CreateSchema { name, fields }, if_not_exists)
-        })
-        .boxed()
+        kw(Identifier::Create)
+            .ignore_then(if_not_exists_clause())
+            .then_ignore(kw(Identifier::Schema))
+            .then(schema_name())
+            .boxed()
+            .then(fields)
+            .map(|((if_not_exists, name), fields)| {
+                CreateStatement::new(
+                    CreateSchema {
+                        labels: Default::default(),
+                        name,
+                        fields,
+                    },
+                    if_not_exists,
+                )
+            })
+            .boxed()
+    })
 }
 
 pub fn parse_create_wire_schema_tokens(tokens: &[Token]) -> Result<Statement, Vec<ParseError<'_>>> {

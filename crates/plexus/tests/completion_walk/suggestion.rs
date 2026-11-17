@@ -249,6 +249,12 @@ impl Materializer {
         label: &str,
         occurrence: usize,
     ) -> Result<Materialized, MaterializeError> {
+        if label == "label_key" {
+            return Ok(Materialized::verbatim(&format!(
+                "'{}'",
+                synthetic_name("label", occurrence)
+            )));
+        }
         if let Some(filler) = self.literals.get(label) {
             return Ok(Materialized::verbatim(filler));
         }

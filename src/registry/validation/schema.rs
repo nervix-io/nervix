@@ -331,6 +331,7 @@ mod tests {
         let result = registry.apply_batch(
             &schema_domain,
             vec![Model::Schema(CreateSchema {
+                labels: Default::default(),
                 name: named("root_branch"),
                 fields: Vec::new(),
             })],
@@ -345,6 +346,7 @@ mod tests {
         let result = registry.apply_batch(
             &wire_schema_domain,
             vec![Model::WireJsonSchema(CreateWireSchema {
+                labels: Default::default(),
                 name: named("empty_wire"),
                 strictness: Default::default(),
                 fields: Vec::<WireSchemaField<JsonType>>::new(),
@@ -371,6 +373,7 @@ mod tests {
                 &domain,
                 vec![
                     Model::Schema(CreateSchema {
+                        labels: Default::default(),
                         name: named("sensitive_event"),
                         fields: vec![
                             SchemaField {
@@ -388,6 +391,7 @@ mod tests {
                         ],
                     }),
                     Model::Schema(CreateSchema {
+                        labels: Default::default(),
                         name: named("public_event"),
                         fields: vec![
                             SchemaField {
@@ -407,6 +411,7 @@ mod tests {
                     explicitly_unbranched_relay("sensitive_events", "sensitive_event"),
                     explicitly_unbranched_relay("public_events", "public_event"),
                     Model::Reingestor(CreateReingestor {
+                        labels: Default::default(),
                         name: named("leak_events"),
                         from: ProcessorInputs::single(named("sensitive_events")),
                         output_routes: unbranched_transforming_outputs("public_events"),
@@ -438,6 +443,7 @@ mod tests {
                 &domain,
                 vec![
                     Model::Schema(CreateSchema {
+                        labels: Default::default(),
                         name: SchemaName::parse("short_schema").expect("valid identifier"),
                         fields: vec![SchemaField {
                             name: FieldName::parse("window").expect("valid identifier"),
@@ -450,6 +456,7 @@ mod tests {
                         }],
                     }),
                     Model::Schema(CreateSchema {
+                        labels: Default::default(),
                         name: SchemaName::parse("long_schema").expect("valid identifier"),
                         fields: vec![SchemaField {
                             name: FieldName::parse("window").expect("valid identifier"),

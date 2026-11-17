@@ -23,6 +23,7 @@ command = "../scripts/mdbook_llms.py"
 description = "Plexus, the Nervix graph definition language: configuration reference."
 include = [
   "plexus-overview.md",
+  "entity-labels.md",
   "control-plane.md",
   "working-message.md",
   "filter-map-functions.md",

@@ -95,14 +95,14 @@ macro_rules! declare_transports {
                 config: Vec<ClientConfigEntry>,
             ) -> Model<RequestedResourceVersion> {
                 match self {
-                    $(Self::$variant => Model::$model($ty { name, mount, config }),)+
-                    $(Self::$pooled => Model::$pooled_model($pooled_ty {
+                    $(Self::$variant => Model::$model($ty { labels: Default::default(), name, mount, config }),)+
+                    $(Self::$pooled => Model::$pooled_model($pooled_ty { labels: Default::default(),
                         name,
                         pool: pool.verified("the pooled draft validated its required bounds"),
                         mount,
                         config,
                     }),)+
-                    Self::Websockets => Model::ClientWebsockets(CreateClientWebsockets {
+                    Self::Websockets => Model::ClientWebsockets(CreateClientWebsockets { labels: Default::default(),
                         name, mount, signaling_protocol, config,
                     }),
                 }

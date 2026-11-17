@@ -119,6 +119,7 @@ impl GeneratedDomain {
             });
         }
         GeneratedSchema::new(CreateSchema {
+            labels: Default::default(),
             name: SchemaName::parse("generated").assured("the schema name is a literal name"),
             fields,
         })

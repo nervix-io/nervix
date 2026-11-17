@@ -29,6 +29,7 @@ fn relay(name: &str, schema: &str, branch: Option<&str>, materialized: bool) -> 
         None
     };
     CreateRelay {
+        labels: Default::default(),
         name: relay_name(name),
         schema: SchemaName::parse(schema).assured("the test names a valid schema"),
         buffer: nonzero_ext::nonzero!(4usize),

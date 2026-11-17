@@ -29,7 +29,7 @@ The planner and executor partition that ordered sequence the same way:
 
 | Content | Execution boundary |
 | --- | --- |
-| Consecutive model `CREATE`, supported `ALTER`, `DROP`, and `REBIND RESOURCE` operations | One atomic model run, evaluated in written order against one candidate graph. |
+| Consecutive model `CREATE`, supported `ALTER`, `DROP`, `SET LABELS`, `DROP LABELS`, and `REBIND RESOURCE` operations | One atomic model run, evaluated in written order against one candidate graph. |
 | `START`, `STOP`, `CREATE RESOURCE`, or `RESET WASM PROCESSOR ... STATE` | One step each; each ends a preceding model run. |
 
 A model run's configuration and schedule are published in one authoritative step. Its *base-to-final*
@@ -40,6 +40,13 @@ before that publication writes none of its candidate models. Other steps retain 
 effect boundaries; the transaction as a whole is **not** atomic. Commit stops at the first
 definitive failure and retains its applied prefix. A step can have an authoritative effect while
 runtime activation is still `APPLYING`; completion is recorded separately.
+
+Labels are owned by the entity in that candidate, including entities without configuration
+`ALTER`. Their edits participate in the same base-to-final diff, captured policy and conflict
+fences. A metadata-only aspect is control-plane-only and `DYNAMIC`: it contributes no pause,
+activation, rebuild, state purge, ownership move or forced flush. A mixed run keeps all effects
+of its actual configuration changes. `SHOW LABELS` in an open transaction reads the staged
+candidate and identifies its preview; it is a read and accepts no operation.
 
 Queue admission replays the accepted prefix in this exact order. An unfinished *final* model run
 may be admitted with an `INCOMPLETE` candidate and planning diagnostics when a later operation in

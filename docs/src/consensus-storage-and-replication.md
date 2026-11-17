@@ -524,8 +524,8 @@ status, keeping the start version, start mode, clock, schedule and incremental s
 
 The current emitter Models carry explicit key expressions, source-partition routing and
 expression-only SQS FIFO groups. The dedicated database owns exactly four current keyspaces:
-`raft_licensing_transitions_inferencer_pages_operational_inherited_topology_logs`, `raft_licensing_transitions_inferencer_pages_operational_inherited_topology_meta`, `raft_licensing_transitions_inferencer_pages_operational_inherited_topology_state`, and
-`raft_licensing_transitions_inferencer_pages_operational_inherited_topology_snapshots`. Opening it validates the complete keyspace namespace before
+`raft_entity_labels_inherited_topology_logs`, `raft_entity_labels_inherited_topology_meta`, `raft_entity_labels_inherited_topology_state`, and
+`raft_entity_labels_inherited_topology_snapshots`. Opening it validates the complete keyspace namespace before
 reading any records. The committed cluster-parameter record stores ordered typed TLS cipher
 suites and key-exchange groups; recovery validates their complete pair before returning that
 record. This namespace identifies the current Model shape, including the statement
@@ -554,7 +554,7 @@ committed node records under record-family tag `C`, each with the revision that 
 incarnation-bound capacity claim, including transport, DNS, database, consensus, engine, connector
 host, operational and listener capacities, its detected properties and its tags. The boxed node record
 announcement keeps unrelated command variants within the inline payload-size bound. Its state metadata
-requires the current `ClusterState` encoding, 39, including the cluster identity reference,
+requires the current `ClusterState` encoding, 40, including the cluster identity reference,
 committed cluster parameters, the durable restore installation gate and the unit-keyed committed
 schedule in which a relay of a partitioned branch is scheduled as one unit per partition.
 The current shape also requires inferencer state bindings and their initial expressions,
@@ -882,6 +882,12 @@ creation policy and every recovered user before publishing the state. Snapshot m
 user records preserve the complete values. The namespace and state-encoding checks above fence
 this shape before rkyv reads any user record or log entry.
 
+Domain Model archives use a current fixed header followed by the four committed label acceptance
+limits as `u64` words and the Model archive. Readers validate the complete decoded map against
+those recorded limits; a permissive node-local default cannot reinterpret the stored policy.
+The consensus state and a backup domain cut carry their own committed policy publication, so
+snapshot/replay and restore validate metadata under the policy captured with that configuration.
+
 ## Declared Engine And Database Capacities
 
 [Node Settings](node-settings.md#consensus-capacities) lists the local consensus capacity and
@@ -900,7 +906,9 @@ and remains greater than it. A whole snapshot transfer keeps one configured dead
 
 The current capability record includes transport, resolver, database and consensus projections.
 Its larger announcement is boxed within its one command variant, keeping the existing 256-byte
-inline Raft payload guard for all commands. No other Raft command gains a boxing allocation.
+inline Raft payload guard for all commands. The cluster parameter seed, applied once at first
+bootstrap, likewise boxes its complete policy record, which with the four entity-label limits
+exceeds that bound; no ordinary log entry gains a boxing allocation.
 The current keyspace names and interconnect fingerprint identify this representation. A database
 from another shape must be recreated; there is no alternate reader or migration path.
 

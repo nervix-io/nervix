@@ -72,6 +72,7 @@ using ConnectOptions =
     std::unique_ptr<nx_connect_options, Releaser<nx_connect_options, nx_connect_options_free>>;
 using Execution = std::unique_ptr<nx_execution, Releaser<nx_execution, nx_execution_free>>;
 using Outcome = std::unique_ptr<nx_outcome, Releaser<nx_outcome, nx_outcome_free>>;
+using EntityLabels = std::unique_ptr<nx_entity_labels, Releaser<nx_entity_labels, nx_entity_labels_free>>;
 using Schema = std::unique_ptr<nx_schema, Releaser<nx_schema, nx_schema_free>>;
 using Event = std::unique_ptr<nx_event, Releaser<nx_event, nx_event_release>>;
 using ClockEvent = std::unique_ptr<nx_clock_event, Releaser<nx_clock_event, nx_clock_event_release>>;
@@ -302,6 +303,27 @@ Outcome execute(const Session &session, const std::string &query, const nx_cance
     nx_outcome *outcome = nullptr;
     check(nx_session_execute(session.get(), execution.get(), cancel, &outcome));
     return Outcome(outcome);
+}
+
+void check_labels(const Session &session, const std::string &relay) {
+    Outcome outcome = execute(session, "SHOW LABELS ON RELAY " + relay + " FORMAT TEXT;", nullptr);
+    nx_entity_labels *raw = nullptr;
+    check(nx_outcome_entity_labels(outcome.get(), &raw));
+    EntityLabels labels(raw);
+    outcome.reset();
+    if (!labels) throw std::runtime_error("typed labels are absent");
+    uint64_t revision = 0;
+    if (!nx_entity_labels_revision(labels.get(), &revision)) {
+        throw std::runtime_error("typed labels lack a committed revision");
+    }
+    bool found = false;
+    for (size_t index = 0; index < nx_entity_labels_count(labels.get()); ++index) {
+        const uint8_t *key = nullptr, *value = nullptr;
+        size_t key_len = 0, value_len = 0;
+        check(nx_entity_labels_entry(labels.get(), index, &key, &key_len, &value, &value_len));
+        if (borrowed(key, key_len) == "probe") found = borrowed(value, value_len) == " retained Δ ";
+    }
+    if (!found) throw std::runtime_error("typed labels lost exact metadata");
 }
 
 Cancel with_deadline(uint64_t millis) {
@@ -2026,6 +2048,7 @@ void run(const std::string &mode) {
     }
     std::thread releaser([moved = std::move(retained)]() mutable { moved.clear(); });
     releaser.join();
+    check_labels(session, relay);
     check_cancellation(session);
     std::cout << "CHECKS ok" << std::endl;
 

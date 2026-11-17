@@ -1444,7 +1444,18 @@ pub(super) fn state_machine(arbitrary: &mut Arbitrary<'_>) -> StateMachineData {
         .map(|identity| Arc::new(crate::LicensingRecord::free(identity.public().created_at)));
     for _ in 0..arbitrary.entropy().count(RECORDS) {
         let domain = arbitrary.rule_name::<DomainName>();
-        let schedule = arbitrary.domain_schedule_of(domain.clone());
+        let mut schedule = arbitrary.domain_schedule_of(domain.clone());
+        let limits = nervix_models::EntityLabelLimits::from(
+            &state
+                .parameters
+                .assured("the generator committed its policy")
+                .values,
+        );
+        for node in schedule.nodes.values_mut() {
+            if node.config.labels().validate(&limits).is_err() {
+                *node.config.labels_mut() = nervix_models::EntityLabels::default();
+            }
+        }
         state.schedule.domains.insert(domain, schedule);
     }
     for _ in 0..arbitrary.entropy().count(RECORDS) {
@@ -2066,7 +2077,7 @@ fn command_of(arbitrary: &mut Arbitrary<'_>, variant: CommandVariant) -> Consens
             observed_at: arbitrary.timestamp(),
         },
         CommandVariant::SeedClusterParameters => ConsensusCommand::SeedClusterParameters {
-            values: arbitrary.cluster_parameter_values(),
+            values: Box::new(arbitrary.cluster_parameter_values()),
         },
         CommandVariant::AlterClusterParameters => ConsensusCommand::AlterClusterParameters {
             reference: arbitrary.execution_reference(),

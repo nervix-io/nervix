@@ -70,6 +70,11 @@ typedef struct nx_connect_options nx_connect_options;
 typedef struct nx_execution nx_execution;
 typedef struct nx_outcome nx_outcome;
 typedef struct nx_inspection nx_inspection;
+typedef struct nx_entity_labels nx_entity_labels;
+typedef enum {
+    NX_ENTITY_LABEL_VIEW_COMMITTED = 1,
+    NX_ENTITY_LABEL_VIEW_STAGED = 2
+} nx_entity_label_view_kind;
 typedef struct nx_schema nx_schema;
 typedef struct nx_event nx_event;
 typedef struct nx_clock_event nx_clock_event;
@@ -549,6 +554,25 @@ bool nx_suggestions_continuation(const nx_suggestions *suggestions,
 void nx_suggestions_free(nx_suggestions *suggestions);
 
 /* ---- State inspections -------------------------------------------------------------------- */
+/* Retain exact entity metadata independently of outcome. Free with nx_entity_labels_free. */
+nx_error *nx_outcome_entity_labels(const nx_outcome *outcome, nx_entity_labels **out);
+void nx_entity_labels_free(nx_entity_labels *labels);
+/* All returned byte spans borrow labels, and retain exact UTF-8 including empty values. */
+void nx_entity_labels_domain(const nx_entity_labels *labels, const uint8_t **data, size_t *len);
+void nx_entity_labels_entity_kind(const nx_entity_labels *labels, const uint8_t **data, size_t *len);
+void nx_entity_labels_entity_name(const nx_entity_labels *labels, const uint8_t **data, size_t *len);
+nx_entity_label_view_kind nx_entity_labels_view(const nx_entity_labels *labels);
+/* Optional accessors return false when the explicit view has no such field; zero is a value. */
+bool nx_entity_labels_revision(const nx_entity_labels *labels, uint64_t *out);
+bool nx_entity_labels_transaction_id(const nx_entity_labels *labels, const uint8_t **data, size_t *len);
+bool nx_entity_labels_position(const nx_entity_labels *labels, uint64_t *out);
+bool nx_entity_labels_planning_basis(const nx_entity_labels *labels, const uint8_t **data, size_t *len);
+uint64_t nx_entity_labels_policy_revision(const nx_entity_labels *labels);
+void nx_entity_labels_limits(const nx_entity_labels *labels, uint64_t *count, uint64_t *key_bytes, uint64_t *value_bytes, uint64_t *bytes);
+size_t nx_entity_labels_count(const nx_entity_labels *labels);
+/* Entries are ordered lexicographically by exact key; an invalid index is InvalidArgument. */
+nx_error *nx_entity_labels_entry(const nx_entity_labels *labels, size_t index, const uint8_t **key, size_t *key_len, const uint8_t **value, size_t *value_len);
+
 /* Retain the typed state envelope independently of outcome. Free with nx_inspection_free. */
 nx_error *nx_outcome_inspection(const nx_outcome *outcome, nx_inspection **out);
 /* One lossless typed JSON document; borrowed until the inspection handle is freed. */
