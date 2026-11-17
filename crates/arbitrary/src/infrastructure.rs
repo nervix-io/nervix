@@ -41,6 +41,7 @@ impl Arbitrary<'_> {
             None
         };
         CreateRelay {
+            labels: Default::default(),
             name,
             schema,
             buffer: NonZeroUsize::new(capacity).verified("the range above starts at one"),
@@ -64,6 +65,7 @@ impl Arbitrary<'_> {
             None
         };
         CreateBranch {
+            labels: Default::default(),
             name,
             schema,
             ttl,
@@ -116,6 +118,7 @@ impl Arbitrary<'_> {
             None
         };
         CreateVhost {
+            labels: Default::default(),
             name,
             hostnames,
             tls,
@@ -173,6 +176,7 @@ impl Arbitrary<'_> {
             EndpointKind::Websockets { signaling_protocol }
         };
         CreateEndpoint {
+            labels: Default::default(),
             name,
             on_vhost,
             path,
@@ -227,6 +231,7 @@ impl Arbitrary<'_> {
         let fail_matchers = self.programs(0);
         let timeout = self.duration();
         CreateSignalingProtocol {
+            labels: Default::default(),
             name,
             format,
             on_connect: SignalingProtocolOnConnect {
@@ -256,6 +261,7 @@ impl Arbitrary<'_> {
     /// A lookup keyed by one field of the records a resource version holds.
     pub fn create_lookup(&mut self) -> CreateLookup<RequestedResourceVersion> {
         CreateLookup {
+            labels: Default::default(),
             name: self.name(),
             key_field: self.name(),
             resource: self.name(),

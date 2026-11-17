@@ -128,6 +128,7 @@ fn command_outcome(
         transaction: None,
         transaction_admission: None,
         inspection: None,
+        entity_labels: None,
         state: None,
         resource: None,
         backup: None,

@@ -33,6 +33,7 @@ fn predicate(field: &str) -> Expression {
 
 fn schema(name: &str, ty: ParseAsType) -> CreateSchema {
     CreateSchema {
+        labels: Default::default(),
         name: named(name),
         fields: vec![SchemaField {
             name: named("bytes"),

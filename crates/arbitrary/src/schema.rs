@@ -150,7 +150,11 @@ impl Arbitrary<'_> {
     pub fn create_schema(&mut self) -> CreateSchema {
         let name = self.name();
         let fields = self.schema_fields(1);
-        CreateSchema { name, fields }
+        CreateSchema {
+            labels: Default::default(),
+            name,
+            fields,
+        }
     }
 
     /// At least `minimum` schema fields with distinct names.
@@ -214,6 +218,7 @@ impl Arbitrary<'_> {
             });
         }
         CreateWireSchema {
+            labels: Default::default(),
             name,
             strictness,
             fields,

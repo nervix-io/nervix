@@ -167,6 +167,7 @@ mod describe_output;
 mod domain_clock;
 mod domain_lifecycle;
 mod entity_gate;
+mod entity_labels;
 mod error;
 mod http_endpoint;
 mod interconnect_relay;
@@ -265,15 +266,6 @@ use crate::{
         RuntimeEnvironment, RuntimeEvent,
     },
 };
-
-#[cfg(not(test))]
-#[global_allocator]
-static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
-
-#[cfg(test)]
-#[global_allocator]
-static GLOBAL: alloc_count::AllocCounter<tikv_jemallocator::Jemalloc> =
-    alloc_count::AllocCounter(tikv_jemallocator::Jemalloc);
 
 /// One live peer whose advertised interconnect endpoint this health round can reach.
 struct ReachablePeer {

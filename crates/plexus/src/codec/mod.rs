@@ -65,20 +65,21 @@ pub fn create_codec_parser<'src>() -> impl Parser<
     CreateStatement<CreateCodec<RequestedResourceVersion>>,
     extra::Err<ParseError<'src>>,
 > + Clone {
-    kw(Identifier::Create)
-        .ignore_then(if_not_exists_clause())
-        .then(
-            choice((
-                wire::create(),
-                protobuf::create(),
-                jaq::create(),
-                syslog::create(),
-            ))
-            .boxed(),
-        )
-        .then_ignore(tok(Token::Semicolon).or_not())
-        .map(|(if_not_exists, codec)| CreateStatement::new(codec, if_not_exists))
-        .boxed()
+    crate::labels::finish_creation({
+        kw(Identifier::Create)
+            .ignore_then(if_not_exists_clause())
+            .then(
+                choice((
+                    wire::create(),
+                    protobuf::create(),
+                    jaq::create(),
+                    syslog::create(),
+                ))
+                .boxed(),
+            )
+            .map(|(if_not_exists, codec)| CreateStatement::new(codec, if_not_exists))
+            .boxed()
+    })
 }
 
 pub fn parse_create_codec_tokens(

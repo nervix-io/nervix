@@ -14,7 +14,7 @@
 use nervix_client_wire::CommandRequest;
 use nervix_models::{
     AckMode, CreateDeduplicator, CreateEmitter, CreateJunction, CreateRelay, CreateSchema,
-    DomainName, Model, ModelName, Statement, TransactionLifecycle,
+    DomainName, Model, ModelName, Statement, TransactionLifecycle, TransactionPosition,
 };
 
 use super::super::{
@@ -24,6 +24,87 @@ use super::super::{
         test_command_request, test_execution_reference,
     },
 };
+
+#[nervix_primitives::test]
+async fn entity_label_commands_apply_and_inspect_the_candidate_without_queueing_the_read() {
+    let TestService {
+        service,
+        registry: _registry,
+        path,
+    } = build_test_service(true).await;
+    let mut subscriptions = SessionSubscriptions::new();
+    let completed = nervix_primitives::time::timeout(std::time::Duration::from_secs(20), async {
+        for query in [
+            "CREATE SCHEMA labelled ( value U32 ) LABELS { 'owner' = 'Operations', 'empty' = '' };",
+            "SET LABELS ON SCHEMA labelled { 'owner' = 'Platform', 'region' = 'east' };",
+            "DROP LABELS ON SCHEMA labelled { 'region', 'absent' };",
+        ] {
+            let result = service
+                .test_command(test_command_request(query, "default"), &mut subscriptions)
+                .await;
+            assert!(result.succeeded(), "{query}: {}", result.message);
+        }
+        let committed = service
+            .test_command(
+                test_command_request("SHOW LABELS ON SCHEMA labelled;", "default"),
+                &mut subscriptions,
+            )
+            .await
+            .entity_labels
+            .expect("the applied metadata read has a typed capture");
+        assert_eq!(committed.labels().get("owner"), Some("Platform"));
+        assert_eq!(committed.labels().get("empty"), Some(""));
+        assert_eq!(committed.labels().get("region"), None);
+        for (query, position) in [
+            ("BEGIN;", None),
+            (
+                "SET LABELS ON SCHEMA labelled { 'owner' = 'Staged' };",
+                Some(0),
+            ),
+        ] {
+            let result = service
+                .test_command(
+                    CommandRequest {
+                        expected_transaction_position: position.map(TransactionPosition::new),
+                        ..test_command_request(query, "default")
+                    },
+                    &mut subscriptions,
+                )
+                .await;
+            assert!(result.succeeded(), "{query}: {}", result.message);
+        }
+        let staged = service
+            .test_command(
+                test_command_request("SHOW LABELS ON SCHEMA labelled;", "default"),
+                &mut subscriptions,
+            )
+            .await;
+        assert!(staged.succeeded(), "{}", staged.message);
+        let staged = staged
+            .entity_labels
+            .expect("the candidate read stays typed");
+        let nervix_models::EntityLabelView::Staged { preview } = staged.view() else {
+            panic!("the attached transaction reads its candidate view");
+        };
+        assert_eq!(preview.position, nervix_models::TransactionPosition::new(1));
+        assert_eq!(staged.labels().get("owner"), Some("Staged"));
+        let reverted = service
+            .test_command(
+                CommandRequest {
+                    expected_transaction_position: Some(TransactionPosition::new(1)),
+                    ..test_command_request("REVERT;", "default")
+                },
+                &mut subscriptions,
+            )
+            .await;
+        assert!(reverted.succeeded(), "{}", reverted.message);
+        assert_eq!(committed.labels().get("owner"), Some("Platform"));
+    })
+    .await;
+    subscriptions.stop_all().await;
+    let _ = std::fs::remove_dir_all(&path);
+    completed.expect("metadata edits and candidate reads finish without a blocked command");
+}
 
 #[nervix_primitives::test]
 async fn process_command_create_if_not_exists_returns_already_existed_for_models() {

@@ -11,6 +11,7 @@
 )]
 
 mod emitter_payload;
+mod entity_labels;
 mod entity_presentation;
 
 use std::{borrow::Cow, fmt::Display, num::NonZeroU64};
@@ -724,6 +725,8 @@ impl Statement {
     /// parsed script can be rendered back statement for statement.
     pub fn to_canonical_plexus(&self) -> error_stack::Result<String, CanonicalPlexusError> {
         match self {
+            Self::MutateEntityLabels(edit) => Ok(edit.to_canonical_plexus()),
+            Self::ShowLabels(show) => Ok(show.to_canonical_plexus()),
             Self::AlterCluster(alter) => Ok(alter.to_canonical_plexus()),
             Self::Create(create) => {
                 let rendered = create.body.to_canonical_plexus()?;
@@ -1246,6 +1249,15 @@ impl<Version: Display> Model<Version> {
 
 impl CreatePlacement {
     pub fn to_canonical_plexus(&self) -> error_stack::Result<String, CanonicalPlexusError> {
+        Ok(entity_labels::append_labels(
+            self.configuration_to_canonical_plexus()?,
+            &self.labels,
+        ))
+    }
+
+    pub(crate) fn configuration_to_canonical_plexus(
+        &self,
+    ) -> error_stack::Result<String, CanonicalPlexusError> {
         let scope = match &self.scope {
             crate::PlacementScope::DomainWide => "DOMAIN WIDE".to_owned(),
             crate::PlacementScope::Corridor { from, to } => format!(
@@ -1275,6 +1287,15 @@ impl CreatePlacement {
 
 impl CreateUdf {
     pub fn to_canonical_plexus(&self) -> error_stack::Result<String, CanonicalPlexusError> {
+        Ok(entity_labels::append_labels(
+            self.configuration_to_canonical_plexus()?,
+            &self.labels,
+        ))
+    }
+
+    pub(crate) fn configuration_to_canonical_plexus(
+        &self,
+    ) -> error_stack::Result<String, CanonicalPlexusError> {
         let arguments = self
             .arguments
             .iter()
@@ -1310,6 +1331,27 @@ impl CreateUdf {
 }
 
 impl CreateSchema {
+    pub fn to_canonical_plexus(&self) -> error_stack::Result<String, CanonicalPlexusError> {
+        Ok(entity_labels::append_labels(
+            self.configuration_to_canonical_plexus()?,
+            &self.labels,
+        ))
+    }
+
+    pub(crate) fn configuration_to_canonical_plexus(
+        &self,
+    ) -> error_stack::Result<String, CanonicalPlexusError> {
+        self.definition().to_canonical_plexus()
+    }
+}
+
+impl crate::SchemaDefinition {
+    pub fn to_canonical_plexus(&self) -> error_stack::Result<String, CanonicalPlexusError> {
+        self.as_ref().to_canonical_plexus()
+    }
+}
+
+impl crate::SchemaRef<'_> {
     pub fn to_canonical_plexus(&self) -> error_stack::Result<String, CanonicalPlexusError> {
         let fields = self
             .fields
@@ -1528,6 +1570,9 @@ macro_rules! impl_standard_client_canonical {
         $(
             impl<Version: Display> $Client<Version> {
                 pub fn to_canonical_plexus(&self) -> error_stack::Result<String, CanonicalPlexusError> {
+                    Ok(entity_labels::append_labels(self.configuration_to_canonical_plexus()?, &self.labels))
+                }
+                fn configuration_to_canonical_plexus(&self) -> error_stack::Result<String, CanonicalPlexusError> {
                     let mut clauses = client_pool_clauses!(self, $pooling);
                     if let Some(mount) = self.mount.as_ref() {
                         clauses.push(Clause::line(format!(
@@ -1573,6 +1618,15 @@ impl_standard_client_canonical! {
 
 impl<Version: Display> CreateClientS3<Version> {
     pub fn to_canonical_plexus(&self) -> error_stack::Result<String, CanonicalPlexusError> {
+        Ok(entity_labels::append_labels(
+            self.configuration_to_canonical_plexus()?,
+            &self.labels,
+        ))
+    }
+
+    pub(crate) fn configuration_to_canonical_plexus(
+        &self,
+    ) -> error_stack::Result<String, CanonicalPlexusError> {
         let config = config_entry_items(&self.config)?.join(", ");
 
         Ok(format!(
@@ -1587,6 +1641,15 @@ impl<Version: Display> CreateClientS3<Version> {
 
 impl<Version: Display> CreateClientWebsockets<Version> {
     pub fn to_canonical_plexus(&self) -> error_stack::Result<String, CanonicalPlexusError> {
+        Ok(entity_labels::append_labels(
+            self.configuration_to_canonical_plexus()?,
+            &self.labels,
+        ))
+    }
+
+    pub(crate) fn configuration_to_canonical_plexus(
+        &self,
+    ) -> error_stack::Result<String, CanonicalPlexusError> {
         let mut clauses = Vec::new();
         if let Some(protocol) = self.signaling_protocol.as_ref() {
             clauses.push(Clause::line(format!(
@@ -1633,6 +1696,15 @@ fn signaling_protocol_clause(signaling_protocol: Option<&SignalingProtocolName>)
 
 impl<Version: Display> CreateVhost<Version> {
     pub fn to_canonical_plexus(&self) -> error_stack::Result<String, CanonicalPlexusError> {
+        Ok(entity_labels::append_labels(
+            self.configuration_to_canonical_plexus()?,
+            &self.labels,
+        ))
+    }
+
+    pub(crate) fn configuration_to_canonical_plexus(
+        &self,
+    ) -> error_stack::Result<String, CanonicalPlexusError> {
         let tls = match &self.tls {
             Some(tls) => format!(
                 " WITH TLS {} VERSION {}",
@@ -1652,6 +1724,15 @@ impl<Version: Display> CreateVhost<Version> {
 
 impl CreateEndpoint {
     pub fn to_canonical_plexus(&self) -> error_stack::Result<String, CanonicalPlexusError> {
+        Ok(entity_labels::append_labels(
+            self.configuration_to_canonical_plexus()?,
+            &self.labels,
+        ))
+    }
+
+    pub(crate) fn configuration_to_canonical_plexus(
+        &self,
+    ) -> error_stack::Result<String, CanonicalPlexusError> {
         Ok(format!(
             "CREATE {} {} ON {} PATH {}{};",
             self.kind,
@@ -1665,6 +1746,15 @@ impl CreateEndpoint {
 
 impl<Version: Display> CreateSignalingProtocol<Version> {
     pub fn to_canonical_plexus(&self) -> error_stack::Result<String, CanonicalPlexusError> {
+        Ok(entity_labels::append_labels(
+            self.configuration_to_canonical_plexus()?,
+            &self.labels,
+        ))
+    }
+
+    pub(crate) fn configuration_to_canonical_plexus(
+        &self,
+    ) -> error_stack::Result<String, CanonicalPlexusError> {
         let mut clauses = String::new();
         if self.on_connect.accept_data {
             clauses.push_str(" ACCEPT DATA");
@@ -1743,6 +1833,15 @@ fn jaq_program_list_to_plexus(programs: &[String]) -> String {
 
 impl<Version: Display> CreateCodec<Version> {
     pub fn to_canonical_plexus(&self) -> error_stack::Result<String, CanonicalPlexusError> {
+        Ok(entity_labels::append_labels(
+            self.configuration_to_canonical_plexus()?,
+            &self.labels,
+        ))
+    }
+
+    pub(crate) fn configuration_to_canonical_plexus(
+        &self,
+    ) -> error_stack::Result<String, CanonicalPlexusError> {
         let mut clauses = Vec::new();
         let (head, transformations) = match &self.wire_format {
             CodecWireFormat::Json { wire_schema } => {
@@ -1880,6 +1979,15 @@ fn codec_encoding_rule_to_plexus(rule: &CodecEncodingRule) -> String {
 
 impl CreateBranch {
     pub fn to_canonical_plexus(&self) -> error_stack::Result<String, CanonicalPlexusError> {
+        Ok(entity_labels::append_labels(
+            self.configuration_to_canonical_plexus()?,
+            &self.labels,
+        ))
+    }
+
+    pub(crate) fn configuration_to_canonical_plexus(
+        &self,
+    ) -> error_stack::Result<String, CanonicalPlexusError> {
         let mut rendered = format!(
             "CREATE BRANCH {} SCHEMA {} TTL {}",
             self.name.as_str(),
@@ -1905,6 +2013,16 @@ impl CreateBranch {
 
 impl CreateIngestor {
     pub fn to_canonical_plexus(&self) -> error_stack::Result<String, CanonicalPlexusError> {
+        Ok(entity_labels::append_labels(
+            self.configuration_to_canonical_plexus()?,
+            &self.labels,
+        ))
+    }
+
+    /// Canonical execution configuration, excluding descriptive entity labels.
+    pub fn configuration_to_canonical_plexus(
+        &self,
+    ) -> error_stack::Result<String, CanonicalPlexusError> {
         let timestamp = match &self.timestamp_source {
             Some(IngestTimestampSource::Now) => " TIMESTAMP NOW".to_string(),
             Some(IngestTimestampSource::At(field)) => format!(" TIMESTAMP AT {}", field.as_str()),
@@ -1942,6 +2060,15 @@ impl CreateIngestor {
 
 impl CreateGenerator {
     pub fn to_canonical_plexus(&self) -> error_stack::Result<String, CanonicalPlexusError> {
+        Ok(entity_labels::append_labels(
+            self.configuration_to_canonical_plexus()?,
+            &self.labels,
+        ))
+    }
+
+    pub(crate) fn configuration_to_canonical_plexus(
+        &self,
+    ) -> error_stack::Result<String, CanonicalPlexusError> {
         let mut clauses = vec![
             Clause::line(format!(
                 "USING MATERIALIZED STATE {}",
@@ -1961,6 +2088,15 @@ impl CreateGenerator {
 
 impl CreateRelay {
     pub fn to_canonical_plexus(&self) -> error_stack::Result<String, CanonicalPlexusError> {
+        Ok(entity_labels::append_labels(
+            self.configuration_to_canonical_plexus()?,
+            &self.labels,
+        ))
+    }
+
+    pub(crate) fn configuration_to_canonical_plexus(
+        &self,
+    ) -> error_stack::Result<String, CanonicalPlexusError> {
         let mut rendered = format!(
             "CREATE RELAY {} SCHEMA {}",
             self.name.as_str(),
@@ -1986,6 +2122,15 @@ impl CreateRelay {
 
 impl<Version: Display> CreateLookup<Version> {
     pub fn to_canonical_plexus(&self) -> error_stack::Result<String, CanonicalPlexusError> {
+        Ok(entity_labels::append_labels(
+            self.configuration_to_canonical_plexus()?,
+            &self.labels,
+        ))
+    }
+
+    pub(crate) fn configuration_to_canonical_plexus(
+        &self,
+    ) -> error_stack::Result<String, CanonicalPlexusError> {
         Ok(format!(
             "CREATE HASH MAP {} KEY {} FROM RESOURCE {} VERSION {} PATH {} DECODE USING {};",
             self.name.as_str(),
@@ -2125,6 +2270,15 @@ fn processor_input_clauses(
 
 impl CreateJunction {
     pub fn to_canonical_plexus(&self) -> error_stack::Result<String, CanonicalPlexusError> {
+        Ok(entity_labels::append_labels(
+            self.configuration_to_canonical_plexus()?,
+            &self.labels,
+        ))
+    }
+
+    pub(crate) fn configuration_to_canonical_plexus(
+        &self,
+    ) -> error_stack::Result<String, CanonicalPlexusError> {
         let mut clauses = processor_input_clauses(&self.from, self.mode)?;
         clauses.extend(filter_where_clause(&self.filter_where)?);
         clauses.extend(processor_tail_clauses(
@@ -2142,6 +2296,15 @@ impl CreateJunction {
 
 impl CreateDeduplicator {
     pub fn to_canonical_plexus(&self) -> error_stack::Result<String, CanonicalPlexusError> {
+        Ok(entity_labels::append_labels(
+            self.configuration_to_canonical_plexus()?,
+            &self.labels,
+        ))
+    }
+
+    pub(crate) fn configuration_to_canonical_plexus(
+        &self,
+    ) -> error_stack::Result<String, CanonicalPlexusError> {
         let mut clauses = processor_input_clauses(&self.from, self.mode)?;
         clauses.extend(filter_where_clause(&self.filter_where)?);
         clauses.push(Clause::line(format!(
@@ -2168,6 +2331,15 @@ impl CreateDeduplicator {
 
 impl CreateCorrelator {
     pub fn to_canonical_plexus(&self) -> error_stack::Result<String, CanonicalPlexusError> {
+        Ok(entity_labels::append_labels(
+            self.configuration_to_canonical_plexus()?,
+            &self.labels,
+        ))
+    }
+
+    pub(crate) fn configuration_to_canonical_plexus(
+        &self,
+    ) -> error_stack::Result<String, CanonicalPlexusError> {
         let mut clauses = vec![
             Clause::line(prefixed_processor_inputs_to_plexus("LEFT", &self.left)?),
             Clause::line(prefixed_processor_inputs_to_plexus("RIGHT", &self.right)?),
@@ -2206,6 +2378,15 @@ fn correlation_timeout_action_to_plexus(action: &CorrelationTimeoutAction) -> St
 
 impl CreateReorderer {
     pub fn to_canonical_plexus(&self) -> error_stack::Result<String, CanonicalPlexusError> {
+        Ok(entity_labels::append_labels(
+            self.configuration_to_canonical_plexus()?,
+            &self.labels,
+        ))
+    }
+
+    pub(crate) fn configuration_to_canonical_plexus(
+        &self,
+    ) -> error_stack::Result<String, CanonicalPlexusError> {
         let mut clauses = processor_input_clauses(&self.from, self.mode)?;
         clauses.extend(filter_where_clause(&self.filter_where)?);
         clauses.push(Clause::line(format!(
@@ -2232,6 +2413,15 @@ impl CreateReorderer {
 
 impl CreateWindowProcessor {
     pub fn to_canonical_plexus(&self) -> error_stack::Result<String, CanonicalPlexusError> {
+        Ok(entity_labels::append_labels(
+            self.configuration_to_canonical_plexus()?,
+            &self.labels,
+        ))
+    }
+
+    pub(crate) fn configuration_to_canonical_plexus(
+        &self,
+    ) -> error_stack::Result<String, CanonicalPlexusError> {
         let mut clauses = processor_input_clauses(&self.from, self.mode)?;
         clauses.extend(filter_where_clause(&self.filter_where)?);
         clauses.push(Clause::line(format!(
@@ -2260,6 +2450,15 @@ impl CreateWindowProcessor {
 
 impl CreateEmitter {
     pub fn to_canonical_plexus(&self) -> error_stack::Result<String, CanonicalPlexusError> {
+        Ok(entity_labels::append_labels(
+            self.configuration_to_canonical_plexus()?,
+            &self.labels,
+        ))
+    }
+
+    pub(crate) fn configuration_to_canonical_plexus(
+        &self,
+    ) -> error_stack::Result<String, CanonicalPlexusError> {
         let mut clauses = vec![Clause::line(format!(
             "FROM {}",
             processor_inputs_to_plexus(&self.from)?
@@ -2318,6 +2517,15 @@ fn window_bound_to_plexus(bound: &WindowBound) -> String {
 
 impl CreateReingestor {
     pub fn to_canonical_plexus(&self) -> error_stack::Result<String, CanonicalPlexusError> {
+        Ok(entity_labels::append_labels(
+            self.configuration_to_canonical_plexus()?,
+            &self.labels,
+        ))
+    }
+
+    pub(crate) fn configuration_to_canonical_plexus(
+        &self,
+    ) -> error_stack::Result<String, CanonicalPlexusError> {
         let mut clauses = processor_input_clauses(&self.from, self.mode)?;
         clauses.extend(filter_where_clause(&self.filter_where)?);
         clauses.extend(materialized_state_clauses(&self.materialized_state)?);
@@ -2332,6 +2540,15 @@ impl CreateReingestor {
 
 impl<Version: Display> CreateInferencer<Version> {
     pub fn to_canonical_plexus(&self) -> error_stack::Result<String, CanonicalPlexusError> {
+        Ok(entity_labels::append_labels(
+            self.configuration_to_canonical_plexus()?,
+            &self.labels,
+        ))
+    }
+
+    pub(crate) fn configuration_to_canonical_plexus(
+        &self,
+    ) -> error_stack::Result<String, CanonicalPlexusError> {
         let mut clauses = processor_input_clauses(&self.from, self.mode)?;
         clauses.extend(filter_where_clause(&self.filter_where)?);
         clauses.push(Clause::line(format!(
@@ -2366,6 +2583,15 @@ impl<Version: Display> CreateInferencer<Version> {
 
 impl<Version: Display> CreateWasmProcessor<Version> {
     pub fn to_canonical_plexus(&self) -> error_stack::Result<String, CanonicalPlexusError> {
+        Ok(entity_labels::append_labels(
+            self.configuration_to_canonical_plexus()?,
+            &self.labels,
+        ))
+    }
+
+    pub(crate) fn configuration_to_canonical_plexus(
+        &self,
+    ) -> error_stack::Result<String, CanonicalPlexusError> {
         let mut clauses = processor_input_clauses(&self.from, self.mode)?;
         clauses.extend(filter_where_clause(&self.filter_where)?);
         clauses.push(Clause::line(format!(
@@ -2963,13 +3189,16 @@ where
         .map(wire_schema_field_to_plexus::<T>)
         .collect::<error_stack::Result<Vec<_>, CanonicalPlexusError>>()?;
 
-    Ok(block_statement(
-        format!(
-            "CREATE WIRE {format_kw} SCHEMA {} MODE {}",
-            schema.name.as_str(),
-            schema.strictness.as_ref()
+    Ok(entity_labels::append_labels(
+        block_statement(
+            format!(
+                "CREATE WIRE {format_kw} SCHEMA {} MODE {}",
+                schema.name.as_str(),
+                schema.strictness.as_ref()
+            ),
+            fields,
         ),
-        fields,
+        &schema.labels,
     ))
 }
 
@@ -3670,6 +3899,7 @@ mod tests {
     #[test]
     fn renders_wire_schema_canonical() {
         let schema: Model = Model::WireAvroSchema(CreateWireSchema {
+            labels: Default::default(),
             name: named("latency"),
             strictness: Default::default(),
             fields: vec![
@@ -3696,6 +3926,7 @@ mod tests {
     #[test]
     fn renders_avro_array_items_at_every_depth() {
         let schema: Model = Model::WireAvroSchema(CreateWireSchema {
+            labels: Default::default(),
             name: named("lists"),
             strictness: Default::default(),
             fields: vec![
@@ -3733,6 +3964,7 @@ mod tests {
     #[test]
     fn renders_internal_schema_canonical() {
         let schema = CreateSchema {
+            labels: Default::default(),
             name: named("latency"),
             fields: vec![
                 SchemaField {
@@ -3760,6 +3992,7 @@ mod tests {
     #[test]
     fn renders_multidimensional_internal_arrays_canonical() {
         let schema = CreateSchema {
+            labels: Default::default(),
             name: named("tensors"),
             fields: vec![SchemaField {
                 name: named("matrix"),
@@ -3784,6 +4017,7 @@ mod tests {
     #[test]
     fn renders_transport_values_as_string_literals() {
         let model: CreateClientKafka = CreateClientKafka {
+            labels: Default::default(),
             name: named("kafka_main"),
             mount: None,
             config: vec![
@@ -3803,6 +4037,7 @@ mod tests {
     #[test]
     fn renders_config_values_that_mix_quote_styles() {
         let model: CreateClientKafka = CreateClientKafka {
+            labels: Default::default(),
             name: named("k"),
             mount: None,
             config: vec![KafkaConfigEntry {
@@ -3831,6 +4066,7 @@ mod tests {
     #[test]
     fn renders_json_wire_schema_canonical() {
         let schema: Model = Model::WireJsonSchema(CreateWireSchema {
+            labels: Default::default(),
             name: named("payload"),
             strictness: Default::default(),
             fields: vec![
@@ -3856,6 +4092,7 @@ mod tests {
     #[test]
     fn renders_loose_cbor_wire_schema_canonical() {
         let schema: Model = Model::WireCborSchema(CreateWireSchema {
+            labels: Default::default(),
             name: named("payload"),
             strictness: crate::WireSchemaStrictness::Loose,
             fields: vec![WireSchemaField {
@@ -3874,6 +4111,7 @@ mod tests {
     #[test]
     fn renders_optional_schema_fields_canonical() {
         let internal = CreateSchema {
+            labels: Default::default(),
             name: named("latency"),
             fields: vec![SchemaField {
                 name: named("p99"),
@@ -3883,6 +4121,7 @@ mod tests {
             }],
         };
         let wire: Model = Model::WireJsonSchema(CreateWireSchema {
+            labels: Default::default(),
             name: named("payload"),
             strictness: Default::default(),
             fields: vec![WireSchemaField {
@@ -3906,7 +4145,7 @@ mod tests {
     fn renders_all_client_types_canonical() {
         let expectations = [
             (
-                CreateClientHttp::<u64> {
+                CreateClientHttp::<u64> { labels: Default::default(),
                     name: named("http_main"),
                     mount: None,
                     config: vec![
@@ -3925,7 +4164,7 @@ mod tests {
                 "CREATE HTTP CLIENT http_main\n  CONFIG {\n    'endpoint' = 'https://example.com',\n    'timeout_ms' = '5000'\n  };",
             ),
             (
-                CreateClientSentry::<u64> {
+                CreateClientSentry::<u64> { labels: Default::default(),
                     name: named("sentry_main"),
                     mount: None,
                     config: vec![SentryConfigEntry {
@@ -3938,7 +4177,7 @@ mod tests {
                 "CREATE SENTRY CLIENT sentry_main\n  CONFIG {\n    'dsn' = 'https://key@sentry.example/42'\n  };",
             ),
             (
-                CreateClientMqtt::<u64> {
+                CreateClientMqtt::<u64> { labels: Default::default(),
                     name: named("mqtt_main"),
                     mount: None,
                     config: vec![config_entry("host", "mqtt.internal")],
@@ -3948,7 +4187,7 @@ mod tests {
                 "CREATE MQTT CLIENT mqtt_main\n  CONFIG {\n    'host' = 'mqtt.internal'\n  };",
             ),
             (
-                CreateClientNats::<u64> {
+                CreateClientNats::<u64> { labels: Default::default(),
                     name: named("nats_main"),
                     mount: None,
                     config: vec![config_entry("servers", "nats://localhost:4222")],
@@ -3958,7 +4197,7 @@ mod tests {
                 "CREATE NATS CLIENT nats_main\n  CONFIG {\n    'servers' = 'nats://localhost:4222'\n  };",
             ),
             (
-                CreateClientPrometheus::<u64> {
+                CreateClientPrometheus::<u64> { labels: Default::default(),
                     name: named("prom_main"),
                     mount: None,
                     config: vec![PrometheusConfigEntry {
@@ -3971,7 +4210,7 @@ mod tests {
                 "CREATE PROMETHEUS CLIENT prom_main\n  CONFIG {\n    'url' = 'http://prometheus:9090'\n  };",
             ),
             (
-                CreateClientRabbitMq::<u64> {
+                CreateClientRabbitMq::<u64> { labels: Default::default(),
                     name: named("rmq_main"),
                     mount: None,
                     config: vec![config_entry("uri", "amqp://guest:guest@localhost:5672")],
@@ -3981,7 +4220,7 @@ mod tests {
                 "CREATE RABBITMQ CLIENT rmq_main\n  CONFIG {\n    'uri' = 'amqp://guest:guest@localhost:5672'\n  };",
             ),
             (
-                CreateClientRedis::<u64> {
+                CreateClientRedis::<u64> { labels: Default::default(),
                     name: named("redis_main"),
                     pool: pool_bounds(1, 4),
                     mount: None,
@@ -3992,7 +4231,7 @@ mod tests {
                 "CREATE REDIS CLIENT redis_main\n  POOL SIZE MIN 1 MAX 4\n  CONFIG {\n    'url' = 'redis://localhost:6379'\n  };",
             ),
             (
-                CreateClientPostgres::<u64> {
+                CreateClientPostgres::<u64> { labels: Default::default(),
                     name: named("postgres_tls"),
                     pool: pool_bounds(0, 1),
                     mount: Some(ClientResourceMount {
@@ -4012,7 +4251,7 @@ mod tests {
                 "CREATE POSTGRES CLIENT postgres_tls\n  POOL SIZE MIN 0 MAX 1\n  MOUNT dev_tls VERSION 3\n  CONFIG {\n    'addr' = 'postgresql://db.example.com/nervix?sslmode=verify-full',\n    'tls_ca_file' = '{{ dev_tls }}/ca.pem'\n  };",
             ),
             (
-                CreateClientZeroMq::<u64> {
+                CreateClientZeroMq::<u64> { labels: Default::default(),
                     name: named("zmq_main"),
                     mount: None,
                     config: vec![config_entry("bind", "tcp://*:5555")],
@@ -4022,7 +4261,7 @@ mod tests {
                 "CREATE ZEROMQ CLIENT zmq_main\n  CONFIG {\n    'bind' = 'tcp://*:5555'\n  };",
             ),
             (
-                CreateClientSyslog::<u64> {
+                CreateClientSyslog::<u64> { labels: Default::default(),
                     name: named("syslog_main"),
                     mount: Some(ClientResourceMount {
                         resource: named("syslog_tls"),
@@ -4039,7 +4278,7 @@ mod tests {
                 "CREATE SYSLOG CLIENT syslog_main\n  MOUNT syslog_tls VERSION 2\n  CONFIG {\n    'protocol' = 'tls',\n    'addr' = 'logs.example.com:6514',\n    'tls_ca_file' = '{{ syslog_tls }}/ca.pem'\n  };",
             ),
             (
-                CreateClientSqs::<u64> {
+                CreateClientSqs::<u64> { labels: Default::default(),
                     name: named("sqs_main"),
                     mount: None,
                     config: vec![config_entry("region", "us-east-1")],
@@ -4049,7 +4288,7 @@ mod tests {
                 "CREATE SQS CLIENT sqs_main\n  CONFIG {\n    'region' = 'us-east-1'\n  };",
             ),
             (
-                CreateClientWebsockets::<u64> {
+                CreateClientWebsockets::<u64> { labels: Default::default(),
                     name: named("ws_main"),
                     mount: None,
                     signaling_protocol: None,
@@ -4060,7 +4299,7 @@ mod tests {
                 "CREATE WEBSOCKETS CLIENT ws_main\n  CONFIG {\n    'url' = 'wss://example.com/socket'\n  };",
             ),
             (
-                CreateClientWebsockets::<u64> {
+                CreateClientWebsockets::<u64> { labels: Default::default(),
                     name: named("ws_main"),
                     mount: None,
                     signaling_protocol: Some(named("binance_ws")),
@@ -4080,6 +4319,7 @@ mod tests {
     #[test]
     fn renders_other_model_kinds_canonical() {
         let vhost: CreateVhost = CreateVhost {
+            labels: Default::default(),
             name: named("public"),
             hostnames: vec!["example.com".to_string(), "api.example.com".to_string()],
             tls: None,
@@ -4090,6 +4330,7 @@ mod tests {
         );
 
         let tls_vhost: CreateVhost = CreateVhost {
+            labels: Default::default(),
             name: named("secure"),
             hostnames: vec!["secure.example.com".to_string()],
             tls: Some(crate::VhostTlsResource {
@@ -4103,6 +4344,7 @@ mod tests {
         );
 
         let endpoint = CreateEndpoint {
+            labels: Default::default(),
             name: named("orders_http"),
             on_vhost: named("public"),
             path: "/orders".to_string(),
@@ -4113,6 +4355,7 @@ mod tests {
             "CREATE HTTP ENDPOINT orders_http ON public PATH '/orders';"
         );
         let websocket_endpoint = CreateEndpoint {
+            labels: Default::default(),
             name: named("orders_ws"),
             on_vhost: named("public"),
             path: "/ws".to_string(),
@@ -4129,6 +4372,7 @@ mod tests {
         );
 
         let signaling_protocol: CreateSignalingProtocol = CreateSignalingProtocol {
+            labels: Default::default(),
             name: named("binance_ws"),
             format: SignalingWireFormat::Json,
             on_connect: crate::SignalingProtocolOnConnect {
@@ -4151,6 +4395,7 @@ mod tests {
         );
 
         let protobuf_signaling_protocol: CreateSignalingProtocol = CreateSignalingProtocol {
+            labels: Default::default(),
             name: named("orders_ws"),
             format: SignalingWireFormat::Protobuf(SignalingProtobufConfig {
                 resource: named("proto_bundle"),
@@ -4191,6 +4436,7 @@ mod tests {
         );
 
         let codec: CreateCodec = CreateCodec {
+            labels: Default::default(),
             name: named("orders_codec"),
             wire_format: CodecWireFormat::Json {
                 wire_schema: named("orders_wire"),
@@ -4205,6 +4451,7 @@ mod tests {
         );
 
         let syslog_codec: CreateCodec = CreateCodec {
+            labels: Default::default(),
             name: named("syslog_codec"),
             wire_format: CodecWireFormat::Syslog,
             schema: named("syslog_event"),
@@ -4216,6 +4463,7 @@ mod tests {
         );
 
         let codec_with_encoding: CreateCodec = CreateCodec {
+            labels: Default::default(),
             name: named("orders_codec"),
             wire_format: CodecWireFormat::Json {
                 wire_schema: named("orders_wire"),
@@ -4235,6 +4483,7 @@ mod tests {
         );
 
         let codec_with_jaq: CreateCodec = CreateCodec {
+            labels: Default::default(),
             name: named("orders_codec"),
             wire_format: CodecWireFormat::JaqNative {
                 format: CodecJaqFormat::Json,
@@ -4254,6 +4503,7 @@ mod tests {
         );
 
         let ingestion_codec: CreateCodec = CreateCodec {
+            labels: Default::default(),
             name: named("orders_ingestion"),
             wire_format: CodecWireFormat::JaqNative {
                 format: CodecJaqFormat::Json,
@@ -4273,6 +4523,7 @@ mod tests {
         );
 
         let cbor_codec: CreateCodec = CreateCodec {
+            labels: Default::default(),
             name: named("orders_cbor"),
             wire_format: CodecWireFormat::JaqNative {
                 format: CodecJaqFormat::Cbor,
@@ -4292,6 +4543,7 @@ mod tests {
         );
 
         let protobuf_codec: CreateCodec = CreateCodec {
+            labels: Default::default(),
             name: named("orders_proto"),
             wire_format: CodecWireFormat::Protobuf(CodecProtobufConfig {
                 resource: named("proto_bundle"),
@@ -4320,6 +4572,7 @@ mod tests {
         );
 
         let batching_protobuf_codec: CreateCodec = CreateCodec {
+            labels: Default::default(),
             name: named("orders_proto"),
             wire_format: CodecWireFormat::Protobuf(CodecProtobufConfig {
                 resource: named("proto_bundle"),
@@ -4347,6 +4600,7 @@ mod tests {
         );
 
         let relay = CreateRelay {
+            labels: Default::default(),
             name: named("orders_stream"),
             schema: named("orders"),
             buffer: nonzero!(1usize),
@@ -4359,6 +4613,7 @@ mod tests {
         );
 
         let relay = CreateRelay {
+            labels: Default::default(),
             name: named("orders_stream"),
             schema: named("orders"),
             buffer: nonzero!(1usize),
@@ -4371,6 +4626,7 @@ mod tests {
         );
 
         let junction = CreateJunction {
+            labels: Default::default(),
             name: named("orders_junction"),
             from: ProcessorInputs::new(vec![named("orders_a"), named("orders_b")], Vec::new())
                 .with_collect_policy("25ms".to_string(), Some("2MiB".to_string())),
@@ -4388,6 +4644,7 @@ mod tests {
         );
 
         let deduplicator = CreateDeduplicator {
+            labels: Default::default(),
             name: named("orders_dedup"),
             from: ProcessorInputs::single(named("orders_in")),
             output_routes: flushed_outputs("orders_out"),
@@ -4406,6 +4663,7 @@ mod tests {
         );
 
         let correlator = CreateCorrelator {
+            labels: Default::default(),
             name: named("orders_correlator"),
             left: ProcessorInputs::new(
                 vec![named("orders_left"), named("orders_left_archive")],
@@ -4447,6 +4705,7 @@ mod tests {
         );
 
         let window_processor = CreateWindowProcessor {
+            labels: Default::default(),
             name: named("latency_window"),
             from: ProcessorInputs::single(named("orders_in")),
             output_routes: ProcessorOutputs::new(vec![ProcessorOutput {
@@ -4493,6 +4752,7 @@ mod tests {
         );
 
         let reingestor = CreateReingestor {
+            labels: Default::default(),
             name: named("orders_repartition"),
             from: ProcessorInputs::single(named("orders_in")),
             output_routes: flushed_outputs("orders_out").with_branch(OutputBranch::Unbranched),
@@ -4508,6 +4768,7 @@ mod tests {
         );
 
         let route_reingestor = CreateReingestor {
+            labels: Default::default(),
             name: named("orders_splitter"),
             from: ProcessorInputs::single(named("orders_in")),
             output_routes: ProcessorOutputs::new(vec![
@@ -4698,6 +4959,7 @@ mod tests {
             let rendered_mode = connector.publishing().to_canonical_plexus();
             let rendered_kind = connector.kind().phrase();
             let emitter = CreateEmitter {
+                labels: Default::default(),
                 instances: crate::EmitterInstances::ONE,
                 name: named("emit_orders"),
                 from: ProcessorInputs::single(named("orders_stream"))
@@ -4844,6 +5106,7 @@ mod tests {
     #[test]
     fn renders_postgres_conflict_action_canonical() {
         let emitter = CreateEmitter {
+            labels: Default::default(),
             instances: crate::EmitterInstances::ONE,
             name: named("emit_notifications"),
             from: ProcessorInputs::single(named("notifications")),
@@ -4903,6 +5166,7 @@ mod tests {
     #[test]
     fn renders_mysql_conflict_action_canonical() {
         let emitter = CreateEmitter {
+            labels: Default::default(),
             instances: crate::EmitterInstances::ONE,
             name: named("emit_notifications"),
             from: ProcessorInputs::single(named("notifications")),
@@ -4960,6 +5224,7 @@ mod tests {
     #[test]
     fn renders_mongodb_conflict_action_canonical() {
         let emitter = CreateEmitter {
+            labels: Default::default(),
             instances: crate::EmitterInstances::ONE,
             name: named("emit_notifications"),
             from: ProcessorInputs::single(named("notifications")),
@@ -5019,6 +5284,7 @@ mod tests {
     /// An ingestor of `input` writing to `orders`, as the canonical rendering tests declare it.
     fn orders_ingestor(name: &str, input: crate::IngestorInput) -> CreateIngestor {
         CreateIngestor {
+            labels: Default::default(),
             name: named(name),
             output_routes: flushed_ingestor_outputs("orders"),
             input,
@@ -5346,6 +5612,7 @@ mod tests {
     #[test]
     fn model_dispatches_to_variant_specific_canonicalization() {
         let model: Model = Model::ClientKafka(CreateClientKafka {
+            labels: Default::default(),
             name: named("kafka_main"),
             mount: None,
             config: vec![config_entry("bootstrap.servers", "localhost:9092")],
@@ -5515,6 +5782,7 @@ mod tests {
     #[test]
     fn a_statement_holding_a_non_finite_float_reports_the_literal_it_cannot_spell() {
         let junction = CreateJunction {
+            labels: Default::default(),
             name: named("scored_orders"),
             from: ProcessorInputs::single(named("orders")),
             output_routes: flushed_outputs("scored"),
@@ -5551,6 +5819,7 @@ mod tests {
     #[test]
     fn a_codec_without_a_spelling_names_itself_and_the_rule_it_breaks() {
         let syslog: CreateCodec = CreateCodec {
+            labels: Default::default(),
             name: named("syslog_codec"),
             wire_format: CodecWireFormat::Syslog,
             schema: named("syslog_event"),
@@ -5575,6 +5844,7 @@ mod tests {
 
         let no_programs = CodecJaqTransformations::default();
         let jaq: CreateCodec = CreateCodec {
+            labels: Default::default(),
             name: named("jaq_codec"),
             wire_format: CodecWireFormat::JaqNative {
                 format: CodecJaqFormat::Json,
@@ -5584,6 +5854,7 @@ mod tests {
             encoding_rules: Vec::new(),
         };
         let protobuf: CreateCodec = CreateCodec {
+            labels: Default::default(),
             name: named("proto_codec"),
             wire_format: CodecWireFormat::Protobuf(CodecProtobufConfig {
                 resource: named("proto_bundle"),

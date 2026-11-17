@@ -64,6 +64,14 @@ fn every_client_parses_into_the_connector_it_configures() {
 }
 
 #[test]
+fn every_declared_client_accepts_the_common_metadata_tail() {
+    for (connector, declaration) in every_client() {
+        let text = statement(connector, &pool_bounds(declaration.pooling));
+        crate::conformance_support::assert_entity_labels_tail(&text);
+    }
+}
+
+#[test]
 fn every_client_head_is_offered_as_one_composed_phrase() {
     for prefix in ["CREATE ", "CREATE IF NOT EXISTS "] {
         let suggestions = crate::statement::suggest_statement(prefix, prefix.len());

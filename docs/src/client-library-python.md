@@ -121,6 +121,18 @@ for a different one.
 {{#include ../../tests/client_conformance/python/suite/cluster/test_execute.py:upload_conflict}}
 ```
 
+### Inspect Entity Labels
+
+`outcome.entity_labels` retains a typed, bounded metadata snapshot after `SHOW LABELS`, independent
+of the selected text or JSON presentation and of the outcome's lifetime. Keys and values keep their
+exact spelling; an empty value differs from an absent key. `EntityLabelViewKind` distinguishes a
+committed revision from a transaction's staged preview. The policy revision and byte/count limits
+describe the committed acceptance policy captured with that view.
+
+```python
+{{#include ../../tests/client_conformance/python/suite/cluster/test_entity_labels.py:entity_labels}}
+```
+
 ### Inspect Materialized State
 
 `outcome.state_inspection` returns an independently retained inspection, or `None` when the

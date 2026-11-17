@@ -100,6 +100,7 @@ pub(super) fn create<'src>()
         .then(encoding_rules())
         .map(
             |((((format, name), schema), transformations), encoding_rules)| CreateCodec {
+                labels: Default::default(),
                 name,
                 wire_format: CodecWireFormat::JaqNative {
                     format,

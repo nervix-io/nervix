@@ -507,6 +507,7 @@ fn direct_values_sensitivity_reports_the_typed_external_target() {
     };
     let identifier = ModelName::from(&emitter.name);
     let input_schema = CreateSchema {
+        labels: Default::default(),
         name: named("event"),
         fields: vec![SchemaField {
             name: named("secret"),
@@ -567,6 +568,7 @@ fn direct_values_type_failure_keeps_the_vm_compile_cause() {
     };
     let identifier = ModelName::from(&emitter.name);
     let input_schema = CreateSchema {
+        labels: Default::default(),
         name: named("event"),
         fields: vec![SchemaField {
             name: named("value"),
@@ -661,6 +663,7 @@ fn http_request_type_failure_keeps_the_vm_compile_cause() {
             .expect("a string literal is a valid expression"),
     }));
     let schema = CreateSchema {
+        labels: Default::default(),
         name: named("event"),
         fields: vec![SchemaField {
             name: named("value"),
@@ -860,6 +863,7 @@ fn sqs_fifo_group_is_validated_at_emitter_creation() {
                 branch("tenant_branch", "tenant_branch_schema"),
                 relay_branched_by("tenant_events", "event_schema", "tenant_branch"),
                 Model::ClientSqs(CreateClientSqs {
+                    labels: Default::default(),
                     name: named("sqs_main"),
                     mount: None,
                     config: vec![
@@ -927,6 +931,7 @@ fn sqs_fifo_group_is_validated_at_emitter_creation() {
 fn emitter_header_invocations_are_rejected_for_unsupported_emitters() {
     let domain = DomainName::parse("default").expect("valid domain");
     let schema = CreateSchema {
+        labels: Default::default(),
         name: named("event_schema"),
         fields: vec![SchemaField {
             name: named("tenant"),
@@ -936,6 +941,7 @@ fn emitter_header_invocations_are_rejected_for_unsupported_emitters() {
         }],
     };
     let mut emitter = CreateEmitter {
+        labels: Default::default(),
         instances: nervix_models::EmitterInstances::ONE,
         name: named("emit"),
         from: ProcessorInputs::single(named("events")),
@@ -1029,6 +1035,7 @@ fn emitter_header_invocations_are_rejected_for_unsupported_emitters() {
 fn a_repeated_literal_header_write_is_refused_where_the_emitter_keeps_one_value_per_name() {
     let domain = DomainName::parse("default").expect("valid domain");
     let schema = CreateSchema {
+        labels: Default::default(),
         name: named("event_schema"),
         fields: vec![SchemaField {
             name: named("tenant"),
@@ -1038,6 +1045,7 @@ fn a_repeated_literal_header_write_is_refused_where_the_emitter_keeps_one_value_
         }],
     };
     let mut emitter = CreateEmitter {
+        labels: Default::default(),
         instances: nervix_models::EmitterInstances::ONE,
         name: named("emit"),
         from: ProcessorInputs::single(named("events")),
@@ -1240,6 +1248,7 @@ fn mqtt_instances_greater_than_one_are_valid() {
             wire_schema("event_wire"),
             codec("event_codec", "event_schema"),
             Model::ClientMqtt(nervix_models::CreateClientMqtt {
+                labels: Default::default(),
                 name: named("mqtt_main"),
                 mount: None,
                 config: vec![nervix_models::MqttConfigEntry {
@@ -1249,6 +1258,7 @@ fn mqtt_instances_greater_than_one_are_valid() {
             }),
             relay("notifications", "event_schema"),
             Model::Ingestor(CreateIngestor {
+                labels: Default::default(),
                 name: IngestorName::parse("mqtt_ing").expect("valid identifier"),
                 output_routes: unbranched_transforming_outputs("notifications"),
                 input: nervix_models::IngestorInput::Transport(
@@ -1288,6 +1298,7 @@ fn ingestor_timestamp_field_must_use_rfc3339_schema_type() {
         &domain,
         vec![
             Model::Schema(CreateSchema {
+                labels: Default::default(),
                 name: SchemaName::parse("event_schema").expect("valid identifier"),
                 fields: vec![
                     SchemaField {
@@ -1305,6 +1316,7 @@ fn ingestor_timestamp_field_must_use_rfc3339_schema_type() {
                 ],
             }),
             Model::WireJsonSchema(CreateWireSchema {
+                labels: Default::default(),
                 name: WireSchemaName::parse("event_wire").expect("valid identifier"),
                 strictness: Default::default(),
                 fields: vec![
@@ -1324,6 +1336,7 @@ fn ingestor_timestamp_field_must_use_rfc3339_schema_type() {
             client_model("broker"),
             relay("notifications", "event_schema"),
             Model::Ingestor(CreateIngestor {
+                labels: Default::default(),
                 name: IngestorName::parse("ing").expect("valid identifier"),
                 output_routes: unbranched_transforming_outputs("notifications"),
                 input: nervix_models::IngestorInput::Transport(
@@ -1366,6 +1379,7 @@ fn ingestor_timestamp_field_must_use_rfc3339_schema_type() {
 /// A client ingestor reading `event_schema` into `notifications` under `mode`.
 fn client_ingestor(mode: nervix_models::ClientIngestMode) -> Model {
     Model::Ingestor(CreateIngestor {
+        labels: Default::default(),
         name: IngestorName::parse("app_in").expect("valid identifier"),
         output_routes: unbranched_transforming_outputs("notifications"),
         input: nervix_models::IngestorInput::Client(nervix_models::ClientProducerIngestor {
@@ -1750,6 +1764,7 @@ fn ingestor_route_validation_accepts_explicit_projection() {
             &domain,
             vec![
                 Model::Schema(CreateSchema {
+                    labels: Default::default(),
                     name: SchemaName::parse("event_schema").expect("valid identifier"),
                     fields: vec![
                         SchemaField {
@@ -1773,6 +1788,7 @@ fn ingestor_route_validation_accepts_explicit_projection() {
                     ],
                 }),
                 Model::Schema(CreateSchema {
+                    labels: Default::default(),
                     name: SchemaName::parse("transformed_schema").expect("valid identifier"),
                     fields: vec![
                         SchemaField {
@@ -1790,6 +1806,7 @@ fn ingestor_route_validation_accepts_explicit_projection() {
                     ],
                 }),
                 Model::WireJsonSchema(CreateWireSchema {
+                    labels: Default::default(),
                     name: WireSchemaName::parse("event_wire").expect("valid identifier"),
                     strictness: Default::default(),
                     fields: vec![
@@ -1816,6 +1833,7 @@ fn ingestor_route_validation_accepts_explicit_projection() {
                 branch_schema("tenant_branch", &["tenant"]),
                 branch_for_relay("notifications", "tenant_branch"),
                 Model::Ingestor(CreateIngestor {
+                    labels: Default::default(),
                     name: IngestorName::parse("ing").expect("valid identifier"),
                     output_routes: (ProcessorOutputs::new(vec![ProcessorOutput {
                         relay: RelayName::parse("notifications").expect("valid identifier"),
@@ -1874,6 +1892,7 @@ fn ingestor_filter_map_compile_errors_are_reported_on_leader() {
         &domain,
         vec![
             Model::Schema(CreateSchema {
+                labels: Default::default(),
                 name: SchemaName::parse("event_schema").expect("valid identifier"),
                 fields: vec![SchemaField {
                     name: FieldName::parse("value").expect("valid identifier"),
@@ -1883,6 +1902,7 @@ fn ingestor_filter_map_compile_errors_are_reported_on_leader() {
                 }],
             }),
             Model::Schema(CreateSchema {
+                labels: Default::default(),
                 name: SchemaName::parse("transformed_schema").expect("valid identifier"),
                 fields: vec![SchemaField {
                     name: FieldName::parse("total").expect("valid identifier"),
@@ -1892,6 +1912,7 @@ fn ingestor_filter_map_compile_errors_are_reported_on_leader() {
                 }],
             }),
             Model::WireJsonSchema(CreateWireSchema {
+                labels: Default::default(),
                 name: WireSchemaName::parse("event_wire").expect("valid identifier"),
                 strictness: Default::default(),
                 fields: vec![WireSchemaField {
@@ -1904,6 +1925,7 @@ fn ingestor_filter_map_compile_errors_are_reported_on_leader() {
             client_model("broker"),
             relay("notifications", "transformed_schema"),
             Model::Ingestor(CreateIngestor {
+                labels: Default::default(),
                 name: IngestorName::parse("ing").expect("valid identifier"),
                 output_routes: (ProcessorOutputs::new(vec![ProcessorOutput {
                     relay: RelayName::parse("notifications").expect("valid identifier"),
@@ -1964,6 +1986,7 @@ fn ingestor_inherit_all_except_rejects_required_uninitialized_field() {
         &domain,
         vec![
             Model::Schema(CreateSchema {
+                labels: Default::default(),
                 name: SchemaName::parse("event_schema").expect("valid identifier"),
                 fields: vec![
                     SchemaField {
@@ -1981,6 +2004,7 @@ fn ingestor_inherit_all_except_rejects_required_uninitialized_field() {
                 ],
             }),
             Model::WireJsonSchema(CreateWireSchema {
+                labels: Default::default(),
                 name: WireSchemaName::parse("event_wire").expect("valid identifier"),
                 strictness: Default::default(),
                 fields: vec![
@@ -2000,6 +2024,7 @@ fn ingestor_inherit_all_except_rejects_required_uninitialized_field() {
             client_model("broker"),
             relay("notifications", "event_schema"),
             Model::Ingestor(CreateIngestor {
+                labels: Default::default(),
                 name: IngestorName::parse("ing").expect("valid identifier"),
                 output_routes: (ProcessorOutputs::new(vec![ProcessorOutput {
                     relay: RelayName::parse("notifications").expect("valid identifier"),
@@ -2241,6 +2266,7 @@ fn sentry_emitter_rejects_http_client() {
                 wire_schema("event_wire"),
                 codec("event_codec", "event_schema"),
                 Model::ClientHttp(CreateClientHttp {
+                    labels: Default::default(),
                     name: named("sentry_main"),
                     mount: None,
                     config: vec![
@@ -2286,6 +2312,7 @@ fn a_syslog_ingestor_rejects_a_client_of_another_connector() {
                 client_model("collector"),
                 relay("notifications", "event_schema"),
                 Model::Ingestor(CreateIngestor {
+                    labels: Default::default(),
                     name: named("syslog_ing"),
                     output_routes: unbranched_transforming_outputs("notifications"),
                     input: nervix_models::IngestorInput::Transport(
@@ -2350,6 +2377,7 @@ fn an_endpoint_ingestor_rejects_an_endpoint_of_the_other_type() {
                 ),
                 relay("notifications", "event_schema"),
                 Model::Ingestor(CreateIngestor {
+                    labels: Default::default(),
                     name: named("web_in"),
                     output_routes: unbranched_transforming_outputs("notifications"),
                     input: nervix_models::IngestorInput::Transport(
@@ -2437,6 +2465,7 @@ fn an_iceberg_emitter_rejects_a_catalog_client_of_another_connector() {
             vec![
                 schema("event_schema"),
                 Model::ClientS3(CreateClientS3 {
+                    labels: Default::default(),
                     name: named("lake"),
                     mount: None,
                     config: Vec::new(),
@@ -2492,6 +2521,7 @@ fn a_prometheus_client_is_created_only_with_a_config_its_source_can_use() {
     let domain = DomainName::parse("default").expect("valid domain");
     let prometheus_client = |config: &[(&str, &str)]| {
         Model::ClientPrometheus(CreateClientPrometheus {
+            labels: Default::default(),
             name: named("prom_main"),
             mount: None,
             config: config
@@ -2631,6 +2661,7 @@ fn envelope_schema() -> CreateSchema {
         sensitive,
     };
     CreateSchema {
+        labels: Default::default(),
         name: named("event_schema"),
         fields: vec![
             field("tenant", ParseAsType::String, false, false),

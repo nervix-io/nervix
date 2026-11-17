@@ -185,6 +185,7 @@ impl Numbers {
             ),
         ];
         let schema = GeneratedSchema::new(CreateSchema {
+            labels: Default::default(),
             name: SchemaName::parse("numbers").assured("the schema name is a literal name"),
             fields,
         });

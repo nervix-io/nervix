@@ -169,7 +169,7 @@ def check_retention(retained, reported, fields, key_fields):
     del churn
     gc.collect()
     for view, snapshot in zip(views, snapshots):
-        if bytes(view) != snapshot or bytes(view[4:8]) != b"NXSM":
+        if bytes(view) != snapshot or bytes(view[4:8]) != b"NXEL":
             raise RuntimeError("a borrowed frame changed while only its view kept it alive")
     owners = [view.obj for view in views]
     for owner, lines in zip(owners, reported):
@@ -1268,6 +1268,11 @@ def main():
     if output_dir := environment.get("NERVIX_CLIENT_WIRE_BINDING_PROFILE_DIR"):
         profile_binding(retained[0], fields, output_dir)
 
+    captured_labels = execute(session, f"SHOW LABELS ON RELAY {relay} FORMAT TEXT;").entity_labels
+    if captured_labels is None or captured_labels.labels.get("probe") != " retained Δ ":
+        raise RuntimeError("typed entity labels lost exact metadata")
+    if captured_labels.entity_name != relay or captured_labels.revision is None:
+        raise RuntimeError("typed entity labels lost identity or committed revision")
     check_retention(retained, reported, fields, key_fields)
     check_cancellation(session)
     report("CHECKS ok")

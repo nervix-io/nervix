@@ -159,63 +159,65 @@ pub fn create_signaling_protocol_parser<'src>() -> impl Parser<
     CreateStatement<CreateSignalingProtocol<RequestedResourceVersion>>,
     extra::Err<ParseError<'src>>,
 > + Clone {
-    kw(Identifier::Create)
-        .ignore_then(if_not_exists_clause())
-        .then_ignore(kw_phrase2(Identifier::Signaling, Identifier::Protocol))
-        .then(signaling_protocol_name())
-        .then_ignore(kw(Identifier::Format))
-        .then(signaling_wire_format())
-        .boxed()
-        .then(
-            kw(Identifier::Fail)
-                .ignore_then(kw(Identifier::Jaq))
-                .ignore_then(jaq_program_list("jaq_matcher"))
-                .or_not()
-                .map(Option::unwrap_or_default),
-        )
-        .then_ignore(kw(Identifier::On))
-        .then_ignore(kw(Identifier::Connect))
-        .then(
-            kw(Identifier::Accept)
-                .ignore_then(kw(Identifier::Data))
-                .or_not()
-                .map(|accept| accept.is_some()),
-        )
-        .then(signaling_step().repeated().at_least(1).collect::<Vec<_>>())
-        .boxed()
-        .then_ignore(kw(Identifier::Timeout))
-        .then(duration_lit().try_map(|timeout, span| {
-            let mapping_input = parse_duration_text(&timeout).map(|_| timeout.clone());
-            match mapping_input {
-                Ok(mapped_value) => Ok(mapped_value),
-                Err(error) => Err(Rich::custom(
-                    span,
-                    format!("invalid duration '{timeout}': {error}"),
-                )),
-            }
-        }))
-        .then_ignore(tok(Token::Semicolon).or_not())
-        .map(
-            |(
-                (((((if_not_exists, name), format), fail_matchers), accept_data), steps),
-                timeout,
-            )| {
-                CreateStatement::new(
-                    CreateSignalingProtocol {
-                        name,
-                        format,
-                        on_connect: SignalingProtocolOnConnect {
-                            accept_data,
-                            steps,
-                            fail_matchers,
-                            timeout,
+    crate::labels::finish_creation({
+        kw(Identifier::Create)
+            .ignore_then(if_not_exists_clause())
+            .then_ignore(kw_phrase2(Identifier::Signaling, Identifier::Protocol))
+            .then(signaling_protocol_name())
+            .then_ignore(kw(Identifier::Format))
+            .then(signaling_wire_format())
+            .boxed()
+            .then(
+                kw(Identifier::Fail)
+                    .ignore_then(kw(Identifier::Jaq))
+                    .ignore_then(jaq_program_list("jaq_matcher"))
+                    .or_not()
+                    .map(Option::unwrap_or_default),
+            )
+            .then_ignore(kw(Identifier::On))
+            .then_ignore(kw(Identifier::Connect))
+            .then(
+                kw(Identifier::Accept)
+                    .ignore_then(kw(Identifier::Data))
+                    .or_not()
+                    .map(|accept| accept.is_some()),
+            )
+            .then(signaling_step().repeated().at_least(1).collect::<Vec<_>>())
+            .boxed()
+            .then_ignore(kw(Identifier::Timeout))
+            .then(duration_lit().try_map(|timeout, span| {
+                let mapping_input = parse_duration_text(&timeout).map(|_| timeout.clone());
+                match mapping_input {
+                    Ok(mapped_value) => Ok(mapped_value),
+                    Err(error) => Err(Rich::custom(
+                        span,
+                        format!("invalid duration '{timeout}': {error}"),
+                    )),
+                }
+            }))
+            .map(
+                |(
+                    (((((if_not_exists, name), format), fail_matchers), accept_data), steps),
+                    timeout,
+                )| {
+                    CreateStatement::new(
+                        CreateSignalingProtocol {
+                            labels: Default::default(),
+                            name,
+                            format,
+                            on_connect: SignalingProtocolOnConnect {
+                                accept_data,
+                                steps,
+                                fail_matchers,
+                                timeout,
+                            },
                         },
-                    },
-                    if_not_exists,
-                )
-            },
-        )
-        .boxed()
+                        if_not_exists,
+                    )
+                },
+            )
+            .boxed()
+    })
 }
 
 pub fn parse_create_signaling_protocol_tokens(

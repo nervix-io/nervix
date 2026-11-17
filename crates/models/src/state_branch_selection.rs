@@ -177,6 +177,7 @@ mod tests {
             BranchName::parse("by_tenant")
                 .assured("the test name satisfies the branch name grammar"),
             CreateSchema {
+                labels: Default::default(),
                 name: SchemaName::parse("tenant_key")
                     .assured("the test name satisfies the schema name grammar"),
                 fields: vec![SchemaField {

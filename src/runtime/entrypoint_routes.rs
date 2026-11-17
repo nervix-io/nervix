@@ -646,11 +646,13 @@ mod tests {
     fn filtering_ingestor() -> Vec<Model> {
         vec![
             Model::ClientZeroMq(CreateClientZeroMq {
+                labels: Default::default(),
                 name: named("zmq"),
                 mount: None,
                 config: Vec::new(),
             }),
             Model::Ingestor(CreateIngestor {
+                labels: Default::default(),
                 name: named("source"),
                 output_routes: with_inherit_all(ProcessorOutputs::single(named("keyed")))
                     .with_flush_policy(FlushPolicy::Immediate)
@@ -710,6 +712,7 @@ mod tests {
         let plans = fixture.plan(
             &domain,
             vec![Model::Ingestor(CreateIngestor {
+                labels: Default::default(),
                 name: named("source"),
                 output_routes: with_inherit_all(ProcessorOutputs::single(named("events")))
                     .with_flush_policy(FlushPolicy::Immediate)
@@ -836,6 +839,7 @@ mod tests {
 
     fn filtering_reingestor(flush_interval: &str, collect_for: &str) -> CreateReingestor {
         CreateReingestor {
+            labels: Default::default(),
             name: named("repartition"),
             from: ProcessorInputs::new(
                 vec![named("incoming")],

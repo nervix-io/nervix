@@ -29,7 +29,7 @@ use ciborium::value::Value;
 use ciborium_ll::{Decoder as CborDecoder, Header as CborHeader};
 use error_stack::{Report, ResultExt as _};
 use nervix_approx_into::ApproxInto as _;
-use nervix_models::{CborType, CreateWireSchema, ParseAsType, WireSchemaStrictness};
+use nervix_models::{CborType, ParseAsType, WireSchemaStrictness};
 use serde::{
     Serialize, Serializer,
     ser::{SerializeMap, SerializeSeq},
@@ -55,7 +55,7 @@ struct CompiledCborWireField {
 }
 
 impl CompiledCborWireSchema {
-    pub(super) fn compile(schema: &CreateWireSchema<CborType>) -> Self {
+    pub(super) fn compile(schema: nervix_models::WireSchemaRef<'_, CborType>) -> Self {
         Self {
             strictness: schema.strictness,
             fields: schema
