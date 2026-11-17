@@ -779,8 +779,16 @@ async fn initial_empty_append_probes_use_management_before_one_data_stream() {
             .append_stream_open_recorder
             .attempts
             .load(Ordering::Relaxed),
+        1,
+        "only the data input attempts a replication stream"
+    );
+    assert_eq!(
+        peer.client
+            .append_stream_open_recorder
+            .replication_attempts
+            .load(Ordering::Relaxed),
         3,
-        "both finite management inputs and the data input are setup attempts"
+        "both finite management inputs and the data input pass the caller gate"
     );
 }
 
