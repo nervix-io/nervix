@@ -83,7 +83,7 @@ the rest of the domain continues running.
 
 Before readers change, Nervix drains admitted work, including pending key claims, and transfers
 committed offsets into the new reader layout. Intake resumes after the affected owners install the
-new schedule. Kafka observation follows the leader's configured `kafka-partition-watch-interval`.
+new schedule. Kafka observation follows the leader's `control-plane-kafka-partition-watch-interval`.
 Pulsar observation and topology observer reconciliation use `partition-topology-poll-interval`.
 
 Growing a topic from twelve to sixteen partitions advances the branch epoch. An automatic branch

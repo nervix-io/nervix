@@ -353,7 +353,11 @@ impl WatcherSpec {
             .iter()
             .any(|source| matches!(source.source, PartitionSourcePlan::Kafka(_)))
         {
-            service.inner.runtime.kafka_partition_watch_interval()
+            service
+                .inner
+                .operational
+                .control_plane
+                .kafka_partition_watch_interval()
         } else {
             service.inner.runtime.partition_topology_poll_interval()
         };

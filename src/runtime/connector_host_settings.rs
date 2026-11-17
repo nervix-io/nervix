@@ -25,31 +25,10 @@ pub enum ConnectorHostSettingsError {
     Kafka,
     #[error("invalid Syslog intake capability")]
     Syslog,
-    #[error("kafka-partition-watch-interval must be positive and no longer than u32::MAX seconds")]
-    PartitionWatch,
     #[error(
         "partition-topology-poll-interval must be positive and no longer than u32::MAX seconds"
     )]
     TopologyPoll,
-}
-
-pub struct KafkaPartitionWatchInterval;
-impl SettingDefinition for KafkaPartitionWatchInterval {
-    type Class = NodeCapabilities;
-    type Value = Duration;
-    type Context = ();
-    type Error = ConnectorHostSettingsError;
-    const NAME: &'static str = "kafka-partition-watch-interval";
-    const DERIVATION: Option<&'static str> = None;
-    fn default_value(_: &()) -> Duration {
-        Duration::from_secs(1)
-    }
-    fn validate(value: &Duration, _: &()) -> Result<(), Report<Self::Error>> {
-        if value.is_zero() || value.as_secs() > u64::from(u32::MAX) {
-            return Err(Report::new(ConnectorHostSettingsError::PartitionWatch));
-        }
-        Ok(())
-    }
 }
 
 pub struct PartitionTopologyPollInterval;
@@ -77,7 +56,6 @@ pub struct ConnectorHostSettings {
     pub retry: nervix_connector::RetryBackoffSettings,
     pub kafka: nervix_connector_kafka::KafkaTopicIngestorSettings,
     pub syslog: nervix_connector_syslog::SyslogListenerSettings,
-    partition_watch: Setting<KafkaPartitionWatchInterval>,
     topology_poll: Setting<PartitionTopologyPollInterval>,
 }
 
@@ -86,7 +64,6 @@ pub struct ConnectorHostSettingOverrides {
     pub retry_multiplier: Option<std::num::NonZeroU32>,
     pub retry_jitter_percent: Option<u8>,
     pub kafka_assignment_retry: Option<Duration>,
-    pub kafka_partition_watch_interval: Option<Duration>,
     pub partition_topology_poll_interval: Option<Duration>,
     pub syslog_queue_capacity: Option<std::num::NonZeroUsize>,
     pub syslog_read_chunk_bytes: Option<u64>,
@@ -111,7 +88,6 @@ impl ConnectorHostSettings {
                 values.syslog_read_chunk_bytes,
             )
             .change_context(ConnectorHostSettingsError::Syslog)?,
-            partition_watch: Setting::resolve(values.kafka_partition_watch_interval, &())?,
             topology_poll: Setting::resolve(values.partition_topology_poll_interval, &())?,
         })
     }
@@ -124,15 +100,10 @@ impl ConnectorHostSettings {
             retry_multiplier: self.retry.multiplier(),
             retry_jitter_percent: self.retry.jitter_percent(),
             kafka_domain_assignment_retry: self.kafka.assignment_retry(),
-            kafka_partition_watch_interval: self.kafka_partition_watch_interval(),
             partition_topology_poll_interval: self.partition_topology_poll_interval(),
             syslog_intake_queue_capacity: positive(self.syslog.queue_capacity()),
             syslog_read_chunk_bytes: positive(self.syslog.read_chunk_bytes()),
         }
-    }
-
-    pub fn kafka_partition_watch_interval(self) -> Duration {
-        *self.partition_watch.value()
     }
 
     pub fn partition_topology_poll_interval(self) -> Duration {
@@ -149,11 +120,6 @@ impl Default for ConnectorHostSettings {
 impl super::Runtime {
     pub(crate) fn partition_topology_poll_interval(&self) -> Duration {
         self.inner.connector_host.partition_topology_poll_interval()
-    }
-
-    /// The node's configured cadence for leader-owned Kafka topology observation.
-    pub(crate) fn kafka_partition_watch_interval(&self) -> Duration {
-        self.inner.connector_host.kafka_partition_watch_interval()
     }
 }
 
@@ -177,10 +143,6 @@ mod tests {
         assert_eq!(
             settings.capabilities().partition_topology_poll_interval,
             interval
-        );
-        assert_eq!(
-            settings.kafka_partition_watch_interval(),
-            KafkaPartitionWatchInterval::default_value(&())
         );
         for value in [Duration::ZERO, Duration::from_secs(u64::from(u32::MAX) + 1)] {
             let error = ConnectorHostSettings::resolve(ConnectorHostSettingOverrides {

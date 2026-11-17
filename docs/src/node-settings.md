@@ -1040,8 +1040,7 @@ not alter a graph's stored execution contract. Each flag has an environment twin
 | `--connector-retry-multiplier` | 2 | positive multiplier applied between reconnect attempts |
 | `--connector-retry-jitter-percent` | 0 | 0 through 100 percent added to the next multiplied delay, within the declared cap |
 | `--kafka-domain-assignment-retry` | 100 ms | positive retry cadence while a domain-offset assignment is unavailable |
-| `--kafka-partition-watch-interval` | 1 s | positive topology inspection cadence |
-| `--partition-topology-poll-interval` | 1 s | positive Pulsar partition inspection and topology observer reconciliation cadence; Kafka inspection keeps its own interval |
+| `--partition-topology-poll-interval` | 1 s | positive Pulsar partition inspection and topology observer reconciliation cadence; Kafka inspection follows `--control-plane-kafka-partition-watch-interval` |
 | `--syslog-intake-queue-capacity` | 64 frames | positive, within the native channel permit bound; stream intake backpressures when full |
 | `--syslog-read-chunk-bytes` | 8 KiB | positive, addressable bytes per stream read, further limited by the frame bound |
 

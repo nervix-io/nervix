@@ -360,7 +360,7 @@ mod runtime_lifecycle;
 mod runtime_settings;
 pub use connector_host_settings::{
     ConnectorHostSettingOverrides, ConnectorHostSettings, ConnectorHostSettingsError,
-    KafkaPartitionWatchInterval, PartitionTopologyPollInterval,
+    PartitionTopologyPollInterval,
 };
 mod schedule_apply;
 mod snapshot_staging;

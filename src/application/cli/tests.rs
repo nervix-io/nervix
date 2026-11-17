@@ -41,11 +41,10 @@ const SETTINGS_HEADINGS: [&str; 17] = [
 ];
 
 /// Every setting the settings groups declare, by the name its definition gives it.
-const SETTING_NAMES: [&str; 152] = [
+const SETTING_NAMES: [&str; 151] = [
     "connector-retry-multiplier",
     "connector-retry-jitter-percent",
     "kafka-domain-assignment-retry",
-    "kafka-partition-watch-interval",
     "partition-topology-poll-interval",
     "syslog-intake-queue-capacity",
     "syslog-read-chunk-bytes",

@@ -571,15 +571,13 @@ fn engine_capability_line(values: nervix_models::EngineCapabilities) -> String {
 
 fn connector_host_capability_line(values: nervix_models::ConnectorHostCapabilities) -> String {
     format!(
-        "{}={} {}={} {}={} {}={} {}={} {}={} {}={}",
+        "{}={} {}={} {}={} {}={} {}={} {}={}",
         nervix_connector::ConnectorRetryMultiplier::NAME,
         values.retry_multiplier,
         nervix_connector::ConnectorRetryJitterPercent::NAME,
         values.retry_jitter_percent,
         nervix_connector_kafka::KafkaDomainAssignmentRetry::NAME,
         humantime::format_duration(values.kafka_domain_assignment_retry),
-        crate::runtime::KafkaPartitionWatchInterval::NAME,
-        humantime::format_duration(values.kafka_partition_watch_interval),
         crate::runtime::PartitionTopologyPollInterval::NAME,
         humantime::format_duration(values.partition_topology_poll_interval),
         nervix_connector_syslog::SyslogIntakeQueueCapacity::NAME,

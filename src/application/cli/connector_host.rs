@@ -23,7 +23,7 @@ use crate::{
     application::cli_values::{HumanBytes, HumanDuration},
     runtime::{
         ConnectorHostSettingOverrides, ConnectorHostSettings, ConnectorHostSettingsError,
-        KafkaPartitionWatchInterval, PartitionTopologyPollInterval,
+        PartitionTopologyPollInterval,
     },
 };
 
@@ -36,9 +36,7 @@ pub struct ConnectorHostArgs {
     pub connector_retry_jitter_percent: Option<u8>,
     #[arg(long = KafkaDomainAssignmentRetry::NAME, env = "NERVIX_KAFKA_DOMAIN_ASSIGNMENT_RETRY", help = format!("Retry cadence while a Kafka domain assignment is unavailable. Default: {}", humantime::format_duration(KafkaDomainAssignmentRetry::default_value(&()))))]
     pub kafka_domain_assignment_retry: Option<HumanDuration>,
-    #[arg(long = KafkaPartitionWatchInterval::NAME, env = "NERVIX_KAFKA_PARTITION_WATCH_INTERVAL", help = format!("Kafka partition topology inspection cadence. Default: {}", humantime::format_duration(KafkaPartitionWatchInterval::default_value(&()))))]
-    pub kafka_partition_watch_interval: Option<HumanDuration>,
-    #[arg(long = PartitionTopologyPollInterval::NAME, env = "NERVIX_PARTITION_TOPOLOGY_POLL_INTERVAL", help = format!("Pulsar partition inspection and leader-owned topology observer reconciliation cadence. Kafka inspection uses its own interval. Default: {}", humantime::format_duration(PartitionTopologyPollInterval::default_value(&()))))]
+    #[arg(long = PartitionTopologyPollInterval::NAME, env = "NERVIX_PARTITION_TOPOLOGY_POLL_INTERVAL", help = format!("Pulsar partition inspection and leader-owned topology observer reconciliation cadence. Kafka inspection follows control-plane-kafka-partition-watch-interval. Default: {}", humantime::format_duration(PartitionTopologyPollInterval::default_value(&()))))]
     pub partition_topology_poll_interval: Option<HumanDuration>,
     #[arg(long = SyslogIntakeQueueCapacity::NAME, env = "NERVIX_SYSLOG_INTAKE_QUEUE_CAPACITY", help = format!("Frames queued between stream connections and the Syslog ingestor. Default: {}", SyslogIntakeQueueCapacity::default_value(&())))]
     pub syslog_intake_queue_capacity: Option<NonZeroUsize>,
@@ -53,9 +51,6 @@ impl ConnectorHostArgs {
             retry_multiplier: self.connector_retry_multiplier,
             retry_jitter_percent: self.connector_retry_jitter_percent,
             kafka_assignment_retry: self.kafka_domain_assignment_retry.map(|value| value.0),
-            kafka_partition_watch_interval: self
-                .kafka_partition_watch_interval
-                .map(|value| value.0),
             partition_topology_poll_interval: self
                 .partition_topology_poll_interval
                 .map(|value| value.0),
@@ -68,9 +63,6 @@ impl ConnectorHostArgs {
             connector_retry_multiplier: Some(settings.retry.multiplier()),
             connector_retry_jitter_percent: Some(settings.retry.jitter_percent()),
             kafka_domain_assignment_retry: Some(HumanDuration(settings.kafka.assignment_retry())),
-            kafka_partition_watch_interval: Some(HumanDuration(
-                settings.kafka_partition_watch_interval(),
-            )),
             partition_topology_poll_interval: Some(HumanDuration(
                 settings.partition_topology_poll_interval(),
             )),
@@ -92,10 +84,6 @@ impl ConnectorHostArgs {
         command.optional(
             KafkaDomainAssignmentRetry::NAME,
             self.kafka_domain_assignment_retry,
-        );
-        command.optional(
-            KafkaPartitionWatchInterval::NAME,
-            self.kafka_partition_watch_interval,
         );
         command.optional(
             PartitionTopologyPollInterval::NAME,

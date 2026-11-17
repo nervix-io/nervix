@@ -104,7 +104,6 @@ impl Arbitrary<'_> {
             )
         };
         let assignment = duration();
-        let watch = duration();
         let topology_poll = duration();
         let mut positive = || {
             std::num::NonZeroU64::new(self.entropy.boundary_biased(1..=65_536))
@@ -114,7 +113,6 @@ impl Arbitrary<'_> {
             retry_multiplier: multiplier,
             retry_jitter_percent: jitter,
             kafka_domain_assignment_retry: assignment,
-            kafka_partition_watch_interval: watch,
             partition_topology_poll_interval: topology_poll,
             syslog_intake_queue_capacity: positive(),
             syslog_read_chunk_bytes: positive(),
