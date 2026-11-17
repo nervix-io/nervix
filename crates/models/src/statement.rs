@@ -678,6 +678,8 @@ pub struct DomainState {
     pub start_version: u64,
     pub last_start: DomainStartPoint,
     pub clock: Option<DomainClockState>,
+    /// Why its committed stop ended the domain, kept while it stays stopped; a start clears it.
+    pub stop_cause: Option<crate::DomainStopCause>,
 }
 
 #[derive(
@@ -1984,7 +1986,7 @@ impl BranchPartitions {
     pub fn units_served_by(self, instance: u64, instances: std::num::NonZeroU64) -> Vec<Unit> {
         let mut served = Vec::new();
         for (ordinal, unit) in (0_u64..).zip(self.units()) {
-            if ordinal % instances.get() == instance {
+            if ordinal % instances == instance {
                 served.push(unit);
             }
         }

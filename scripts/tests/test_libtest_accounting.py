@@ -16,7 +16,7 @@ from scripts.libtest_accounting import (
 )
 
 LIBRARY = """\
-     Running unittests src/lib.rs (target/debug/deps/nervix_interconnect-1234)
+     Running unittests src/lib.rs (target/debug/build/nervix-interconnect/1234/out/nervix_interconnect-1234)
 
 running 12 tests
 test wire::simulation_checks::a ... ok
@@ -24,7 +24,7 @@ test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 431 filtered out; f
 """
 
 SIMULATION = """\
-     Running tests/simulation.rs (target/debug/deps/simulation-5678)
+     Running tests/simulation.rs (target/debug/build/nervix-interconnect/5678/out/simulation-5678)
 
 running 36 tests
 test result: ok. 34 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 61.0s

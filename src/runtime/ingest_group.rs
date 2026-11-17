@@ -1132,8 +1132,8 @@ impl BranchedEntrypointBatch {
         }
         let mut selections = Vec::<BranchedBranchSelection>::new();
         let mut positions = HashMap::<Option<BranchKey>, usize>::default();
-        for index in 0..row_count {
-            let key = self.keys[index].clone();
+        for (index, key) in self.keys.iter().enumerate() {
+            let key = key.clone();
             if let Some(position) = positions.get(&key).copied() {
                 selections[position].rows.push(index);
                 continue;

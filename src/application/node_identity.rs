@@ -2,9 +2,10 @@
 //!
 //! Layer: edges.
 //!
-//! - **Owns.** The node's identity, its listen and advertised addresses, its TLS files, its name
-//!   resolution files and its storage paths, resolved from the command line. None of them is a
-//!   setting: they are what a node is provisioned with, not policy a class governs.
+//! - **Owns.** The node's identity, the tags its operator provisioned it with, its listen and
+//!   advertised addresses, its TLS files, its name resolution files and its storage paths, resolved
+//!   from the command line. None of them is a setting: they are what a node is provisioned with,
+//!   not policy a class governs.
 //! - **Depends on.** The vocabulary's node names and endpoints, and the resolver configuration.
 //! - **Must not know.** Settings, or what the node runs once it has started.
 
@@ -16,7 +17,7 @@
 use std::{net::SocketAddr, path::PathBuf};
 
 use nervix_dns::DnsConfiguration;
-use nervix_models::{ClusterNodeName, NodeEndpoint};
+use nervix_models::{ClusterNodeName, NodeEndpoint, NodeTags};
 use typed_builder::TypedBuilder;
 
 use super::{InternalTransportMode, authentication::DEFAULT_USER};
@@ -66,6 +67,10 @@ pub struct NodeIdentity {
     pub web_console_tls_key: Option<PathBuf>,
     pub cluster_id: String,
     pub node_id: ClusterNodeName,
+    /// What the operator says this node is for. They are part of the node's record and change
+    /// only when the node restarts with other tags.
+    #[builder(default)]
+    pub tags: NodeTags,
     pub grpc_advertise_addr: NodeEndpoint,
     pub interconnect_listen_addr: SocketAddr,
     pub interconnect_advertise_addr: NodeEndpoint,
