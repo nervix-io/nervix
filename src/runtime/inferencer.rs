@@ -1258,8 +1258,8 @@ mod tests {
     use ordered_float::OrderedFloat;
 
     use super::{
-        OnnxInferencerSession, OnnxRuntimeProbe, PreparedExecution,
-        PreparedInvocation, RuntimeTensorSchema, RuntimeTensorSlice,
+        OnnxInferencerSession, OnnxRuntimeProbe, PreparedExecution, PreparedInvocation,
+        RuntimeTensorSchema, RuntimeTensorSlice,
     };
     use crate::{
         runtime::{

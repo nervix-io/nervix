@@ -1239,14 +1239,12 @@ struct BranchInputAcknowledgements {
 impl BranchInputAcknowledgements {
     fn cloned(source: &[AckSet]) -> Self {
         let mut needs_keepalive = false;
-        let acks = source
-            .iter()
-            .map(|acks| {
-                let acks = acks.clone();
-                needs_keepalive |= !acks.is_empty();
-                acks
-            })
-            .collect();
+        let mut acks = Vec::with_capacity(source.len());
+        for source_acks in source {
+            let cloned_acks = source_acks.clone();
+            needs_keepalive |= !cloned_acks.is_empty();
+            acks.push(cloned_acks);
+        }
         Self {
             acks,
             needs_keepalive,
