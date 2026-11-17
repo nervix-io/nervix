@@ -28,6 +28,7 @@ mod listeners;
 mod membership;
 mod memory_pressure;
 mod node;
+mod operational;
 #[cfg(test)]
 mod properties;
 mod resources;
@@ -49,6 +50,7 @@ pub use self::{
     membership::MembershipArgs,
     memory_pressure::MemoryPressureArgs,
     node::{NODE_TAGS_OPTION, NodeArgs},
+    operational::OperationalArgs,
     resources::ResourceArgs,
     runtime::RuntimeArgs,
     scheduling::SchedulingArgs,

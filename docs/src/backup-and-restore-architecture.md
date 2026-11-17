@@ -1309,3 +1309,18 @@ capture. Deloxide workload records register the state-store installation and pub
 four selections; pointer publication, native tensors, async admission and transport waits are
 outside its detector. The [stateful inference qualification](https://app.clickup.com/t/86bcyakvx)
 owns chaos qualification.
+
+Backup retry cadence and restore conversion's admission wait/retry are node capabilities, with
+50ms backup retries and a 30s conversion wait with 50ms retries by default. Each conversion unit
+keeps its first-refusal time and captured policy; a retry releases the failed attempt's charges
+and does not renew that wait. Capture and restored-state staging expiry use two thirds of command
+retry validity, ten minutes by default. Their maintenance sweep uses the local restore-staging
+cadence. Local capture/install revision waits use twenty Raft heartbeats, five seconds by default.
+
+Captured-section chunks use sixteen executor bulk chunks capped at half the immutable bulk
+pool, preserving the default 1 MiB transfer piece and room for two live read/transport buffers.
+The bound reads no admission counters, and a large configured bulk quantum cannot demand more
+than the pool can admit. Header reservation and materialized identity caps use the executor snapshot header and
+section limits. Client download queue depth follows session memory and frame limits; archive chunks
+use one sixteenth of the frame bound. These changes retain complete archive verification,
+installation authority, final-chunk handover, quota ownership and per-attempt cancellation.

@@ -212,6 +212,7 @@ mod tests {
         let node = ClusterNodeName::parse("worker").expect("node name");
         NodeRecord {
             claim: NodeCapabilityRecord {
+                operational: Default::default(),
                 identity: ClusterNodeIdentity::new(node, ClusterNodeIncarnation::new(incarnation)),
                 capabilities: nervix_models::NodeCapabilities {
                     runtime: nervix_models::DataPlaneSettings::default().capabilities(),
@@ -495,6 +496,13 @@ mod tests {
             .with_max_len(2048)
             .for_each(|bytes: &[u8]| {
                 let committed = Arbitrary::new(bytes, Domain::Vocabulary).committed_node_record();
+                let json = serde_json::to_vec(&committed.record.claim)
+                    .expect("the complete current claim has a JSON encoding");
+                assert_eq!(
+                    serde_json::from_slice::<NodeCapabilityRecord>(&json)
+                        .expect("every operational value validates on decode"),
+                    committed.record.claim
+                );
                 let encoded = DurableBatch::encode(&committed, 1 << 20)
                     .expect("a bounded current record fits the record budget");
                 let decoded = storage_decode::<CommittedNodeRecord>(&encoded)

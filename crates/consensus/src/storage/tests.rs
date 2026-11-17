@@ -45,7 +45,9 @@ async fn password_work_and_complete_credentials_survive_recovery() -> TestResult
     harness
         .apply(
             1,
-            ConsensusCommand::SeedClusterParameters { values: parameters },
+            ConsensusCommand::SeedClusterParameters {
+                values: Box::new(parameters),
+            },
         )
         .await?;
     let mut expected = BTreeMap::new();

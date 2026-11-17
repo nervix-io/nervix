@@ -301,10 +301,17 @@ rewrites the planned requirement to make a later outcome appear expected.
 Ownership-handoff engagement confirms the closed admission hold and requested flush. The
 coordinator observes each exact operation's pending drain before capture; a drained response
 publishes the participant's capture freeze. A drain timeout keeps the pending node and work counts
-and releases attempted holds before independent schedule units continue. Retrying a two-second
+and releases attempted holds before independent schedule units continue. Retrying a bounded
 engagement reply timeout, or a request whose interconnect stream broke, waits on the same
 receiver-owned identity, adds no pause attempt and extends no lease. Preparation retains its original deadline, and cleanup releases every attempted
 participant.
+
+Entity-gate and domain-drain polling use the operation's captured committed cluster parameters.
+Changing a polling interval does not alter its scope, begin another attempt, release a held gate
+or renew a lease. Participant RPC attempts use their remaining operation budget and the derived
+transport deadline; local retry cadence and recovery concurrency remain node capabilities.
+[Node Settings](node-settings.md#control-plane-and-session-capabilities) owns these values and
+their change procedures.
 
 The step changes from `UNATTEMPTED` to `APPLYING` when its authoritative effect transition is
 recorded. It becomes `APPLIED` only after required activation, ingestor readiness, handoff, and

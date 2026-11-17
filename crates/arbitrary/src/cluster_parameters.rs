@@ -54,6 +54,11 @@ impl Arbitrary<'_> {
                 .assured("the declared selection includes a TLS 1.2-capable group");
         let ack_unit = Duration::from_nanos(entropy.boundary_biased(1..=1_000_000_000));
         ClusterParameterValues::resolve(ClusterParameterSeedValues {
+            forced_recovery_budget: Some(parameter_duration(entropy)),
+            ownership_handoff_poll_interval: Some(parameter_duration(entropy)),
+            entity_gate_poll_interval: Some(parameter_duration(entropy)),
+            domain_drain_poll_interval: Some(parameter_duration(entropy)),
+            runtime_readiness_propagation_bound: Some(parameter_duration(entropy)),
             licensing_request_timeout: Some(parameter_duration(entropy)),
             licensing_retry_backoff_max: Some(parameter_duration(entropy)),
             licensing_stream_idle_timeout: Some(parameter_duration(entropy)),

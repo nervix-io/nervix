@@ -337,6 +337,11 @@ macro_rules! parameter_values {
 }
 
 parameter_values! {
+    forced_recovery_budget: ForcedRecoveryBudget(Duration) => Duration,
+    ownership_handoff_poll_interval: OwnershipHandoffPollInterval(Duration) => Duration,
+    entity_gate_poll_interval: EntityGatePollInterval(Duration) => Duration,
+    domain_drain_poll_interval: DomainDrainPollInterval(Duration) => Duration,
+    runtime_readiness_propagation_bound: RuntimeReadinessPropagationBound(Duration) => Duration,
     licensing_request_timeout: LicensingRequestTimeout(Duration) => Duration,
     licensing_retry_backoff_max: LicensingRetryBackoffMax(Duration) => Duration,
     licensing_stream_idle_timeout: LicensingStreamIdleTimeout(Duration) => Duration,

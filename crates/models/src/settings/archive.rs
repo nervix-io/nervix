@@ -1,4 +1,4 @@
-//! Validated archive and JSON projections of context-free settings.
+//! Archive and JSON projections that retain a setting's validation boundary.
 //!
 //! Layer: vocabulary.
 //! - **Owns.** Validated archive and JSON projections of context-free settings.

@@ -75,6 +75,10 @@ impl MemoryBudget {
         }
     }
 
+    pub(crate) fn capacity_bytes(&self) -> u64 {
+        u64::from(self.capacity)
+    }
+
     pub(crate) fn snapshot(&self) -> MemoryBudgetSnapshot {
         let capacity_bytes = self.capacity.into();
         let available: u64 = self.permits.available_permits().try_into().verified(

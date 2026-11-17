@@ -130,6 +130,15 @@ pub(crate) struct ScenarioConsumers {
     pending_reads: BTreeMap<String, AbortOnDropHandle<EmitterDelivery>>,
 }
 
+impl ScenarioConsumers {
+    pub(super) fn native(&self, name: &str) -> &EmitterConsumer {
+        let Some(ScenarioConsumer::Native(consumer)) = self.open.get(name) else {
+            panic!("the scenario opens native consumer {name}");
+        };
+        consumer
+    }
+}
+
 enum ScenarioConsumer {
     Native(StdArc<EmitterConsumer>),
     WebSocket { session: String, id: ConsumerId },

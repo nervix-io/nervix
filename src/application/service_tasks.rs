@@ -94,7 +94,10 @@ mod tests {
     use crate::application::ShutdownCoordinator;
 
     fn deadline_after(timeout: Duration) -> ShutdownDeadline {
-        let coordinator = ShutdownCoordinator::new(timeout);
+        let coordinator = ShutdownCoordinator::new(
+            timeout,
+            crate::application::shutdown::ShutdownSettings::default().task_grace_period(),
+        );
         coordinator.request_stop();
         coordinator
             .request()

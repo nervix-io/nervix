@@ -42,7 +42,7 @@ const SETTINGS_HEADINGS: [&str; 18] = [
 ];
 
 /// Every setting the settings groups declare, by the name its definition gives it.
-const SETTING_NAMES: [&str; 175] = [
+const SETTING_NAMES: [&str; 176] = [
     "runtime-delivery-capacity",
     "runtime-ingest-group-max-rows",
     "runtime-ingest-group-idle-flush",
@@ -149,6 +149,7 @@ const SETTING_NAMES: [&str; 175] = [
     "memory-pressure-resume-jitter",
     "drain-timeout",
     "shutdown-timeout",
+    "task-grace-period",
     "resource-max-archive-bytes",
     "resource-max-extracted-bytes",
     "resource-max-file-count",

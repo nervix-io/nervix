@@ -417,11 +417,11 @@ class InventoryTests(unittest.TestCase):
             "rate-limit-utc-generations",
             "vm-decimal-rounding-floats",
             "vm-decimal-rounding-integers",
+            "vm-list-shapes",
             "vm-list-conversions",
             "vm-list-conversion-lengths",
-            "vm-list-shapes",
-            "vm-list-arithmetic",
             "vm-list-statistics",
+            "vm-list-arithmetic",
             "approx-into-rounding",
             "approx-into-exact",
             "simd-json-escapes",
@@ -563,33 +563,37 @@ class InventoryTests(unittest.TestCase):
         }
         for target, version in {
             "benchmark-metrics-report": 1,
-            "ingestor-describe-envelope": 14,
-            "plexus-model": 65,
-            "plexus-archive-model": 68,
-            "plexus-statement": 76,
-            "plexus-statement-text": 75,
-            "plexus-format-document": 75,
-            "plexus-format-text": 74,
-            "models-archived-models": 72,
-            "registry-archived-models": 59,
-            "consensus-state-records": 74,
-            "consensus-state-corruption": 74,
-            "consensus-raft-records": 73,
-            "registry-stored-models": 52,
-            "registry-stored-models-corruption": 52,
-            "consensus-raft-records-malformed": 59,
+            "ingestor-describe-envelope": 15,
+            "plexus-model": 66,
+            "plexus-archive-model": 69,
+            "plexus-statement": 77,
+            "plexus-statement-text": 76,
+            "plexus-format-document": 76,
+            "plexus-format-text": 75,
+            "models-archived-models": 73,
+            "registry-archived-models": 60,
+            "consensus-state-records": 75,
+            "consensus-state-corruption": 75,
+            "consensus-raft-records": 74,
+            "registry-stored-models": 53,
+            "registry-stored-models-corruption": 53,
+            "consensus-raft-records-malformed": 60,
             "cluster-identity-record-rkyv": 3,
-            "node-settings-command-line": 16,
-            "node-records": 6,
+            "node-settings-command-line": 17,
+            "node-records": 7,
+            "runtime-state-replication-wire": 18,
+            "runtime-state-replication-malformed": 18,
+            "client-consumer-stream-frames": 13,
+            "client-consumer-stream-frames-malformed": 13,
             "inferencer-describe-envelope": 1,
             "inferencer-tensor-columns": 1,
             "inferencer-state-snapshots": 1,
-            "backup-inferencer-values": 5,
-            "backup-inferencer-malformed": 5,
-            "backup-record-manifest": 21,
-            "backup-complete-archives": 21,
-            "backup-malformed-records": 21,
-            "backup-corrupt-archives": 22,
+            "backup-inferencer-values": 6,
+            "backup-inferencer-malformed": 6,
+            "backup-record-manifest": 22,
+            "backup-complete-archives": 22,
+            "backup-malformed-records": 22,
+            "backup-corrupt-archives": 23,
             "backup-capture-wire": 3,
             "backup-capture-wire-malformed": 3,
             "backup-section-mapping": 4,
@@ -600,12 +604,12 @@ class InventoryTests(unittest.TestCase):
 
             "inferencer-state-snapshots-malformed": 1,
             "inferencer-native-snapshot-projection": 1,
-            "console-emitter-drafts": 10,
-            "console-processor-drafts": 10,
-            "console-placement-drafts": 3,
-            "client-requests": 16,
-            "client-producer-link-frames": 13,
-            "client-producer-link-frames-malformed": 13,
+            "console-emitter-drafts": 11,
+            "console-processor-drafts": 11,
+            "console-placement-drafts": 4,
+            "client-requests": 17,
+            "client-producer-link-frames": 14,
+            "client-producer-link-frames-malformed": 14,
         }.items():
             with self.subTest(target=target):
                 self.assertEqual(versions[target], version)
@@ -613,8 +617,8 @@ class InventoryTests(unittest.TestCase):
     def test_state_inspection_representations_are_bounded_pairs(self) -> None:
         targets = {target.id: target for target in bolero.load_inventory().targets}
         for name, version in (
-            ("client-state-inspection", 9),
-            ("state-inspection-cursor", 11),
+            ("client-state-inspection", 10),
+            ("state-inspection-cursor", 12),
             ("interconnect-wasm-state-inspection", 4),
             ("wasm-state-inspection-cursor", 4),
             ("client-published-processor-sections", 2),
@@ -627,7 +631,7 @@ class InventoryTests(unittest.TestCase):
     def test_inference_inspection_transport_domain_has_tensor_sections(self) -> None:
         target = next(target for target in bolero.load_inventory().targets
                       if target.id == "interconnect-processor-state-inspection")
-        self.assertEqual(target.domain_version, 7)
+        self.assertEqual(target.domain_version, 8)
         self.assertEqual(target.max_input_bytes, 1024)
         self.assertTrue((target.corpus / "inference-tensor-layout").is_file())
 

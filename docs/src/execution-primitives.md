@@ -439,6 +439,12 @@ file no longer names.
 
 ## Executor Admission And Draining
 
+`Executor::bulk_read_batch_bytes` derives a read batch from the immutable bulk quantum and pool
+capacity, leaving room for a preceding charged batch. It reads no admission counters or semaphore
+state. [Node Settings](node-settings.md#execution-capabilities) owns the sizing rule; the production
+admission check covers defaults, a tuned quantum larger than a pool fraction, and an odd-byte pool.
+
+
 Every class holds a bounded FIFO of admitted jobs. A worker takes the next job directly after its
 current callback exits, retaining the same blocking-pool dispatch while a backlog remains. The
 consensus storage class has one worker and executes jobs in admission order. CPU workers use

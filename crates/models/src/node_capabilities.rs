@@ -1,8 +1,9 @@
 //! The resolved capacity claim of one concrete node run.
 //!
 //! Layer: vocabulary.
-//! - **Owns.** CPU and memory capacity, transport, DNS, database, consensus, engine and connector
-//!   host limits, peer receive bounds and the incarnation-bound claim the node record holds.
+//! - **Owns.** CPU and memory capacity, transport, DNS, database, consensus, engine, connector
+//!   host, operational and listener limits, peer receive bounds and the incarnation-bound claim
+//!   the node record holds.
 //! - **Depends on.** Node identities and serialization primitives.
 //! - **Must not know.** Detection, consensus, transport or placement policy.
 
@@ -253,6 +254,7 @@ impl NodeCapabilities {
 pub struct NodeCapabilityRecord {
     pub identity: ClusterNodeIdentity,
     pub capabilities: NodeCapabilities,
+    pub operational: nervix_primitives::sync::StdArc<crate::NodeOperationalCapabilities>,
 }
 
 /// The peer-count input shared by transport capacity and DNS concurrency derivations.
@@ -294,4 +296,5 @@ impl crate::SettingDefinition for MaxPeers {
 pub struct ShutdownCapabilities {
     pub shutdown_timeout: Duration,
     pub drain_timeout: Duration,
+    pub task_grace_period: Duration,
 }
