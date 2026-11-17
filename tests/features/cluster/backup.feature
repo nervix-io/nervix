@@ -1284,9 +1284,9 @@ Feature: Configuration backup into a public archive
     When backup archive "valid.nvxb" is copied to "foreign_kind.nvxb" with its manifest's record kind set to 9
     And the CLI describes backup archive "foreign_kind.nvxb" as text
     Then the CLI fails with "holds a record of kind 9 where a manifest record belongs"
-    When backup archive "valid.nvxb" is copied to "foreign_version.nvxb" with its manifest's record version set to 5
+    When backup archive "valid.nvxb" is copied to "foreign_version.nvxb" with its manifest's record version set to 65535
     And the CLI describes backup archive "foreign_version.nvxb" as text
-    Then the CLI fails with "holds a manifest record of format version 5; this reader supports version 4"
+    Then the CLI fails with "holds a manifest record of format version 65535; this reader supports version 5"
 
   Scenario: The CLI exits with a failure and a JSON error when a backup is refused
     Given a 1 node nervix cluster is started

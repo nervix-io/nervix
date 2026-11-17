@@ -35,6 +35,13 @@ const BATCH: &str = "BATCH MAX MESSAGES 10 MAX SIZE 64KiB";
 /// The mapping a generated direct `VALUES` emitter writes.
 const VALUES: &str = "VALUES {'id' = id, 'name' = name}";
 
+#[test]
+fn every_declared_emitter_entity_accepts_the_common_metadata_tail() {
+    for kind in EmitterEntityKind::all() {
+        crate::conformance_support::assert_entity_labels_tail(&Generated::of(kind).text());
+    }
+}
+
 /// The option written in its first declared form.
 fn first_example(option: &OptionDeclaration) -> &'static str {
     match option.form {

@@ -86,6 +86,7 @@ impl VhostDraft {
             None
         };
         Ok(CreateVhost {
+            labels: Default::default(),
             name,
             hostnames,
             tls,

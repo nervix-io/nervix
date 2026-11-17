@@ -930,6 +930,7 @@ mod tests {
             transaction: None,
             transaction_admission: None,
             inspection: None,
+            entity_labels: None,
             state: None,
             resource: None,
             subscription: None,

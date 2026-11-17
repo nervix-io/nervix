@@ -867,7 +867,8 @@ impl ClientIngestorStartPlan {
 
 /// The identity of a client ingestor's endpoint contract: the ingestor as producers see it, its
 /// input schema, and the branch declarations its routes construct. Flush cadence is left out, so
-/// a change that only retunes flushing keeps every producer attached.
+/// a change that only retunes flushing keeps every producer attached. Descriptive labels on the
+/// ingestor and its schemas do not participate in the endpoint contract.
 /// Non-security BLAKE3: detects endpoint contract changes; authentication/admission are separate.
 fn client_endpoint_contract(
     ingestor: &CreateIngestor,
@@ -888,9 +889,10 @@ fn client_endpoint_contract(
         hasher.update(part.as_bytes());
     };
     add(&contract_ingestor
-        .to_canonical_plexus()
+        .configuration_to_canonical_plexus()
         .change_context_lazy(unrenderable)?);
     add(&schema
+        .definition()
         .to_canonical_plexus()
         .change_context_lazy(unrenderable)?);
     for route in ingestor.output_routes.outputs() {
@@ -1309,6 +1311,7 @@ mod tests {
 
     fn ingestor_model(source: IngestorEntity) -> Model {
         Model::Ingestor(CreateIngestor {
+            labels: Default::default(),
             name: named("source"),
             output_routes: with_inherit_all(ProcessorOutputs::single(named("events")))
                 .with_flush_policy(FlushPolicy::Immediate)
@@ -1407,6 +1410,7 @@ mod tests {
                 quiesce: IngestQuiesceMode::Suspend,
             })),
             source_model: Model::ClientHttp(CreateClientHttp {
+                labels: Default::default(),
                 name: named("upstream"),
                 mount: None,
                 config: Vec::new(),
@@ -1439,6 +1443,7 @@ mod tests {
                 quiesce: IngestQuiesceMode::Suspend,
             })),
             source_model: Model::ClientKafka(CreateClientKafka {
+                labels: Default::default(),
                 name: named("upstream"),
                 mount: None,
                 config: Vec::new(),
@@ -1472,6 +1477,7 @@ mod tests {
                 quiesce: IngestQuiesceMode::Suspend,
             })),
             source_model: Model::ClientPulsar(CreateClientPulsar {
+                labels: Default::default(),
                 name: named("upstream"),
                 mount: None,
                 config: Vec::new(),
@@ -1504,6 +1510,7 @@ mod tests {
                 quiesce: IngestQuiesceMode::Drop,
             })),
             source_model: Model::ClientMqtt(CreateClientMqtt {
+                labels: Default::default(),
                 name: named("upstream"),
                 mount: None,
                 config: Vec::new(),
@@ -1534,6 +1541,7 @@ mod tests {
                 quiesce: IngestQuiesceMode::Drop,
             })),
             source_model: Model::ClientNats(CreateClientNats {
+                labels: Default::default(),
                 name: named("upstream"),
                 mount: None,
                 config: Vec::new(),
@@ -1569,6 +1577,7 @@ mod tests {
                 quiesce: IngestQuiesceMode::Suspend,
             })),
             source_model: Model::ClientRabbitMq(CreateClientRabbitMq {
+                labels: Default::default(),
                 name: named("upstream"),
                 mount: None,
                 config: Vec::new(),
@@ -1594,6 +1603,7 @@ mod tests {
                 quiesce: IngestQuiesceMode::Drop,
             })),
             source_model: Model::ClientRedis(CreateClientRedis {
+                labels: Default::default(),
                 name: named("upstream"),
                 pool: pool_bounds(),
                 mount: None,
@@ -1623,6 +1633,7 @@ mod tests {
                 },
             )),
             source_model: Model::ClientPrometheus(CreateClientPrometheus {
+                labels: Default::default(),
                 name: named("upstream"),
                 mount: None,
                 config: Vec::new(),
@@ -1648,6 +1659,7 @@ mod tests {
                 quiesce: IngestQuiesceMode::Suspend,
             })),
             source_model: Model::ClientZeroMq(CreateClientZeroMq {
+                labels: Default::default(),
                 name: named("upstream"),
                 mount: None,
                 config: Vec::new(),
@@ -1680,6 +1692,7 @@ mod tests {
                 quiesce: IngestQuiesceMode::Suspend,
             })),
             source_model: Model::ClientSqs(CreateClientSqs {
+                labels: Default::default(),
                 name: named("upstream"),
                 mount: None,
                 config: Vec::new(),
@@ -1706,6 +1719,7 @@ mod tests {
                 },
             })),
             source_model: Model::Endpoint(CreateEndpoint {
+                labels: Default::default(),
                 name: named("upstream"),
                 on_vhost: named("public"),
                 path: "/events".to_string(),
@@ -1732,6 +1746,7 @@ mod tests {
                 },
             )),
             source_model: Model::ClientWebsockets(CreateClientWebsockets {
+                labels: Default::default(),
                 name: named("upstream"),
                 mount: None,
                 signaling_protocol: None,
@@ -1758,6 +1773,7 @@ mod tests {
                 quiesce: IngestQuiesceMode::Suspend,
             })),
             source_model: Model::ClientSyslog(CreateClientSyslog {
+                labels: Default::default(),
                 name: named("upstream"),
                 mount: None,
                 config: Vec::new(),
@@ -1894,6 +1910,7 @@ mod tests {
                 },
             }));
         let endpoint = Model::Endpoint(CreateEndpoint {
+            labels: Default::default(),
             name: named("upstream"),
             on_vhost: named("public"),
             path: "/events".to_owned(),
@@ -2099,7 +2116,7 @@ mod tests {
     #[rstest::rstest]
     #[case::client(
         http_case(),
-        Model::ClientHttp(CreateClientHttp {
+        Model::ClientHttp(CreateClientHttp { labels: Default::default(),
             name: named("different"),
             mount: None,
             config: Vec::new(),
@@ -2107,7 +2124,7 @@ mod tests {
     )]
     #[case::endpoint(
         endpoint_case(),
-        Model::Endpoint(CreateEndpoint {
+        Model::Endpoint(CreateEndpoint { labels: Default::default(),
             name: named("different"),
             on_vhost: named("public"),
             path: "/events".to_string(),
@@ -2144,6 +2161,7 @@ mod tests {
     /// its statement declares.
     fn client_ingestor_model(ack_timeout: &str, backoff: &str, max_backoff: &str) -> Model {
         Model::Ingestor(CreateIngestor {
+            labels: Default::default(),
             name: named("source"),
             output_routes: with_inherit_all(ProcessorOutputs::single(named("events")))
                 .with_flush_policy(FlushPolicy::Immediate)
@@ -2204,6 +2222,43 @@ mod tests {
         );
         assert_eq!(plan.window_size().get(), 4);
         assert_eq!(plan, &plan.clone(), "plans compare by what they decide");
+    }
+
+    #[test]
+    fn client_endpoint_contract_ignores_labels_and_flush_edits_but_tracks_input_policy() {
+        let mut models = vec![
+            schema("payload"),
+            relay("events", "payload"),
+            client_ingestor_model("30s", "100ms", "1s"),
+        ];
+        let baseline = planned_entrypoints(models.clone()).assured("the fixture plans");
+        let contract = client_plan(start_plan(&baseline)).contract;
+        for value in ["Platform", "Operations"] {
+            for model in &mut models {
+                *model.labels_mut() = serde_json::from_value(serde_json::json!({"owner": value}))
+                    .assured("the fixture has one valid label");
+            }
+            let Model::Ingestor(ingestor) = &mut models[2] else {
+                unreachable!("the third fixture Model is the client ingestor");
+            };
+            for route in &mut ingestor.output_routes.routes {
+                route.flush_policy = Some(FlushPolicy::Each {
+                    interval: "10ms".to_owned(),
+                    max_batch_size: "1MiB".to_owned(),
+                });
+            }
+            let changed = planned_entrypoints(models.clone()).assured("the edited fixture plans");
+            assert_eq!(client_plan(start_plan(&changed)).contract, contract);
+        }
+        let Model::Ingestor(ingestor) = &mut models[2] else {
+            unreachable!("the third fixture Model is the client ingestor");
+        };
+        let nervix_models::IngestorInput::Client(input) = &mut ingestor.input else {
+            unreachable!("the fixture ingestor accepts client batches");
+        };
+        input.mode.ack_timeout = "31s".to_owned();
+        let changed = planned_entrypoints(models).assured("the input policy edit plans");
+        assert_ne!(client_plan(start_plan(&changed)).contract, contract);
     }
 
     #[rstest]

@@ -145,6 +145,7 @@ fn vm() -> &'static JavaVM {
                 crate::endpoints::METHODS,
                 crate::events::METHODS,
                 crate::inspection::METHODS,
+                crate::entity_labels::METHODS,
                 crate::inspection::UNIT_METHODS,
                 crate::inspection::SECTION_METHODS,
                 crate::sessions::METHODS,

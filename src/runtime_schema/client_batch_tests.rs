@@ -29,6 +29,7 @@ use crate::runtime_schema::{CompiledSchema, UnsupportedFieldKind, compile_schema
 /// string.
 fn schema() -> CompiledSchema {
     compile_schema(&CreateSchema {
+        labels: Default::default(),
         name: SchemaName::parse("order").assured("a literal schema name"),
         fields: vec![
             SchemaField {

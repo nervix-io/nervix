@@ -14,6 +14,7 @@ mod suggestion;
 #[path = "walker.rs"]
 mod walker;
 
+use meticulous::ResultExt as _;
 use nervix_plexus::{Token, Word, lex};
 
 use crate::{
@@ -269,6 +270,23 @@ fn offered_client_key_literals_complete_the_config_grammar() {
         literals > 0,
         "client completion must offer declared literal keys"
     );
+}
+
+#[test]
+fn repeated_label_keys_are_distinct_literals_that_complete_the_metadata_grammar() {
+    let materializer = Materializer::new();
+    let first = materializer
+        .materialize("label_key", 0)
+        .assured("the declared label-key placeholder has a literal filler");
+    let second = materializer
+        .materialize("label_key", 1)
+        .assured("a repeated label-key placeholder has a distinct literal filler");
+    assert_ne!(first.text, second.text);
+    let source = format!(
+        "CREATE SCHEMA labelled (value U32) LABELS {{ {} = '', {} = 'Δ' }};",
+        first.text, second.text
+    );
+    assert_eq!(Grammar::Client.parse(&source), ParseOutcome::Accepted);
 }
 
 #[test]

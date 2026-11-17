@@ -58,6 +58,7 @@ use crate::{
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
 pub struct CreateClientWebsockets<Version = u64> {
+    pub labels: crate::EntityLabels,
     pub name: ClientName,
     pub mount: Option<ClientResourceMount<Version>>,
     pub signaling_protocol: Option<SignalingProtocolName>,

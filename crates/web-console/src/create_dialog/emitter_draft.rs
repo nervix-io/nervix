@@ -431,6 +431,7 @@ impl EmitterDraft {
             );
         }
         let emitter = CreateEmitter {
+            labels: Default::default(),
             instances,
             name,
             from: self.build_inputs()?,

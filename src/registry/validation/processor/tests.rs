@@ -535,6 +535,7 @@ fn apply_batch_accepts_unconditional_processor_output_route() {
                 explicitly_unbranched_relay("raw_events", "event_schema"),
                 explicitly_unbranched_relay("projected_events", "event_schema"),
                 Model::Deduplicator(CreateDeduplicator {
+                    labels: Default::default(),
                     name: named("dedup_events"),
                     from: ProcessorInputs::single(named("raw_events")),
                     output_routes: with_inherit_all(ProcessorOutputs::single(named(
@@ -585,6 +586,7 @@ fn apply_batch_rejects_zero_input_collection_boundaries() {
         let mut inputs = ProcessorInputs::single(named("raw_events"));
         inputs.collect_policy = Some(collect_policy);
         let junction = Model::Junction(CreateJunction {
+            labels: Default::default(),
             name: named("collect_events"),
             from: inputs,
             output_routes: unbranched_transforming_outputs("collected_events"),
@@ -626,6 +628,7 @@ fn apply_batch_rejects_incompatible_deduplicator_stream_schemas() {
             vec![
                 schema("event_schema"),
                 Model::Schema(CreateSchema {
+                    labels: Default::default(),
                     name: SchemaName::parse("wide_schema").expect("valid identifier"),
                     fields: vec![
                         SchemaField {
@@ -671,6 +674,7 @@ fn apply_batch_rejects_multiple_deduplicator_inputs_with_different_schemas() {
             vec![
                 schema("event_schema"),
                 Model::Schema(CreateSchema {
+                    labels: Default::default(),
                     name: named("wide_schema"),
                     fields: vec![
                         SchemaField {
@@ -691,6 +695,7 @@ fn apply_batch_rejects_multiple_deduplicator_inputs_with_different_schemas() {
                 explicitly_unbranched_relay("notifications_b", "wide_schema"),
                 explicitly_unbranched_relay("deduped", "event_schema"),
                 Model::Deduplicator(CreateDeduplicator {
+                    labels: Default::default(),
                     name: named("dedup_notifications"),
                     from: ProcessorInputs::new(
                         vec![named("notifications_a"), named("notifications_b")],
@@ -733,6 +738,7 @@ fn apply_batch_rejects_incompatible_junction_stream_schemas() {
             vec![
                 schema("event_schema"),
                 Model::Schema(CreateSchema {
+                    labels: Default::default(),
                     name: SchemaName::parse("wide_schema").expect("valid identifier"),
                     fields: vec![
                         SchemaField {
@@ -1161,6 +1167,7 @@ fn apply_batch_rejects_output_predicate_missing_from_schema() {
             &domain,
             vec![
                 Model::Schema(CreateSchema {
+                    labels: Default::default(),
                     name: SchemaName::parse("event_schema").expect("valid identifier"),
                     fields: vec![
                         SchemaField {
@@ -1178,6 +1185,7 @@ fn apply_batch_rejects_output_predicate_missing_from_schema() {
                     ],
                 }),
                 Model::WireJsonSchema(CreateWireSchema {
+                    labels: Default::default(),
                     name: WireSchemaName::parse("event_wire").expect("valid identifier"),
                     strictness: Default::default(),
                     fields: vec![
@@ -1209,6 +1217,7 @@ fn apply_batch_rejects_output_predicate_missing_from_schema() {
                     &["tenant"],
                 ),
                 Model::Reingestor(CreateReingestor {
+                    labels: Default::default(),
                     name: named("route_logs"),
                     from: ProcessorInputs::single(named("notifications")),
                     output_routes: with_output_branch(

@@ -24,6 +24,11 @@ macro_rules! host_enum {
     };
 }
 
+host_enum! { EntityLabelViewKind from EntityLabelViewKind {
+    Committed = 1 as "COMMITTED",
+    Staged = 2 as "STAGED",
+} }
+
 host_enum! { InspectionRejection from InspectionRejection {
     UnknownEntity = 1 as "UNKNOWN_ENTITY",
     NotMaterialized = 2 as "NOT_MATERIALIZED",
@@ -290,6 +295,7 @@ pub(crate) fn register(module: RModule) -> Result<(), Error> {
 }
 
 fn register_inspection(module: RModule) -> Result<(), Error> {
+    EntityLabelViewKind::register(module)?;
     InspectionRejection::register(module)?;
     InspectionStage::register(module)?;
     InspectionUnitKind::register(module)?;

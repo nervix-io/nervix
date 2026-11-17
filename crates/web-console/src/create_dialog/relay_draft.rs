@@ -167,6 +167,7 @@ impl RelayDraft {
             .parse::<NonZeroUsize>()
             .map_err(|cause| Report::new(cause).change_context(RelayDraftError::Capacity))?;
         Ok(CreateRelay {
+            labels: Default::default(),
             name,
             schema: schema.clone(),
             buffer,

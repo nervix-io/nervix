@@ -50,6 +50,14 @@ impl<K: Ord + Clone, V: Clone> Records<K, V> {
         self.entries.get(key).map(Arc::as_ref)
     }
 
+    /// Retain one immutable record without retaining unrelated publication contents.
+    pub(crate) fn get_shared<Q: Ord + ?Sized>(&self, key: &Q) -> Option<Arc<V>>
+    where
+        K: Borrow<Q>,
+    {
+        self.entries.get(key).cloned()
+    }
+
     pub(crate) fn get_mut<Q: Ord + ?Sized>(&mut self, key: &Q) -> Option<&mut V>
     where
         K: Borrow<Q>,

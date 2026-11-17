@@ -337,6 +337,7 @@ mod tests {
         client_model: Model,
     ) -> EntrypointPlans {
         let ingestor = CreateIngestor {
+            labels: Default::default(),
             name: named("orders_ingestor"),
             output_routes: with_inherit_all(nervix_models::ProcessorOutputs::single(named(
                 "events",
@@ -355,6 +356,7 @@ mod tests {
             domain,
             vec![
                 Model::Schema(nervix_models::CreateSchema {
+                    labels: Default::default(),
                     name: named("payload"),
                     fields: vec![nervix_models::SchemaField {
                         name: named("value"),
@@ -364,6 +366,7 @@ mod tests {
                     }],
                 }),
                 Model::WireJsonSchema(nervix_models::CreateJsonWireSchema {
+                    labels: Default::default(),
                     name: named("payload_wire"),
                     strictness: Default::default(),
                     fields: vec![nervix_models::WireSchemaField {
@@ -373,6 +376,7 @@ mod tests {
                     }],
                 }),
                 Model::Codec(nervix_models::CreateCodec {
+                    labels: Default::default(),
                     name: named("json"),
                     wire_format: nervix_models::CodecWireFormat::Json {
                         wire_schema: named("payload_wire"),
@@ -381,6 +385,7 @@ mod tests {
                     encoding_rules: Vec::new(),
                 }),
                 Model::Relay(CreateRelay {
+                    labels: Default::default(),
                     name: named("events"),
                     schema: named("payload"),
                     buffer: nonzero_ext::nonzero!(2usize),
@@ -412,6 +417,7 @@ mod tests {
                 },
             )),
             Model::ClientKafka(nervix_models::CreateClientKafka {
+                labels: Default::default(),
                 name: named("broker"),
                 mount: None,
                 config: vec![],
@@ -471,6 +477,7 @@ mod tests {
                 quiesce: IngestQuiesceMode::Suspend,
             })),
             Model::ClientHttp(CreateClientHttp {
+                labels: Default::default(),
                 name: client_name,
                 mount: None,
                 config: Vec::new(),
@@ -578,6 +585,7 @@ mod tests {
                     quiesce: IngestQuiesceMode::Suspend,
                 })),
                 Model::ClientHttp(CreateClientHttp {
+                    labels: Default::default(),
                     name: client_name.clone(),
                     mount: None,
                     config: Vec::new(),
@@ -593,6 +601,7 @@ mod tests {
                     quiesce: IngestQuiesceMode::Suspend,
                 })),
                 Model::ClientPrometheus(CreateClientPrometheus {
+                    labels: Default::default(),
                     name: client_name.clone(),
                     mount: None,
                     config: Vec::new(),
@@ -614,6 +623,7 @@ mod tests {
                     quiesce: IngestQuiesceMode::Suspend,
                 })),
                 Model::ClientRabbitMq(CreateClientRabbitMq {
+                    labels: Default::default(),
                     name: client_name.clone(),
                     mount: None,
                     config: Vec::new(),
@@ -635,6 +645,7 @@ mod tests {
                     quiesce: IngestQuiesceMode::Suspend,
                 })),
                 Model::ClientSqs(CreateClientSqs {
+                    labels: Default::default(),
                     name: client_name.clone(),
                     mount: None,
                     config: Vec::new(),
@@ -648,6 +659,7 @@ mod tests {
                     quiesce: IngestQuiesceMode::Drop,
                 })),
                 Model::ClientRedis(CreateClientRedis {
+                    labels: Default::default(),
                     name: client_name.clone(),
                     pool: ClientPoolBounds::new(0, nonzero_ext::nonzero!(1u32))
                         .assured("zero is below one"),
@@ -668,6 +680,7 @@ mod tests {
                     quiesce: IngestQuiesceMode::Drop,
                 })),
                 Model::ClientMqtt(CreateClientMqtt {
+                    labels: Default::default(),
                     name: client_name.clone(),
                     mount: None,
                     config: Vec::new(),
@@ -732,6 +745,7 @@ mod tests {
     /// The ZeroMQ client `upstream`, reading `addr` with the optional resource mount.
     fn zeromq_client(mount: Option<ClientResourceMount>, addr: &str) -> CreateClientZeroMq {
         CreateClientZeroMq {
+            labels: Default::default(),
             name: named("upstream"),
             mount,
             config: vec![ClientConfigEntry {

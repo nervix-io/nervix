@@ -14,7 +14,6 @@
 
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
 
-use meticulous::ResultExt as _;
 use nervix_arbitrary::{Arbitrary, Domain};
 use nervix_execution::Executor;
 use nervix_interconnect::{

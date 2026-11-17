@@ -47,6 +47,7 @@ pub struct CommandOutcome {
     /// The transaction a `DESCRIBE TRANSACTION` read, whichever format rendered its message. It
     /// may name a transaction other than `transaction`, which stays this session's own binding.
     pub inspection: Option<Box<TransactionInspection>>,
+    pub entity_labels: Option<Box<nervix_models::EntityLabelsInspection>>,
     /// The typed state a `SHOW ... STATE` read, whichever format rendered its message.
     pub state: Option<Box<nervix_client_wire::StateInspection>>,
     /// The versions, entries and bindings `DESCRIBE RESOURCE <name>` read, whichever text its
@@ -108,6 +109,7 @@ impl CommandOutcome {
             transaction: None,
             transaction_admission: None,
             inspection: None,
+            entity_labels: None,
             state: None,
             resource: None,
             subscription: None,
@@ -245,6 +247,7 @@ impl From<wire::CommandOutcome> for CommandOutcome {
             transaction: outcome.transaction,
             transaction_admission: outcome.transaction_admission,
             inspection: outcome.inspection,
+            entity_labels: outcome.entity_labels,
             state: outcome.state,
             resource: outcome.resource,
             subscription: None,

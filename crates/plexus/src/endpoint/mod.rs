@@ -19,7 +19,7 @@ use crate::{
     parser_support::{
         LexedInput, ParseError, ParseFromSourceError, endpoint_name, if_not_exists_clause,
         into_parse_error, kw, kw_phrase2, lex_input, signaling_protocol_clause, string_lit,
-        suggest_from, tok, vhost_ref,
+        suggest_from, vhost_ref,
     },
 };
 
@@ -33,6 +33,7 @@ struct EndpointProperties {
 impl EndpointProperties {
     fn into_endpoint(self, kind: EndpointKind) -> CreateEndpoint {
         CreateEndpoint {
+            labels: Default::default(),
             name: self.name,
             on_vhost: self.on_vhost,
             path: self.path,
@@ -70,21 +71,22 @@ fn endpoint_properties<'src>()
 pub fn create_endpoint_parser<'src>()
 -> impl Parser<'src, &'src [Token], CreateStatement<CreateEndpoint>, extra::Err<ParseError<'src>>>
 + Clone {
-    let properties = endpoint_properties();
-    let http = kw_phrase2(Identifier::Http, Identifier::Endpoint)
-        .ignore_then(properties.clone())
-        .map(|properties| properties.into_endpoint(EndpointKind::Http));
-    let websockets = kw_phrase2(Identifier::Websockets, Identifier::Endpoint)
-        .ignore_then(properties)
-        .then(signaling_protocol_clause().or_not())
-        .map(|(properties, signaling_protocol)| {
-            properties.into_endpoint(EndpointKind::Websockets { signaling_protocol })
-        });
-    kw(Identifier::Create)
-        .ignore_then(if_not_exists_clause())
-        .then(choice((http, websockets)))
-        .then_ignore(tok(Token::Semicolon).or_not())
-        .map(|(if_not_exists, endpoint)| CreateStatement::new(endpoint, if_not_exists))
+    crate::labels::finish_creation({
+        let properties = endpoint_properties();
+        let http = kw_phrase2(Identifier::Http, Identifier::Endpoint)
+            .ignore_then(properties.clone())
+            .map(|properties| properties.into_endpoint(EndpointKind::Http));
+        let websockets = kw_phrase2(Identifier::Websockets, Identifier::Endpoint)
+            .ignore_then(properties)
+            .then(signaling_protocol_clause().or_not())
+            .map(|(properties, signaling_protocol)| {
+                properties.into_endpoint(EndpointKind::Websockets { signaling_protocol })
+            });
+        kw(Identifier::Create)
+            .ignore_then(if_not_exists_clause())
+            .then(choice((http, websockets)))
+            .map(|(if_not_exists, endpoint)| CreateStatement::new(endpoint, if_not_exists))
+    })
 }
 
 pub fn parse_create_endpoint_tokens(
@@ -248,7 +250,7 @@ mod tests {
             );
         }
         let http = "CREATE HTTP ENDPOINT intake ON edge PATH '/events' ";
-        assert!(suggest_client_statement(http, http.len()).is_empty());
+        assert_eq!(suggest_client_statement(http, http.len()), [";", "LABELS"]);
         let websocket = concat!(
             "CREATE WEBSOCKETS ENDPOINT intake ON edge PATH '/events' ",
             "WITH SIGNALING PROTOCOL "

@@ -52,6 +52,7 @@ impl Arbitrary<'_> {
             _ => Some(IngestTimestampSource::AtMetadata(self.name())),
         };
         CreateIngestor {
+            labels: Default::default(),
             name: self.name(),
             output_routes: self.processor_outputs(
                 RouteShape::Transforming,

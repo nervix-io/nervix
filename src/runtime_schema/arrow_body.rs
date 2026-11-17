@@ -540,6 +540,7 @@ mod framing_tests {
         let executor = crate::runtime::single_worker_executor();
         let section = SealedSection::sealed(&executor).await;
         let schema = super::super::compile_schema(&nervix_models::CreateSchema {
+            labels: Default::default(),
             name: "relay_event"
                 .try_into()
                 .assured("the test schema name is valid"),

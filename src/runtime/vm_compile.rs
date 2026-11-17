@@ -2188,6 +2188,7 @@ mod tests {
     #[nervix_primitives::test]
     async fn ingestor_filter_map_accepts_missing_optional_input_fields() {
         let input_schema = Arc::new(compile_schema(&CreateSchema {
+            labels: Default::default(),
             name: named("optional_logic"),
             fields: vec![
                 nervix_models::SchemaField {
@@ -2205,6 +2206,7 @@ mod tests {
             ],
         }));
         let output_schema = Arc::new(compile_schema(&CreateSchema {
+            labels: Default::default(),
             name: named("optional_logic_output"),
             fields: vec![
                 nervix_models::SchemaField {
