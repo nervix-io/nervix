@@ -265,15 +265,6 @@ use crate::{
     },
 };
 
-#[cfg(not(test))]
-#[global_allocator]
-static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
-
-#[cfg(test)]
-#[global_allocator]
-static GLOBAL: alloc_count::AllocCounter<tikv_jemallocator::Jemalloc> =
-    alloc_count::AllocCounter(tikv_jemallocator::Jemalloc);
-
 /// One live peer whose advertised interconnect endpoint this health round can reach.
 struct ReachablePeer {
     node_id: ClusterNodeName,

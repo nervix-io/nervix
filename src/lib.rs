@@ -37,6 +37,18 @@ compile_error!(
      release-like profiles"
 );
 
+/// The process allocator for the whole crate: jemalloc, wrapped in tests by `alloc_count`'s counter
+/// so the allocation-counting tests of every module measure the same allocator.
+#[cfg(not(test))]
+#[global_allocator]
+static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
+/// The test build's counting wrapper around the same allocator.
+#[cfg(test)]
+#[global_allocator]
+static GLOBAL: alloc_count::AllocCounter<tikv_jemallocator::Jemalloc> =
+    alloc_count::AllocCounter(tikv_jemallocator::Jemalloc);
+
 pub mod application;
 #[cfg(test)]
 mod archive_allocation_tests;
