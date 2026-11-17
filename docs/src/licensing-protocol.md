@@ -187,7 +187,10 @@ For example, reducing unlimited nodes to four while seven are in use protects th
 reduction from four to three protects one further unit, keeping the first deadline. The effective
 allowance is seven until the first deadline, four until the second, then three. An improvement caps
 remaining grants at their protected existing usage, preventing expansion. Same-revision refreshes
-create no transition. A deterministic UUIDv8 derives from the complete replicated impact inputs;
+create no transition. A term-end tick and a release assess their actual policy change even when
+there is no newly issued conditions revision; neither invents a signed revision to select that
+behavior. The committed trigger and its complete inputs determine the result. A deterministic
+UUIDv8 derives from the complete replicated impact inputs;
 the engine reads neither randomness nor a clock. The caller owns retaining, acknowledging and
 removing transitions, and feature owners decide what an over-limit state permits.
 

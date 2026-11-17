@@ -755,7 +755,7 @@ mod tests {
     }
 
     #[nervix_primitives::test]
-    async fn reorderer_key_program_evaluates_direct_u32_field() {
+    async fn accepted_work_reorderer_key_program_keeps_values_while_waiting() {
         let input_schema = test_schema(&[
             ("tenant", ParseAsType::String),
             ("sequence", ParseAsType::U32),
@@ -767,10 +767,10 @@ mod tests {
             &[expression("input.sequence")],
             input_schema.arrow_schema(),
             None,
-            nervix_vm::VmSettings::default(),
+            offloaded_vm_settings(),
         )
         .expect("reorderer key program should compile");
-        let records = vec![
+        let mut records = vec![
             test_runtime_row([
                 (
                     "tenant".to_string(),
@@ -794,20 +794,33 @@ mod tests {
                 ),
             ]),
         ];
+        records.resize(1025, records[1].clone());
         let input = vm_input_from_test_rows(&records, &program.program.input_schema)
             .expect("VM input batch should build");
-        let output = execute_program_with_selection_in_context(
-            &Executor::default(),
-            &program.program,
-            &input,
-            &VmExecutionContext {
-                now: Timestamp::from_unix_nanos(1),
-                injector: None,
-            },
+        let executor = single_worker_executor();
+        let output = accepted_work_after_cpu_room(
+            &executor,
+            nervix_execution::CpuClass::Data,
+            execute_accepted_program_with_selection_in_context(
+                executor.accepted_work(),
+                &program.program,
+                &input,
+                &VmExecutionContext {
+                    now: Timestamp::from_unix_nanos(1),
+                    injector: None,
+                },
+            ),
         )
         .await
         .expect("reorderer key program should execute");
 
+        assert_eq!(output.batch.row_count(), 1025);
+        for row in 1..1025 {
+            assert_eq!(
+                reorder_key_part(output.batch.column(program.key_column_offset), row),
+                ReorderKeyPart::UInt64(1)
+            );
+        }
         assert_eq!(program.key_count, 1);
         assert_eq!(
             program.key_column_offset,

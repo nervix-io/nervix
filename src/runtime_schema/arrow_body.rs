@@ -151,6 +151,7 @@ struct BodyContract {
     max_sections: NonZeroUsize,
     /// The budget and ceilings this body travels under.
     carriage: ArrowBodyCarriage,
+    admission: QueueAdmission,
 }
 
 impl RuntimeRecordBatch {
@@ -269,6 +270,7 @@ impl RuntimeRecordBatch {
                 decoded_limit: executor.limits().relay_decoded_bytes.as_u64(),
                 max_sections: NonZeroUsize::MAX,
                 carriage: ArrowBodyCarriage::Relay,
+                admission: QueueAdmission::RefuseWhenFull,
             },
         )
         .await
@@ -290,6 +292,7 @@ impl RuntimeRecordBatch {
                 decoded_limit: executor.limits().snapshot_section_bytes.as_u64(),
                 max_sections: NonZeroUsize::MIN,
                 carriage: ArrowBodyCarriage::SnapshotSection,
+                admission: QueueAdmission::RefuseWhenFull,
             },
         )
         .await
@@ -343,7 +346,7 @@ fn encode_admitted_body(
 impl CompiledSchema {
     /// Decode one relay body that must carry exactly one Arrow section of this schema. A body that
     /// declares another schema, no section, or more than one is refused before its columns reach a
-    /// relay.
+    /// relay. Accepted carriage waits for a Data worker place while retaining its body and charge.
     pub async fn decode_arrow_body(
         &self,
         executor: &Executor,
@@ -358,6 +361,7 @@ impl CompiledSchema {
                 decoded_limit,
                 max_sections: NonZeroUsize::MIN,
                 carriage: ArrowBodyCarriage::Relay,
+                admission: QueueAdmission::WaitForPlace,
             },
         )
         .await?;
@@ -413,8 +417,9 @@ async fn decode_body(
     }
     .change_context(ArrowBodyError::Admission)?;
     let decoded = executor
-        .run_cpu(
+        .run_cpu_with(
             contract.carriage.cpu_class(),
+            contract.admission,
             reservation,
             move |_charge, cancellation| {
                 cancellation
@@ -529,6 +534,51 @@ mod framing_tests {
     use meticulous::{OptionExt as _, ResultExt as _};
 
     use super::{super::ipc_stream::CONTINUATION_MARKER, *};
+
+    #[nervix_primitives::test]
+    async fn accepted_work_relay_decoding_waits_for_data_room() {
+        let executor = crate::runtime::single_worker_executor();
+        let section = SealedSection::sealed(&executor).await;
+        let schema = super::super::compile_schema(&nervix_models::CreateSchema {
+            name: "relay_event"
+                .try_into()
+                .assured("the test schema name is valid"),
+            fields: [
+                ("wide", nervix_models::ParseAsType::I64),
+                ("narrow", nervix_models::ParseAsType::I32),
+            ]
+            .into_iter()
+            .map(|(name, ty)| nervix_models::SchemaField {
+                name: name.try_into().assured("the test field name is valid"),
+                ty,
+                optional: false,
+                sensitive: false,
+            })
+            .collect(),
+        });
+        let input = executor
+            .charge_owned(MemoryClass::Relay, section.bytes)
+            .await
+            .assured("the relay budget holds a three-row body");
+        let filled = crate::runtime::FilledCpuClass::fill(&executor, CpuClass::Data).await;
+        let mut decoding = Box::pin(schema.decode_arrow_body(
+            &executor,
+            input,
+            executor.limits().relay_decoded_bytes.as_u64(),
+        ));
+        let first = futures_util::poll!(decoding.as_mut());
+        filled.release().await;
+        assert!(
+            first.is_pending(),
+            "an accepted relay body waits without becoming a delivery failure"
+        );
+        let decoded = decoding
+            .await
+            .assured("the body opens after the worker place frees");
+        assert_eq!(decoded.batch().num_rows(), 3);
+        assert_eq!(executor.snapshot().data_cpu.refused, 0);
+        assert_eq!(executor.snapshot().relay_memory.reserved_bytes, 0);
+    }
 
     /// The length prefix of a message in the current stream format: the continuation marker and
     /// the metadata length.

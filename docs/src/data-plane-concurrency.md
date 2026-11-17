@@ -1968,6 +1968,16 @@ it:
   stop ends it as well. The race holds no lock and no guard across an await
 - one concrete processor branch serializes its own batches, while other branches remain
   independent
+- accepted branch input and programs wait for a place in their bounded worker class through the
+  executor's borrowed `AcceptedWork` contract. The class semaphore preserves arrival order ahead
+  of later requests. The owner takes no further input while waiting, holds no queue lock across
+  the wait, and preserves its processor state. Teardown drops the future within its existing
+  grace or drain deadline, returning the wait's charge and place. A stateful inferencer obtains
+  its queue place before handing its native session to a job. Logical deadlines due during the
+  wait are handled before the branch takes another input. Borrowed ACK scopes renew active and
+  retained rows without copying their sets; window acknowledgement parking and endpoint absolute
+  deadlines keep their existing meaning. The branch stop grace covers both queuing STOP and
+  joining its task
 - one already-resolved histogram series serializes its bounded accumulator update, once per
   recording: a batch's delivery latencies arrive as one folded recording, so the lock is taken once
   per batch; counter series are atomic

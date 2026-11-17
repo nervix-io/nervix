@@ -249,6 +249,7 @@ mod tests {
                         received_at: now,
                         request_id: decision.in_reply_to,
                     },
+                    transitions: nervix_consensus::CommittedLicenseTransitions::default(),
                 })),
             }),
             verification: Some(Ok(VerifiedLicenseDecision {

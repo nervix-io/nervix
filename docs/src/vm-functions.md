@@ -788,18 +788,26 @@ The VM's entry point alone decides where a program runs:
 
 The node resolves worker, queue and memory capacities once at startup;
 [Execution Capabilities](node-settings.md#execution-capabilities) defines the local bounds.
-A caller hands the entry point the node's `Executor` and awaits the result; it chooses neither
-the class nor the charge. An admitted execution is charged to the relay memory class for the bytes
-the batch's columns hold, the usual order of what the program builds from them, and never more
+A caller binds the operation to request work or to `AcceptedWork` and awaits the result; it chooses
+neither the class nor the charge. An admitted execution is charged to the relay memory class for
+the bytes the batch's columns hold, the usual order of what the program builds from them, and never more
 than one relay batch may decode into. A batch Arrow cannot measure is charged that bound. A UDF
 runs operator-supplied native code the node cannot bound, so its executions take the extension
 class: one that never returns holds an extension worker and leaves the data workers, which relay
 bodies are encoded and decoded on, their whole capacity.
 
-Admission can refuse. A class whose wait queue is full refuses the execution with
-`RuntimeError::ExecutionNotAdmitted`, and a job that panics on its worker returns
-`RuntimeError::ExecutionPanicked`. Both are batch errors, which reach the node's error policy as
-the report of the planned step that ran the program, like any other batch failure.
+Programs for accepted data wait when their class's queue is full. This includes processor keys,
+filters, routes and window programs; ingestor, emitter, reingestor and generator programs; inference
+inputs; WASM output routes; and error-record assignments. A full queue produces no runtime error,
+error-policy outcome or retry. The branch keeps its input and state, takes no more input while
+waiting, and passes backpressure towards its source. The owner ends the wait on teardown under its
+existing lifecycle deadline. Logical timers due meanwhile are applied in order afterwards.
+
+Request programs, including statement constants and session subscription predicates, retain
+immediate typed `RuntimeError::ExecutionNotAdmitted` refusal when they need a worker and its queue
+is full. A waiting accepted job takes a freed place ahead of a later request. An admitted job's
+panic still returns `RuntimeError::ExecutionPanicked`; actual cancellation and evaluation failures
+keep the planned step's existing handling.
 
 The compiling node resolves these admission and cache capabilities once and carries them in the
 compiled program. Set `--vm-inline-row-limit 0` to admit every nonempty batch to Data workers;
