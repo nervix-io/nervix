@@ -613,7 +613,7 @@ impl RemoteDispatcher {
              outcome",
         );
         branch_channel.reopen_delivery_channel();
-        payload.delivery = branch_channel.next_delivery();
+        payload.delivery = branch_channel.next_delivery_with_policy(payload.ack_timing);
         self.dispatch_admitted_relay_attempt(
             node_id,
             payload,
