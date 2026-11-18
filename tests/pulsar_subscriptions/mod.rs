@@ -11,6 +11,26 @@
 use super::*;
 use crate::common::cluster::PulsarSubscriptionObservation;
 
+/// Establish a disconnected writer and an observed reconnect before releasing a held rejection.
+#[when(expr = "the stallable endpoint {string} resets its connections and observes a replacement")]
+async fn when_stallable_endpoint_resets_and_observes_replacement(
+    world: &mut ScenarioWorld,
+    name: String,
+) {
+    let proxy = world
+        .stallable_tcp_proxies
+        .get(&name)
+        .unwrap_or_else(|| panic!("stallable endpoint '{name}' is not configured"));
+    proxy
+        .reset_and_wait_for_replacement(Duration::from_secs(60))
+        .await
+        .assured("the driver observed the reset and started a replacement connection");
+    append_cucumber_log_line(&format!(
+        "endpoint '{name}' reset and observed a replacement: {}",
+        endpoint_connection_timeline(proxy)
+    ));
+}
+
 /// The delivery mode every scenario ingestor reads in. Its retry policy also paces how often a
 /// missing provisioned subscription is checked again.
 const SCENARIO_MODE: &str = "MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 2s";

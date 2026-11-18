@@ -311,11 +311,12 @@ impl Cluster {
 
     /// A public checkpoint listing supplies exact model identities; fetching the replica's bytes
     /// proves it holds the listed generations before the scenario ends their owner.
-    pub(crate) async fn wait_for_inferencer_replica_checkpoints(
+    pub(crate) async fn wait_for_branch_replica_checkpoints(
         &self,
         owner: &str,
         replica: &str,
         lifecycle: StatePlacementEnvelope,
+        kind: nervix_interconnect::RuntimeStateKind,
     ) -> io::Result<()> {
         let probe = self.snapshot_probe(owner).await?;
         let target = self
@@ -355,16 +356,11 @@ impl Cluster {
             let revisions = page
                 .revised
                 .into_iter()
-                .filter(|entry| {
-                    matches!(
-                        entry.state,
-                        nervix_interconnect::RuntimeState::Inferencer { .. }
-                    )
-                })
+                .filter(|entry| entry.state.kind() == kind)
                 .collect::<Vec<_>>();
             if page.more || revisions.len() != 2 {
                 return Err(io::Error::other(
-                    "the fixture must list both inference branches in one page",
+                    "the fixture must list both retained branches in one page",
                 ));
             }
             for revision in revisions {
@@ -387,7 +383,7 @@ impl Cluster {
                     .result
                     .map_err(io::Error::other)?
                     .ok_or_else(|| {
-                        io::Error::other("the owner has no populated inference checkpoint")
+                        io::Error::other("the owner has no populated branch checkpoint")
                     })?;
                 if source.lsm < revision.lsm {
                     return Err(io::Error::other(
@@ -406,6 +402,7 @@ impl Cluster {
                     )
                     .await?;
                 loop {
+                    nervix_primitives::task::consume_budget().await;
                     let response = probe
                         .transport
                         .request(
@@ -434,7 +431,7 @@ impl Cluster {
                         }
                         if payload.is_empty() {
                             return Err(io::Error::other(
-                                "an inference checkpoint cannot be empty bytes",
+                                "a branch checkpoint cannot be empty bytes",
                             ));
                         }
                         break;
@@ -447,7 +444,7 @@ impl Cluster {
         .await
         .map_err(|_| {
             io::Error::other(
-                "replica did not hold both current inference branch generations within 90 seconds",
+                "replica did not hold both current branch generations within 90 seconds",
             )
         });
         probe.shutdown().await;

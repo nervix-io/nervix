@@ -361,10 +361,11 @@ mismatch when it cannot run beside a voter. It refuses the run of a voter that c
 older voter's run the same way, without changing the membership.
 [Prerequisites At Join](node-settings.md#prerequisites-at-join) describes the verdicts the leader
 publishes and what a refused node does. Each membership reconciliation gives a blocking learner
-catch-up attempt ten seconds. Promotion to voter is proposed only after the learner has confirmed
-a replicated log prefix and the attempt reports it within the configured catch-up lag allowance.
-An absent replication match never satisfies that allowance, even on a short log. The membership
-change has its own ten-second bound. A catch-up timeout leaves
+catch-up attempt ten seconds. Promotion to voter is proposed only after that attempt reports the
+learner has confirmed a log prefix within the configured replication lag allowance. An absent
+confirmation proves no catch-up, even on a short log whose numeric distance fits the allowance;
+the current lag is checked again if the leader's log grows while confirmation waits. The
+membership change has its own ten-second bound. A catch-up timeout leaves
 the node a learner. A failed reconciliation records `raft membership reconciliation failed`, and
 the one-second reconciliation loop tries again while ordinary replication continues.
 

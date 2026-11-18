@@ -47,6 +47,31 @@ class ConnectionTests(unittest.TestCase):
         self.assertIs(run.session, session)
 
 
+class PlannerTests(unittest.TestCase):
+    def test_an_expired_center_does_not_consume_a_requested_submission(self):
+        run = driver.Run(SimpleNamespace(ticks=2, timestamps="at", domain="simulation"))
+        clock = Mock()
+        clock.paced.skew = 100
+        clock.admits.side_effect = lambda _utc, event: 0 <= event <= 1100
+        window = driver.Window(clock, 0, 100, 1000)
+        self.assertTrue(window.contains(0))
+        grid = driver.TickGrid(7, SimpleNamespace(origin=0, period=100))
+        run.clock = Mock()
+        run.clock.reach.return_value = ("center", window)
+        run.clock.paced.return_value = clock
+        run.producer = SimpleNamespace(endpoint=SimpleNamespace(admission=driver.nx.Admission.OPEN))
+        run.first_tick = Mock(return_value=0)
+        run.reopen = Mock(side_effect=lambda current: current)
+        run.plan = Mock(return_value=[])
+        run.prepare = Mock(side_effect=lambda tick, readings: {"tick": tick, "size": 1})
+        run.wait_for_credit = Mock(return_value=True)
+        run.send = Mock()
+        with patch.object(driver, "line"), patch.object(driver.Window, "at", return_value=window):
+            run.simulate(grid)
+        self.assertEqual([call.args[0]["tick"] for call in run.send.call_args_list], [1, 2])
+        self.assertEqual([call.args[-1] for call in run.plan.call_args_list], [1, 1, 2])
+
+
 class EndpointOpenTests(unittest.TestCase):
     def open_sequence(self, refusals, intent, times):
         def attempt():
@@ -146,6 +171,30 @@ class ClockPolicyTests(unittest.TestCase):
 
 
 class OutcomeTests(unittest.TestCase):
+    def test_a_completed_ordinary_reading_waits_for_its_unobserved_rejection(self):
+        run = driver.Run(SimpleNamespace())
+        endpoint = Mock()
+        endpoint.rejoin.return_value = SimpleNamespace(result=driver.nx.SubmissionResult.COMPLETED)
+        producer = driver.Producer(endpoint)
+        producer.outstanding.update(batches=1, bytes=64)
+        run.ledger = Mock()
+        with tempfile.TemporaryDirectory() as directory:
+            run.effects = driver.EffectStore(str(Path(directory) / "effects.jsonl"))
+            run.effects.apply("reading", {
+                "kind": "reading", "reading_id": "applied", "sensor": "sensor-0", "tick": 1,
+                "occurred_at": driver.rfc3339(100), "admitted_at": driver.rfc3339(101),
+                "timestamp_source": "at", "value": 1, "generation": 7,
+            })
+            run.effects.apply("rejection", {
+                "kind": "rejection", "reading_id": "noticed", "occurred_at": driver.rfc3339(0),
+                "error_code": "validation", "error_message": "outside", "generation": 7,
+            })
+            with patch.object(driver, "line"):
+                run.await_outcome(producer, 3, ["late", "applied", "noticed"], 64, 12)
+            run.effects.file.close()
+        self.assertEqual(run.awaited_effects, ["late"])
+        self.assertEqual(producer.outstanding, {"batches": 0, "bytes": 0})
+
     def test_terminal_outcomes_preserve_the_ledger_cause(self):
         cases = [
             (SimpleNamespace(result=driver.nx.SubmissionResult.COMPLETED), ("completed", "")),
@@ -173,12 +222,14 @@ class OutcomeTests(unittest.TestCase):
         replacement.outstanding.update(batches=2, bytes=128)
         run.producer = replacement
         run.ledger = Mock()
+        run.effects = Mock()
+        run.effects.pending_effects.return_value = ["reading"]
         with patch.object(driver, "line"):
-            run.await_outcome(submitting, 3, ["reading", "rejection"], 64, 12)
+            run.await_outcome(submitting, 3, ["reading"], 64, 12)
         self.assertEqual(submitting.outstanding, {"batches": 0, "bytes": 0})
         self.assertEqual(replacement.outstanding, {"batches": 2, "bytes": 128})
-        self.assertEqual(run.awaited_effects, ["reading", "rejection"])
-        run.ledger.outcome.assert_called_once_with(["reading", "rejection"], "completed", "")
+        self.assertEqual(run.awaited_effects, ["reading"])
+        run.ledger.outcome.assert_called_once_with(["reading"], "completed", "")
 
 
 class EffectDrainTests(unittest.TestCase):

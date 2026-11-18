@@ -128,7 +128,7 @@ impl MaterializedGenerationReadCache {
         }
         // Return the previous cache admission before trying to retain its replacement.
         self.clear_unit(unit);
-        let mut snapshot = runtime
+        let (envelope, mut snapshot) = runtime
             .fetch_described_materialized_snapshot(owner, &placement, schema, envelope)
             .await
             .change_context_lazy(|| MaterializedReadError::RemoteSnapshot {

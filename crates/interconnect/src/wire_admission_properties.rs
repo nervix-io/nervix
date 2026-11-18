@@ -99,10 +99,19 @@ fn bolero_receive_admission_outcomes_preserve_every_field() {
             ];
             let executor = Executor::default();
             runtime.block_on(async {
+                let mut outcomes = Vec::with_capacity(failures.len() + 1);
                 for (report, expected_failure, status) in failures {
                     nervix_primitives::task::consume_budget().await;
                     let failure = RemoteRequestFailure::decode(report, class);
                     assert_eq!(failure, expected_failure);
+                    outcomes.push((failure, status));
+                }
+                outcomes.push((
+                    RemoteRequestFailure::PreconditionChanged,
+                    http::StatusCode::PRECONDITION_FAILED,
+                ));
+                for (failure, status) in outcomes {
+                    nervix_primitives::task::consume_budget().await;
                     assert_eq!(failure.status(), status);
                     let expected = ResponseEnvelope {
                         class,

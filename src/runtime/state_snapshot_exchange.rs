@@ -30,13 +30,16 @@
     )
 )]
 
+use std::time::Duration;
+
 use error_stack::{Report, ResultExt as _};
 use futures_util::stream;
 use nervix_interconnect::{
-    RemoteOperationFailure, RemoteOperationFailureKind, RemoteOperationSubject, RequestError,
-    StreamHandlerError, StreamingResponse,
+    InterconnectStreamRequest as _, RemoteOperationFailure, RemoteOperationFailureKind,
+    RemoteOperationSubject, RequestError, StreamHandlerError, StreamingResponse,
 };
 use nervix_models::ClusterNodeName;
+use nervix_primitives::time::{Instant, timeout_at};
 use thiserror::Error;
 
 use super::{
@@ -46,10 +49,6 @@ use super::{
         DescribeStateSnapshot, DescribedStateSnapshot, FetchStateSnapshot, SealedSnapshotEnvelope,
     },
 };
-
-/// How long a requester waits for the owner to describe what it would transfer. Sealing runs on
-/// the bulk workers behind whatever else is admitted there, so this is longer than an ordinary
-/// control request rather than the same.
 
 #[derive(Debug, Error)]
 #[cfg_attr(
@@ -67,6 +66,11 @@ pub(in crate::runtime) enum MaterializedSnapshotExchangeError {
     },
     #[error("failed to describe {placement} on node '{target}'")]
     Describe {
+        target: ClusterNodeName,
+        placement: RuntimeStatePlacement,
+    },
+    #[error("node '{target}' described no generation of {placement} to a requester holding none")]
+    NoGeneration {
         target: ClusterNodeName,
         placement: RuntimeStatePlacement,
     },
@@ -149,6 +153,22 @@ impl MaterializedSnapshotExchangeError {
             target: target.clone(),
             placement: placement.clone(),
             failure,
+        })
+    }
+
+    fn opening_timeout(
+        target: &ClusterNodeName,
+        placement: &RuntimeStatePlacement,
+        timeout: Duration,
+    ) -> Report<Self> {
+        Report::new(RequestError::Timeout {
+            node: target.clone(),
+            request: FetchStateSnapshot::NAME,
+            timeout,
+        })
+        .change_context(Self::OpenTransfer {
+            target: target.clone(),
+            placement: placement.clone(),
         })
     }
 
@@ -245,17 +265,7 @@ impl Runtime {
             );
         };
         let Some(sealed) = state.sealed_at(request.revision) else {
-            let subject = RemoteOperationSubject::state(&placement.to_remote());
-            return Err(
-                Report::new(RemoteOperationFailure::not_ready(subject)).change_context(
-                    StreamHandlerError::new(format!(
-                        "materialized relay '{}' no longer holds the sealed generation at \
-                         revision {}",
-                        placement.identifier.as_str(),
-                        request.revision
-                    )),
-                ),
-            );
+            return Err(Report::new(StreamHandlerError::PreconditionChanged));
         };
         let chunk_bytes = self.inner.executor.limits().bulk_chunk_bytes.as_u64();
         let length = sealed.descriptor.length;
@@ -305,11 +315,12 @@ impl Runtime {
         };
         self.fetch_described_materialized_snapshot(target_node_id, placement, schema, envelope)
             .await
-            .map(Some)
+            .map(|(_, snapshot)| Some(snapshot))
     }
 
     /// Describe the selected owner's exact sealed generation before deciding whether bytes are
     /// needed. Readers that retain contents compare the complete envelope, not only its revision.
+    /// The configured describe timeout covers sealing on the bulk workers.
     #[cfg_attr(
         nervix_lint,
         nervix::context(
@@ -359,8 +370,9 @@ impl Runtime {
         })
     }
 
-    /// Receive and verify exactly the generation the owner described. A replaced generation is
-    /// refused by the owner or fails verification; no other contents can satisfy this envelope.
+    /// Receive and verify exactly a described generation. When publication replaced it before
+    /// opening, re-describe within the opening attempt's original deadline. Return the envelope
+    /// actually verified so a retained read never caches new contents under a preceding identity.
     #[cfg_attr(
         nervix_lint,
         nervix::context(
@@ -374,7 +386,10 @@ impl Runtime {
         placement: &RuntimeStatePlacement,
         schema: &nervix_primitives::sync::StdArc<arrow_schema::Schema>,
         envelope: SealedSnapshotEnvelope,
-    ) -> error_stack::Result<RestoredMaterializedSnapshot, MaterializedSnapshotExchangeError> {
+    ) -> error_stack::Result<
+        (SealedSnapshotEnvelope, RestoredMaterializedSnapshot),
+        MaterializedSnapshotExchangeError,
+    > {
         let Some(dispatcher) = self.inner.remote_dispatcher.load_full() else {
             return Err(Report::new(
                 MaterializedSnapshotExchangeError::DispatcherUnavailable {
@@ -383,23 +398,120 @@ impl Runtime {
                 },
             ));
         };
-        let mut body = dispatcher
+        let timeout = self.inner.data_plane.snapshot_fetch_timeout();
+        let opened = dispatcher
             .request_stream_with_timeout(
                 target_node_id,
                 FetchStateSnapshot {
                     placement: placement.to_remote(),
                     revision: envelope.revision,
                 },
-                self.inner.data_plane.snapshot_fetch_timeout(),
+                timeout,
             )
-            .await
-            .map_err(|error| {
-                MaterializedSnapshotExchangeError::from_stream_opening(
-                    error,
-                    target_node_id,
-                    placement,
+            .await;
+        let (envelope, mut body) = match opened {
+            Ok(body) => (envelope, body),
+            Err(error) => {
+                let Some(deadline) = error.current_context().stream_precondition_deadline() else {
+                    return Err(MaterializedSnapshotExchangeError::from_stream_opening(
+                        error,
+                        target_node_id,
+                        placement,
+                    ));
+                };
+                // The first attempt supplies its transport-owned deadline. Successful reads add
+                // neither another timer nor a clock read, and refusals cannot renew the budget.
+                // Keep the additional retry state off the ordinary read's inline future.
+                // Its one allocation exists only after a producer rejects the first opening.
+                let retry = timeout_at(
+                    deadline,
+                    Box::pin(async {
+                        let mut refused_revision = envelope.revision;
+                        loop {
+                            nervix_primitives::task::consume_budget().await;
+                            if Instant::now() >= deadline {
+                                return Err(MaterializedSnapshotExchangeError::opening_timeout(
+                                    target_node_id,
+                                    placement,
+                                    timeout,
+                                ));
+                            }
+                            let Some(envelope) = self
+                                .describe_materialized_snapshot_from(
+                                    target_node_id,
+                                    placement,
+                                    None,
+                                )
+                                .await?
+                            else {
+                                return Err(Report::new(
+                                    MaterializedSnapshotExchangeError::NoGeneration {
+                                        target: target_node_id.clone(),
+                                        placement: placement.clone(),
+                                    },
+                                ));
+                            };
+                            if envelope.revision == refused_revision {
+                                // The producer has not published a replacement for the refused
+                                // generation. Preserve the materialized dependency's WAIT/SKIP
+                                // policy instead of turning temporary absence into a record error.
+                                return Err(Report::new(
+                                    MaterializedSnapshotExchangeError::RemoteFailure {
+                                        target: target_node_id.clone(),
+                                        placement: placement.clone(),
+                                        failure: RemoteOperationFailure::not_ready(
+                                            RemoteOperationSubject::state(&placement.to_remote()),
+                                        ),
+                                    },
+                                ));
+                            }
+                            match dispatcher
+                                .request_stream_with_timeout(
+                                    target_node_id,
+                                    FetchStateSnapshot {
+                                        placement: placement.to_remote(),
+                                        revision: envelope.revision,
+                                    },
+                                    timeout,
+                                )
+                                .await
+                            {
+                                Ok(body) => return Ok((envelope, body)),
+                                Err(error)
+                                    if error
+                                        .current_context()
+                                        .stream_precondition_deadline()
+                                        .is_some() =>
+                                {
+                                    refused_revision = envelope.revision;
+                                }
+                                Err(error) => {
+                                    return Err(
+                                        MaterializedSnapshotExchangeError::from_stream_opening(
+                                            error,
+                                            target_node_id,
+                                            placement,
+                                        ),
+                                    );
+                                }
+                            }
+                        }
+                    }),
                 )
-            })?;
+                .await;
+                match retry {
+                    Ok(result) => result?,
+                    Err(_) => {
+                        return Err(MaterializedSnapshotExchangeError::opening_timeout(
+                            target_node_id,
+                            placement,
+                            timeout,
+                        )
+                        .attach_printable(error));
+                    }
+                }
+            }
+        };
         if body.content_length() != envelope.length {
             return Err(Report::new(
                 MaterializedSnapshotExchangeError::TransferLength {
@@ -454,7 +566,7 @@ impl Runtime {
                 placement: placement.clone(),
             },
         )?;
-        RestoredMaterializedSnapshot::open_relay(
+        let restored = RestoredMaterializedSnapshot::open_relay(
             &self.inner.executor,
             schema,
             SealedSource::staged(staged),
@@ -463,7 +575,8 @@ impl Runtime {
         .change_context(MaterializedSnapshotExchangeError::OpenSnapshot {
             target: target_node_id.clone(),
             placement: placement.clone(),
-        })
+        })?;
+        Ok((envelope, restored))
     }
 
     /// Refresh one materialized relay state from the node that owns it, installing whatever it

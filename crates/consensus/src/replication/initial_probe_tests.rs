@@ -696,6 +696,21 @@ async fn initial_empty_append_probes_use_management_before_one_data_stream() {
     let vote = Vote::new_committed(1, leader);
     let boundary = LogIdOf::new(committed.clone(), 11);
     let option = RPCOption::new(Duration::from_secs(5));
+    let mut ended = peer
+        .client
+        .stream_append(stream::empty(), option.clone())
+        .await
+        .assured("ended input needs no peer admission");
+    assert!(ended.next().await.is_none());
+    drop(ended);
+    assert_eq!(
+        peer.client
+            .append_stream_open_recorder
+            .attempts
+            .load(Ordering::Relaxed),
+        0,
+        "ended input is not a setup attempt"
+    );
     for _ in 0..2 {
         nervix_primitives::task::consume_budget().await;
         let input = stream::iter([openraft::raft::AppendEntriesRequest::<TypeConfig> {
@@ -758,6 +773,22 @@ async fn initial_empty_append_probes_use_management_before_one_data_stream() {
         peer.append_streams.load(Ordering::Relaxed),
         1,
         "only the data input opens a replication stream"
+    );
+    assert_eq!(
+        peer.client
+            .append_stream_open_recorder
+            .attempts
+            .load(Ordering::Relaxed),
+        1,
+        "only the data input attempts a replication stream"
+    );
+    assert_eq!(
+        peer.client
+            .append_stream_open_recorder
+            .replication_attempts
+            .load(Ordering::Relaxed),
+        3,
+        "both finite management inputs and the data input pass the caller gate"
     );
 }
 

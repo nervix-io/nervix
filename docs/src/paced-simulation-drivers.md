@@ -165,6 +165,11 @@ Slow application processing does not slow domain time. A driver that falls behin
 centers it missed as soon as it can, stamped with their own times, and the ingestor admits them as
 long as its window still retains them: the newest 256 reached centers. A center the window no
 longer retains is skipped with a `SKIPPED` line instead of being submitted only to be rejected.
+Skipped centers do not count toward `--ticks`: the driver continues until it has submitted the
+requested number of tick centers, or a stop, generation change or endpoint refusal ends the run.
+The clock can advance between the driver's check and server admission. If a center expires in
+transit, its timestamp rejection is an application outcome, recorded in the effect store just like
+a deliberately invalid reading's rejection.
 
 ## What A Run Does
 
@@ -268,6 +273,10 @@ A reading's identity names the START generation, tick, sensor and burst position
 for, so it stays the same when the reading is replayed.
 
 ## Event Time: `TIMESTAMP AT` And `TIMESTAMP NOW`
+
+After waiting for producer credit, both drivers read the admission window again. A planned
+`TIMESTAMP AT` submission needs its own retained tick center. If that center has expired,
+the driver advances to another tick and keeps the requested submission count.
 
 `--invalid-every 3` stamps the first reading of every third tick one nanosecond further than the
 skew before the oldest center the window retains. Submitted to `simulated_readings`, which reads

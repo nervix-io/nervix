@@ -1440,6 +1440,49 @@ async fn a_subscription_fanout_that_does_not_decode_is_refused() {
 }
 
 #[nervix_primitives::test]
+async fn a_routed_batch_is_counted_while_waiting_for_a_subscription() {
+    let services = test_relay_boundary_services();
+    let RelayBoundaryFanout::Direct(fanout) = &services.fanout else {
+        panic!("the fixture has direct relay fan-out");
+    };
+    fanout
+        .subscriptions
+        .receivers()
+        .set_capacity(nonzero!(1usize));
+    let subscription = services.subscription_receiver();
+    let batch = quiesce_test_batch();
+    services.fanout_local_subscriptions(&batch).await;
+
+    let dispatch = services.inject_remote_message(Unit::SINGLE, &batch);
+    assert_eq!(services.fanout.transit().held(), 1);
+    let mut dispatch = std::pin::pin!(dispatch);
+    assert!(futures_util::poll!(&mut dispatch).is_pending());
+    assert_eq!(
+        services.fanout.transit().held(),
+        1,
+        "a routed batch already held by this node stays visible to a drain before fan-out"
+    );
+
+    drop(subscription);
+    dispatch
+        .await
+        .expect("closing the subscription releases the routed batch");
+    assert_eq!(services.fanout.transit().held(), 0);
+}
+
+#[test]
+fn cancelling_a_routed_batch_before_its_first_poll_releases_its_admission() {
+    let services = test_relay_boundary_services();
+    let batch = quiesce_test_batch();
+    let dispatch = services.inject_remote_message(Unit::SINGLE, &batch);
+    assert_eq!(services.fanout.transit().held(), 1);
+
+    drop(dispatch);
+
+    assert_eq!(services.fanout.transit().held(), 0);
+}
+
+#[nervix_primitives::test]
 async fn a_routed_attached_batch_fails_its_acknowledgement_without_an_attached_consumer() {
     let services = test_relay_boundary_services();
     let (acks, completion) = AckSet::root();

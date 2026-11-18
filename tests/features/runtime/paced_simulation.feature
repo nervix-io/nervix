@@ -149,8 +149,9 @@ Feature: Paced simulation drivers
     Then within "60s" the paced simulation driver prints a line starting with "REOPENED generation=2"
     And within "180s" the paced simulation driver finishes with the status its outcomes imply
     And the paced simulation driver reports
-      | generations | 2 |
-      | duplicates  | 0 |
+      | generations       | 2    |
+      | duplicates        | 0    |
+      | rejection_notices | >= 1 |
     And every completed paced simulation reading has exactly one effect from its own generation
     And the paced simulation records readings and window rejections in generation 2
     And the paced simulation ledger submits no reading of generation 1 after generation 2 begins
@@ -387,6 +388,38 @@ Feature: Paced simulation drivers
       | python | rust     |
 
   @paced_simulation
+  Scenario Outline: The <driver> driver submits every requested tick after backpressure expires a center
+    Given a 1 node nervix cluster is started
+    And the active domain is "paced_simulation"
+    And the leader node is configured with the paced simulation example graph
+    # The 256-center admission window retains 6.4 wall seconds at this rate. Holding an output
+    # for seven seconds with one producer credit positively expires the next prepared center.
+    When these Plexus commands are executed on the leader node
+      """
+      START AT NOW TIME RATE 4.0;
+      """
+    And the <driver> paced simulation driver runs through node "node-1" with arguments "--ticks 3 --sensors 1 --credit-batches 1 --processing-time 7s"
+    Then within "60s" the paced simulation driver prints a line starting with "SKIPPED tick="
+    And within "120s" the paced simulation driver exits with status 0
+    And the paced simulation driver reports
+      | readings        | 3    |
+      | completed       | 3    |
+      | effects         | >= 1 |
+      | duplicates      | 0    |
+      | not_admitted    | 0    |
+      | outcome_unknown | 0    |
+      | credit_waits    | >= 1 |
+    # The clock may move again between the driver's local check and server admission. Every
+    # submitted identity must still have its exact reading or a typed timestamp refusal.
+    And the paced simulation effects account for every submitted reading or its timestamp rejection exactly once
+    And every paced simulation reading was admitted no earlier than it occurred
+
+    Examples:
+      | driver |
+      | rust   |
+      | python |
+
+  @paced_simulation
   Scenario Outline: The <driver> driver saturates its producer on one session while its consumers acknowledge, commands complete and the clock keeps ticking on <cluster_size> nodes
     Given a <cluster_size> node nervix cluster is started
     And the active domain is "paced_simulation"
@@ -416,6 +449,10 @@ Feature: Paced simulation drivers
       | rust   | 1            |
       | rust   | 3            |
       | python | 1            |
+
+    @slots_6
+    Examples:
+      | driver | cluster_size |
       | python | 3            |
 
   @paced_simulation

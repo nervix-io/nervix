@@ -13,6 +13,7 @@ use nervix_client_wire::{
 };
 use nervix_model_harness::shuttle::check_random_and_pct;
 use nervix_models::{DomainName, DomainPace, DomainStatus};
+use shuttle::rand::{RngCore as _, thread_rng};
 
 use super::*;
 use crate::RequestKind;
@@ -55,7 +56,8 @@ async fn races_registration(violation: &Violation) {
         .emitters
         .begin_generation(&nervix_client_wire::SessionLimits::DEFAULT)
         .assured("default client retention fits the fixture session");
-    let pending = Arc::new(SyncMutex::new(PendingReplies::new()));
+    let pending = Arc::new(SyncMutex::new(pending_replies()));
+
     let (frames, _outbound) = mpsc::channel(1);
     let requests = Arc::new(ExchangeRequests {
         limits: nervix_client_wire::SessionLimits::DEFAULT,
@@ -134,6 +136,23 @@ async fn races_registration(violation: &Violation) {
         .await
         .expect_err("the generation ends");
     assert!(matches!(ended.current_context(), EventQueueError::Closed));
+}
+
+/// Closing drops the outstanding senders in hash-bucket order. Vary that order with Shuttle's
+/// recorded randomness, so a replay keeps its seed instead of taking fresh process entropy.
+fn pending_replies() -> PendingReplies {
+    let mut pending = PendingReplies::new();
+    let PendingReplies::Open { waiters, .. } = &mut pending else {
+        panic!("a new request registry is open");
+    };
+    let mut random = thread_rng();
+    *waiters = HashMap::with_hasher(ahash::RandomState::with_seeds(
+        random.next_u64(),
+        random.next_u64(),
+        random.next_u64(),
+        random.next_u64(),
+    ));
+    pending
 }
 
 fn reference(value: &str) -> CommandExecutionReference {

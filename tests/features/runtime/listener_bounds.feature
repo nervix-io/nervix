@@ -5,6 +5,8 @@ Feature: Declared public listener bounds
   Scenario Outline: Ordinary fragmented HTTP input within its bounds is admitted on <cluster_size> nodes
     Given node-1 starts with execution-intake-memory-bytes = 4MiB
     And node-1 starts with http-body-bytes = 1MiB
+    # Bound read backings so fragmentation stays within the declared intake pool.
+    And node-1 starts with listener-buffer-bytes = 8KiB
     And a <cluster_size> node nervix cluster is started
     And the leader node is configured with these Plexus commands
       """

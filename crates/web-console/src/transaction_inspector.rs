@@ -199,8 +199,9 @@ impl InspectorSignals {
         self.stale_preview.set(false);
         // Setting a signal notifies its readers even when the value is unchanged, and the request
         // effect reads `open`: reopening an open inspector would request the report this reply
-        // just answered, again and again.
-        if !self.open.get_untracked() {
+        // just answered, again and again. Only an explicit DESCRIBE opens a closed inspector;
+        // a background inspection reply must preserve the user's Close action.
+        if request_target.is_none() && !self.open.get_untracked() {
             self.open.set(true);
         }
 
@@ -1193,6 +1194,45 @@ mod tests {
                     .transaction
                     .transaction_id(),
                 "other"
+            );
+        });
+    }
+
+    #[test]
+    fn a_delayed_inspection_keeps_a_closed_inspector_closed_and_retains_its_report() {
+        Owner::new().with(|| {
+            let inspector = InspectorSignals::new();
+            let attached = configured_inspection();
+            inspector.open_attached();
+            inspector.requested(1);
+            inspector.accept(
+                attached.clone(),
+                1,
+                Some(&TransactionInspectionTarget::Attached),
+                Some(&attached.transaction),
+            );
+            let basis = inspector
+                .commit_basis(&attached.transaction)
+                .assured("the first report supplies the attached commit basis");
+
+            inspector.requested(2);
+            inspector.open.set(false);
+            inspector.accept(
+                attached.clone(),
+                2,
+                Some(&TransactionInspectionTarget::Attached),
+                Some(&attached.transaction),
+            );
+
+            assert!(!inspector.open.get_untracked());
+            assert_eq!(inspector.commit_basis(&attached.transaction), Some(basis));
+            assert_eq!(
+                inspector
+                    .inspection
+                    .get_untracked()
+                    .assured("the delayed report remains available")
+                    .transaction,
+                attached.transaction
             );
         });
     }

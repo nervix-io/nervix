@@ -22,6 +22,7 @@
 )]
 
 use error_stack::ResultExt as _;
+use futures_util::future::Either;
 use nervix_interconnect::{RelayGrantRefusal, TransportError};
 
 use super::{
@@ -575,6 +576,62 @@ impl RemoteDispatcher {
         deadline: Instant,
         capacity_refusals: GrantCapacityRefusals,
     ) -> error_stack::Result<(), RemoteDispatchError> {
+        let result = self
+            .dispatch_admitted_relay_attempt(
+                node_id,
+                payload,
+                branch_channel,
+                deadline,
+                capacity_refusals,
+            )
+            .await;
+        let Err(error) = result else {
+            return Ok(());
+        };
+        if !matches!(
+            error.current_context(),
+            RemoteDispatchError::GrantRefused {
+                refusal: RelayGrantRefusal::ChannelUnopened,
+                ..
+            }
+        ) || payload.delivery.sequence == 0
+        {
+            return Err(error);
+        }
+        if Instant::now() >= deadline {
+            return Err(
+                error.change_context(RemoteDispatchError::AdmissionTotalTimeout {
+                    target: node_id.clone(),
+                    timeout: payload.ack_timing.remote_relay_total_timeout,
+                }),
+            );
+        }
+        // No body was granted. Retain this payload and its ACKs under the held channel gate.
+        // A fresh channel starts at zero, so it can need no further reopening attempt.
+        Err::<(), _>(error).discarded(
+            "the unopened channel admitted no body; its one fresh-channel attempt supplies the \
+             outcome",
+        );
+        branch_channel.reopen_delivery_channel();
+        payload.delivery = branch_channel.next_delivery_with_policy(payload.ack_timing);
+        self.dispatch_admitted_relay_attempt(
+            node_id,
+            payload,
+            branch_channel,
+            deadline,
+            capacity_refusals,
+        )
+        .await
+    }
+
+    async fn dispatch_admitted_relay_attempt(
+        &self,
+        node_id: &ClusterNodeName,
+        payload: &mut RelayPayload,
+        branch_channel: &RelayOutboundSlot,
+        deadline: Instant,
+        capacity_refusals: GrantCapacityRefusals,
+    ) -> error_stack::Result<(), RemoteDispatchError> {
         if branch_channel.cancellation().is_cancelled() {
             return Err(Report::new(RemoteDispatchError::BranchEvicted {
                 target: node_id.clone(),
@@ -587,23 +644,36 @@ impl RemoteDispatcher {
             .relay_cancellation_guard(node_id.clone(), delivery);
         let (registration, admission) = self.register_pending_relay_admission()?;
         payload.admission = Some(registration.clone());
-        let dispatch = self.dispatch_relay_payload(node_id, payload, deadline, capacity_refusals);
-        tokio::pin!(dispatch);
-        let dispatch_result = nervix_primitives::select! {
-            biased;
-            result = &mut dispatch => result,
-            () = branch_channel.cancellation().cancelled() => {
-                Err(Report::new(RemoteDispatchError::BranchEvicted {
-                    target: node_id.clone(),
-                    sequence: delivery.sequence,
-                }))
-            },
+        let dispatch_result = {
+            let dispatch =
+                self.dispatch_relay_payload(node_id, payload, deadline, capacity_refusals);
+            tokio::pin!(dispatch);
+            nervix_primitives::select! {
+                biased;
+                result = &mut dispatch => result,
+                () = branch_channel.cancellation().cancelled() => {
+                    Err(Report::new(RemoteDispatchError::BranchEvicted {
+                        target: node_id.clone(),
+                        sequence: delivery.sequence,
+                    }))
+                },
+            }
         };
         if let Err(error) = dispatch_result {
             self.clear_pending_relay_admission(&registration);
             if matches!(
                 error.current_context(),
                 RemoteDispatchError::ReceiveBounds { .. }
+            ) {
+                cancellation_guard.disarm();
+                return Err(error);
+            }
+            if matches!(
+                error.current_context(),
+                RemoteDispatchError::GrantRefused {
+                    refusal: RelayGrantRefusal::ChannelUnopened,
+                    ..
+                }
             ) {
                 cancellation_guard.disarm();
                 return Err(error);
@@ -978,6 +1048,14 @@ impl RemoteDispatcher {
                         bounds,
                     }));
                 }
+                TransportError::RelayGrantRefused(RelayGrantRefusal::ChannelUnopened)
+                    if unresolved_attempt =>
+                {
+                    // A later refusal cannot prove what an earlier interrupted attempt did.
+                    return Err(error.change_context(RemoteDispatchError::Send {
+                        target: node_id.clone(),
+                    }));
+                }
                 TransportError::RelayGrantRefused(refusal) => RelaySendFailure::Refused(*refusal),
                 _ => {
                     unresolved_attempt = true;
@@ -1170,15 +1248,6 @@ impl Runtime {
             return false;
         };
         dispatcher.local_node_id() == node_id
-    }
-
-    pub(in crate::runtime) async fn inject_remote_stream_boundary_message(
-        &self,
-        services: &RelayBoundaryServices,
-        unit: Unit,
-        batch: &RelayRecordBatch,
-    ) -> RelayDispatchResult {
-        services.inject_remote_message(unit, batch).await
     }
 
     pub(crate) async fn handle_remote_stream(
@@ -1509,19 +1578,22 @@ impl Runtime {
                     &remote.relay,
                 ))
         })?;
+        // A routed batch has passed its owner's dispatch gate. Count it on this node before
+        // acknowledging admission releases that owner's dispatch permit, so a cluster drain
+        // cannot see the batch missing from both nodes. Owner ingress still waits for its gate
+        // before entering the owner buffer.
+        let dispatch = if owner_ingress {
+            Either::Left(self.ingest_stream_boundary_message(
+                &remote.domain,
+                &remote.relay,
+                &services,
+                &batch,
+            ))
+        } else {
+            Either::Right(services.inject_remote_message(remote.unit, &batch))
+        };
         let dispatch = async {
-            let dispatch = if owner_ingress {
-                self.ingest_stream_boundary_message(
-                    &remote.domain,
-                    &remote.relay,
-                    &services,
-                    &batch,
-                )
-                .await
-            } else {
-                self.inject_remote_stream_boundary_message(&services, remote.unit, &batch)
-                    .await
-            };
+            let dispatch = dispatch.await;
             if dispatch.is_ok() {
                 for ack in batch.acks.iter() {
                     ack.ack_success();

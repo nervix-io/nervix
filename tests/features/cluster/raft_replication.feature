@@ -75,6 +75,7 @@ Feature: Pipelined raft replication and bounded log retention
     Then node "node-1" eventually reports status containing "raft member 'node-3' is not currently visible in gossip"
     Given replication setup attempts toward node "node-3" are observed
     When 40 domains named "paced_majority" are created on the leader node
+    Then within "10s" a replication setup attempt toward node "node-3" is observed
     Then within "60s" node "node-1" has applied 40 domains named "paced_majority"
     And within "60s" node "node-2" has applied 40 domains named "paced_majority"
     And replication setup attempts toward node "node-3" respect the caller retry delay

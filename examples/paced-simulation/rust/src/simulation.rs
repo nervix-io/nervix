@@ -571,19 +571,21 @@ impl Planner {
             let Some(window) = self.clock.window(self.generation) else {
                 continue;
             };
-            planned = number;
             let next = tick
                 .checked_add(1)
                 .assured("a tick center past 2^64 periods is unrepresentable and ended the loop");
-            if self.settings.timestamps == TimestampSource::At && !window.contains(center) {
-                // Domain time does not wait for a slow application: a tick center the window no
-                // longer retains would only be rejected.
+            if self.settings.timestamps == TimestampSource::At
+                && (center < window.earliest_center() || !window.contains(center))
+            {
+                // The planned tick needs its own retained center. Skew around the next
+                // center can still admit an event stamped at an expired tick.
                 report::line(format!(
                     "SKIPPED tick={tick} reason=behind_admission_window"
                 ));
                 tick = next;
                 continue;
             }
+            planned = number;
             report::line(format!(
                 "SUBMIT tick={tick} occurred_at={} window={}..{}",
                 center.to_rfc3339(),
@@ -798,6 +800,7 @@ impl Planner {
                 counters: self.counters.clone(),
                 credit: self.credit.clone(),
                 awaited_effects: self.awaited_effects.clone(),
+                effects: self.effects.clone(),
             },
         ));
         self.outcomes.push(task);
@@ -1048,6 +1051,7 @@ struct Awaiting {
     counters: Arc<Counters>,
     credit: Arc<Credit>,
     awaited_effects: Arc<SyncMutex<Vec<String>>>,
+    effects: Arc<Mutex<EffectStore>>,
 }
 
 /// Awaits one submission's terminal outcome, records it in the ledger and reports it.
@@ -1066,10 +1070,8 @@ async fn await_outcome(submission: Submission, awaiting: Awaiting) {
     awaiting.credit.release(bytes);
     let (kind, cause) = outcome_of(&outcome);
     if kind == OutcomeKind::Completed {
-        awaiting
-            .awaited_effects
-            .lock()
-            .extend(reading_ids.iter().cloned());
+        let pending = awaiting.effects.lock().await.pending_effects(&reading_ids);
+        awaiting.awaited_effects.lock().extend(pending);
     }
     let count = u64::try_from(reading_ids.len()).assured("a batch's row count fits u64");
     if let Err(error) = awaiting.ledger.outcome(reading_ids, kind, cause).await {

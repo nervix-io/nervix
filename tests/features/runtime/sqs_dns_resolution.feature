@@ -272,6 +272,10 @@ Feature: SQS name resolution
     Examples:
       | cluster_size | answer         |
       | 1            | name not found |
-      | 3            | name not found |
       | 1            | silence        |
       | 3            | silence        |
+
+    @slots_3
+    Examples:
+      | cluster_size | answer         |
+      | 3            | name not found |

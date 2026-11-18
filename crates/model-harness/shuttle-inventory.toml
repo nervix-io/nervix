@@ -257,6 +257,7 @@ checks = [
   "runtime::relay_boundary::branch_presence_shuttle_tests::shuttle_capacity_and_expiry_publish_whole_memberships",
   "runtime::relay_boundary::shuttle_tests::shuttle_a_detached_consumer_joins_during_attached_backpressure",
   "runtime::relay_boundary::shuttle_tests::shuttle_a_partition_handoff_fences_its_delivery_and_materialized_reads_while_its_sibling_flows",
+  "runtime::relay_boundary::shuttle_tests::shuttle_a_routed_batch_is_counted_before_its_admission_is_reported",
   "runtime::relay_boundary::shuttle_tests::shuttle_a_routed_batch_racing_a_joining_consumer_reserves_a_share_for_every_delivery",
   "runtime::relay_boundary::shuttle_tests::shuttle_emitter_instances_receive_only_their_partitions_while_a_sibling_moves",
   "runtime::relay_boundary::shuttle_tests::shuttle_owner_fanout_fails_its_ack_while_an_attached_consumer_moves",

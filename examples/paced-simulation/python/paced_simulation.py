@@ -500,6 +500,16 @@ class EffectStore:
             self.condition.notify_all()
             return True
 
+    def pending_effects(self, reading_ids: list[str]) -> list[str]:
+        """Completed readings without an observed effect still await their rejection notice.
+
+        A normal reading effect precedes its acknowledgement; an error route acknowledges the
+        publication of a notice before the rejection consumer necessarily receives it.
+        """
+        with self.condition:
+            return [reading_id for reading_id in reading_ids
+                    if reading_id not in self.readings and reading_id not in self.rejections]
+
     def await_effects(self, reading_ids: list[str], until: float,
                       stopping: Callable[[], bool]) -> int:
         """Waits for either effect of every completed reading and returns the count still missing
@@ -1303,11 +1313,13 @@ class Run:
                 window = Window.at(clock, time.time_ns()) if clock is not None else None
                 if window is None:
                     continue
-                planned = number
-                if self.settings.timestamps == "at" and not window.contains(center):
+                if self.settings.timestamps == "at" and (
+                    center < window.earliest or not window.contains(center)
+                ):
                     line(f"SKIPPED tick={tick} reason=behind_admission_window")
                     tick += 1
                     continue
+                planned = number
                 line(f"SUBMIT tick={tick} occurred_at={rfc3339(center)} "
                      f"window={rfc3339(window.earliest)}..{rfc3339(window.latest)}")
                 self.send(prepared)
@@ -1424,9 +1436,12 @@ class Run:
         with self.credit:
             producer.outstanding["batches"] -= 1
             producer.outstanding["bytes"] -= size
-            if kind == "completed":
-                self.awaited_effects.extend(reading_ids)
             self.credit.notify_all()
+        if kind == "completed":
+            assert self.effects is not None
+            pending = self.effects.pending_effects(reading_ids)
+            with self.credit:
+                self.awaited_effects.extend(pending)
         assert self.ledger is not None
         try:
             self.ledger.outcome(reading_ids, kind, cause)

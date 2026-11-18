@@ -143,6 +143,18 @@ impl EffectStore {
         self.readings.contains(reading_id) || self.rejections.contains(reading_id)
     }
 
+    /// Completed readings without an observed effect still await their rejection notice.
+    /// A reading effect precedes its ACK; an error route ACKs publication before delivery.
+    pub(crate) fn pending_effects(&self, reading_ids: &[String]) -> Vec<String> {
+        reading_ids
+            .iter()
+            .filter(|reading_id| {
+                !self.readings.contains(*reading_id) && !self.rejections.contains(*reading_id)
+            })
+            .cloned()
+            .collect()
+    }
+
     /// Applies a delivered reading unless it was applied before.
     pub(crate) async fn reading(
         &mut self,
@@ -281,6 +293,34 @@ mod tests {
             .assured("the store is readable");
         assert_eq!(text.lines().count(), 3);
         assert!(text.contains("\"occurred_at\":\"1970-01-01T00:00:00.000000400Z\""));
+    }
+
+    #[nervix_primitives::test]
+    async fn completed_readings_retain_only_effects_not_observed_in_the_store() {
+        let directory = tempfile::tempdir().assured("a test can create a directory");
+        let path = directory.path().join("effects.jsonl");
+        let mut store = EffectStore::open(&path).await.assured("the store opens");
+        store
+            .reading(&observed("applied"), 1)
+            .await
+            .assured("the reading is recorded");
+        store
+            .rejection(
+                &RejectionNotice {
+                    reading_id: "noticed".to_string(),
+                    occurred_at: Timestamp::from_unix_nanos(400),
+                    error_code: "validation".to_string(),
+                    error_message: "outside any reached logical tick window".to_string(),
+                },
+                1,
+            )
+            .await
+            .assured("the rejection is recorded");
+        let readings = ["late", "applied", "noticed"].map(str::to_string);
+        assert_eq!(store.pending_effects(&readings), ["late"]);
+        drop(store);
+        let reopened = EffectStore::open(&path).await.assured("the store reopens");
+        assert_eq!(reopened.pending_effects(&readings), ["late"]);
     }
 
     #[nervix_primitives::test]

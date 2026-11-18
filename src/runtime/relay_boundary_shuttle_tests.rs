@@ -20,6 +20,63 @@ use super::*;
 use crate::runtime_ack::AckOutcome;
 
 #[test]
+fn shuttle_a_routed_batch_is_counted_before_its_admission_is_reported() {
+    check_dfs(
+        || {
+            shuttle::future::block_on(async {
+                let services = test_relay_boundary_services();
+                let mut consumer = services.add_local_runtime_consumer(AckMode::Attached);
+                let (root, completion) = AckSet::root();
+                let mut batch = quiesce_test_batch();
+                batch.acks = vec![root];
+                let (admitted_tx, admitted_rx) = oneshot::channel();
+                let (release_tx, release_rx) = oneshot::channel();
+                let receiving = services.clone();
+                let routing = nervix_primitives::task::spawn(async move {
+                    let dispatch = receiving.inject_remote_message(Unit::SINGLE, &batch);
+                    admitted_tx.send(()).expect("the drain observes admission");
+                    release_rx
+                        .await
+                        .expect("the admission response is released");
+                    dispatch
+                        .await
+                        .expect("the attached consumer accepts the batch");
+                    batch.ack_success();
+                });
+
+                admitted_rx.await.expect("the receiver reports admission");
+                assert_eq!(
+                    services.fanout.transit().held(),
+                    1,
+                    "a drain sees the admitted batch before its dispatch future is polled"
+                );
+                release_tx
+                    .send(())
+                    .expect("the receiver awaits the response");
+                routing.await.expect("routing finishes");
+                assert_eq!(services.fanout.transit().held(), 0);
+                let mut completion = std::pin::pin!(completion.wait());
+                assert!(futures_util::poll!(&mut completion).is_pending());
+                consumer
+                    .recv()
+                    .await
+                    .expect("the consumer receives the batch")
+                    .ack_success();
+                assert_eq!(completion.await, AckOutcome::Ack);
+                services.remove_local_runtime_consumer(AckMode::Attached);
+
+                let batch = quiesce_test_batch();
+                let cancelled = services.inject_remote_message(Unit::SINGLE, &batch);
+                assert_eq!(services.fanout.transit().held(), 1);
+                drop(cancelled);
+                assert_eq!(services.fanout.transit().held(), 0);
+            });
+        },
+        Some(128),
+    );
+}
+
+#[test]
 fn shuttle_a_detached_consumer_joins_during_attached_backpressure() {
     check_dfs(
         || {
