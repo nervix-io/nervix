@@ -7949,6 +7949,7 @@ dependencies = [
  "nervix-bounded-write",
  "nervix-crypto",
  "nervix-licensing-vocabulary",
+ "nervix-primitives",
  "serde",
  "serde_json",
  "thiserror 2.0.21",

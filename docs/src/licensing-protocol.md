@@ -103,12 +103,15 @@ root; a root a succession carries into the next epoch may name either. It reache
 grants nothing and is no trust document: a trust state refuses to build from one, and the trust
 documents a holder stores never include it.
 
-`PRODUCTION_TRUST_BUNDLE` explicitly represents unprovisioned anchors until the production ceremony
-supplies its reviewed output. An empty bundle grants no trust. This crate embeds no artificial
-production roots and exposes no runtime configuration that replaces the server's anchors. The
-launch owner installs actual compile-checked declarations before enabling production activation.
-Test-service roots are explicit engine inputs; their availability in a server belongs to its
-separate testing-only composition seam.
+Every production build embeds the production root ceremony's reviewed output,
+`production_trust_bundle.json`, verbatim as `PRODUCTION_TRUST_BUNDLE`, so it compares byte for byte
+with the ceremony record. It holds root epoch 0, three P-256 roots with a threshold of two, and no
+successions. `EmbeddedTrustBundle::production()` is its typed form, parsed once per process on first
+use and shared by every licensing environment. A later epoch reaches a build either through a
+threshold succession the service publishes or as an embedded succession a new ceremony adds to the
+file. This crate exposes no runtime configuration that replaces the server's anchors. Test-service
+roots are explicit engine inputs; their availability in a server belongs to its separate
+testing-only composition seam.
 
 ## Conditions And Resolution
 
