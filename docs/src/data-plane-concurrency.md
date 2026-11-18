@@ -206,8 +206,9 @@ Each delivery generation owns its mutable rows under one short synchronous guard
 is independent of the other rows. Each side claims unused positions on demand and returns retired
 positions to its own bounded free queue, preserving admission room when delivery positions fill.
 Shutdown seals first claims before closing the queues and visits only positions that were claimed.
-The silence sweep, once per retained delivery’s captured sweep cadence (one second by default), has the same bound: it reads each side's
-first-claim count and takes a guard only for the positions below it, so a node that forwards
+Deliveries with the same captured sweep interval share a clock phase (one second by default).
+At a due tick the silence sweep reads each side's first-claim count and takes a guard only for
+the positions below it, so a node that forwards
 nothing takes none and a sweep's cost follows the positions its deliveries have used, not the
 configured routing capacity (16,384 positions by default). The counts bound the scan and order nothing: a position's
 guard publishes its correlation, and nothing relies on a sweep having observed a claim. A share

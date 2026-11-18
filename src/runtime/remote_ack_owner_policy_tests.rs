@@ -77,6 +77,29 @@ async fn registrations_before_the_next_deadline_do_not_repeat_the_registry_scan(
     );
 }
 
+#[cfg(not(feature = "shuttle"))]
+#[test]
+fn deliveries_sharing_an_interval_keep_one_registry_scan_per_tick() {
+    let owners = RemoteDispatchRegistry::with_capacity(2);
+    let receiver = ClusterNodeName::parse("receiver").assured("valid fixture name");
+    let start = Instant::now();
+    let interval = owners.timing().remote_ack_sweep_interval;
+    let (first, _first_completion) = AckSet::root();
+    owners
+        .register_ack_with_clock(receiver.clone(), first, || start)
+        .assured("first free position");
+    let first_tick = owners.next_sweep.lock().assured("first sweep is armed");
+    let (second, _second_completion) = AckSet::root();
+    let second_arrival = start + first_tick.duration_since(start) / 2;
+    owners
+        .register_ack_with_clock(receiver, second, || second_arrival)
+        .assured("second free position");
+
+    let (_, next) = owners.sweep_acks(Some(first_tick));
+    assert_eq!(next, Some(first_tick + interval));
+    owners.shutdown();
+}
+
 #[cfg(feature = "shuttle")]
 pub(in crate::runtime) fn assert_announced_deadline_covers_retained_records(
     owners: &RemoteDispatchRegistry,

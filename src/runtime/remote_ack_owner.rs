@@ -78,6 +78,7 @@ pub(super) struct RemoteDispatchRegistry {
     executor: Executor,
     timing: ArcSwap<RemoteAckTiming>,
     changed: Notify,
+    sweep_epoch: Instant,
     next_sweep: Mutex<Option<Instant>>,
 }
 
@@ -166,13 +167,28 @@ impl SweepPolicy {
         self.admission_nanos / self.interval_nanos
     }
 }
+
+/// Preserve one sweep phase for an interval across all deliveries that capture it.
+fn sweep_tick_after(epoch: Instant, now: Instant, interval: std::time::Duration) -> Instant {
+    let period = interval.as_nanos();
+    let phase = now.saturating_duration_since(epoch).as_nanos() % period;
+    let until_next = u64::try_from(period - phase)
+        .assured("the remainder of a validated sweep interval fits in u64 nanoseconds");
+    now + std::time::Duration::from_nanos(until_next)
+}
+
 impl DeliveryRows {
     #[cfg_attr(
         nervix_lint,
         nervix::dispatch(reason = "the caller supplies one immediate monotonic clock read for \
                                    the captured cohort deadline")
     )]
-    fn new(capacity: usize, timing: RemoteAckTiming, now: impl FnOnce() -> Instant) -> Self {
+    fn new(
+        capacity: usize,
+        timing: RemoteAckTiming,
+        epoch: Instant,
+        now: impl FnOnce() -> Instant,
+    ) -> Self {
         let mut rows = Vec::with_capacity(
             capacity
                 .checked_add(1)
@@ -180,7 +196,7 @@ impl DeliveryRows {
         );
         rows.push(DeliveryRow::Policy {
             timing: SweepPolicy::new(timing),
-            next: now() + timing.remote_ack_sweep_interval,
+            next: sweep_tick_after(epoch, now(), timing.remote_ack_sweep_interval),
         });
         Self(rows)
     }
@@ -339,6 +355,7 @@ impl RemoteDispatchRegistry {
             delivery_capacity: capacity,
             timing: ArcSwap::from_pointee(RemoteAckTiming::default()),
             changed: Notify::new(),
+            sweep_epoch: Instant::now(),
             next_sweep: Mutex::new(None),
             executor,
         }
@@ -554,7 +571,7 @@ impl RemoteDispatchRegistry {
         now: impl FnOnce() -> Instant,
     ) -> error_stack::Result<Vec<Option<u64>>, RemoteDispatchError> {
         let remaining = acks.iter().filter(|acks| !acks.is_empty()).count();
-        let mut rows = DeliveryRows::new(acks.len(), timing, now);
+        let mut rows = DeliveryRows::new(acks.len(), timing, self.sweep_epoch, now);
         let mut registrations = Vec::with_capacity(acks.len());
         for (row, acks) in acks.into_iter().enumerate() {
             if acks.is_empty() {
@@ -586,7 +603,11 @@ impl RemoteDispatchRegistry {
     ) -> error_stack::Result<(u64, watch::Receiver<RelayAdmissionUpdate>), RemoteDispatchError>
     {
         let (sender, receiver) = watch::channel(RelayAdmissionUpdate::Pending);
-        let next_sweep = Instant::now() + self.timing().remote_ack_sweep_interval;
+        let next_sweep = sweep_tick_after(
+            self.sweep_epoch,
+            Instant::now(),
+            self.timing().remote_ack_sweep_interval,
+        );
         let id = self.register(RemoteCorrelationState::Admission(sender))?;
         SilenceSweeps::watching(&self.changed, &self.next_sweep).announce(next_sweep);
         Ok((id, receiver))
@@ -831,8 +852,8 @@ impl RemoteDispatchRegistry {
         failed
     }
 
-    /// Count at most one sweep per delivery, even when its timer runs late. Each delivery keeps
-    /// the cadence and report window captured when it registered; a policy update cannot mix them.
+    /// Count at most one sweep per delivery, even when its timer runs late. Deliveries sharing
+    /// an interval use the same phase, and each keeps the report window it captured.
     #[cfg_attr(
         nervix_lint,
         nervix::dispatch(reason = "the delivery owns the bounded row iterator; each step only \
@@ -870,7 +891,7 @@ impl RemoteDispatchRegistry {
                             });
                             continue;
                         }
-                        *delivery_next = now + timing.interval();
+                        *delivery_next = sweep_tick_after(self.sweep_epoch, now, timing.interval());
                     }
                     let delivery_next = *delivery_next;
                     for row in records.rows.iter_mut() {
@@ -901,7 +922,7 @@ impl RemoteDispatchRegistry {
                         true
                     } else {
                         if let Some(now) = now {
-                            let next = now + admission_interval;
+                            let next = sweep_tick_after(self.sweep_epoch, now, admission_interval);
                             next_sweep = Some(match next_sweep {
                                 Some(prior) => prior.min(next),
                                 None => next,
