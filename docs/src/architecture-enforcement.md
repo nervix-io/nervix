@@ -263,7 +263,7 @@ representations and every generated location in ordinary and sanitizer execution
 ## Host Memory Admission
 
 An analysis compilation needs about the memory of rustc's own check of its target, and the server
-library's dwarfs every other. Its diagnostic analysis reaches about 21.62 GiB, while other crates
+library's dwarfs every other. Its diagnostic analysis reaches about 21.72 GiB, while other crates
 stay below the 4 GiB threshold. Its 24 GiB reservation covers the measured peak with room for
 variation between builds. Every configuration builds in a directory of its own, and up to four
 configurations analyze at once, a

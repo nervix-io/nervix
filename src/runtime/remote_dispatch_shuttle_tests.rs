@@ -17,7 +17,7 @@ use futures_util::FutureExt as _;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_model_harness::shuttle::check_interleavings;
 use nervix_models::ClusterNodeName;
-use nervix_primitives::{sync::Arc, thread};
+use nervix_primitives::{sync::Arc, thread, time::Instant};
 
 use crate::{
     runtime::{
@@ -35,7 +35,7 @@ fn shuttle_a_new_registrar_keeps_its_terminal_ack_while_its_live_view_publicatio
     use nervix_models::{
         ClusterNodeIdentity, ClusterNodeIncarnation, RemoteAckOutcome, RemoteAckRegistration,
     };
-    use nervix_primitives::{publication::ArcSwapOption, sync::StdArc, time::Instant};
+    use nervix_primitives::{publication::ArcSwapOption, sync::StdArc};
 
     use super::{RemoteAckWatch, RemoteAckWatchReport};
 
@@ -58,11 +58,20 @@ fn shuttle_a_new_registrar_keeps_its_terminal_ack_while_its_live_view_publicatio
                     ack_id: 1,
                     registrar: ClusterNodeIdentity::new(receiver(), current),
                 };
-                let mut watch = RemoteAckWatch::new(completion, registration);
+                let mut watch = RemoteAckWatch::new(
+                    completion,
+                    registration,
+                    nervix_models::RemoteAckTiming::default(),
+                );
                 let live = reading.load().as_deref().copied();
                 assert!(
                     matches!(
-                        watch.next_report(Some(progress), live, Instant::now()),
+                        watch.next_report(
+                            nervix_models::RemoteAckTiming::default(),
+                            Some(progress),
+                            live,
+                            Instant::now()
+                        ),
                         RemoteAckWatchReport::Send(RemoteAckOutcome::Ack)
                     ),
                     "a delayed preceding incarnation never retires the admitted registrar's \
@@ -377,5 +386,76 @@ fn shuttle_a_departed_admission_waiter_racing_its_reply_returns_one_position() {
         assert!(registry.holds_ack(current));
         assert!(registry.resolve_ack(current, AckOutcome::Ack));
         assert!(matches!(*updates.borrow(), RelayAdmissionUpdate::Admitted));
+    });
+}
+
+#[test]
+fn shuttle_retained_deliveries_keep_their_policy_and_late_sweeps_skip_missed_ticks() {
+    check_interleavings(|| {
+        crate::runtime::remote_ack_owner::policy_tests::policy_epochs();
+        let registry = Arc::new(RemoteDispatchRegistry::with_capacity(1));
+        let captured = registry.timing();
+        let bound = captured.remote_ack_silence_timeout.as_nanos()
+            / captured.remote_ack_sweep_interval.as_nanos();
+        let (acks, completion) = AckSet::root();
+        let id = registry
+            .register_ack(receiver(), acks)
+            .assured("the position is free");
+        registry.admit_ack(id);
+        let changing = registry.clone();
+        let update = thread::spawn(move || {
+            let mut later = captured;
+            later.remote_ack_silence_timeout *= 2;
+            later.remote_ack_dispatch_timeout *= 2;
+            later.validate().assured("the later revision is coherent");
+            changing.install_timing(later);
+        });
+        let sweeping = registry.clone();
+        let sweep = thread::spawn(move || {
+            for _ in 0..=bound {
+                sweeping.fail_silent_acks();
+            }
+        });
+        update.join().assured(JOINED);
+        sweep.join().assured(JOINED);
+        assert!(
+            matches!(completion.wait().now_or_never(), Some(AckOutcome::NoAck(_))),
+            "a racing longer policy cannot extend the retained cohort's silence bound"
+        );
+        assert!(!registry.holds_ack(id));
+        registry.shutdown();
+    });
+}
+
+#[test]
+fn shuttle_registration_deadlines_survive_a_racing_sweep() {
+    check_interleavings(|| {
+        let registry = Arc::new(RemoteDispatchRegistry::with_capacity(2));
+        let start = Instant::now();
+        let (prior, _prior_completion) = AckSet::root();
+        let prior = registry
+            .register_ack_with_clock(receiver(), prior, || start)
+            .assured("first free position");
+        let mut faster = registry.timing();
+        faster.remote_ack_sweep_interval = std::time::Duration::from_millis(1);
+        faster.validate().assured("coherent shorter sweep");
+        registry.install_timing(faster);
+        let (arriving, _arriving_completion) = AckSet::root();
+        let registering = registry.clone();
+        let registration = thread::spawn(move || {
+            registering
+                .register_ack_with_clock(receiver(), arriving, move || start)
+                .assured("second free position")
+        });
+        let sweeping = registry.clone();
+        let sweep = thread::spawn(move || {
+            sweeping.fail_silent_acks();
+        });
+        let arriving = registration.join().assured(JOINED);
+        sweep.join().assured(JOINED);
+        assert!(registry.holds_ack(prior));
+        assert!(registry.holds_ack(arriving));
+        crate::runtime::remote_ack_owner::policy_tests::assert_announced_deadline_covers_retained_records(&registry);
+        registry.shutdown();
     });
 }

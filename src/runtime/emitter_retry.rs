@@ -21,7 +21,7 @@ use nervix_connector::{
 
 use super::*;
 
-pub(super) const RETRY_ACK_ALIVE_EACH: Duration = Duration::from_millis(100);
+pub(super) const RETRY_ACK_ALIVE_EACH: Duration = nervix_models::RemoteAckAliveInterval::DEFAULT;
 
 /// One physical beat for buffered or connector-staged work. It retains no ACK handles and
 /// admits each input's obligations once, so hot input neither postpones the beat nor repeatedly

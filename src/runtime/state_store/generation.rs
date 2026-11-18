@@ -22,18 +22,85 @@ use super::*;
 /// Caller-owned chunk buffers, placement encoding and a bounded deletion batch fit in this
 /// reservation, independent of checkpoint length and count. Fjall's internal reads, caches,
 /// memtables and snapshot retention have separate allocation ownership.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "persisted checkpoint segments have a sixty-four-KiB layout"
+    )
+)]
 pub(crate) const RESTORE_STATE_CHUNK_BYTES: usize = 64 * 1024;
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "restore admission reserves the bounded segment and database copies"
+    )
+)]
 const CHUNK_AND_DATABASE_COPIES: u64 = 512 * 1024;
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "restore admission reserves placement and checkpoint header encoding"
+    )
+)]
 const PLACEMENT_AND_HEADER_ENCODING: u64 = 512 * 1024;
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "restore admission reserves one bounded deletion batch and its copies"
+    )
+)]
 const DELETION_BATCH_AND_COPIES: u64 = 512 * 1024;
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "restore admission reserves bounded storage allocation overhead"
+    )
+)]
 const STORAGE_ALLOCATION_OVERHEAD: u64 = 512 * 1024;
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "restore admission includes every declared working reservation once"
+    )
+)]
 pub(crate) const RESTORE_STATE_WORKING_BYTES: u64 = CHUNK_AND_DATABASE_COPIES
     + PLACEMENT_AND_HEADER_ENCODING
     + DELETION_BATCH_AND_COPIES
     + STORAGE_ALLOCATION_OVERHEAD;
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "deletion batches follow the persisted checkpoint segment size"
+    )
+)]
 const DELETE_BATCH_BYTES: usize = RESTORE_STATE_CHUNK_BYTES;
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "encoded placement leaves room for chunk coordinates in the storage key"
+    )
+)]
 const MAX_PLACEMENT_BYTES: usize = 60 * 1024;
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(fixed, reason = "Fjall keys use an unsigned sixteen-bit length")
+)]
 const MAX_STORAGE_KEY_BYTES: usize = (1_usize << u16::BITS) - 1;
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "stored chunk coordinates contain two u64 words and two separators"
+    )
+)]
 pub(super) const CHUNK_COORDINATE_BYTES: usize = 2 * std::mem::size_of::<u64>() + 2;
 const _: () = assert!(MAX_PLACEMENT_BYTES + CHUNK_COORDINATE_BYTES <= MAX_STORAGE_KEY_BYTES);
 const _: () = assert!(StoredCheckpoint::SEGMENTED_BYTES <= RESTORE_STATE_CHUNK_BYTES);

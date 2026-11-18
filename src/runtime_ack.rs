@@ -240,8 +240,24 @@ impl AckHandoffRemoval {
 
 impl AckHandoffTracking {
     /// The word this encoding reserves for [`AckHandoffState::Complete`].
+    #[cfg_attr(
+        nervix_lint,
+        nervix::constant(
+            fixed,
+            reason = "the packed acknowledgement handoff word reserves its maximum value for \
+                      terminal state"
+        )
+    )]
     const COMPLETE: usize = usize::MAX;
     /// The greatest active-share count this encoding holds, directly below the reserved word.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::constant(
+            fixed,
+            reason = "active acknowledgement shares occupy only values below the terminal handoff \
+                      sentinel"
+        )
+    )]
     const MAX_ACTIVE_SHARES: usize = Self::COMPLETE - 1;
 
     fn tracking(active_shares: usize) -> Self {

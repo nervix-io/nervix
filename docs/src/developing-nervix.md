@@ -19,21 +19,22 @@ wheel, Ruby gem and JVM jar to their shared Rust runtime and ownership contracts
 contract of their language-level suites and [guides](client-libraries.md). The toolchains and
 preparation commands for those native artifacts and suites are listed below.
 
-Nervix is developed on Linux x86_64, Linux aarch64, and macOS arm64. The `just` recipes fetch an
+Nervix is developed on Linux x86_64, Linux aarch64, and macOS arm64. The `just` recipes install an
 ONNX Runtime build for the host and stop on any other.
 
-The server uses `ort` 2.0.0-rc.15 with C API level 28. The downloader pins
-ONNX Runtime 1.30.0 and installs it under `.nervix-deps/onnxruntime`. Download the CPU package or,
-on Linux x86_64, the CUDA 13 package:
+The server uses `ort` 2.0.0-rc.15 with C API level 28. The installer pins ONNX Runtime 1.30.0
+under `.nervix-deps/onnxruntime`. Linux CPU packages come from `scripts/vendor/onnxruntime` in the
+checkout. The installer fetches the macOS CPU and Linux CUDA 13 packages from Microsoft. Install
+the CPU package or, on Linux x86_64, the CUDA 13 package:
 
 ```bash
 just download-onnxruntime
 just download-onnxruntime gpu_cuda13
 ```
 
-The optional second argument selects an upstream platform: `host` (the default), `linux-x64`,
+The optional second argument selects `host` (the default), `linux-x64`,
 `linux-aarch64`, or `osx-arm64`. For example, `just download-onnxruntime cpu linux-aarch64`
-downloads for Linux ARM64 from another supported development host. CUDA packages are available
+installs the Linux ARM64 package from another supported development host. CUDA packages are available
 only for `linux-x64`. Version and destination are fixed; update the runtime pin together with the
 selected `ort` API level.
 
@@ -165,16 +166,16 @@ is the `KACHE_VERSION` that CI's kache-backed jobs install, which the recipes pa
 select them with `--target cpu` and `--target cuda`, respectively. Both targets copy the same
 binaries and Sonic bundle from the shared `builder` stage using `COPY --link`, so those artifact
 layers are shared across the images. Each target has its own runtime base and ONNX Runtime
-download stage; building the CPU target requires only the CPU stages.
+installation stage. The CPU stage reads the vendored archive for its target architecture.
 
-Both images pin their builder, downloader, and runtime base to `debian:trixie-20260918-slim`,
+Both images pin their builder, ONNX Runtime installer, and runtime base to `debian:trixie-20260918-slim`,
 with its multi-platform digest fixed in `Dockerfile.debian`. The Debian image contains the CPU
 runtime and supports AMD64 and ARM64. The CUDA image is AMD64 only. It installs pinned CUDA
 13.2.2 and cuDNN 9.25.1 packages from NVIDIA's Debian 13 repository in one filesystem layer
 directly above the Debian base. The next layer runs `apt-get update` and `apt-get upgrade` before
 installing Nervix's dependencies. CUDA packages are held at their pinned versions during that
 upgrade. Nervix's user, ONNX Runtime libraries, and binaries follow, so application changes reuse
-the large CUDA layer. Both images obtain ONNX Runtime through the same pinned downloader.
+the large CUDA layer. Both images use the same pinned installer.
 
 The CPU layer order is Debian → Debian updates → Nervix; the GPU layer order is
 Debian → CUDA/cuDNN → Debian updates → Nervix. The CUDA layer is built by Nervix and reused
@@ -1248,8 +1249,8 @@ request without the label still checks the book's structure and its tooling.
 
 ### Credential Storage Release Note
 
-This revision requires the current `raft_entity_labels_inherited_topology_ratelimit_*` consensus namespace and `ClusterState`
-encoding 40. A stored state with a different namespace or encoding fails with
+This revision requires the current `raft_runtime_entity_labels_inherited_topology_ratelimit_*` consensus namespace and `ClusterState`
+encoding 41. A stored state with a different namespace or encoding fails with
 `invalid consensus record storage; recreate the node's stored state` before user records or log
 entries are decoded. Recreate the node's stored state; no credential conversion is performed.
 User backup records require version 2 and contain the complete typed credential. A users record

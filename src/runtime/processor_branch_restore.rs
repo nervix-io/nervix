@@ -56,7 +56,11 @@ struct RestoredProcessorBranch {
 impl PendingProcessorBranchRestore {
     /// The restore a new processor task performs first: the branches its previous task handed
     /// over, or the branches its lifecycle checkpoint names when there are none.
-    pub(super) fn new(handoffs: Vec<ProcessorBranchHandoff>) -> Self {
+    pub(super) fn new(
+        handoffs: Vec<ProcessorBranchHandoff>,
+        settings: nervix_models::DataPlaneSettings,
+        retry: nervix_connector::RetryBackoffSettings,
+    ) -> Self {
         let source = if handoffs.is_empty() {
             ProcessorBranchRestoreSource::Lifecycle
         } else {
@@ -64,7 +68,7 @@ impl PendingProcessorBranchRestore {
         };
         Self {
             source,
-            backoff: RuntimeReconnectBackoff::default(),
+            backoff: RuntimeReconnectBackoff::from_settings(settings, retry),
             retry_at: Instant::now(),
         }
     }

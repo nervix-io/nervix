@@ -37,6 +37,7 @@ fn held(start: Instant) -> RelaySendAttempts {
         start,
         after(start, REMOTE_RELAY_TOTAL_TIMEOUT),
         GrantCapacityRefusals::Hold,
+        nervix_models::RemoteAckTiming::default(),
     )
 }
 
@@ -86,7 +87,8 @@ fn a_capacity_refusal_holds_the_delivery_and_gives_its_next_ask_the_whole_stall_
 fn a_held_delivery_waits_twice_as_long_after_each_refusal_up_to_half_the_stall_bound() {
     let start = Instant::now();
     let mut attempts = held(start);
-    let ceiling = RelaySendAttempts::capacity_wait_ceiling();
+    let ceiling =
+        RelaySendAttempts::capacity_wait_ceiling(nervix_models::RemoteAckTiming::default());
     assert_eq!(ceiling, STALL / 2);
 
     let expected = [25, 50, 100, 200, 400, 800, 1600, 2500, 2500, 2500].map(Duration::from_millis);
@@ -125,7 +127,12 @@ fn a_permanent_refusal_ends_the_delivery_at_once() {
 fn a_held_delivery_asks_once_more_at_its_admission_bound_and_then_ends() {
     let start = Instant::now();
     let bound = after(start, Duration::from_secs(10));
-    let mut attempts = RelaySendAttempts::new(start, bound, GrantCapacityRefusals::Hold);
+    let mut attempts = RelaySendAttempts::new(
+        start,
+        bound,
+        GrantCapacityRefusals::Hold,
+        nervix_models::RemoteAckTiming::default(),
+    );
 
     let mut now = start;
     loop {
@@ -197,6 +204,7 @@ fn a_delivery_that_gives_capacity_refusals_up_retries_them_only_within_the_stall
         start,
         after(start, REMOTE_RELAY_TOTAL_TIMEOUT),
         GrantCapacityRefusals::GiveUp,
+        nervix_models::RemoteAckTiming::default(),
     );
 
     let early = after(start, Duration::from_secs(1));
@@ -233,7 +241,12 @@ fn an_attempt_still_running_at_its_deadline_times_out_or_ends_at_the_admission_b
     );
 
     let bound = after(start, Duration::from_secs(1));
-    let attempts = RelaySendAttempts::new(start, bound, GrantCapacityRefusals::Hold);
+    let attempts = RelaySendAttempts::new(
+        start,
+        bound,
+        GrantCapacityRefusals::Hold,
+        nervix_models::RemoteAckTiming::default(),
+    );
     assert_eq!(attempts.attempt_deadline(), bound);
     assert_eq!(
         attempts.after_attempt_deadline(bound),
@@ -245,26 +258,28 @@ fn an_attempt_still_running_at_its_deadline_times_out_or_ends_at_the_admission_b
 fn each_end_names_its_dispatch_failure() {
     let target = ClusterNodeName::parse("node-2").assured("the fixture node name is valid");
     assert_eq!(
-        RelaySendEnd::Refused(RelayGrantRefusal::OutOfOrder).dispatch_error(&target),
+        RelaySendEnd::Refused(RelayGrantRefusal::OutOfOrder)
+            .dispatch_error(&target, nervix_models::RemoteAckTiming::default()),
         RemoteDispatchError::GrantRefused {
             target: target.clone(),
             refusal: RelayGrantRefusal::OutOfOrder,
         }
     );
     assert_eq!(
-        RelaySendEnd::Stalled.dispatch_error(&target),
+        RelaySendEnd::Stalled.dispatch_error(&target, nervix_models::RemoteAckTiming::default()),
         RemoteDispatchError::Send {
             target: target.clone()
         }
     );
     assert_eq!(
-        RelaySendEnd::TimedOut.dispatch_error(&target),
+        RelaySendEnd::TimedOut.dispatch_error(&target, nervix_models::RemoteAckTiming::default()),
         RemoteDispatchError::SendTimeout {
             target: target.clone()
         }
     );
     assert_eq!(
-        RelaySendEnd::AdmissionBound.dispatch_error(&target),
+        RelaySendEnd::AdmissionBound
+            .dispatch_error(&target, nervix_models::RemoteAckTiming::default()),
         RemoteDispatchError::AdmissionTotalTimeout {
             target,
             timeout: REMOTE_RELAY_TOTAL_TIMEOUT,

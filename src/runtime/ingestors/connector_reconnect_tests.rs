@@ -372,6 +372,7 @@ pub(super) fn sequential_policy(position_class: PositionClass) -> BrokerIngestor
             retry,
         },
         position_class,
+        nervix_models::DataPlaneSettings::default(),
     )
 }
 
@@ -542,9 +543,17 @@ async fn successful_upgrades_keep_read_failure_backoff_until_a_batch_is_delivere
 
 #[test]
 fn a_broker_ingestor_without_a_retry_policy_reopens_on_the_reconnect_cadence() {
-    let unacknowledged =
-        BrokerIngestorPolicy::new(IngestorAckPolicy::None, PositionClass::Replayable);
-    assert_eq!(unacknowledged.retry, INGESTOR_RECONNECT_POLICY);
+    let unacknowledged = BrokerIngestorPolicy::new(
+        IngestorAckPolicy::None,
+        PositionClass::Replayable,
+        nervix_models::DataPlaneSettings::default(),
+    );
+    assert_eq!(
+        unacknowledged.retry,
+        crate::runtime::reconnect_backoff::reconnect_policy(
+            nervix_models::DataPlaneSettings::default()
+        )
+    );
 
     let declared = ParsedRetryPolicy {
         backoff: Duration::from_millis(1),
@@ -556,6 +565,7 @@ fn a_broker_ingestor_without_a_retry_policy_reopens_on_the_reconnect_cadence() {
             retry: declared,
         },
         PositionClass::Replayable,
+        nervix_models::DataPlaneSettings::default(),
     );
     assert_eq!(acknowledged.retry, declared);
 }

@@ -32,7 +32,7 @@ while [[ "$#" -gt 0 ]]; do
     esac
 done
 
-# Docker downloads for its target while running on the build host. Local recipes select the
+# Docker installs for its target while running on the build host. Local recipes select the
 # whole host platform, using upstream's architecture spellings for each operating system.
 if [[ "${platform}" == "host" ]]; then
     case "$(uname -s)/$(uname -m)" in
@@ -77,21 +77,29 @@ if [[ -f "${dylib_path}" ]]; then
 fi
 
 archive="${package}.tgz"
-url="https://github.com/microsoft/onnxruntime/releases/download/v${version}/${archive}"
-tmp_dir="$(mktemp -d)"
-trap 'rm -rf "${tmp_dir}"' EXIT
-
-mkdir -p "${root}"
-echo "downloading ONNX Runtime ${version} for ${platform}/${flavor}" >&2
-if ! curl -L --proto '=https' --tlsv1.2 -sSf "${url}" -o "${tmp_dir}/${archive}"; then
-    echo "failed to download ${url}; check that release v${version} publishes ${archive}" >&2
-    exit 1
+if [[ "${platform}/${flavor}" == linux-*/cpu ]]; then
+    archive_path="$(dirname "${BASH_SOURCE[0]}")/vendor/onnxruntime/${archive}"
+    if [[ ! -f "${archive_path}" ]]; then
+        echo "missing vendored ONNX Runtime package: ${archive_path}" >&2
+        exit 1
+    fi
+    echo "installing vendored ONNX Runtime ${version} for ${platform}/${flavor}" >&2
+else
+    tmp_dir="$(mktemp -d)"
+    trap 'rm -rf "${tmp_dir}"' EXIT
+    archive_path="${tmp_dir}/${archive}"
+    url="https://github.com/microsoft/onnxruntime/releases/download/v${version}/${archive}"
+    echo "downloading ONNX Runtime ${version} for ${platform}/${flavor}" >&2
+    if ! curl -L --proto '=https' --tlsv1.2 -sSf "${url}" -o "${archive_path}"; then
+        echo "failed to download ${url}; check that release v${version} publishes ${archive}" >&2
+        exit 1
+    fi
 fi
 mkdir -p "${install_dir}"
-tar -xzf "${tmp_dir}/${archive}" -C "${install_dir}" --strip-components=1
+tar -xzf "${archive_path}" -C "${install_dir}" --strip-components=1
 
 if [[ ! -f "${dylib_path}" ]]; then
-    echo "downloaded ONNX Runtime but did not find ${dylib_path}" >&2
+    echo "ONNX Runtime package ${archive} did not install ${dylib_path}" >&2
     exit 1
 fi
 

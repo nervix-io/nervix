@@ -199,6 +199,7 @@ impl ProcessorWasmStateResetContext<'_> {
                             .live()
                             .verified("the loop skipped every released key before removing it"),
                         ProcessorBranchStopMode::Handoff(response),
+                        runtime.task_stop_grace()
                     )
                 )
                 .await;
@@ -408,7 +409,7 @@ impl ProcessorWasmStateResetContext<'_> {
                 }
             })?;
         let branch_lru_deadline = Instant::now()
-            .checked_add(WASM_CHECKPOINT_DEADLINE)
+            .checked_add(runtime.inner.data_plane.wasm_checkpoint_timeout())
             .assured("the configured WASM checkpoint deadline stays within Instant");
         nervix_primitives::expect_lint!(
             nervix::lifecycle_call,

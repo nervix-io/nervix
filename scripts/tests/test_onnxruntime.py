@@ -56,8 +56,6 @@ class OnnxRuntimeDownloadTests(unittest.TestCase):
 
     def test_downloads_target_packages_and_reuses_the_installed_library(self) -> None:
         for platform, flavor, library in (
-            ("linux-x64", "cpu", "libonnxruntime.so"),
-            ("linux-aarch64", "cpu", "libonnxruntime.so"),
             ("osx-arm64", "cpu", "libonnxruntime.dylib"),
             ("linux-x64", "gpu_cuda13", "libonnxruntime.so"),
         ):
@@ -89,6 +87,36 @@ class OnnxRuntimeDownloadTests(unittest.TestCase):
                     self.assertEqual(repeated.returncode, 0, repeated.stderr)
                     self.assertEqual(repeated.stdout, downloaded.stdout)
                     self.assertEqual(self.calls.read_text().splitlines(), calls)
+
+    def test_installs_vendored_linux_cpu_packages_without_curl(self) -> None:
+        for platform, elf_machine in (("linux-x64", 62), ("linux-aarch64", 183)):
+            with self.subTest(platform=platform):
+                selection = ("--platform", platform, "--flavor", "cpu")
+                installed = self.run_download(*selection)
+                self.assertEqual(installed.returncode, 0, installed.stderr)
+                directory = self.work / ".nervix-deps/onnxruntime" / f"onnxruntime-{platform}-1.30.0"
+                library = directory / "lib/libonnxruntime.so"
+                self.assertEqual(Path(installed.stdout.strip()), library)
+                self.assertEqual(library.readlink(), Path("libonnxruntime.so.1"))
+                self.assertEqual(library.resolve().name, "libonnxruntime.so.1.30.0")
+                for binary in (library, directory / "lib/libonnxruntime_providers_shared.so"):
+                    with binary.open("rb") as file:
+                        header = file.read(20)
+                    self.assertEqual(header[:6], b"\x7fELF\x02\x01")
+                    self.assertEqual(int.from_bytes(header[18:20], "little"), elf_machine)
+                for name in (
+                    "LICENSE",
+                    "ThirdPartyNotices.txt",
+                    "include/onnxruntime_c_api.h",
+                    "lib/cmake/onnxruntime/onnxruntimeConfig.cmake",
+                    "lib/pkgconfig/libonnxruntime.pc",
+                ):
+                    self.assertTrue((directory / name).is_file(), name)
+                for arguments in ((), ("--print-path",)):
+                    repeated = self.run_download(*selection, *arguments)
+                    self.assertEqual(repeated.returncode, 0, repeated.stderr)
+                    self.assertEqual(repeated.stdout, installed.stdout)
+                self.assertFalse(self.calls.exists())
 
     def test_rejects_unpublished_gpu_platforms_before_downloading(self) -> None:
         for platform in ("linux-aarch64", "osx-arm64"):

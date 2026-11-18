@@ -60,8 +60,8 @@ const INITIAL_MESSAGE_CHARGE: u64 = 4 * 1024;
     )
 )]
 pub const WIRE_CONTRACT: WireContractFingerprint = WireContractFingerprint::from_digest([
-    0xa9, 0xfc, 0xa0, 0x48, 0x01, 0x59, 0xd1, 0xfd, 0xac, 0x08, 0xe6, 0x5f, 0x55, 0xae, 0xe1, 0xb4,
-    0x11, 0xd3, 0x30, 0xbc, 0xff, 0x35, 0x1d, 0x6a, 0x27, 0x13, 0x82, 0x1b, 0xdf, 0x39, 0x08, 0x0a,
+    0x79, 0x0b, 0xd5, 0x26, 0x0a, 0x30, 0xba, 0x9f, 0x3a, 0x90, 0x2c, 0x7b, 0x3e, 0xfa, 0x0a, 0x72,
+    0xa5, 0x45, 0xe6, 0x81, 0x3e, 0xc3, 0x4a, 0x6a, 0x83, 0x73, 0x41, 0x91, 0x4c, 0xce, 0xba, 0x9a,
 ]);
 
 /// The first message of every connection: who dials, for which pool, and everything the dialing
@@ -195,6 +195,7 @@ impl<T> Decoded<T> {
 /// The rkyv metadata admitted before an Arrow relay body stream starts.
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq)]
 pub(crate) struct RelayMetadata {
+    pub(crate) ack_timing: nervix_models::RemoteAckTiming,
     pub(crate) decoded_bytes: u64,
     pub(crate) kind: RelayPayloadKind,
     pub(crate) domain: nervix_models::DomainName,
@@ -209,6 +210,7 @@ pub(crate) struct RelayMetadata {
 impl RelayMetadata {
     pub(crate) fn from_payload(payload: &RelayPayload) -> Self {
         Self {
+            ack_timing: payload.ack_timing,
             decoded_bytes: payload.decoded_bytes,
             kind: payload.kind,
             domain: payload.domain.clone(),
@@ -227,6 +229,7 @@ impl RelayMetadata {
         batch_ipc: ChargedBytes,
     ) -> RelayPayload {
         RelayPayload {
+            ack_timing: self.ack_timing,
             decoded_bytes: self.decoded_bytes,
             delivery,
             kind: self.kind,

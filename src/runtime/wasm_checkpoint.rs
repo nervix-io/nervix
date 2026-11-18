@@ -19,10 +19,6 @@ use nervix_wasm::WasmGuestReportExt as _;
 
 use super::*;
 
-/// How long one checkpoint may take to reach its boundary, from the guest's save to the
-/// confirmation of its last replica. A checkpoint still short of its boundary then fails.
-pub(super) const WASM_CHECKPOINT_DEADLINE: Duration = Duration::from_secs(90);
-
 /// The success acknowledgements guest callbacks decided, held back until the checkpoint that covers
 /// those callbacks reaches its boundary.
 ///
@@ -191,7 +187,7 @@ pub(super) async fn checkpoint_wasm_instance(
     #[cfg(feature = "testing")]
     hold_checkpoint_at(runtime, state, crate::WasmCheckpointWindow::BeforeCapture).await;
     let deadline = Instant::now()
-        .checked_add(WASM_CHECKPOINT_DEADLINE)
+        .checked_add(runtime.inner.data_plane.wasm_checkpoint_timeout())
         .assured("a deadline seconds away stays within Instant");
     let boundary = match runtime.wasm_checkpoint_boundary(state) {
         Ok(boundary) => boundary,

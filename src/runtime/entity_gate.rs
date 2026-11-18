@@ -20,6 +20,21 @@ use nervix_primitives::sync::blocking::Mutex;
 
 use super::*;
 
+/// A task receives one fifteenth of its domain's drain budget to finish teardown. This keeps
+/// the default two-second grace while scaling the grace with the configured drain contract.
+/// Positive drain budgets always give teardown at least one monotonic nanosecond.
+pub(crate) const fn task_stop_grace(drain: Duration) -> Duration {
+    let grace = match drain.checked_div(15) {
+        Some(grace) => grace,
+        None => unreachable!(),
+    };
+    if grace.is_zero() {
+        Duration::from_nanos(1)
+    } else {
+        grace
+    }
+}
+
 /// Includes the grace a branch task receives after its configured drain deadline.
 pub const fn branch_task_stop_timeout(domain_drain_timeout: Duration) -> Duration {
     // Saturation is the meaning: a drain timeout configured near `Duration::MAX` already asks to
@@ -27,12 +42,9 @@ pub const fn branch_task_stop_timeout(domain_drain_timeout: Duration) -> Duratio
     nervix_primitives::expect_lint!(
         nervix::clamped_arithmetic,
         "a drain already at Duration MAX cannot be extended by task grace",
-        domain_drain_timeout.saturating_add(PROCESSOR_BRANCH_TASK_SHUTDOWN_GRACE)
+        domain_drain_timeout.saturating_add(task_stop_grace(domain_drain_timeout))
     )
 }
-
-pub(in crate::runtime) const OWNERSHIP_HANDOFF_FREEZE_RECHECK_INTERVAL: Duration =
-    Duration::from_millis(25);
 
 /// The complete logical scope one coordination operation fenced. A retry must name this exact
 /// scope before it can reuse the completed hold.

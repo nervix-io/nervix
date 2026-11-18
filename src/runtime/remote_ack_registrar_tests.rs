@@ -15,9 +15,17 @@ fn after(start: Instant, elapsed: Duration) -> Instant {
 /// A registrar whose run the watch has seen live, and when it saw it.
 fn seen_live(registrar: ClusterNodeIncarnation) -> (RegistrarPresence, Instant) {
     let start = Instant::now();
-    let mut presence = RegistrarPresence::undiscovered(start);
+    let mut presence = RegistrarPresence::undiscovered(
+        start,
+        nervix_models::RemoteAckTiming::default().remote_relay_instantiation_wait,
+    );
     assert_eq!(
-        presence.look(registrar, Some(registrar), start),
+        presence.look(
+            registrar,
+            Some(registrar),
+            start,
+            RegistrarPresence::missing_grace(),
+        ),
         RegistrarLook::Report
     );
     assert_eq!(presence, RegistrarPresence::Present);
@@ -29,11 +37,19 @@ fn a_registrar_missing_from_one_look_is_held_for_and_reported_to_again_when_it_i
     let registrar = run(7);
     let (mut presence, start) = seen_live(registrar);
     let gap = after(start, Duration::from_millis(100));
-    assert_eq!(presence.look(registrar, None, gap), RegistrarLook::Hold);
+    assert_eq!(
+        presence.look(registrar, None, gap, RegistrarPresence::missing_grace(),),
+        RegistrarLook::Hold
+    );
     assert_eq!(presence, RegistrarPresence::Missing { since: gap });
     let back = after(start, Duration::from_millis(200));
     assert_eq!(
-        presence.look(registrar, Some(registrar), back),
+        presence.look(
+            registrar,
+            Some(registrar),
+            back,
+            RegistrarPresence::missing_grace(),
+        ),
         RegistrarLook::Report
     );
     assert_eq!(presence, RegistrarPresence::Present);
@@ -43,7 +59,10 @@ fn a_registrar_missing_from_one_look_is_held_for_and_reported_to_again_when_it_i
 fn a_registrar_missing_for_its_silence_bound_and_one_sweep_ends_the_watch() {
     let registrar = run(7);
     let (mut presence, start) = seen_live(registrar);
-    assert_eq!(presence.look(registrar, None, start), RegistrarLook::Hold);
+    assert_eq!(
+        presence.look(registrar, None, start, RegistrarPresence::missing_grace(),),
+        RegistrarLook::Hold
+    );
     let grace = RegistrarPresence::missing_grace();
     assert!(
         grace > REMOTE_ACK_SILENCE_TIMEOUT,
@@ -53,11 +72,21 @@ fn a_registrar_missing_for_its_silence_bound_and_one_sweep_ends_the_watch() {
         .checked_sub(Duration::from_millis(1))
         .assured("the grace is seconds long");
     assert_eq!(
-        presence.look(registrar, None, after(start, just_inside)),
+        presence.look(
+            registrar,
+            None,
+            after(start, just_inside),
+            RegistrarPresence::missing_grace(),
+        ),
         RegistrarLook::Hold
     );
     assert_eq!(
-        presence.look(registrar, None, after(start, grace)),
+        presence.look(
+            registrar,
+            None,
+            after(start, grace),
+            RegistrarPresence::missing_grace(),
+        ),
         RegistrarLook::Release
     );
 }
@@ -66,15 +95,28 @@ fn a_registrar_missing_for_its_silence_bound_and_one_sweep_ends_the_watch() {
 fn a_registrar_back_from_a_gap_starts_a_later_gap_afresh() {
     let registrar = run(7);
     let (mut presence, start) = seen_live(registrar);
-    assert_eq!(presence.look(registrar, None, start), RegistrarLook::Hold);
+    assert_eq!(
+        presence.look(registrar, None, start, RegistrarPresence::missing_grace(),),
+        RegistrarLook::Hold
+    );
     let back = after(start, Duration::from_secs(10));
     assert_eq!(
-        presence.look(registrar, Some(registrar), back),
+        presence.look(
+            registrar,
+            Some(registrar),
+            back,
+            RegistrarPresence::missing_grace(),
+        ),
         RegistrarLook::Report
     );
     let second_gap = after(start, Duration::from_secs(12));
     assert_eq!(
-        presence.look(registrar, None, second_gap),
+        presence.look(
+            registrar,
+            None,
+            second_gap,
+            RegistrarPresence::missing_grace(),
+        ),
         RegistrarLook::Hold
     );
     let grace = RegistrarPresence::missing_grace();
@@ -82,11 +124,21 @@ fn a_registrar_back_from_a_gap_starts_a_later_gap_afresh() {
         .checked_sub(Duration::from_millis(1))
         .assured("the grace is seconds long");
     assert_eq!(
-        presence.look(registrar, None, after(second_gap, within_second_grace)),
+        presence.look(
+            registrar,
+            None,
+            after(second_gap, within_second_grace),
+            RegistrarPresence::missing_grace(),
+        ),
         RegistrarLook::Hold
     );
     assert_eq!(
-        presence.look(registrar, None, after(second_gap, grace)),
+        presence.look(
+            registrar,
+            None,
+            after(second_gap, grace),
+            RegistrarPresence::missing_grace(),
+        ),
         RegistrarLook::Release
     );
 }
@@ -96,17 +148,26 @@ fn another_run_of_the_registrar_node_ends_the_watch_at_once() {
     let registrar = run(7);
     let (mut presence, start) = seen_live(registrar);
     assert_eq!(
-        presence.look(registrar, Some(run(8)), start),
+        presence.look(
+            registrar,
+            Some(run(8)),
+            start,
+            RegistrarPresence::missing_grace(),
+        ),
         RegistrarLook::Release
     );
 
     let (mut missing, start) = seen_live(registrar);
-    assert_eq!(missing.look(registrar, None, start), RegistrarLook::Hold);
+    assert_eq!(
+        missing.look(registrar, None, start, RegistrarPresence::missing_grace(),),
+        RegistrarLook::Hold
+    );
     assert_eq!(
         missing.look(
             registrar,
             Some(run(8)),
-            after(start, Duration::from_millis(100))
+            after(start, Duration::from_millis(100)),
+            RegistrarPresence::missing_grace(),
         ),
         RegistrarLook::Release
     );
@@ -116,20 +177,32 @@ fn another_run_of_the_registrar_node_ends_the_watch_at_once() {
 fn an_undiscovered_registrar_is_reported_to_until_its_discovery_deadline() {
     let registrar = run(7);
     let start = Instant::now();
-    let mut presence = RegistrarPresence::undiscovered(start);
-    assert_eq!(presence.look(registrar, None, start), RegistrarLook::Report);
+    let mut presence = RegistrarPresence::undiscovered(
+        start,
+        nervix_models::RemoteAckTiming::default().remote_relay_instantiation_wait,
+    );
+    assert_eq!(
+        presence.look(registrar, None, start, RegistrarPresence::missing_grace(),),
+        RegistrarLook::Report
+    );
     let just_inside = REMOTE_RELAY_INSTANTIATION_WAIT
         .checked_sub(Duration::from_millis(1))
         .assured("the discovery grace is seconds long");
     assert_eq!(
-        presence.look(registrar, None, after(start, just_inside)),
+        presence.look(
+            registrar,
+            None,
+            after(start, just_inside),
+            RegistrarPresence::missing_grace(),
+        ),
         RegistrarLook::Report
     );
     assert_eq!(
         presence.look(
             registrar,
             None,
-            after(start, REMOTE_RELAY_INSTANTIATION_WAIT)
+            after(start, REMOTE_RELAY_INSTANTIATION_WAIT),
+            RegistrarPresence::missing_grace(),
         ),
         RegistrarLook::Release
     );
@@ -139,29 +212,44 @@ fn an_undiscovered_registrar_is_reported_to_until_its_discovery_deadline() {
 fn an_earlier_live_view_keeps_the_new_registrars_existing_discovery_and_missing_bounds() {
     let registrar = run(7);
     let start = Instant::now();
-    let mut discovering = RegistrarPresence::undiscovered(start);
+    let mut discovering = RegistrarPresence::undiscovered(
+        start,
+        nervix_models::RemoteAckTiming::default().remote_relay_instantiation_wait,
+    );
     assert_eq!(
-        discovering.look(registrar, Some(run(6)), start),
+        discovering.look(
+            registrar,
+            Some(run(6)),
+            start,
+            RegistrarPresence::missing_grace(),
+        ),
         RegistrarLook::Report
     );
     assert_eq!(
         discovering.look(
             registrar,
             Some(run(6)),
-            after(start, REMOTE_RELAY_INSTANTIATION_WAIT)
+            after(start, REMOTE_RELAY_INSTANTIATION_WAIT),
+            RegistrarPresence::missing_grace(),
         ),
         RegistrarLook::Release
     );
     let (mut present, start) = seen_live(registrar);
     assert_eq!(
-        present.look(registrar, Some(run(6)), start),
+        present.look(
+            registrar,
+            Some(run(6)),
+            start,
+            RegistrarPresence::missing_grace(),
+        ),
         RegistrarLook::Hold
     );
     assert_eq!(
         present.look(
             registrar,
             Some(registrar),
-            after(start, Duration::from_millis(1))
+            after(start, Duration::from_millis(1)),
+            RegistrarPresence::missing_grace(),
         ),
         RegistrarLook::Report
     );
@@ -169,7 +257,8 @@ fn an_earlier_live_view_keeps_the_new_registrars_existing_discovery_and_missing_
         present.look(
             registrar,
             Some(run(6)),
-            after(start, Duration::from_millis(2))
+            after(start, Duration::from_millis(2)),
+            RegistrarPresence::missing_grace(),
         ),
         RegistrarLook::Hold
     );
@@ -178,7 +267,12 @@ fn an_earlier_live_view_keeps_the_new_registrars_existing_discovery_and_missing_
         RegistrarPresence::missing_grace(),
     );
     assert_eq!(
-        present.look(registrar, Some(run(6)), deadline),
+        present.look(
+            registrar,
+            Some(run(6)),
+            deadline,
+            RegistrarPresence::missing_grace(),
+        ),
         RegistrarLook::Release
     );
 }

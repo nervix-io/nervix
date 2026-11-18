@@ -396,9 +396,6 @@ struct FaultInjectionState {
     listener_accept_failures: watch::Sender<ListenerAcceptFailures>,
     /// One scoped observation, borrowed only when a native session starts.
     session_backpressure: watch::Sender<Option<ArmedSessionBackpressure>>,
-    branch_instance_expiration_scan_interval: RwLock<Option<Duration>>,
-    domain_drain_timeout: RwLock<Option<Duration>>,
-    entity_gate_deadline: RwLock<Option<Duration>>,
     scheduler_mode: RwLock<SchedulerMode>,
     leadership_transfers: broadcast::Sender<LeadershipTransferRequest>,
     wasm_state_reset_coordinators:
@@ -622,9 +619,6 @@ impl Default for FaultInjection {
                 syslog_listener_faults,
                 listener_accept_failures,
                 session_backpressure,
-                branch_instance_expiration_scan_interval: RwLock::new(None),
-                domain_drain_timeout: RwLock::new(None),
-                entity_gate_deadline: RwLock::new(None),
                 scheduler_mode: RwLock::new(SchedulerMode::default()),
                 leadership_transfers,
                 wasm_state_reset_coordinators: DashMap::default(),
@@ -2123,18 +2117,6 @@ impl FaultInjection {
         self.inner.syslog_listener_faults.clone()
     }
 
-    pub fn set_branch_instance_expiration_scan_interval(&self, interval: Duration) {
-        *self.inner.branch_instance_expiration_scan_interval.write() = Some(interval);
-    }
-
-    pub fn set_domain_drain_timeout(&self, timeout: Duration) {
-        *self.inner.domain_drain_timeout.write() = Some(timeout);
-    }
-
-    pub fn set_entity_gate_deadline(&self, deadline: Duration) {
-        *self.inner.entity_gate_deadline.write() = Some(deadline);
-    }
-
     pub fn set_scheduler_mode(&self, mode: SchedulerMode) {
         *self.inner.scheduler_mode.write() = mode;
     }
@@ -2782,15 +2764,6 @@ impl FaultInjection {
         configured
     }
 
-    pub(crate) fn branch_instance_expiration_scan_interval(&self) -> Option<Duration> {
-        *self.inner.branch_instance_expiration_scan_interval.read()
-    }
-
-    #[doc(hidden)]
-    pub fn domain_drain_timeout(&self) -> Option<Duration> {
-        *self.inner.domain_drain_timeout.read()
-    }
-
     pub(crate) fn state_replica_polling_is_paused(&self) -> bool {
         self.inner
             .state_replica_polling_paused
@@ -2819,10 +2792,6 @@ impl FaultInjection {
         self.inner
             .state_replica_installation_failing
             .load(Ordering::Acquire)
-    }
-
-    pub(crate) fn entity_gate_deadline(&self) -> Option<Duration> {
-        *self.inner.entity_gate_deadline.read()
     }
 
     pub(crate) fn scheduler_mode(&self) -> SchedulerMode {

@@ -960,6 +960,7 @@ mod shuttle_checks {
                 &state,
                 StateReplicationRoles::owned_by(None),
                 None,
+                2,
             )
             .originator
             .assured("the local assignment originates");

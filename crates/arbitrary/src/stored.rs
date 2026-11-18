@@ -351,6 +351,8 @@ impl Arbitrary<'_> {
             ),
             identity: self.node_identity(),
             capabilities: nervix_models::NodeCapabilities {
+                runtime: self.node_data_plane_capabilities(),
+                shutdown: nervix_models::ShutdownSettings::default().capabilities(),
                 interconnect,
                 dns,
                 node_database: database,

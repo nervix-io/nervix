@@ -15,7 +15,7 @@
 
 use std::num::NonZeroUsize;
 
-use error_stack::Report;
+use error_stack::{Report, ResultExt as _};
 use meticulous::ResultExt as _;
 use nervix_models::SettingDefinition;
 
@@ -25,7 +25,7 @@ use crate::{
     runtime::{
         RestoreStagingMaxBytes, RuntimeSettings, StateInspectionMaxRows,
         StateInspectionMaxSections, StateInspectionReadTimeout, StateInspectionSettings,
-        StateInspectionSettingsError, StateSnapshotInterval,
+        StateSnapshotInterval,
     },
 };
 
@@ -51,25 +51,33 @@ pub struct RuntimeArgs {
     pub inspection_max_sections: Option<NonZeroUsize>,
     #[arg(long = StateInspectionReadTimeout::NAME, env = "NERVIX_INSPECTION_READ_TIMEOUT", help = "Elapsed deadline of one complete state inspection read")]
     pub inspection_read_timeout: Option<HumanDuration>,
+    #[command(flatten)]
+    pub data_plane: super::data_plane::DataPlaneArgs,
 }
 
 impl RuntimeArgs {
-    pub(super) fn settings(&self) -> Result<RuntimeSettings, Report<StateInspectionSettingsError>> {
+    pub(super) fn settings(&self) -> Result<RuntimeSettings, Report<RuntimeArgsError>> {
         let mut settings = RuntimeSettings::resolve(
             self.state_snapshot_interval.map(|value| value.0),
             self.restore_staging_max_bytes.map(|bytes| bytes.0),
         )
         .assured("the runtime settings have valid bounds");
+        settings.data_plane = self
+            .data_plane
+            .settings()
+            .change_context(RuntimeArgsError::DataPlane)?;
         settings.inspection = StateInspectionSettings::resolve(
             self.inspection_max_rows,
             self.inspection_max_sections,
             self.inspection_read_timeout.map(|value| value.0),
-        )?;
+        )
+        .change_context(RuntimeArgsError::Inspection)?;
         Ok(settings)
     }
 
     pub(super) fn from_settings(settings: &RuntimeSettings) -> Self {
         Self {
+            data_plane: super::data_plane::DataPlaneArgs::from_settings(settings.data_plane),
             inspection_max_rows: Some(*settings.inspection.max_rows.value()),
             inspection_max_sections: Some(*settings.inspection.max_sections.value()),
             inspection_read_timeout: Some(HumanDuration(*settings.inspection.read_timeout.value())),
@@ -79,6 +87,7 @@ impl RuntimeArgs {
     }
 
     pub(super) fn render(&self, command_line: &mut CommandLine) {
+        self.data_plane.render(command_line);
         command_line.optional(StateInspectionMaxRows::NAME, self.inspection_max_rows);
         command_line.optional(
             StateInspectionMaxSections::NAME,
@@ -93,4 +102,12 @@ impl RuntimeArgs {
             command_line.option(RestoreStagingMaxBytes::NAME, bytes);
         }
     }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum RuntimeArgsError {
+    #[error("invalid data-plane runtime capabilities")]
+    DataPlane,
+    #[error("invalid state inspection capabilities")]
+    Inspection,
 }

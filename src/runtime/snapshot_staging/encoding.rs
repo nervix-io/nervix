@@ -76,6 +76,8 @@ impl StagedSnapshotWriter {
         let executor = self.executor.clone();
         let artifact_executor = executor.clone();
         let maximum = self.declared;
+        let chunk_bytes = usize::try_from(executor.limits().bulk_chunk_bytes.as_u64())
+            .assured("the validated bulk chunk fits the node address width");
         let mut quota = self._reservation;
         executor
             .run_storage(
@@ -86,17 +88,15 @@ impl StagedSnapshotWriter {
                         .check()
                         .change_context(SnapshotStagingError::Cancelled)?;
                     let (length, result) = {
-                        let mut buffered = BufWriter::with_capacity(
-                            usize::try_from(super::READ_BLOCK_BYTES)
-                                .verified("a transfer block fits the address width"),
-                            file.as_file_mut(),
-                        );
+                        let mut buffered =
+                            BufWriter::with_capacity(chunk_bytes, file.as_file_mut());
                         let mut writer = EncodingWriter {
                             file: &mut buffered,
                             hasher: &mut hasher,
                             cancellation,
                             maximum,
                             written: 0,
+                            chunk_bytes,
                         };
                         let result = encode(&mut writer, cancellation)?;
                         writer
@@ -149,7 +149,7 @@ impl StagedArtifact {
     ) -> Result<nervix_execution::ChargedBytes, Report<SnapshotStagingError>> {
         use std::io::{Read as _, Seek as _, SeekFrom};
 
-        if length > super::READ_BLOCK_BYTES
+        if length > artifact.executor.limits().bulk_chunk_bytes.as_u64()
             || position
                 .checked_add(length)
                 .is_none_or(|end| end > artifact.length)
@@ -199,6 +199,7 @@ impl StagedArtifact {
 
 /// Every writer call is split into bounded units even when the codec presents a large string.
 struct EncodingWriter<'a> {
+    chunk_bytes: usize,
     file: &'a mut dyn Write,
     /// Non-security BLAKE3: measures controlled staged artifact bytes, not their authenticity.
     hasher: &'a mut blake3::Hasher,
@@ -219,10 +220,7 @@ impl Write for EncodingWriter<'_> {
                 "encoded artifact exceeds its admitted disk quota",
             ));
         }
-        for chunk in bytes.chunks(
-            usize::try_from(super::READ_BLOCK_BYTES)
-                .verified("a transfer block fits the address width"),
-        ) {
+        for chunk in bytes.chunks(self.chunk_bytes) {
             self.cancellation.check().map_err(io::Error::other)?;
             self.file.write_all(chunk)?;
             self.hasher.update(chunk);
