@@ -123,6 +123,8 @@ pub enum RemoteRequestFailure {
     ExecutionPoolClosed { class: PoolClass },
     #[error("the coordination identity does not belong to the authenticated request sender")]
     CoordinationIdentityMismatch,
+    #[error("the producer's described state changed before the transfer opened")]
+    PreconditionChanged,
 }
 
 impl RemoteRequestFailure {
@@ -176,6 +178,7 @@ impl RemoteRequestFailure {
             | Self::ExecutionQueueFull { .. }
             | Self::ExecutionPoolClosed { .. } => http::StatusCode::SERVICE_UNAVAILABLE,
             Self::MemoryBudgetExceeded { .. } => http::StatusCode::PAYLOAD_TOO_LARGE,
+            Self::PreconditionChanged => http::StatusCode::PRECONDITION_FAILED,
             _ => http::StatusCode::BAD_REQUEST,
         }
     }
@@ -634,14 +637,16 @@ pub trait InterconnectStreamRequest: RkyvMessage {
 }
 
 #[derive(Debug, Error)]
-#[error("{message}")]
-pub struct StreamHandlerError {
-    message: String,
+pub enum StreamHandlerError {
+    #[error("{message}")]
+    Failed { message: String },
+    #[error("the producer's described state changed before the transfer opened")]
+    PreconditionChanged,
 }
 
 impl StreamHandlerError {
     pub fn new(message: impl Into<String>) -> Self {
-        Self {
+        Self::Failed {
             message: message.into(),
         }
     }
@@ -650,6 +655,24 @@ impl StreamHandlerError {
     pub fn with_cause<C: error_stack::Context>(cause: Report<C>) -> Report<Self> {
         let message = cause.to_string();
         cause.change_context(Self::new(message))
+    }
+}
+
+/// The opening attempt's existing absolute bound, retained only on a precondition refusal.
+#[derive(Debug)]
+pub(crate) struct StreamPreconditionDeadline(Instant);
+
+impl StreamPreconditionDeadline {
+    pub(crate) fn attach(
+        error: Report<TransportError>,
+        deadline: Instant,
+    ) -> Report<TransportError> {
+        if let TransportError::RemoteRejected { status, .. } = error.current_context()
+            && *status == http::StatusCode::PRECONDITION_FAILED.as_u16()
+        {
+            return error.attach(Self(deadline));
+        }
+        error
     }
 }
 
@@ -742,6 +765,12 @@ pub enum RequestError {
         request: &'static str,
         reason: String,
     },
+    #[error("the producer's described state changed while opening '{request}' on node '{node}'")]
+    StreamPreconditionChanged {
+        node: ClusterNodeName,
+        request: &'static str,
+        deadline: Instant,
+    },
     #[error(
         "streamed response for '{request}' from node '{node}' declared {declared} bytes but \
          delivered {received}"
@@ -770,12 +799,28 @@ impl RequestError {
         node: ClusterNodeName,
         request: &'static str,
     ) -> Report<Self> {
+        if let Some(deadline) = cause.downcast_ref::<StreamPreconditionDeadline>() {
+            let deadline = deadline.0;
+            return cause.change_context(Self::StreamPreconditionChanged {
+                node,
+                request,
+                deadline,
+            });
+        }
         let reason = cause.to_string();
         cause.change_context(Self::Stream {
             node,
             request,
             reason,
         })
+    }
+
+    /// A changed stream precondition may be retried only within its original opening deadline.
+    pub const fn stream_precondition_deadline(&self) -> Option<Instant> {
+        match self {
+            Self::StreamPreconditionChanged { deadline, .. } => Some(*deadline),
+            _ => None,
+        }
     }
 
     /// Whether this request was refused solely because a local or remote admission quota was full.
@@ -800,6 +845,7 @@ impl RequestError {
             | Self::Transport { .. }
             | Self::ResponseMismatch { .. }
             | Self::Stream { .. }
+            | Self::StreamPreconditionChanged { .. }
             | Self::StreamLengthMismatch { .. } => false,
             Self::StreamChunkBound { .. } => false,
         }
@@ -1070,6 +1116,12 @@ pub(crate) enum StreamOpeningFailure {
 
 impl StreamOpeningFailure {
     fn handler(error: Report<StreamHandlerError>) -> Self {
+        if matches!(
+            error.current_context(),
+            StreamHandlerError::PreconditionChanged
+        ) {
+            return Self::Request(RemoteRequestFailure::PreconditionChanged);
+        }
         match error.downcast_ref::<RemoteOperationFailure>() {
             Some(failure) => Self::Operation {
                 kind: RemoteOperationFailureKind::from(failure),
@@ -2107,6 +2159,42 @@ mod shuttle_checks;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stream_precondition_refusals_retain_the_original_deadline_and_transport_cause() {
+        let node = ClusterNodeName::parse("owner").assured("the fixture node name is valid");
+        let deadline = Instant::now() + Duration::from_secs(7);
+        let refused = Report::new(TransportError::RemoteRejected {
+            status: http::StatusCode::PRECONDITION_FAILED.as_u16(),
+            message: "the producer's precondition changed".to_owned(),
+        });
+        let refused = StreamPreconditionDeadline::attach(refused, deadline);
+        let error = RequestError::stream_with_cause(refused, node.clone(), "fetch_state_snapshot");
+        assert_eq!(
+            error.current_context().stream_precondition_deadline(),
+            Some(deadline)
+        );
+        assert!(error.contains::<TransportError>());
+        assert!(!error.current_context().is_capacity_exhaustion());
+
+        for status in [
+            http::StatusCode::BAD_REQUEST,
+            http::StatusCode::SERVICE_UNAVAILABLE,
+        ] {
+            let refused = Report::new(TransportError::RemoteRejected {
+                status: status.as_u16(),
+                message: "the producer's precondition changed".to_owned(),
+            });
+            let refused = StreamPreconditionDeadline::attach(refused, deadline);
+            let error =
+                RequestError::stream_with_cause(refused, node.clone(), "fetch_state_snapshot");
+            assert!(matches!(
+                error.current_context(),
+                RequestError::Stream { .. }
+            ));
+            assert_eq!(error.current_context().stream_precondition_deadline(), None);
+        }
+    }
 
     #[derive(Debug, Archive, Serialize, Deserialize)]
     struct BulkDecodeRequest {

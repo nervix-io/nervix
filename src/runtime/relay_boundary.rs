@@ -2308,28 +2308,31 @@ impl RelayBoundaryServices {
     /// for the relay. A batch that carries record acknowledgements fails them when no attached
     /// consumer of the relay runs here any more, so its source delivers it again along the owner's
     /// current routes rather than committing a record no consumer processed.
-    pub(super) async fn inject_remote_message(
-        &self,
+    /// Retains a routed batch before its transport admission is acknowledged. Creating this
+    /// future counts the batch immediately; completing or dropping it hands the batch on.
+    pub(super) fn inject_remote_message<'a>(
+        &'a self,
         unit: Unit,
-        batch: &RelayRecordBatch,
-    ) -> RelayDispatchResult {
-        let _unit_permit = if let Some(gate) = self.unit_dispatch_gate(unit) {
-            let Some(permit) = gate.try_acquire_dispatch() else {
-                for ack in batch.acks.iter() {
-                    ack.no_ack("relay partition routing changed before routed delivery");
-                }
-                return Err(Box::new(batch.clone()));
+        batch: &'a RelayRecordBatch,
+    ) -> impl std::future::Future<Output = RelayDispatchResult> + 'a {
+        let routed = RelayRoutedAdmission::new(self.transit_for_unit(unit));
+        async move {
+            let _routed = routed;
+            let _unit_permit = if let Some(gate) = self.unit_dispatch_gate(unit) {
+                let Some(permit) = gate.try_acquire_dispatch() else {
+                    for ack in batch.acks.iter() {
+                        ack.no_ack("relay partition routing changed before routed delivery");
+                    }
+                    return Err(Box::new(batch.clone()));
+                };
+                Some(permit)
+            } else {
+                None
             };
-            Some(permit)
-        } else {
-            None
-        };
-        self.fanout_local_subscriptions(batch).await;
-        // The routed batch enters this relay on this node here, and the relay holds it until its
-        // consumers here have it.
-        let _routed = RelayRoutedAdmission::new(self.transit_for_unit(unit));
-        self.dispatch_local_runtime_consumers(RuntimeConsumerDispatch::Routed, unit, batch)
-            .await
+            self.fanout_local_subscriptions(batch).await;
+            self.dispatch_local_runtime_consumers(RuntimeConsumerDispatch::Routed, unit, batch)
+                .await
+        }
     }
 }
 

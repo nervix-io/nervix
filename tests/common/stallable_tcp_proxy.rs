@@ -276,6 +276,32 @@ impl StallableTcpProxy {
             .discarded("the proxy holds the sender for as long as it can be asked");
     }
 
+    /// Reset the current connections and wait until they ended and a client starts a replacement.
+    /// The reset signal alone does not mean the client has observed the disconnected transport.
+    pub(crate) async fn reset_and_wait_for_replacement(&self, within: Duration) -> io::Result<()> {
+        let mut accepted = self.accepted.subscribe();
+        let prior_count = accepted.borrow().len();
+        self.reset_connections();
+        nervix_primitives::time::timeout(
+            within,
+            accepted.wait_for(|connections| {
+                connections.len() > prior_count
+                    && connections[..prior_count]
+                        .iter()
+                        .all(|connection| connection.ended_at.is_some())
+            }),
+        )
+        .await
+        .map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::TimedOut,
+                "the reset connections did not end and begin a replacement within the bound",
+            )
+        })?
+        .map_err(|_| io::Error::other("the proxy ended before a replacement connection"))?;
+        Ok(())
+    }
+
     /// When the proxy accepted the connection at `index` in the order it accepted them, counting
     /// from zero, or nothing while it has accepted fewer.
     pub(crate) fn accepted_at(&self, index: usize) -> Option<Instant> {

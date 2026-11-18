@@ -192,6 +192,9 @@ Feature: Accepted work waits for internal worker room
       | 1            |
       | 3            |
 
+  # Every row traverses several forced worker offloads on two branches. Reserve room for that
+  # measured load while retaining the full multi-slice input and the original receive bound.
+  @slots_8
   @accepted_stateful_pipeline
   Scenario Outline: Stateful processors keep interleaved branches through a full data class
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"

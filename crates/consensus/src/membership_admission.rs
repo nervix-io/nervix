@@ -47,11 +47,9 @@ pub(super) async fn catch_up_learner(
             let caught_up = if let (Some(Some(matched)), Some(last)) =
                 (peers.get(&node), observed.last_log_index)
             {
-                match last.checked_sub(matched.index) {
-                    Some(lag) => lag <= raft.config().replication_lag_threshold,
-                    // A match past the observed last entry leaves nothing to replicate.
-                    None => true,
-                }
+                // A confirmed prefix at or beyond the current tip has no remaining lag.
+                last.checked_sub(matched.index)
+                    .is_none_or(|lag| lag <= raft.config().replication_lag_threshold)
             } else {
                 false
             };

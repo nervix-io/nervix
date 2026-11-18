@@ -82,6 +82,7 @@ struct RemoteGenerationFixture {
     transport: Transport,
     selected_owner: watch::Sender<Runtime>,
     fetch_owner: watch::Sender<Runtime>,
+    follow_fetch_owner: watch::Sender<bool>,
     domain: DomainName,
     relay: RelayName,
     placement: RuntimeStatePlacement,
@@ -168,6 +169,7 @@ impl RemoteGenerationFixture {
         });
         let (selected_owner, describe_owner) = watch::channel(Runtime::new());
         let (fetch_owner, fetch_runtime) = watch::channel(Runtime::new());
+        let (follow_fetch_owner, follow_fetch) = watch::channel(false);
         transport
             .register_handler::<DescribeStateSnapshot, _, _>(move |_context, request| {
                 let owner = describe_owner.borrow().clone();
@@ -180,9 +182,15 @@ impl RemoteGenerationFixture {
                 }
             })
             .assured("the snapshot description handler registers");
+        let description_publication = selected_owner.clone();
         transport
             .register_stream_handler::<FetchStateSnapshot, _, _>(move |_context, request| {
                 let owner = fetch_runtime.borrow().clone();
+                if *follow_fetch.borrow() {
+                    // The fixture advances its described owner exactly when the first fetch
+                    // reaches the replacement. Later descriptions see that same publication.
+                    description_publication.send_replace(owner.clone());
+                }
                 async move { owner.stream_sealed_materialized_snapshot(request).await }
             })
             .assured("the snapshot transfer handler registers");
@@ -192,6 +200,7 @@ impl RemoteGenerationFixture {
             transport,
             selected_owner,
             fetch_owner,
+            follow_fetch_owner,
             domain,
             relay,
             placement,
@@ -595,6 +604,113 @@ async fn a_partition_handoff_hides_only_its_materialized_dependency_until_the_fe
         .interconnect
         .shutdown()
         .await;
+}
+
+#[nervix_primitives::test]
+async fn a_replaced_described_generation_is_refetched_without_losing_its_rows() {
+    let fixture = RemoteGenerationFixture::new().await;
+    fixture.replace_generation(0, 0);
+    let described = fixture
+        .reader
+        .describe_materialized_snapshot_from(&fixture.owner_name, &fixture.placement, None)
+        .await
+        .assured("the empty generation is described")
+        .assured("the owner seals even an empty generation");
+    assert_eq!(described.revision, 0);
+
+    // A second requester seals the first publication before this request opens its transfer.
+    // Nothing retains the described artifact: keeping every described generation would make
+    // owner storage depend on requesters that may never fetch or release it.
+    let expected = fixture.replace_generation(10, 2);
+    let owner = fixture.selected_owner.borrow().clone();
+    owner
+        .describe_sealed_materialized_snapshot(&fixture.placement, None)
+        .await
+        .assured("another requester seals the published rows");
+    let (_, restored) = fixture
+        .reader
+        .fetch_described_materialized_snapshot(
+            &fixture.owner_name,
+            &fixture.placement,
+            &fixture.schema.arrow_schema(),
+            described,
+        )
+        .await
+        .assured("a replaced description triggers a fresh exact transfer");
+    let actual = restored
+        .records
+        .iter()
+        .map(|record| MaterializedGenerationRecord {
+            branch: record.branch.clone(),
+            row: record.row.clone(),
+        })
+        .collect::<Vec<_>>();
+    fixture.assert_records(&actual, &expected);
+    assert_eq!(restored.revision, 2);
+    drop(restored);
+    fixture.shutdown().await;
+}
+
+#[cfg(feature = "deloxide")]
+#[test]
+fn diagnostic_replaced_materialized_snapshot() {
+    let directory =
+        std::env::var_os("NERVIX_DEADLOCK_EVIDENCE").map(nervix_deadlock::EvidenceDirectory::new);
+    nervix_deadlock::DiagnosticRun::start(directory)
+        .assured("the snapshot diagnostic process starts its detector before its runtime");
+    a_replaced_described_generation_is_refetched_without_losing_its_rows();
+}
+
+#[cfg(feature = "deloxide")]
+#[test]
+fn diagnostic_replaced_materialized_snapshot_cache() {
+    let directory =
+        std::env::var_os("NERVIX_DEADLOCK_EVIDENCE").map(nervix_deadlock::EvidenceDirectory::new);
+    nervix_deadlock::DiagnosticRun::start(directory)
+        .assured("the snapshot cache diagnostic process starts its detector before its runtime");
+    a_replaced_generation_is_cached_under_the_identity_actually_fetched();
+}
+
+#[nervix_primitives::test]
+async fn a_replaced_generation_is_cached_under_the_identity_actually_fetched() {
+    let fixture = RemoteGenerationFixture::new().await;
+    fixture.replace_generation(0, 0);
+    let preceding_owner = fixture.selected_owner.borrow().clone();
+    let expected = fixture.replace_generation(10, 2);
+    let current_owner = fixture.selected_owner.borrow().clone();
+    current_owner
+        .describe_sealed_materialized_snapshot(&fixture.placement, None)
+        .await
+        .assured("the replacement is sealed before the first fetch opens");
+    fixture.selected_owner.send_replace(preceding_owner);
+    fixture.follow_fetch_owner.send_replace(true);
+
+    let mut routing = DomainRoutingCache::new(fixture.routing.shared());
+    let mut cache = MaterializedGenerationReadCache::default();
+    let first = fixture.read(&mut routing, &mut cache).await;
+    fixture.assert_records(&first, &expected);
+    let first_bytes = fixture.received_bytes();
+    let repeated = fixture.read(&mut routing, &mut cache).await;
+    fixture.assert_records(&repeated, &expected);
+    assert_eq!(
+        fixture.received_bytes(),
+        first_bytes,
+        "the verified replacement identity authorizes reuse without another bulk transfer"
+    );
+    drop(first);
+    drop(repeated);
+    cache.clear();
+    assert_eq!(
+        fixture
+            .reader
+            .inner
+            .executor
+            .memory(MemoryClass::StateReadCache)
+            .reserved_bytes,
+        0,
+        "the retained replacement releases its full admission when the cache ends"
+    );
+    fixture.shutdown().await;
 }
 
 #[nervix_primitives::test]

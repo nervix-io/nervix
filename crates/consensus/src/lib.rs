@@ -2427,6 +2427,7 @@ struct ConsensusTestProbeState {
 #[cfg(feature = "testing")]
 #[derive(Debug, Default)]
 struct AppendStreamCounts {
+    /// Non-ended caller inputs, including initial management-only probes.
     replication_attempts: u64,
     attempts: u64,
     opened: u64,

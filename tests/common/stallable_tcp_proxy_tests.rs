@@ -199,10 +199,18 @@ async fn resetting_closes_forwarded_connections_and_the_proxy_keeps_listening() 
     dependency.next_read().await;
     read_echo(&mut forwarded, b"open").await;
 
-    proxy.reset_connections();
-
-    read_closed(&mut forwarded).await;
-    let mut after = connect(&proxy).await;
+    let (reset, mut after) =
+        tokio::join!(proxy.reset_and_wait_for_replacement(OUTCOME_BOUND), async {
+            read_closed(&mut forwarded).await;
+            connect(&proxy).await
+        });
+    reset.assured("reset observes the prior connection ending and the client reconnecting");
+    let connections = proxy.accepted_connections();
+    let [before, replacement] = connections.as_slice() else {
+        panic!("the reset has one ended connection and one replacement: {connections:?}");
+    };
+    assert!(before.ended_at.is_some());
+    assert!(replacement.ended_at.is_none());
     write(&mut after, b"after").await;
     dependency.next_read().await;
     read_echo(&mut after, b"after").await;

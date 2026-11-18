@@ -77,16 +77,25 @@ Feature: Attached acknowledgements across consumer moves
       {"event_id":"routed","branch_name":"a","sequence":2}
       """
     Then the admitted remote relay dispatch pause for domain "{{domain}}" is reached
-    When these Plexus commands are executed on the leader node
+    Given the entity gate for domain "{{domain}}" pauses after engagement
+    When these Plexus commands begin executing in the background
       """
       RELOCATE EMITTER moved_emitter ONTO NODE node-2 IGNORE PREFERENCES;
+      """
+    Then the entity gate pause for domain "{{domain}}" is reached
+    # Admission owns this batch until dispatch finishes. Close the handoff gate before releasing
+    # it, so the former owner rejects it and the sender retries against the destination's route.
+    When the admitted remote relay dispatch pause for domain "{{domain}}" is released
+    And the entity gate pause for domain "{{domain}}" is released
+    Then the background Plexus execution succeeds
+    When these Plexus commands are executed on the leader node
+      """
       SHOW CLUSTER STATUS;
       """
     Then the last command output contains
       """
       - domain={{domain}} kind=emitter name=moved_emitter owner=node-2
       """
-    When the admitted remote relay dispatch pause for domain "{{domain}}" is released
     Then within "60s" Kafka consumer group "moved_sink_group_{{test_id}}" next offset for topic "moved_sink_in_{{test_id}}" partition 0 is "at least 2"
     And within "30s" the observed broker receives payloads
       """

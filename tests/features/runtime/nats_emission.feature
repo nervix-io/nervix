@@ -191,7 +191,7 @@ Feature: NATS emission
       | 1            |
       | 3            |
 
-  @nats_core_connection_loss @deloxide_stress
+  @slots_8 @nats_core_connection_loss @deloxide_stress
   # Padding belongs to the external write under test. Relay hops carry the same 12000 sequence
   # records, and the emitter constructs their 1000-byte padding before its client sees them.
   Scenario Outline: A core NATS write retries every record through connection loss
@@ -254,7 +254,7 @@ Feature: NATS emission
       | 1            |
       | 3            |
 
-  @nats_core_connection_loss @nats_core_stop_connection_loss @deloxide_stress
+  @slots_8 @nats_core_connection_loss @nats_core_stop_connection_loss @deloxide_stress
   Scenario Outline: Nervix reports a core NATS connection change during STOP
     Given NATS is running
     And a NATS endpoint the scenario controls is configured
@@ -322,6 +322,7 @@ Feature: NATS emission
       | 1            |
       | 3            |
 
+  @slots_8
   Scenario Outline: NATS SUBJECT emitter drains a wide columnar batch in order without duplicates
     Given NATS is running
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"

@@ -245,8 +245,8 @@ impl LedgerReading {
         parse_timestamp(&self.occurred_at)
     }
 
-    /// Whether the ingestor the reading was submitted to rejects it: only a `TIMESTAMP AT`
-    /// ingestor checks the event time, and only a stamp before the window fails it.
+    /// Whether the driver deliberately stamped this reading outside a `TIMESTAMP AT` window.
+    /// A center may also expire between the driver's check and the server's admission.
     fn expects_rejection(&self) -> bool {
         self.timestamps == "at" && self.stamp == "before_window"
     }
@@ -929,6 +929,25 @@ async fn then_the_driver_error_count(world: &mut ScenarioWorld, text: String, co
 /// for one its ingestor rejected. Nothing else is in the store.
 #[then("the paced simulation effects hold every reading of its ledger exactly once")]
 async fn then_the_effects_hold_every_reading_exactly_once(world: &mut ScenarioWorld) {
+    assert_paced_effects(world, false);
+}
+
+#[then(
+    "the paced simulation effects account for every submitted reading or its timestamp rejection \
+     exactly once"
+)]
+async fn then_the_effects_account_for_every_submission(world: &mut ScenarioWorld) {
+    let readings = world.paced_simulation.records().readings().len();
+    let reported = parse_count(&world.paced_simulation.finished().summary()["readings"]);
+    assert_eq!(
+        u64::try_from(readings).expect("the scenario's reading count fits u64"),
+        reported,
+        "the ledger must name every submitted reading exactly once"
+    );
+    assert_paced_effects(world, true);
+}
+
+fn assert_paced_effects(world: &ScenarioWorld, allow_racing_timestamp_rejection: bool) {
     let records = world.paced_simulation.records();
     let readings = records.readings();
     let outcomes = records.outcomes();
@@ -945,11 +964,26 @@ async fn then_the_effects_hold_every_reading_exactly_once(world: &mut ScenarioWo
             outcome.outcome,
             outcome.cause
         );
-        if reading.expects_rejection() {
-            let Some(EffectRecord::Rejection { generation, .. }) = notices.get(reading_id).copied()
+        if reading.expects_rejection()
+            || (allow_racing_timestamp_rejection && notices.contains_key(reading_id))
+        {
+            let Some(EffectRecord::Rejection {
+                generation,
+                occurred_at,
+                error_code,
+                error_message,
+                ..
+            }) = notices.get(reading_id).copied()
             else {
                 panic!("rejected reading {reading_id} has no rejection notice");
             };
+            assert_eq!(reading.timestamps, "at", "notice of {reading_id}");
+            assert_eq!(parse_timestamp(occurred_at), reading.occurred_at());
+            assert_eq!(error_code, "validation", "notice of {reading_id}");
+            assert!(
+                error_message.contains(OUTSIDE_WINDOW),
+                "notice of {reading_id} says '{error_message}'"
+            );
             assert_eq!(
                 *generation, reading.generation,
                 "the rejection of {reading_id} was recorded under another generation"

@@ -586,7 +586,11 @@ A refused byte-stream opening carries the same four operation classes in the fix
 diagnostic remains the bounded error body. Request decoding, execution admission, I/O and encoding
 failures carry no operation class, so their status or display text cannot turn them into ordinary
 state absence. Successful stream framing, content length, quotas and progress deadlines are
-unchanged. This response-header contract is part of the current wire fingerprint.
+unchanged. This response-header contract is part of the current wire fingerprint. A changed snapshot
+precondition retains its distinct `412` refusal and the original opening deadline. If a fresh
+description has not published a replacement revision, the materialized dependency remains not ready
+and follows its declared wait, skip or default policy; a newly published revision is fetched within
+that same opening budget.
 
 Relay metadata uses the same validated control encoding, while relay bodies remain Arrow IPC from
 the source relay to the destination runtime. Bulk operations transfer opaque byte chunks and let
@@ -1193,6 +1197,13 @@ outcome is no longer known there. A channel opened just before one that was forg
 refused the same way; its sender handles that as any retired delivery and reopens the channel under
 a fresh incarnation. The floor and every retained watermark end with the peer's bound process epoch.
 
+A receiver that has never opened a channel refuses a nonzero continuation as `channel_unopened`,
+before reserving a body. After a quick owner restart, the runtime keeps that definitely unadmitted
+payload and its ACKs under its existing channel gate, opens a fresh channel at sequence zero and
+retries within the original admission deadline. A prior interrupted send makes its outcome
+uncertain and forbids this retry; a retained channel still requires its exact next position, and a
+forgotten channel still returns `Retired`.
+
 Lost terminal replies remain reconcilable while their watermark is retained. A sixty-second sweep
 reclaims attempts, outbound correlations and channel watermarks after ten minutes without progress
 or reconciliation; live admission reports renew retained records. The sweep forgets a watermark the
@@ -1229,9 +1240,11 @@ read or decode is drained unkept and refused for memory like any other, so a ful
 at once instead of holding the request, and its admission stream, until room returns. Every other
 refusal is permanent for the grant that asked: its sender epoch, body length or admission
 registration is wrong, its content conflicts with what its delivery identity was first granted with,
-its sequence is out of order, or its admission registration is already active. The refusal crosses
+its channel was never opened, its sequence is out of order, or its admission registration is
+already active. The refusal crosses
 the wire as a typed `RelayGrantRefusal`, never as an HTTP status or text, and the sender decides
-from its class alone. A permanent refusal fails the delivery at once.
+from its class alone. A permanent refusal fails that grant at once; only a definitely unadmitted
+`channel_unopened` continuation can open a fresh channel as described above.
 
 A capacity refusal holds a routed or owner-ingress delivery back. The receiver answered, so the
 refusal does not count toward the five-second stall bound: the sender asks for a grant again after
@@ -1271,6 +1284,12 @@ Such a cycle then needs the decoded data of the deliveries waiting on full buffe
 the encoded bodies of held senders, to fill the relay budgets of both nodes. The five-minute bound
 ends it, failing the held deliveries as the five-second dispatch bound did before deliveries were
 held.
+
+A batch routed to another node's consumers counts as held relay work there before the receiver
+acknowledges runtime admission. That count spans the admission response, local subscription fan-out
+and delivery to the attached consumers, so a concurrent alteration cannot overlook work between
+the relay owner and its consumers. Completion or cancellation releases the count once. Owner
+ingress still waits for its dispatch gate before entering the owner buffer.
 
 `nervix_interconnect_relay_grant_refusals_total` counts the refusals a node answered and the ones it
 received, by direction and reason; a rising count of capacity refusals received means held
@@ -1938,6 +1957,16 @@ node's opaque diagnostic text. A materialized snapshot is streamed only after a 
 description identifies its exact length, digest, revision, fence, and branch generation; the
 placement that the request names supplies its schema fingerprint.
 
+Sealing a newer materialized generation may replace a description before its bulk fetch opens.
+The producer then returns a typed precondition refusal (HTTP 412). The requester re-describes and
+opens the replacement within the first opening attempt's original absolute deadline. This is
+neither an absent dependency nor a general execution failure: `REQUIRED WAIT`, `REQUIRED SKIP`
+and defaults still apply to the state actually read. Other refusals and transport, length, digest
+or decoding failures remain errors. An opened stream retains its exact artifact as before; the
+owner retains no history on behalf of descriptions that may never be fetched. Successful reads
+add no round trip, timer, clock read or retained allocation. The current wire fingerprint fences
+this typed refusal together with the rest of the interconnect contract.
+
 Runtime-state message properties use the production bounded encoder and decoder on each
 request's Commands, Replication or Bulk class. The `runtime-state-replication-wire` target checks
 complete request and response values, including every state kind, schema and WASM generation,
@@ -1984,6 +2013,8 @@ verified decoded generation and fetch bytes only when the owner, placement or co
 envelope changes. The envelope's digest, length, revision, ownership fence and branch generation
 all participate in reuse, so a restarted owner with changed contents at an equal or lower revision
 requires another transfer. A failed description never authorizes serving the retained view.
+After a precondition retry, the cache retains the envelope actually verified with its contents,
+so a subsequent unchanged read reuses that generation without another bulk transfer.
 This uses the existing describe and bounded fetch operations without another wire form or lane.
 
 The [Control Plane](./control-plane.md) defines when replicated changes and resources become

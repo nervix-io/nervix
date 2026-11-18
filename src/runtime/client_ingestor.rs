@@ -1475,6 +1475,18 @@ impl Endpoint {
             submission,
             acknowledgement,
         } = resolved;
+        #[cfg(feature = "testing")]
+        if let ClientSubmissionOutcome::ProcessingFailed(failure) = &acknowledgement.outcome {
+            debug!(
+                domain = self.domain.as_str(),
+                ingestor = self.ingestor.as_str(),
+                attachment = %attachment,
+                ?submission,
+                ?failure,
+                detail = acknowledgement.detail.as_deref(),
+                "an admitted client batch failed its downstream acknowledgement"
+            );
+        }
         self.window_used = self
             .window_used
             .checked_sub(1)
