@@ -1313,7 +1313,9 @@ class Run:
                 window = Window.at(clock, time.time_ns()) if clock is not None else None
                 if window is None:
                     continue
-                if self.settings.timestamps == "at" and not window.contains(center):
+                if self.settings.timestamps == "at" and (
+                    center < window.earliest or not window.contains(center)
+                ):
                     line(f"SKIPPED tick={tick} reason=behind_admission_window")
                     tick += 1
                     continue

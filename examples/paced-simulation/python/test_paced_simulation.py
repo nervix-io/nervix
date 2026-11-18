@@ -51,9 +51,10 @@ class PlannerTests(unittest.TestCase):
     def test_an_expired_center_does_not_consume_a_requested_submission(self):
         run = driver.Run(SimpleNamespace(ticks=2, timestamps="at", domain="simulation"))
         clock = Mock()
-        clock.paced.skew = 0
-        clock.admits.side_effect = lambda utc, event: event >= 100
+        clock.paced.skew = 100
+        clock.admits.side_effect = lambda _utc, event: 0 <= event <= 1100
         window = driver.Window(clock, 0, 100, 1000)
+        self.assertTrue(window.contains(0))
         grid = driver.TickGrid(7, SimpleNamespace(origin=0, period=100))
         run.clock = Mock()
         run.clock.reach.return_value = ("center", window)

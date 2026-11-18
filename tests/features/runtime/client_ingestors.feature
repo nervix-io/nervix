@@ -1276,7 +1276,11 @@ Feature: Client ingestors
     And producer "orders" submits batch "within" with rows
       | region | order_id | amount | card   |
       | eu     | o-1      | 1      | 4111-1 |
-    And producer "orders" submits batch "beyond" with rows
+    Then HTTP receiver "emitter" eventually captures one request that is
+      """
+      POST /orders/eu/o-1
+      """
+    When producer "orders" submits batch "beyond" with rows
       | region | order_id | amount | card   |
       | us     | o-2      | 2      | 4111-2 |
     Then batch "beyond" is not admitted because "credit exceeded"

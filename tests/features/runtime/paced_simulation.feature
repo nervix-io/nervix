@@ -449,6 +449,10 @@ Feature: Paced simulation drivers
       | rust   | 1            |
       | rust   | 3            |
       | python | 1            |
+
+    @slots_6
+    Examples:
+      | driver | cluster_size |
       | python | 3            |
 
   @paced_simulation

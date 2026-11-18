@@ -274,6 +274,10 @@ for, so it stays the same when the reading is replayed.
 
 ## Event Time: `TIMESTAMP AT` And `TIMESTAMP NOW`
 
+After waiting for producer credit, both drivers read the admission window again. A planned
+`TIMESTAMP AT` submission needs its own retained tick center. If that center has expired,
+the driver advances to another tick and keeps the requested submission count.
+
 `--invalid-every 3` stamps the first reading of every third tick one nanosecond further than the
 skew before the oldest center the window retains. Submitted to `simulated_readings`, which reads
 `TIMESTAMP AT occurred_at`, that reading is rejected: its batch still completes, because the error

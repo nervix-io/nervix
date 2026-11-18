@@ -574,9 +574,11 @@ impl Planner {
             let next = tick
                 .checked_add(1)
                 .assured("a tick center past 2^64 periods is unrepresentable and ended the loop");
-            if self.settings.timestamps == TimestampSource::At && !window.contains(center) {
-                // Domain time does not wait for a slow application: a tick center the window no
-                // longer retains would only be rejected.
+            if self.settings.timestamps == TimestampSource::At
+                && (center < window.earliest_center() || !window.contains(center))
+            {
+                // The planned tick needs its own retained center. Skew around the next
+                // center can still admit an event stamped at an expired tick.
                 report::line(format!(
                     "SKIPPED tick={tick} reason=behind_admission_window"
                 ));
