@@ -27,6 +27,7 @@ pub struct Runtime {
 /// a `Runtime` handle and therefore hold their values directly. The few that keep an `Arc` of
 /// their own have a second owner that outlives the handle's borrow, and each names that owner.
 pub(in crate::runtime) struct RuntimeInner {
+    pub(in crate::runtime) data_plane: nervix_models::DataPlaneSettings,
     pub(in crate::runtime) interconnect_request_timeout: Duration,
     /// Process-local lifetimes of materialized state, allocated once at construction.
     pub(in crate::runtime) inspection_instances: AtomicU64,

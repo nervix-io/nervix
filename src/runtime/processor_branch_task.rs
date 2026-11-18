@@ -37,6 +37,15 @@ use super::{
     *,
 };
 
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "processor input and commands each admit one pending ownership handoff"
+    )
+)]
+const PROCESSOR_HANDOFF_CAPACITY: usize = 1;
+
 /// Every way starting or restoring a processor's branch tasks fails.
 ///
 /// A variant that concerns one branch names it by its [`BranchScope`], never by its key's values.
@@ -68,8 +77,6 @@ pub(super) enum ProcessorBranchTaskError {
         lsm: u64,
     },
 }
-
-pub(super) const PROCESSOR_BRANCH_TASK_SHUTDOWN_GRACE: Duration = Duration::from_secs(2);
 
 #[derive(Debug)]
 pub(super) enum ProcessorBranchStopMode {
@@ -364,7 +371,11 @@ pub(super) async fn run_processor_node_runtime(
     // branch, its input stays queued in its relays, so no record starts a new lifetime for a branch
     // the restore would resume.
     let restore_context = ProcessorRuntimeContext::new(runtime_handle.clone(), domain.clone());
-    let mut pending_restore = Some(PendingProcessorBranchRestore::new(restored_handoffs));
+    let mut pending_restore = Some(PendingProcessorBranchRestore::new(
+        restored_handoffs,
+        runtime_handle.inner.data_plane,
+        runtime_handle.inner.connector_host.retry,
+    ));
     let quiesce_counters = nervix_primitives::expect_lint!(
         nervix::lifecycle_call,
         "task startup installs and retains the exact node quiesce counters before processing input",
@@ -534,7 +545,7 @@ pub(super) async fn run_processor_node_runtime(
         }
 
         let maintenance_timeout = if ownership_frozen {
-            OWNERSHIP_HANDOFF_FREEZE_RECHECK_INTERVAL
+            (runtime_handle.entity_gate_deadline() / 1200).max(Duration::from_nanos(1))
         } else {
             let mut next_maintenance = match pending_restore.as_ref() {
                 Some(restore) => restore.retry_at(),
@@ -1128,6 +1139,7 @@ pub(super) async fn dispatch_processor_node_input(
                         &key,
                         task,
                         ProcessorBranchStopMode::Detach,
+                        runtime_handle.task_stop_grace()
                     )
                 )
                 .await;
@@ -1246,8 +1258,8 @@ impl PreparedProcessorBranch {
         if let Some(node) = branch.processors.get_mut(&processor) {
             node.pending_materialized = pending_materialized;
         }
-        let (input_tx, input_rx) = mpsc::channel(1);
-        let (command_tx, command_rx) = mpsc::channel(1);
+        let (input_tx, input_rx) = mpsc::channel(PROCESSOR_HANDOFF_CAPACITY);
+        let (command_tx, command_rx) = mpsc::channel(PROCESSOR_HANDOFF_CAPACITY);
         let (snapshot_shutdown_tx, _) = watch::channel(false);
         let spawned = match branch.processors.get(&processor) {
             Some(node) => node.spawn_snapshot_task(&context.runtime_handle, &snapshot_shutdown_tx),
@@ -1599,7 +1611,7 @@ async fn run_processor_branch_task(
                     break;
                 }
             }
-            _ = sleep(OWNERSHIP_HANDOFF_FREEZE_RECHECK_INTERVAL), if ownership_frozen => {}
+            _ = sleep((runtime_handle.entity_gate_deadline() / 1200).max(Duration::from_nanos(1))), if ownership_frozen => {}
         }
     }
     while let Ok(ProcessorBranchInput { relay, batch, work }) = input.try_recv() {
@@ -1686,10 +1698,11 @@ pub(super) async fn stop_processor_branch_task(
     key: &Option<BranchKey>,
     entry: &ProcessorBranchTask,
     mode: ProcessorBranchStopMode,
+    grace: Duration,
 ) {
     let processor = processor.into();
     let mut task = None;
-    let stopped = nervix_primitives::time::timeout(PROCESSOR_BRANCH_TASK_SHUTDOWN_GRACE, async {
+    let stopped = nervix_primitives::time::timeout(grace, async {
         entry
             .commands
             .send(ProcessorBranchCommand::Stop(mode))
@@ -1718,7 +1731,7 @@ pub(super) async fn stop_processor_branch_task(
                 domain = domain.as_str(),
                 processor = processor.as_str(),
                 scope = %BranchScope::from(key),
-                grace_period = %humantime::format_duration(PROCESSOR_BRANCH_TASK_SHUTDOWN_GRACE),
+                grace_period = %humantime::format_duration(grace),
                 "processor branch task exceeded shutdown grace period; aborting"
             );
             let Some(task) = task.or_else(|| entry.task.lock().take()) else {
@@ -1824,6 +1837,7 @@ pub(super) async fn handoff_all_processor_branch_instances(
             &key,
             task,
             ProcessorBranchStopMode::Handoff(response),
+            runtime.task_stop_grace(),
         )
         .await;
         if let Ok(handoff) = receiver.await {
@@ -1865,6 +1879,7 @@ pub(super) async fn expire_processor_branch_instances(
                     &key,
                     task,
                     ProcessorBranchStopMode::Evict,
+                    runtime.task_stop_grace()
                 )
             )
             .await;
@@ -1918,6 +1933,7 @@ pub(super) async fn evict_processor_branch_instances_to_capacity(
                     &key,
                     task,
                     ProcessorBranchStopMode::Evict,
+                    runtime.task_stop_grace()
                 )
             )
             .await;
@@ -1967,6 +1983,7 @@ pub(super) async fn shutdown_all_processor_branch_instances(
             &key,
             task,
             ProcessorBranchStopMode::Detach,
+            runtime.task_stop_grace(),
         )
         .await;
         debug!(

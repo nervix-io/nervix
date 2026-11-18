@@ -40,8 +40,14 @@ async fn records_wait_for_room_and_are_stored_once_it_returns() {
         receiver(),
         vec![acks, AckSet::empty()],
         storage_deadline(),
+        RemoteAckTiming::default(),
         std::future::pending(),
     );
+    let mut later = RemoteAckTiming::default();
+    later.remote_relay_total_timeout *= 2;
+    later.remote_ack_alive_interval *= 2;
+    later.validate().assured("the later revision is coherent");
+    owners.install_timing(later);
     let mut storage = std::pin::pin!(storage);
 
     assert!(storage.as_mut().now_or_never().is_none());
@@ -59,9 +65,18 @@ async fn records_wait_for_room_and_are_stored_once_it_returns() {
 
     drop(occupied);
     nervix_primitives::time::advance(RECHECK_INTERVAL).await;
-    let Some(Ok(RecordStorage::Stored(ids))) = storage.as_mut().now_or_never() else {
+    let Some(Ok(RecordStorage::Stored {
+        registrations: ids,
+        timing,
+    })) = storage.as_mut().now_or_never()
+    else {
         panic!("the records are stored at the first recheck after room returns");
     };
+    assert_eq!(
+        timing,
+        RemoteAckTiming::default(),
+        "storage keeps the caller's complete captured revision even before its first poll"
+    );
     assert_eq!(ids.len(), 2);
     assert!(
         ids[1].is_none(),
@@ -91,6 +106,7 @@ async fn records_still_without_room_at_their_bound_are_refused_with_the_budget_c
         receiver(),
         vec![acks],
         storage_deadline(),
+        RemoteAckTiming::default(),
         std::future::pending(),
     );
     let mut storage = std::pin::pin!(storage);
@@ -126,11 +142,17 @@ async fn a_storage_wait_ends_without_a_charge_when_its_delivery_is_cancelled() {
         .assured("the fixture reserves exactly its relay budget");
     let (cancel, cancelled) = oneshot::channel::<()>();
     let (acks, _completion) = AckSet::root();
-    let storage = owners.store_acks(receiver(), vec![acks], storage_deadline(), async {
-        cancelled
-            .await
-            .discarded("a dropped sender cancels the delivery as surely as a sent value");
-    });
+    let storage = owners.store_acks(
+        receiver(),
+        vec![acks],
+        storage_deadline(),
+        RemoteAckTiming::default(),
+        async {
+            cancelled
+                .await
+                .discarded("a dropped sender cancels the delivery as surely as a sent value");
+        },
+    );
     let mut storage = std::pin::pin!(storage);
 
     assert!(storage.as_mut().now_or_never().is_none());
@@ -159,10 +181,14 @@ async fn a_delivery_without_acknowledgements_stores_nothing() {
             receiver(),
             vec![AckSet::empty(); 3],
             storage_deadline(),
+            RemoteAckTiming::default(),
             std::future::pending(),
         )
         .await;
-    let Ok(RecordStorage::Stored(ids)) = storage else {
+    let Ok(RecordStorage::Stored {
+        registrations: ids, ..
+    }) = storage
+    else {
         panic!("rows without acknowledgements store nothing: {storage:?}");
     };
     assert_eq!(ids, vec![None; 3]);
@@ -177,7 +203,12 @@ fn remote_ack_owner_cost() {
     use nervix_primitives::time::Instant;
     use sorted_vec::SortedVec;
 
-    let owners = RemoteDispatchRegistry::new(Executor::default());
+    let owners = RemoteDispatchRegistry::new(
+        Executor::default(),
+        nervix_models::DataPlaneSettings::default()
+            .delivery_capacity()
+            .arch_into(),
+    );
     for rows in [1, 64] {
         for sample in 0..5 {
             let mut timings = Vec::with_capacity(1_000);

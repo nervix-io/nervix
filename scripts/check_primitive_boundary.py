@@ -179,6 +179,8 @@ UNMODELED_ITEMS = frozenset(
         ("runtime", "Builder"),
         ("runtime", "Runtime"),
         ("thread", "Builder"),
+        ("thread", "Thread"),
+        ("thread", "park_timeout"),
         ("thread", "sleep"),
         ("task", "consume_budget"),
         ("task", "spawn"),

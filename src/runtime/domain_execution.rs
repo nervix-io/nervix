@@ -910,6 +910,7 @@ impl Runtime {
             BoundMessageErrorRoutes::bind(
                 revision.message_errors.clone(),
                 MessageErrorRouteBindingContext {
+                    immediate_minimum: self.data_plane_settings().immediate_flush_minimum(),
                     vm_settings: self.inner.vm_settings,
                     relay_services: &relay_services,
                     materialized_stream_specs: &materialized_stream_specs,

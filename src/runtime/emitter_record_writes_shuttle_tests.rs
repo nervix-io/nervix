@@ -515,7 +515,12 @@ fn a_drain_never_finds_the_emitter_empty_while_a_member_is_retained() {
             shares.push(share);
             completions.push(completion);
         }
-        let mut buffer = EmitterBatchBuffer::reporting_to(buffered, RuntimeFlushPolicy::Immediate);
+        let mut buffer = EmitterBatchBuffer::reporting_to(
+            buffered,
+            RuntimeFlushPolicy::Immediate {
+                minimum: nervix_models::DataPlaneSettings::default().immediate_flush_minimum(),
+            },
+        );
         buffer
             .retain_without_cadence(one_batch(shares))
             .assured("the modeled buffer has a flush policy");

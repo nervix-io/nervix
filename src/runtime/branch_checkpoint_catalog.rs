@@ -15,23 +15,19 @@
 )]
 
 use std::{
-    num::{NonZeroU64, NonZeroUsize},
+    num::NonZeroU64,
     ops::Bound::{Excluded, Unbounded},
 };
 
 use imbl::{GenericHashMap, GenericOrdMap, shared_ptr::DefaultSharedPtr};
-use meticulous::OptionExt as _;
+use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_interconnect::{BranchCheckpointCursor, RuntimeState};
 use nervix_primitives::{
     publication::ArcSwap,
     sync::{Arc, StdArc},
 };
 
-use super::BranchKey;
-
-/// How many removals a catalog keeps for the replicas that have not learned of them yet. A replica
-/// whose cursor is older than the oldest removal the catalog kept is sent the complete catalog.
-const RETAINED_REMOVALS: usize = 1_024;
+use super::{BranchKey, branch_key::BranchKeyPageBudget};
 
 /// The entries of one catalog, by branch. Unbranched work is the absent key. A persistent map shares
 /// its structure with the catalog it was derived from, so a change copies only the path to the
@@ -106,6 +102,7 @@ pub(super) struct CatalogedCheckpoint {
 /// Everything one catalog holds at one moment.
 #[derive(Debug, Clone)]
 struct CatalogState {
+    retained_removals: usize,
     /// Chosen when the catalog is created, so a cursor another catalog returned is never taken
     /// for one of this catalog's.
     epoch: u64,
@@ -119,7 +116,7 @@ struct CatalogState {
     entries: Entries,
     /// Every present branch by the sequence of its latest change.
     revisions: ChangeOrder,
-    /// The removals the catalog kept, by the sequence of each. At most [`RETAINED_REMOVALS`].
+    /// The removals the catalog kept, by the sequence of each. At most the configured removal history.
     removals: ChangeOrder,
 }
 
@@ -133,14 +130,23 @@ struct CatalogEntry {
 
 impl BranchCheckpointCatalog {
     /// An empty catalog with a fresh epoch.
-    pub(super) fn new() -> Self {
-        Self::with_epoch(fastrand::u64(..))
+    pub(super) fn new(retained_removals: usize) -> Self {
+        Self::with_limits(fastrand::u64(..), retained_removals)
     }
 
     /// An empty catalog whose cursors carry `epoch`.
+    #[cfg(test)]
     pub(super) fn with_epoch(epoch: u64) -> Self {
+        Self::with_limits(
+            epoch,
+            usize::try_from(nervix_models::DataPlaneSettings::default().retained_removals())
+                .assured("the declared collection bound fits usize"),
+        )
+    }
+    fn with_limits(epoch: u64, retained_removals: usize) -> Self {
         Self {
             published: Arc::new(ArcSwap::from_pointee(CatalogState {
+                retained_removals,
                 epoch,
                 sequence: 0,
                 discarded_through: 0,
@@ -195,12 +201,32 @@ impl BranchCheckpointCatalog {
 
     /// The first changes after `cursor`, at most `page` of them, or the first `page` checkpoints
     /// of the catalog when the cursor cannot say what changed after it.
+    #[cfg(test)]
     pub(super) fn changes_after(
         &self,
         cursor: Option<BranchCheckpointCursor>,
         page: NonZeroUsize,
     ) -> CheckpointListing {
         let current = self.published.load_full();
+        match current.incremental_from(cursor) {
+            Some(after) => CheckpointListing::Continued(current.page_after(after, page.into())),
+            None => CheckpointListing::Restarted(current.first_page(page.into())),
+        }
+    }
+
+    /// Read a page bounded by the replication frame budget. The count bound derives from
+    /// archived fixed entry size; key accounting additionally bounds variable payloads without
+    /// constructing or serializing a second remote page.
+    pub(super) fn changes_within(
+        &self,
+        cursor: Option<BranchCheckpointCursor>,
+        bytes: u64,
+    ) -> CheckpointListing {
+        let current = self.published.load_full();
+        let page = BranchKeyPageBudget::new(
+            bytes,
+            std::mem::size_of::<nervix_interconnect::BranchCheckpointRevision>(),
+        );
         match current.incremental_from(cursor) {
             Some(after) => CheckpointListing::Continued(current.page_after(after, page)),
             None => CheckpointListing::Restarted(current.first_page(page)),
@@ -239,7 +265,10 @@ impl BranchCheckpointCatalog {
 
 impl Default for BranchCheckpointCatalog {
     fn default() -> Self {
-        Self::new()
+        Self::new(
+            usize::try_from(nervix_models::DataPlaneSettings::default().retained_removals())
+                .assured("the declared collection bound fits usize"),
+        )
     }
 }
 
@@ -305,9 +334,9 @@ impl CatalogState {
             .assured("a count just raised from zero or more is never zero")
     }
 
-    /// Keep at most [`RETAINED_REMOVALS`] removals, discarding the oldest.
+    /// Keep at most the configured removal history removals, discarding the oldest.
     fn discard_old_removals(&mut self) {
-        while self.removals.len() > RETAINED_REMOVALS {
+        while self.removals.len() > self.retained_removals {
             let (oldest, remaining) = self.removals.without_min_with_key();
             let (removed_at, _) = oldest.verified("a map longer than its bound has a first entry");
             self.removals = remaining;
@@ -330,7 +359,7 @@ impl CatalogState {
 
     /// The first `page` changes after sequence `after`, removals and revisions in the order they
     /// happened.
-    fn page_after(&self, after: u64, page: NonZeroUsize) -> CheckpointPage {
+    fn page_after(&self, after: u64, mut page: BranchKeyPageBudget) -> CheckpointPage {
         let mut removals = self.removals.range((Excluded(after), Unbounded)).peekable();
         let mut revisions = self
             .revisions
@@ -340,7 +369,7 @@ impl CatalogState {
         let mut revised = Vec::new();
         let mut listed = 0_usize;
         let mut last = after;
-        while listed < page.get() {
+        while listed < page.entries().get() {
             let next_removal = removals.peek().map(|(sequence, _)| **sequence);
             let next_revision = revisions.peek().map(|(sequence, _)| **sequence);
             let removal_first = match (next_removal, next_revision) {
@@ -349,6 +378,14 @@ impl CatalogState {
                 (None, Some(_)) => false,
                 (Some(removal), Some(revision)) => removal < revision,
             };
+            let branch = if removal_first {
+                removals.peek().verified("a removal was selected").1
+            } else {
+                revisions.peek().verified("a revision was selected").1
+            };
+            if !page.include(branch.as_ref(), listed) {
+                break;
+            }
             if removal_first {
                 let (sequence, branch) = removals
                     .next()
@@ -371,14 +408,18 @@ impl CatalogState {
     }
 
     /// The first `page` checkpoints of the catalog in the order they last changed.
-    fn first_page(&self, page: NonZeroUsize) -> CheckpointPage {
+    fn first_page(&self, mut page: BranchKeyPageBudget) -> CheckpointPage {
         let mut revisions = self.revisions.iter().peekable();
         let mut revised = Vec::new();
         let mut last = 0;
-        while revised.len() < page.get() {
-            let Some((sequence, branch)) = revisions.next() else {
+        while revised.len() < page.entries().get() {
+            let Some((_, branch)) = revisions.peek() else {
                 break;
             };
+            if !page.include(branch.as_ref(), revised.len()) {
+                break;
+            }
+            let (sequence, branch) = revisions.next().verified("the next revision was inspected");
             revised.push(self.cataloged(branch));
             last = *sequence;
         }
@@ -423,3 +464,6 @@ impl CatalogState {
 #[cfg(test)]
 #[path = "branch_checkpoint_catalog_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+use std::num::NonZeroUsize;

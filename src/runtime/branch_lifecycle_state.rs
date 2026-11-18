@@ -17,7 +17,7 @@
 
 use ahash::{HashMap, HashSet};
 use imbl::{GenericHashMap, shared_ptr::DefaultSharedPtr};
-use meticulous::OptionExt as _;
+use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_checkpoint_replication::CheckpointReplication;
 use nervix_interconnect::RuntimeState;
 use nervix_primitives::{
@@ -67,22 +67,23 @@ type PassiveCheckpoints = GenericHashMap<
 
 impl Default for ReplicatedBranchLifecycle {
     fn default() -> Self {
-        Self {
-            assignment: Arc::new(ArcSwapOption::empty()),
-            passive: ArcSwap::from_pointee(PassiveCheckpoints::default()),
-            latest: ArcSwapOption::empty(),
-            replication: CheckpointReplication::new(),
-            catalog: BranchCheckpointCatalog::default(),
-            announcements: Mutex::default(),
-        }
+        Self::assigned(
+            Arc::new(ArcSwapOption::empty()),
+            usize::try_from(nervix_models::DataPlaneSettings::default().retained_removals())
+                .assured("the declared collection bound fits usize"),
+        )
     }
 }
 
 impl ReplicatedBranchLifecycle {
-    pub(super) fn assigned(assignment: SharedStateAssignment) -> Self {
+    pub(super) fn assigned(assignment: SharedStateAssignment, retained_removals: usize) -> Self {
         Self {
             assignment,
-            ..Self::default()
+            passive: ArcSwap::from_pointee(PassiveCheckpoints::default()),
+            latest: ArcSwapOption::empty(),
+            replication: CheckpointReplication::new(),
+            catalog: BranchCheckpointCatalog::new(retained_removals),
+            announcements: Mutex::default(),
         }
     }
 

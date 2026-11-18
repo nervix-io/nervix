@@ -78,7 +78,7 @@ impl RabbitMqQueueIngestorStartPlan {
             unacknowledged_admission: QueueAdmission::RefuseWhenFull,
             client_mounts: resolved.mounts.into_iter().collect(),
         }
-        .open::<RabbitMqQueueIngestor>(ingestor)
+        .open::<RabbitMqQueueIngestor>(runtime, ingestor)
         .await
     }
 }

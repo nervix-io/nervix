@@ -51,15 +51,36 @@ use thiserror::Error;
 pub(super) const CONTINUATION_MARKER: [u8; 4] = [0xff; 4];
 
 /// The width of the continuation marker and of the metadata length that follows it.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "Arrow IPC continuation markers and metadata lengths are four-byte words"
+    )
+)]
 const FRAME_WORD: usize = 4;
 
 /// The width of one offset of a list, a text or a bytes field. Arrow reads an offsets buffer as
 /// whole offsets after checking only that it holds enough of them.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the supported Arrow IPC list text and binary offsets are four-byte words"
+    )
+)]
 const OFFSET_WIDTH: i64 = 4;
 
 /// The longest field node a record batch may declare. Arrow's validation multiplies the length of a
 /// fixed-size list by its size, itself at most `i32::MAX`, and panics when the product overflows; a
 /// length within `i32` keeps that product inside 64 bits.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "an i32 field-node bound keeps Arrow fixed-list length products within i64"
+    )
+)]
 const MAX_FIELD_NODE_LENGTH: i32 = i32::MAX;
 
 /// Why a stream is not framed within the bytes that carry it.

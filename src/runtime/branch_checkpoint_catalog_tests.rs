@@ -230,7 +230,10 @@ fn a_cursor_older_than_a_discarded_removal_restarts_the_listing() {
     let survivor = tenant("survivor");
     let _survivor_entry = catalog.register(survivor.clone(), state(), 1);
     let (_, first) = page(catalog.changes_after(None, page_of(16)));
-    for index in 0..=RETAINED_REMOVALS {
+    for index in
+        0..=usize::try_from(nervix_models::DataPlaneSettings::default().retained_removals())
+            .expect("fixture bound fits usize")
+    {
         let entry = catalog.register(tenant(&format!("churn-{index}")), state(), 1);
         drop(entry);
     }
@@ -302,4 +305,45 @@ fn unbranched_work_is_catalogued_under_the_absent_branch() {
     let (_, listed) = page(catalog.changes_after(None, page_of(16)));
 
     assert_eq!(listed.revised, vec![cataloged(&None, 3)]);
+}
+
+#[test]
+fn replication_byte_budget_pages_variable_keys_without_losing_cursor_progress() {
+    let catalog = BranchCheckpointCatalog::with_epoch(EPOCH);
+    let keys = [
+        tenant(&"a".repeat(1024)),
+        tenant(&"b".repeat(1024)),
+        tenant(&"c".repeat(1024)),
+    ];
+    let registrations = keys
+        .iter()
+        .map(|key| catalog.register(key.clone(), state(), 7))
+        .collect::<Vec<_>>();
+    let mut cursor = None;
+    let mut seen = Vec::new();
+    for _ in 0..keys.len() {
+        let (_, listed) = page(catalog.changes_within(cursor, 64 * 1024));
+        assert_eq!(
+            listed.revised.len(),
+            1,
+            "variable keys consume the frame allowance"
+        );
+        seen.extend(listed.revised.iter().map(|entry| entry.branch.clone()));
+        cursor = Some(listed.cursor);
+    }
+    assert_eq!(seen, keys);
+    let (_, final_page) = page(catalog.changes_within(cursor, 64 * 1024));
+    assert!(!final_page.more);
+    assert!(final_page.revised.is_empty());
+    for registration in registrations {
+        drop(registration);
+    }
+    let mut removed = Vec::new();
+    for _ in 0..keys.len() {
+        let (_, listed) = page(catalog.changes_within(cursor, 64 * 1024));
+        assert_eq!(listed.removed.len(), 1);
+        removed.extend(listed.removed);
+        cursor = Some(listed.cursor);
+    }
+    assert_eq!(removed, keys);
 }

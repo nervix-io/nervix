@@ -26,7 +26,14 @@ use error_stack::ResultExt as _;
 
 use super::*;
 
-pub(super) const BRANCH_INSTANCE_EXPIRATION_SCAN_INTERVAL: Duration = Duration::from_secs(30);
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "branch tasks accept one pending handoff before applying backpressure"
+    )
+)]
+const BRANCH_HANDOFF_CAPACITY: usize = 1;
 
 /// Every way a branched entrypoint fails to take one input into the concrete branch it belongs to,
 /// before the input's routes buffer it. The ingestor or reingestor names itself when it reports
@@ -1199,7 +1206,7 @@ impl IngestorRouteRuntime {
             template.branch.clone(),
             expiration_scan_interval,
         );
-        let (sender, input) = mpsc::channel(1);
+        let (sender, input) = mpsc::channel(BRANCH_HANDOFF_CAPACITY);
         let (shutdown, shutdown_rx) = watch::channel(false);
         let runtime = Arc::new(Self {
             sender,
@@ -1233,13 +1240,13 @@ impl IngestorRouteRuntime {
         self.sender.clone()
     }
 
-    pub(super) async fn shutdown(&self) {
+    pub(super) async fn shutdown(&self, grace: Duration) {
         self.shutdown.send_replace(true);
         let task = self.task.lock().take();
         if let Some(task) = task {
             task.join_after_shutdown("branch entrypoint").await;
         }
-        self.branch_runtime.shutdown().await;
+        self.branch_runtime.shutdown(grace).await;
     }
 }
 
@@ -1570,8 +1577,8 @@ impl BranchExecutionRuntime {
         expiration_scan_interval: Duration,
     ) -> Arc<Self> {
         // input from ingestor/re-ingestor
-        let (sender, mut input) = mpsc::channel(1);
-        let (checkpoints, mut checkpoint_requests) = mpsc::channel(1);
+        let (sender, mut input) = mpsc::channel(BRANCH_HANDOFF_CAPACITY);
+        let (checkpoints, mut checkpoint_requests) = mpsc::channel(BRANCH_HANDOFF_CAPACITY);
         let (shutdown, mut shutdown_rx) = watch::channel(false);
         let runtime = Arc::new(Self {
             domain: domain.clone(),
@@ -1757,7 +1764,7 @@ impl BranchExecutionRuntime {
                 // Maintenance wakeups are physical, so their interval is a plain monotonic sleep.
                 // The branch's own deadline is logical and is awaited on the domain clock below.
                 let maintenance_sleep = if ownership_frozen {
-                    OWNERSHIP_HANDOFF_FREEZE_RECHECK_INTERVAL
+                    (runtime_handle.entity_gate_deadline() / 1200).max(Duration::from_nanos(1))
                 } else {
                     next_expiration_scan
                         .checked_duration_since(Instant::now())
@@ -1970,15 +1977,13 @@ impl BranchExecutionRuntime {
             reason = "install or terminate the one branch lifecycle task and its join handle"
         )
     )]
-    pub(super) async fn shutdown(&self) {
-        const SHUTDOWN_GRACE_PERIOD: Duration = Duration::from_secs(2);
-
+    pub(super) async fn shutdown(&self, grace: Duration) {
         self.shutdown.send_replace(true);
         let Some(mut task) = self.task.lock().take() else {
             return;
         };
 
-        match nervix_primitives::time::timeout(SHUTDOWN_GRACE_PERIOD, &mut task).await {
+        match nervix_primitives::time::timeout(grace, &mut task).await {
             Ok(Ok(())) => {}
             Ok(Err(error)) => {
                 if error.is_cancelled() {
@@ -2000,7 +2005,7 @@ impl BranchExecutionRuntime {
                 warn!(
                     domain = self.domain.as_str(),
                     ingestor = self.ingestor.as_str(),
-                    grace_period = %humantime::format_duration(SHUTDOWN_GRACE_PERIOD),
+                    grace_period = %humantime::format_duration(grace),
                     "branched ingestor task exceeded shutdown grace period; aborting"
                 );
                 task.abort();
@@ -2386,9 +2391,5 @@ pub(super) async fn flush_branch_junction(
 }
 
 #[cfg(test)]
-#[cfg_attr(
-    nervix_lint,
-    nervix::layer(harness, reason = "test module remains outside product execution")
-)]
 #[path = "branch_runtime_tests.rs"]
 mod tests;

@@ -308,11 +308,32 @@ impl StateCapability {
 }
 
 /// The low bits of a packed binding that hold its capability tag; the generation fills the rest.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the packed state binding reserves two low bits for capability discriminants"
+    )
+)]
 const CAPABILITY_TAG_BITS: u32 = 2;
 /// How many tags the capability bits hold, which is the factor a generation is scaled by to leave
 /// room for them.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the packed state generation is scaled past its capability bits"
+    )
+)]
 const CAPABILITY_TAG_SLOTS: u64 = 1 << CAPABILITY_TAG_BITS;
 /// The bits of a packed binding that hold its capability tag.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the packed state binding reads only its low capability bits"
+    )
+)]
 const CAPABILITY_TAG_MASK: u8 = (1 << CAPABILITY_TAG_BITS) - 1;
 
 // A packed binding is read back through the declared discriminant, so every tag must be that
@@ -338,7 +359,6 @@ const _: () = {
 };
 
 /// How many times a rebind spins on the operations it waits for before it yields its thread.
-const ADMISSION_SPINS_BEFORE_YIELD: u32 = 64;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::runtime) struct StateAssignmentToken {
@@ -457,14 +477,15 @@ impl StateAdmissions {
     /// long as the operations already running. The spin yields through the primitive boundary,
     /// whose yield a deterministic scheduler sees, so that scheduler runs the operations this waits
     /// for instead of the spin.
-    fn wait_until_finished(&self, generation: u64) {
+    fn wait_until_finished(&self, generation: u64, parallelism: usize) {
         let admitted = self.of_generation(generation);
+        let spin_limit = if parallelism > 1 { 64 } else { 0 };
         let mut spins = 0_u32;
         while admitted.fetch_add(0, Ordering::AcqRel) != 0 {
-            if spins < ADMISSION_SPINS_BEFORE_YIELD {
+            if spins < spin_limit {
                 spins = spins
                     .checked_add(1)
-                    .verified("the loop only spins while below ADMISSION_SPINS_BEFORE_YIELD");
+                    .verified("the loop only spins while below spin_limit");
                 std::hint::spin_loop();
             } else {
                 nervix_primitives::thread::yield_now();
@@ -538,6 +559,7 @@ impl StateAssignmentAuthority {
         &self,
         roles: StateReplicationRoles,
         local_node: Option<&ClusterNodeName>,
+        parallelism: usize,
     ) -> StateAssignmentBinding {
         let _barrier = self.barrier.lock();
         let superseded = self.current_binding();
@@ -545,7 +567,8 @@ impl StateAssignmentAuthority {
         self.roles.store(StdArc::new(roles));
         // Release: a reader that loads this binding also observes the roles published with it.
         self.binding.store(binding.packed, Ordering::Release);
-        self.admissions.wait_until_finished(superseded.generation());
+        self.admissions
+            .wait_until_finished(superseded.generation(), parallelism);
         binding
     }
 

@@ -70,7 +70,7 @@ impl NatsSubjectIngestorStartPlan {
             unacknowledged_admission: QueueAdmission::WaitForPlace,
             client_mounts: resolved.mounts.into_iter().collect(),
         }
-        .open::<NatsSubjectIngestor>(ingestor)
+        .open::<NatsSubjectIngestor>(runtime, ingestor)
         .await
     }
 }
@@ -108,7 +108,7 @@ impl NatsStreamIngestorStartPlan {
             unacknowledged_admission: QueueAdmission::RefuseWhenFull,
             client_mounts: resolved.mounts.into_iter().collect(),
         }
-        .open::<NatsStreamIngestor>(ingestor)
+        .open::<NatsStreamIngestor>(runtime, ingestor)
         .await
     }
 }

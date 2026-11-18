@@ -147,20 +147,55 @@ const SNAPSHOT_HEADER: &[u8; 16] = b"NERVIX DEDUP KEY";
 
 /// What each key adds to a streamed keyspace checkpoint's serializer scratch: the resolver of its
 /// entry, which stays there until the entries are written.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "streamed checkpoint scratch holds one archived entry resolver per key"
+    )
+)]
 pub(super) const STREAMED_KEY_RESOLVER_BYTES: usize =
     std::mem::size_of::<<DeduplicatorEntrySnapshot as Archive>::Resolver>();
 
 /// The resolvers one key's parts occupy in serializer scratch while that key is written.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "streamed checkpoint scratch holds one archived resolver per key part"
+    )
+)]
 const STREAMED_PART_RESOLVER_BYTES: usize =
     std::mem::size_of::<<DeduplicatorKeyPartSnapshot as Archive>::Resolver>();
 
 /// What one entry and each of its parts can occupy in the encoded checkpoint beyond the bytes of
 /// their text and byte values, alignment padding included.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "checkpoint admission covers the archived entry layout and alignment"
+    )
+)]
 const ENCODED_ENTRY_BYTES: u64 = 64;
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "checkpoint admission covers the archived key-part layout and alignment"
+    )
+)]
 const ENCODED_PART_BYTES: u64 = 48;
 
 /// What a keyspace checkpoint occupies beside its entries: its header, the archived root and the
 /// root's alignment.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "checkpoint admission covers the persisted header root and alignment"
+    )
+)]
 pub(super) const ENCODED_SNAPSHOT_BYTES: u64 = 128;
 
 impl DeduplicatorKey {

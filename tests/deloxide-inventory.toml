@@ -694,6 +694,7 @@ tags = [
   "@client_io_03_generation",
   "@client_wire_subscription_timeout",
   "@remote_ack_owners",
+  "@runtime_settings",
   "@backup_wait",
   "@client_wire_backup_outage",
   "@stopped_checkpoint_writes",
@@ -1304,7 +1305,7 @@ selections = ["deloxide", "deloxide-order", "deloxide-stress"]
 test = "runtime::materialized_state::publication_tests::deloxide_materialized_publications"
 
 [[workload]]
-coverage = "Remote acknowledgement silence sweeps whose ticks are already due when runtime teardown cancels them, and the registry's final resolution, under tracked position guards."
+coverage = "Captured timing cohorts retain their own silence bounds, late sweeps skip missed ticks, and the earliest wake deadline coalesces registrations under its tracked guard without retaining that guard during position scans. Runtime teardown cancels already-due scans before the registry resolves retained acknowledgements. Timers, Notify and scheduling are untracked."
 id = "owner.remote-ack-silence-sweeps"
 invariant = "One fresh diagnostic process ends overrunning silence sweeps through runtime teardown after the sweep in progress, lets the registry resolve the acknowledgement that sweep kept, and records no finding."
 invocation = "owner-tests"
@@ -4711,6 +4712,8 @@ workloads = [
 [[owner]]
 path = "src/runtime/entity_gate.rs"
 workloads = [
+  "scenario.runtime-settings-materialized-capacity",
+  "stress.runtime-settings-materialized-capacity",
   "scenario.ingestor-instance-01",
   "stress.ingestor-instance-01",
   "scenario.ingestor-instance-02",
@@ -4908,6 +4911,8 @@ workloads = [
 [[owner]]
 path = "src/runtime/materialized_state.rs"
 workloads = [
+  "scenario.runtime-settings-materialized-capacity",
+  "stress.runtime-settings-materialized-capacity",
   "scenario.inherited-topology-restore",
   "stress.inherited-topology-restore",
 
@@ -5041,6 +5046,8 @@ workloads = [
 [[owner]]
 path = "src/runtime/remote_ack_owner.rs"
 workloads = [
+  "scenario.runtime-settings-lost-ack",
+  "stress.runtime-settings-lost-ack",
   "owner.remote-ack-silence-sweeps",
   "scenario.remote-ack-branches",
   "scenario.remote-ack-loss",
@@ -6913,100 +6920,105 @@ path = "crates/tls/src/lib.rs"
 workloads = []
 
 
-[[invocation]]
-bound_seconds = 900
-concurrency = 1
-evidence = true
-id = "entity-label-publication"
-inputs = ["tests/features/runtime/entity_labels.feature"]
-kind = "cucumber"
-package = "nervix-scenarios"
-selections = ["deloxide", "deloxide-order"]
-tags = ["@entity_labels_publication", "@entity_labels_restore"]
-target = "test:scenarios"
-
 [[workload]]
-coverage = "The production metadata reader acquires the applied-state publication lock during a committed or staged view. Transaction planning, snapshot/restart and archive restore reach existing tracked registry and consensus owners; async ACK waits are outside detector evidence."
+coverage = "Sealed capture, entity-gate drain, staged restore and materialized publication acquire tracked owner locks; HTTP and filesystem waits remain untracked."
 examples = 2
-feature = "tests/features/runtime/entity_labels.feature"
-id = "scenario.entity-label-publication-1"
-invariant = "Exact labels, typed revision/policy coherence and retained execution/state survive the selected transaction or lifecycle operation without a tracked-lock cycle."
-invocation = "entity-label-publication"
-scenario = "Label commits preserve two branch states and in-flight acknowledgement trees"
+feature = "tests/features/cluster/runtime_settings.feature"
+id = "scenario.runtime-settings-materialized-capacity"
+invariant = "The acknowledged materialized relay captures and restores all rows within the resolved relay metadata bound."
+invocation = "scenarios"
+scenario = "Materialized metadata above eight MiB captures and restores on <cluster_size> nodes"
 selections = ["deloxide", "deloxide-order"]
 
 [[workload]]
-coverage = "The production metadata reader acquires the applied-state publication lock during a committed or staged view. Transaction planning, snapshot/restart and archive restore reach existing tracked registry and consensus owners; async ACK waits are outside detector evidence."
+coverage = "Under scheduling stress: Sealed capture, entity-gate drain, staged restore and materialized publication acquire tracked owner locks; HTTP and filesystem waits remain untracked."
 examples = 2
-feature = "tests/features/runtime/entity_labels.feature"
-id = "scenario.entity-label-publication-2"
-invariant = "Exact labels, typed revision/policy coherence and retained execution/state survive the selected transaction or lifecycle operation without a tracked-lock cycle."
-invocation = "entity-label-publication"
-scenario = "Label candidates are visible only to their transaction and revert atomically"
+feature = "tests/features/cluster/runtime_settings.feature"
+id = "stress.runtime-settings-materialized-capacity"
+invariant = "The acknowledged materialized relay captures and restores all rows within the resolved relay metadata bound."
+invocation = "stress-restore-scenarios"
+scenario = "Materialized metadata above eight MiB captures and restores on <cluster_size> nodes"
+selections = ["deloxide-stress-restore"]
+
+[[workload]]
+coverage = "Parameter commit and runtime teardown reach tracked control-plane and lifecycle locks; duration arithmetic is synchronous and untracked."
+examples = 2
+feature = "tests/features/cluster/runtime_settings.feature"
+id = "scenario.runtime-settings-ack-policy"
+invariant = "A coherent timing group commits atomically and an incoherent update changes nothing."
+invocation = "scenarios"
+scenario = "A remote acknowledgement timing group commits together on <cluster_size> nodes"
 selections = ["deloxide", "deloxide-order"]
 
 [[workload]]
-coverage = "The production metadata reader acquires the applied-state publication lock during a committed or staged view. Transaction planning, snapshot/restart and archive restore reach existing tracked registry and consensus owners; async ACK waits are outside detector evidence."
-examples = 4
-feature = "tests/features/runtime/entity_labels.feature"
-id = "scenario.entity-label-publication-3"
-invariant = "Exact labels, typed revision/policy coherence and retained execution/state survive the selected transaction or lifecycle operation without a tracked-lock cycle."
-invocation = "entity-label-publication"
-scenario = "Restart and archive restore retain the captured label revision"
+coverage = "Under scheduling stress: Parameter commit and runtime teardown reach tracked control-plane and lifecycle locks; duration arithmetic is synchronous and untracked."
+examples = 2
+feature = "tests/features/cluster/runtime_settings.feature"
+id = "stress.runtime-settings-ack-policy"
+invariant = "A coherent timing group commits atomically and an incoherent update changes nothing."
+invocation = "stress-scenarios"
+scenario = "A remote acknowledgement timing group commits together on <cluster_size> nodes"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Ingestor lifecycle, relay publication and teardown reach tracked locks; broker I/O, grouping buffers and async timing are untracked."
+examples = 2
+feature = "tests/features/cluster/runtime_settings.feature"
+id = "scenario.runtime-settings-ingest-grouping"
+invariant = "The emitter observes two full three-row groups under local grouping capabilities."
+invocation = "scenarios"
+scenario = "Local ingest grouping closes full three-row batches on <cluster_size> nodes"
 selections = ["deloxide", "deloxide-order"]
 
-[[owner]]
-path = "crates/consensus/src/entity_labels.rs"
-workloads = [
-  "scenario.entity-label-publication-1",
-  "scenario.entity-label-publication-2",
-  "scenario.entity-label-publication-3",
-  "stress.entity-label-publication-1",
-  "stress.entity-label-publication-2",
-  "stress.entity-label-publication-3",
-]
-
 [[workload]]
-coverage = "Under scheduling stress: The production metadata reader acquires the applied-state publication lock during a committed or staged view. Transaction planning, snapshot/restart and archive restore reach existing tracked registry and consensus owners; async ACK waits are outside detector evidence."
+coverage = "Under scheduling stress: Ingestor lifecycle, relay publication and teardown reach tracked locks; broker I/O, grouping buffers and async timing are untracked."
 examples = 2
-feature = "tests/features/runtime/entity_labels.feature"
-id = "stress.entity-label-publication-1"
-invariant = "Exact labels, typed revision/policy coherence and retained execution/state survive the selected transaction or lifecycle operation without a tracked-lock cycle."
-invocation = "stress-entity-label-publication"
-scenario = "Label commits preserve two branch states and in-flight acknowledgement trees"
-selections = ["deloxide-stress", "deloxide-stress-restore"]
+feature = "tests/features/cluster/runtime_settings.feature"
+id = "stress.runtime-settings-ingest-grouping"
+invariant = "The emitter observes two full three-row groups under local grouping capabilities."
+invocation = "stress-scenarios"
+scenario = "Local ingest grouping closes full three-row batches on <cluster_size> nodes"
+selections = ["deloxide-stress"]
 
 [[workload]]
-coverage = "Under scheduling stress: The production metadata reader acquires the applied-state publication lock during a committed or staged view. Transaction planning, snapshot/restart and archive restore reach existing tracked registry and consensus owners; async ACK waits are outside detector evidence."
+coverage = "Committed capability validation and node lifecycle acquire tracked owner locks; pure deadline comparison is outside detector evidence."
 examples = 2
-feature = "tests/features/runtime/entity_labels.feature"
-id = "stress.entity-label-publication-2"
-invariant = "Exact labels, typed revision/policy coherence and retained execution/state survive the selected transaction or lifecycle operation without a tracked-lock cycle."
-invocation = "stress-entity-label-publication"
-scenario = "Label candidates are visible only to their transaction and revert atomically"
-selections = ["deloxide-stress", "deloxide-stress-restore"]
+feature = "tests/features/cluster/runtime_settings.feature"
+id = "scenario.runtime-settings-drain-budget"
+invariant = "Domain and gate policy cannot exceed any live node drain or shutdown capability."
+invocation = "scenarios"
+scenario = "A domain drain cannot exceed a live node's shutdown budget on <cluster_size> nodes"
+selections = ["deloxide", "deloxide-order"]
 
 [[workload]]
-coverage = "Under scheduling stress: The production metadata reader acquires the applied-state publication lock during a committed or staged view. Transaction planning, snapshot/restart and archive restore reach existing tracked registry and consensus owners; async ACK waits are outside detector evidence."
-examples = 4
-feature = "tests/features/runtime/entity_labels.feature"
-id = "stress.entity-label-publication-3"
-invariant = "Exact labels, typed revision/policy coherence and retained execution/state survive the selected transaction or lifecycle operation without a tracked-lock cycle."
-invocation = "stress-entity-label-publication"
-scenario = "Restart and archive restore retain the captured label revision"
-selections = ["deloxide-stress", "deloxide-stress-restore"]
+coverage = "Under scheduling stress: Committed capability validation and node lifecycle acquire tracked owner locks; pure deadline comparison is outside detector evidence."
+examples = 2
+feature = "tests/features/cluster/runtime_settings.feature"
+id = "stress.runtime-settings-drain-budget"
+invariant = "Domain and gate policy cannot exceed any live node drain or shutdown capability."
+invocation = "stress-scenarios"
+scenario = "A domain drain cannot exceed a live node's shutdown budget on <cluster_size> nodes"
+selections = ["deloxide-stress"]
 
-[[invocation]]
-bound_seconds = 900
-concurrency = 1
-evidence = true
-id = "stress-entity-label-publication"
-inputs = ["tests/features/runtime/entity_labels.feature"]
-kind = "cucumber"
-package = "nervix-scenarios"
-selections = ["deloxide-stress", "deloxide-stress-restore"]
-tags = ["@entity_labels_publication", "@entity_labels_restore"]
-target = "test:scenarios"
+[[workload]]
+coverage = "Remote correlation and root lifecycle use tracked locks; network loss, elapsed timing, Kafka confirmation and async wake ordering are untracked."
+examples = 1
+feature = "tests/features/cluster/runtime_settings.feature"
+id = "scenario.runtime-settings-lost-ack"
+invariant = "A lost terminal ACK expires under the captured short policy and sequential Kafka ingestion resumes within the measured bound."
+invocation = "scenarios"
+scenario = "A committed silence policy expires a lost forwarded acknowledgement sooner"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: Remote correlation and root lifecycle use tracked locks; network loss, elapsed timing, Kafka confirmation and async wake ordering are untracked."
+examples = 1
+feature = "tests/features/cluster/runtime_settings.feature"
+id = "stress.runtime-settings-lost-ack"
+invariant = "A lost terminal ACK expires under the captured short policy and sequential Kafka ingestion resumes within the measured bound."
+invocation = "stress-scenarios"
+scenario = "A committed silence policy expires a lost forwarded acknowledgement sooner"
+selections = ["deloxide-stress"]
 
 [[workload]]
 coverage = "Production source-instance lifecycle, branch runtime and ACK owners, schedule publication and native checkpoint transfer; restore additionally traverses captured materialized rows and epoch/provenance installation. Broker I/O, async observation and routing publications are outside detector evidence."
@@ -7172,3 +7184,106 @@ selections = ["deloxide-stress"]
 gap = "The diagnostic-node workload reaches successful HTTP input and its retained accounting guard. Slow bodies, capacity refusal and cancellation racing allocation observation are qualified by the ordinary listener scenarios and the production-owner Shuttle check; those interleavings are outside detector evidence. The selected accounting mutex holds no I/O, await, copy or graph dispatch."
 path = "src/application/listener_input.rs"
 workloads = ["scenario.diagnostic-nodes", "stress.diagnostic-nodes"]
+
+[[invocation]]
+bound_seconds = 900
+concurrency = 1
+evidence = true
+id = "entity-label-publication"
+inputs = ["tests/features/runtime/entity_labels.feature"]
+kind = "cucumber"
+package = "nervix-scenarios"
+selections = ["deloxide", "deloxide-order"]
+tags = ["@entity_labels_publication", "@entity_labels_restore"]
+target = "test:scenarios"
+
+
+[[workload]]
+coverage = "The production metadata reader acquires the applied-state publication lock during a committed or staged view. Transaction planning, snapshot/restart and archive restore reach existing tracked registry and consensus owners; async ACK waits are outside detector evidence."
+examples = 2
+feature = "tests/features/runtime/entity_labels.feature"
+id = "scenario.entity-label-publication-1"
+invariant = "Exact labels, typed revision/policy coherence and retained execution/state survive the selected transaction or lifecycle operation without a tracked-lock cycle."
+invocation = "entity-label-publication"
+scenario = "Label commits preserve two branch states and in-flight acknowledgement trees"
+selections = ["deloxide", "deloxide-order"]
+
+
+[[workload]]
+coverage = "The production metadata reader acquires the applied-state publication lock during a committed or staged view. Transaction planning, snapshot/restart and archive restore reach existing tracked registry and consensus owners; async ACK waits are outside detector evidence."
+examples = 2
+feature = "tests/features/runtime/entity_labels.feature"
+id = "scenario.entity-label-publication-2"
+invariant = "Exact labels, typed revision/policy coherence and retained execution/state survive the selected transaction or lifecycle operation without a tracked-lock cycle."
+invocation = "entity-label-publication"
+scenario = "Label candidates are visible only to their transaction and revert atomically"
+selections = ["deloxide", "deloxide-order"]
+
+
+[[workload]]
+coverage = "The production metadata reader acquires the applied-state publication lock during a committed or staged view. Transaction planning, snapshot/restart and archive restore reach existing tracked registry and consensus owners; async ACK waits are outside detector evidence."
+examples = 4
+feature = "tests/features/runtime/entity_labels.feature"
+id = "scenario.entity-label-publication-3"
+invariant = "Exact labels, typed revision/policy coherence and retained execution/state survive the selected transaction or lifecycle operation without a tracked-lock cycle."
+invocation = "entity-label-publication"
+scenario = "Restart and archive restore retain the captured label revision"
+selections = ["deloxide", "deloxide-order"]
+
+
+[[owner]]
+path = "crates/consensus/src/entity_labels.rs"
+workloads = [
+  "scenario.entity-label-publication-1",
+  "scenario.entity-label-publication-2",
+  "scenario.entity-label-publication-3",
+  "stress.entity-label-publication-1",
+  "stress.entity-label-publication-2",
+  "stress.entity-label-publication-3",
+]
+
+
+[[workload]]
+coverage = "Under scheduling stress: The production metadata reader acquires the applied-state publication lock during a committed or staged view. Transaction planning, snapshot/restart and archive restore reach existing tracked registry and consensus owners; async ACK waits are outside detector evidence."
+examples = 2
+feature = "tests/features/runtime/entity_labels.feature"
+id = "stress.entity-label-publication-1"
+invariant = "Exact labels, typed revision/policy coherence and retained execution/state survive the selected transaction or lifecycle operation without a tracked-lock cycle."
+invocation = "stress-entity-label-publication"
+scenario = "Label commits preserve two branch states and in-flight acknowledgement trees"
+selections = ["deloxide-stress", "deloxide-stress-restore"]
+
+
+[[workload]]
+coverage = "Under scheduling stress: The production metadata reader acquires the applied-state publication lock during a committed or staged view. Transaction planning, snapshot/restart and archive restore reach existing tracked registry and consensus owners; async ACK waits are outside detector evidence."
+examples = 2
+feature = "tests/features/runtime/entity_labels.feature"
+id = "stress.entity-label-publication-2"
+invariant = "Exact labels, typed revision/policy coherence and retained execution/state survive the selected transaction or lifecycle operation without a tracked-lock cycle."
+invocation = "stress-entity-label-publication"
+scenario = "Label candidates are visible only to their transaction and revert atomically"
+selections = ["deloxide-stress", "deloxide-stress-restore"]
+
+
+[[workload]]
+coverage = "Under scheduling stress: The production metadata reader acquires the applied-state publication lock during a committed or staged view. Transaction planning, snapshot/restart and archive restore reach existing tracked registry and consensus owners; async ACK waits are outside detector evidence."
+examples = 4
+feature = "tests/features/runtime/entity_labels.feature"
+id = "stress.entity-label-publication-3"
+invariant = "Exact labels, typed revision/policy coherence and retained execution/state survive the selected transaction or lifecycle operation without a tracked-lock cycle."
+invocation = "stress-entity-label-publication"
+scenario = "Restart and archive restore retain the captured label revision"
+selections = ["deloxide-stress", "deloxide-stress-restore"]
+
+
+[[invocation]]
+bound_seconds = 900
+concurrency = 1
+evidence = true
+id = "stress-entity-label-publication"
+inputs = ["tests/features/runtime/entity_labels.feature"]
+kind = "cucumber"
+package = "nervix-scenarios"
+selections = ["deloxide-stress", "deloxide-stress-restore"]
+tags = ["@entity_labels_publication", "@entity_labels_restore"]
+target = "test:scenarios"

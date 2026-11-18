@@ -92,8 +92,22 @@ pub(super) enum WindowPublishedSnapshot {
 }
 
 const WINDOW_SNAPSHOT_MAGIC: [u8; 8] = *b"NVXWIN64";
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the window snapshot frame contains magic and one four-byte length"
+    )
+)]
 const WINDOW_SNAPSHOT_FRAME_BYTES: usize = WINDOW_SNAPSHOT_MAGIC.len() + 4;
 /// The little-endian `u32` length that precedes every typed section.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "typed window snapshot sections prefix their body with a four-byte length"
+    )
+)]
 const TYPED_SECTION_PREFIX_BYTES: usize = 4;
 
 #[derive(Debug, Clone, Copy, thiserror::Error)]

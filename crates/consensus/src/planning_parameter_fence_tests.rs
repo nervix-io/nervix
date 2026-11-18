@@ -17,7 +17,7 @@ fn seeded_state() -> StateMachineData {
     let seeded = apply_consensus_command(
         &mut state,
         &ConsensusCommand::SeedClusterParameters {
-            values: Box::new(ClusterParameterValues::default()),
+            values: Box::default(),
         },
     );
     assert_eq!(seeded.response, ConsensusResponse::Applied);
@@ -61,6 +61,7 @@ fn publish_timeout(state: &mut StateMachineData, seconds: u64) {
     );
     assert_eq!(admitted.response, ConsensusResponse::Applied);
     let inputs = ClusterParameterPlanningInputs {
+        capabilities: BTreeMap::new(),
         current,
         schedule: ClusterSchedule::from(&state.schedule).domains,
         domains: (&state.domains).into(),

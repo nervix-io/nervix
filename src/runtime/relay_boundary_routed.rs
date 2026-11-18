@@ -29,6 +29,7 @@ use super::*;
 /// and every destination carries a handle to that one allocation. Only the target relay and the
 /// acknowledgement obligations differ between destinations.
 pub(in crate::runtime) struct RoutedDelivery<'a> {
+    pub(in crate::runtime) ack_timing: nervix_models::RemoteAckTiming,
     pub(in crate::runtime) decoded_bytes: u64,
     pub(in crate::runtime) delivery: RelayDelivery,
     pub(in crate::runtime) domain: &'a DomainName,
@@ -50,6 +51,7 @@ pub(in crate::runtime) struct RoutedDelivery<'a> {
 )]
 pub(in crate::runtime) fn routed_payload(delivery: RoutedDelivery<'_>) -> RelayPayload {
     RelayPayload {
+        ack_timing: delivery.ack_timing,
         decoded_bytes: delivery.decoded_bytes,
         delivery: delivery.delivery,
         kind: RelayPayloadKind::Routed,

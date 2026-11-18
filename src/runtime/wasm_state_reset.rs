@@ -475,7 +475,7 @@ impl Runtime {
             .change_context_lazy(failed)?;
         let captured = state.capture(bytes, boundary);
         let deadline = Instant::now()
-            .checked_add(WASM_CHECKPOINT_DEADLINE)
+            .checked_add(self.inner.data_plane.wasm_checkpoint_timeout())
             .assured("the configured WASM checkpoint deadline stays within Instant");
         let durable = self
             .persist_wasm_checkpoint(&state, captured, deadline)

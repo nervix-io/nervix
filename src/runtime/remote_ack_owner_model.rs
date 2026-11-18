@@ -405,13 +405,14 @@ impl CorrelationModel {
         counts
     }
 
-    pub fn memory(&self, bytes_per_row: usize) -> u64 {
+    pub fn memory(&self, bytes_per_row: usize, bytes_per_delivery: usize) -> u64 {
         let rows: usize = self
             .deliveries
             .values()
             .map(|delivery| delivery.rows.len())
             .sum();
-        u64::try_from(rows * bytes_per_row).assured("four deliveries of four rows fit in u64")
+        u64::try_from(rows * bytes_per_row + self.deliveries.len() * bytes_per_delivery)
+            .assured("four deliveries of four rows and their policy headers fit in u64")
     }
 
     pub fn live_records(&self) -> Vec<u64> {

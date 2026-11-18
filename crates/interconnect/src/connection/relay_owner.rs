@@ -29,6 +29,10 @@ use nervix_primitives::sync::blocking::Mutex;
 
 use super::{relay_watermarks::RelayChannelWatermarks, *};
 
+/// Due reports retain weak attempt handles and each attempt's captured send budget.
+type RelayProgressReports =
+    BTreeMap<RemoteAckRegistration, (StdWeak<RelayAdmissionRecord>, Duration)>;
+
 impl TransportState {
     pub(super) fn bind_relay_owner(
         &self,
@@ -181,6 +185,7 @@ pub(super) struct RelayPeerOwner {
 }
 
 struct RelayPeerProtocol {
+    channel_retention: Option<Duration>,
     run: RelayPeerRun,
     // Ordered retirement makes cancellation and permit release deterministic under exploration.
     grants: BTreeMap<u64, RelayGrant>,
@@ -205,6 +210,7 @@ impl RelayPeerOwner {
         Self {
             retention: capacity.retention,
             state: Mutex::new(RelayPeerProtocol {
+                channel_retention: None,
                 run: RelayPeerRun::Starting,
                 grants: BTreeMap::new(),
                 attempts: BTreeMap::new(),
@@ -329,6 +335,34 @@ impl RelayPeerOwner {
         self.state.lock().grants.contains_key(&grant_id)
     }
 
+    pub(super) fn retention(&self) -> Duration {
+        self.state
+            .lock()
+            .channel_retention
+            .unwrap_or(self.retention)
+    }
+
+    /// Read each retained attempt once per due timer or new registration. Finished RPCs update
+    /// their own next report directly; they do not cause another full peer scan.
+    pub(super) fn due_progress(&self, now: Instant) -> (RelayProgressReports, Option<Instant>) {
+        let state = self.state.lock();
+        let mut due = BTreeMap::new();
+        let mut next: Option<Instant> = None;
+        for record in state.attempts.values() {
+            let (report, deadline) = record.take_progress_report(now);
+            if let Some((registration, timeout)) = report {
+                due.insert(registration, (StdArc::downgrade(record), timeout));
+            }
+            if let Some(deadline) = deadline {
+                next = Some(match next {
+                    Some(next) => next.min(deadline),
+                    None => deadline,
+                });
+            }
+        }
+        (due, next)
+    }
+
     pub(super) fn register(&self, grant_id: u64, grant: RelayGrant) -> RelayGrantRegistration {
         let mut state = self.state.lock();
         let record = &grant.admission;
@@ -357,6 +391,14 @@ impl RelayPeerOwner {
         if state.grants.contains_key(&grant_id) || state.attempts.len() >= self.capacity {
             return RelayGrantRegistration::ChannelBusy;
         }
+        let previous_retention = state.channel_retention.unwrap_or(self.retention);
+        let requested_retention = 2 * record.metadata.ack_timing.remote_relay_total_timeout;
+        let retention = match state.channel_retention {
+            Some(current) => current.max(requested_retention),
+            None => requested_retention,
+        };
+        state.channel_retention = Some(retention);
+        let retention_changed = retention != previous_retention;
         state
             .active_channels
             .insert(record.attempt.channel.clone(), record.attempt.sequence);
@@ -367,7 +409,7 @@ impl RelayPeerOwner {
             .attempts
             .insert(record.attempt.clone(), StdArc::clone(record));
         state.grants.insert(grant_id, grant);
-        RelayGrantRegistration::Registered
+        RelayGrantRegistration::Registered { retention_changed }
     }
 
     pub(super) fn claim_grant(
@@ -475,22 +517,14 @@ impl RelayPeerOwner {
         Some(record)
     }
 
-    pub(super) fn progress_registrations(&self) -> BTreeSet<RemoteAckRegistration> {
-        self.state
-            .lock()
-            .attempts
-            .values()
-            .filter_map(|record| record.progress_registration())
-            .collect()
-    }
-
     pub(super) fn sweep(&self, now: Instant) {
         let mut state = self.state.lock();
+        let retention = state.channel_retention.unwrap_or(self.retention);
         if matches!(state.run, RelayPeerRun::AwaitingMembership { .. })
             && now
                 .checked_duration_since(self.created_at)
                 .assured("the peer sweep follows owner creation")
-                >= self.retention
+                >= retention
         {
             state.run = RelayPeerRun::Ended;
             self.closed.cancel();
@@ -500,7 +534,7 @@ impl RelayPeerOwner {
         }
         let protocol = &mut *state;
         let attempts = &protocol.attempts;
-        protocol.watermarks.expire(now, self.retention, |channel| {
+        protocol.watermarks.expire(now, retention, |channel| {
             RelayPeerProtocol::holds_attempt(attempts, channel)
         });
         // Terminal outcomes whose replies were lost remain available throughout reconciliation.
@@ -512,7 +546,7 @@ impl RelayPeerOwner {
                 if now
                     .checked_duration_since(entry.last_progress())
                     .assured("a relay sweep follows the attempt's progress")
-                    >= self.retention
+                    >= retention
                 {
                     Some(entry.clone())
                 } else {
@@ -531,7 +565,7 @@ impl RelayPeerOwner {
             if now
                 .checked_duration_since(attempt.last_progress)
                 .assured("a relay sweep follows outbound progress")
-                >= self.retention
+                >= retention
             {
                 expired_outbound.push(key.clone());
             }
@@ -546,7 +580,8 @@ impl RelayPeerOwner {
         key: &OutboundRelayKey,
         epoch: u64,
         admission: &RelayAdmissionKey,
-    ) -> Result<(), Report<TransportError>> {
+        timing: nervix_models::RemoteAckTiming,
+    ) -> Result<bool, Report<TransportError>> {
         let mut state = self.state.lock();
         if !state.accepts_epoch(epoch) {
             return Err(Report::new(TransportError::RelayIndeterminate));
@@ -571,6 +606,13 @@ impl RelayPeerOwner {
                 "relay admission acknowledgement names another delivery".to_string(),
             )));
         }
+        let previous_retention = state.channel_retention.unwrap_or(self.retention);
+        let requested_retention = 2 * timing.remote_relay_total_timeout;
+        let retention = match state.channel_retention {
+            Some(current) => current.max(requested_retention),
+            None => requested_retention,
+        };
+        state.channel_retention = Some(retention);
         state.outbound_attempts.insert(
             key.clone(),
             OutboundRelayAttempt {
@@ -581,7 +623,7 @@ impl RelayPeerOwner {
         state
             .outbound_admissions
             .insert(admission.clone(), key.clone());
-        Ok(())
+        Ok(retention != previous_retention)
     }
 
     fn outbound_capacity(&self) -> usize {

@@ -366,7 +366,7 @@ impl Application {
         let raft_timings = settings.raft;
         let raft_retention = settings.raft_retention;
         let replica_count = settings.scheduling.replica_count();
-        let runtime_settings = settings.runtime;
+        let mut runtime_settings = settings.runtime;
         let state_snapshot_interval = runtime_settings.state_snapshot_interval();
         let db_path = self.identity.db_path.clone();
         let temp_dir = self.identity.temp_dir.clone();
@@ -445,6 +445,7 @@ impl Application {
             dns,
             memory,
             capabilities,
+            data_plane,
             properties,
             peer_receive,
             client_endpoints,
@@ -461,6 +462,7 @@ impl Application {
                 return Err(error.change_context(AppError::Preflight));
             }
         };
+        runtime_settings.data_plane = data_plane;
         let memory_pressure_controller = {
             let mapping_input = memory_pressure
                 .config()
@@ -697,6 +699,13 @@ impl Application {
             && consensus.observer().cluster_parameters().is_none()
             && let Err(error) =
                 preflight::validate_resource_volume(&parameter_seeds, database_volume, &db_path)
+                    .and_then(|()| {
+                        preflight::validate_runtime_budget(
+                            &parameter_seeds,
+                            &node_id,
+                            capabilities.shutdown,
+                        )
+                    })
         {
             startup.consensus = Some(consensus);
             startup.terminate().await;
@@ -1236,6 +1245,8 @@ impl Application {
             };
             if let Some(record) = record {
                 preflight::validate_resource_volume(&record.values, database_volume, &db_path)
+                    .change_context(AppError::Preflight)?;
+                preflight::validate_runtime_budget(&record.values, &node_id, capabilities.shutdown)
                     .change_context(AppError::Preflight)?;
                 break record;
             }

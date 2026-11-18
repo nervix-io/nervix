@@ -40,8 +40,14 @@ use super::{
 
 // A current replica receives an empty stream. A checkpoint starts with its little-endian revision
 // and BLAKE3 digest; the HTTP content length declares the remaining native payload's exact length.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the offset checkpoint header contains one u64 revision and a BLAKE3 digest"
+    )
+)]
 const HEADER_BYTES: usize = 40;
-const CHUNK_BYTES: u64 = 64 * 1024;
 
 #[derive(Debug, PartialEq, Eq, Error)]
 enum KafkaOffsetTransferError {
@@ -194,7 +200,10 @@ impl Runtime {
         let working = self
             .inner
             .executor
-            .reserve(MemoryClass::Bulk, CHUNK_BYTES)
+            .reserve(
+                MemoryClass::Bulk,
+                self.inner.executor.limits().bulk_chunk_bytes.as_u64(),
+            )
             .await
             .map_err(StreamHandlerError::with_cause)?;
         let writer = self
@@ -235,11 +244,12 @@ impl Runtime {
             .open_reader()
             .await
             .map_err(StreamHandlerError::with_cause)?;
+        let chunk_bytes = self.inner.executor.limits().bulk_chunk_bytes.as_u64();
         let chunks = stream::once(async move { Ok(header) }).chain(stream::try_unfold(
             (artifact, reader),
-            |(artifact, mut reader)| async move {
+            move |(artifact, mut reader)| async move {
                 let chunk = reader
-                    .next_chunk(CHUNK_BYTES)
+                    .next_chunk(chunk_bytes)
                     .await
                     .map_err(StreamHandlerError::with_cause)?;
                 Ok::<_, Report<StreamHandlerError>>(chunk.map(|chunk| (chunk, (artifact, reader))))
@@ -351,7 +361,7 @@ impl Runtime {
         };
         let working = length.checked_mul(12).ok_or_else(admission_size)?;
         let working = working
-            .checked_add(CHUNK_BYTES)
+            .checked_add(self.inner.executor.limits().bulk_chunk_bytes.as_u64())
             .ok_or_else(admission_size)?;
         let charge = self
             .inner
@@ -359,7 +369,7 @@ impl Runtime {
             .try_reserve(MemoryClass::RestoreMetadata, working)
             .change_context_lazy(failure)?;
         let (read_charge, decode_charge) = charge
-            .split(length + CHUNK_BYTES)
+            .split(length + self.inner.executor.limits().bulk_chunk_bytes.as_u64())
             .change_context_lazy(failure)?;
         let payload = staged
             .read_admitted(length, read_charge)

@@ -30,8 +30,6 @@
     )
 )]
 
-use std::time::Duration;
-
 use error_stack::{Report, ResultExt as _};
 use futures_util::stream;
 use nervix_interconnect::{
@@ -52,7 +50,6 @@ use super::{
 /// How long a requester waits for the owner to describe what it would transfer. Sealing runs on
 /// the bulk workers behind whatever else is admitted there, so this is longer than an ordinary
 /// control request rather than the same.
-const DESCRIBE_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Error)]
 #[cfg_attr(
@@ -342,7 +339,7 @@ impl Runtime {
                     placement: placement.to_remote(),
                     after_revision,
                 },
-                DESCRIBE_TIMEOUT,
+                self.inner.data_plane.snapshot_describe_timeout(),
             )
             .await
             .change_context_lazy(|| MaterializedSnapshotExchangeError::Describe {
@@ -387,12 +384,13 @@ impl Runtime {
             ));
         };
         let mut body = dispatcher
-            .request_stream(
+            .request_stream_with_timeout(
                 target_node_id,
                 FetchStateSnapshot {
                     placement: placement.to_remote(),
                     revision: envelope.revision,
                 },
+                self.inner.data_plane.snapshot_fetch_timeout(),
             )
             .await
             .map_err(|error| {

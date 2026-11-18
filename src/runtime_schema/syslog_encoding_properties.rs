@@ -190,13 +190,27 @@ fn bolero_syslog_malformed_messages_do_not_publish_partial_rows() {
             let valid = record.expected();
             let mut builder = fixture.codec.schema.batch_builder(2);
             let mut decoder = JsonDecoder::default();
-            let count = decode_with_codec(&fixture.codec, &valid, &mut decoder, &mut builder)
-                .assured("the preceding record is valid");
+            let count = decode_with_codec(
+                &fixture.codec,
+                &valid,
+                &mut decoder,
+                &mut builder,
+                usize::try_from(nervix_models::PayloadUnfoldLimit::DEFAULT)
+                    .assured("the current default fits usize"),
+            )
+            .assured("the preceding record is valid");
             assert_eq!(count, 1);
             // The fixed head selects the RFC 5424 parser even when the generated tail is not UTF-8.
             let mut payload = b"<34>1 ".to_vec();
             payload.extend_from_slice(input);
-            let outcome = decode_with_codec(&fixture.codec, &payload, &mut decoder, &mut builder);
+            let outcome = decode_with_codec(
+                &fixture.codec,
+                &payload,
+                &mut decoder,
+                &mut builder,
+                usize::try_from(nervix_models::PayloadUnfoldLimit::DEFAULT)
+                    .assured("the current default fits usize"),
+            );
             let expected_rows = match outcome {
                 Ok(count) => {
                     assert_eq!(count, 1);

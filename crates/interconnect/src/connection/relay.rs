@@ -24,6 +24,7 @@
     )
 )]
 
+use error_stack::ResultExt as _;
 use futures_util::StreamExt as _;
 
 use super::*;
@@ -258,11 +259,14 @@ impl TransportState {
             .relay_owner
             .as_ref()
             .assured("a leased connection completed its authenticated binding");
-        relay_owner.register_outbound(
+        if relay_owner.register_outbound(
             &outbound_key,
             management.connection.peer_epoch,
             &admission_key,
-        )?;
+            payload.ack_timing,
+        )? {
+            self.relay_retention_changed.notify_one();
+        }
         let grant_response = management
             .request_raw(
                 self,
@@ -371,90 +375,131 @@ impl TransportState {
             target: ClusterNodeName,
             admission_id: u64,
             failure: Option<String>,
+            next: Option<Instant>,
         }
-
-        let mut interval =
-            nervix_primitives::time::interval(nervix_models::HOST_RELAY_ALIVE_INTERVAL);
-        interval.set_missed_tick_behavior(nervix_primitives::time::MissedTickBehavior::Skip);
+        let mut reports = FuturesUnordered::new();
+        let mut next: Option<Instant> = None;
+        let mut scan = true;
         loop {
             nervix_primitives::task::consume_budget().await;
-            nervix_primitives::select! {
-                _ = self.admission_closed.cancelled() => break,
-                _ = interval.tick() => {}
-            }
-
-            // Report in registration order, not map order, so every process sends the same reports
-            // in the same sequence.
-            let owners = self.relay_owners.load_full();
-            let mut registrations = BTreeSet::new();
-            for owner in owners.owners.values() {
-                registrations.extend(owner.progress_registrations());
-            }
-            let mut reports = FuturesUnordered::new();
-            for registration in registrations {
-                nervix_primitives::task::consume_budget().await;
-                let state = self.clone();
-                reports.push(async move {
-                    let target = registration.registrar.node_id().clone();
-                    let ack_id = registration.ack_id;
-                    let result = timeout(
-                        state.options.relay_progress_send_timeout(),
-                        state.send(
-                            &target,
-                            Envelope::Ack(registration.resolution(RemoteAckOutcome::Alive)),
-                        ),
-                    )
-                    .await;
-                    let failure = match result {
-                        Ok(Ok(())) => None,
-                        Ok(Err(error)) => Some(error.to_string()),
-                        Err(_) => Some(format!(
-                            "relay progress send exceeded {:?}",
-                            state.options.relay_progress_send_timeout()
-                        )),
-                    };
-                    ProgressReport {
-                        target,
-                        admission_id: ack_id,
-                        failure,
+            let changed = self.relay_progress_changed.notified();
+            let mut changed = std::pin::pin!(changed);
+            changed.as_mut().enable();
+            if scan {
+                let now = Instant::now();
+                let owners = self.relay_owners.load_full();
+                let mut due = BTreeMap::new();
+                next = None;
+                for owner in owners.owners.values() {
+                    let (registrations, deadline) = owner.due_progress(now);
+                    due.extend(registrations);
+                    if let Some(deadline) = deadline {
+                        next = Some(match next {
+                            Some(next) => next.min(deadline),
+                            None => deadline,
+                        });
                     }
-                });
-            }
-            while !reports.is_empty() {
-                nervix_primitives::task::consume_budget().await;
-                let completed = nervix_primitives::select! {
-                    _ = self.admission_closed.cancelled() => return,
-                    completed = reports.next() => completed,
-                };
-                let Some(report) = completed else {
-                    break;
-                };
-                if let Some(error) = report.failure {
-                    debug!(
-                        target_node = %report.target,
-                        admission_id = report.admission_id,
-                        error,
-                        "failed to report queued relay progress"
-                    );
+                }
+                // Registration order is deterministic; every pending RPC is polled independently.
+                for (registration, (record, send_timeout)) in due {
+                    nervix_primitives::task::consume_budget().await;
+                    let send_timeout = self.options.relay_progress_send_timeout(send_timeout);
+                    let state = self.clone();
+                    reports.push(async move {
+                        let target = registration.registrar.node_id().clone();
+                        let ack_id = registration.ack_id;
+                        let result = timeout(
+                            send_timeout,
+                            state.send(
+                                &target,
+                                Envelope::Ack(registration.resolution(RemoteAckOutcome::Alive)),
+                            ),
+                        )
+                        .await;
+                        let failure = match result {
+                            Ok(Ok(())) => None,
+                            Ok(Err(error)) => Some(error.to_string()),
+                            Err(_) => {
+                                Some(format!("relay progress send exceeded {send_timeout:?}"))
+                            }
+                        };
+                        let next = record
+                            .upgrade()
+                            .and_then(|record| record.finish_progress_report(Instant::now()));
+                        ProgressReport {
+                            target,
+                            admission_id: ack_id,
+                            failure,
+                            next,
+                        }
+                    });
                 }
             }
+            scan = false;
+            enum ProgressEvent<T> {
+                Changed,
+                Timer,
+                Completed(T),
+            }
+            let deadline = next;
+            let timer = async move {
+                if let Some(deadline) = deadline {
+                    nervix_primitives::time::sleep_until(deadline).await;
+                } else {
+                    std::future::pending::<()>().await;
+                }
+            };
+            let event = nervix_primitives::select! {
+                biased;
+                _ = self.admission_closed.cancelled() => return,
+                event = async {
+                    nervix_primitives::select! {
+                        _ = changed => ProgressEvent::Changed,
+                        _ = timer => ProgressEvent::Timer,
+                        completed = reports.next(), if !reports.is_empty() => ProgressEvent::Completed(completed),
+                    }
+                } => event,
+            };
+            match event {
+                ProgressEvent::Changed | ProgressEvent::Timer => scan = true,
+                ProgressEvent::Completed(Some(report)) => {
+                    if let Some(deadline) = report.next {
+                        next = Some(match next {
+                            Some(next) => next.min(deadline),
+                            None => deadline,
+                        });
+                    }
+                    if let Some(error) = report.failure {
+                        debug!(target_node = %report.target, admission_id = report.admission_id,
+                            error, "failed to report queued relay progress");
+                    }
+                }
+                ProgressEvent::Completed(None) => {
+                    unreachable!("a nonempty progress set returns a report")
+                }
+            }
+            nervix_primitives::task::yield_now().await;
         }
     }
 
     pub(super) async fn retire_idle_relay_channels(self) {
-        let mut interval = nervix_primitives::time::interval(self.options.relay_retention.sweep());
-        interval.set_missed_tick_behavior(nervix_primitives::time::MissedTickBehavior::Skip);
         loop {
             nervix_primitives::task::consume_budget().await;
-            nervix_primitives::select! {
-                _ = self.admission_closed.cancelled() => break,
-                _ = interval.tick() => {}
-            }
+            let changed = self.relay_retention_changed.notified();
+            let mut changed = std::pin::pin!(changed);
+            changed.as_mut().enable();
             let owners = self.relay_owners.load_full();
+            let mut cadence = self.options.relay_retention.sweep();
             for owner in owners.owners.values() {
                 owner.sweep(Instant::now());
+                cadence = cadence.min((owner.retention() / 10).max(Duration::from_nanos(1)));
             }
             self.prune_ended_relay_owners();
+            nervix_primitives::select! {
+                _ = self.admission_closed.cancelled() => return,
+                _ = changed => {},
+                _ = nervix_primitives::time::sleep(cadence) => {},
+            }
         }
     }
 
@@ -720,6 +765,12 @@ impl TransportState {
                 .await;
         }
         let grant_id = self.next_grant_id(&relay_owner);
+        grant
+            .metadata
+            .ack_timing
+            .validate()
+            .change_context(TransportError::RelayAckTiming)?;
+        let first_report = Instant::now() + grant.metadata.ack_timing.remote_ack_alive_interval;
         let record = StdArc::new(RelayAdmissionRecord {
             attempt: attempt.clone(),
             admission_key: admission_key.clone(),
@@ -728,6 +779,8 @@ impl TransportState {
             _metadata_memory: metadata_memory,
             choice: AdmissionChoice::new(),
             state: nervix_primitives::sync::blocking::Mutex::new(RelayAdmissionProtocol {
+                next_progress_at: first_report,
+                progress_reporting: false,
                 phase: RelayBodyPhase::Reserved { grant_id },
                 rejection: None,
                 capacity: Some(RelayAdmissionCapacity {
@@ -751,7 +804,12 @@ impl TransportState {
             _expiry: CancelOnDrop::new(expiry.clone()),
         };
         match relay_owner.register(grant_id, grant) {
-            RelayGrantRegistration::Registered => {}
+            RelayGrantRegistration::Registered { retention_changed } => {
+                self.relay_progress_changed.notify_one();
+                if retention_changed {
+                    self.relay_retention_changed.notify_one();
+                }
+            }
             RelayGrantRegistration::Existing(existing) => {
                 if existing.body_bytes != record.body_bytes || existing.metadata != record.metadata
                 {

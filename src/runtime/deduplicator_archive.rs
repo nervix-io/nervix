@@ -293,6 +293,13 @@ pub(crate) fn restored_key_fixed_bytes() -> u64 {
 
 /// How far the keyspace's restore metadata charge grows at a time, so that admitting keys asks the
 /// budget once per mebibyte rather than once per key.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "resident restore metadata is charged in one-MiB reservation increments"
+    )
+)]
 const RESIDENT_GROWTH_BYTES: u64 = 1024 * 1024;
 
 /// A keyspace rebuilt from archived key groups, oldest key first.

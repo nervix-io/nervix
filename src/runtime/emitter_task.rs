@@ -38,6 +38,16 @@ use super::{
     *,
 };
 
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the emitter command protocol retains four control requests independently of \
+                  record buffering"
+    )
+)]
+const EMITTER_COMMAND_CAPACITY: usize = 4;
+
 #[path = "emitter_branch_retention.rs"]
 pub(super) mod branch_retention;
 use branch_retention::EmitterBranchRetention;
@@ -474,7 +484,10 @@ impl EmitterConnectorContext {
     }
 
     pub(super) fn parse_flush_policy(&self, policy: &FlushPolicy) -> Option<RuntimeFlushPolicy> {
-        match Runtime::parse_runtime_node_flush_policy(policy) {
+        match Runtime::parse_runtime_node_flush_policy(
+            policy,
+            self.runtime.data_plane_settings().immediate_flush_minimum(),
+        ) {
             Ok(policy) => Some(policy),
             Err(error) => {
                 self.runtime.events().report_error(format!(
@@ -1058,7 +1071,7 @@ impl EmitterTask {
         let input_collect_policy =
             Runtime::parse_runtime_node_input_collect_policy(emitter.collect_policy.as_ref())
                 .change_context(EmitterStartError::CollectPolicy)?;
-        let (commands, command_rx) = mpsc::channel(4);
+        let (commands, command_rx) = mpsc::channel(EMITTER_COMMAND_CAPACITY);
         let (stop_signal, mut stop_rx) = watch::channel(None);
         let task_stop_signal = stop_signal.clone();
 

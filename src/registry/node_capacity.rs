@@ -101,6 +101,8 @@ mod tests {
                 (
                     node.clone(),
                     NodeCapabilities {
+                        runtime: nervix_models::DataPlaneSettings::default().capabilities(),
+                        shutdown: nervix_models::ShutdownSettings::default().capabilities(),
                         interconnect: nervix_interconnect::TransportSettings::default()
                             .capabilities(),
                         dns: nervix_arbitrary::Arbitrary::new(
@@ -162,6 +164,8 @@ mod tests {
             (
                 nodes[0].clone(),
                 NodeCapabilities {
+                    runtime: nervix_models::DataPlaneSettings::default().capabilities(),
+                    shutdown: nervix_models::ShutdownSettings::default().capabilities(),
                     interconnect: nervix_interconnect::TransportSettings::default().capabilities(),
                     dns: nervix_arbitrary::Arbitrary::new(
                         &[],
@@ -210,6 +214,8 @@ mod tests {
             (
                 nodes[1].clone(),
                 NodeCapabilities {
+                    runtime: nervix_models::DataPlaneSettings::default().capabilities(),
+                    shutdown: nervix_models::ShutdownSettings::default().capabilities(),
                     interconnect: nervix_interconnect::TransportSettings::default().capabilities(),
                     dns: nervix_arbitrary::Arbitrary::new(
                         &[],
@@ -269,6 +275,8 @@ mod tests {
             (
                 nodes[0].clone(),
                 NodeCapabilities {
+                    runtime: nervix_models::DataPlaneSettings::default().capabilities(),
+                    shutdown: nervix_models::ShutdownSettings::default().capabilities(),
                     interconnect: nervix_interconnect::TransportSettings::default().capabilities(),
                     dns: nervix_arbitrary::Arbitrary::new(
                         &[],
@@ -317,6 +325,8 @@ mod tests {
             (
                 nodes[1].clone(),
                 NodeCapabilities {
+                    runtime: nervix_models::DataPlaneSettings::default().capabilities(),
+                    shutdown: nervix_models::ShutdownSettings::default().capabilities(),
                     interconnect: nervix_interconnect::TransportSettings::default().capabilities(),
                     dns: nervix_arbitrary::Arbitrary::new(
                         &[],

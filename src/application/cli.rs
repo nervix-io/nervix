@@ -16,6 +16,7 @@ mod cluster_parameters;
 mod connector_host;
 mod consensus;
 mod consensus_operations;
+mod data_plane;
 mod database;
 #[cfg(feature = "deloxide")]
 mod diagnostics;
