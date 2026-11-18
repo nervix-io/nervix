@@ -1062,6 +1062,12 @@ run registered under the same number.
 
 ### Record Acknowledgements The Receiver Stops Reporting
 
+The timing examples below use the default remote ACK policy. Each delivery captures the committed
+alive, dispatch, silence, sweep, total-admission and instantiation bounds together; a live update
+does not change retained deliveries. Delivery-position capacity is a local node capability.
+[Node Settings](node-settings.md#data-plane-runtime-policy-and-capacity) owns the options and
+validation. Local emitter and message-error progress beats retain their separate 100ms cadence.
+
 A receiver reports every record acknowledgement it holds to the node that registered it. While the
 downstream work the acknowledgement stands for continues, it sends a report 100 milliseconds after
 its previous one was delivered or given up, and when the work completes it sends the terminal
@@ -1091,6 +1097,9 @@ the sweep bounds an abandoned registration at the five-minute total admission wa
 than elapsed time, so a registering node whose own execution stalled, such as a paused container,
 does not fail acknowledgements whose reports it could not receive meanwhile.
 
+An idle correlation registry waits for a new registration; it schedules the next scan from the
+earliest retained cohort deadline. A late scan counts once and skips missed ticks.
+
 A failed acknowledgement resolves negatively exactly once. The sweep and report transitions use
 the exact delivery generation's guard, so a report that arrives first keeps the acknowledgement
 pending, and a terminal outcome or the delivery's own failure that resolves it first leaves the
@@ -1109,7 +1118,7 @@ the record, and the ingestor's retry takes over. Each sweep that failed acknowle
 
 ### Bounded Correlation And Peer Owners
 
-The sender has 8,192 delivery positions and a separate 8,192 admission positions. One delivery
+By default the sender has 8,192 delivery positions and a separate 8,192 admission positions. One delivery
 owns all its record rows, with independent outcomes; filling delivery capacity therefore leaves
 room to register its runtime admission. The opaque acknowledgement number encodes a position,
 generation and row. Resolution validates all three, together with the registrar's full discovery
@@ -1824,7 +1833,7 @@ Debug events name the placement, revision and declared length when streaming and
 without logging checkpoint bytes. A branch checkpoint listing request names the entity's branch
 lifecycle placement and the cursor the replica's previous listing
 returned. The owner answers with the next changes of its catalog of the entity's branch
-checkpoints, in the order they happened and at most 256 of them: each branch whose checkpoint
+checkpoints, in the order they happened, bounded by the replication frame limit and each branch key's charge: each branch whose checkpoint
 changed, with the state that checkpoint belongs to and its newest revision, and each branch whose
 state went away, followed by the cursor after them and whether more changes follow. The listing
 restarts from the catalog's beginning when the replica has no cursor, when its cursor belongs to
@@ -2684,6 +2693,16 @@ Duplex setup selects its budget through `DuplexSetupDeadline`. Client producer a
 links select the active transport connection-setup budget. Engine operations retain their
 request-relative class; consensus prefix confirmation and ordered-stream setup resolve the
 same selected value. The selection bounds opening, never the stream's lifetime.
+
+Relay metadata carries one captured acknowledgement timing group per delivery. Admission progress
+reports use its alive interval and dispatch budget. Each send is also capped by the host's existing
+progress-control allowance: one tenth of its request budget, no longer than its body-progress
+budget. This keeps management capacity from lingering after short control work ends. The captured
+group adds 96 bytes to serialized relay metadata, included in its exact reservation. Channel
+retention covers the largest accepted total admission budget of the current peer incarnation. The current wire fingerprint
+also identifies runtime and shutdown capability claims. See
+[Node Settings](node-settings.md#data-plane-runtime-policy-and-capacity) for live updates and the
+relationship checks applied before publication and at receipt.
 
 ## WASM State Page Operation
 

@@ -99,6 +99,15 @@ pub(super) fn announce(
             );
         }
     }
+    if let Some(parameters) = state.parameters
+        && let Err(error) = parameters
+            .values
+            .validate_runtime_capabilities([&record.claim])
+    {
+        return AppliedConsensusCommand::conflict(ConsensusConflict::InvalidClusterParameter {
+            issue: error.current_context().clone(),
+        });
+    }
     let revision = match &state.last_applied_log_id {
         Some(log_id) => log_id.index,
         None => 0,
@@ -206,6 +215,8 @@ mod tests {
                 operational: Default::default(),
                 identity: ClusterNodeIdentity::new(node, ClusterNodeIncarnation::new(incarnation)),
                 capabilities: nervix_models::NodeCapabilities {
+                    runtime: nervix_models::DataPlaneSettings::default().capabilities(),
+                    shutdown: nervix_models::ShutdownSettings::default().capabilities(),
                     interconnect: nervix_interconnect::TransportSettings::default().capabilities(),
                     dns: nervix_arbitrary::Arbitrary::new(
                         &[],
@@ -288,6 +299,34 @@ mod tests {
         record: &NodeRecord,
     ) -> Option<&'state CommittedNodeRecord> {
         state.node_records.get(record.identity().node_id())
+    }
+
+    #[test]
+    fn announcement_refuses_a_run_whose_shutdown_budget_cannot_fit_committed_deadlines() {
+        let mut candidate = record(7);
+        let mut state = admitted_state(&candidate);
+        state.parameters = Some(ClusterParameterRecord {
+            revision: std::num::NonZeroU64::MIN,
+            values: ClusterParameterValues::default(),
+        });
+        candidate.claim.capabilities.shutdown.drain_timeout = Duration::from_secs(1);
+        let unchanged = state.clone();
+        assert!(matches!(
+            announce(&mut state, &candidate).response,
+            ConsensusResponse::Conflict(ConsensusConflict::InvalidClusterParameter { .. })
+        ));
+        assert_eq!(state, unchanged, "a refused announcement publishes nothing");
+
+        candidate.claim.capabilities.shutdown =
+            nervix_models::ShutdownSettings::default().capabilities();
+        assert_eq!(
+            announce(&mut state, &candidate).response,
+            ConsensusResponse::Applied
+        );
+        assert_eq!(
+            committed(&state, &candidate).map(|record| &record.record),
+            Some(&candidate)
+        );
     }
 
     #[test]

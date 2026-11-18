@@ -62,7 +62,7 @@ impl SyslogListenerIngestorStartPlan {
             unacknowledged_admission: QueueAdmission::WaitForPlace,
             client_mounts: resolved.mounts.into_iter().collect(),
         }
-        .open::<SyslogListenerIngestor>(ingestor)
+        .open::<SyslogListenerIngestor>(runtime, ingestor)
         .await
     }
 }

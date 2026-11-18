@@ -52,8 +52,7 @@ impl PrometheusQueryIngestorStartPlan {
         };
         // Each intake batch fills at most one ingest group, so a vector of any size enters the
         // graph group by group.
-        let intake_batch = NonZeroUsize::new(INGEST_GROUP_MAX_ROWS)
-            .assured("an ingest group holds at least one message");
+        let intake_batch = intake_batch_bound(runtime.inner.data_plane.ingest_group_max_rows());
         PacedIngestorStart {
             connector: PrometheusQueryIngestorPlan {
                 tls_policy: runtime.outward_tls().clone(),
@@ -70,6 +69,25 @@ impl PrometheusQueryIngestorStartPlan {
         .open::<PrometheusQueryIngestor>(runtime, ingestor)
         .await
     }
+}
+
+/// Respect both the local grouping choice and the entity's declared intake memory bound.
+fn intake_batch_bound(group: u64) -> NonZeroUsize {
+    use nervix_models::{BufferBound, BufferCapacity, IngestorDeclaration as _};
+    let [_, intake] = nervix_models::PrometheusQueryIngestor::CAPABILITIES
+        .bounds
+        .buffers
+    else {
+        unreachable!("the query declaration names its response and sample intake")
+    };
+    let BufferBound::Bounded {
+        capacity: BufferCapacity::Items { count, .. },
+        ..
+    } = intake.bound
+    else {
+        unreachable!("the sample intake declares an item bound")
+    };
+    NonZeroUsize::new(group.min(count).arch_into()).assured("both declared bounds are positive")
 }
 
 #[cfg(test)]
@@ -92,8 +110,12 @@ mod tests {
         let [_, intake_batch] = PrometheusQueryIngestor::CAPABILITIES.bounds.buffers else {
             panic!("a query ingestor declares its response and its intake batch");
         };
-        let group = u64::try_from(INGEST_GROUP_MAX_ROWS)
-            .assured("the ingest group bound fits u64 on every supported target");
+        let group = nervix_models::DataPlaneSettings::default().ingest_group_max_rows();
+        assert_eq!(intake_batch_bound(3).get(), 3);
+        assert_eq!(
+            intake_batch_bound(group * 2).get(),
+            intake_batch_bound(group).get()
+        );
         assert_eq!(
             intake_batch.holds,
             "samples the host takes in as one intake batch"

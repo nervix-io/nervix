@@ -16,7 +16,6 @@ use super::*;
 
 /// How many runtime events the bus holds for a receiver that has fallen behind. A receiver that
 /// exceeds it is told how many it missed rather than being left to believe it saw everything.
-const RUNTIME_EVENT_CAPACITY: usize = 256;
 
 #[derive(Debug, Clone)]
 pub enum RuntimeEvent {
@@ -36,8 +35,8 @@ pub(crate) struct RuntimeEvents {
 }
 
 impl RuntimeEvents {
-    pub(in crate::runtime) fn new() -> Self {
-        let (sender, _) = broadcast::channel(RUNTIME_EVENT_CAPACITY);
+    pub(in crate::runtime) fn new(capacity: usize) -> Self {
+        let (sender, _) = broadcast::channel(capacity);
         Self { sender }
     }
 

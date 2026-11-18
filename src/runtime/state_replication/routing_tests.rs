@@ -77,6 +77,7 @@ fn materialized_relay_publication_retains_exact_routes_and_reclaims_ended_branch
             &state,
             StateReplicationRoles::owned_by(None),
             None,
+            2,
         )
         .originator
         .assured("local origination");
@@ -113,10 +114,14 @@ fn materialized_relay_publication_retains_exact_routes_and_reclaims_ended_branch
         placements[1].clone(),
         row.arrow_schema(),
     ));
-    let mut originator =
-        ReplicatedMaterializedRelayState::bind(&state, StateReplicationRoles::owned_by(None), None)
-            .originator
-            .assured("local origination");
+    let mut originator = ReplicatedMaterializedRelayState::bind(
+        &state,
+        StateReplicationRoles::owned_by(None),
+        None,
+        2,
+    )
+    .originator
+    .assured("local origination");
     originator
         .update_last_by_timestamp(&placements[1].branch_key, row)
         .assured("current assignment");
@@ -174,10 +179,14 @@ fn a_materialized_branch_publication_owns_absence_beside_the_relay_snapshot() {
         root_placement.clone(),
         row(7).arrow_schema(),
     ));
-    let mut relay_owner =
-        ReplicatedMaterializedRelayState::bind(&root, StateReplicationRoles::owned_by(None), None)
-            .originator
-            .assured("the relay originates");
+    let mut relay_owner = ReplicatedMaterializedRelayState::bind(
+        &root,
+        StateReplicationRoles::owned_by(None),
+        None,
+        2,
+    )
+    .originator
+    .assured("the relay originates");
     relay_owner
         .update_last_by_timestamp(&acme, row(7))
         .assured("current relay assignment");
@@ -203,6 +212,7 @@ fn a_materialized_branch_publication_owns_absence_beside_the_relay_snapshot() {
         &branch,
         StateReplicationRoles::owned_by(None),
         None,
+        2,
     )
     .originator
     .assured("the concrete branch originates");

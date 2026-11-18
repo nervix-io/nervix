@@ -30,9 +30,8 @@ use nervix_recovery::NoReceiver as _;
 use tracing::warn;
 
 use super::{
-    ExecutionRevision, PROCESSOR_BRANCH_TASK_SHUTDOWN_GRACE, PlacementTasks, ProcessorNodeCommand,
-    RelayOwnerRoutes, RelayStateTask, RelayUnitRef, Runtime, ScheduledNodeTask,
-    materialized_partition_moves::RelayStateCommand,
+    ExecutionRevision, PlacementTasks, ProcessorNodeCommand, RelayOwnerRoutes, RelayStateTask,
+    RelayUnitRef, Runtime, ScheduledNodeTask, materialized_partition_moves::RelayStateCommand,
 };
 
 /// What a retirement does to one local unit's task.
@@ -96,7 +95,7 @@ impl Runtime {
                 }
                 RetiringUnit::EndedRelay(task) => {
                     let unit = task.unit;
-                    if let Err(error) = task.stop(PROCESSOR_BRANCH_TASK_SHUTDOWN_GRACE).await {
+                    if let Err(error) = task.stop(self.task_stop_grace()).await {
                         warn!(
                             domain = domain.as_str(),
                             relay = node.identifier.as_str(),
@@ -198,7 +197,7 @@ impl Runtime {
         unit: Unit,
         task: ScheduledNodeTask,
     ) {
-        match task.handoff().await {
+        match task.handoff(self.task_stop_grace()).await {
             Ok(handoffs) => {
                 if !handoffs.is_empty() {
                     warn!(

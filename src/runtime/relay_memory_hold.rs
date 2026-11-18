@@ -34,7 +34,10 @@ use super::*;
 /// node's other relay work behind it, including the work whose completion returns the room it
 /// waits for. Nothing notifies the hold of a release either: every relay operation on the node
 /// releases into this class, and none of them should pay for telling a hold.
-pub(super) const RECHECK_INTERVAL: Duration = Duration::from_millis(10);
+#[cfg(test)]
+pub(super) const RECHECK_INTERVAL: Duration = nervix_models::RemoteRelayTotalTimeout::DEFAULT
+    .checked_div(30_000)
+    .expect("a nonzero fixed divisor");
 
 /// A charge of `bytes` of relay memory that waits for room until `deadline`.
 #[derive(Debug, Clone, Copy)]
@@ -68,6 +71,8 @@ impl RelayMemoryHold {
         executor: &Executor,
         cancelled: impl Future<Output = ()>,
     ) -> Result<RelayMemoryHolding, Report<AdmissionError>> {
+        let recheck_interval = (self.deadline.saturating_duration_since(Instant::now()) / 30_000)
+            .max(Duration::from_nanos(1));
         let mut cancelled = std::pin::pin!(cancelled);
         loop {
             nervix_primitives::task::consume_budget().await;
@@ -97,7 +102,7 @@ impl RelayMemoryHold {
                 }
             }
             let recheck = Instant::now()
-                .checked_add(RECHECK_INTERVAL)
+                .checked_add(recheck_interval)
                 .assured("the fixed recheck interval fits the monotonic clock")
                 .min(self.deadline);
             nervix_primitives::select! {

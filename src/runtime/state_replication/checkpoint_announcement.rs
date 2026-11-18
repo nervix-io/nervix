@@ -140,7 +140,8 @@ impl Runtime {
                     );
                 }
             }
-            sleep(STATE_CHECKPOINT_ANNOUNCEMENT_RETRY_INTERVAL).await;
+            sleep((self.inner.state_replication_poll_interval / 10).max(Duration::from_nanos(1)))
+                .await;
         }
     }
 

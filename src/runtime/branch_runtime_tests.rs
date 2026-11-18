@@ -1,9 +1,14 @@
-//! Concrete branch lifecycle, retained state and required materialized-input regressions.
+//! Branch runtime delivery and parked-work owner tests.
 //!
-//! Layer: test harness, outside the product layer order.
-//! - **Owns.** Branch dispatch, state restoration, eviction and parked-input regression cases.
-//! - **Depends on.** The production branch runtime and its runtime test fixtures.
-//! - **Must not know.** Connector protocols, Plexus parsing or application transactions.
+//! Layer: test harness.
+//! - **Owns.** Branch routing, parked materialized work and acknowledgement/drain regressions.
+//! - **Depends on.** The production branch runtime and scenario-free runtime fixtures.
+//! - **Must not know.** External connector drivers or control-plane orchestration.
+
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "owns the test harness boundary declared above")
+)]
 
 use nervix_interconnect::EntityGatePurpose;
 use nervix_models::{IngestorName, ModelKind, ModelName, NodeRef, ParseAsType, RelayName};

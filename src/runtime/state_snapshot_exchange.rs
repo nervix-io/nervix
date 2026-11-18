@@ -50,11 +50,6 @@ use super::{
     },
 };
 
-/// How long a requester waits for the owner to describe what it would transfer. Sealing runs on
-/// the bulk workers behind whatever else is admitted there, so this is longer than an ordinary
-/// control request rather than the same.
-const DESCRIBE_TIMEOUT: Duration = Duration::from_secs(30);
-
 #[derive(Debug, Error)]
 #[cfg_attr(
     nervix_lint,
@@ -325,6 +320,7 @@ impl Runtime {
 
     /// Describe the selected owner's exact sealed generation before deciding whether bytes are
     /// needed. Readers that retain contents compare the complete envelope, not only its revision.
+    /// The configured describe timeout covers sealing on the bulk workers.
     #[cfg_attr(
         nervix_lint,
         nervix::context(
@@ -354,7 +350,7 @@ impl Runtime {
                     placement: placement.to_remote(),
                     after_revision,
                 },
-                DESCRIBE_TIMEOUT,
+                self.inner.data_plane.snapshot_describe_timeout(),
             )
             .await
             .change_context_lazy(|| MaterializedSnapshotExchangeError::Describe {
@@ -402,13 +398,15 @@ impl Runtime {
                 },
             ));
         };
+        let timeout = self.inner.data_plane.snapshot_fetch_timeout();
         let opened = dispatcher
-            .request_stream(
+            .request_stream_with_timeout(
                 target_node_id,
                 FetchStateSnapshot {
                     placement: placement.to_remote(),
                     revision: envelope.revision,
                 },
+                timeout,
             )
             .await;
         let (envelope, mut body) = match opened {
@@ -421,9 +419,6 @@ impl Runtime {
                         placement,
                     ));
                 };
-                let timeout = dispatcher
-                    .interconnect
-                    .stream_request_deadline::<FetchStateSnapshot>();
                 // The first attempt supplies its transport-owned deadline. Successful reads add
                 // neither another timer nor a clock read, and refusals cannot renew the budget.
                 // Keep the additional retry state off the ordinary read's inline future.
@@ -471,12 +466,13 @@ impl Runtime {
                                 ));
                             }
                             match dispatcher
-                                .request_stream(
+                                .request_stream_with_timeout(
                                     target_node_id,
                                     FetchStateSnapshot {
                                         placement: placement.to_remote(),
                                         revision: envelope.revision,
                                     },
+                                    timeout,
                                 )
                                 .await
                             {

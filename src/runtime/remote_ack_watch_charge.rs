@@ -27,16 +27,30 @@ use nervix_execution::{AdmissionError, Reservation};
 
 use super::{
     relay_memory_hold::{RelayMemoryHold, RelayMemoryHolding},
-    remote_dispatch::REMOTE_RELAY_TOTAL_TIMEOUT,
     *,
 };
 
 /// The relay memory one acknowledgement watch holds: its row's poll future, its queue node, its ACK
 /// root and its registration fit within it.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "one admitted watch reserves its poll future queue node and acknowledgement root"
+    )
+)]
 const WATCH_BYTES: u64 = 1024;
 
 /// The relay memory of the one task that multiplexes a batch's watches, with its scheduler
 /// allocation, however many rows the batch carries.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "one multiplexing task reserves its scheduler allocation independently of row \
+                  count"
+    )
+)]
 const TASK_BYTES: u64 = 4096;
 
 /// The relay memory the acknowledgement watches of one admitted batch hold.
@@ -84,9 +98,10 @@ impl RemoteAckWatchCharge {
         executor: &Executor,
         watches: NonZeroUsize,
         cancelled: impl Future<Output = ()>,
+        total_timeout: Duration,
     ) -> Result<RemoteAckWatchHold, Report<AdmissionError>> {
         let deadline = Instant::now()
-            .checked_add(REMOTE_RELAY_TOTAL_TIMEOUT)
+            .checked_add(total_timeout)
             .assured("the fixed relay admission bound fits the monotonic clock");
         let holding = RelayMemoryHold::new(Self::bytes(watches), deadline)
             .charge(executor, cancelled)
@@ -129,3 +144,6 @@ impl RemoteAckWatchCharge {
 #[cfg(test)]
 #[path = "remote_ack_watch_charge_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+use super::remote_dispatch::REMOTE_RELAY_TOTAL_TIMEOUT;

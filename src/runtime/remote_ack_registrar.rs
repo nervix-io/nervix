@@ -24,13 +24,11 @@
     )
 )]
 
-use super::{
-    remote_dispatch::{
-        REMOTE_ACK_SILENCE_SWEEP_INTERVAL, REMOTE_ACK_SILENCE_TIMEOUT,
-        REMOTE_RELAY_INSTANTIATION_WAIT,
-    },
-    *,
+#[cfg(test)]
+use super::remote_dispatch::{
+    REMOTE_ACK_SILENCE_SWEEP_INTERVAL, REMOTE_ACK_SILENCE_TIMEOUT, REMOTE_RELAY_INSTANTIATION_WAIT,
 };
+use super::*;
 
 /// Where a receiver's acknowledgement watch stands with the run of the node that registered the
 /// acknowledgement, as the receiver's live view shows that run.
@@ -57,9 +55,9 @@ pub(super) enum RegistrarLook {
 
 impl RegistrarPresence {
     /// A watch that starts at `now`, before its registrar's run has appeared in the live view.
-    pub(super) fn undiscovered(now: Instant) -> Self {
+    pub(super) fn undiscovered(now: Instant, discovery_wait: Duration) -> Self {
         let deadline = now
-            .checked_add(REMOTE_RELAY_INSTANTIATION_WAIT)
+            .checked_add(discovery_wait)
             .assured("the bounded registrar discovery grace fits the monotonic clock");
         Self::Undiscovered { deadline }
     }
@@ -68,6 +66,7 @@ impl RegistrarPresence {
     /// watch ends. A registering node whose run goes on has failed the acknowledgement by then: it
     /// fails one whose receiver it has not heard from for its silence bound, at its first sweep
     /// after that bound.
+    #[cfg(test)]
     pub(super) fn missing_grace() -> Duration {
         REMOTE_ACK_SILENCE_TIMEOUT
             .checked_add(REMOTE_ACK_SILENCE_SWEEP_INTERVAL)
@@ -81,14 +80,15 @@ impl RegistrarPresence {
         registrar: ClusterNodeIncarnation,
         live: Option<ClusterNodeIncarnation>,
         now: Instant,
+        missing_grace: Duration,
     ) -> RegistrarLook {
         let Some(incarnation) = live else {
-            return self.missed(now);
+            return self.missed(now, missing_grace);
         };
         if incarnation < registrar {
             // Transport admission can precede gossip learning the registering run. Its
             // predecessor is an undiscovered/missing view, not evidence of replacement.
-            return self.missed(now);
+            return self.missed(now, missing_grace);
         }
         if incarnation > registrar {
             // A newer run replaced the registrar, and nothing in it holds this acknowledgement.
@@ -99,7 +99,7 @@ impl RegistrarPresence {
     }
 
     /// A look at `now` that found no run of the registrar's node in the live view.
-    fn missed(&mut self, now: Instant) -> RegistrarLook {
+    fn missed(&mut self, now: Instant, missing_grace: Duration) -> RegistrarLook {
         match *self {
             // A run that has only just joined may not be in this node's live view yet, while the
             // transport already reaches it.
@@ -119,7 +119,7 @@ impl RegistrarPresence {
                 let missing_for = now
                     .checked_duration_since(since)
                     .assured("the watch read `since` on the monotonic clock at an earlier look");
-                if missing_for >= Self::missing_grace() {
+                if missing_for >= missing_grace {
                     return RegistrarLook::Release;
                 }
                 RegistrarLook::Hold

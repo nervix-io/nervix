@@ -256,11 +256,12 @@ async fn a_round_in_which_no_branch_changed_asks_the_owner_twice_however_many_br
     for branch_count in [16, 300] {
         let mut replica = CaughtUpReplica::new(branch_count);
 
-        let pages = branch_count.div_ceil(BRANCH_CHECKPOINT_LISTING_PAGE.get());
-        let mut first_round = vec![OwnerRequest::Lifecycle {
-            after_lsm: Some(LIFECYCLE),
-        }];
-        first_round.extend(std::iter::repeat_n(OwnerRequest::Listing, pages));
+        let first_round = vec![
+            OwnerRequest::Lifecycle {
+                after_lsm: Some(LIFECYCLE),
+            },
+            OwnerRequest::Listing,
+        ];
         assert_eq!(
             replica.round().await,
             first_round,

@@ -50,16 +50,16 @@ pub(super) enum RuntimeFlushPolicy {
         interval: Duration,
         max_batch_size: u64,
     },
-    Immediate,
+    Immediate {
+        minimum: Duration,
+    },
 }
 
 impl RuntimeFlushPolicy {
-    pub(super) const IMMEDIATE_MINIMUM_TIMEOUT: Duration = Duration::from_micros(100);
-
     pub(super) fn size_boundary_reached(self, pending_bytes: u64) -> bool {
         match self {
             Self::Each { max_batch_size, .. } => pending_bytes >= max_batch_size,
-            Self::Immediate => false,
+            Self::Immediate { .. } => false,
         }
     }
 }
@@ -267,9 +267,9 @@ impl BranchBufferTimer {
                 let due_at = checked_add_duration_to_timestamp(snapshot.now(), interval);
                 BranchBufferDeadline::Logical(clock.deadline_at(due_at))
             }
-            RuntimeFlushPolicy::Immediate => {
+            RuntimeFlushPolicy::Immediate { minimum } => {
                 let physical = PhysicalDeadlineCapability::operational()
-                    .after(RuntimeFlushPolicy::IMMEDIATE_MINIMUM_TIMEOUT)
+                    .after(minimum)
                     .change_context(BranchBufferTimingError::PhysicalRange)?;
                 BranchBufferDeadline::Physical(physical)
             }
@@ -471,7 +471,13 @@ mod tests {
 
         let mut immediate = BranchBufferTimer::default();
         immediate
-            .arm_flush(RuntimeFlushPolicy::Immediate, &clock, &snapshot)
+            .arm_flush(
+                RuntimeFlushPolicy::Immediate {
+                    minimum: nervix_models::DataPlaneSettings::default().immediate_flush_minimum(),
+                },
+                &clock,
+                &snapshot,
+            )
             .assured("the fixture timeout fits the monotonic clock range");
         assert!(matches!(
             immediate.deadline(),
@@ -487,12 +493,24 @@ mod tests {
             .assured("the fixture installs a running unpaced clock");
         let mut timer = BranchBufferTimer::default();
         timer
-            .arm_flush(RuntimeFlushPolicy::Immediate, &clock, &snapshot)
+            .arm_flush(
+                RuntimeFlushPolicy::Immediate {
+                    minimum: nervix_models::DataPlaneSettings::default().immediate_flush_minimum(),
+                },
+                &clock,
+                &snapshot,
+            )
             .assured("the fixture timeout fits the monotonic clock range");
 
         nervix_primitives::time::advance(Duration::from_micros(50)).await;
         timer
-            .arm_flush(RuntimeFlushPolicy::Immediate, &clock, &snapshot)
+            .arm_flush(
+                RuntimeFlushPolicy::Immediate {
+                    minimum: nervix_models::DataPlaneSettings::default().immediate_flush_minimum(),
+                },
+                &clock,
+                &snapshot,
+            )
             .assured("an armed timer does not schedule a second deadline");
         assert!(
             !timer
@@ -587,6 +605,11 @@ mod tests {
             }
             .size_boundary_reached(8)
         );
-        assert!(!RuntimeFlushPolicy::Immediate.size_boundary_reached(u64::MAX));
+        assert!(
+            !(RuntimeFlushPolicy::Immediate {
+                minimum: nervix_models::DataPlaneSettings::default().immediate_flush_minimum()
+            })
+            .size_boundary_reached(u64::MAX)
+        );
     }
 }

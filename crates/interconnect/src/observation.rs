@@ -148,7 +148,8 @@ impl ConnectionFailureReason {
             | TransportError::ProgressTimeout { .. }
             | TransportError::PeerProcessChanged { .. }
             | TransportError::Closed(_) => Self::Setup,
-            TransportError::Settings
+            TransportError::RelayAckTiming
+            | TransportError::Settings
             | TransportError::InvalidHandshake(_)
             | TransportError::StaleRoute { .. }
             | TransportError::InvalidServerName(_)
@@ -208,7 +209,8 @@ impl StreamResetReason {
                 }
             }
             TransportError::ShuttingDown => Self::Shutdown,
-            TransportError::Encode(_)
+            TransportError::RelayAckTiming
+            | TransportError::Encode(_)
             | TransportError::Decode(_)
             | TransportError::Http(_)
             | TransportError::InvalidOptions { .. }

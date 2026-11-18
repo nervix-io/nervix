@@ -97,24 +97,23 @@ impl Default for SnapshotStagingLimits {
     /// bounds the interconnection settings declare.
     fn default() -> Self {
         Self {
-            staging_bytes: 128 * GIBIBYTE,
-            snapshot_bytes: 64 * GIBIBYTE,
+            staging_bytes: nervix_models::DataPlaneSettings::default().snapshot_staging_bytes(),
+            snapshot_bytes: nervix_models::DataPlaneSettings::default().snapshot_bytes(),
         }
     }
 }
 
-#[cfg_attr(
-    nervix_lint,
-    nervix::constant(fixed, reason = "IEC 80000-13 defines a gibibyte as 2^30 bytes")
-)]
-const GIBIBYTE: u64 = 1024 * 1024 * 1024;
-
 /// How many staging bytes one quota permit stands for. A quota this large is counted in blocks so
 /// the whole node budget fits the permit count a semaphore is expressed in.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "quota permits account for staging bytes in one-MiB blocks within the semaphore \
+                  count"
+    )
+)]
 const STAGING_PERMIT_BYTES: u64 = 1024 * 1024;
-
-/// How much of a staged snapshot one filesystem read moves into the buffer it is building.
-const READ_BLOCK_BYTES: u64 = 64 * 1024;
 
 /// The node's staging area: one directory and the quota every transfer into it shares.
 #[derive(Debug, Clone)]
@@ -689,6 +688,7 @@ impl StagedSnapshot {
             .file
             .take()
             .assured("a staged snapshot holds its file between completed storage jobs");
+        let block_bound = self.executor.limits().bulk_chunk_bytes.as_u64();
         let read = self
             .executor
             .run_storage(
@@ -699,7 +699,7 @@ impl StagedSnapshot {
                     let result = if cancellation.is_cancelled() {
                         Err(Report::new(SnapshotStagingError::Cancelled))
                     } else {
-                        read_exact(&mut file, charge, length, cancellation)
+                        read_exact(&mut file, charge, length, block_bound, cancellation)
                     };
                     StagedRead { file, result }
                 },
@@ -717,11 +717,12 @@ fn read_exact(
     file: &mut tempfile::NamedTempFile,
     charge: nervix_execution::Reservation,
     length: u64,
+    block_bound: u64,
     cancellation: &nervix_execution::Cancellation,
 ) -> Result<ChargedBytes, Report<SnapshotStagingError>> {
     let mut buffer = BudgetedBuffer::with_limit(charge, length.max(1));
     let mut remaining = length;
-    let block_bytes = usize::try_from(length.min(READ_BLOCK_BYTES))
+    let block_bytes = usize::try_from(length.min(block_bound))
         .verified("the block size is capped at the read block, which fits every pointer width");
     let mut block = vec![0_u8; block_bytes];
     while remaining > 0 {

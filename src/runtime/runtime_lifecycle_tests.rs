@@ -199,7 +199,8 @@ async fn generators_that_outlast_their_stop_grace_share_one_grace() {
     let elapsed = stop_duration(&runtime, &domain, execution).await;
 
     assert_eq!(
-        elapsed, TASK_STOP_GRACE,
+        elapsed,
+        crate::runtime::entity_gate::task_stop_grace(nervix_models::DomainDrainTimeout::DEFAULT),
         "{UNRESPONSIVE_TASKS} generators that never stop must cost the domain one stop grace, not \
          one each"
     );
@@ -221,7 +222,8 @@ async fn reingestor_tasks_that_outlast_their_stop_grace_share_one_grace() {
     let elapsed = stop_duration(&runtime, &domain, execution).await;
 
     assert_eq!(
-        elapsed, TASK_STOP_GRACE,
+        elapsed,
+        crate::runtime::entity_gate::task_stop_grace(nervix_models::DomainDrainTimeout::DEFAULT),
         "every task of {UNRESPONSIVE_TASKS} reingestors that never stop must share one stop grace"
     );
 }
@@ -246,7 +248,8 @@ async fn task_kinds_stop_in_turn_so_each_kind_keeps_its_own_grace() {
 
     assert_eq!(
         elapsed,
-        TASK_STOP_GRACE * 2,
+        crate::runtime::entity_gate::task_stop_grace(nervix_models::DomainDrainTimeout::DEFAULT)
+            * 2,
         "a generator and a reingestor that never stop belong to two kinds, each with its grace"
     );
 }
@@ -667,7 +670,11 @@ fn status_record(status: &str, watermark: i64) -> RuntimeRow {
 
 /// How long a check holds a materialized relay's last write: past the stop grace of every task of
 /// its domain, so a stop that ends that write at a grace has finished inside the window.
-const HELD_PAST_THE_STOP_GRACE: Duration = Duration::from_secs(TASK_STOP_GRACE.as_secs() * 2);
+const HELD_PAST_THE_STOP_GRACE: Duration = Duration::from_secs(
+    crate::runtime::entity_gate::task_stop_grace(nervix_models::DomainDrainTimeout::DEFAULT)
+        .as_secs()
+        * 2,
+);
 
 /// A materialized relay's checkpoint writer makes its last write once its domain stops, and the
 /// stop waits for that write with no grace, however long it takes: a stopped backup cut reads the

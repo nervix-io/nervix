@@ -16,10 +16,7 @@
 
 use nervix_interconnect::RelayGrantRefusal;
 
-use super::{
-    remote_dispatch::{REMOTE_RELAY_TOTAL_TIMEOUT, RemoteDispatchError},
-    *,
-};
+use super::{remote_dispatch::RemoteDispatchError, *};
 
 /// What a delivery does while its receiver refuses its grant for capacity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -76,6 +73,7 @@ pub(super) struct RelaySendAttempts {
     stall_deadline: Instant,
     admission_deadline: Instant,
     capacity_waits: RuntimeReconnectBackoff,
+    timing: nervix_models::RemoteAckTiming,
 }
 
 impl RelaySendAttempts {
@@ -83,15 +81,17 @@ impl RelaySendAttempts {
         now: Instant,
         admission_deadline: Instant,
         capacity_refusals: GrantCapacityRefusals,
+        timing: nervix_models::RemoteAckTiming,
     ) -> Self {
         Self {
+            timing,
             capacity_refusals,
-            stall_deadline: Self::stall_deadline_after(now, admission_deadline),
+            stall_deadline: Self::stall_deadline_after(now, admission_deadline, timing),
             admission_deadline,
             capacity_waits: RuntimeReconnectBackoff {
-                initial: RemoteDispatcher::DISPATCH_RETRY_INTERVAL,
-                next: RemoteDispatcher::DISPATCH_RETRY_INTERVAL,
-                max: Self::capacity_wait_ceiling(),
+                initial: timing.retry_interval(),
+                next: timing.retry_interval(),
+                max: Self::capacity_wait_ceiling(timing),
                 settings: nervix_connector::RetryBackoffSettings::default(),
             },
         }
@@ -100,8 +100,8 @@ impl RelaySendAttempts {
     /// The longest a held delivery waits before it asks for its grant again: half the stall
     /// bound, so a held delivery notices that room returned at most that late, and asks at most
     /// once in that time while it waits.
-    pub(super) fn capacity_wait_ceiling() -> Duration {
-        RemoteDispatcher::DISPATCH_TIMEOUT / 2
+    pub(super) fn capacity_wait_ceiling(timing: nervix_models::RemoteAckTiming) -> Duration {
+        (timing.remote_ack_dispatch_timeout / 2).max(Duration::from_nanos(1))
     }
 
     /// The instant the next attempt must end by.
@@ -124,7 +124,7 @@ impl RelaySendAttempts {
             }
         }
         let retry_at = now
-            .checked_add(RemoteDispatcher::DISPATCH_RETRY_INTERVAL)
+            .checked_add(self.timing.retry_interval())
             .assured("the fixed dispatch retry interval fits the monotonic clock");
         if retry_at >= self.stall_deadline {
             return RelaySendStep::End(RelaySendEnd::Stalled);
@@ -151,12 +151,17 @@ impl RelaySendAttempts {
             .assured("a wait bounded by half the stall bound fits the monotonic clock")
             .min(self.admission_deadline);
         // The wait is the sender's own, so the ask that follows it has the whole stall bound.
-        self.stall_deadline = Self::stall_deadline_after(retry_at, self.admission_deadline);
+        self.stall_deadline =
+            Self::stall_deadline_after(retry_at, self.admission_deadline, self.timing);
         RelaySendStep::RetryAt(retry_at)
     }
 
-    fn stall_deadline_after(now: Instant, admission_deadline: Instant) -> Instant {
-        now.checked_add(RemoteDispatcher::DISPATCH_TIMEOUT)
+    fn stall_deadline_after(
+        now: Instant,
+        admission_deadline: Instant,
+        timing: nervix_models::RemoteAckTiming,
+    ) -> Instant {
+        now.checked_add(timing.remote_ack_dispatch_timeout)
             .assured("the fixed dispatch stall bound fits the monotonic clock")
             .min(admission_deadline)
     }
@@ -164,7 +169,11 @@ impl RelaySendAttempts {
 
 impl RelaySendEnd {
     /// The dispatch failure that names this end for the delivery sent to `target`.
-    pub(super) fn dispatch_error(self, target: &ClusterNodeName) -> RemoteDispatchError {
+    pub(super) fn dispatch_error(
+        self,
+        target: &ClusterNodeName,
+        timing: nervix_models::RemoteAckTiming,
+    ) -> RemoteDispatchError {
         match self {
             Self::Refused(refusal) => RemoteDispatchError::GrantRefused {
                 target: target.clone(),
@@ -178,7 +187,7 @@ impl RelaySendEnd {
             },
             Self::AdmissionBound => RemoteDispatchError::AdmissionTotalTimeout {
                 target: target.clone(),
-                timeout: REMOTE_RELAY_TOTAL_TIMEOUT,
+                timeout: timing.remote_relay_total_timeout,
             },
         }
     }
@@ -187,3 +196,6 @@ impl RelaySendEnd {
 #[cfg(test)]
 #[path = "relay_send_attempts_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+use super::remote_dispatch::REMOTE_RELAY_TOTAL_TIMEOUT;

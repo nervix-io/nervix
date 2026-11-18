@@ -21,17 +21,19 @@ use rkyv::{
 use serde::{Deserialize, Serialize};
 use strum::EnumIter;
 use thiserror::Error;
-use value::{ParameterSetting, ParameterValue};
 
 use crate::SettingDefinition;
+
 #[doc(hidden)]
 pub mod value;
 mod value_archive;
-
+use value::{ParameterSetting, ParameterValue};
 mod durations;
 mod entity_labels;
 mod limits;
 mod publication;
+mod remote_ack;
+pub use remote_ack::*;
 #[cfg(test)]
 mod tests;
 mod tls;
@@ -91,6 +93,30 @@ pub enum ClusterParameterValueKind {
     )
 )]
 pub enum ClusterParameterError {
+    #[error(
+        "remote-ack-silence-timeout must exceed twice remote-ack-dispatch-timeout plus \
+         remote-ack-alive-interval"
+    )]
+    AckReportWindow,
+    #[error(
+        "remote-ack-sweep-interval must divide remote-ack-silence-timeout and \
+         remote-relay-total-timeout exactly"
+    )]
+    AckSweepDivisibility,
+    #[error(
+        "remote-relay-total-timeout must cover remote-ack-dispatch-timeout and \
+         remote-relay-instantiation-wait"
+    )]
+    AckAdmissionWindow,
+    #[error(
+        "{parameter} ({requested:?}) exceeds node '{node}' drain/shutdown budget ({available:?})"
+    )]
+    NodeDeadline {
+        parameter: ClusterParameterKey,
+        node: crate::ClusterNodeName,
+        requested: Duration,
+        available: Duration,
+    },
     #[error("{parameter} must be greater than zero")]
     NonPositiveDuration { parameter: ClusterParameterKey },
     #[error("{parameter} must not exceed {maximum:?}")]
@@ -192,7 +218,7 @@ macro_rules! parameter_values {
                 let values = Self {
                     $($field: fields.$field,)+
                 };
-                values.validate_tls().map_err(|error| D::Error::custom(format_args!("{error:#}")))?;
+                values.validate_relationships().map_err(|error| D::Error::custom(format_args!("{error:#}")))?;
                 Ok(values)
             }
         }
@@ -205,7 +231,7 @@ macro_rules! parameter_values {
                     $($field: ParameterSetting::from_stored(self.$field.deserialize(deserializer)?)
                         .map_err(|error| D::Error::new(error.into_error()))?,)+
                 };
-                values.validate_tls().map_err(|error| D::Error::new(error.into_error()))?;
+                values.validate_relationships().map_err(|error| D::Error::new(error.into_error()))?;
                 Ok(values)
             }
         }
@@ -240,7 +266,7 @@ macro_rules! parameter_values {
         impl ClusterParameterValues {
             pub fn resolve(seed: ClusterParameterSeedValues) -> Result<Self, Report<ClusterParameterError>> {
                 let values = Self { $($field: ParameterSetting::resolve(seed.$field, &())?,)+ };
-                values.validate_tls()?;
+                values.validate_relationships()?;
                 Ok(values)
             }
 
@@ -252,7 +278,7 @@ macro_rules! parameter_values {
                 for update in updates.iter() {
                     match update { $(ClusterParameterChange::$definition(value) => { next.$field = ParameterSetting::new(*value, &())?; },)+ }
                 }
-                next.validate_tls()?;
+                next.validate_relationships()?;
                 Ok(next)
             }
 
@@ -321,6 +347,13 @@ parameter_values! {
     licensing_request_timeout: LicensingRequestTimeout(Duration) => Duration,
     licensing_retry_backoff_max: LicensingRetryBackoffMax(Duration) => Duration,
     licensing_stream_idle_timeout: LicensingStreamIdleTimeout(Duration) => Duration,
+    payload_unfold_limit: PayloadUnfoldLimit(u64) => Count<u32>,
+    remote_ack_alive_interval: RemoteAckAliveInterval(Duration) => Duration,
+    remote_ack_dispatch_timeout: RemoteAckDispatchTimeout(Duration) => Duration,
+    remote_ack_silence_timeout: RemoteAckSilenceTimeout(Duration) => Duration,
+    remote_ack_sweep_interval: RemoteAckSweepInterval(Duration) => Duration,
+    remote_relay_total_timeout: RemoteRelayTotalTimeout(Duration) => Duration,
+    remote_relay_instantiation_wait: RemoteRelayInstantiationWait(Duration) => Duration,
     node_unavailability_timeout: NodeUnavailabilityTimeout(Duration) => Duration,
     domain_drain_timeout: DomainDrainTimeout(Duration) => Duration,
     entity_gate_deadline: EntityGateDeadline(Duration) => Duration,
@@ -481,9 +514,56 @@ impl ClusterParameterValues {
     pub fn http_header_limits(&self) -> crate::HttpHeaderLimits {
         crate::HttpHeaderLimits::new(
             crate::Setting::new(self.http_header_bytes(), &())
-                .assured("the parameter was validated"),
+                .assured("the committed byte bound is validated"),
             crate::Setting::new(self.http_header_fields(), &())
-                .assured("the parameter was validated"),
+                .assured("the committed field bound is validated"),
         )
+    }
+}
+
+impl ClusterParameterValues {
+    fn validate_relationships(&self) -> Result<(), Report<ClusterParameterError>> {
+        self.validate_tls()?;
+        RemoteAckTiming::from_parameters(self).validate()
+    }
+
+    /// Validate the local lifecycle budgets captured in the same commit fence as the policy.
+    pub fn validate_runtime_capabilities<'a>(
+        &self,
+        records: impl IntoIterator<Item = &'a crate::NodeCapabilityRecord>,
+    ) -> Result<(), Report<ClusterParameterError>> {
+        for record in records {
+            self.validate_runtime_budget(record.identity.node_id(), record.capabilities.shutdown)?;
+        }
+        Ok(())
+    }
+
+    /// Apply the same admission contract before a node publishes its incarnation-bound claim.
+    pub fn validate_runtime_budget(
+        &self,
+        node: &crate::ClusterNodeName,
+        shutdown: crate::ShutdownCapabilities,
+    ) -> Result<(), Report<ClusterParameterError>> {
+        let available = shutdown.drain_timeout.min(shutdown.shutdown_timeout);
+        for (parameter, requested) in [
+            (
+                ClusterParameterKey::DomainDrainTimeout,
+                self.domain_drain_timeout(),
+            ),
+            (
+                ClusterParameterKey::EntityGateDeadline,
+                self.entity_gate_deadline(),
+            ),
+        ] {
+            if requested > available {
+                return Err(Report::new(ClusterParameterError::NodeDeadline {
+                    parameter,
+                    node: node.clone(),
+                    requested,
+                    available,
+                }));
+            }
+        }
+        Ok(())
     }
 }

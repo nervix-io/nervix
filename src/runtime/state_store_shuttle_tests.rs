@@ -83,7 +83,7 @@ impl FenceModel {
     fn new(operation_threads: usize) -> Self {
         let authority = StateAssignmentAuthority::default();
         let first = authority
-            .rebind(StateReplicationRoles::owned_by(None), None)
+            .rebind(StateReplicationRoles::owned_by(None), None, 2)
             .token_for(StateCapability::Originate)
             .assured("a state without roles is originated locally");
         let mut running_generations = Vec::with_capacity(operation_threads);
@@ -143,7 +143,7 @@ impl FenceModel {
     fn rebind(&self) {
         let published = self
             .authority
-            .rebind(StateReplicationRoles::owned_by(None), None)
+            .rebind(StateReplicationRoles::owned_by(None), None, 2)
             .fence();
         self.returned_generation.store(published, Ordering::SeqCst);
         for running_generation in &self.running_generations {
@@ -187,6 +187,7 @@ impl InstallationModel {
             .rebind(
                 StateReplicationRoles::owned_by(Some(local.clone())),
                 Some(&local),
+                2,
             )
             .token_for(StateCapability::Originate)
             .assured("the local node owns a state whose primary it is");
@@ -288,7 +289,7 @@ impl InstallationModel {
             StateReplicationRoles::owned_by(Some(self.local.clone()))
         };
         self.authority
-            .rebind(roles, Some(&self.local))
+            .rebind(roles, Some(&self.local), 2)
             .token_for(StateCapability::InstallSnapshot)
     }
 }

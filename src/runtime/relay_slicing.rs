@@ -81,7 +81,7 @@ impl RemoteDispatcher {
                     if Instant::now() >= deadline {
                         return Err(Report::new(RemoteDispatchError::AdmissionTotalTimeout {
                             target: node.clone(),
-                            timeout: super::remote_dispatch::REMOTE_RELAY_TOTAL_TIMEOUT,
+                            timeout: payload.ack_timing.remote_relay_total_timeout,
                         }));
                     }
                     let selected = batch
@@ -139,6 +139,7 @@ impl RemoteDispatcher {
                         .checked_add(cursor.part_rows())
                         .assured("the selected range fits the batch");
                     let mut part = RelayPayload {
+                        ack_timing: payload.ack_timing,
                         delivery,
                         decoded_bytes: decoded,
                         kind: payload.kind,
@@ -171,7 +172,7 @@ impl RemoteDispatcher {
                                 owner.admit_prefix(cursor.admitted_rows());
                             }
                             if cursor.admitted_rows() < cursor.total_rows() {
-                                delivery = channel.next_delivery();
+                                delivery = channel.next_delivery_with_policy(payload.ack_timing);
                                 unused_position.retain(delivery);
                             }
                         }
@@ -225,7 +226,8 @@ mod tests {
             .store_pending_acks(
                 &receiver,
                 vec![first, second, third],
-                RemoteDispatcher::delivery_deadline(),
+                dispatcher.delivery_deadline(nervix_models::RemoteAckTiming::default()),
+                nervix_models::RemoteAckTiming::default(),
                 std::future::pending(),
             )
             .await

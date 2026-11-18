@@ -17,6 +17,13 @@ use super::*;
 /// What compiling one resource's protobuf sources is charged. The parser's memory is bounded by the
 /// installed sources, which the resource store's limits bound, so the charge only admits the
 /// compilation onto the bulk workers.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "one byte is an admission token for one protobuf compile job"
+    )
+)]
 const PROTOBUF_COMPILE_RESERVATION_BYTES: u64 = 1;
 
 #[derive(Debug, Error, PartialEq, Eq)]

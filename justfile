@@ -1243,6 +1243,23 @@ test-runtime-loom check:
     printf 'Loom owner checkpoint directory: %s\n' "$checkpoint_dir"
     LOOM_CHECKPOINT_FILE="$checkpoint_dir/checkpoint.json" LOOM_CHECKPOINT_INTERVAL=1 cargo test --profile loom --package nervix-server --features loom --lib {{ quote(check) }} -- --exact --nocapture --test-threads=1
 
+# Exercise committed runtime timings and local capacities through the public interface.
+test-runtime-settings *args: build-deps build-plexus-format build-test-cli build-deadlock-report
+    ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)" cargo test --package nervix-scenarios --test scenarios -- --input {{ quote(justfile_directory() / "tests/features/cluster/runtime_settings{,}.feature") }} {{ quote(args) }}
+
+# Collect the focused public settings scenarios into the ordinary Rust coverage profile.
+# Reset counters with coverage-clean-profiles before a fresh collection; this selector appends.
+coverage-runtime-settings output="target/runtime-settings.lcov" *args: build-deps build-plexus-format
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    just coverage-cli-binary
+    just coverage-deadlock-report-binary
+    export NERVIX_TEST_CLI_PATH={{ quote(cargo_target_dir + "/llvm-cov-target/debug/nervix-cli") }}
+    export NERVIX_DEADLOCK_REPORT_TOOL={{ quote(cargo_target_dir + "/llvm-cov-target/debug/nervix-deadlock-report") }}
+    install -m 755 {{ quote(cargo_target_dir + "/debug/nervix-plexus-format") }} {{ quote(cargo_target_dir + "/llvm-cov-target/debug/nervix-plexus-format") }}
+    cargo llvm-cov --no-clean --package nervix-scenarios --test scenarios --no-default-ignore-filename-regex --lcov --output-path {{ quote(output) }} -- --input {{ quote(justfile_directory() / "tests/features/cluster/runtime_settings{,}.feature") }} {{ quote(args) }}
+
 # Focused ordinary-mode regressions for runtime owners.
 test-runtime *args: build-web-console wasm-processor-guests download-onnxruntime
     ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)" cargo test --package nervix-server --features testing --lib -- {{ args }}
@@ -5623,7 +5640,7 @@ generate-dev-tls:
 generate-test-onnx output="tests/fixtures/onnx/simple_score.onnx" alternate_output="tests/fixtures/onnx/alternate_score.onnx" batch_output="tests/fixtures/onnx/batch_score.onnx" f64_output="tests/fixtures/onnx/f64_score.onnx" matrix_output="tests/fixtures/onnx/matrix_identity.onnx" dynamic_batch_output="tests/fixtures/onnx/dynamic_batch_score.onnx" scalar_output="tests/fixtures/onnx/scalar_identity.onnx" running_sum_output="tests/fixtures/onnx/running_sum.onnx" checked_running_sum_output="tests/fixtures/onnx/checked_running_sum.onnx":
     python3 scripts/train_simple_onnx.py --output {{ output }} --alternate-output {{ alternate_output }} --batch-output {{ batch_output }} --f64-output {{ f64_output }} --matrix-output {{ matrix_output }} --dynamic-batch-output {{ dynamic_batch_output }} --scalar-output {{ scalar_output }} --running-sum-output {{ running_sum_output }} --checked-running-sum-output {{ checked_running_sum_output }}
 
-# Download a CPU or CUDA 13 runtime; `host` selects the current machine's platform.
+# Install a CPU or CUDA 13 runtime. The `host` platform selects the current machine.
 download-onnxruntime flavor="cpu" platform="host":
     bash scripts/download_onnxruntime.sh --flavor {{ quote(flavor) }} --platform {{ quote(platform) }}
 

@@ -540,12 +540,22 @@ fn capability_line(record: &NodeCapabilityRecord) -> String {
         .collect::<Vec<_>>()
         .join(" ");
     format!(
-        "  capabilities: committed {} cpu-count={cpu} memory-bytes={memory} {} {} {} \
-         listeners={:?} {operational}",
+        "  capabilities: committed {} cpu-count={cpu} memory-bytes={memory} {} {} {} {} \
+         drain-timeout={} shutdown-timeout={} task-grace-period={} listeners={:?} {operational}",
         record.identity,
         bounds_line(capabilities.receive),
         engine_capability_line(capabilities.engines),
         connector_host_capability_line(capabilities.connector_host),
+        capabilities
+            .runtime
+            .described()
+            .into_iter()
+            .map(|(name, value)| format!("{name}={value}"))
+            .collect::<Vec<_>>()
+            .join(" "),
+        timing_text(capabilities.shutdown.drain_timeout),
+        timing_text(capabilities.shutdown.shutdown_timeout),
+        timing_text(capabilities.shutdown.task_grace_period),
         capabilities.listeners,
     )
 }
@@ -732,6 +742,8 @@ mod tests {
                     ClusterNodeIncarnation::new(incarnation),
                 ),
                 capabilities: NodeCapabilities {
+                    runtime: nervix_models::DataPlaneSettings::default().capabilities(),
+                    shutdown: nervix_models::ShutdownSettings::default().capabilities(),
                     interconnect: nervix_interconnect::TransportSettings::default().capabilities(),
                     dns: nervix_arbitrary::Arbitrary::new(
                         &[],
@@ -835,6 +847,8 @@ mod tests {
             operational: Default::default(),
             identity: identity(node, incarnation),
             capabilities: NodeCapabilities {
+                runtime: nervix_models::DataPlaneSettings::default().capabilities(),
+                shutdown: nervix_models::ShutdownSettings::default().capabilities(),
                 interconnect: nervix_interconnect::TransportSettings::default().capabilities(),
                 dns: nervix_arbitrary::Arbitrary::new(&[], nervix_arbitrary::Domain::Vocabulary)
                     .node_capability_record()

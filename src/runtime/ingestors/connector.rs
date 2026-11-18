@@ -62,15 +62,6 @@ use read::{AllowanceHoldEnd, ReadOutcome, hold_for_allowance, read_batch, wait_f
 #[path = "connector_poll.rs"]
 mod poll;
 
-const INGESTOR_ERROR_RETRY: Duration = Duration::from_millis(100);
-
-/// How an ingestor whose delivery mode declares no retry policy reopens after a failure: the delay
-/// starts here and doubles up to the ceiling.
-pub(super) const INGESTOR_RECONNECT_POLICY: ParsedRetryPolicy = ParsedRetryPolicy {
-    backoff: Duration::from_millis(250),
-    max_backoff: Duration::from_secs(30),
-};
-
 impl IngestorSpec {
     /// The identity this ingestor's running ingestor is registered under.
     pub(in crate::runtime) fn runtime_key(&self) -> DomainNodeUnitRef {
@@ -194,6 +185,7 @@ impl<P> BrokerIngestorStart<'_, P> {
     /// leaves no running ingestor behind.
     pub(super) async fn open<C>(
         self,
+        runtime: &Runtime,
         ingestor: &IngestorSpec,
     ) -> error_stack::Result<IngestorStart, IngestorStartError>
     where
@@ -226,6 +218,7 @@ impl<P> BrokerIngestorStart<'_, P> {
             policy: BrokerIngestorPolicy::new(
                 plan.acknowledgement,
                 plan.capabilities.position_class(),
+                runtime.inner.data_plane,
             ),
         });
         Ok(IngestorStart {
@@ -249,6 +242,8 @@ pub(super) struct BrokerIngestorInstance<C> {
 /// How the host drives one broker ingestor instance.
 #[derive(Debug, Clone, Copy)]
 pub(super) struct BrokerIngestorPolicy {
+    pub(super) error_retry: Duration,
+    pub(super) unacknowledged_poll_batch: NonZeroUsize,
     /// How its messages are grouped and how long their acknowledgement trees are waited on.
     pub(super) acknowledgement: IngestorAckPolicy,
     /// How the host backs off after a failed resume, batch or rejection.
@@ -262,13 +257,22 @@ impl BrokerIngestorPolicy {
     /// How the host drives a broker ingestor whose declared delivery mode is `acknowledgement` and
     /// whose positions are of `position_class`: an acknowledged mode retries by its declared
     /// policy, and an ingestor without one reopens on the host's reconnect cadence.
-    pub(super) fn new(acknowledgement: IngestorAckPolicy, position_class: PositionClass) -> Self {
+    pub(super) fn new(
+        acknowledgement: IngestorAckPolicy,
+        position_class: PositionClass,
+        settings: nervix_models::DataPlaneSettings,
+    ) -> Self {
         let retry = match acknowledgement {
-            IngestorAckPolicy::None => INGESTOR_RECONNECT_POLICY,
+            IngestorAckPolicy::None => super::super::reconnect_backoff::reconnect_policy(settings),
             IngestorAckPolicy::Sequential { retry, .. }
             | IngestorAckPolicy::Parallel { retry, .. } => retry,
         };
         Self {
+            error_retry: settings.ingestor_error_retry(),
+            unacknowledged_poll_batch: NonZeroUsize::new(
+                settings.unacknowledged_poll_batch().arch_into(),
+            )
+            .assured("the configured poll bound is positive"),
             acknowledgement,
             retry,
             position_class,
@@ -379,12 +383,14 @@ where
             cadence,
             intake_batch,
         } = *self;
+        let error_retry = host.runtime.inner.data_plane.ingestor_error_retry();
         Box::pin(run_paced_ingestor(
             connector,
             host,
             cadence,
             intake_batch,
             shutdown,
+            error_retry,
         ))
     }
 }
@@ -590,8 +596,13 @@ impl RuntimeIngestorHost {
                 .ingestor_ack_root_trackers(&spec.domain, &spec.ingestor, spec.unit);
         let collector = IngestRouteCollector::new(
             spec.output_routes.metadata.clone(),
-            INGEST_GROUP_MAX_ROWS,
+            spec.runtime
+                .inner
+                .data_plane
+                .ingest_group_max_rows()
+                .arch_into(),
             spec.metrics.clone(),
+            spec.runtime.inner.data_plane.ingest_group_idle_flush(),
         );
         let quiesce_observation = spec.quiesce.observation();
         let dispatcher = spec.runtime.inner.remote_dispatcher.load();
@@ -978,6 +989,7 @@ impl RuntimeIngestorHost {
             self.collector.projection.clone(),
             messages.len().max(1),
             self.metrics.clone(),
+            self.runtime.inner.data_plane.ingest_group_idle_flush(),
         );
         let decoded = self
             .runtime
@@ -1143,7 +1155,15 @@ impl RuntimeIngestorHost {
             })
             .await
             .change_context(IngestorIntakeError::Dispatch)?;
-        if self.flush_each_intake || self.collector.len() >= INGEST_GROUP_MAX_ROWS {
+        if self.flush_each_intake
+            || self.collector.len()
+                >= self
+                    .runtime
+                    .inner
+                    .data_plane
+                    .ingest_group_max_rows()
+                    .arch_into()
+        {
             self.flush().await?;
         }
         Ok(())
@@ -1258,7 +1278,15 @@ impl RuntimeIngestorHost {
             })
             .await
             .change_context(IngestorIntakeError::Dispatch)?;
-        if self.flush_each_intake || self.collector.len() >= INGEST_GROUP_MAX_ROWS {
+        if self.flush_each_intake
+            || self.collector.len()
+                >= self
+                    .runtime
+                    .inner
+                    .data_plane
+                    .ingest_group_max_rows()
+                    .arch_into()
+        {
             self.flush().await?;
         }
         Ok(true)
@@ -1705,7 +1733,15 @@ impl RuntimeIngestorHost {
             })
             .await
             .change_context(IngestorIntakeError::Dispatch)?;
-        if self.flush_each_intake || self.collector.len() >= INGEST_GROUP_MAX_ROWS {
+        if self.flush_each_intake
+            || self.collector.len()
+                >= self
+                    .runtime
+                    .inner
+                    .data_plane
+                    .ingest_group_max_rows()
+                    .arch_into()
+        {
             self.flush().await?;
         }
         Ok(true)
@@ -1789,6 +1825,7 @@ async fn prepare_paced_ingestor<C, H>(
     ready: &mut bool,
     failed_poll: &mut bool,
     shutdown: &mut watch::Receiver<bool>,
+    error_retry: Duration,
 ) -> PacedIngestorAction
 where
     C: IngestorConnector,
@@ -1846,7 +1883,7 @@ where
                 *ready = false;
                 host.mark_unready();
                 host.record_poll_error(format!("{error:#}"));
-                return if wait_for_paced_retry(host, shutdown, INGESTOR_ERROR_RETRY).await {
+                return if wait_for_paced_retry(host, shutdown, error_retry).await {
                     PacedIngestorAction::Restart
                 } else {
                     PacedIngestorAction::Stop
@@ -1871,6 +1908,7 @@ async fn run_paced_ingestor<C, H, D>(
     mut cadence: D,
     intake_batch: NonZeroUsize,
     mut shutdown: watch::Receiver<bool>,
+    error_retry: Duration,
 ) where
     C: PacedIngestorConnector,
     H: PacedIngestorHostServices,
@@ -1888,6 +1926,7 @@ async fn run_paced_ingestor<C, H, D>(
             &mut ready,
             &mut failed_poll,
             &mut shutdown,
+            error_retry,
         )
         .await;
         match preparation {
@@ -2094,6 +2133,8 @@ pub(super) async fn run_ingestor_instance_with_retry<C>(
     C: BrokerIngestorConnector,
 {
     let BrokerIngestorPolicy {
+        error_retry,
+        unacknowledged_poll_batch,
         acknowledgement,
         retry: retry_policy,
         position_class,
@@ -2184,7 +2225,7 @@ pub(super) async fn run_ingestor_instance_with_retry<C>(
                 Err(error) => {
                     ready = false;
                     host.mark_unready();
-                    let delay = ingestor_retry_delay(retry_delay);
+                    let delay = ingestor_retry_delay(retry_delay, error_retry);
                     host.record_transient_error(ingestor_failure_reason(&error), delay);
                     host.report_error(format!("{error:#}"));
                     if !wait_for_retry(&mut host, &mut shutdown, delay).await {
@@ -2210,7 +2251,7 @@ pub(super) async fn run_ingestor_instance_with_retry<C>(
                 started_at.elapsed(),
             );
             if let Err(error) = rejected {
-                let delay = ingestor_retry_delay(retry_delay);
+                let delay = ingestor_retry_delay(retry_delay, error_retry);
                 host.record_transient_error(ingestor_failure_reason(&error), delay);
                 host.report_error(format!("{error:#}"));
                 pending_rejection = Some(positions);
@@ -2231,7 +2272,7 @@ pub(super) async fn run_ingestor_instance_with_retry<C>(
 
         // The read takes no more than the unit's RATE LIMIT allowance admits now, and none while
         // it admits nothing, so the transport keeps what the allowance cannot admit yet.
-        let window = batch_request(acknowledgement);
+        let window = batch_request(acknowledgement, unacknowledged_poll_batch);
         let request = match host.read_budget(window.max_messages) {
             IngestorReadBudget::Take(max_messages) => IngestorBatchRequest {
                 max_messages,
@@ -2254,7 +2295,7 @@ pub(super) async fn run_ingestor_instance_with_retry<C>(
             ReadOutcome::ResumeRequired => {
                 ready = false;
                 host.mark_unready();
-                let delay = ingestor_retry_delay(retry_delay);
+                let delay = ingestor_retry_delay(retry_delay, error_retry);
                 if !end.wait_for_retry(&mut host, &mut shutdown, delay).await {
                     break;
                 }
@@ -2264,7 +2305,7 @@ pub(super) async fn run_ingestor_instance_with_retry<C>(
             ReadOutcome::Closed => break,
             ReadOutcome::Failed(error) => {
                 read_failed = true;
-                let delay = ingestor_retry_delay(retry_delay);
+                let delay = ingestor_retry_delay(retry_delay, error_retry);
                 host.record_transient_error(ingestor_failure_reason(&error), delay);
                 host.report_error(format!("{error:#}"));
                 if !end.wait_for_retry(&mut host, &mut shutdown, delay).await {
@@ -2278,13 +2319,13 @@ pub(super) async fn run_ingestor_instance_with_retry<C>(
         // What a cancelled read returns is taken in before the loop acts on the quiesce change or
         // the stop that cancelled it.
         if !messages.is_empty() {
-            let retry_after = ingestor_retry_delay(retry_delay);
+            let retry_after = ingestor_retry_delay(retry_delay, error_retry);
             match handle_batch(&mut connector, &mut host, policy, retry_after, messages).await {
                 BatchDisposition::Accepted => {
                     retry_delay = retry_policy.backoff;
                 }
                 BatchDisposition::Retry => {
-                    let delay = ingestor_retry_delay(retry_delay);
+                    let delay = ingestor_retry_delay(retry_delay, error_retry);
                     if !end.wait_for_retry(&mut host, &mut shutdown, delay).await {
                         break;
                     }
@@ -2298,7 +2339,7 @@ pub(super) async fn run_ingestor_instance_with_retry<C>(
                     }
                     ready = false;
                     host.mark_unready();
-                    let delay = ingestor_retry_delay(retry_delay);
+                    let delay = ingestor_retry_delay(retry_delay, error_retry);
                     if !end.wait_for_retry(&mut host, &mut shutdown, delay).await {
                         break;
                     }
@@ -2326,9 +2367,16 @@ pub(super) async fn run_ingestor_instance_with_retry<C>(
     host.mark_unready();
 }
 
-fn batch_request(acknowledgement: IngestorAckPolicy) -> IngestorBatchRequest {
+fn batch_request(
+    acknowledgement: IngestorAckPolicy,
+    unacknowledged_batch: NonZeroUsize,
+) -> IngestorBatchRequest {
     match acknowledgement {
-        IngestorAckPolicy::None | IngestorAckPolicy::Sequential { .. } => IngestorBatchRequest {
+        IngestorAckPolicy::None => IngestorBatchRequest {
+            max_messages: unacknowledged_batch,
+            batch_timeout: None,
+        },
+        IngestorAckPolicy::Sequential { .. } => IngestorBatchRequest {
             max_messages: NonZeroUsize::MIN,
             batch_timeout: None,
         },
@@ -2531,8 +2579,8 @@ async fn flush_for_lifecycle(host: &mut IngestorHost) {
     }
 }
 
-fn ingestor_retry_delay(delay: Duration) -> Duration {
-    delay.max(INGESTOR_ERROR_RETRY)
+fn ingestor_retry_delay(delay: Duration, minimum: Duration) -> Duration {
+    delay.max(minimum)
 }
 
 async fn wait_for_retry(

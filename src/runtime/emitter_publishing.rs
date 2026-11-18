@@ -422,7 +422,7 @@ impl EmitterConnectorState {
         // The supervisor already waits through this grace for the stop answer. Reserve half for
         // receiving the emitter's deadline report, and half for delivering it to the supervisor.
         // The emitter still receives only the original deadline.
-        let finish_bound = deadline + PROCESSOR_BRANCH_TASK_SHUTDOWN_GRACE / 2;
+        let finish_bound = deadline + context.runtime.task_stop_grace() / 2;
         match nervix_primitives::time::timeout_at(
             finish_bound,
             self.finish_transport(context, deadline),
@@ -681,7 +681,7 @@ impl EmitterConnectorState {
             return;
         };
         match nervix_primitives::time::timeout(
-            PROCESSOR_BRANCH_TASK_SHUTDOWN_GRACE,
+            context.runtime.task_stop_grace(),
             open.lifecycle
                 .close(open.connector.lifecycle_mut(), context),
         )
@@ -1861,7 +1861,9 @@ mod tests {
         let context = emitter_context();
         let mut connector = EmitterConnectorState::opened(Box::new(unencodable_emitter()));
         let mut buffer = EmitterBatchBuffer::default();
-        buffer.set_flush_policy(RuntimeFlushPolicy::Immediate);
+        buffer.set_flush_policy(RuntimeFlushPolicy::Immediate {
+            minimum: nervix_models::DataPlaneSettings::default().immediate_flush_minimum(),
+        });
         buffer
             .push(
                 &emitter_context(),
@@ -1937,7 +1939,9 @@ mod tests {
     #[test]
     fn caller_owned_publish_failure_includes_current_after_older_buffered_batches() {
         let mut buffer = EmitterBatchBuffer::default();
-        buffer.set_flush_policy(RuntimeFlushPolicy::Immediate);
+        buffer.set_flush_policy(RuntimeFlushPolicy::Immediate {
+            minimum: nervix_models::DataPlaneSettings::default().immediate_flush_minimum(),
+        });
         buffer
             .push(
                 &emitter_context(),

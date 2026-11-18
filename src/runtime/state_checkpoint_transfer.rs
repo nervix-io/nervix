@@ -18,6 +18,7 @@
     )
 )]
 
+use arch_into::ArchInto as _;
 use error_stack::{Report, ResultExt as _};
 use futures_util::stream;
 use meticulous::{OptionExt as _, ResultExt as _};
@@ -39,7 +40,6 @@ use super::{
 
 /// The host accepts at most 64 MiB of guest state. This bound also leaves room for the checkpoint
 /// envelope and for the other runtime state kinds that share this transfer mechanism.
-const MAX_CHECKPOINT_BYTES: u64 = 256 * 1024 * 1024;
 
 #[derive(Debug, Error)]
 enum CheckpointTransferError {
@@ -97,10 +97,10 @@ impl Runtime {
             placement: placement.clone(),
         };
         let length = u64::try_from(snapshot.payload.len()).assured("checkpoint length fits in u64");
-        if length > MAX_CHECKPOINT_BYTES {
+        if length > self.inner.data_plane.checkpoint_bytes() {
             return Err(Report::new(CheckpointTransferError::TooLarge {
                 length,
-                maximum: MAX_CHECKPOINT_BYTES,
+                maximum: self.inner.data_plane.checkpoint_bytes(),
             })
             .change_context(capture()));
         }
@@ -110,11 +110,18 @@ impl Runtime {
             .reserve(MemoryClass::RestoreMetadata, length.max(1))
             .await
             .change_context_lazy(capture)?;
+        let chunk_bytes = self
+            .inner
+            .executor
+            .limits()
+            .bulk_chunk_bytes
+            .as_u64()
+            .arch_into();
         self.inner
             .executor
             .run_cpu(CpuClass::Bulk, reservation, move |charge, cancellation| {
                 let mut hasher = blake3::Hasher::new();
-                for chunk in snapshot.payload.chunks(64 * 1024) {
+                for chunk in snapshot.payload.chunks(chunk_bytes) {
                     cancellation.check()?;
                     hasher.update(chunk);
                 }
@@ -212,11 +219,11 @@ impl Runtime {
             _ => snapshot,
         };
         let length = u64::try_from(snapshot.payload.len()).assured("checkpoint length fits in u64");
-        if length > MAX_CHECKPOINT_BYTES {
+        if length > self.inner.data_plane.checkpoint_bytes() {
             return Err(StreamHandlerError::with_cause(Report::new(
                 CheckpointTransferError::TooLarge {
                     length,
-                    maximum: MAX_CHECKPOINT_BYTES,
+                    maximum: self.inner.data_plane.checkpoint_bytes(),
                 },
             )));
         }
@@ -236,11 +243,11 @@ impl Runtime {
         bytes: nervix_execution::ChargedBytes,
     ) -> Result<StreamingResponse, Report<StreamHandlerError>> {
         let length = u64::try_from(bytes.len()).assured("checkpoint length fits u64");
-        if length > MAX_CHECKPOINT_BYTES {
+        if length > self.inner.data_plane.checkpoint_bytes() {
             return Err(StreamHandlerError::with_cause(Report::new(
                 CheckpointTransferError::TooLarge {
                     length,
-                    maximum: MAX_CHECKPOINT_BYTES,
+                    maximum: self.inner.data_plane.checkpoint_bytes(),
                 },
             )));
         }
@@ -291,10 +298,10 @@ impl Runtime {
             target: target.clone(),
             placement: placement.clone(),
         };
-        if descriptor.length > MAX_CHECKPOINT_BYTES {
+        if descriptor.length > self.inner.data_plane.checkpoint_bytes() {
             return Err(Report::new(CheckpointTransferError::TooLarge {
                 length: descriptor.length,
-                maximum: MAX_CHECKPOINT_BYTES,
+                maximum: self.inner.data_plane.checkpoint_bytes(),
             })
             .change_context(failure()));
         }

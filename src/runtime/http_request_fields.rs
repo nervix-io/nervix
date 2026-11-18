@@ -40,8 +40,29 @@ const METHOD_FIELD: &str = "method";
 const PATH_FIELD: &str = "path";
 /// Where the method and the path sit among the fields, which are evaluated in this order and then
 /// every header write after them.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the HTTP request schema places method in its first column"
+    )
+)]
 const METHOD_POSITION: usize = 0;
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the HTTP request schema places path in its second column"
+    )
+)]
 const PATH_POSITION: usize = 1;
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the HTTP request schema places headers after method and path"
+    )
+)]
 const FIRST_HEADER_POSITION: usize = 2;
 
 /// Why an HTTP emitter's request fields cannot be compiled, or why a batch's evaluated fields

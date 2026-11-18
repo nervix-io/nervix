@@ -183,6 +183,27 @@ impl SettingDefinition for ResourceMaxFileCount {
     }
 }
 
+/// The maximum number of records a codec may unfold from one ingested payload.
+/// This is cluster policy because exceeding it rejects the payload independently of placement.
+pub struct PayloadUnfoldLimit;
+impl PayloadUnfoldLimit {
+    pub const DEFAULT: u64 = 65_536;
+}
+impl SettingDefinition for PayloadUnfoldLimit {
+    type Class = ClusterParameters;
+    type Value = u64;
+    type Context = ();
+    type Error = ClusterParameterError;
+    const NAME: &'static str = "payload-unfold-limit";
+    const DERIVATION: Option<&'static str> = None;
+    fn default_value(_: &()) -> u64 {
+        Self::DEFAULT
+    }
+    fn validate(value: &u64, _: &()) -> Result<(), Report<ClusterParameterError>> {
+        ClusterParameterKey::PayloadUnfoldLimit.validate_count(*value, 1, u64::from(u32::MAX))
+    }
+}
+
 /// The most records one declared emitter batch may contain.
 pub struct MaxBatchMessages;
 
