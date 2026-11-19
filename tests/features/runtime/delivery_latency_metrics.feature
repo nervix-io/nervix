@@ -13,6 +13,7 @@ Feature: Delivery latency metrics
       CREATE SCHEMA reading ( tenant STRING, sequence I64, occurred_at DATETIME );
       CREATE SCHEMA tenant_key ( tenant STRING );
       CREATE BRANCH tenants SCHEMA tenant_key TTL 1h;
+      CREATE BRANCH reingested_tenants SCHEMA tenant_key TTL 1h;
       CREATE JAQ JSON CODEC reading_batch_codec TO SCHEMA reading
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE WIRE JSON SCHEMA reading_wire MODE STRICT ( tenant string, sequence integer, occurred_at string );
@@ -20,8 +21,8 @@ Feature: Delivery latency metrics
         ENCODE occurred_at AS RFC3339;
       CREATE RELAY raw_readings SCHEMA reading BRANCHED BY tenants;
       CREATE RELAY admitted_readings SCHEMA reading BRANCHED BY tenants;
-      CREATE RELAY reingested_readings SCHEMA reading BRANCHED BY tenants;
-      CREATE RELAY emitted_readings SCHEMA reading BRANCHED BY tenants;
+      CREATE RELAY reingested_readings SCHEMA reading BRANCHED BY reingested_tenants;
+      CREATE RELAY emitted_readings SCHEMA reading BRANCHED BY reingested_tenants;
       CREATE VHOST edge delivery-latency-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT ingress ON edge PATH '/readings';
       CREATE HTTP ENDPOINT INGESTOR ingestor FROM ingress MODE NO ACK
@@ -34,10 +35,10 @@ Feature: Delivery latency metrics
         BRANCHED BY tenants
         TO admitted_readings INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
       CREATE REINGESTOR reingest FROM admitted_readings
-        TO reingested_readings INHERIT ALL BRANCHED BY tenants
+        TO reingested_readings INHERIT ALL BRANCHED BY reingested_tenants SET tenant = message.tenant
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
       CREATE JUNCTION forward FROM reingested_readings
-        BRANCHED BY tenants
+        BRANCHED BY reingested_tenants
         TO emitted_readings INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
       CREATE ZEROMQ CLIENT zeromq_main
         CONFIG {

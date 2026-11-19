@@ -98,8 +98,6 @@ impl EntrypointTarget<'_> {
 pub(super) enum BoundRouteBranch {
     /// The records leave unbranched.
     Unbranched,
-    /// The records keep the branch key their input arrived with.
-    Preserved,
     /// The records receive the branch key this program constructs.
     Constructed(CompiledBranchProgram),
     Inherited(Box<BoundInheritedBranch>),
@@ -121,7 +119,7 @@ impl BoundRouteBranch {
         match self {
             Self::Constructed(program) => Some((program, None)),
             Self::Inherited(branch) => Some((&branch.program, Some(branch.projection))),
-            _ => None,
+            Self::Unbranched => None,
         }
     }
 }
@@ -218,7 +216,6 @@ impl ExecutionBuildDeps<'_> {
         } = schemas;
         let lowered = match branch {
             PlannedRouteBranch::Unbranched => return Ok(BoundRouteBranch::Unbranched),
-            PlannedRouteBranch::Preserved(_) => return Ok(BoundRouteBranch::Preserved),
             PlannedRouteBranch::Constructed { program, .. } => program,
             PlannedRouteBranch::Inherited(branch) => &branch.program,
         };

@@ -119,15 +119,6 @@ fn ProcessorRouteBranchEditor(
         <Show when=move || !family.declares_node_branch() fallback=|| ()>
             <fieldset class="create-field create-processor-route-branching">
                 <legend>"Route branch"</legend>
-                <button type="button" data-branch="preserve"
-                    class:active=move || draft.get().active_route().is_some_and(|route| matches!(route.branch, RouteBranchDraft::Preserve))
-                    disabled=pending
-                    on:click=move |_| { draft.update(|state| {
-                        if let Some(route) = state.active_route_mut() {
-                            route.branch.choose_preserve();
-                            if let Some(relay) = &mut route.relay { relay.invalidate(); }
-                        }
-                    }); signals.edit(); }>"Preserve incoming branch"</button>
                 <button type="button" data-branch="unbranched"
                     class:active=move || draft.get().active_route().is_some_and(|route| matches!(route.branch, RouteBranchDraft::Unbranched))
                     disabled=pending

@@ -859,12 +859,17 @@ impl DomainState {
                         &reingestor.from,
                         "reingestor input",
                     )?;
-                    let first_input_relay = processor_first_input_relay(
-                        domain,
-                        identifier,
-                        &reingestor.from,
-                        "reingestor input",
-                    )?;
+                    let &(first_input_relay, input_schema) = input_schemas
+                        .first()
+                        .assured("validated reingestor inputs have at least one relay");
+                    let mut input_parametrizations = HashMap::new();
+                    for &(relay, _) in &input_schemas {
+                        if let Some(branch) =
+                            relay_declared_branch(domain, identifier, models, relay)?
+                        {
+                            input_parametrizations.entry(branch).or_insert(relay);
+                        }
+                    }
                     let branch_schema = relay_declared_branch_schema(
                         domain,
                         identifier,
@@ -906,16 +911,14 @@ impl DomainState {
                             consumer_schema,
                             "reingestor flow",
                         )?;
-                        let incoming_branch =
-                            relay_declared_branch(domain, identifier, models, first_input_relay)?;
                         ensure_output_branch(
                             domain,
                             identifier,
                             models,
                             output,
-                            input_schemas[0].1,
+                            input_schema,
                             &effective_schema,
-                            incoming_branch,
+                            Some(&input_parametrizations),
                         )?;
                     }
                     add_output_message_error_policy_edges(

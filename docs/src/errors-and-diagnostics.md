@@ -146,6 +146,9 @@ Transaction model preflight adds its operation identity with `change_context` ab
 report. It does not nest that report in a context field: the ordinary typed report chain remains
 inspectable, so command projection can retain the schema's invalid-key diagnosis.
 
+Reingestor preflight reports `RegistryError::ReingestorParametrizationConflict` when a named
+output matches an input relay's parametrization. The command error identifies the reingestor,
+the parametrization, and both relay names.
 
 Connector-storage worker capacity crosses the typed node-capability setting boundary before
 executor construction. A claim exceeding the primitive's permit representation returns

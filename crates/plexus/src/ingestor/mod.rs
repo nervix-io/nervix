@@ -1345,12 +1345,7 @@ mod tests {
     fn suggests_set_after_branched_by() {
         let input = "CREATE HTTP ENDPOINT INGESTOR i FROM ep MODE NO ACK ON QUIESCE BUFFER MAX \
                      SIZE 1MiB DECODE USING sch TO s BRANCHED BY u_branch ";
-        let suggestions = suggest_create_ingestor(input, input.len());
-        assert!(suggestions.contains(&"SET".to_string()));
-        assert!(suggestions.contains(&"FLUSH EACH".to_string()));
-        assert!(!suggestions.contains(&"VALUES".to_string()));
-        assert!(!suggestions.contains(&"TTL".to_string()));
-        assert!(!suggestions.contains(&"TIMESTAMP".to_string()));
+        crate::conformance_support::assert_offers_exactly(input, &["SET"]);
     }
 
     #[test]
