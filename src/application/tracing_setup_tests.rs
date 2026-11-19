@@ -11,7 +11,11 @@ use std::{net::SocketAddr, time::Duration};
 use futures_util::poll;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_dns::{DnsConfiguration, DnsLookupError, DnsLookupFailure, DnsResolver, NameServers};
-use nervix_primitives::{net::TcpListener, sync::watch, time::timeout};
+use nervix_primitives::{
+    net::TcpListener,
+    sync::watch,
+    time::{Instant, timeout},
+};
 use nervix_test_environment::dns_authority::{DnsAnswer, DnsAuthority};
 use opentelemetry_sdk::trace::SpanExporter as _;
 use tempfile::TempDir;
@@ -42,7 +46,7 @@ impl Fixture {
         let root = tempfile::tempdir().assured("a fixture directory can be created");
         let resolver_configuration = root.path().join("resolv.conf");
         let hosts_file = root.path().join("hosts");
-        // Silent queries outlast TEST_WAIT; only the exporter's connection deadline can end them.
+        // The fixture's DNS deadline outlasts TEST_WAIT so the exporter can time out first.
         std::fs::write(
             &resolver_configuration,
             "options ndots:1 timeout:30 attempts:1\n",
@@ -149,15 +153,30 @@ async fn startup_wait_retains_early_exports_and_closes_if_startup_ends() {
 
 #[nervix_primitives::test]
 async fn the_trace_export_timeout_bounds_a_silent_node_dns_lookup() {
+    // Give the resolver and authority time to run alongside the rest of the suite.
+    const EXPORT_TIMEOUT: Duration = Duration::from_secs(2);
+    const _: () = assert!(EXPORT_TIMEOUT.as_nanos() < TEST_WAIT.as_nanos());
+
     let fixture = Fixture::new(DnsAnswer::Silent).await;
-    let trace = TraceExporter::from_endpoint(ENDPOINT.to_string(), Duration::from_millis(100))
+    let trace = TraceExporter::from_endpoint(ENDPOINT.to_string(), EXPORT_TIMEOUT)
         .assured("the configured HTTP collector endpoint is valid");
     trace.dns.send_replace(Some(fixture.resolver.clone()));
+    let started = Instant::now();
     let result = timeout(TEST_WAIT, trace.exporter.export(Vec::new()))
         .await
-        .assured("the export timeout ends the connection before the DNS hook's deadline");
-    assert!(result.is_err());
-    assert!(fixture.authority.questions_for(NAME) > 0);
+        .assured("the export ends within the test guard, before the DNS hook's deadline");
+    assert!(
+        fixture.authority.questions_for(NAME) > 0,
+        "the node resolver must ask the authority before the export ends"
+    );
+    assert!(
+        result.is_err(),
+        "silent DNS leaves the collector unreachable"
+    );
+    assert!(
+        started.elapsed() >= EXPORT_TIMEOUT,
+        "the export ended before its configured timeout"
+    );
 }
 
 #[nervix_primitives::test]
