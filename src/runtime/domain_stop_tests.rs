@@ -177,10 +177,11 @@ async fn a_stopping_domain_runs_its_tasks_until_its_stop_ends() {
     );
     // A drained branch holds no accepted output, so its end without a running clock loses
     // nothing and reports no error.
-    match events.try_recv() {
-        Err(nervix_primitives::sync::broadcast::error::TryRecvError::Empty) => {}
-        other => panic!("a graceful stop's teardown raised a runtime event: {other:?}"),
-    }
+    let mut received = std::pin::pin!(events.recv());
+    assert!(
+        futures_util::poll!(received.as_mut()).is_pending(),
+        "a graceful stop's teardown raised a runtime event"
+    );
     assert!(
         runtime
             .inner

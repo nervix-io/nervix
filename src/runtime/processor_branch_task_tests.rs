@@ -918,10 +918,11 @@ async fn a_drained_branch_ends_without_its_clock_and_reports_nothing() {
 
     detach_branch(&runtime, &domain, branch).await;
 
-    match events.try_recv() {
-        Err(nervix_primitives::sync::broadcast::error::TryRecvError::Empty) => {}
-        other => panic!("a drained branch reported an error as it ended: {other:?}"),
-    }
+    let mut received = std::pin::pin!(events.recv());
+    assert!(
+        futures_util::poll!(received.as_mut()).is_pending(),
+        "a drained branch reported an error as it ended"
+    );
     owner
         .stop(Duration::from_secs(1))
         .await
@@ -943,9 +944,10 @@ async fn a_branch_holding_output_reports_what_it_cannot_publish_without_its_cloc
 
     detach_branch(&runtime, &domain, branch).await;
 
-    let RuntimeEvent::Error(message) = events
-        .try_recv()
-        .expect("a branch that loses its accepted output reports it");
+    let RuntimeEvent::Error(message) = timeout(Duration::from_secs(1), events.recv())
+        .await
+        .expect("a branch reports the output it loses as it ends")
+        .expect("the runtime keeps its event bus open");
     assert!(
         message.contains("stopped without its clock and cannot publish its accepted output"),
         "unexpected report: {message}"
