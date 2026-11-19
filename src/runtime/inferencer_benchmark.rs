@@ -18,7 +18,7 @@
     )
 )]
 
-use std::{collections::BTreeMap, num::NonZeroUsize, path::PathBuf, time::Duration};
+use std::{collections::BTreeMap, num::NonZeroUsize, path::PathBuf};
 
 use ahash::HashMap;
 use meticulous::{OptionExt as _, ResultExt as _};
@@ -414,9 +414,12 @@ impl InferencerBranchFixture {
         let Self {
             runtime, owners, ..
         } = self;
+        // Each relay owner gets the stop timeout the runtime gives its relay owners when a domain
+        // stops.
+        let grace = runtime.branch_task_stop_timeout();
         for owner in owners {
             owner
-                .stop(Duration::from_secs(1))
+                .stop(grace)
                 .await
                 .assured("the fixture relay owner stops");
         }

@@ -3858,7 +3858,7 @@ bench *args: build-web-console
     cargo bench --package nervix-vm --bench vm -- {{ args }}
 
 # Exercise every benchmark body once without spending CI's smoke-test budget on release codegen.
-bench-smoke: build-web-console wasm-processor-guests download-onnxruntime check-emitter-flush-graph bench-smoke-bodies
+bench-smoke: build-web-console wasm-processor-guests download-onnxruntime generate-test-onnx check-emitter-flush-graph bench-smoke-bodies
 
 # The benchmark bodies `bench-smoke` exercises, without the console build that precedes them there.
 # `coverage-native-extras` builds the console outside its instrumentation and then runs these in it.
@@ -3899,7 +3899,7 @@ bench-admitted-work-executable executable *args:
 # Measure one inferencer branch admitting a batch, from INPUTS through the model to its route's
 # dispatch: one message at a time, batched, and with STATE. Extra arguments are forwarded to
 # Criterion.
-bench-inferencer *args: build-web-console download-onnxruntime
+bench-inferencer *args: build-web-console download-onnxruntime generate-test-onnx
     ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)" cargo bench --package nervix-server --bench inferencer --features benchmarks -- {{ args }}
 
 # Measure retained full emitter flushes; every iteration checks the delivered-row count.
