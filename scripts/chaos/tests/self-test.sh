@@ -668,8 +668,8 @@ CHAOS_NODE_1_ADDRESS="10.213.7.11" \
 CHAOS_NODE_2_ADDRESS="10.213.7.12" \
 CHAOS_NODE_3_ADDRESS="10.213.7.13" \
     docker compose -f "${chaos_dir}/compose.yaml" --profile tools --profile three-node --profile rolling \
-    --profile stateful --profile paced --profile endpoints --profile lifetimes config --format json \
-    >"${compose_json}"
+    --profile stateful --profile paced --profile endpoints --profile lifetimes --profile events \
+    config --format json >"${compose_json}"
 
 jq -e --arg image "${placeholder_image}" \
     --arg heartbeat "${CHAOS_RAFT_HEARTBEAT_INTERVAL:-250ms}" \
@@ -699,6 +699,9 @@ jq -e --arg image "${placeholder_image}" \
     and ([.services.admin, .services.probe] | all(.init == true and .command == ["sleep", "infinity"]))
     and .services["clock-observer"].labels["io.nervix.chaos.role"] == "observer"
     and .services["clock-observer"].image == $image
+    and .services["events-observer"].labels["io.nervix.chaos.role"] == "observer"
+    and .services["events-observer"].image == $image
+    and ([.services["events-observer"].volumes[] | .read_only] | all(. == true))
     and .services["nervix-1"].environment.NERVIX_RAFT_HEARTBEAT_INTERVAL == $heartbeat
     and .services["nervix-1"].environment.NERVIX_RAFT_SNAPSHOT_ENTRY_THRESHOLD == $snapshot_entries
     and .services["nervix-1"].environment.NERVIX_RAFT_COVERED_LOG_ENTRIES_RETAINED == $covered_entries
@@ -918,6 +921,7 @@ printf 'chaos harness self-test passed\n'
 "${script_dir}/stateful-self-test.sh"
 "${script_dir}/endpoint-self-test.sh"
 "${script_dir}/lifetimes-self-test.sh"
+"${script_dir}/correctness-harness-self-test.sh"
 "${script_dir}/backup-fault-self-test.sh"
 "${script_dir}/restore-self-test.sh"
 "${script_dir}/backup-state-self-test.sh"
