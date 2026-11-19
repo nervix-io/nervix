@@ -152,7 +152,7 @@ Feature: A move whose swap fails holds the moved unit until every node applied i
       {"event_id":"u-5","tenant":"beta","content":"c-u-5"}
       {"event_id":"u-6","tenant":"acme","content":"c-u-6"}
       """
-    When these Plexus commands are executed on the active session
+    When these Plexus commands are executed on the leader node
       """
       SHOW CLUSTER STATUS;
       """

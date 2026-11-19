@@ -645,10 +645,11 @@ fn shuttle_a_routed_batch_racing_a_joining_consumer_reserves_a_share_for_every_d
     );
 }
 
-/// The batches a consumer's receiver holds, read and counted.
+/// The batches a consumer's receiver holds, read, handled and counted.
 fn received_batches(consumer: &mut RelayRuntimeFanIn) -> usize {
     let mut received = 0usize;
-    while let RelayTryRecv::Batch(_) = consumer.try_recv() {
+    while let RelayTryRecv::Batch(delivered) = consumer.try_recv() {
+        delivered.ack_success();
         received = received
             .checked_add(1)
             .assured("a check publishes one batch");
@@ -656,11 +657,13 @@ fn received_batches(consumer: &mut RelayRuntimeFanIn) -> usize {
     received
 }
 
-/// A batch the owner publishes while a failed entity swap holds the relay reaches the consumer the
-/// restore starts again exactly once, and its publication completes. The swap stops the unit's
-/// previous task after the fence and, when it got that far, moves the registration to a
-/// replacement; the restore puts the registration back and starts the previous consumer before
-/// the hold ends, so no publication meets a counted consumer without a receiver.
+/// A batch the owner publishes across a failed entity swap's hold reaches the unit's consumer
+/// exactly once and is acknowledged, or meets the hold itself and is refused before any consumer
+/// sees it. The swap stops the unit's previous task after the fence and, when it got that far,
+/// moves the registration to a replacement; the restore puts the registration back and starts the
+/// previous consumer before the hold ends, so no publication meets a counted consumer without a
+/// receiver. A held relay refuses an owner batch and fails its acknowledgement so that its source
+/// delivers it again, as it does for every hold; any other failure is the restore's.
 #[test]
 fn shuttle_a_batch_held_through_a_failed_swap_reaches_the_restored_consumer_once() {
     check_dfs(
@@ -695,6 +698,8 @@ fn shuttle_a_batch_held_through_a_failed_swap_reaches_the_restored_consumer_once
                         ));
                         let mut batch = quiesce_test_batch();
                         batch.key = string_branch_key("tenant", "acme");
+                        let (root, completion) = AckSet::root();
+                        batch.acks = vec![root];
                         let unit = partitioning
                             .unit_of(&batch.key)
                             .assured("the concrete key names its relay unit");
@@ -743,18 +748,28 @@ fn shuttle_a_batch_held_through_a_failed_swap_reaches_the_restored_consumer_once
                         };
                         drop(lease);
 
-                        owner
-                            .await
-                            .assured("the owner task finishes")
-                            .assured("the restored consumer admits the held batch");
+                        let published = owner.await.assured("the owner task finishes");
                         deliveries = deliveries
                             .checked_add(received_batches(&mut restored))
                             .assured("a check publishes one batch");
-                        assert_eq!(
-                            deliveries, 1,
-                            "a batch published across a failed swap reaches the unit's consumer \
-                             exactly once"
-                        );
+                        if published.is_ok() {
+                            assert_eq!(
+                                deliveries, 1,
+                                "a batch published across a failed swap reaches the unit's \
+                                 consumer exactly once"
+                            );
+                            assert_eq!(completion.wait().await, AckOutcome::Ack);
+                        } else {
+                            assert_eq!(deliveries, 0, "a refused batch reaches no consumer");
+                            let AckOutcome::NoAck(reason) = completion.wait().await else {
+                                panic!("a refused batch fails its acknowledgement");
+                            };
+                            assert!(
+                                reason.ends_with("routing changed before owner fan-out"),
+                                "only the hold itself refuses the batch, but it failed with: \
+                                 {reason}"
+                            );
+                        }
                     }
                 }
             });

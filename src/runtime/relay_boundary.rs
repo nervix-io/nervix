@@ -2232,7 +2232,7 @@ impl RelayBoundaryServices {
 
     /// The runtime consumers of `mode` a publication to `unit` counts on: those of the whole
     /// relay and those of the unit.
-    #[cfg(test)]
+    #[cfg(all(test, feature = "testing"))]
     pub(super) fn counted_unit_runtime_consumers(&self, mode: AckMode, unit: Unit) -> usize {
         let whole = match mode {
             AckMode::Attached => &self.attached_runtime_consumer_count,

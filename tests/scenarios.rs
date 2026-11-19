@@ -27759,6 +27759,8 @@ async fn then_cluster_observability_metric_eventually_totals(
         .map(str::to_owned)
         .collect::<Vec<_>>();
     let expected: f64 = expected.approx_into();
+    // A node that exposes no such family counts nothing, since it never ran an instance the family
+    // counts; at least one node must expose it, so a misspelled family still fails.
     let mut observed = BTreeMap::new();
     let outcome =
         nervix_primitives::time::timeout(common::status_request::STATUS_WAIT_BUDGET, async {
@@ -27766,22 +27768,26 @@ async fn then_cluster_observability_metric_eventually_totals(
                 nervix_primitives::task::consume_budget().await;
                 observed.clear();
                 let mut total = 0.0;
+                let mut exposed = false;
                 for node in world.cluster().node_ids() {
                     nervix_primitives::task::consume_budget().await;
                     let value = match world
                         .cluster()
-                        .sum_observability_metric(&node, &metric_name, &labels)
+                        .exposed_observability_metric_sum(&node, &metric_name, &labels)
                         .await
                     {
                         Ok(value) => value,
                         Err(error) => {
-                            panic!("node '{node}' did not expose '{metric_name}': {error}")
+                            panic!("node '{node}' did not report '{metric_name}': {error}")
                         }
                     };
-                    total += value;
+                    if let Some(value) = value {
+                        exposed = true;
+                        total += value;
+                    }
                     observed.insert(node, value);
                 }
-                if total == expected {
+                if exposed && total == expected {
                     break;
                 }
                 nervix_primitives::time::sleep(Duration::from_millis(100)).await;
@@ -27790,7 +27796,8 @@ async fn then_cluster_observability_metric_eventually_totals(
         .await;
     assert!(
         outcome.is_ok(),
-        "metric '{metric_name}' with labels {labels:?} did not total {expected}: {observed:?}"
+        "metric '{metric_name}' with labels {labels:?} did not total {expected} (a node without \
+         the family shows None): {observed:?}"
     );
 }
 
