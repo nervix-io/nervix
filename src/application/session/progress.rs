@@ -33,6 +33,8 @@ pub(super) async fn run_request_progress(shared: Arc<SessionShared>) {
         let mut changed = std::pin::pin!(changed);
         changed.as_mut().enable();
         let due = shared.take_due_progress(Instant::now());
+        #[cfg(feature = "testing")]
+        let due = shared.withhold_faulted_progress(due);
         for request_id in due.requests {
             nervix_primitives::task::consume_budget().await;
             let frame = RequestProgress { request_id }

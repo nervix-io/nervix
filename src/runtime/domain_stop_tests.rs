@@ -196,3 +196,29 @@ async fn a_stopping_domain_runs_its_tasks_until_its_stop_ends() {
         "the teardown recorded what it cut, here nothing"
     );
 }
+
+#[nervix_primitives::test]
+async fn a_node_reports_what_its_stop_cut_only_once_its_teardown_ended() {
+    let runtime = Runtime::default();
+    let domain = domain(DOMAIN);
+    apply(&runtime, 1, state(DomainStatus::Running, None)).await;
+    let teardown = StopTeardown {
+        start_version: 1,
+        enforced: false,
+    };
+
+    runtime.begin_stop_ledger(&domain, teardown);
+    assert_eq!(runtime.stop_report(&domain, 1), StopReportAnswer::Pending);
+    runtime.record_stop_cuts(&domain, teardown);
+    assert_eq!(
+        runtime.stop_report(&domain, 1),
+        StopReportAnswer::Pending,
+        "the cuts are recorded, but the teardown still ends the tasks and writes the final \
+         snapshot"
+    );
+    runtime.complete_stop_ledger(&domain, teardown);
+    assert_eq!(
+        runtime.stop_report(&domain, 1),
+        StopReportAnswer::Reported(Vec::new())
+    );
+}

@@ -2453,6 +2453,19 @@ impl SessionServiceImpl {
         {
             return Ok(advanced);
         }
+        // A STOP step's effect only began, or joined, the domain's stop. The step applies until
+        // that stop ends, as when a later attempt resumes it, so the steps after it run against
+        // the stopped domain they were planned for.
+        if succeeded
+            && application_failure.is_none()
+            && let TransactionState::Committing(progress) = &advanced.state
+            && let Some(applying) = &progress.applying
+            && let Some(TransactionStepEffect::StopDomain { inputs, request }) = &applying.effect
+        {
+            application_failure =
+                Box::pin(self.wait_for_transaction_stop(&advanced, applying, inputs, request))
+                    .await;
+        }
         self.record_transaction_application_completion(
             &advanced,
             application_failure,

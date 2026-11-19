@@ -140,7 +140,7 @@ nervix-cli backup cluster --output cluster.nvxb --format json
 | `--without-state` | Captures configuration only. |
 | `--without-pause` | Captures published runtime state without quiescing a running domain. |
 | `--timeout DURATION` | Bounds the normal quiesced capture of each running domain. |
-| `--backup-wait-timeout DURATION` | Bounds the overall command wait across all cuts, redirects and reconnects. Defaults to `10m`; also applies to Plexus through `--command` and the REPL. |
+| `--backup-wait-timeout DURATION` | Bounds how long the command waits with neither its answer nor a progress report from the node serving it, across all cuts, redirects and reconnects. Defaults to `10m`; also applies to Plexus through `--command` and the REPL. |
 | `--execution-reference REFERENCE` | Recovers the same backup under its durable reference, with the original selected domain, scope, resources and capture options. The output destination may change. |
 | `--format text` or `--format json` | How the report is printed. Text is the default. |
 
@@ -213,14 +213,17 @@ mv /tmp/.tmpQ2x9Lk/backup.nvxb cluster.nvxb
 
 ### Waiting And Recovering
 
-The native client uses one bounded overall command wait for `BACKUP`, ten minutes by default.
+The native client bounds a `BACKUP` command's wait by silence, ten minutes by default: the wait
+ends only once neither the command's answer nor a progress report arrived within that time, and the
+node serving the command reports progress for as long as it serves it.
 `--backup-wait-timeout` sets it independently of each domain's `--timeout`, without counting or
 predicting domains. Native wait options accept durations from one millisecond through 24 hours.
 Redirects and reconnects share the same deadline and execution reference. Ordinary request and
 retry deadlines remain separate; an archive download begins after the command completes and
 bounds each frame's wait with the ordinary request timeout.
 
-When the command wait expires, admission may already have happened. The CLI exits unsuccessfully
+When the command wait expires, which a node that stopped answering causes, admission may already
+have happened. The CLI exits unsuccessfully
 and reports the durable reference. A JSON `BACKUP_FAILED` report includes
 `error.execution_reference` for an uncertain command or failed archive download. Recover promptly
 with the same selected `--domain`, scope, resource inclusion and capture options:

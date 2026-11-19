@@ -718,8 +718,9 @@ The concurrent map inventory records their lifecycle registration, observation a
 ### Server endpoint intake
 
 `EndpointIntakeRoutes` owns one immutable host-and-path table containing each domain's configured
-endpoint definitions and the ingestor lifetimes bound to them. Domain install or teardown and ingestor
-bind or unbind derive a replacement from the current publication with `ArcSwap::rcu`. Concurrent
+endpoint definitions and the ingestor lifetimes bound to them. Domain install or teardown, a stopping
+domain's withdrawal and its calling off, and ingestor bind or unbind derive a replacement from the
+current publication with `ArcSwap::rcu`. Concurrent
 writers retry against the latest complete table, preserving unrelated domains and ingestors. A
 passive installation publishes no endpoint definitions. The listening socket remains present on
 every node independently of this table.
@@ -750,6 +751,16 @@ exact ingestor allocation, so a late close cannot remove a replacement with the 
 Configuration withdrawal removes the route; ingestor withdrawal alone leaves configured metadata
 available to report unavailable intake. These publications remain volatile data-plane state.
 
+A stopping domain withdraws its routes once its intake holds. The table moves the domain's
+definitions and the bindings of its ingestors aside without ending their lifetimes: a request that
+resolved the route before keeps the intake it borrowed, so work it admitted finishes, while a later
+request finds no route and is answered 404. The stop's teardown ends the withdrawn lifetimes with
+the domain. A stop that is called off publishes the definitions again with every lifetime that has
+not ended, and a source bound meanwhile waits with them. Each route keeps its bindings in the order
+the table created them, a sequence a relaxed counter assigns for uniqueness alone, so a binding
+published again returns to its place and a shared request's first failure stays the earliest
+binding's.
+
 A request dispatches all bindings of its resolved endpoint concurrently before waiting for their
 combined result. One binding's downstream ACK cannot gate delivery to another binding. The
 production fanout and request windows have a Shuttle check that withholds both consumer ACKs
@@ -775,7 +786,8 @@ The bounded outcome-body property checks the public projection separately.
 
 Unit regressions and the registered Bolero operation sequence exercise the production owner and
 retained lifetimes. Shuttle races whole-domain publication with resolution, unbind with admitted
-requests and replacement, and domain teardown with retained routes. These checks treat publication
+requests and replacement, domain teardown with retained routes, a stopping domain's withdrawal with
+a retained request, and a called-off stop's restoration with an unbind. These checks treat publication
 operations as opaque scheduling points. Both publications reuse the primitive boundary's existing
 implementation: no new memory-ordering protocol is introduced, and Loom does not model their
 internals. Listener ownership and network primitives retain their existing contracts; Turmoil is

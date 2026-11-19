@@ -1248,9 +1248,9 @@ deadlines: each report starts both again, so a command the server keeps serving,
 that waits for the work in motion, is answered however long it takes, and a deadline passes only
 once neither the answer nor a report arrived within it. A request that goes silent for
 `request_timeout` causes the client to end every request still waiting on that session, and the
-next request opens a new one. This also bounds a stalled application wait when transport keepalive
-still succeeds. While an
-election converges it retries with a delay that starts at 100 milliseconds and doubles up to one
+next request opens a new one. The deadline bounds silence only: a request the server still serves
+is reported however long it waits, so a wait ends on a node that stopped answering, not on one that
+is slow to answer. While an election converges it retries with a delay that starts at 100 milliseconds and doubles up to one
 second. When a call's deadline passes before a command's outcome is known, and the command may have
 been admitted, the call fails as uncertain and names the execution reference. When a nonterminal
 server answer arrived before the deadline, the Rust client's report also retains the last such
@@ -1265,7 +1265,8 @@ see [Interrupting A Statement](./client-tools-cli.md#interrupting-a-statement). 
 stops waiting only drops its waiter, and the reply, when it comes, is discarded.
 
 `nervix-cli backup --timeout` sets only each running domain's quiesce timeout; its request and
-retry budgets stay at their defaults, and `--backup-wait-timeout` bounds the overall command wait.
+retry budgets stay at their defaults, and `--backup-wait-timeout` bounds how long the command waits
+with neither its answer nor a progress report.
 
 For native Rust sessions, the client loads a Hickory resolver during setup or uses one its owner
 provided. It resolves the hostname of each selected server, seed, and redirect on a new connection

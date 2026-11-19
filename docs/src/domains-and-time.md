@@ -138,8 +138,9 @@ A `STOP` is graceful and has no time limit of its own. It runs in this order:
 
 1. **Intake stops.** On every node the domain's ingestors stop taking input, whatever their
    `ON QUIESCE` mode, its generators stop producing, and its client producers stay attached with
-   admission suspended. An endpoint answers a request it has not admitted `503`; a request it
-   admitted before the stop gets its real answer. The domain shows `status: stopping`.
+   admission suspended. The domain's endpoints are withdrawn, so a request that arrives later is
+   answered `404`; one that reached an endpoint without being admitted is answered `503`, and a
+   request admitted before the stop gets its real answer. The domain shows `status: stopping`.
 2. **Messages in motion finish.** The domain's graph keeps running, and so does its clock. Every
    collector, route buffer and emitter buffer is flushed whatever its cadence, and a publish attempt
    already on the wire runs to its outcome. The stop waits, with no limit, until nothing is in
@@ -159,9 +160,10 @@ A `STOP` is graceful and has no time limit of its own. It runs in this order:
 still in motion is answered "not processed", the last snapshot of every processor's branch state is
 left as it was, and the answer says the stop was enforced and lists what it cut. A zero duration
 enforces at once. `STOP CANCEL AFTER <duration>;` withdraws its request once its time has passed: a
-domain left with no request runs on, intake resumes, and nothing is cut. The answer of a cancelled
-request fails, says it was cancelled and names what the stop was waiting for. A statement carries at
-most one of the two clauses; each counts from when its command was admitted.
+domain left with no request runs on, intake resumes, its endpoints are published again, and nothing
+is cut. The answer of a cancelled request fails, says it was cancelled and names what the stop was
+waiting for. A statement carries at most one of the two clauses; each counts from when its command
+was admitted.
 
 A `STOP` that finds the domain stopping joins its stop as a request of its own. The earliest
 `ENFORCE` of any request ends the stop for all of them, and a `CANCEL` withdraws only its own

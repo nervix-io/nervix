@@ -301,6 +301,24 @@ impl Runtime {
                 }
             }
 
+            // A stopping domain withdraws its endpoints once its intake holds, so a request that
+            // arrives later finds no route, and withdraws them again after a rebuild published
+            // them. A request admitted before the stop finishes through the intake it borrowed. A
+            // domain that runs again, its stop called off, publishes them again.
+            match domain_status {
+                nervix_models::DomainStatus::Stopping => {
+                    self.inner
+                        .endpoint_intake_routes
+                        .withdraw_stopping_domain(&domain.domain);
+                }
+                nervix_models::DomainStatus::Running | nervix_models::DomainStatus::Paused => {
+                    self.inner
+                        .endpoint_intake_routes
+                        .restore_withdrawn_domain(&domain.domain);
+                }
+                nervix_models::DomainStatus::Stopped => {}
+            }
+
             if let nervix_models::DomainStatus::Running = domain_status {
                 let build = || RuntimeError::build_domain_execution(&domain.domain);
                 self.purge_stale_runtime_state(&domain.domain)

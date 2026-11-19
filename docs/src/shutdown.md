@@ -1038,10 +1038,10 @@ licensing stop's fixed time comes due, acts on it, and drains again from a relea
 drain has no time limit: the domain drain timeout and the task grace bound neither it nor the
 publish attempts on the wire it waits for. Work that cannot move on, held by a `REQUIRED WAIT`, an
 emitter's retry, a reorderer or correlator until its time or its partner, or a window until further
-input fills it, never holds it open. An emitter that a generation finds waiting for a retry completes the generation at once,
-and one whose publish fails during a generation hands the records to its retry schedule rather than
-retrying inline. Only then does the owner commit the domain stopped, and each node tears the domain
-down.
+input fills it, never holds it open. During a stop, an emitter that a generation finds waiting for
+a retry completes the generation at once, and one whose publish fails during a generation hands the
+records to its retry schedule rather than retrying inline. Only then does the owner commit the
+domain stopped, and each node tears the domain down.
 
 A completed stop's teardown first lets a publish already on the wire run to its outcome, records
 what it is about to cut, and then ends the domain's tasks with the final snapshot writes described

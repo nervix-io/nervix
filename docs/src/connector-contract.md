@@ -2655,11 +2655,14 @@ Terminal teardown of a domain execution, when the domain stops, its execution is
 rebuilt or the node shuts down, ends the emitter task wherever it is, including in the middle of a
 publish, and then finishes the emitter. A domain's graceful `STOP` never reaches a publish this
 way: its drain rests only with no publish on the wire, and its teardown first lets an attempt a
-retry began since run to its outcome. A force-flush generation, which a stop's drain, a backup cut
-and a terminating node's drain request, gets one publish attempt from an emitter: a retryable
-failure hands the records to the emitter's own retry schedule, and an emitter already waiting for a
-retry completes the generation at once, so a destination that stays down never holds a generation
-open. The stopping execution gives every emitter its deadline before
+retry began since run to its outcome. A force-flush generation that a stopping domain's drain
+requests gets one publish attempt from an emitter: a retryable failure hands the records to the
+emitter's own retry schedule, and an emitter already waiting for a retry completes the generation
+at once, so a destination that stays down never holds the stop open. Every other drain's
+generation, from an alteration's pause, a backup cut or a terminating node, publishes what the
+emitter holds at once, a record a retry holds included, and retries inline with its backoff until
+the destination takes it, the stop deadline passes or the task shuts down. The stopping execution
+gives every emitter its deadline before
 it signals the shutdown: the domain drain timeout from that moment, and no later than the node's
 shutdown deadline when the node is stopping. A task whose relay interaction ends without a stop or
 a teardown drains its buffer and finishes the emitter by the stop deadline it holds; a task that holds

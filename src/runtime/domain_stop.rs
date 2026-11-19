@@ -47,8 +47,30 @@ use super::*;
 pub(crate) struct StopLedgerEntry {
     /// The domain's start version when the stop that this teardown serves ended it.
     start_version: u64,
-    /// Every cut of the teardown, or `None` while the teardown still runs.
-    cuts: Option<Vec<StopCut>>,
+    progress: StopLedgerProgress,
+}
+
+/// How far one node's teardown of a stopped domain has come.
+#[derive(Debug, Clone)]
+enum StopLedgerProgress {
+    /// The teardown began; what it cuts is not recorded yet.
+    Begun,
+    /// What the teardown cuts is recorded while the domain's tasks still run. The tasks are still
+    /// ending: each emitter finishes what its client holds, and the final snapshot is being
+    /// written.
+    Recorded(Vec<StopCut>),
+    /// The teardown ended: every task ended and the final snapshot is written. Only now does the
+    /// node report what it cut, so a stop answers once every node's teardown ended.
+    TornDown(Vec<StopCut>),
+}
+
+impl StopLedgerProgress {
+    /// The progress once the teardown ended. A teardown that recorded nothing reports nothing.
+    fn torn_down(&mut self) {
+        if let Self::Recorded(cuts) = self {
+            *self = Self::TornDown(std::mem::take(cuts));
+        }
+    }
 }
 
 /// How this node tears a stopped domain down: the ending of the stop that just ended it.
@@ -373,7 +395,7 @@ impl Runtime {
             domain.clone(),
             StopLedgerEntry {
                 start_version: teardown.start_version,
-                cuts: None,
+                progress: StopLedgerProgress::Begun,
             },
         );
     }
@@ -429,19 +451,36 @@ impl Runtime {
             domain.clone(),
             StopLedgerEntry {
                 start_version: teardown.start_version,
-                cuts: Some(cuts),
+                progress: StopLedgerProgress::Recorded(cuts),
             },
         );
     }
 
-    /// What this node's teardown cut for the stop that ended `domain` at `start_version`.
+    /// Records that the teardown of `domain` for the stop `teardown` serves ended: every task
+    /// ended, each emitter finished what its client held and the final snapshot is written.
+    pub(in crate::runtime) fn complete_stop_ledger(
+        &self,
+        domain: &DomainName,
+        teardown: StopTeardown,
+    ) {
+        if let Some(mut entry) = self.inner.stop_ledgers.get_mut(domain)
+            && entry.start_version == teardown.start_version
+        {
+            entry.progress.torn_down();
+        }
+    }
+
+    /// What this node's teardown cut for the stop that ended `domain` at `start_version`, once
+    /// that teardown ended.
     pub(crate) fn stop_report(&self, domain: &DomainName, start_version: u64) -> StopReportAnswer {
         if let Some(entry) = self.inner.stop_ledgers.get(domain)
             && entry.start_version == start_version
         {
-            return match &entry.cuts {
-                Some(cuts) => StopReportAnswer::Reported(cuts.clone()),
-                None => StopReportAnswer::Pending,
+            return match &entry.progress {
+                StopLedgerProgress::TornDown(cuts) => StopReportAnswer::Reported(cuts.clone()),
+                StopLedgerProgress::Begun | StopLedgerProgress::Recorded(_) => {
+                    StopReportAnswer::Pending
+                }
             };
         }
         // A node that still runs the domain's execution has not torn it down yet; one that runs

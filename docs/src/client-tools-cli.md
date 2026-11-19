@@ -52,7 +52,7 @@ server options and their environment variables.
 | `--cursor <OFFSET>` | | end of input | UTF-8 byte offset in `--suggest` input |
 | `--execution-reference <REFERENCE>` | | | with `--command` or a node administration subcommand, send the command under the execution reference the CLI printed for an earlier uncertain run of it, which recovers that run's outcome |
 | `--upload-identity <IDENTITY>` | | | with a `--command` that is one `UPLOAD RESOURCE`, send it under the upload identity the CLI printed for an earlier uncertain run of it, which recovers that run's outcome |
-| `--backup-wait-timeout <DURATION>` | `NERVIX_CLI_BACKUP_WAIT_TIMEOUT` | `10m` | overall wait of one `BACKUP` command across its cuts, redirects and reconnects, from one millisecond through 24 hours; applies to `backup`, `--command` and the REPL |
+| `--backup-wait-timeout <DURATION>` | `NERVIX_CLI_BACKUP_WAIT_TIMEOUT` | `10m` | how long one `BACKUP` command waits with neither its answer nor a progress report, across its cuts, redirects and reconnects, from one millisecond through 24 hours; applies to `backup`, `--command` and the REPL |
 
 There is no general CLI configuration file and no `--version` flag. `--server`, `--domain`, and the
 TLS options have no environment-variable equivalents. The DNS options select the resolver used by

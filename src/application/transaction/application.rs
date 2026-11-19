@@ -199,7 +199,7 @@ impl SessionServiceImpl {
 
     /// Waits for the stop a STOP step requested to end. Returns the step's failure when the
     /// request was withdrawn by its CANCEL or the stop could not be followed.
-    async fn wait_for_transaction_stop(
+    pub(in crate::application) async fn wait_for_transaction_stop(
         &self,
         transaction: &ReplicatedTransaction,
         applying: &TransactionApplyingStep,

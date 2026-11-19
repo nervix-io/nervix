@@ -14803,6 +14803,26 @@ async fn when_relocation_publication_pause_is_released(world: &mut ScenarioWorld
         .release_relocation_publication_pause(&domain);
 }
 
+/// Silences the progress reports of every request the node's sessions serve, so a client that
+/// bounds its wait hears silence from that node, as it would from a node that stopped answering.
+#[given(expr = "request progress reports from node {string} are withheld")]
+#[when(expr = "request progress reports from node {string} are withheld")]
+async fn given_request_progress_reports_withheld(world: &mut ScenarioWorld, node_id: String) {
+    let node_id = expand_placeholders(world, &node_id);
+    world
+        .fault_injection
+        .withhold_request_progress_on(crate::common::cluster::node_name(&node_id));
+}
+
+#[given(expr = "request progress reports from node {string} are restored")]
+#[when(expr = "request progress reports from node {string} are restored")]
+async fn when_request_progress_reports_restored(world: &mut ScenarioWorld, node_id: String) {
+    let node_id = expand_placeholders(world, &node_id);
+    world
+        .fault_injection
+        .restore_request_progress_on(&crate::common::cluster::node_name(&node_id));
+}
+
 #[given(expr = "command response delivery on node {string} pauses after execution")]
 async fn given_command_response_delivery_pause(world: &mut ScenarioWorld, node_id: String) {
     let node_id = expand_placeholders(world, &node_id);
@@ -31915,6 +31935,50 @@ async fn when_http_payload_is_posted_and_is_not_routed(
         reported.contains("404"),
         "expected http post to be unrouted, got: {reported}"
     );
+}
+
+/// Posts until the node answers that no domain publishes the route, as it answers once the domain
+/// that published it withdrew it. Each node applies a revision on its own, so the first posts may
+/// still find the route.
+#[then(
+    expr = "within {string} node {string} answers http payload for host {string} path {string} as \
+            not routed"
+)]
+async fn then_node_answers_http_payload_as_not_routed_within(
+    world: &mut ScenarioWorld,
+    duration: String,
+    node_id: String,
+    host: String,
+    path: String,
+    #[step] step: &Step,
+) {
+    let duration = parse_duration_text(&duration).expect("step duration must be a valid duration");
+    let node_id = expand_placeholders(world, &node_id);
+    let host = expand_placeholders(world, &host);
+    let path = expand_placeholders(world, &path);
+    let payload = expand_placeholders(world, docstring(step));
+    let deadline = Instant::now() + duration;
+    loop {
+        nervix_primitives::task::consume_budget().await;
+        let posted = world
+            .cluster()
+            .publish_http(&node_id, &host, &path, &payload)
+            .await;
+        let answered = match posted {
+            Ok(()) => "202 Accepted".to_string(),
+            Err(error) => error.to_string(),
+        };
+        if answered.contains("404") {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "node '{node_id}' still routes http payloads for host '{host}' path '{path}' after \
+             {}; it last answered {answered}",
+            humantime::format_duration(duration)
+        );
+        nervix_primitives::time::sleep(Duration::from_millis(100)).await;
+    }
 }
 
 #[when(

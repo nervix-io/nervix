@@ -716,6 +716,91 @@ Feature: A domain STOP lets the work already inside the domain finish
       | 1            |
       | 3            |
 
+  @graceful_stop_endpoints_withdrawn
+  Scenario Outline: A stopping domain withdraws its endpoints while a request it admitted goes on, and a called-off stop publishes them again on <cluster_size> nodes
+    Given HTTP receiver "slow" is running
+    And HTTP receiver "slow" answers unscripted requests with "hold response until released"
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these Plexus commands are executed on the leader node
+      """
+      CREATE SCHEMA event ( id STRING );
+      CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( id string );
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
+      CREATE RELAY outgoing SCHEMA event UNBRANCHED;
+      CREATE VHOST edge stop-endpoint-{{test_id}}.example.com;
+      CREATE HTTP ENDPOINT ingress ON edge PATH '/events';
+      CREATE HTTP ENDPOINT acknowledged ON edge PATH '/acked';
+      CREATE HTTP ENDPOINT INGESTOR intake FROM ingress MODE NO ACK
+        ON QUIESCE REJECT RETRY AFTER 1s DECODE USING event_codec
+        TO outgoing INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE HTTP ENDPOINT INGESTOR acknowledged_intake FROM acknowledged
+        MODE ACK MAX 8 ACK TIMEOUT 5m
+        ON QUIESCE REJECT RETRY AFTER 1s DECODE USING event_codec
+        TO outgoing INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE HTTP CLIENT slow_api CONFIG {
+        'endpoint' = '{{http_receiver.slow}}', 'timeout_ms' = 600000
+      };
+      CREATE HTTP REQUEST EMITTER published FROM outgoing
+        ATTACHED
+        TO slow_api METHOD 'POST' PATH concat('/events/', input.id)
+          MODE ACK RETRY POLICY BACKOFF 100ms MAX 1s WITHOUT BODY
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      START;
+      """
+    # The endpoint admits the request, which waits for its acknowledgement while the destination
+    # holds its publish, so the stop waits too.
+    And endpoint request "admitted" is posted on node "<request_node>" host "stop-endpoint-{{test_id}}.example.com" path "/acked"
+      """
+      {"id":"before"}
+      """
+    Then HTTP receiver "slow" eventually receives at least 1 request
+    When these Plexus commands begin executing in the background
+      """
+      STOP CANCEL AFTER 20s;
+      """
+    Then the background Plexus execution is still running after "3s"
+    # Intake ended with the stop and the domain's endpoints are withdrawn, so a request that
+    # arrives now finds no route.
+    And within "10s" node "<request_node>" answers http payload for host "stop-endpoint-{{test_id}}.example.com" path "/events" as not routed
+      """
+      {"id":"during"}
+      """
+    # The stop owns the domain until it ends or is called off, so a START is refused meanwhile.
+    When these Plexus commands fail with "is stopping"
+      """
+      START;
+      """
+    # The stop is called off: the domain runs on and publishes its endpoints again.
+    Then the background Plexus execution fails with "cancelled"
+    And within "30s" node "<request_node>" accepts http payload for host "stop-endpoint-{{test_id}}.example.com" path "/events"
+      """
+      {"id":"after"}
+      """
+    # The request admitted before the stop kept its intake through the withdrawal, so it gets its
+    # real answer once its message finishes.
+    When HTTP receiver "slow" releases its held responses with "respond 204"
+    Then endpoint request "admitted" answers HTTP 200 with "completed" cause "none"
+    And HTTP receiver "slow" eventually captures one request that is
+      """
+      POST /events/after
+      """
+    And HTTP receiver "slow" captured one request that is
+      """
+      POST /events/before
+      """
+    And HTTP receiver "slow" captured no request with request line "POST /events/during"
+
+    Examples:
+      | cluster_size | request_node |
+      | 1            | node-1       |
+      | 3            | node-3       |
+
   @graceful_stop_reorderer_rows_cut
   Scenario Outline: A STOP does not wait for rows a reorderer holds; it lists them as cut and the source sends them again after START on <cluster_size> nodes
     Given Kafka is running

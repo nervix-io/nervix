@@ -173,13 +173,17 @@ Feature: Bounded multi-domain backup waits and exact recovery
     Then the current leader node is saved as placeholder "leader"
     Given the backup cut for domain "{{backup_base}}_a" will pause before its capture
     And the backup cut for domain "{{backup_base}}_b" will pause before its capture
+    # The node still serves the backup, so it would keep the CLI's wait alive with progress reports.
+    # Withholding them makes the node silent, which is what ends a bounded wait.
+    And request progress reports from node "{{leader}}" are withheld
     When the CLI begins backing up "cluster --timeout 30s --backup-wait-timeout 3s" from node "{{leader}}" into "pending.nvxb" in the background
     And backup cut "{{backup_base}}_a" is held for 2 seconds and then released
     Then the backup cut for domain "{{backup_base}}_b" has reached its pause
     And the background CLI backup finishes
     And the CLI backup wait failure exposes its execution reference for recovery
     And backup archive "pending.nvxb" does not exist
-    When the CLI begins backing up "cluster --timeout 30s --execution-reference {{backup_reference}} --backup-wait-timeout 1m" from node "{{leader}}" into "recovered.nvxb" in the background
+    When request progress reports from node "{{leader}}" are restored
+    And the CLI begins backing up "cluster --timeout 30s --execution-reference {{backup_reference}} --backup-wait-timeout 1m" from node "{{leader}}" into "recovered.nvxb" in the background
     And the backup cut pause for domain "{{backup_base}}_b" is released
     Then the background CLI backup finishes
     And the CLI backup succeeded with a JSON report naming domain "{{backup_base}}_b"

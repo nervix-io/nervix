@@ -212,6 +212,8 @@ checks = [
   "runtime::endpoint_acknowledgement::shuttle_tests::shuttle_endpoint_a_deadline_racing_an_ack_resolves_once_and_returns_its_slot",
   "runtime::endpoint_acknowledgement::shuttle_tests::shuttle_endpoint_intake_stop_wakes_a_held_response_without_waiting_for_ingestor_close",
   "runtime::endpoint_acknowledgement::shuttle_tests::shuttle_endpoint_every_binding_starts_before_a_shared_request_waits_for_acknowledgements",
+  "runtime::endpoint_route_table::shuttle_tests::shuttle_endpoint_a_source_that_ends_while_its_stop_is_called_off_is_never_published_again",
+  "runtime::endpoint_route_table::shuttle_tests::shuttle_endpoint_a_stopping_domains_withdrawal_keeps_the_intake_a_retained_request_borrowed",
   "runtime::endpoint_route_table::shuttle_tests::shuttle_endpoint_domain_teardown_ends_intake_even_when_a_request_retains_the_table",
   "runtime::endpoint_route_table::shuttle_tests::shuttle_endpoint_publication_keeps_every_route_of_a_domain_in_one_revision",
   "runtime::endpoint_route_table::shuttle_tests::shuttle_endpoint_unbind_fences_retained_requests_and_preserves_a_concurrent_replacement",

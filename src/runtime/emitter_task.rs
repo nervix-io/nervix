@@ -1483,18 +1483,20 @@ impl EmitterTaskLoop<'_> {
                         completion.complete();
                         continue;
                     }
-                    // A scheduled retry owns publication: it publishes the buffer when it is due,
-                    // so a generation releases nothing here and completes at once.
-                    if self.state.retry.is_active() {
+                    // A stopping domain's drain waits for no record a retry holds: for its
+                    // generations, a scheduled retry owns publication and publishes the buffer
+                    // when it is due, so the generation releases nothing and completes at once.
+                    let stopping = self.context.clock.is_stopping();
+                    if stopping && self.state.retry.is_active() {
                         completion.complete();
                         continue;
                     }
                     let publish_result = {
-                        let kind = EmitterPublishAttemptKind::from_retry(false);
                         let EmitterTaskState {
                             connector,
                             buffer,
                             backoff,
+                            retry,
                             ..
                         } = &mut self.state;
                         let mut control = EmitterPublishControl {
@@ -1503,16 +1505,35 @@ impl EmitterTaskLoop<'_> {
                             stop_rx: &mut *self.stop_rx,
                             backoff,
                         };
-                        connector
-                            .flush_now(
-                                &self.connector_label,
-                                self.context,
-                                &mut control,
-                                buffer,
-                                kind,
-                            )
-                            .await
-                            .map_err(EmitterPublishFailure::buffer)
+                        if stopping {
+                            // One attempt: a failure goes back to the retry schedule, so the
+                            // stop's generation never waits out an unavailable destination.
+                            connector
+                                .flush_now(
+                                    &self.connector_label,
+                                    self.context,
+                                    &mut control,
+                                    buffer,
+                                    EmitterPublishAttemptKind::from_retry(false),
+                                )
+                                .await
+                                .map_err(EmitterPublishFailure::buffer)
+                        } else {
+                            // Every other drain waits for what the emitter holds: its generation
+                            // publishes a record a retry holds at once and retries inline until
+                            // the destination takes it, the stop deadline passes or the task
+                            // shuts down.
+                            connector
+                                .flush_all(
+                                    &self.connector_label,
+                                    self.context,
+                                    &mut control,
+                                    buffer,
+                                    EmitterPublishAttemptKind::from_retry(retry.is_active()),
+                                )
+                                .await
+                                .map_err(EmitterPublishFailure::buffer)
+                        }
                     };
                     let mut pending_batch = None;
                     self.state

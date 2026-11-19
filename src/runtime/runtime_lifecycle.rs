@@ -998,6 +998,12 @@ impl Runtime {
         for services in execution.routing.relay_services.values() {
             services.retire_channels();
         }
+        // The teardown of a stopped domain ended: every task ended, each emitter finished what its
+        // client held and the final snapshot is written. Only now does this node report what the
+        // stop cut, so the stop answers after every node's teardown.
+        if let Some(teardown) = self.stop_teardown(domain) {
+            self.complete_stop_ledger(domain, teardown);
+        }
         if !self.inner.domains.contains_key(domain) {
             self.clear_runtime_state_for_domain(domain);
         }
