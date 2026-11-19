@@ -407,9 +407,97 @@ fn connect<K: Ord>(
 
 #[cfg(test)]
 mod tests {
+    use nervix_arbitrary::{Arbitrary, Domain};
+    use nervix_models::{BranchKeyFingerprint, BranchPartitions, BranchSelection, Model};
     use nonzero_ext::nonzero;
+    use petgraph::visit::EdgeRef as _;
 
     use super::*;
+    use crate::registry::{
+        domain_state::DomainState,
+        test_fixtures::{branch, branch_schema, junction, named, relay_branched_by, schema},
+    };
+
+    fn partition_corridor(partitions: NonZeroU16, processors: u8) -> ActiveGraph {
+        let Model::Branch(mut parametrization) = branch("tenants", "tenant_key") else {
+            unreachable!("the fixture builds a branch declaration");
+        };
+        parametrization.partitions = BranchPartitions::Direct(partitions);
+        let mut models = vec![
+            schema("record"),
+            branch_schema("tenant_key", &["tenant"]),
+            Model::Branch(parametrization),
+            relay_branched_by("incoming", "record", "tenants"),
+        ];
+        let mut upstream = String::from("incoming");
+        for index in 0..processors {
+            let downstream = format!("relay_{index}");
+            models.push(relay_branched_by(&downstream, "record", "tenants"));
+            let name = format!("junction_{index}");
+            let Model::Junction(mut processor) = junction(&name, &[&upstream], &downstream) else {
+                unreachable!("the fixture builds a junction declaration");
+            };
+            processor.branched_by = BranchSelection::branched_by(named("tenants"));
+            models.push(Model::Junction(processor));
+            upstream = downstream;
+        }
+        let models = models.into_iter().collect();
+        DomainState::build(&named("partition_corridor"), &models)
+            .assured("the generated corridor uses one schema and one parametrization")
+            .graph
+    }
+
+    #[test]
+    fn bolero_branch_hops_keep_the_partition_of_the_same_parametrization() {
+        bolero::check!()
+            .with_iterations(128)
+            .with_max_len(32)
+            .for_each(|bytes: &[u8]| {
+                let mut arbitrary = Arbitrary::new(bytes, Domain::Vocabulary);
+                let count = u16::from(1 + arbitrary.entropy().byte() % 8);
+                let count = NonZeroU16::new(count).assured("the generated count is nonzero");
+                let processors = 1 + arbitrary.entropy().byte() % 4;
+                let seeds: [nervix_models::PartitionSeed; 8] = std::array::from_fn(|index| {
+                    let tenant = format!("tenant_{index}_{}", arbitrary.entropy().byte());
+                    let key = serde_json::json!({ "tenant": tenant }).to_string();
+                    BranchKeyFingerprint::of_canonical_text(&key).partition_seed()
+                });
+                let graph = partition_corridor(count, processors);
+                let mut verified_hops = 0;
+                for edge in graph.graph.edge_references() {
+                    if !edge.weight().is_runtime_flow_edge() {
+                        continue;
+                    }
+                    let left = &graph.graph[edge.source()];
+                    let right = &graph.graph[edge.target()];
+                    let left_branch = left.resolved_branching.as_ref().assured("a corridor input");
+                    let right_branch = right
+                        .resolved_branching
+                        .as_ref()
+                        .assured("a corridor output");
+                    assert_eq!(left_branch.branch(), Some(&named("tenants")));
+                    assert_eq!(left_branch, right_branch);
+                    let correspondence = UnitCorrespondence::decide(left, right);
+                    assert_eq!(correspondence.class, HopClass::Identity);
+                    for seed in seeds {
+                        let partition = left_branch.partitions().assured("the layout is resolved");
+                        let unit = partition.unit_of(seed);
+                        let target = right_branch.partitions().assured("the layout is resolved");
+                        assert_eq!(target.unit_of(seed), unit);
+                        assert_eq!(
+                            correspondence.partners(true, unit).collect::<Vec<_>>(),
+                            [unit]
+                        );
+                        assert_eq!(
+                            correspondence.partners(false, unit).collect::<Vec<_>>(),
+                            [unit]
+                        );
+                    }
+                    verified_hops += 1;
+                }
+                assert_eq!(verified_hops, usize::from(processors) * 2);
+            });
+    }
 
     #[test]
     fn hop_classes_admit_only_policies_with_a_defined_unit_mapping() {

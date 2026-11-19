@@ -15,6 +15,7 @@ use syn::{
     visit::{self, Visit},
 };
 
+mod branches;
 pub mod provenance;
 
 /// The rule of authored cryptography outside AWS-LC. `nervix-ratchet gate` refuses every site of
@@ -37,6 +38,24 @@ pub struct SourceSite {
 
 #[derive(Debug, thiserror::Error)]
 pub enum SourceError {
+    #[error(
+        "branch ownership at {path}:{line}:{column} refuses a branch-keyed collection in inactive \
+         source"
+    )]
+    InactiveBranchCollection {
+        path: String,
+        line: usize,
+        column: usize,
+    },
+    #[error(
+        "branch ownership at {path}:{line}:{column} requires one expectation on its declaration \
+         with a ClickUp repair task"
+    )]
+    BranchExpectation {
+        path: String,
+        line: usize,
+        column: usize,
+    },
     #[error("invalid fixed-constant contract at {path}:{line}:{column}: {problem}")]
     ConstantContract {
         path: String,
@@ -66,6 +85,9 @@ pub fn scan(files: Vec<SourceInput>) -> Result<Vec<SourceSite>, error_stack::Rep
                 cause,
             }
         })?;
+        if product(&input.path) {
+            branches::check(&input.path, &parsed)?;
+        }
         Scanner {
             path: &input.path,
             sites: &mut sites,

@@ -64,6 +64,13 @@ impl OwnerCheckpointListing {
 
 impl CheckpointPage {
     fn to_remote(&self) -> BranchCheckpointPage {
+        #[cfg_attr(
+            nervix_lint,
+            expect(
+                nervix::branch_inversion,
+                reason = "this branch collection supports checkpoints, partition transfers or state recovery; use the owning partition in https://app.clickup.com/t/86bd1z3ng"
+            )
+        )]
         let mut removed = Vec::with_capacity(self.removed.len());
         for branch in &self.removed {
             removed.push(BranchKey::to_remote_key(branch));

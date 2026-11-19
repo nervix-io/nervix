@@ -1,0 +1,29 @@
+{
+  "epochs": [
+    {
+      "epoch": 0,
+      "roots": [
+        {
+          "kty": "EC",
+          "crv": "P-256",
+          "x": "qzlUNgN1pQc_XzXP5syW8Ku2yBP52Db66QsTMH0tpHM",
+          "y": "rYwa_CsRatXm35l3c4qbgQq2tQCVi0aZ6TGFUBH42zU"
+        },
+        {
+          "kty": "EC",
+          "crv": "P-256",
+          "x": "9K8-X0PjGZ0FRuN0gczDP8gie_S-c3-qIKUwveM-7EA",
+          "y": "f_IZTJB0Z57S8q5noi9Z0UerHQrU-a0JhoCWNHo68nQ"
+        },
+        {
+          "kty": "EC",
+          "crv": "P-256",
+          "x": "nUC2n3UmRWH0xaiDUmTV_Ugpv6Jech_ScaSEX2a3VKc",
+          "y": "nJY-bUbgS1oMSUMH2QP3Q46TX_pSqfUfRC7w3hA4mEI"
+        }
+      ],
+      "threshold": 2
+    }
+  ],
+  "successions": []
+}

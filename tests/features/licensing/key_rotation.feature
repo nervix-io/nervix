@@ -1,7 +1,7 @@
 Feature: Cluster licensing key rotation
   Rotation changes the signing key without replacing the cluster or restarting a signed deadline.
 
-  Scenario Outline: An unactivated cluster rotates without provisioned service trust on <cluster_size> nodes
+  Scenario Outline: An unactivated cluster rotates under the production licensing environment on <cluster_size> nodes
     Given a <cluster_size> node nervix cluster is started
     When these Plexus commands are executed on the leader node
       """

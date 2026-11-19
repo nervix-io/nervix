@@ -249,6 +249,13 @@ struct RelayInputCollection {
     /// Collected batches keyed by branch, in the order the branches first collected. Arrival order
     /// decides which branch flushes next, and the key resolves the branch a batch belongs to, so
     /// this is one ordered map instead of a map plus a separate order sequence to scan.
+    #[cfg_attr(
+        nervix_lint,
+        expect(
+            nervix::branch_inversion,
+            reason = "processor or generator bookkeeping independently tracks branches; use branch-owned parts or the partition table in https://app.clickup.com/t/86bd1z1bj"
+        )
+    )]
     pending: IndexMap<Option<BranchKey>, RuntimeInputCollector>,
     quiesce_counters: Option<Arc<NodeQuiesceCounters>>,
     pending_batches: usize,

@@ -666,6 +666,13 @@ impl Runtime {
             let mut cadence = cadence;
             let cadence_cancellation = CancellationToken::new();
             let mut pending_occurrence = None::<DomainCadenceOccurrence>;
+            #[cfg_attr(
+                nervix_lint,
+                expect(
+                    nervix::branch_inversion,
+                    reason = "processor or generator bookkeeping independently tracks branches; use branch-owned parts or the partition table in https://app.clickup.com/t/86bd1z1bj"
+                )
+            )]
             let mut branch_states =
                 HashMap::<Option<BranchKey>, GeneratorBranchTaskState>::default();
 
@@ -791,9 +798,23 @@ impl Runtime {
                     // Records arrive with the concrete branch they were materialized in, so
                     // the generator groups by that typed identity instead of rediscovering it
                     // from the columns.
+                    #[cfg_attr(
+                        nervix_lint,
+                        expect(
+                            nervix::branch_inversion,
+                            reason = "processor or generator bookkeeping independently tracks branches; use branch-owned parts or the partition table in https://app.clickup.com/t/86bd1z1bj"
+                        )
+                    )]
                     let mut source_state_by_branch =
                         HashMap::<Option<BranchKey>, Vec<RuntimeRow>>::default();
                     if !state_load_failed {
+                        #[cfg_attr(
+                            nervix_lint,
+                            expect(
+                                nervix::branch_inversion,
+                                reason = "processor or generator bookkeeping independently tracks branches; use branch-owned parts or the partition table in https://app.clickup.com/t/86bd1z1bj"
+                            )
+                        )]
                         let mut latest_state = HashMap::<Option<BranchKey>, RuntimeRow>::default();
                         // Keep an uncached snapshot's admission through evaluation and dispatch,
                         // after its rows have been grouped into branch-local inputs.
@@ -838,6 +859,13 @@ impl Runtime {
                                 break;
                             }
                         };
+                        #[cfg_attr(
+                            nervix_lint,
+                            expect(
+                                nervix::branch_inversion,
+                                reason = "processor or generator bookkeeping independently tracks branches; use branch-owned parts or the partition table in https://app.clickup.com/t/86bd1z1bj"
+                            )
+                        )]
                         let active_branch_keys = source_state_by_branch
                             .keys()
                             .cloned()

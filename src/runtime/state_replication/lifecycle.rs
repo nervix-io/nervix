@@ -76,6 +76,13 @@ impl Runtime {
         domain: &DomainName,
         relay: &RelayName,
     ) -> error_stack::Result<(), ExecutionBuildError> {
+        #[cfg_attr(
+            nervix_lint,
+            expect(
+                nervix::branch_inversion,
+                reason = "this branch collection supports checkpoints, partition transfers or state recovery; use the owning partition in https://app.clickup.com/t/86bd1z3ng"
+            )
+        )]
         let placements = self
             .inner
             .replicated_materialized_stream_states
@@ -113,6 +120,13 @@ impl Runtime {
         domain: &DomainName,
         deduplicator: &DeduplicatorName,
     ) -> error_stack::Result<(), ExecutionBuildError> {
+        #[cfg_attr(
+            nervix_lint,
+            expect(
+                nervix::branch_inversion,
+                reason = "this branch collection supports checkpoints, partition transfers or state recovery; use the owning partition in https://app.clickup.com/t/86bd1z3ng"
+            )
+        )]
         let placements = self
             .inner
             .replicated_deduplicator_states

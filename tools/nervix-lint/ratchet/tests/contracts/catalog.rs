@@ -114,6 +114,14 @@ pub const REFUSED: &[Refusal] = &[
         diagnostic: "blanket suppression",
     },
     Refusal {
+        name: "branch_inversion",
+        diagnostic: "nervix::branch_inversion",
+    },
+    Refusal {
+        name: "branch_inversion_expectations",
+        diagnostic: "expectation is unfulfilled",
+    },
+    Refusal {
         name: "callback_effect",
         diagnostic: "nervix::sync_acquisition",
     },
@@ -357,6 +365,7 @@ pub const ALLOWED: &[&str] = &[
     "architecture_projection",
     "bounded_lock",
     "bounded_task_body",
+    "branch_inversion_allowed",
     "changed_caller_current",
     "changed_source_cold",
     "constant_allowed",

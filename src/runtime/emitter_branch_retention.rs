@@ -50,6 +50,13 @@ type RetentionResult<T> = Result<T, Report<EmitterBranchRetentionError>>;
 /// A retirement changes source branches together, without copying identities per buffered row.
 #[derive(Default)]
 pub(in crate::runtime) struct EmitterBranchRetirements {
+    #[cfg_attr(
+        nervix_lint,
+        expect(
+            nervix::branch_inversion,
+            reason = "materialized or emitter state groups its data by branch; move it to the branch in https://app.clickup.com/t/86bd1z3bd"
+        )
+    )]
     branches: BTreeMap<RelayName, HashSet<BranchKey>>,
 }
 
@@ -84,6 +91,13 @@ struct EmitterSourceBranches {
     partitioning: RelayPartitioning,
     ttl: Duration,
     capacity: Option<NonZeroUsize>,
+    #[cfg_attr(
+        nervix_lint,
+        expect(
+            nervix::branch_inversion,
+            reason = "relay and follower bookkeeping keeps its own branch entries; read the parametrizer partition in https://app.clickup.com/t/86bd1z0ty"
+        )
+    )]
     units: BTreeMap<Unit, BranchInstanceRegistry<BranchKey, ()>>,
 }
 
@@ -209,6 +223,13 @@ impl EmitterBranchRetention {
             .created;
         let mut retired = EmitterBranchRetirements::default();
         if let Some(capacity) = branches.capacity {
+            #[cfg_attr(
+                nervix_lint,
+                expect(
+                    nervix::branch_inversion,
+                    reason = "materialized or emitter state groups its data by branch; move it to the branch in https://app.clickup.com/t/86bd1z3bd"
+                )
+            )]
             let keys = instances
                 .evict_lru_to_capacity(capacity)
                 .into_iter()
@@ -240,6 +261,13 @@ impl EmitterBranchRetention {
     fn expire_at(&mut self, now: Timestamp) -> EmitterBranchRetirements {
         let mut retired = EmitterBranchRetirements::default();
         for (source, branches) in &mut self.sources {
+            #[cfg_attr(
+                nervix_lint,
+                expect(
+                    nervix::branch_inversion,
+                    reason = "materialized or emitter state groups its data by branch; move it to the branch in https://app.clickup.com/t/86bd1z3bd"
+                )
+            )]
             let mut keys = HashSet::default();
             let ttl = branches.ttl;
             branches.units.retain(|_, instances| {

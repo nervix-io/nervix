@@ -1470,7 +1470,11 @@ Feature: Client wire failure regressions
       """
     Then the current leader node is saved as placeholder "leader"
     Given client "recovering" is connected to node "{{leader}}"
-    And the next successful reply to native command "CREATE SCHEMA recovered_identity (value STRING);" names another execution
+    When client "recovering" executes these Plexus commands
+      """
+      CREATE SCHEMA completed_before_foreign_reply (value STRING);
+      """
+    Given the next successful reply to native command "CREATE SCHEMA recovered_identity (value STRING);" names another execution
     When client "recovering" executes these Plexus commands
       """
       CREATE SCHEMA recovered_identity (value STRING);
@@ -1483,6 +1487,14 @@ Feature: Client wire failure regressions
     Then the last command output contains
       """
       recovered_identity
+      """
+    When client "recovering" executes these Plexus commands
+      """
+      SHOW CREATE SCHEMA completed_before_foreign_reply;
+      """
+    Then the last command output contains
+      """
+      completed_before_foreign_reply
       """
 
     Examples:
@@ -1500,7 +1512,11 @@ Feature: Client wire failure regressions
       """
     Then the current leader node is saved as placeholder "leader"
     Given client "recovering" is connected to node "{{leader}}"
-    And the next successful reply to native command "CREATE SCHEMA reply_kind_identity (value STRING);" is a reply of another kind
+    When client "recovering" executes these Plexus commands
+      """
+      CREATE SCHEMA completed_before_wrong_kind (value STRING);
+      """
+    Given the next successful reply to native command "CREATE SCHEMA reply_kind_identity (value STRING);" is a reply of another kind
     When client "recovering" executes these Plexus commands
       """
       CREATE SCHEMA reply_kind_identity (value STRING);
@@ -1513,6 +1529,14 @@ Feature: Client wire failure regressions
     Then the last command output contains
       """
       reply_kind_identity
+      """
+    When client "recovering" executes these Plexus commands
+      """
+      SHOW CREATE SCHEMA completed_before_wrong_kind;
+      """
+    Then the last command output contains
+      """
+      completed_before_wrong_kind
       """
 
     Examples:

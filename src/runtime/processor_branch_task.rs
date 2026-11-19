@@ -365,6 +365,13 @@ pub(super) async fn run_processor_node_runtime(
         )
     );
     runtime_handle.register_branch_lifecycle_metrics(&domain, template.branch.as_ref());
+    #[cfg_attr(
+        nervix_lint,
+        expect(
+            nervix::branch_inversion,
+            reason = "processor or generator bookkeeping independently tracks branches; use branch-owned parts or the partition table in https://app.clickup.com/t/86bd1z1bj"
+        )
+    )]
     let mut instances = ProcessorBranches::new();
     let mut last_persisted_lru_lsm = 0;
     // The task restores its branches before it takes any input. Until one attempt installs every

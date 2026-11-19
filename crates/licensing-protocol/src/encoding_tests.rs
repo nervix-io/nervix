@@ -124,9 +124,28 @@ fn signature_is_checked_before_payload_json_and_original_input_is_not_reserializ
 }
 
 #[test]
-fn unprovisioned_and_inconsistent_trust_bundles_fail_closed() {
+fn production_trust_bundle_installs_its_root_epoch() {
+    let bundle = EmbeddedTrustBundle::production();
+    // The embedded JSON is parsed once per process; every call shares that one bundle.
+    assert!(std::ptr::eq(bundle, EmbeddedTrustBundle::production()));
+    assert!(bundle.successions.is_empty());
+    let [epoch] = bundle.epochs.as_slice() else {
+        panic!("the production bundle embeds exactly root epoch 0");
+    };
+    assert_eq!(epoch.epoch, 0);
+    assert_eq!(epoch.roots.len(), 3);
+    assert_eq!(epoch.threshold.get(), 2);
+    let documents = TrustDocuments {
+        documents: Vec::new(),
+    };
+    let state = TrustState::build(bundle, &documents, limits())
+        .assured("the production root set has distinct roots and a reachable threshold");
+    assert_eq!(state.root_sets().collect::<Vec<_>>(), vec![epoch]);
+}
+
+#[test]
+fn inconsistent_trust_bundles_fail_closed() {
     let fixture = Fixture::new();
-    assert!(PRODUCTION_TRUST_BUNDLE.is_none());
     let mut embedded = fixture.embedded();
     embedded.epochs.clear();
     assert!(TrustState::build(&embedded, &fixture.documents(), limits()).is_err());

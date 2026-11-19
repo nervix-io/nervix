@@ -10,7 +10,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use chrono::{DateTime, Utc};
 use error_stack::{Report, ResultExt as _};
-use meticulous::OptionExt as _;
+use meticulous::{OptionExt as _, ResultExt as _};
+use nervix_primitives::unmodeled::sync::LazyLock;
 use thiserror::Error;
 
 use crate::{
@@ -24,9 +25,24 @@ use crate::{
     requests::TrustHeld,
 };
 
-/// The launch ceremony owns provisioning. Absence grants no trust and cannot be replaced through
-/// a runtime configuration path. Test and ceremony callers supply their own explicit engine input.
-pub const PRODUCTION_TRUST_BUNDLE: Option<EmbeddedTrustBundle> = None;
+/// The production root ceremony's reviewed output, embedded verbatim from
+/// `production_trust_bundle.json` so that it compares byte for byte with the ceremony record: root
+/// epoch 0 and every succession the build carries. It is a build input that no runtime
+/// configuration path replaces, parsed once per process on first use.
+static PRODUCTION_TRUST_BUNDLE: LazyLock<EmbeddedTrustBundle> = LazyLock::new(|| {
+    serde_json::from_str(include_str!("production_trust_bundle.json")).assured(
+        "the embedded bundle is fixed at build time, and \
+         production_trust_bundle_installs_its_root_epoch parses it",
+    )
+});
+
+impl EmbeddedTrustBundle {
+    /// The anchors every production build verifies licensing documents against, shared for the
+    /// process lifetime. Test and ceremony callers supply their own explicit engine input instead.
+    pub fn production() -> &'static Self {
+        &PRODUCTION_TRUST_BUNDLE
+    }
+}
 
 #[derive(Debug, Error)]
 pub enum TrustError {

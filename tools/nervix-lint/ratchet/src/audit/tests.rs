@@ -99,6 +99,7 @@ fn evidence(configuration: &str, candidates: Vec<AuditCandidate>) -> Completion 
                 crate_source: "src/lib.rs".into(),
                 arguments: Vec::new(),
                 findings: Vec::new(),
+                branch_inversions: Vec::new(),
                 audit: candidates,
                 excluded_generated: 0,
                 excluded_external: 0,

@@ -1253,6 +1253,13 @@ impl Runtime {
         domain: &DomainName,
     ) -> Result<(), error_stack::Report<RuntimePersistenceError>> {
         self.inner.state_replication_routing.purge_stale(domain);
+        #[cfg_attr(
+            nervix_lint,
+            expect(
+                nervix::branch_inversion,
+                reason = "this branch collection supports checkpoints, partition transfers or state recovery; use the owning partition in https://app.clickup.com/t/86bd1z3ng"
+            )
+        )]
         let stale_deduplicators = self
             .inner
             .replicated_deduplicator_states
@@ -1266,6 +1273,13 @@ impl Runtime {
         for placement in stale_deduplicators {
             self.inner.replicated_deduplicator_states.remove(&placement);
         }
+        #[cfg_attr(
+            nervix_lint,
+            expect(
+                nervix::branch_inversion,
+                reason = "this branch collection supports checkpoints, partition transfers or state recovery; use the owning partition in https://app.clickup.com/t/86bd1z3ng"
+            )
+        )]
         let stale_materialized = self
             .inner
             .replicated_materialized_stream_states
@@ -1281,6 +1295,13 @@ impl Runtime {
                 .replicated_materialized_stream_states
                 .remove(&placement);
         }
+        #[cfg_attr(
+            nervix_lint,
+            expect(
+                nervix::branch_inversion,
+                reason = "this branch collection supports checkpoints, partition transfers or state recovery; use the owning partition in https://app.clickup.com/t/86bd1z3ng"
+            )
+        )]
         let stale_windows = self
             .inner
             .replicated_window_processor_states
@@ -1296,6 +1317,13 @@ impl Runtime {
                 .replicated_window_processor_states
                 .remove(&placement);
         }
+        #[cfg_attr(
+            nervix_lint,
+            expect(
+                nervix::branch_inversion,
+                reason = "this branch collection supports checkpoints, partition transfers or state recovery; use the owning partition in https://app.clickup.com/t/86bd1z3ng"
+            )
+        )]
         let stale_wasm = self
             .inner
             .replicated_wasm_processor_states
@@ -1311,6 +1339,13 @@ impl Runtime {
                 .replicated_wasm_processor_states
                 .remove(&placement);
         }
+        #[cfg_attr(
+            nervix_lint,
+            expect(
+                nervix::branch_inversion,
+                reason = "this branch collection supports checkpoints, partition transfers or state recovery; use the owning partition in https://app.clickup.com/t/86bd1z3ng"
+            )
+        )]
         let stale_offsets = self
             .inner
             .replicated_kafka_offset_states
@@ -1324,6 +1359,13 @@ impl Runtime {
         for placement in stale_offsets {
             self.inner.replicated_kafka_offset_states.remove(&placement);
         }
+        #[cfg_attr(
+            nervix_lint,
+            expect(
+                nervix::branch_inversion,
+                reason = "this branch collection supports checkpoints, partition transfers or state recovery; use the owning partition in https://app.clickup.com/t/86bd1z3ng"
+            )
+        )]
         let stale_aggregates = self
             .inner
             .replicated_branch_aggregated_states
@@ -1339,6 +1381,13 @@ impl Runtime {
                 .replicated_branch_aggregated_states
                 .remove(&placement);
         }
+        #[cfg_attr(
+            nervix_lint,
+            expect(
+                nervix::branch_inversion,
+                reason = "this branch collection supports checkpoints, partition transfers or state recovery; use the owning partition in https://app.clickup.com/t/86bd1z3ng"
+            )
+        )]
         let stale_presences = self
             .inner
             .relay_branch_presences
@@ -1377,70 +1426,112 @@ impl Runtime {
 
     pub(in crate::runtime) fn clear_runtime_state_for_domain(&self, domain: &DomainName) {
         self.inner.state_replication_routing.retire_domain(domain);
-        let placements = self
+        #[cfg_attr(
+            nervix_lint,
+            expect(
+                nervix::branch_inversion,
+                reason = "this branch collection supports checkpoints, partition transfers or state recovery; use the owning partition in https://app.clickup.com/t/86bd1z3ng"
+            )
+        )]
+        let deduplicator_placements = self
             .inner
             .replicated_deduplicator_states
             .iter()
             .map(|entry| entry.key().clone())
             .filter(|placement| &placement.domain == domain)
             .collect::<Vec<_>>();
-        for placement in placements {
+        for placement in deduplicator_placements {
             self.inner.replicated_deduplicator_states.remove(&placement);
         }
-        let placements = self
+        #[cfg_attr(
+            nervix_lint,
+            expect(
+                nervix::branch_inversion,
+                reason = "this branch collection supports checkpoints, partition transfers or state recovery; use the owning partition in https://app.clickup.com/t/86bd1z3ng"
+            )
+        )]
+        let kafka_offset_placements = self
             .inner
             .replicated_kafka_offset_states
             .iter()
             .map(|entry| entry.key().clone())
             .filter(|placement| &placement.domain == domain)
             .collect::<Vec<_>>();
-        for placement in placements {
+        for placement in kafka_offset_placements {
             self.inner.replicated_kafka_offset_states.remove(&placement);
         }
-        let placements = self
+        #[cfg_attr(
+            nervix_lint,
+            expect(
+                nervix::branch_inversion,
+                reason = "this branch collection supports checkpoints, partition transfers or state recovery; use the owning partition in https://app.clickup.com/t/86bd1z3ng"
+            )
+        )]
+        let materialized_placements = self
             .inner
             .replicated_materialized_stream_states
             .iter()
             .map(|entry| entry.key().clone())
             .filter(|placement| &placement.domain == domain)
             .collect::<Vec<_>>();
-        for placement in placements {
+        for placement in materialized_placements {
             self.inner
                 .replicated_materialized_stream_states
                 .remove(&placement);
         }
-        let placements = self
+        #[cfg_attr(
+            nervix_lint,
+            expect(
+                nervix::branch_inversion,
+                reason = "this branch collection supports checkpoints, partition transfers or state recovery; use the owning partition in https://app.clickup.com/t/86bd1z3ng"
+            )
+        )]
+        let window_placements = self
             .inner
             .replicated_window_processor_states
             .iter()
             .map(|entry| entry.key().clone())
             .filter(|placement| &placement.domain == domain)
             .collect::<Vec<_>>();
-        for placement in placements {
+        for placement in window_placements {
             self.inner
                 .replicated_window_processor_states
                 .remove(&placement);
         }
-        let placements = self
+        #[cfg_attr(
+            nervix_lint,
+            expect(
+                nervix::branch_inversion,
+                reason = "this branch collection supports checkpoints, partition transfers or state recovery; use the owning partition in https://app.clickup.com/t/86bd1z3ng"
+            )
+        )]
+        let wasm_placements = self
             .inner
             .replicated_wasm_processor_states
             .iter()
             .map(|entry| entry.key().clone())
             .filter(|placement| &placement.domain == domain)
             .collect::<Vec<_>>();
-        for placement in placements {
+        for placement in wasm_placements {
             self.inner
                 .replicated_wasm_processor_states
                 .remove(&placement);
         }
-        let placements = self
+        #[cfg_attr(
+            nervix_lint,
+            expect(
+                nervix::branch_inversion,
+                reason = "this branch collection supports checkpoints, partition transfers or state recovery; use the owning partition in https://app.clickup.com/t/86bd1z3ng"
+            )
+        )]
+        let aggregated_placements = self
             .inner
             .replicated_branch_aggregated_states
             .iter()
             .map(|entry| entry.key().clone())
             .filter(|placement| &placement.domain == domain)
             .collect::<Vec<_>>();
-        for placement in placements {
+        for placement in aggregated_placements {
             self.inner
                 .replicated_branch_aggregated_states
                 .remove(&placement);

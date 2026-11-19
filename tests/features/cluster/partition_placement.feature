@@ -40,10 +40,20 @@ Feature: Placement policies apply to corresponding execution units
       """
       {"tenant":"acme","id":2}
       """
+    And http payload is posted to node "node-1" with host "placement-{{test_id}}.example.com" path "/events"
+      """
+      {"tenant":"eta","id":3}
+      """
+    And http payload is posted to node "node-1" with host "placement-{{test_id}}.example.com" path "/events"
+      """
+      {"tenant":"acme","id":4}
+      """
     Then within "30s" the relay subscription receives payloads
       """
       key={"tenant":"eta"} payload={"id":1,"tenant":"eta"}
       key={"tenant":"acme"} payload={"id":2,"tenant":"acme"}
+      key={"tenant":"eta"} payload={"id":3,"tenant":"eta"}
+      key={"tenant":"acme"} payload={"id":4,"tenant":"acme"}
       """
     When these Plexus commands are executed on the leader node
       """
@@ -87,16 +97,26 @@ Feature: Placement policies apply to corresponding execution units
     And placeholder "after_1" equals placeholder "before_1"
     When http payload is posted to node "node-1" with host "placement-{{test_id}}.example.com" path "/events"
       """
-      {"tenant":"eta","id":3}
+      {"tenant":"eta","id":5}
       """
     And http payload is posted to node "node-1" with host "placement-{{test_id}}.example.com" path "/events"
       """
-      {"tenant":"acme","id":4}
+      {"tenant":"acme","id":6}
+      """
+    And http payload is posted to node "node-1" with host "placement-{{test_id}}.example.com" path "/events"
+      """
+      {"tenant":"eta","id":7}
+      """
+    And http payload is posted to node "node-1" with host "placement-{{test_id}}.example.com" path "/events"
+      """
+      {"tenant":"acme","id":8}
       """
     Then within "30s" the relay subscription receives payloads
       """
-      key={"tenant":"eta"} payload={"id":3,"tenant":"eta"}
-      key={"tenant":"acme"} payload={"id":4,"tenant":"acme"}
+      key={"tenant":"eta"} payload={"id":5,"tenant":"eta"}
+      key={"tenant":"acme"} payload={"id":6,"tenant":"acme"}
+      key={"tenant":"eta"} payload={"id":7,"tenant":"eta"}
+      key={"tenant":"acme"} payload={"id":8,"tenant":"acme"}
       """
     When these Plexus commands fail
       """

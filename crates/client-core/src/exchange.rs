@@ -960,9 +960,17 @@ impl PendingReplies {
     }
 
     fn end(&mut self, end: ExchangeEnd) {
-        if let Self::Closed(_) = self {
+        let Self::Open { waiters, .. } = self else {
             return;
+        };
+        // Only ending pays for ordering. Registration and ordinary replies retain their hash
+        // lookups, while waking waiters must not depend on the map's random hash seed.
+        let mut ordered: Vec<_> = waiters.drain().collect();
+        ordered.sort_unstable_by_key(|(request_id, _)| *request_id);
+        for (_, waiter) in ordered {
+            drop(waiter);
         }
+        // The reader-ending sender is released after every remaining request, as on any close.
         *self = Self::Closed(end);
     }
 

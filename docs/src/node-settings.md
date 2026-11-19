@@ -524,7 +524,7 @@ the current key authorizes the request and the pending key proves possession. On
 rotation completion installs both the next generation and its decision. A lost response replays
 the retained request identity and bytes, including across leadership changes, and a definitive
 service refusal abandons the pending key. Free and released clusters rotate locally without
-service access or provisioned service trust.
+service access or service-issued trust documents.
 
 `RELEASE LICENSE` commits the free target policy before contacting the service. It returns after
 that local commit; `DESCRIBE LICENSE` reports `mode: released`, `policy: releasing` and
@@ -542,8 +542,8 @@ its own permanent identity and consumes the freed activation slot.
 
 The service is the compiled deployment `https://licensing.nervix.io`. Plexus and node options
 supply no alternative address or trust anchors. HTTPS uses the node resolver and outward TLS
-policy, HTTP/1.1 or HTTP/2, no redirects and no environment proxy. Activation requires the build's
-provisioned licensing trust bundle; an unprovisioned build refuses activation. The
+policy, HTTP/1.1 or HTTP/2, no redirects and no environment proxy. Activation verifies the
+service's signed documents against the production trust bundle the build embeds. The
 [shared protocol](licensing-protocol.md#trust-and-provisioning) owns provisioning and verification.
 
 The leader signs challenge-bound requests with the cluster key. Lost responses retry the same

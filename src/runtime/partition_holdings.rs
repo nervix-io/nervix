@@ -71,6 +71,13 @@ pub(super) struct UnitHoldings {
     pub(super) epoch: PartitionEpochNumber,
     /// Every key the unit holds, live or released and not yet forgotten, that the current count
     /// places in another unit.
+    #[cfg_attr(
+        nervix_lint,
+        expect(
+            nervix::branch_inversion,
+            reason = "this branch collection supports checkpoints, partition transfers or state recovery; use the owning partition in https://app.clickup.com/t/86bd1z3ng"
+        )
+    )]
     pub(super) misplaced: MisplacedKeys,
     /// The keys the unit claimed from another unit in this epoch.
     pub(super) claimed: u64,
@@ -292,6 +299,13 @@ impl Runtime {
 pub(super) struct HoldingsTracker {
     branch: BranchName,
     epoch: PartitionEpochNumber,
+    #[cfg_attr(
+        nervix_lint,
+        expect(
+            nervix::branch_inversion,
+            reason = "this branch collection supports checkpoints, partition transfers or state recovery; use the owning partition in https://app.clickup.com/t/86bd1z3ng"
+        )
+    )]
     misplaced: MisplacedKeys,
     claimed: u64,
     publication: UnitHoldingsPublication,
@@ -376,6 +390,13 @@ impl HoldingsTracker {
                                    which it holds exclusively")
     )]
     pub(super) fn retain(&mut self, holds: impl Fn(&BranchKey) -> bool) -> bool {
+        #[cfg_attr(
+            nervix_lint,
+            expect(
+                nervix::branch_inversion,
+                reason = "this branch collection supports checkpoints, partition transfers or state recovery; use the owning partition in https://app.clickup.com/t/86bd1z3ng"
+            )
+        )]
         let mut gone = Vec::new();
         for (fingerprint, misplaced) in self.misplaced.iter() {
             if !holds(&misplaced.key) {

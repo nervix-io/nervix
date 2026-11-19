@@ -1198,6 +1198,13 @@ impl Runtime {
         if snapshots.len() == 1 {
             return Ok(snapshots.pop());
         }
+        #[cfg_attr(
+            nervix_lint,
+            expect(
+                nervix::branch_inversion,
+                reason = "this branch collection supports checkpoints, partition transfers or state recovery; use the owning partition in https://app.clickup.com/t/86bd1z3ng"
+            )
+        )]
         let mut entries =
             HashMap::<Option<BranchKey>, BranchInstanceSnapshotEntry<Option<BranchKey>>>::default();
         let mut lsm = 0_u64;
@@ -1298,6 +1305,13 @@ impl Runtime {
             kind: node.kind(),
             identifier: node.identifier.clone(),
         };
+        #[cfg_attr(
+            nervix_lint,
+            expect(
+                nervix::branch_inversion,
+                reason = "this branch collection supports checkpoints, partition transfers or state recovery; use the owning partition in https://app.clickup.com/t/86bd1z3ng"
+            )
+        )]
         let mut expected = HashSet::default();
         for (_, state) in Self::global_recovery_state_components(node) {
             let placement = self
