@@ -28,7 +28,7 @@ const JOINS: &str = "Shuttle fails an execution when a model thread panics";
 fn shuttle_forced_routing_fence_cancels_racing_bindings_until_successor_publication() {
     check_interleavings(|| {
         let channels = Arc::new(RelayChannels::default());
-        let branch = channels.bind(&None, Unit::SINGLE);
+        let branch = channels.bind_relay(&None, Unit::SINGLE);
         let retained = branch.ingress();
         let producer = thread::spawn(move || {
             branch.outbound(RelayOutboundChannel {
@@ -43,10 +43,10 @@ fn shuttle_forced_routing_fence_cancels_racing_bindings_until_successor_publicat
         fence.join().assured(JOINS);
         assert!(retained.cancellation().is_cancelled());
         assert!(racing.cancellation().is_cancelled());
-        let during = channels.bind(&None, Unit::SINGLE).ingress();
+        let during = channels.bind_relay(&None, Unit::SINGLE).ingress();
         assert!(during.cancellation().is_cancelled());
         channels.replace_destinations();
-        let successor = channels.bind(&None, Unit::SINGLE).ingress();
+        let successor = channels.bind_relay(&None, Unit::SINGLE).ingress();
         assert!(!successor.cancellation().is_cancelled());
         assert!(retained.cancellation().is_cancelled());
         assert!(racing.cancellation().is_cancelled());
@@ -60,13 +60,13 @@ fn shuttle_first_binding_has_one_winner_and_routing_retirement_cancels_every_slo
         let channels = Arc::new(RelayChannels::default());
         let first = channels.clone();
         let left = thread::spawn(move || {
-            let branch = first.bind(&None, Unit::SINGLE);
+            let branch = first.bind_relay(&None, Unit::SINGLE);
             let slot = branch.ingress();
             (branch, slot)
         });
         let second = channels.clone();
         let right = thread::spawn(move || {
-            let branch = second.bind(&None, Unit::SINGLE);
+            let branch = second.bind_relay(&None, Unit::SINGLE);
             let slot = branch.ingress();
             (branch, slot)
         });
@@ -80,11 +80,11 @@ fn shuttle_first_binding_has_one_winner_and_routing_retirement_cancels_every_slo
         writer.join().assured(JOINS);
         let selected = reader.join().assured(JOINS);
         assert!(first_slot.cancellation().is_cancelled());
-        channels.retire(&None);
+        channels.retire_branch(&None);
         assert!(selected.cancellation().is_cancelled());
         assert!(a.is_retired());
         assert!(a.ingress().cancellation().is_cancelled());
-        assert!(!channels.bind(&None, Unit::SINGLE).is_retired());
+        assert!(!channels.bind_relay(&None, Unit::SINGLE).is_retired());
     });
 }
 
@@ -117,18 +117,18 @@ fn shuttle_binding_racing_the_last_producer_keeps_a_live_channel() {
 fn shuttle_branch_retirement_racing_a_route_refresh_never_revives_a_retained_producer() {
     check_interleavings(|| {
         let channels = Arc::new(RelayChannels::default());
-        let branch = channels.bind(&None, Unit::SINGLE);
+        let branch = channels.bind_relay(&None, Unit::SINGLE);
         channels.replace_owner_of(&[Unit::SINGLE]);
         let reader_branch = branch.clone();
         let reader = thread::spawn(move || reader_branch.ingress());
         let writer_channels = channels.clone();
-        let writer = thread::spawn(move || writer_channels.retire(&None));
+        let writer = thread::spawn(move || writer_channels.retire_branch(&None));
         let slot = reader.join().assured(JOINS);
         writer.join().assured(JOINS);
         assert!(branch.is_retired());
         assert!(slot.cancellation().is_cancelled());
         assert!(branch.ingress().cancellation().is_cancelled());
-        let replacement = channels.bind(&None, Unit::SINGLE);
+        let replacement = channels.bind_relay(&None, Unit::SINGLE);
         assert!(!replacement.is_retired());
         channels.retire_all();
         assert!(replacement.is_retired());
@@ -141,7 +141,7 @@ fn shuttle_first_delivery_binding_racing_terminal_retirement_cannot_publish_a_li
         let channels = Arc::new(RelayChannels::default());
         let producer_channels = channels.clone();
         let producer = thread::spawn(move || {
-            let branch = producer_channels.bind(&None, Unit::SINGLE);
+            let branch = producer_channels.bind_relay(&None, Unit::SINGLE);
             let outbound = branch.outbound(RelayOutboundChannel {
                 node_id: ClusterNodeName::parse("node-2").assured("valid peer"),
                 relay: RelayName::parse("events").assured("valid relay"),
@@ -186,8 +186,8 @@ fn shuttle_replacing_one_partition_owner_retires_only_that_partitions_channels()
     check_interleavings(move || {
         let units = [Unit::partition(0), Unit::partition(1)];
         let channels = Arc::new(RelayChannels::for_units(&units));
-        let moving = channels.bind(&moving_key, Unit::partition(0));
-        let staying = channels.bind(&staying_key, Unit::partition(1));
+        let moving = channels.bind_relay(&moving_key, Unit::partition(0));
+        let staying = channels.bind_relay(&staying_key, Unit::partition(1));
         let moving_slot = moving.ingress();
         let staying_slot = staying.ingress();
         let staying_branch = staying.clone();
@@ -223,13 +223,13 @@ fn shuttle_fencing_one_partition_holds_only_its_bindings_until_successor_publica
     check_interleavings(move || {
         let units = [Unit::partition(0), Unit::partition(1)];
         let channels = Arc::new(RelayChannels::for_units(&units));
-        let moving = channels.bind(&moving_key, Unit::partition(0));
+        let moving = channels.bind_relay(&moving_key, Unit::partition(0));
         let retained = moving.ingress();
         let binding_channels = channels.clone();
         let staying_key_for_binding = staying_key.clone();
         let producer = thread::spawn(move || {
             binding_channels
-                .bind(&staying_key_for_binding, Unit::partition(1))
+                .bind_relay(&staying_key_for_binding, Unit::partition(1))
                 .ingress()
         });
         let fencing = channels.clone();
@@ -244,7 +244,7 @@ fn shuttle_fencing_one_partition_holds_only_its_bindings_until_successor_publica
         assert!(!moving.ingress().cancellation().is_cancelled());
         assert!(
             !channels
-                .bind(&staying_key, Unit::partition(1))
+                .bind_relay(&staying_key, Unit::partition(1))
                 .ingress()
                 .cancellation()
                 .is_cancelled()

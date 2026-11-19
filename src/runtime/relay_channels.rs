@@ -149,8 +149,12 @@ impl RelayChannels {
     }
 
     /// Retains the channels for the relay's own use until its branch owner retires the key.
-    pub(super) fn bind(&self, key: &Option<BranchKey>, unit: Unit) -> StdArc<RelayBranchChannels> {
-        self.bind_as(key, unit, RelayBranchBinding::Relay)
+    pub(super) fn bind_relay(
+        &self,
+        key: &Option<BranchKey>,
+        unit: Unit,
+    ) -> StdArc<RelayBranchChannels> {
+        self.bind(key, unit, RelayBranchBinding::Relay)
     }
 
     pub(super) fn bind_producer(
@@ -158,7 +162,7 @@ impl RelayChannels {
         key: &Option<BranchKey>,
         unit: Unit,
     ) -> StdArc<RelayBranchChannels> {
-        self.bind_as(key, unit, RelayBranchBinding::Producer)
+        self.bind(key, unit, RelayBranchBinding::Producer)
     }
 
     pub(super) fn release_producer(
@@ -167,7 +171,7 @@ impl RelayChannels {
         branch: &StdArc<RelayBranchChannels>,
     ) {
         if branch.release_producer() {
-            self.retire_published(key, branch);
+            self.retire(key, branch);
         }
     }
 
@@ -175,7 +179,7 @@ impl RelayChannels {
     ///
     /// A unit the relay is not scheduled as has no routing generation, so its channels are bound
     /// already retired and refuse every delivery.
-    fn bind_as(
+    fn bind(
         &self,
         key: &Option<BranchKey>,
         unit: Unit,
@@ -210,7 +214,7 @@ impl RelayChannels {
                 }
                 // Finish withdrawing this exact allocation if the last producer has already
                 // ended it. A racing binder must never revive its slots.
-                self.retire_published(key, branch);
+                self.retire(key, branch);
                 current = self.branches.load_full();
                 continue;
             }
@@ -234,7 +238,7 @@ impl RelayChannels {
             let observed = self.branches.compare_and_swap(&current, StdArc::new(next));
             if StdArc::ptr_eq(&current, &observed) {
                 if self.closed.is_cancelled() {
-                    self.retire_published(key, branch);
+                    self.retire(key, branch);
                 }
                 return branch.clone();
             }
@@ -242,13 +246,13 @@ impl RelayChannels {
         }
     }
 
-    pub(super) fn retire(&self, key: &Option<BranchKey>) {
+    pub(super) fn retire_branch(&self, key: &Option<BranchKey>) {
         if let Some(branch) = self.branches.load_full().get(key) {
-            self.retire_published(key, branch);
+            self.retire(key, branch);
         }
     }
 
-    fn retire_published(&self, key: &Option<BranchKey>, branch: &StdArc<RelayBranchChannels>) {
+    fn retire(&self, key: &Option<BranchKey>, branch: &StdArc<RelayBranchChannels>) {
         branch.retire();
         let mut current = self.branches.load_full();
         loop {

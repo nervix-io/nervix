@@ -1974,8 +1974,13 @@ async fn an_ended_producer_cannot_attach_to_a_recreated_relay_branch() {
         key: None,
     });
     producer.retire();
-    services.channels.retire(&None);
-    assert!(!services.channels.bind(&None, Unit::SINGLE).is_retired());
+    services.channels.retire_branch(&None);
+    assert!(
+        !services
+            .channels
+            .bind_relay(&None, Unit::SINGLE)
+            .is_retired()
+    );
     let (batch, completion) = presence_test_batch(None);
     assert!(producer.dispatch_boundary(&batch).await.is_err());
     assert!(matches!(completion.wait().await, AckOutcome::NoAck(_)));

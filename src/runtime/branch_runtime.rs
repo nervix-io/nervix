@@ -77,24 +77,6 @@ pub(super) struct BranchRuntime {
     pub(super) metrics: BranchRuntimeMetrics,
 }
 
-/// The branch lane can end delivery before it waits to take the branch's state lock.
-pub(super) struct BranchInstanceRuntime {
-    pub(super) delivery_lifetime: CancellationToken,
-    pub(super) state: Mutex<BranchRuntime>,
-}
-
-impl BranchInstanceRuntime {
-    pub(super) async fn lock(&self) -> nervix_primitives::sync::MutexGuard<'_, BranchRuntime> {
-        self.state.lock().await
-    }
-
-    pub(super) fn into_inner(self) -> BranchRuntime {
-        self.state.into_inner()
-    }
-}
-
-type EntrypointBranches = BranchInstanceRegistry<Option<BranchKey>, BranchInstanceRuntime>;
-
 pub(super) struct BranchRuntimeMetrics {
     pub(super) source_dirty: BranchMetricsMark,
     pub(super) processor_dirty: HashMap<ModelName, BranchMetricsMark>,
@@ -2082,6 +2064,33 @@ impl BranchExecutionRuntime {
         }
     }
 }
+
+/// The branch lane can end delivery before it waits to take the branch's state lock.
+pub(super) struct BranchInstanceRuntime {
+    pub(super) delivery_lifetime: CancellationToken,
+    pub(super) state: Mutex<BranchRuntime>,
+}
+
+impl BranchInstanceRuntime {
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            bounded,
+            reason = "the retained branch serializes access to its own execution state",
+            key = "one concrete branch instance",
+            bound = "one admitted dispatch, tick, checkpoint or retirement holds the branch state"
+        )
+    )]
+    pub(super) async fn lock(&self) -> nervix_primitives::sync::MutexGuard<'_, BranchRuntime> {
+        self.state.lock().await
+    }
+
+    pub(super) fn into_inner(self) -> BranchRuntime {
+        self.state.into_inner()
+    }
+}
+
+type EntrypointBranches = BranchInstanceRegistry<Option<BranchKey>, BranchInstanceRuntime>;
 
 #[cfg_attr(
     nervix_lint,

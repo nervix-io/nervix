@@ -31,21 +31,24 @@ fn channel() -> RelayOutboundChannel {
 fn retained_branches_follow_routes_but_never_follow_recreated_incarnations() {
     let channels = RelayChannels::default();
     let key = string_branch_key("tenant", "acme");
-    let branch = channels.bind(&key, Unit::SINGLE);
+    let branch = channels.bind_relay(&key, Unit::SINGLE);
     let ingress = branch.ingress();
     let outbound = branch.outbound(channel());
-    assert!(StdArc::ptr_eq(&branch, &channels.bind(&key, Unit::SINGLE)));
+    assert!(StdArc::ptr_eq(
+        &branch,
+        &channels.bind_relay(&key, Unit::SINGLE)
+    ));
     assert!(StdArc::ptr_eq(&outbound, &branch.outbound(channel())));
     channels.replace_owner_of(&[Unit::SINGLE]);
     assert!(ingress.cancellation().is_cancelled());
     assert!(outbound.cancellation().is_cancelled());
     let current = branch.ingress();
     assert!(!current.cancellation().is_cancelled());
-    channels.retire(&key);
+    channels.retire_branch(&key);
     assert!(current.cancellation().is_cancelled());
     assert!(branch.is_retired());
     assert!(branch.ingress().cancellation().is_cancelled());
-    let recreated = channels.bind(&key, Unit::SINGLE);
+    let recreated = channels.bind_relay(&key, Unit::SINGLE);
     assert!(!StdArc::ptr_eq(&branch, &recreated));
     assert!(!recreated.ingress().cancellation().is_cancelled());
     channels.retire_all();
@@ -73,7 +76,7 @@ fn bolero_relay_sequences_preserve_exact_lifetimes_and_order() {
                 let (key, unit) = &keys[usize::from(byte / 5) % keys.len()];
                 match byte % 5 {
                     0 | 1 => {
-                        let branch = channels.bind(key, *unit);
+                        let branch = channels.bind_relay(key, *unit);
                         let slot = branch.outbound(channel());
                         let delivery = slot.next_delivery();
                         if let Some(previous) =
@@ -109,7 +112,7 @@ fn bolero_relay_sequences_preserve_exact_lifetimes_and_order() {
                         assert_eq!(still_live, live_elsewhere);
                     }
                     3 => {
-                        channels.retire(key);
+                        channels.retire_branch(key);
                         for (selected, _, branch, slot) in &retained {
                             if selected == key {
                                 assert!(branch.is_retired());
@@ -156,15 +159,18 @@ fn a_relays_routes_outlive_its_local_producers() {
     let channels = RelayChannels::default();
     let key = string_branch_key("tenant", "acme");
     let producer = channels.bind_producer(&key, Unit::SINGLE);
-    let relay = channels.bind(&key, Unit::SINGLE);
+    let relay = channels.bind_relay(&key, Unit::SINGLE);
     let outbound = relay.outbound(channel());
     assert!(StdArc::ptr_eq(&producer, &relay));
 
     channels.release_producer(&key, &producer);
     assert!(!outbound.cancellation().is_cancelled());
-    assert!(StdArc::ptr_eq(&relay, &channels.bind(&key, Unit::SINGLE)));
+    assert!(StdArc::ptr_eq(
+        &relay,
+        &channels.bind_relay(&key, Unit::SINGLE)
+    ));
 
-    channels.retire(&key);
+    channels.retire_branch(&key);
     assert!(outbound.cancellation().is_cancelled());
 }
 
@@ -172,7 +178,7 @@ fn a_relays_routes_outlive_its_local_producers() {
 async fn retirement_ends_a_queued_channel_wait_without_waiting_for_its_holder() {
     use futures_util::FutureExt as _;
     let channels = RelayChannels::default();
-    let branch = channels.bind(&None, Unit::SINGLE);
+    let branch = channels.bind_relay(&None, Unit::SINGLE);
     let slot = branch.outbound(channel());
     let holder = slot
         .lock_for_delivery()
@@ -181,7 +187,7 @@ async fn retirement_ends_a_queued_channel_wait_without_waiting_for_its_holder() 
     let waiter = slot.lock_for_delivery();
     tokio::pin!(waiter);
     assert!(waiter.as_mut().now_or_never().is_none());
-    channels.retire(&None);
+    channels.retire_branch(&None);
     assert!(waiter.await.is_none());
     assert!(slot.lock_for_delivery().await.is_none());
     drop(holder);
@@ -192,7 +198,7 @@ async fn retirement_ends_a_queued_channel_wait_without_waiting_for_its_holder() 
 fn relay_channel_cost() {
     let channels = RelayChannels::default();
     let key = string_branch_key("tenant", "acme");
-    let branch = channels.bind(&key, Unit::SINGLE);
+    let branch = channels.bind_relay(&key, Unit::SINGLE);
     let allocated = tikv_jemalloc_ctl::thread::allocatedp::read().expect("server uses jemalloc");
     let deallocated =
         tikv_jemalloc_ctl::thread::deallocatedp::read().expect("server uses jemalloc");
@@ -211,7 +217,7 @@ fn relay_channel_cost() {
                 let slot = if retained_branch {
                     branch.ingress()
                 } else {
-                    channels.bind(&key, Unit::SINGLE).ingress()
+                    channels.bind_relay(&key, Unit::SINGLE).ingress()
                 };
                 std::hint::black_box(slot);
                 timings.push(start.elapsed().as_nanos());
@@ -234,12 +240,12 @@ fn relay_channel_cost() {
     let freed_before = deallocated.get();
     let start = Instant::now();
     for _ in 0..10_000 {
-        channels.retire(&key);
-        let current = channels.bind(&key, Unit::SINGLE);
+        channels.retire_branch(&key);
+        let current = channels.bind_relay(&key, Unit::SINGLE);
         std::hint::black_box(current.outbound(channel()));
         assert_eq!(channels.branches.load().len(), 1);
     }
-    channels.retire(&key);
+    channels.retire_branch(&key);
     let allocated_churn = allocated.get() - allocated_before;
     let freed_churn = deallocated.get() - freed_before;
     println!(
@@ -255,7 +261,7 @@ fn relay_channel_cost() {
 fn subscription_generations_preserve_equal_interests_and_release_withdrawn_peers() {
     use nervix_models::{ClusterNodeIdentity, ClusterNodeIncarnation};
     let channels = RelayChannels::default();
-    let branch = channels.bind(&None, Unit::SINGLE);
+    let branch = channels.bind_relay(&None, Unit::SINGLE);
     let domain = DomainName::parse("sales").expect("valid domain");
     let relay = RelayName::parse("events").expect("valid relay");
     let node = ClusterNodeName::parse("node-2").expect("valid node");

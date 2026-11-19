@@ -255,63 +255,6 @@ pub(super) struct RelayOutboundSlot {
     cancellation: CancellationToken,
 }
 
-/// The ordered channel shared by senders and the optional lifetime of this particular sender.
-#[derive(Clone, Copy)]
-pub(super) struct RelayDeliveryChannel<'a> {
-    pub(super) slot: &'a RelayOutboundSlot,
-    producer_lifetime: Option<&'a CancellationToken>,
-}
-
-impl<'a> RelayDeliveryChannel<'a> {
-    pub(super) fn new(
-        slot: &'a RelayOutboundSlot,
-        producer_lifetime: Option<&'a CancellationToken>,
-    ) -> Self {
-        Self {
-            slot,
-            producer_lifetime,
-        }
-    }
-
-    pub(super) fn producer_ended(self) -> bool {
-        self.producer_lifetime
-            .is_some_and(|token| token.is_cancelled())
-    }
-
-    pub(super) fn has_producer(self) -> bool {
-        self.producer_lifetime.is_some()
-    }
-
-    fn cancellation_reason(self) -> &'static str {
-        if self.producer_ended() {
-            "relay producer lifetime ended"
-        } else {
-            "relay channel was retired"
-        }
-    }
-
-    pub(super) async fn while_producer_lives<T>(
-        self,
-        work: impl std::future::Future<Output = T>,
-    ) -> Option<T> {
-        match self.producer_lifetime {
-            Some(lifetime) => lifetime.run_until_cancelled(work).await,
-            None => Some(work.await),
-        }
-    }
-
-    pub(super) async fn cancelled(self) {
-        if let Some(lifetime) = self.producer_lifetime {
-            nervix_primitives::select! {
-                () = lifetime.cancelled() => {},
-                () = self.slot.cancellation().cancelled() => {},
-            }
-        } else {
-            self.slot.cancellation().cancelled().await;
-        }
-    }
-}
-
 #[derive(Debug)]
 #[cfg_attr(
     nervix_lint,
@@ -1640,7 +1583,7 @@ impl RelayBoundaryServices {
         branch: &Option<BranchKey>,
         unit: Unit,
     ) -> StdArc<RelayOutboundSlot> {
-        self.channels.bind(branch, unit).ingress()
+        self.channels.bind_relay(branch, unit).ingress()
     }
 
     pub(super) fn outbound_slot(
@@ -1652,7 +1595,7 @@ impl RelayBoundaryServices {
         unit: Unit,
     ) -> StdArc<RelayOutboundSlot> {
         self.channels
-            .bind(branch, unit)
+            .bind_relay(branch, unit)
             .outbound(RelayOutboundChannel {
                 node_id: node_id.clone(),
                 relay: relay.clone(),
@@ -1669,7 +1612,7 @@ impl RelayBoundaryServices {
         relay: &RelayName,
     ) -> StdArc<channels::SubscriptionChannels> {
         self.channels
-            .bind(branch, unit)
+            .bind_relay(branch, unit)
             .subscriptions(snapshot, domain, relay)
     }
 
@@ -1678,7 +1621,7 @@ impl RelayBoundaryServices {
     }
 
     pub(super) fn remove_branch_slots(&self, branch: &Option<BranchKey>) {
-        self.channels.retire(branch);
+        self.channels.retire_branch(branch);
     }
 
     pub(super) async fn enqueue_owner_batch(
@@ -2548,19 +2491,6 @@ impl ConcreteRelayRuntime {
     }
 }
 
-impl Drop for ConcreteRelayRuntime {
-    fn drop(&mut self) {
-        self.release_channels();
-    }
-}
-
-fn reject_relay_delivery(batch: &RelayRecordBatch, reason: &'static str) -> RelayDispatchResult {
-    for ack in &batch.acks {
-        ack.no_ack(reason);
-    }
-    Err(Box::new(batch.clone()))
-}
-
 impl RelayBoundaryBuilder {
     /// The `CAPACITY` of each unit owner's buffer, in batches.
     pub(super) fn owner_capacity(&self) -> usize {
@@ -2981,6 +2911,76 @@ impl Runtime {
         });
         Ok(RelayOwnerTask { shutdown, task })
     }
+}
+
+/// The ordered channel shared by senders and the optional lifetime of this particular sender.
+#[derive(Clone, Copy)]
+pub(super) struct RelayDeliveryChannel<'a> {
+    pub(super) slot: &'a RelayOutboundSlot,
+    producer_lifetime: Option<&'a CancellationToken>,
+}
+
+impl<'a> RelayDeliveryChannel<'a> {
+    pub(super) fn new(
+        slot: &'a RelayOutboundSlot,
+        producer_lifetime: Option<&'a CancellationToken>,
+    ) -> Self {
+        Self {
+            slot,
+            producer_lifetime,
+        }
+    }
+
+    pub(super) fn producer_ended(self) -> bool {
+        self.producer_lifetime
+            .is_some_and(|token| token.is_cancelled())
+    }
+
+    pub(super) fn has_producer(self) -> bool {
+        self.producer_lifetime.is_some()
+    }
+
+    fn cancellation_reason(self) -> &'static str {
+        if self.producer_ended() {
+            "relay producer lifetime ended"
+        } else {
+            "relay channel was retired"
+        }
+    }
+
+    pub(super) async fn while_producer_lives<T>(
+        self,
+        work: impl std::future::Future<Output = T>,
+    ) -> Option<T> {
+        match self.producer_lifetime {
+            Some(lifetime) => lifetime.run_until_cancelled(work).await,
+            None => Some(work.await),
+        }
+    }
+
+    pub(super) async fn cancelled(self) {
+        if let Some(lifetime) = self.producer_lifetime {
+            nervix_primitives::select! {
+                () = lifetime.cancelled() => {},
+                () = self.slot.cancellation().cancelled() => {},
+            }
+        } else {
+            self.slot.cancellation().cancelled().await;
+        }
+    }
+}
+
+impl Drop for ConcreteRelayRuntime {
+    fn drop(&mut self) {
+        self.release_channels();
+    }
+}
+
+fn reject_relay_delivery(batch: &RelayRecordBatch, reason: &'static str) -> RelayDispatchResult {
+    for ack in &batch.acks {
+        ack.no_ack(reason);
+    }
+    Err(Box::new(batch.clone()))
 }
 
 #[cfg(test)]
