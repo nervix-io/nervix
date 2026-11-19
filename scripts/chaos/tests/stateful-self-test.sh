@@ -453,6 +453,62 @@ expect_pass 'inferencer checkpoint already counted volatile redeliveries with un
     inferencer_verdict "${tmp_dir}/inferred-above.ndjson" "${tmp_dir}/inferred-crash.json"
 jq -e '.restored_counts == {alpha: [34], beta: [34]} and .count_excess == {alpha: 6, beta: 6}' \
     "${tmp_dir}/inferencer.json" >/dev/null || fail 'the inferencer verdict did not retain the replay count excess'
+# A partitioned owner crash promotes each unit on its own survivor, and each survivor applies the
+# failover by itself. The survivor that promoted a branch's inferencer partition continues from the
+# count its replica held, RESTORED, and routes the branch's output to the survivor that took over the
+# emitter. Until that survivor has installed the emitter it refuses every routed batch, and the source
+# redelivers each refused row. Every attempt advances the count, but only an admitted attempt
+# reaches the output. Alpha's two volatile rows are refused together six times before both pass.
+# Beta's pass on the sixth attempt for its first row and on the seventh for its second, which
+# leaves two breaks. A refused delivery after recovery, the third argument, is refused once more.
+inferred_through_refused_failover() {
+    local restored="$1"
+    local output="$2"
+    local refused_after_recovery="${3:-none}"
+    jq -c -s --argjson restored "${restored}" --arg refused_after_recovery "${refused_after_recovery}" '
+        def refused($row): {row: $row, admitted: false};
+        def admitted($row): {row: $row, admitted: true};
+        def scores($attempts):
+            reduce $attempts[] as $attempt ({count: $restored, scores: []};
+                .count += 1
+                | if $attempt.admitted then .scores += [.count] else . end)
+            | .scores;
+        [.[] | select(.sequence < 56) | {branch_name, score: [.branch_index]}] as $before
+        | [group_by(.branch_name)[]
+           | .[0].branch_name as $branch
+           | [.[] | select(.sequence >= 56 and .sequence < 60) | .branch_index] as $volatile
+           | [.[] | select(.sequence >= 60) | .branch_index] as $recovered
+           | (if $branch == "alpha" then
+                [range(0; 6) | $volatile[] | refused(.)] + [$volatile[] | admitted(.)]
+              else
+                [range(0; 5) | $volatile[] | refused(.)]
+                + [admitted($volatile[0]), refused($volatile[1]), admitted($volatile[1])]
+              end) as $failover
+           | [$recovered[] as $row
+              | if $branch == $refused_after_recovery and $row == $recovered[-1]
+                then refused($row), admitted($row)
+                else admitted($row) end] as $after_recovery
+           | scores($failover + $after_recovery)[]
+           | {branch_name: $branch, score: [.]}] as $after
+        | ($before + $after)[]' "${input}" >"${output}"
+}
+inferred_through_refused_failover 28 "${tmp_dir}/inferred-refused.ndjson"
+expect_pass 'inferencer counted rows refused while a survivor installed the failover again' \
+    inferencer_verdict "${tmp_dir}/inferred-refused.ndjson" "${tmp_dir}/inferred-crash.json"
+jq -e '.restored_counts == {alpha: [40], beta: [38, 40]} and .count_excess == {alpha: 12, beta: 11}' \
+    "${tmp_dir}/inferencer.json" >/dev/null \
+    || fail 'the inferencer verdict did not report the counts of the refused redeliveries'
+inferred_through_refused_failover 0 "${tmp_dir}/inferred-refused-reset.ndjson"
+expect_failure 'inferencer state reset while a survivor refused its redeliveries' \
+    'state durable at the milestone was lost' "${tmp_dir}/inferencer.json" \
+    inferencer_verdict "${tmp_dir}/inferred-refused-reset.ndjson" "${tmp_dir}/inferred-crash.json"
+expect_failure 'inferencer counted refused redeliveries again without a fault' \
+    'differed from its record count while no fault' "${tmp_dir}/inferencer.json" \
+    inferencer_verdict "${tmp_dir}/inferred-refused.ndjson" "${tmp_dir}/none.json"
+inferred_through_refused_failover 28 "${tmp_dir}/inferred-refused-late.ndjson" alpha
+expect_failure 'inferencer delivery refused after recovery' 'did not advance by one per record' \
+    "${tmp_dir}/inferencer.json" \
+    inferencer_verdict "${tmp_dir}/inferred-refused-late.ndjson" "${tmp_dir}/inferred-crash.json"
 jq -c 'if .branch_name == "alpha" and .score[0] >= 48 then .score[0] += 1 else . end' \
     "${tmp_dir}/inferred-restored.ndjson" >"${tmp_dir}/inferred-skipped.ndjson"
 expect_failure 'inferencer counts after recovery skipped' 'did not advance by one per record' \

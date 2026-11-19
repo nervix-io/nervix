@@ -1947,8 +1947,17 @@ expectations:
   therefore continues after the fault from a restored count `C`: the updates after its last
   checkpoint are skipped, and a volatile row the source redelivers counts again. `C` must be at
   least the branch's records before the milestone. Redeliveries can already be reflected in that
-  checkpoint, including callbacks whose output was not observed. The distinct-input ledger and
-  observed output replays therefore do not give an upper bound on `C`. Every count after the
+  checkpoint, including callbacks whose output was not observed. In the partitioned owner crash,
+  the survivor that promotes a branch's inferencer partition can route its output to the survivor
+  that took over `chaos_inferred_emitter` before that survivor has started it. Each such output is
+  refused, the source redelivers its row, and every refused attempt advances the count without an
+  observed output, so the branch continues from a `C` above its records before recovery. Failover
+  is at least once, as [Planned Ownership Handoffs And
+  Failover](control-plane.md#planned-ownership-handoffs-and-failover) states, so the
+  distinct-input ledger and observed output replays do not give an upper bound on `C`. The
+  verifier's self-test replays that interleaving: it passes, while the same counts fail when the
+  restored count drops below the milestone, when they occur without a fault, or when a delivery is
+  refused after recovery. Every count after the
   fault that does not follow the branch's previous count by one,
   such as the first count `C + 1` of the restored branch or an output a former owner delivered
   before its fence took effect, must start again from such a `C`. The verdict records every
