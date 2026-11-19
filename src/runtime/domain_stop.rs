@@ -39,7 +39,7 @@ use nervix_interconnect::domain_stop::{
 };
 use nervix_models::{StopCut, StopCutKind};
 
-use super::*;
+use super::{domain_clock::DomainTaskState, *};
 
 /// What one node's teardown of a stopped domain cut, kept until the stop's owner collects it or
 /// the domain starts again.
@@ -189,6 +189,18 @@ impl Runtime {
         domain: &DomainName,
         action: StopDrainAction,
     ) -> StopDrainStatus {
+        // The owner can ask before this node applied the stop. Its intake still admits then, which
+        // its view reports, and it releases nothing: an emitter that still sees the domain running
+        // would take the flush for an ordinary drain's and retry an unavailable destination inline.
+        if !self.applied_stop(domain) {
+            let mut status = self.observe_stopping_domain(domain);
+            status.entries.push(StopWaitEntry {
+                entity: None,
+                kind: StopWaitKind::AdmittingIngestor,
+                items: 1,
+            });
+            return status;
+        }
         match action {
             StopDrainAction::FlushMovingWork => {
                 let status = self.observe_stopping_domain(domain);
@@ -204,6 +216,21 @@ impl Runtime {
             }
             StopDrainAction::Observe => self.observe_stopping_domain(domain),
         }
+    }
+
+    /// Whether this node applied the stop of `domain`: its intake holds, and its emitters take the
+    /// stop's flush generations as the stop's.
+    fn applied_stop(&self, domain: &DomainName) -> bool {
+        let Ok(lifecycle) = self.domain_clock_lifecycle(domain) else {
+            return false;
+        };
+        matches!(
+            lifecycle.task_state(),
+            Some(DomainTaskState {
+                status: nervix_models::DomainStatus::Stopping,
+                ..
+            })
+        )
     }
 
     /// Observes what `domain` holds on this node, in motion and held, entity by entity.

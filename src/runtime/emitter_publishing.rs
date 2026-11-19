@@ -821,6 +821,12 @@ impl EmitterConnectorState {
                     return Err(error);
                 }
                 Err(error) if emitter_publish_error_is_retryable(&error) => {
+                    // A stopping domain's drain waits for no record a retry holds. A generation
+                    // that began before the domain stopped hands its records to the task's retry
+                    // schedule once it has, as the stop's own generations do.
+                    if context.clock.is_stopping() {
+                        return Err(error);
+                    }
                     self.reconnect_after(&error, context);
                     let reason = emitter_error_message(&error);
                     let wait = emitter_retry_delay(control.backoff, &error);

@@ -222,3 +222,47 @@ async fn a_node_reports_what_its_stop_cut_only_once_its_teardown_ended() {
         StopReportAnswer::Reported(Vec::new())
     );
 }
+
+#[nervix_primitives::test]
+async fn a_node_takes_no_drain_step_before_it_applied_the_stop() {
+    use nervix_interconnect::domain_stop::{StopDrainAction, StopWaitEntry, StopWaitKind};
+
+    let runtime = Runtime::default();
+    let domain = domain(DOMAIN);
+    apply(&runtime, 1, state(DomainStatus::Running, None)).await;
+    let not_applied = StopWaitEntry {
+        entity: None,
+        kind: StopWaitKind::AdmittingIngestor,
+        items: 1,
+    };
+
+    // The stop's owner can ask before this node applied the stop. Its intake still admits then, so
+    // it reports that and releases nothing: an emitter that still sees the domain running would
+    // take the flush for an ordinary drain's and wait out an unavailable destination.
+    let early = runtime.stop_drain_status(&domain, StopDrainAction::Confirm);
+    assert!(
+        early.moving(),
+        "a node that has not applied the stop is not at rest"
+    );
+    assert!(early.entries.contains(&not_applied));
+
+    let stopping = DomainStopping {
+        began_at_revision: 2,
+        operators: BTreeMap::from([(
+            CommandExecutionReference::parse("operator-stop").expect("valid reference"),
+            OperatorStopRequest {
+                requested_at: Timestamp::from_unix_nanos(1),
+                limit: None,
+            },
+        )]),
+        licensing: None,
+    };
+    apply(
+        &runtime,
+        2,
+        state(DomainStatus::Stopping, Some(DomainStop::Stopping(stopping))),
+    )
+    .await;
+    let applied = runtime.stop_drain_status(&domain, StopDrainAction::Observe);
+    assert!(!applied.entries.contains(&not_applied));
+}

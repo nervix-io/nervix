@@ -2661,7 +2661,8 @@ emitter's own retry schedule, and an emitter already waiting for a retry complet
 at once, so a destination that stays down never holds the stop open. Every other drain's
 generation, from an alteration's pause, a backup cut or a terminating node, publishes what the
 emitter holds at once, a record a retry holds included, and retries inline with its backoff until
-the destination takes it, the stop deadline passes or the task shuts down. The stopping execution
+the destination takes it, the stop deadline passes or the task shuts down; once the domain begins
+stopping, it hands the records to its retry schedule instead. The stopping execution
 gives every emitter its deadline before
 it signals the shutdown: the domain drain timeout from that moment, and no later than the node's
 shutdown deadline when the node is stopping. A task whose relay interaction ends without a stop or
