@@ -5094,7 +5094,6 @@ coverage-go-ci-tool:
 # this builds the Rust gate and installs its pinned complexity analyzer.
 test-docs: typed-ratchet-source-build install-cargo-crap build-client-suite-java-checker
     NERVIX_CLIENT_SUITE_JAVA_CHECKER={{ quote(cargo_target_dir + "/client-suites/java") }} NERVIX_CLIENT_CONFORMANCE_DIR={{ quote(cargo_target_dir + "/client-conformance") }} uv run --locked python -m unittest discover -s scripts/tests -p "test_*.py"
-    node --test cloudflare/docs-worker/src/index.test.js
 
 # Screenshots are recaptured from the current console and the nervix-cli and nervix-server
 # reference chapters are rendered from the current binaries, so a published book can never describe
@@ -5197,18 +5196,9 @@ publish-dir source target zone_id alias="snapshot" bucket="nervix-docs":
 purge-cache zone_id:
     python3 scripts/purge_cloudflare_cache.py --zone-id {{ zone_id }}
 
-worker-deploy zone_id="":
-    #!/usr/bin/env bash
-    set -euo pipefail
-    npx --yes wrangler deploy --config cloudflare/docs-worker/wrangler.jsonc
-    if [[ -n "{{ zone_id }}" ]]; then
-        python3 scripts/purge_cloudflare_cache.py --zone-id {{ zone_id }}
-    fi
-
 publish-book target zone_id alias="snapshot" bucket="nervix-docs":
     just book-pdf {{ target }} docs/book/nervix.pdf
     just publish-dir docs/book {{ target }} {{ zone_id }} {{ alias }} {{ bucket }}
-    just worker-deploy {{ zone_id }}
 
 deps:
     just generate-dev-tls
