@@ -332,6 +332,100 @@ Feature: Interconnect relay admission
       """
     And the background http publish succeeds
 
+  Scenario: An idle producer expires while another producer delivers the same relay branch
+    Given branched relay expiration scan interval is configured as "100ms"
+    And the production sticky scheduler is configured
+    And a 3 node nervix cluster is started
+    And ZeroMQ emission endpoint "{{zeromq_emit_addr}}" is observed
+    When these Plexus commands are executed through the client on node "node-1"
+      """
+      CORDON NODE node-2;
+      CORDON NODE node-3;
+      CREATE UNPACED DOMAIN shared_expiry_{{test_id}};
+      """
+    Given the active domain is "shared_expiry_{{test_id}}"
+    When these Plexus commands are executed on the leader node
+      """
+      CREATE SCHEMA event (
+        tenant STRING,
+        seq I64
+      );
+      CREATE SCHEMA tenant_branch ( tenant STRING );
+      CREATE BRANCH by_tenant SCHEMA tenant_branch TTL 10s;
+      CREATE WIRE JSON SCHEMA event_wire MODE STRICT (
+        tenant string,
+        seq integer
+      );
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
+      CREATE RELAY events SCHEMA event BRANCHED BY by_tenant;
+      CREATE ZEROMQ CLIENT emitter CONFIG {
+        'addr' = '{{zeromq_emit_addr}}',
+        'bind' = 'false'
+      };
+      CREATE VHOST edge shared-expiry-{{test_id}}.example.com;
+      CREATE HTTP ENDPOINT active_ingress ON edge PATH '/active';
+      CREATE HTTP ENDPOINT idle_ingress ON edge PATH '/idle';
+      CREATE HTTP ENDPOINT INGESTOR active_ingestor
+        FROM active_ingress MODE NO ACK
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
+        TO events INHERIT ALL BRANCHED BY by_tenant
+        SET tenant = message.tenant
+        FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE HTTP ENDPOINT INGESTOR idle_ingestor
+        FROM idle_ingress MODE NO ACK
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
+        TO events INHERIT ALL BRANCHED BY by_tenant
+        SET tenant = message.tenant
+        FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE ZEROMQ PUSH EMITTER emitter_output FROM events
+        TO emitter MODE NO ACK RETRY POLICY BACKOFF 100ms MAX 5s
+        ENCODE USING event_codec INHERIT ALL FLUSH EACH 8s MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      START;
+      """
+    When these Plexus commands are executed through the client on node "node-1"
+      """
+      UNCORDON NODE node-2;
+      UNCORDON NODE node-3;
+      """
+    Then node "node-3" eventually accepts http traffic for host "shared-expiry-{{test_id}}.example.com" path "/idle"
+      """
+      {"tenant":"shared","seq":1}
+      """
+    # Waiting for the emitter's flush ages the idle producer's branch. The active producer
+    # binds the same key on node-3 just before the idle producer's TTL expires.
+    Then within "20s" the observed broker receives payloads
+      """
+      {"tenant":"shared","seq":1}
+      """
+    Given remote relay admission for branch '{"tenant":"shared"}' in domain "shared_expiry_{{test_id}}" is paused
+    When http payload begins posting in the background to node "node-3" with host "shared-expiry-{{test_id}}.example.com" path "/active"
+      """
+      {"tenant":"shared","seq":2}
+      """
+    Then the remote relay admission pause for branch '{"tenant":"shared"}' in domain "shared_expiry_{{test_id}}" is reached
+    And node "node-3" observability metric "nervix_branch_evictions_total" with labels eventually equals 1
+      """
+      domain="shared_expiry_{{test_id}}"
+      branch="by_tenant"
+      physical_node_id="node-3"
+      reason="ttl"
+      """
+    And node "node-3" observability metric "nervix_branch_instances" with labels eventually equals 1
+      """
+      domain="shared_expiry_{{test_id}}"
+      branch="by_tenant"
+      physical_node_id="node-3"
+      """
+    When the remote relay admission pause for branch '{"tenant":"shared"}' in domain "shared_expiry_{{test_id}}" is released
+    Then within "30s" the observed broker receives payloads
+      """
+      {"tenant":"shared","seq":2}
+      """
+    And the background http publish succeeds
+
   # Every node-3 branch opens its own relay channel to the relay's owner on node-1. The first 600
   # tenants' branches expire, and then the same tenants return with new branches, so 1,201 channels
   # from node-3 reach node-1 within the ten minutes the receiver retains a channel's watermark,

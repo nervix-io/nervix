@@ -1948,6 +1948,10 @@ jobs:
         if: contains(github.event.pull_request.labels.*.name, 'extra-miri')
         run: just test-expiry-map-miri
 
+      - name: Relay channel Miri
+        if: contains(github.event.pull_request.labels.*.name, 'extra-miri')
+        run: just test-relay-channel-miri
+
       - name: Runner diagnostics before Expiry map mutation tests
         if: contains(github.event.pull_request.labels.*.name, 'extra-mutation')
         uses: ./.github/actions/runner-diagnostics
@@ -1957,6 +1961,10 @@ jobs:
       - name: Expiry map mutation tests
         if: contains(github.event.pull_request.labels.*.name, 'extra-mutation')
         run: just test-expiry-map-mutants
+
+      - name: Relay channel mutation tests
+        if: contains(github.event.pull_request.labels.*.name, 'extra-mutation')
+        run: just test-relay-channel-mutants
 
       - name: Setup uv for runner coverage
         if: contains(github.event.pull_request.labels.*.name, 'extra-runners')

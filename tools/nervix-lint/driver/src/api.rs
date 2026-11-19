@@ -14,14 +14,17 @@ use crate::contracts::Flow;
 declare_tool_lint! { pub nervix::CLAMPED_ARITHMETIC, Deny, "clamping and wrapping require their actual arithmetic meaning", report_in_external_macro: true }
 declare_tool_lint! { pub nervix::COMBINATOR_CONTROL_FLOW, Deny, "Option and Result decisions belong in explicit statements", report_in_external_macro: true }
 
-struct Call<'tcx> {
-    definition: DefId,
-    span: Span,
-    receiver: &'tcx Expr<'tcx>,
-    arguments: &'tcx [Expr<'tcx>],
+pub(crate) struct Call<'tcx> {
+    pub(crate) definition: DefId,
+    pub(crate) span: Span,
+    pub(crate) receiver: &'tcx Expr<'tcx>,
+    pub(crate) arguments: &'tcx [Expr<'tcx>],
 }
 
-fn call<'tcx>(cx: &LateContext<'tcx>, expression: &'tcx Expr<'tcx>) -> Option<Call<'tcx>> {
+pub(crate) fn call<'tcx>(
+    cx: &LateContext<'tcx>,
+    expression: &'tcx Expr<'tcx>,
+) -> Option<Call<'tcx>> {
     let typeck = cx.typeck_results();
     let (definition, span, token, receiver, arguments) = match expression.kind {
         ExprKind::MethodCall(segment, receiver, arguments, _) => (

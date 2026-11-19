@@ -17,7 +17,7 @@ use nervix_models::ClusterNodeName;
 use nervix_primitives::time::Instant;
 
 use super::{
-    relay_boundary::{RelayOutboundSlot, UnusedRelayPosition},
+    relay_boundary::{RelayDeliveryChannel, UnusedRelayPosition},
     relay_send_attempts::GrantCapacityRefusals,
     remote_dispatch::{PendingRemoteAckDelivery, RemoteDispatchError, RemoteDispatcher},
 };
@@ -36,16 +36,22 @@ impl RemoteDispatcher {
         node: &ClusterNodeName,
         mut payload: RelayPayload,
         batch: &RuntimeRecordBatch,
-        channel: &RelayOutboundSlot,
+        channel: RelayDeliveryChannel<'_>,
         deadline: Instant,
         capacity: GrantCapacityRefusals,
         mut acknowledgements: Option<&mut PendingRemoteAckDelivery>,
     ) -> Result<(), Report<RemoteDispatchError>> {
-        let mut unused_position = UnusedRelayPosition::new(channel, payload.delivery);
+        let mut unused_position = UnusedRelayPosition::new(channel.slot, payload.delivery);
         #[cfg(feature = "testing")]
-        self.fault_injection
-            .pause_relay_before_grant_if_armed(&payload.domain)
+        let _ = channel
+            .while_producer_lives(
+                self.fault_injection
+                    .pause_relay_before_grant_if_armed(&payload.domain),
+            )
             .await;
+        if channel.producer_ended() {
+            return Err(producer_evicted(node, payload.delivery.sequence));
+        }
         unused_position.disarm();
         match self
             .dispatch_admitted_relay_payload(node, &mut payload, channel, deadline, capacity)
@@ -78,6 +84,9 @@ impl RemoteDispatcher {
                 }
                 while cursor.admitted_rows() < cursor.total_rows() {
                     nervix_primitives::task::consume_budget().await;
+                    if channel.producer_ended() {
+                        return Err(producer_evicted(node, delivery.sequence));
+                    }
                     if Instant::now() >= deadline {
                         return Err(Report::new(RemoteDispatchError::AdmissionTotalTimeout {
                             target: node.clone(),
@@ -108,12 +117,14 @@ impl RemoteDispatcher {
                             target: node.clone(),
                         }));
                     }
-                    let encoded = selected
-                        .encode_arrow_ipc(
-                            self.executor(),
-                            nervix_execution::QueueAdmission::RefuseWhenFull,
-                        )
+                    let encoding = selected.encode_arrow_ipc(
+                        self.executor(),
+                        nervix_execution::QueueAdmission::RefuseWhenFull,
+                    );
+                    let encoded = channel
+                        .while_producer_lives(encoding)
                         .await
+                        .ok_or_else(|| producer_evicted(node, delivery.sequence))?
                         .change_context(RemoteDispatchError::Send {
                             target: node.clone(),
                         })?;
@@ -172,7 +183,8 @@ impl RemoteDispatcher {
                                 owner.admit_prefix(cursor.admitted_rows());
                             }
                             if cursor.admitted_rows() < cursor.total_rows() {
-                                delivery = channel.next_delivery_with_policy(payload.ack_timing);
+                                delivery =
+                                    channel.slot.next_delivery_with_policy(payload.ack_timing);
                                 unused_position.retain(delivery);
                             }
                         }
@@ -192,6 +204,13 @@ impl RemoteDispatcher {
             }
         }
     }
+}
+
+fn producer_evicted(node: &ClusterNodeName, sequence: u64) -> Report<RemoteDispatchError> {
+    Report::new(RemoteDispatchError::BranchEvicted {
+        target: node.clone(),
+        sequence,
+    })
 }
 
 #[cfg(test)]

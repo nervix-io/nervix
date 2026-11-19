@@ -225,7 +225,7 @@ impl Arbitrary<'_> {
         if self.entropy.flag() {
             OutputBranch::BranchedBy {
                 branch: self.name(),
-                assignments: self.assignments(0, false),
+                assignments: self.assignments(1, false),
             }
         } else {
             OutputBranch::Unbranched

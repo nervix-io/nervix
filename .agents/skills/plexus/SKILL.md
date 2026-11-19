@@ -665,7 +665,8 @@ literal HTTP polling headers, at model creation and when a later cap is lowered.
 - Include Roto `test` blocks with every agent-generated UDF. Creation runs those tests and rejects
   the UDF without persisting it when any test rejects.
 - Select `BRANCHED BY <branch>` or `UNBRANCHED` explicitly. Normal processors preserve their named
-  branch; use a reingestor when the graph must repartition or remove branch grouping.
+  branch. Use a reingestor to enter a parametrization distinct from every input relay's or to
+  send records unbranched. See [Runtime Nodes](../../../docs/src/processors.md#reingestor).
 - Treat placement rules as path-gated overlays, not connectivity-independent groups. Use
   `REQUIRE COLOCATION` only for a hard same-cluster-node constraint; `PREFER COLOCATION` and
   `SUGGEST SEPARATION` are soft, `NEUTRAL` leaves scheduler heuristics active, and no hard

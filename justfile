@@ -67,7 +67,12 @@ fuzz-plan count="3":
 prepare-archive-counts-fuzz: (prepare-bolero "registry-archived-models")
 
 # Run all registered properties with bounded randomized cases and source-adjacent corpus replay.
-test-bolero filter="": bolero-deps
+# Native snapshot properties load the CPU runtime in their test process.
+test-bolero filter="": bolero-deps download-onnxruntime
+    #!/usr/bin/env bash
+    set -euo pipefail
+    ORT_DYLIB_PATH="${ORT_DYLIB_PATH:-$(bash scripts/download_onnxruntime.sh --print-path)}"
+    export ORT_DYLIB_PATH
     python3 -m scripts.bolero test {{ quote(filter) }}
 
 # Run selected registered owners with their canonical case, corpus and execution checks. Global
@@ -300,6 +305,7 @@ test: tests-deps build-client-jvm-tests build-client-ruby build-client-c-suites
         nervix-paced-simulation
         nervix-primitives
         nervix-rate-limit
+        nervix-relay-channel
         nervix-tls
         nervix-scenarios
         nervix-server
@@ -323,6 +329,7 @@ test: tests-deps build-client-jvm-tests build-client-ruby build-client-c-suites
         --package nervix-model-harness \
         --package nervix-paced-simulation \
         --package nervix-rate-limit \
+        --package nervix-relay-channel \
         --package nervix-tls \
         --package nervix-wasm
     cargo test --all-targets --features native --package nervix-primitives
@@ -1316,8 +1323,7 @@ test-list-conversions *args: build-deps
 
 # Create domains, users and resources through the web console's popup forms on in-process one- and
 # three-node clusters, with rejected, queued, recovered and pending submissions, and with only the
-# in-process server's prerequisites. The input is an absolute glob, so Cucumber reads the feature
-# file instead of walking the checkout; a literal path is no glob and selects nothing.
+# in-process server's prerequisites.
 [positional-arguments]
 test-visual-create *args: build-web-console wasm-processor-guests download-onnxruntime
     #!/usr/bin/env bash
@@ -1327,7 +1333,7 @@ test-visual-create *args: build-web-console wasm-processor-guests download-onnxr
         --input "$PWD/tests/features/web-console/visual_create{,}.feature" "$@"
 
 # Create ingestors through the web console's visual form on in-process one- and three-node clusters,
-# their RATE LIMIT rows included. The input is an absolute glob, as `test-visual-create` explains.
+# their RATE LIMIT rows included.
 [positional-arguments]
 test-visual-create-ingestor *args: build-web-console wasm-processor-guests download-onnxruntime
     #!/usr/bin/env bash
@@ -1367,8 +1373,7 @@ test-placement-members *args: build-web-console download-onnxruntime
 
 # Create placement rules, use the contextual create actions and build a complete graph in one
 # transaction through the web console's visual forms on in-process one- and three-node clusters,
-# with only the in-process server's prerequisites. The input is an absolute glob, so Cucumber
-# reads the two feature files instead of walking the checkout.
+# with only the in-process server's prerequisites.
 [positional-arguments]
 test-visual-placement-graph *args: build-web-console wasm-processor-guests download-onnxruntime
     #!/usr/bin/env bash
@@ -1788,7 +1793,7 @@ test-deadlock-probes features="deloxide" *args:
 # The packages whose `shuttle_` checks `test-shuttle` explores, as the Shuttle inventory lists them,
 # and whose test builds `shuttle-clippy-targets` lints. scripts/tests/test_shuttle_checks.py holds
 # this list to the inventory.
-shuttle_test_packages := ["nervix-tls", "nervix-execution", "nervix-interconnect", "nervix-client-core", "nervix-connector", "nervix-connector-kafka", "nervix-connector-mqtt", "nervix-connector-rabbitmq", "nervix-connector-redis", "nervix-connector-sqs", "nervix-connector-syslog", "nervix-connector-websockets", "nervix-consensus", "nervix-server", "nervix-deadlock", "nervix-rate-limit"]
+shuttle_test_packages := ["nervix-tls", "nervix-execution", "nervix-interconnect", "nervix-client-core", "nervix-connector", "nervix-connector-kafka", "nervix-connector-mqtt", "nervix-connector-rabbitmq", "nervix-connector-redis", "nervix-connector-sqs", "nervix-connector-syslog", "nervix-connector-websockets", "nervix-consensus", "nervix-server", "nervix-deadlock", "nervix-rate-limit", "nervix-relay-channel"]
 
 # Explore every registered Shuttle check of a production owner, each in its own process: under the
 # exploration it declares, then under the uncontrolled-nondeterminism detector. The inventory in
@@ -2670,6 +2675,91 @@ test-runtime-state-capabilities: tests-deps
 test-expiry-map:
     cargo test --package nervix-expiry-map
 
+# Test the standalone broadcast channel and its byte reservations.
+test-relay-channel *args:
+    cargo test --package nervix-relay-channel --lib -- {{ args }}
+
+# Run just this package's models with the common evidence and weakening checks.
+test-relay-channel-loom phase="run":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    python3 - {{ quote(phase) }} {{ quote(cargo_target_dir) }} <<'PYTHON'
+    import sys
+    from pathlib import Path
+    from scripts import loom_models
+
+    root = Path.cwd()
+    target = Path(sys.argv[2]).resolve()
+    inventory = loom_models.parse_inventory((root / loom_models.INVENTORY).read_text())
+    invariants = tuple(model for model in inventory.invariants if model.package == "nervix-relay-channel")
+    identities = {model.id for model in invariants}
+    qualifications = tuple(item for item in inventory.qualifications if item.invariant in identities)
+    selected = loom_models.Inventory(invariants, qualifications)
+    commands = loom_models.Commands(root)
+    if sys.argv[1] == "qualify":
+        raise SystemExit(loom_models.qualify(commands, selected, target))
+    if sys.argv[1] != "run":
+        raise SystemExit("expected run or qualify")
+    report = target / "relay-channel-loom.json"
+    raise SystemExit(loom_models.run_models(commands, selected, target, "", report=report))
+    PYTHON
+
+test-relay-channel-miri *args:
+    MIRIFLAGS="-Zmiri-disable-isolation" BOLERO_RANDOM_ITERATIONS=4 BOLERO_RANDOM_MAX_LEN=512 \
+        cargo +nightly miri test --package nervix-relay-channel --lib -- {{ args }}
+
+# Exercise deliberate changes to admission, cancellation, delivery and standstill invariants.
+# Each selector must continue to identify a mutation when the product code changes.
+test-relay-channel-mutants *args:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    selectors=(
+        'replace > with >= in Writer::try_reserve$'
+        'replace \|\| with && in Writer::try_reserve$'
+        'replace match guard state.waiting != 0 with false in Writer::try_reserve$'
+        'replace Granter::remove_cancelled with \(\)$'
+        'replace == with != in Granter::finish$'
+        'replace Publication<T>::arm_wait with \(\)$'
+        'replace Log<T>::link with \(\)$'
+        'replace Slot<T>::release with \(\)$'
+        'replace <impl Drop for Member<T>>::drop with \(\)$'
+        'replace Channel<T, K>::finish_retirements with \(\)$'
+        'replace != with == in Snapshot<T, K>::check$'
+    )
+    arguments=(--package nervix-relay-channel --timeout 10)
+    for selector in "${selectors[@]}"; do arguments+=(--re "$selector"); done
+    listed=$(cargo mutants "${arguments[@]}" --list)
+    for selector in "${selectors[@]}"; do
+        if ! rg --quiet -- "$selector" <<< "$listed"; then
+            echo "Missing relay channel mutation matching $selector" >&2
+            exit 1
+        fi
+    done
+    # These tests use direct calls or controlled polls for the mutated transitions, so a faulty
+    # wake-up or grant yields a test assertion without depending on a test process timeout.
+    cases=(
+        budget::slots::tests::publication_keys_round_trip_and_retire_without_wrapping
+        budget::tests::a_blocked_head_applies_the_return_without_granting_the_follower
+        channel::tests::an_empty_channel_starts_with_admission_disabled
+        channel::tests::capture_finishes_an_unsubscribe_that_was_cancelled_before_the_seal_drained
+        channel::tests::dropping_the_channel_frees_the_retained_position_of_a_suspended_reader
+        generation::tests::dropping_a_watch_removes_its_waiter_from_the_publication_path
+        log::tests::draining_slots_allows_the_writer_to_reuse_its_own_blocks
+        tests::a_later_small_request_leaves_room_for_the_head
+        tests::a_live_shrink_keeps_charges_and_refuses_new_overage
+        tests::dropping_the_channel_ends_sends_and_delivers_the_items_it_already_holds
+        tests::restoration_refuses_impossible_positions_reader_counts_and_total_weight
+        tests::standstill_round_trips_each_position_weight_and_closed_end
+        tests::strict_fit_uses_the_whole_reservation
+        waiters::tests::cancellation_after_charging_and_before_delivery_refunds_only_a_real_grant
+        waiters::tests::cancelling_a_follower_unlinks_it_while_the_head_is_still_waiting
+    )
+    cargo mutants "${arguments[@]}" {{ args }} -- -- --exact "${cases[@]}"
+
+# Run the standalone channel workloads. Keep releases comparable with the recorded baseline.
+bench-relay-channel *args:
+    cargo bench --package nervix-relay-channel --bench weighted -- {{ args }}
+
 # Bolero reads its checked-in corpus from the source tree, which Miri's isolation forbids, so the
 # Miri run lifts isolation and bounds the property's random cases beside that corpus.
 test-expiry-map-miri *args:
@@ -2716,6 +2806,7 @@ test-coverage-binaries: tests-deps
         nervix-paced-simulation
         nervix-primitives
         nervix-rate-limit
+        nervix-relay-channel
         nervix-tls
         nervix-scenarios
         nervix-server
@@ -2763,6 +2854,7 @@ test-coverage-binaries: tests-deps
         --package nervix-model-harness \
         --package nervix-paced-simulation \
         --package nervix-rate-limit \
+        --package nervix-relay-channel \
         --package nervix-tls \
         --package nervix-wasm
     coverage --all-targets --features native --package nervix-primitives
@@ -3754,6 +3846,7 @@ bench-smoke: build-web-console wasm-processor-guests download-onnxruntime check-
 # `coverage-native-extras` builds the console outside its instrumentation and then runs these in it.
 bench-smoke-bodies:
     cargo bench --profile dev --package nervix-primitives --features native --bench ordinary_cost -- --test
+    cargo bench --profile dev --package nervix-relay-channel --bench weighted -- --test
     cargo bench --profile dev --package nervix-server --bench relay_interaction --features benchmarks -- --test
     cargo bench --profile dev --package nervix-server --bench admitted_work --features benchmarks -- --test
     cargo bench --profile dev --package nervix-server --bench emitter_flush --features benchmarks -- --rows 1 --iterations 1 --trials 1 --warmup 0
@@ -4173,11 +4266,11 @@ clippy_shuttle_connector_packages_3 := [
     "nervix-connector-websockets",
 ]
 
-clippy_shuttle_runtime_packages := ["nervix-tls", "nervix-client-core", "nervix-execution", "nervix-interconnect", "nervix-wasm", "nervix-rate-limit"]
+clippy_shuttle_runtime_packages := ["nervix-tls", "nervix-client-core", "nervix-execution", "nervix-interconnect", "nervix-wasm", "nervix-rate-limit", "nervix-relay-channel"]
 
 # Every package `test-shuttle` explores, in two lanes: the runtime and server, and the connectors.
 # scripts/tests/test_shuttle_checks.py holds the two to an exact partition of shuttle_test_packages.
-clippy_shuttle_test_packages_1 := ["nervix-tls", "nervix-execution", "nervix-interconnect", "nervix-client-core", "nervix-consensus", "nervix-server", "nervix-deadlock", "nervix-rate-limit"]
+clippy_shuttle_test_packages_1 := ["nervix-tls", "nervix-execution", "nervix-interconnect", "nervix-client-core", "nervix-consensus", "nervix-server", "nervix-deadlock", "nervix-rate-limit", "nervix-relay-channel"]
 
 clippy_shuttle_test_packages_2 := [
     "nervix-connector",
@@ -4228,7 +4321,7 @@ clippy-lane-ordinary-foundation-2: *(clippy-target "ordinary-foundation-2" *clip
 [private]
 clippy-lane-ordinary-foundation-3: \
     *(clippy-target "ordinary-foundation-3" *clippy_foundation_packages_3 ["--all-features", "--all-targets"]) \
-    *(clippy-target "ordinary-foundation-3" *["nervix-execution", "nervix-model-harness", "nervix-rate-limit", "nervix-tls", "nervix-wasm"] ["--all-targets"]) \
+    *(clippy-target "ordinary-foundation-3" *["nervix-execution", "nervix-model-harness", "nervix-rate-limit", "nervix-relay-channel", "nervix-tls", "nervix-wasm"] ["--all-targets"]) \
     (clippy-target "ordinary-foundation-3" "nervix-deadlock" ["--all-targets", "--features", "report-tool"])
 
 [private]
@@ -4319,7 +4412,8 @@ loom-clippy-targets: clippy-lane-loom-1 clippy-lane-loom-2
 [private]
 clippy-lane-loom-1: \
     (clippy-target "loom-1" "nervix-primitives" ["--all-targets", "--features", "loom native"]) \
-    *(clippy-target "loom-1" *["nervix-execution", "nervix-model-harness", "nervix-interconnect", "nervix-connector-fake"] ["--all-targets", "--features", "loom"])
+    *(clippy-target "loom-1" *["nervix-execution", "nervix-model-harness", "nervix-interconnect", "nervix-connector-fake"] ["--all-targets", "--features", "loom"]) \
+    (clippy-target "loom-1" "nervix-relay-channel" ["--lib", "--profile", "test", "--features", "loom"])
 
 [private]
 clippy-lane-loom-2: \

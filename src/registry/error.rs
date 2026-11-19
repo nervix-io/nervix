@@ -16,9 +16,9 @@ use std::fmt;
 
 use error_stack::{Context, Report};
 use nervix_models::{
-    BranchSelection, ClientName, ConnectorKind, DomainName, EmitterEntityKind, EndpointName,
-    EndpointType, FieldName, IngestorEntityKind, IngestorMetadataType, ModelKind, ModelName,
-    RelayName,
+    BranchName, BranchSelection, ClientName, ConnectorKind, DomainName, EmitterEntityKind,
+    EndpointName, EndpointType, FieldName, IngestorEntityKind, IngestorMetadataType, ModelKind,
+    ModelName, ReingestorName, RelayName,
 };
 use nervix_vm::program::WindowAggregateFunction;
 use thiserror::Error;
@@ -331,6 +331,27 @@ impl fmt::Display for OtelMappingIssue {
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub(crate) enum RegistryError {
+    #[error(
+        "reingestor '{reingestor}' cannot use parametrization '{parametrization}' for both input \
+         relay '{input}' and output relay '{output}' in domain '{domain}'"
+    )]
+    ReingestorParametrizationConflict {
+        domain: DomainName,
+        reingestor: ReingestorName,
+        input: RelayName,
+        output: RelayName,
+        parametrization: BranchName,
+    },
+    #[error(
+        "output relay '{relay}' requires SET assignments for parametrization '{parametrization}' \
+         of model '{identifier}' in domain '{domain}'"
+    )]
+    MissingBranchKeyAssignments {
+        domain: DomainName,
+        identifier: ModelName,
+        relay: RelayName,
+        parametrization: BranchName,
+    },
     #[error("external partition topology is invalid in domain '{domain}'")]
     PartitionTopology { domain: DomainName },
     #[error("inferencer '{node}' has invalid tensor schemas in domain '{domain}'")]

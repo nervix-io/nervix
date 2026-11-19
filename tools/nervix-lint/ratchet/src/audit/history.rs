@@ -132,10 +132,13 @@ impl History {
         let text = Git::decode(output.stdout).change_context(Error::AuditRecord {
             record: AuditRecord::Baseline,
         })?;
-        let value: serde_json::Value = match serde_json::from_str(&text) {
+        let mut value: serde_json::Value = match serde_json::from_str(&text) {
             Ok(value) => value,
             Err(_) => return Ok(BTreeMap::new()),
         };
+        if let Some(fields) = value.as_object_mut() {
+            fields.remove("branch_inversion_sites");
+        }
         serde_json::from_value(value).change_context(Error::AuditRecord {
             record: AuditRecord::Baseline,
         })

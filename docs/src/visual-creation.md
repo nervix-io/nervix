@@ -468,6 +468,9 @@ The system guarantees that:
   outcomes, and is never sent again under a new identity.
 - Every page is bounded by its page size, and every console request by the session's request
   window and the console's outstanding limits.
+- A reingestor route can select `UNBRANCHED` or a named destination and key assignments. The
+  preview includes the selected branch clause. When the command runs, the registry checks that a
+  named destination differs from every input parametrization.
 
 It does not guarantee more than that:
 
@@ -477,9 +480,6 @@ It does not guarantee more than that:
 - Search text and dependency lists have no bound of their own beyond the session's string,
   collection and frame limits.
 - Drafts live only in the page, so a reload discards them.
-- A reingestor route whose branch action preserves the incoming branch builds a route without a
-  branch clause, which the route grammar refuses, so that form's command fails when the server
-  parses it. An explicit `UNBRANCHED` or `BRANCHED BY` choice builds an executable route.
 - REPL completion narrows a relay only by what its statement writes before the cursor. A
   statement's first input and an ingestor's or reingestor's route relay are offered from every
   relay, and a generator's materialized relay from every relay with materialized state on any

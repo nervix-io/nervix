@@ -24,8 +24,9 @@ Feature: Domain-paced branch buffering
         TO SCHEMA timed_event;
       CREATE SCHEMA tenant_branch (tenant STRING);
       CREATE BRANCH by_tenant SCHEMA tenant_branch TTL 5h;
+      CREATE BRANCH observed_by_tenant SCHEMA tenant_branch TTL 5h;
       CREATE RELAY fast_ingested SCHEMA timed_event BRANCHED BY by_tenant;
-      CREATE RELAY observed SCHEMA timed_event BRANCHED BY by_tenant;
+      CREATE RELAY observed SCHEMA timed_event BRANCHED BY observed_by_tenant;
       CREATE VHOST edge fast-buffering-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT fast_buffering_endpoint
         ON edge
@@ -46,7 +47,8 @@ Feature: Domain-paced branch buffering
         COLLECT FOR 1m MAX BATCH SIZE 1MiB
         TO observed
           INHERIT ALL
-          BRANCHED BY by_tenant
+          BRANCHED BY observed_by_tenant
+          SET tenant = message.tenant
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG;
       CREATE SUBSCRIPTION observed_subscription TO observed;
@@ -111,8 +113,9 @@ Feature: Domain-paced branch buffering
         TO SCHEMA timed_event;
       CREATE SCHEMA tenant_branch (tenant STRING);
       CREATE BRANCH by_tenant SCHEMA tenant_branch TTL 5h;
+      CREATE BRANCH observed_by_tenant SCHEMA tenant_branch TTL 5h;
       CREATE RELAY fast_ingested SCHEMA timed_event BRANCHED BY by_tenant;
-      CREATE RELAY observed SCHEMA timed_event BRANCHED BY by_tenant;
+      CREATE RELAY observed SCHEMA timed_event BRANCHED BY observed_by_tenant;
       CREATE VHOST edge fast-buffering-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT fast_buffering_endpoint
         ON edge
@@ -133,7 +136,8 @@ Feature: Domain-paced branch buffering
         COLLECT FOR 1m MAX BATCH SIZE 1MiB
         TO observed
           INHERIT ALL
-          BRANCHED BY by_tenant
+          BRANCHED BY observed_by_tenant
+          SET tenant = message.tenant
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG;
       CREATE SUBSCRIPTION observed_subscription TO observed;
@@ -272,8 +276,9 @@ Feature: Domain-paced branch buffering
         TO SCHEMA timed_event;
       CREATE SCHEMA tenant_branch (tenant STRING);
       CREATE BRANCH by_tenant SCHEMA tenant_branch TTL 5m;
+      CREATE BRANCH observed_by_tenant SCHEMA tenant_branch TTL 5m;
       CREATE RELAY collect_ingested SCHEMA timed_event BRANCHED BY by_tenant;
-      CREATE RELAY observed SCHEMA timed_event BRANCHED BY by_tenant;
+      CREATE RELAY observed SCHEMA timed_event BRANCHED BY observed_by_tenant;
       CREATE VHOST edge collect-buffering-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT collect_buffering_endpoint
         ON edge
@@ -294,7 +299,8 @@ Feature: Domain-paced branch buffering
         COLLECT FOR 100us MAX BATCH SIZE 1MiB
         TO observed
           INHERIT ALL
-          BRANCHED BY by_tenant
+          BRANCHED BY observed_by_tenant
+          SET tenant = message.tenant
           FLUSH EACH 1h MAX BATCH SIZE 1B
           ON MESSAGE ERROR LOG;
       CREATE SUBSCRIPTION observed_subscription TO observed;

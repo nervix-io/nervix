@@ -148,7 +148,16 @@ pub(super) enum ClaimCatalog {
     /// The catalog is being read from every peer unit.
     Reading,
     /// Every peer unit answered: the key fingerprints each holds that land in this unit.
-    Read(BTreeMap<BranchKeyFingerprint, Unit>),
+    Read(
+        #[cfg_attr(
+            nervix_lint,
+            expect(
+                nervix::branch_inversion,
+                reason = "this branch collection supports checkpoints, partition transfers or state recovery; use the owning partition in https://app.clickup.com/t/86bd1z3ng"
+            )
+        )]
+        BTreeMap<BranchKeyFingerprint, Unit>,
+    ),
 }
 
 /// How a claimant proceeds with one input for a key it does not hold.
@@ -193,6 +202,13 @@ pub(super) struct CatalogedKey {
 /// What one claimant's catalog read found: every key another unit holds for it, by fingerprint.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(super) struct ReadCatalog {
+    #[cfg_attr(
+        nervix_lint,
+        expect(
+            nervix::branch_inversion,
+            reason = "this branch collection supports checkpoints, partition transfers or state recovery; use the owning partition in https://app.clickup.com/t/86bd1z3ng"
+        )
+    )]
     keys: BTreeMap<BranchKeyFingerprint, CatalogedKey>,
 }
 
@@ -203,6 +219,13 @@ impl ReadCatalog {
 
     /// The unit holding each key, by fingerprint.
     pub(super) fn holders(&self) -> BTreeMap<BranchKeyFingerprint, Unit> {
+        #[cfg_attr(
+            nervix_lint,
+            expect(
+                nervix::branch_inversion,
+                reason = "this branch collection supports checkpoints, partition transfers or state recovery; use the owning partition in https://app.clickup.com/t/86bd1z3ng"
+            )
+        )]
         let mut holders = BTreeMap::new();
         for (fingerprint, cataloged) in &self.keys {
             holders.insert(*fingerprint, cataloged.holder);
@@ -221,9 +244,23 @@ impl ReadCatalog {
 /// rest back, until a resolution releases what it parked.
 pub(super) struct PartitionClaimant<I> {
     catalog: ClaimCatalog,
+    #[cfg_attr(
+        nervix_lint,
+        expect(
+            nervix::branch_inversion,
+            reason = "this branch collection supports checkpoints, partition transfers or state recovery; use the owning partition in https://app.clickup.com/t/86bd1z3ng"
+        )
+    )]
     parked: IndexMap<BranchKey, VecDeque<I>, ahash::RandomState>,
     parked_inputs: usize,
     capacity: usize,
+    #[cfg_attr(
+        nervix_lint,
+        expect(
+            nervix::branch_inversion,
+            reason = "this branch collection supports checkpoints, partition transfers or state recovery; use the owning partition in https://app.clickup.com/t/86bd1z3ng"
+        )
+    )]
     claiming: IndexMap<BranchKey, Unit, ahash::RandomState>,
 }
 
@@ -319,6 +356,13 @@ impl<I> PartitionClaimant<I> {
         holders: BTreeMap<BranchKeyFingerprint, Unit>,
     ) -> Vec<CatalogResolution<I>> {
         let mut resolutions = Vec::new();
+        #[cfg_attr(
+            nervix_lint,
+            expect(
+                nervix::branch_inversion,
+                reason = "this branch collection supports checkpoints, partition transfers or state recovery; use the owning partition in https://app.clickup.com/t/86bd1z3ng"
+            )
+        )]
         let mut waiting = Vec::new();
         for key in self.parked.keys() {
             if !self.claiming.contains_key(key) {

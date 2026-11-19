@@ -72,7 +72,7 @@ impl Runtime {
     }
 
     /// Deletes the stored state of every unit of `relay`. The state this node holds in memory
-    /// stays until [`Self::forget_materialized_relay_state`], so a swap that fails after this
+    /// stays until [`Self::purge_materialized_relay_state`], so a swap that fails after this
     /// deletion still finds it there.
     pub(in crate::runtime) fn purge_stored_materialized_relay_state(
         &self,
@@ -95,11 +95,18 @@ impl Runtime {
     }
 
     /// Drops the state this node holds in memory for every unit of `relay`, and its replication.
-    pub(in crate::runtime) fn forget_materialized_relay_state(
+    pub(in crate::runtime) fn purge_materialized_relay_state(
         &self,
         domain: &DomainName,
         relay: &RelayName,
     ) {
+        #[cfg_attr(
+            nervix_lint,
+            expect(
+                nervix::branch_inversion,
+                reason = "this branch collection supports checkpoints, partition transfers or state recovery; use the owning partition in https://app.clickup.com/t/86bd1z3ng"
+            )
+        )]
         let placements = self
             .inner
             .replicated_materialized_stream_states
@@ -120,7 +127,7 @@ impl Runtime {
     }
 
     /// Deletes the stored keyspace of `deduplicator`. The state this node holds in memory stays
-    /// until [`Self::forget_deduplicator_state`], so a swap that fails after this deletion still
+    /// until [`Self::purge_deduplicator_state`], so a swap that fails after this deletion still
     /// finds it there.
     pub(in crate::runtime) fn purge_stored_deduplicator_state(
         &self,
@@ -143,11 +150,18 @@ impl Runtime {
     }
 
     /// Drops the keyspace this node holds in memory for `deduplicator`, and its replication.
-    pub(in crate::runtime) fn forget_deduplicator_state(
+    pub(in crate::runtime) fn purge_deduplicator_state(
         &self,
         domain: &DomainName,
         deduplicator: &DeduplicatorName,
     ) {
+        #[cfg_attr(
+            nervix_lint,
+            expect(
+                nervix::branch_inversion,
+                reason = "this branch collection supports checkpoints, partition transfers or state recovery; use the owning partition in https://app.clickup.com/t/86bd1z3ng"
+            )
+        )]
         let placements = self
             .inner
             .replicated_deduplicator_states

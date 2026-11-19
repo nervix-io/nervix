@@ -26,6 +26,16 @@ fn report(seed: &[u8; 32]) -> CompilerReport {
         candidate_seed.rotate_left(usize::from(index) * 5 + 1);
         audit.push(audit_candidate(&candidate_seed, index));
     }
+    let branch_inversions = findings
+        .iter()
+        .take(3)
+        .map(|finding| BranchInversion {
+            owner: finding.owner.clone(),
+            declaration: text(seed),
+            span: finding.span.clone(),
+            expectation_reason: seed[3].is_multiple_of(2).then(|| text(seed)),
+        })
+        .collect();
     CompilerReport {
         compiler: text(seed),
         identity: text(seed),
@@ -35,6 +45,7 @@ fn report(seed: &[u8; 32]) -> CompilerReport {
         arguments,
         audit,
         findings,
+        branch_inversions,
         excluded_generated: integer(seed, 6),
         excluded_external: integer(seed, 7),
         complete: seed[14].is_multiple_of(2),

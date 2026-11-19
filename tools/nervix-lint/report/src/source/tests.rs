@@ -62,6 +62,58 @@ enum Choice { Data { #[cfg(feature = "testing")] value: u32 } }
 }
 
 #[test]
+fn branch_suppressions_in_inactive_items_and_macro_bodies_are_refused() {
+    for source in [
+        "#[cfg(any())] #[allow(nervix::branch_inversion)] struct Data;",
+        r#"
+macro_rules! storage {
+    () => {
+        #[expect(nervix::branch_inversion, reason = "repairs through https://app.clickup.com/t/fixture")]
+        struct Data;
+    };
+}
+"#,
+    ] {
+        let error = scan(vec![SourceInput {
+            path: "src/fixture.rs".into(),
+            source: source.into(),
+        }])
+        .expect_err("the declaration cannot lose its lint");
+        assert!(matches!(
+            error.current_context(),
+            SourceError::BranchExpectation { .. }
+        ));
+    }
+    assert!(sites(r#"
+struct Data {
+    #[cfg_attr(nervix_lint, expect(nervix::branch_inversion, reason = "repair https://app.clickup.com/t/fixture"))]
+    fields: u32,
+}
+"#).is_empty());
+}
+
+#[test]
+fn inactive_source_refuses_explicit_branch_collections_and_keeps_lookalikes() {
+    for source in [
+        "#[cfg(any())] struct \
+         State(::std::collections::BTreeSet<::nervix_models::BranchKeyFingerprint>);",
+        "macro_rules! state { () => { #[cfg(any())] struct \
+         State(::std::vec::Vec<::nervix_models::BranchKeyFingerprint>); }; }",
+    ] {
+        let error = scan(vec![SourceInput {
+            path: "src/fixture.rs".into(),
+            source: source.into(),
+        }])
+        .expect_err("inactive source holds a known branch identity collection");
+        assert!(matches!(
+            error.current_context(),
+            SourceError::InactiveBranchCollection { .. }
+        ));
+    }
+    assert!(sites("#[cfg(any())] struct State(own::Vec<own::BranchKeyFingerprint>);").is_empty());
+}
+
+#[test]
 fn malformed_authored_source_fails_with_its_own_location() {
     let result = scan(vec![SourceInput {
         path: "src/broken.rs".into(),
@@ -147,6 +199,36 @@ fn bolero_source_syntax_preserves_casts_and_gates() {
         let decoded = serde_json::from_slice::<Vec<SourceSite>>(&bytes)
             .assured("the encoded source sites are valid");
         assert_eq!(decoded, result);
+
+        let level = if seed[4].is_multiple_of(2) { "expect" } else { "allow" };
+        let result = scan(vec![SourceInput {
+            path: input.path,
+            source: format!(
+                "#[cfg(any())]\nstruct Data {{ #[cfg_attr(nervix_lint, {level}(nervix::branch_inversion, reason = \"repair https://app.clickup.com/t/fixture\"))] data: u32 }}"
+            ),
+        }]);
+        if level == "expect" {
+            assert!(result.assured("the field owns one expectation").is_empty());
+        } else {
+            let error = result.expect_err("blanket suppression is refused");
+            assert!(matches!(error.current_context(), SourceError::BranchExpectation { line: 2, .. }));
+        }
+
+        let collection = if seed[5].is_multiple_of(2) {
+            "::std::vec::Vec<::nervix_models::BranchKeyFingerprint>"
+        } else {
+            "::std::vec::Vec<local::BranchKeyFingerprint>"
+        };
+        let inactive = scan(vec![SourceInput {
+            path: "src/fixture.rs".into(),
+            source: format!("#[cfg(any())]\nstruct Data({collection});"),
+        }]);
+        if seed[5].is_multiple_of(2) {
+            let error = inactive.expect_err("the inactive collection names a real identity");
+            assert!(matches!(error.current_context(), SourceError::InactiveBranchCollection { line: 2, .. }));
+        } else {
+            assert!(inactive.assured("the type is a lookalike").is_empty());
+        }
     });
 }
 

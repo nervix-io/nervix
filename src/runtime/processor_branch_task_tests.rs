@@ -158,6 +158,7 @@ async fn a_branch_task_ends_with_the_handle_its_processor_task_holds() {
     let entry = ProcessorBranchTask {
         input,
         commands,
+        delivery_lifetime: nervix_primitives::sync::CancellationToken::new(),
         task: nervix_primitives::sync::blocking::Mutex::new(Some(AbortOnDropHandle::new(task))),
     };
 
@@ -205,6 +206,7 @@ async fn waiting_branch_task_for_test(
         ProcessorBranchTask {
             input,
             commands,
+            delivery_lifetime: nervix_primitives::sync::CancellationToken::new(),
             task: nervix_primitives::sync::blocking::Mutex::new(Some(AbortOnDropHandle::new(task))),
         },
         has_ended,
@@ -534,6 +536,7 @@ async fn processor_dispatch_hands_dequeued_work_into_branch_mailbox() {
         ProcessorBranchSlot::Live(ProcessorBranchTask {
             input: input_tx,
             commands,
+            delivery_lifetime: nervix_primitives::sync::CancellationToken::new(),
             task: nervix_primitives::sync::blocking::Mutex::new(Some(AbortOnDropHandle::new(task))),
         }),
     );
@@ -602,6 +605,7 @@ async fn accepted_processor_input_records_branch_activity_at_its_own_domain_time
         ProcessorBranchSlot::Live(ProcessorBranchTask {
             input: input_tx,
             commands,
+            delivery_lifetime: nervix_primitives::sync::CancellationToken::new(),
             task: nervix_primitives::sync::blocking::Mutex::new(Some(AbortOnDropHandle::new(task))),
         }),
     );

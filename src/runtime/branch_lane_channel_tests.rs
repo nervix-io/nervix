@@ -45,7 +45,6 @@ struct LaneRelays {
     runtime: Runtime,
     domain: DomainName,
     template: BranchInstanceTemplate,
-    published_services: Arc<RelayBoundaryServices>,
     sibling_services: Arc<RelayBoundaryServices>,
 }
 
@@ -76,20 +75,30 @@ impl LaneRelays {
             runtime,
             domain,
             template,
-            published_services,
             sibling_services,
         }
     }
 
     /// The ingress channels of `key` on the relay the lane publishes through and on its sibling.
-    fn ingress_slots(&self, key: &Option<BranchKey>) -> BranchKeyIngressSlots {
+    async fn ingress_slots(
+        &self,
+        key: &Option<BranchKey>,
+        instance: &BranchInstanceRuntime,
+    ) -> BranchKeyIngressSlots {
         BranchKeyIngressSlots {
-            published: self.published_services.ingress_slot(key, Unit::SINGLE),
+            published: instance
+                .lock()
+                .await
+                .relays
+                .get(&named::<RelayName>("routed_orders"))
+                .expect("the fixture binds its output relay")
+                .retained_ingress()
+                .expect("the producer retains its ingress"),
             sibling: self.sibling_services.ingress_slot(key, Unit::SINGLE),
         }
     }
 
-    async fn entrypoint_branch(&self, key: &Option<BranchKey>) -> Mutex<BranchRuntime> {
+    async fn entrypoint_branch(&self, key: &Option<BranchKey>) -> BranchInstanceRuntime {
         self.template
             .instantiate(&self.runtime, &self.domain, key.clone(), 1)
             .await
@@ -115,14 +124,19 @@ impl BranchKeyIngressSlots {
     }
 }
 
-/// A processor branch task whose task already finished, so ending the branch waits for nothing.
-fn finished_processor_branch_task() -> ProcessorBranchTask {
+/// Keeps the processor's instantiated producer until the production stop path ends its task.
+fn processor_branch_task(instance: BranchInstanceRuntime) -> ProcessorBranchTask {
     let (input, _) = mpsc::channel(1);
-    let (commands, _) = mpsc::channel(1);
-    let task = nervix_primitives::task::spawn(async {});
+    let (commands, mut stop) = mpsc::channel(1);
+    let delivery_lifetime = instance.delivery_lifetime.clone();
+    let task = nervix_primitives::task::spawn(async move {
+        drop(stop.recv().await);
+        drop(instance);
+    });
     ProcessorBranchTask {
         input,
         commands,
+        delivery_lifetime,
         task: nervix_primitives::sync::blocking::Mutex::new(Some(AbortOnDropHandle::new(task))),
     }
 }
@@ -131,13 +145,14 @@ fn finished_processor_branch_task() -> ProcessorBranchTask {
 async fn an_expiring_processor_branch_ends_only_the_channels_it_publishes_through() {
     let lane = LaneRelays::new();
     let key = string_branch_key("tenant", "acme");
-    let slots = lane.ingress_slots(&key);
+    let branch = lane.entrypoint_branch(&key).await;
+    let slots = lane.ingress_slots(&key, &branch).await;
     let mut instances = ProcessorBranches::new();
     instances.insert_restored(
         key.clone(),
         last_input(),
         1,
-        ProcessorBranchSlot::Live(finished_processor_branch_task()),
+        ProcessorBranchSlot::Live(processor_branch_task(branch)),
     );
 
     expire_processor_branch_instances(
@@ -159,19 +174,21 @@ async fn an_evicted_processor_branch_ends_only_the_channels_it_publishes_through
     let lane = LaneRelays::new();
     let evicted = string_branch_key("tenant", "acme");
     let retained = string_branch_key("tenant", "globex");
-    let slots = lane.ingress_slots(&evicted);
+    let evicted_branch = lane.entrypoint_branch(&evicted).await;
+    let retained_branch = lane.entrypoint_branch(&retained).await;
+    let slots = lane.ingress_slots(&evicted, &evicted_branch).await;
     let mut instances = ProcessorBranches::new();
     instances.insert_restored(
         evicted.clone(),
         last_input(),
         1,
-        ProcessorBranchSlot::Live(finished_processor_branch_task()),
+        ProcessorBranchSlot::Live(processor_branch_task(evicted_branch)),
     );
     instances.insert_restored(
         retained.clone(),
         long_after_last_input(),
         2,
-        ProcessorBranchSlot::Live(finished_processor_branch_task()),
+        ProcessorBranchSlot::Live(processor_branch_task(retained_branch)),
     );
 
     evict_processor_branch_instances_to_capacity(
@@ -196,8 +213,8 @@ async fn an_expiring_entrypoint_branch_ends_only_the_channels_it_publishes_throu
     let lane = LaneRelays::new();
     let key = string_branch_key("tenant", "acme");
     let branch = lane.entrypoint_branch(&key).await;
-    let slots = lane.ingress_slots(&key);
-    let mut instances = BranchInstanceRegistry::<Option<BranchKey>, Mutex<BranchRuntime>>::new();
+    let slots = lane.ingress_slots(&key, &branch).await;
+    let mut instances = BranchInstanceRegistry::new();
     instances.insert_restored(key.clone(), last_input(), 1, branch);
 
     let expired = expire_branch_instance_instances(
@@ -216,14 +233,66 @@ async fn an_expiring_entrypoint_branch_ends_only_the_channels_it_publishes_throu
 }
 
 #[nervix_primitives::test]
+async fn an_expiring_entrypoint_preserves_a_second_producers_relay_channel() {
+    let lane = LaneRelays::new();
+    let key = string_branch_key("tenant", "acme");
+    let idle = lane.entrypoint_branch(&key).await;
+    let active = lane.entrypoint_branch(&key).await;
+    let slot = lane.ingress_slots(&key, &idle).await.published;
+    let first_delivery = slot.next_delivery();
+    let mut instances = BranchInstanceRegistry::new();
+    instances.insert_restored(key.clone(), last_input(), 1, idle);
+
+    let expired = expire_branch_instance_instances(
+        &lane.runtime,
+        &lane.domain,
+        &named::<IngestorName>("idle_source"),
+        &lane.template,
+        long_after_last_input(),
+        Duration::from_secs(1),
+        &mut instances,
+    )
+    .await;
+
+    assert_eq!(expired, vec![key.clone()]);
+    assert!(
+        !slot.cancellation().is_cancelled(),
+        "another producer still holds this branch channel"
+    );
+    let retained = lane.ingress_slots(&key, &active).await.published;
+    assert!(StdArc::ptr_eq(&slot, &retained));
+    let next_delivery = retained.next_delivery();
+    assert_eq!(
+        next_delivery.channel_incarnation,
+        first_delivery.channel_incarnation
+    );
+    assert_eq!(next_delivery.sequence, first_delivery.sequence + 1);
+
+    active.into_inner().evict().await;
+    assert!(
+        slot.cancellation().is_cancelled(),
+        "the shared channel ends when its last producer ends"
+    );
+    let rebound = lane.entrypoint_branch(&key).await;
+    let reopened = lane
+        .ingress_slots(&key, &rebound)
+        .await
+        .published
+        .next_delivery();
+    assert!(reopened.channel_incarnation > next_delivery.channel_incarnation);
+    assert_eq!(reopened.sequence, 0);
+    drop(rebound);
+}
+
+#[nervix_primitives::test]
 async fn an_evicted_entrypoint_branch_ends_only_the_channels_it_publishes_through() {
     let lane = LaneRelays::new();
     let evicted = string_branch_key("tenant", "acme");
     let retained = string_branch_key("tenant", "globex");
     let evicted_branch = lane.entrypoint_branch(&evicted).await;
     let retained_branch = lane.entrypoint_branch(&retained).await;
-    let slots = lane.ingress_slots(&evicted);
-    let mut instances = BranchInstanceRegistry::<Option<BranchKey>, Mutex<BranchRuntime>>::new();
+    let slots = lane.ingress_slots(&evicted, &evicted_branch).await;
+    let mut instances = BranchInstanceRegistry::new();
     instances.insert_restored(evicted.clone(), last_input(), 1, evicted_branch);
     instances.insert_restored(
         retained.clone(),
@@ -261,5 +330,6 @@ fn deloxide_branch_lane_channel_retirement() {
     an_expiring_processor_branch_ends_only_the_channels_it_publishes_through();
     an_evicted_processor_branch_ends_only_the_channels_it_publishes_through();
     an_expiring_entrypoint_branch_ends_only_the_channels_it_publishes_through();
+    an_expiring_entrypoint_preserves_a_second_producers_relay_channel();
     an_evicted_entrypoint_branch_ends_only_the_channels_it_publishes_through();
 }

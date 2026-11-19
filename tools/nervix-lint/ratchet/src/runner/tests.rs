@@ -81,6 +81,7 @@ impl Fixture {
             crate_source: source.display().to_string(),
             arguments: Vec::new(),
             findings: Vec::new(),
+            branch_inversions: Vec::new(),
             audit: Vec::new(),
             excluded_generated: 0,
             excluded_external: 0,

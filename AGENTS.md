@@ -201,8 +201,8 @@ violates instead of softening the contract to match today's imports.
   key-version change still refreshes interests, prerequisites and routes without offering a
   membership event. Every server notice carries its semantic kind, and clients and bindings route
   notices by that kind; notice text is display-only.
-- Runtime execution is materialized per concrete branch; branch-local state, scheduling, buffering
-  and materialized views stay visibly branch-local in types and ownership.
+- Branch runtime ownership and its relation to scheduling are defined in
+  [A branch owns its runtime](#a-branch-owns-its-runtime).
 - Server endpoint definitions and bound intakes form one immutable host-and-path publication. A
   request resolves it once, and a WebSocket connection keeps its selected route and signaling
   protocol. An ingestor's close or drop ends its exact intake lifetime before the binding is withdrawn,
@@ -491,6 +491,8 @@ keeps the chapter current in the same change. Where areas meet, each chapter kee
   execution contracts, a Shuttle check or Loom model, and the diagnostic mode's deadlock detection
   and its evidence. A change that adds a concurrent map, or changes how often one is reached or what
   disposes of it, also updates `tests/concurrent-map-inventory-ledger.md`.
+- [Branch-Owned Runtime](docs/src/branch-owned-runtime.md): parametrizer partition ownership,
+  branch membership publication, branch-owned parts and the partition invariant.
 - [VM Functions](docs/src/vm-functions.md): expression lowering, the semantic catalog and function
   registration, type or sensitivity checking, constant folding or expression sharing, compiled
   programs and their prepared artifacts, the runtime bridge and execution context, scalar operands,
@@ -629,8 +631,9 @@ keeps the chapter current in the same change. Where areas meet, each chapter kee
   encode unbranched execution with an empty string, empty map, zero-field schema, synthetic root
   branch or reserved user identifier.
 - Ingestors construct outgoing branches route by route.
-- Reingestors are branch-boundary nodes: each route may preserve the incoming branch, construct a
-  different branch or become unbranched.
+- Reingestors are branch-boundary nodes. Each route becomes unbranched or constructs a key for a
+  named parametrization distinct from every input relay's. Equal key schemas or values still
+  require the route to evaluate the destination's key assignments.
 - Junctions, deduplicators, reorderers, window processors, inferencers, WASM processors, correlators
   and generators preserve branch identity. Their branch declaration is node-wide, and every input
   and output uses that exact named branch.
@@ -643,6 +646,25 @@ keeps the chapter current in the same change. Where areas meet, each chapter kee
 - Error routes preserve the branch in which the failed operation executed, and their target relay
   has the same exact branch declaration; ingestor errors are unbranched.
 
+### A branch owns its runtime
+
+A branch is the owner of everything that exists for its key: its part of each relay, its processor tasks, its route and collect buffers, timers, state and metrics. They are created when the branch is created and removed, whole, when the branch is removed. A relay, processor, ingestor, emitter or generator is a template that a branch instantiates; it never contains branches.
+
+- Each partition of a parametrizer is one scheduled unit with one owner node. It alone holds the registry of that partition's branches and decides their creation, limit, draining, eviction and expiry. The limit is counted, and a branch is evicted, only within its own partition; no partition counts, drains or evicts another partition's branch. It publishes its decisions as the partition's branch table. Every cluster node that runs parts of that partition's branches keeps one view of that table, changed only by those decisions. The registry, the table and that one view on each cluster node are the only branch-keyed collections in Nervix. The units of relays, processors and other nodes for that partition follow its decisions and decide none of their own, whether they are on the same node or another.
+- A producer, consumer or task reaches its branch's part through a handle resolved when it was bound to that branch, and keeps the handle. Nothing looks a branch up per record, batch, frame or acknowledgement. The one exception is the entry point that computes a record's key: it resolves that key once, where the key is computed, through the branch table, and nowhere else.
+- Unparametrized work is the single-instance case of the same ownership, never a separate path owned by a node.
+- A message never crosses a partition boundary inside its branch. From the route that creates a branch to the reingestor or emitter that ends it, every hop delivers the message to the same partition of the same parametrizer. A message reaches another partition only by entering another branch, through a reingestor route that parametrizes it anew, or by leaving parametrized execution. A repartition moves a whole branch, with its state, to another partition; at every moment the branch belongs to exactly one partition. Placement rules are therefore written against graph nodes, and the scheduler applies them to every partition uniformly; no rule, node or task addresses one partition's data from another's.
+
+These are defects to reject, however spelled:
+
+- A node of any kind, or a task serving one, holding a collection of branch keys, branches or per-branch state: a map, set, registry, index, cache, sorted sequence or scanned vector.
+- The same collection keyed by a fingerprint, an optional key, a wrapper, an alias, an interned index or a tuple containing a branch key, or reached through a generic parameter instantiated with one.
+- One task serving several branches through a per-branch map of buffers, queues, timers or lanes.
+- Anything but the parametrizer partition deciding, repeating or caching a branch's lifetime, limit, eviction or membership, the one view of its branch table on each cluster node excepted.
+- Moving such a collection into a helper, another module or crate, or behind a trait, so the node no longer names it.
+
+No justification makes an inversion acceptable: not that it is temporary, smaller, faster to write, already present nearby, required by a port or migration, or that the parametrizer partition cannot yet express what the node needs. When it cannot express it, the change extends the parametrizer partition. When a task appears to need an inversion, stop and report to the human directing the session before writing it. An existing inversion is a defect recorded on ClickUp against its repair task; it is never extended, copied, re-created after its removal or cited as precedent.
+
 ### Materialized state
 
 - Materialized dependencies are explicit, node-wide, same-domain and compatible with the node's
@@ -653,13 +675,15 @@ keeps the chapter current in the same change. Where areas meet, each chapter kee
   the wait wakes.
 - Duplicate dependencies are invalid. Defaults initialize every required field; omitted optional
   fields become typed nulls.
-- Individual materialized records may become ready and update independently, but eviction removes
-  the whole concrete branch and drops its suspended or buffered branch-local work.
+- Individual materialized records may become ready and update independently. When the parametrizer
+  partition removes a branch, its materialized records and suspended or buffered work follow that
+  decision.
 - Ingestors cannot access materialized state. Reingestors resolve state in the incoming branch,
   never a partially constructed outgoing branch.
-- A generator declares exactly one materialized relay in the simplified dependency form. A branch's
-  appearance starts a branch-local generator task, and its eviction drops the task and its buffered
-  output. Generators may have multiple routes, all preserving that source branch.
+- A generator declares exactly one materialized relay in the simplified dependency form. The
+  parametrizer partition's branch creation starts the generator task for that branch, and its
+  removal ends the task and drops its buffered output. Generators may have multiple routes, all
+  preserving that source branch.
 
 ### Flush and route errors
 
@@ -1076,7 +1100,7 @@ at `tests/`, depends on `httparse`.
 ## Architecture Rules and the Debt Ratchet
 
 [Architecture Rules And The Debt Ratchet](docs/src/architecture-enforcement.md) owns the complete
-eighteen-family contract matrix, the nine source-contract annotations, source and compiler scope,
+contract matrix, the nine source-contract annotations, source and compiler scope,
 report identity and reuse, the analysis toolchain and its upgrade, qualification and its CI
 selection, what each form of evidence establishes, and the workaround audit and its review limits.
 
@@ -1086,7 +1110,8 @@ Real Nervix compiler diagnostics, across the complete declared configuration mat
 consumption, language dependencies, recurring cluster awaits, node identities, installation state,
 synchronization, failure signatures, discarded outcomes, canonical panic APIs, report-bearing
 tracing fields, integer and `Duration` clamped arithmetic and `Option` and `Result` adapter control
-flow. Finite API recognition is Rust code in the rules, and no policy is inferred from filenames,
+flow and [branch collection ownership](#a-branch-owns-its-runtime). Finite API recognition is Rust
+code in the rules, and no policy is inferred from filenames,
 sharing traits or method names. Contracts and reviewed exceptions live beside their source owners
 under `cfg_attr(nervix_lint, ...)`, move with their module, and state the actual recurring,
 lifecycle, observer, outside or bounded execution with reasons and bounded identities; no owner
@@ -1153,11 +1178,14 @@ inventory and CI policy, and native coverage uses matching LLVM tools.
 Architecture debt is counted and only decreases. `just ratchet` counts oversized files, actual Rust
 cast expressions, struct fields whose presence depends on `cfg(feature = "testing")`, functions
 whose cyclomatic complexity exceeds 30 and [`hidden_tunables`](#node-settings) over tracked and
-newly authored Rust, and [`non_aws_lc_crypto`](#cryptography) over the product dependency graph.
+newly authored Rust, [`non_aws_lc_crypto`](#cryptography) over the product dependency graph, and
+[`branch_inversions`](#a-branch-owns-its-runtime) over the complete checked compiler matrix.
 Its stable source parser sees inactive branches and named or tuple fields; raw identifiers, import
 aliases, qualified paths and conditional documentation attributes are not those facts. CI fails
 when a structural count exceeds `debt-baseline.json`. A change may lower a count, never raise one;
 when a count falls, run `just ratchet --update` and commit the baseline.
+The branch ownership baseline also pins the resolved declarations. Its count and set of sites can
+only shrink, and each existing expectation names the task that will remove it.
 `just ratchet --show <count>` lists a count's sites. Some defects have no count: the gate refuses
 authored cryptography outside AWS-LC and a second AWS-LC module outright, whatever the baseline
 holds.

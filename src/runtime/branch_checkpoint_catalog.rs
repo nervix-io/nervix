@@ -81,6 +81,13 @@ pub(super) struct CheckpointPage {
     /// Where the replica stands once it applied this page.
     pub(super) cursor: BranchCheckpointCursor,
     /// The branches whose state went away.
+    #[cfg_attr(
+        nervix_lint,
+        expect(
+            nervix::branch_inversion,
+            reason = "this branch collection supports checkpoints, partition transfers or state recovery; use the owning partition in https://app.clickup.com/t/86bd1z3ng"
+        )
+    )]
     pub(super) removed: Vec<Option<BranchKey>>,
     /// The branch checkpoints that changed, each at its newest revision. A branch whose state went
     /// away and was registered again appears in both lists, and its checkpoint is the newer fact.
@@ -113,10 +120,31 @@ struct CatalogState {
     discarded_through: u64,
     /// How many registrations the catalog handed out.
     registrations: u64,
+    #[cfg_attr(
+        nervix_lint,
+        expect(
+            nervix::branch_inversion,
+            reason = "this branch collection supports checkpoints, partition transfers or state recovery; use the owning partition in https://app.clickup.com/t/86bd1z3ng"
+        )
+    )]
     entries: Entries,
     /// Every present branch by the sequence of its latest change.
+    #[cfg_attr(
+        nervix_lint,
+        expect(
+            nervix::branch_inversion,
+            reason = "this branch collection supports checkpoints, partition transfers or state recovery; use the owning partition in https://app.clickup.com/t/86bd1z3ng"
+        )
+    )]
     revisions: ChangeOrder,
     /// The removals the catalog kept, by the sequence of each. At most the configured removal history.
+    #[cfg_attr(
+        nervix_lint,
+        expect(
+            nervix::branch_inversion,
+            reason = "this branch collection supports checkpoints, partition transfers or state recovery; use the owning partition in https://app.clickup.com/t/86bd1z3ng"
+        )
+    )]
     removals: ChangeOrder,
 }
 
@@ -365,6 +393,13 @@ impl CatalogState {
             .revisions
             .range((Excluded(after), Unbounded))
             .peekable();
+        #[cfg_attr(
+            nervix_lint,
+            expect(
+                nervix::branch_inversion,
+                reason = "this branch collection supports checkpoints, partition transfers or state recovery; use the owning partition in https://app.clickup.com/t/86bd1z3ng"
+            )
+        )]
         let mut removed = Vec::new();
         let mut revised = Vec::new();
         let mut listed = 0_usize;

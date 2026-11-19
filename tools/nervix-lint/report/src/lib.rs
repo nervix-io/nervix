@@ -188,6 +188,23 @@ pub struct Finding {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
+pub struct BranchInversion {
+    pub owner: String,
+    pub declaration: String,
+    pub span: SourceSpan,
+    pub expectation_reason: Option<String>,
+}
+
+pub fn branch_repair_task(reason: &str) -> Option<&str> {
+    let (_, value) = reason.split_once("https://app.clickup.com/t/")?;
+    let end = value
+        .find(|c: char| !(c.is_ascii_alphanumeric() || c == '-'))
+        .unwrap_or(value.len());
+    (end > 0).then(|| &value[..end])
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct CompilerReport {
     pub compiler: String,
     pub identity: String,
@@ -196,6 +213,7 @@ pub struct CompilerReport {
     pub crate_source: String,
     pub arguments: Vec<String>,
     pub findings: Vec<Finding>,
+    pub branch_inversions: Vec<BranchInversion>,
     /// Review candidates for lint workarounds; aggregation of acquisitions ignores them.
     pub audit: Vec<audit::AuditCandidate>,
     pub excluded_generated: u32,

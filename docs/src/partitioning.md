@@ -36,14 +36,12 @@ The largest native partition coordinate must also fit the connectors' signed 32-
 
 ## Producers And Key Identity
 
-Kafka topic and Pulsar topic ingestors can construct inherited keys. Their immutable transport
-positions supply the external partition. Branch assignments construct the key fields and cannot
-choose the partition through an expression.
+Only Kafka topic and Pulsar topic ingestors can construct keys for a parametrization with
+inherited partitions. Their immutable transport positions supply the external partition. Branch
+assignments construct the key fields.
 
-Other constructing ingestors and constructing reingestor routes are refused. Routes that preserve
-an inherited key may continue to carry it through the graph. A key's canonical field text and
-fingerprint remain field-based; changing its external partition does not create a different
-business identity.
+Branch-preserving processor routes carry inherited keys through their own parametrization.
+A key's canonical field text and fingerprint remain field-based across external partitions.
 
 Co-producing topics must have equal observed partition counts. They must also publish each key
 consistently to its partition to preserve that key's source order. Nervix checks the observed

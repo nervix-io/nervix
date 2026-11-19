@@ -135,10 +135,10 @@ impl Runtime {
         for purge in &purges {
             match purge {
                 SwapStatePurge::Deduplicator(deduplicator) => {
-                    self.forget_deduplicator_state(domain, deduplicator);
+                    self.purge_deduplicator_state(domain, deduplicator);
                 }
                 SwapStatePurge::MaterializedRelay(relay) => {
-                    self.forget_materialized_relay_state(domain, relay);
+                    self.purge_materialized_relay_state(domain, relay);
                 }
             }
         }

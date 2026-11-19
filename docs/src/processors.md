@@ -872,8 +872,10 @@ batch counted once however many of its records are pending.
 
 ## Reingestor
 
-Reingestors are branch-boundary transforming nodes. Each route preserves the incoming exact branch,
-constructs another branch, or becomes unbranched:
+A reingestor transforms records and can change how they are grouped. Each route uses
+`UNBRANCHED` or constructs a key with `BRANCHED BY <branch> SET ...`. The named
+parametrization must match the destination relay and be distinct from every input relay's
+parametrization.
 
 ```plexus
 CREATE REINGESTOR repartition_events
@@ -888,12 +890,15 @@ CREATE REINGESTOR repartition_events
     ON MESSAGE ERROR LOG;
 ```
 
-When the outgoing branch name equals the incoming branch, no branch `SET` is allowed and the key is
-preserved. A message passes its input's `FROM ... WHERE` and then the reingestor's `FILTER WHERE`
-before any route constructs it. State lookup always uses the incoming branch, never a partially
-constructed outgoing key. The reingestor resolves the outgoing branch before buffering the route,
-so each concrete outgoing branch has an independent flush interval and size boundary. Downstream
-branch execution receives the completed Arrow batch and does not apply a second flush policy.
+Creation and alteration reject a matching name and identify the parametrization and both relays.
+The destination's `SET` expressions run for each row the route accepts, including when the input
+and destination share a key schema or their keys have equal values.
+
+A message passes its input's `FROM ... WHERE` and then the reingestor's `FILTER WHERE` before any
+route constructs it. State lookup uses the incoming branch. The reingestor resolves the outgoing
+branch before buffering the route, so each concrete outgoing branch has an independent flush
+interval and size boundary. The reingestor owns the flush cadence for the completed Arrow batch it
+hands to downstream branch execution.
 
 ### Altering Reingestors
 
@@ -916,8 +921,8 @@ ALTER REINGESTOR repartition_events
 ```
 
 The input, collection, filter, attachment, and materialized-state forms are the same as for
-junctions. Route add/replace bodies include the reingestor's required per-route `BRANCHED BY ...`
-or `UNBRANCHED` construction. Reingestors do not have a node-wide branching operation.
+junctions. Branching is set on each route. Added and replaced routes declare
+`BRANCHED BY <branch> SET ...` or `UNBRANCHED` for their destination.
 
 Every reingestor change uses entity pause because inputs, route construction, attachment, and
 dependency changes affect its relay consumers or branch-entrypoint wiring. Nervix gates both old

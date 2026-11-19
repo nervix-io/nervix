@@ -1679,8 +1679,29 @@ struct MetricSeries {
     connector: ConnectorInteractionMetrics,
     counters: DashMap<MetricKey, Arc<CounterSeries>>,
     histograms: DashMap<MetricKey, Arc<HistogramSeries>>,
+    #[cfg_attr(
+        nervix_lint,
+        expect(
+            nervix::branch_inversion,
+            reason = "relay and follower bookkeeping keeps its own branch entries; read the parametrizer partition in https://app.clickup.com/t/86bd1z0ty"
+        )
+    )]
     branch_counters: DashMap<BranchMetricKey, Arc<CounterSeries>>,
+    #[cfg_attr(
+        nervix_lint,
+        expect(
+            nervix::branch_inversion,
+            reason = "relay and follower bookkeeping keeps its own branch entries; read the parametrizer partition in https://app.clickup.com/t/86bd1z0ty"
+        )
+    )]
     branch_histograms: DashMap<BranchMetricKey, Arc<HistogramSeries>>,
+    #[cfg_attr(
+        nervix_lint,
+        expect(
+            nervix::branch_inversion,
+            reason = "relay and follower bookkeeping keeps its own branch entries; read the parametrizer partition in https://app.clickup.com/t/86bd1z0ty"
+        )
+    )]
     branch_instance_references: DashMap<BranchInstanceMetricKey, BranchInstanceReferences>,
     prometheus: PrometheusMetrics,
 }
@@ -5145,6 +5166,13 @@ impl RuntimeMetrics {
         &self,
         include: impl Fn(&MetricKey) -> bool,
     ) -> Vec<DataflowBranchStatistics> {
+        #[cfg_attr(
+            nervix_lint,
+            expect(
+                nervix::branch_inversion,
+                reason = "relay and follower bookkeeping keeps its own branch entries; read the parametrizer partition in https://app.clickup.com/t/86bd1z0ty"
+            )
+        )]
         let mut branches = BTreeMap::<BranchKeyFingerprint, DataflowStatistics>::new();
         for entry in self.series.branch_counters.iter() {
             let series = entry.key();

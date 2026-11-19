@@ -1,4 +1,163 @@
 Feature: Reingestor repartitioning
+  @reingestor_parametrization
+  Scenario Outline: A reingestor cannot send records back into any input parametrization
+    Given a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA order_event (tenant STRING);
+      CREATE SCHEMA tenant_key (tenant STRING);
+      CREATE BRANCH web_by_tenant SCHEMA tenant_key TTL 5m;
+      CREATE BRANCH store_by_tenant SCHEMA tenant_key TTL 5m;
+      CREATE RELAY web_orders SCHEMA order_event BRANCHED BY web_by_tenant;
+      CREATE RELAY store_orders SCHEMA order_event BRANCHED BY store_by_tenant;
+      CREATE RELAY routed_web_orders SCHEMA order_event BRANCHED BY web_by_tenant;
+      """
+    When these Plexus commands fail with "reingestor 'route_orders' cannot use parametrization 'web_by_tenant' for both input relay 'web_orders' and output relay 'routed_web_orders'"
+      """
+      CREATE REINGESTOR route_orders FROM <inputs>
+        TO routed_web_orders INHERIT ALL
+        BRANCHED BY web_by_tenant SET tenant = input.tenant
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
+      """
+
+    Examples:
+      | cluster_size | inputs                   |
+      | 1            | web_orders               |
+      | 3            | web_orders               |
+      | 1            | store_orders, web_orders |
+      | 3            | store_orders, web_orders |
+
+  @reingestor_parametrization
+  Scenario Outline: Reingestor alterations cannot introduce an input and output parametrization match
+    Given a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA order_event (tenant STRING);
+      CREATE SCHEMA tenant_key (tenant STRING);
+      CREATE BRANCH web_by_tenant SCHEMA tenant_key TTL 5m;
+      CREATE BRANCH store_by_tenant SCHEMA tenant_key TTL 5m;
+      CREATE RELAY web_orders SCHEMA order_event BRANCHED BY web_by_tenant;
+      CREATE RELAY store_orders SCHEMA order_event BRANCHED BY store_by_tenant;
+      CREATE RELAY routed_web_orders SCHEMA order_event BRANCHED BY web_by_tenant;
+      CREATE RELAY routed_store_orders SCHEMA order_event BRANCHED BY store_by_tenant;
+      CREATE REINGESTOR route_orders FROM store_orders
+        TO routed_web_orders INHERIT ALL
+        BRANCHED BY web_by_tenant SET tenant = input.tenant
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
+      """
+    When these Plexus commands fail with "reingestor 'route_orders' cannot use parametrization 'web_by_tenant' for both input relay 'web_orders' and output relay 'routed_web_orders'"
+      """
+      ALTER REINGESTOR route_orders ADD FROM web_orders;
+      """
+    And these Plexus commands fail with "reingestor 'route_orders' cannot use parametrization 'store_by_tenant' for both input relay 'store_orders' and output relay 'routed_store_orders'"
+      """
+      ALTER REINGESTOR route_orders
+        ADD ROUTE TO routed_store_orders INHERIT ALL
+          BRANCHED BY store_by_tenant SET tenant = input.tenant
+          FLUSH IMMEDIATE ON MESSAGE ERROR LOG,
+        DROP ROUTE TO routed_web_orders;
+      """
+    And these Plexus commands are executed on the leader node
+      """
+      SHOW CREATE REINGESTOR route_orders;
+      """
+    Then the last command output contains
+      """
+      CREATE REINGESTOR route_orders
+        FROM store_orders
+        ATTACHED
+        TO routed_web_orders
+          INHERIT ALL
+          BRANCHED BY web_by_tenant SET tenant = input.tenant
+          FLUSH IMMEDIATE
+          ON MESSAGE ERROR LOG;
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
+  @reingestor_parametrization
+  Scenario Outline: Distinct parametrizations with equal schemas compute keys for interleaved inputs
+    Given a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA order_event (tenant STRING, marker STRING);
+      CREATE SCHEMA tenant_key (tenant STRING);
+      CREATE BRANCH web_by_tenant SCHEMA tenant_key TTL 5m;
+      CREATE BRANCH store_by_tenant SCHEMA tenant_key TTL 5m;
+      CREATE BRANCH combined_by_tenant SCHEMA tenant_key TTL 5m;
+      CREATE RELAY web_orders SCHEMA order_event BRANCHED BY web_by_tenant;
+      CREATE RELAY store_orders SCHEMA order_event BRANCHED BY store_by_tenant;
+      CREATE RELAY combined_orders SCHEMA order_event BRANCHED BY combined_by_tenant;
+      CREATE WIRE JSON SCHEMA order_wire MODE STRICT (tenant string, marker string);
+      CREATE WIRE JSON CODEC order_codec FROM WIRE SCHEMA order_wire TO SCHEMA order_event;
+      CREATE VHOST edge http-{{test_id}}-reingestor-orders.example.com;
+      CREATE HTTP ENDPOINT web_endpoint ON edge PATH '/web';
+      CREATE HTTP ENDPOINT store_endpoint ON edge PATH '/store';
+      CREATE HTTP ENDPOINT INGESTOR web_ingest FROM web_endpoint MODE NO ACK
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING order_codec
+        TO web_orders INHERIT ALL
+        BRANCHED BY web_by_tenant SET tenant = input.tenant
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE HTTP ENDPOINT INGESTOR store_ingest FROM store_endpoint MODE NO ACK
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING order_codec
+        TO store_orders INHERIT ALL
+        BRANCHED BY store_by_tenant SET tenant = input.tenant
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE REINGESTOR combine_orders FROM web_orders, store_orders
+        TO combined_orders INHERIT ALL
+        BRANCHED BY combined_by_tenant SET tenant = LOWER(input.tenant)
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
+      CREATE SUBSCRIPTION combined_subscription TO combined_orders;
+      START;
+      """
+    When http payload is posted to host "http-{{test_id}}-reingestor-orders.example.com" path "/web"
+      """
+      {"tenant":"acme","marker":"first"}
+      """
+    Then within "10s" the relay subscription receives a payload
+      """
+      {"marker":"first","tenant":"acme"}
+      """
+    And the last relay subscription payload contains key fragment '{"tenant":"acme"}'
+    When http payload is posted to host "http-{{test_id}}-reingestor-orders.example.com" path "/store"
+      """
+      {"tenant":"BETA","marker":"second"}
+      """
+    Then within "10s" the relay subscription receives a payload
+      """
+      {"marker":"second","tenant":"BETA"}
+      """
+    And the last relay subscription payload contains key fragment '{"tenant":"beta"}'
+    When http payload is posted to host "http-{{test_id}}-reingestor-orders.example.com" path "/web"
+      """
+      {"tenant":"GAMMA","marker":"third"}
+      """
+    Then within "10s" the relay subscription receives a payload
+      """
+      {"marker":"third","tenant":"GAMMA"}
+      """
+    And the last relay subscription payload contains key fragment '{"tenant":"gamma"}'
+    When http payload is posted to host "http-{{test_id}}-reingestor-orders.example.com" path "/store"
+      """
+      {"tenant":"acme","marker":"fourth"}
+      """
+    Then within "10s" the relay subscription receives a payload
+      """
+      {"marker":"fourth","tenant":"acme"}
+      """
+    And the last relay subscription payload contains key fragment '{"tenant":"acme"}'
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
   Scenario Outline: Reingestor evaluates branch construction through the VM and changes grouping
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
