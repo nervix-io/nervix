@@ -182,6 +182,13 @@ impl Runtime {
     )> {
         let mut decoded = Vec::with_capacity(checkpoints.len());
         let mut charges = Vec::new();
+        #[cfg_attr(
+            nervix_lint,
+            expect(
+                nervix::branch_inversion,
+                reason = "this branch collection supports checkpoints, partition transfers or state recovery; use the owning partition in https://app.clickup.com/t/86bd1z3ng"
+            )
+        )]
         let mut placements = HashSet::default();
         for checkpoint in checkpoints {
             let placement = RuntimeStatePlacement::from_remote(checkpoint.placement)
@@ -335,6 +342,13 @@ fn merge_checkpoints(
         .ok_or_else(|| refuse(IngestorUnitLayoutError::Bounds))?;
     let mut offsets = Vec::new();
     let mut metrics = Vec::new();
+    #[cfg_attr(
+        nervix_lint,
+        expect(
+            nervix::branch_inversion,
+            reason = "this branch collection supports checkpoints, partition transfers or state recovery; use the owning partition in https://app.clickup.com/t/86bd1z3ng"
+        )
+    )]
     let mut branches = HashMap::default();
     for (placement, snapshot) in inputs {
         cancellation

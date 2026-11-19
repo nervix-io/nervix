@@ -715,6 +715,13 @@ pub enum ConcreteBranchCoverage {
     /// Only the named concrete keys participate.
     Selected {
         branch: BranchName,
+        #[cfg_attr(
+            nervix_lint,
+            expect(
+                nervix::branch_inversion,
+                reason = "the temporary WASM reset records its named branches in the transaction plan and report; replace this set through https://app.clickup.com/t/86bd53azw"
+            )
+        )]
         keys: CanonicalImpactSet<BranchKeyFingerprint>,
     },
 }

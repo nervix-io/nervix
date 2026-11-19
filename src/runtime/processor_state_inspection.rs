@@ -526,6 +526,13 @@ pub(crate) struct ProcessorStatePageBounds {
 /// The ordinary branch selector and, only during repartitioning, copies selected elsewhere.
 pub(crate) struct ProcessorStateSelection {
     pub(crate) branch: StateInspectionBranchSelection,
+    #[cfg_attr(
+        nervix_lint,
+        expect(
+            nervix::branch_inversion,
+            reason = "processor or generator bookkeeping independently tracks branches; use branch-owned parts or the partition table in https://app.clickup.com/t/86bd1z1bj"
+        )
+    )]
     pub(crate) partition_exclusions: Option<BTreeSet<BranchKeyFingerprint>>,
 }
 

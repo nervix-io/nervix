@@ -743,6 +743,10 @@ or for external delivery:
   a replica can hold a checkpoint whose acknowledgement arrived too late;
 - an ingestor that keeps redelivering while no owner accepts the input can deliver it to the recovered
   branch more than once;
+- after a failover, a guest's output can reach a survivor that has not yet started the consumer it
+  now runs; that survivor refuses the output, so the input the guest already accepted is negatively
+  acknowledged and redelivered, once for every refused attempt (see [Planned Ownership Handoffs And
+  Failover](control-plane.md#planned-ownership-handoffs-and-failover));
 - an ingestor without acknowledgements redelivers nothing, and loses the input in every window before
   local durability.
 

@@ -407,6 +407,7 @@ members = [
   "crates/primitives/macros",
   "crates/rate-limit",
   "crates/recovery",
+  "crates/relay-channel",
   "crates/simd-kernels",
   "crates/test-environment",
   "crates/nervix-cli",

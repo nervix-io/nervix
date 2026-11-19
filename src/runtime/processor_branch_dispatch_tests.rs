@@ -110,6 +110,7 @@ async fn processor_input_for_a_branch_task_that_stopped_fails_as_an_internal_err
         ProcessorBranchSlot::Live(ProcessorBranchTask {
             input: input_tx,
             commands,
+            delivery_lifetime: nervix_primitives::sync::CancellationToken::new(),
             task: nervix_primitives::sync::blocking::Mutex::new(Some(AbortOnDropHandle::new(task))),
         }),
     );

@@ -95,6 +95,13 @@ pub(super) struct ReplicatedMaterializedRelayState {
     assignment: StateAssignmentAuthority,
     /// Lifecycle changes publish a persistent index under the assignment barrier. Established
     /// branch updates retain their row publication and never reach this index.
+    #[cfg_attr(
+        nervix_lint,
+        expect(
+            nervix::branch_inversion,
+            reason = "materialized or emitter state groups its data by branch; move it to the branch in https://app.clickup.com/t/86bd1z3bd"
+        )
+    )]
     entries: ArcSwap<MaterializedBranches>,
     /// Advances whenever a branch appears in or leaves this state. A capture records it, so a
     /// snapshot sealed before an eviction cannot resurrect the branch that eviction dropped.
@@ -129,6 +136,13 @@ pub struct MaterializedRelayStateRead {
 pub struct MaterializedRelayStateOriginator {
     read: MaterializedRelayStateRead,
     assignment: StateAssignmentToken,
+    #[cfg_attr(
+        nervix_lint,
+        expect(
+            nervix::branch_inversion,
+            reason = "materialized or emitter state groups its data by branch; move it to the branch in https://app.clickup.com/t/86bd1z3bd"
+        )
+    )]
     branches: super::HashMap<Option<BranchKey>, MaterializedBranchRecord>,
 }
 
@@ -167,6 +181,13 @@ impl ReplicatedMaterializedRelayState {
         let Some(restored) = restored else {
             return state;
         };
+        #[cfg_attr(
+            nervix_lint,
+            expect(
+                nervix::branch_inversion,
+                reason = "materialized or emitter state groups its data by branch; move it to the branch in https://app.clickup.com/t/86bd1z3bd"
+            )
+        )]
         let mut entries = MaterializedBranches::default();
         for record in restored.records {
             let branch = MaterializedBranchRecord::new(record.row);
@@ -228,6 +249,13 @@ impl ReplicatedMaterializedRelayState {
         let read = MaterializedRelayStateRead {
             state: state.clone(),
         };
+        #[cfg_attr(
+            nervix_lint,
+            expect(
+                nervix::branch_inversion,
+                reason = "materialized or emitter state groups its data by branch; move it to the branch in https://app.clickup.com/t/86bd1z3bd"
+            )
+        )]
         let mut branches = super::HashMap::default();
         if binding.token_for(StateCapability::Originate).is_some() {
             for (key, published) in state.entries.load().iter() {
@@ -585,6 +613,13 @@ impl MaterializedRelayStateRead {
         &self,
         activated_at: nervix_models::Timestamp,
     ) -> BranchInstanceRegistry<Option<BranchKey>, ()> {
+        #[cfg_attr(
+            nervix_lint,
+            expect(
+                nervix::branch_inversion,
+                reason = "relay and follower bookkeeping keeps its own branch entries; read the parametrizer partition in https://app.clickup.com/t/86bd1z0ty"
+            )
+        )]
         let mut instances = BranchInstanceRegistry::new();
         for (branch, published) in self.state.entries.load().iter() {
             if published.load_full().is_some() {
@@ -615,6 +650,7 @@ impl MaterializedRelayStateOriginator {
                 let Some((previous, branch)) = self.branches.remove_entry(key) else {
                     return;
                 };
+                #[cfg_attr(nervix_lint, expect(nervix::branch_inversion, reason = "materialized or emitter state groups its data by branch; move it to the branch in https://app.clickup.com/t/86bd1z3bd"))]
                 let mut entries = (**state.entries.load()).clone();
                 entries.remove(&previous);
                 entries.insert(key.clone(), branch.published.clone());
@@ -670,6 +706,7 @@ impl MaterializedRelayStateOriginator {
             .assignment
             .authorize_exclusive(self.assignment, StateCapability::Originate, || {
                 let branch = MaterializedBranchRecord::new(record);
+                #[cfg_attr(nervix_lint, expect(nervix::branch_inversion, reason = "materialized or emitter state groups its data by branch; move it to the branch in https://app.clickup.com/t/86bd1z3bd"))]
                 let mut entries = (**state.entries.load()).clone();
                 entries.insert(key.clone(), branch.published.clone());
                 self.branches.insert(key.clone(), branch);
@@ -697,6 +734,7 @@ impl MaterializedRelayStateOriginator {
             .authorize_exclusive(self.assignment, StateCapability::Originate, || {
                 let branch = self.branches.remove(key)?;
                 branch.published.store(None);
+                #[cfg_attr(nervix_lint, expect(nervix::branch_inversion, reason = "materialized or emitter state groups its data by branch; move it to the branch in https://app.clickup.com/t/86bd1z3bd"))]
                 let mut entries = (**state.entries.load()).clone();
                 entries.remove(key);
                 state.entries.store(StdArc::new(entries));
@@ -815,6 +853,7 @@ impl MaterializedRelaySnapshotInstaller {
                         },
                     ));
                 }
+                #[cfg_attr(nervix_lint, expect(nervix::branch_inversion, reason = "materialized or emitter state groups its data by branch; move it to the branch in https://app.clickup.com/t/86bd1z3bd"))]
                 let mut entries = MaterializedBranches::default();
                 for record in restored.records {
                     let branch = MaterializedBranchRecord::new(record.row);

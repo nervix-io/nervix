@@ -164,6 +164,13 @@ pub(in crate::runtime) struct RuntimeInner {
     pub(in crate::runtime) state_snapshot_tasks: state_replication::StateSnapshotTasks,
     /// The copy of each branch checkpoint this node installed as a replica, taken when it is
     /// promoted and dropped when its branch lifecycle stops naming the branch.
+    #[cfg_attr(
+        nervix_lint,
+        expect(
+            nervix::branch_inversion,
+            reason = "this branch collection supports checkpoints, partition transfers or state recovery; use the owning partition in https://app.clickup.com/t/86bd1z3ng"
+        )
+    )]
     pub(in crate::runtime) passive_runtime_state_snapshots:
         DashMap<RuntimeStatePlacement, PersistedRuntimeStateEntry, RandomState>,
     /// Immutable registry of per-domain publication handles shared by branch tasks and backup.
@@ -173,6 +180,13 @@ pub(in crate::runtime) struct RuntimeInner {
     /// replica, with the catalog of the branch checkpoints it owns for the entity and the owner's
     /// announcements a replica has not acted on yet. The replica task that keeps an entity current
     /// retains its handle, and each owned branch state retains its catalog entry.
+    #[cfg_attr(
+        nervix_lint,
+        expect(
+            nervix::branch_inversion,
+            reason = "this branch collection supports checkpoints, partition transfers or state recovery; use the owning partition in https://app.clickup.com/t/86bd1z3ng"
+        )
+    )]
     pub(in crate::runtime) replicated_branch_lifecycles:
         DashMap<RuntimeStatePlacement, Arc<ReplicatedBranchLifecycle>, RandomState>,
     pub(in crate::runtime) prepared_runtime_state_handoffs:
@@ -181,29 +195,85 @@ pub(in crate::runtime) struct RuntimeInner {
         DashMap<DomainNodeUnitRef, ActivatedRuntimeStateHandoff, RandomState>,
     pub(in crate::runtime) prepared_forced_runtime_state_recoveries:
         DashMap<DomainNodeUnitRef, PreparedForcedRuntimeStateRecovery, RandomState>,
+    #[cfg_attr(
+        nervix_lint,
+        expect(
+            nervix::branch_inversion,
+            reason = "this branch collection supports checkpoints, partition transfers or state recovery; use the owning partition in https://app.clickup.com/t/86bd1z3ng"
+        )
+    )]
     pub(in crate::runtime) prepared_runtime_state_snapshots:
         DashMap<RuntimeStatePlacement, PreparedRuntimeStateSnapshot, RandomState>,
+    #[cfg_attr(
+        nervix_lint,
+        expect(
+            nervix::branch_inversion,
+            reason = "relay and follower bookkeeping keeps its own branch entries; read the parametrizer partition in https://app.clickup.com/t/86bd1z0ty"
+        )
+    )]
     pub(in crate::runtime) relay_branch_presences:
         DashMap<RuntimeStatePlacement, RelayBranchPresence, RandomState>,
     /// The holdings every unit of a branch-keyed entity this node owns publishes while its
     /// branch's partition count changes. Each unit's owner registers its publication when it starts
     /// and withdraws it when it ends; claimants and observers read it. No record path reaches it.
     pub(in crate::runtime) partition_holdings: super::partition_holdings::PartitionHoldingsRegistry,
+    #[cfg_attr(
+        nervix_lint,
+        expect(
+            nervix::branch_inversion,
+            reason = "this branch collection supports checkpoints, partition transfers or state recovery; use the owning partition in https://app.clickup.com/t/86bd1z3ng"
+        )
+    )]
     pub(in crate::runtime) replicated_deduplicator_states:
         DashMap<RuntimeStatePlacement, Arc<ReplicatedDeduplicatorState>, RandomState>,
+    #[cfg_attr(
+        nervix_lint,
+        expect(
+            nervix::branch_inversion,
+            reason = "this branch collection supports checkpoints, partition transfers or state recovery; use the owning partition in https://app.clickup.com/t/86bd1z3ng"
+        )
+    )]
     pub(in crate::runtime) replicated_kafka_offset_states:
         DashMap<RuntimeStatePlacement, Arc<ReplicatedKafkaOffsetState>, RandomState>,
+    #[cfg_attr(
+        nervix_lint,
+        expect(
+            nervix::branch_inversion,
+            reason = "this branch collection supports checkpoints, partition transfers or state recovery; use the owning partition in https://app.clickup.com/t/86bd1z3ng"
+        )
+    )]
     pub(in crate::runtime) replicated_materialized_stream_states:
         DashMap<RuntimeStatePlacement, Arc<ReplicatedMaterializedRelayState>, RandomState>,
     /// Sealed materialized snapshots that have been opened and are waiting for the state they
     /// belong to to be built. Opening one is bulk work, so it happens on a path that can wait and
     /// the synchronous construction consumes the result.
+    #[cfg_attr(
+        nervix_lint,
+        expect(
+            nervix::branch_inversion,
+            reason = "materialized or emitter state groups its data by branch; move it to the branch in https://app.clickup.com/t/86bd1z3bd"
+        )
+    )]
     pub(in crate::runtime) restored_materialized_stream_states:
         DashMap<RuntimeStatePlacement, RestoredMaterializedSnapshot, RandomState>,
     pub(in crate::runtime) relay_state_epochs: DashMap<DomainName, Arc<AtomicU64>, RandomState>,
     pub(in crate::runtime) materialized_state_changed: Notify,
+    #[cfg_attr(
+        nervix_lint,
+        expect(
+            nervix::branch_inversion,
+            reason = "this branch collection supports checkpoints, partition transfers or state recovery; use the owning partition in https://app.clickup.com/t/86bd1z3ng"
+        )
+    )]
     pub(in crate::runtime) replicated_window_processor_states:
         DashMap<RuntimeStatePlacement, Arc<ReplicatedWindowProcessorState>, RandomState>,
+    #[cfg_attr(
+        nervix_lint,
+        expect(
+            nervix::branch_inversion,
+            reason = "this branch collection supports checkpoints, partition transfers or state recovery; use the owning partition in https://app.clickup.com/t/86bd1z3ng"
+        )
+    )]
     pub(in crate::runtime) replicated_wasm_processor_states:
         DashMap<RuntimeStatePlacement, Arc<ReplicatedWasmProcessorState>, RandomState>,
     /// Published once, when the node's control plane starts draining refused WASM guest-state
@@ -212,6 +282,13 @@ pub(in crate::runtime) struct RuntimeInner {
         ArcSwapOption<mpsc::Sender<WasmStateRecoveryRequest>>,
     /// The refused guest-state lifetimes this node has raised and not yet seen answered.
     pub(in crate::runtime) raised_wasm_state_recoveries: RaisedWasmStateRecoveries,
+    #[cfg_attr(
+        nervix_lint,
+        expect(
+            nervix::branch_inversion,
+            reason = "this branch collection supports checkpoints, partition transfers or state recovery; use the owning partition in https://app.clickup.com/t/86bd1z3ng"
+        )
+    )]
     pub(in crate::runtime) replicated_branch_aggregated_states:
         DashMap<RuntimeStatePlacement, Arc<ReplicatedBranchAggregatedState>, RandomState>,
     pub(in crate::runtime) wasm_runtime: WasmRuntime,

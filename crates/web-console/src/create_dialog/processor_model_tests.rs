@@ -149,7 +149,7 @@ fn inheritance(value: Option<&Inheritance>) -> InheritDraft {
 
 fn route_branch(value: Option<&OutputBranch>) -> RouteBranchDraft {
     match value {
-        None => RouteBranchDraft::Preserve,
+        None => RouteBranchDraft::Unselected,
         Some(OutputBranch::Unbranched) => RouteBranchDraft::Unbranched,
         Some(OutputBranch::BranchedBy {
             branch,

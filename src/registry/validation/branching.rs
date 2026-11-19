@@ -20,7 +20,7 @@ use meticulous::OptionExt;
 use nervix_models::{
     BranchName, BranchSelection, CorrelationTimeoutAction, CreateBranch, CreateSchema, DomainName,
     FieldName, Model, ModelIndex, ModelKind, ModelName, NodeRef, OutputBranch, ProcessorOutput,
-    ProcessorOutputs, RelayBranching, RelayName, ResolvedBranching, SchemaName,
+    ProcessorOutputs, ReingestorName, RelayBranching, RelayName, ResolvedBranching, SchemaName,
     parse_duration_text,
 };
 use nervix_vm::{
@@ -159,7 +159,7 @@ pub(in crate::registry) fn ensure_output_branch(
     output: &ProcessorOutput,
     input_schema: &CreateSchema,
     output_schema: &CreateSchema,
-    incoming_branch: Option<&BranchName>,
+    input_parametrizations: Option<&HashMap<&BranchName, &RelayName>>,
 ) -> Result<(), Report<RegistryError>> {
     let target_branch = relay_declared_branch(domain, identifier, models, &output.relay)?;
     let Some(branch_action) = output.branch.as_ref() else {
@@ -206,18 +206,25 @@ pub(in crate::registry) fn ensure_output_branch(
         }));
     }
 
-    if incoming_branch == Some(branch_ref) {
-        if assignments.is_empty() {
-            return Ok(());
-        }
-        return Err(Report::new(RegistryError::InvalidModel {
-            domain: domain.as_str().to_string(),
-            identifier: identifier.as_str().to_string(),
-            reason: format!(
-                "TO output '{}' preserves branch '{}' and cannot construct a new key",
-                output.relay.as_str(),
-                branch_ref.as_str()
-            ),
+    if let Some(input_parametrizations) = input_parametrizations
+        && let Some(input) = input_parametrizations.get(branch_ref).copied()
+    {
+        return Err(Report::new(
+            RegistryError::ReingestorParametrizationConflict {
+                domain: domain.clone(),
+                reingestor: ReingestorName::from(identifier),
+                input: input.clone(),
+                output: output.relay.clone(),
+                parametrization: branch_ref.clone(),
+            },
+        ));
+    }
+    if assignments.is_empty() {
+        return Err(Report::new(RegistryError::MissingBranchKeyAssignments {
+            domain: domain.clone(),
+            identifier: identifier.clone(),
+            relay: output.relay.clone(),
+            parametrization: branch_ref.clone(),
         }));
     }
 

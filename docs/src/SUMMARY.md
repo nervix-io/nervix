@@ -92,6 +92,7 @@
   - [Data Plane](./data-plane.md)
   - [Execution Primitives](./execution-primitives.md)
   - [Data-Plane Concurrency](./data-plane-concurrency.md)
+  - [Branch-Owned Runtime](./branch-owned-runtime.md)
   - [SIMD Kernels](./simd-kernels.md)
   - [VM Functions](./vm-functions.md)
   - [Wire Schema Binding](./wire-schema-binding.md)

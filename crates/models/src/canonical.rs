@@ -31,32 +31,32 @@ use crate::{
     AlterReordererOperation, AlterSchema, AlterSchemaOperation, AlterWireSchema,
     AlterWireSchemaOperation, Assignment, AssignmentTarget, AssignmentTargetScope, AvroType,
     Backup, BackupCapture, BackupResources, BackupScope, BinaryOperator, BranchEviction,
-    BranchPartitions, BranchSelection, CborType, ClickHouseValueMapping, ClientConfigEntry,
-    ClientIngestMode, ClientResourceMount, CodecEncodingRule, CodecJaqTransformations, CodecName,
-    CodecWireFormat, CorrelationTimeoutAction, CreateBranch, CreateClientAzureBlob,
-    CreateClientClickHouse, CreateClientGcs, CreateClientHttp, CreateClientIcebergRest,
-    CreateClientKafka, CreateClientMongoDb, CreateClientMqtt, CreateClientMySql, CreateClientNats,
-    CreateClientOtel, CreateClientPostgres, CreateClientPrometheus, CreateClientPulsar,
-    CreateClientRabbitMq, CreateClientRedis, CreateClientS3, CreateClientSentry, CreateClientSqs,
-    CreateClientSyslog, CreateClientWebsockets, CreateClientZeroMq, CreateCodec, CreateCorrelator,
-    CreateDeduplicator, CreateEmitter, CreateEndpoint, CreateGenerator, CreateInferencer,
-    CreateIngestor, CreateJunction, CreateLookup, CreatePlacement, CreateReingestor, CreateRelay,
-    CreateReorderer, CreateSchema, CreateSignalingProtocol, CreateUdf, CreateVhost,
-    CreateWasmProcessor, CreateWindowProcessor, CreateWireSchema, DescribeBackup,
-    DescribeTransaction, DomainPace, DomainStartPoint, EmitterBatchPolicy, EmitterBody,
-    EmitterEntity, EmitterEnvelope, EmitterPublishing, EnvelopeClause, ExistingUserPolicy,
-    Expression, FieldScope, Float64Literal, FlushPolicy, GeneralErrorPolicy,
-    InferencerStateBinding, InferencerStateInitial, InferencerTensorDeclaration,
-    InferencerTensorDimension, InferencerTensorMapping, InferencerTensorSchema,
-    IngestTimestampSource, IngestorInput, Inheritance, InputCollectPolicy, InspectionFormat,
-    Invocation, JsonType, Literal, MaterializedStateDependency, MaterializedStatePolicy,
-    MembershipOperator, MessageErrorPolicy, Model, ModelName, MongoDbConflictAction,
-    MySqlConflictAction, NamePosition, OutputBranch, ParseAsType, PostgresConflictAction,
-    ProcessorInputWhere, ProcessorInputs, ProcessorOutputs, RangeOperator, RelayBranching,
-    RelayName, Restore, RestoreLifecycle, RestoreMode, RestoreScope, RestoreState, RetryPolicy,
-    RouteConstruction, SchemaField, SignalingProtocolName, SignalingStep, SignalingWaitStep,
-    SignalingWireFormat, Statement, SubscriptionLiteral, TransactionInspectionTarget,
-    UnaryOperator, WindowBound, WindowStateLimit, WireSchemaField,
+    BranchName, BranchPartitions, BranchSelection, CborType, ClickHouseValueMapping,
+    ClientConfigEntry, ClientIngestMode, ClientResourceMount, CodecEncodingRule,
+    CodecJaqTransformations, CodecName, CodecWireFormat, CorrelationTimeoutAction, CreateBranch,
+    CreateClientAzureBlob, CreateClientClickHouse, CreateClientGcs, CreateClientHttp,
+    CreateClientIcebergRest, CreateClientKafka, CreateClientMongoDb, CreateClientMqtt,
+    CreateClientMySql, CreateClientNats, CreateClientOtel, CreateClientPostgres,
+    CreateClientPrometheus, CreateClientPulsar, CreateClientRabbitMq, CreateClientRedis,
+    CreateClientS3, CreateClientSentry, CreateClientSqs, CreateClientSyslog,
+    CreateClientWebsockets, CreateClientZeroMq, CreateCodec, CreateCorrelator, CreateDeduplicator,
+    CreateEmitter, CreateEndpoint, CreateGenerator, CreateInferencer, CreateIngestor,
+    CreateJunction, CreateLookup, CreatePlacement, CreateReingestor, CreateRelay, CreateReorderer,
+    CreateSchema, CreateSignalingProtocol, CreateUdf, CreateVhost, CreateWasmProcessor,
+    CreateWindowProcessor, CreateWireSchema, DescribeBackup, DescribeTransaction, DomainPace,
+    DomainStartPoint, EmitterBatchPolicy, EmitterBody, EmitterEntity, EmitterEnvelope,
+    EmitterPublishing, EnvelopeClause, ExistingUserPolicy, Expression, FieldScope, Float64Literal,
+    FlushPolicy, GeneralErrorPolicy, InferencerStateBinding, InferencerStateInitial,
+    InferencerTensorDeclaration, InferencerTensorDimension, InferencerTensorMapping,
+    InferencerTensorSchema, IngestTimestampSource, IngestorInput, Inheritance, InputCollectPolicy,
+    InspectionFormat, Invocation, JsonType, Literal, MaterializedStateDependency,
+    MaterializedStatePolicy, MembershipOperator, MessageErrorPolicy, Model, ModelName,
+    MongoDbConflictAction, MySqlConflictAction, NamePosition, OutputBranch, ParseAsType,
+    PostgresConflictAction, ProcessorInputWhere, ProcessorInputs, ProcessorOutputs, RangeOperator,
+    RelayBranching, RelayName, Restore, RestoreLifecycle, RestoreMode, RestoreScope, RestoreState,
+    RetryPolicy, RouteConstruction, SchemaField, SignalingProtocolName, SignalingStep,
+    SignalingWaitStep, SignalingWireFormat, Statement, SubscriptionLiteral,
+    TransactionInspectionTarget, UnaryOperator, WindowBound, WindowStateLimit, WireSchemaField,
 };
 
 /// The Plexus release canonical rendering writes.
@@ -646,16 +646,19 @@ fn output_branch_to_plexus(
             branch,
             assignments,
         } => {
-            let mut rendered = format!("BRANCHED BY {}", branch.as_str());
-            if !assignments.is_empty() {
-                let construction = RouteConstruction {
-                    assignments: assignments.clone(),
-                    ..RouteConstruction::default()
-                };
-                rendered.push(' ');
-                rendered.push_str(&route_construction_to_plexus(&construction)?);
+            if assignments.is_empty() {
+                return Err(Report::new(
+                    CanonicalPlexusError::MissingBranchKeyAssignments {
+                        branch: branch.clone(),
+                    },
+                ));
             }
-            Ok(rendered)
+            let construction = RouteConstruction {
+                assignments: assignments.clone(),
+                ..RouteConstruction::default()
+            };
+            let construction = route_construction_to_plexus(&construction)?;
+            Ok(format!("BRANCHED BY {} {construction}", branch.as_str()))
         }
         OutputBranch::Unbranched => Ok("UNBRANCHED".to_string()),
     }
@@ -667,6 +670,8 @@ fn output_branch_to_plexus(
 /// holding it, so a caller can locate the refusal without reading its message.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum CanonicalPlexusError {
+    #[error("branch '{branch}' requires SET assignments to render an output route")]
+    MissingBranchKeyAssignments { branch: BranchName },
     /// An `F64` literal that is NaN or infinite. Plexus spells a float only as a finite decimal.
     #[error("cannot represent non-finite float in Plexus: {}", .value.value())]
     UnrepresentableFloat { value: Float64Literal },

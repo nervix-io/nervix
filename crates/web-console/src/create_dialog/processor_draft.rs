@@ -67,7 +67,7 @@ pub(super) enum ProcessorFamily {
 
 impl ProcessorFamily {
     /// Whether one node-wide `BRANCHED BY` or `UNBRANCHED` declaration governs every input and
-    /// route. A reingestor instead preserves, drops or constructs the branch route by route.
+    /// route. Each reingestor route chooses an unbranched or named destination.
     pub(super) fn declares_node_branch(self) -> bool {
         match self {
             Self::Junction
@@ -1268,7 +1268,7 @@ impl ProcessorDraft {
                 RouteContract::Transforming if family.declares_node_branch() => {
                     route.build_preserving()
                 }
-                RouteContract::Transforming => route.build_reingestor(),
+                RouteContract::Transforming => route.build(),
                 RouteContract::FlushedSetOnly => route.build_set_only(SetOnlyEmission::Flushed),
                 RouteContract::WindowSetOnly => {
                     route.build_set_only(SetOnlyEmission::WindowCadence)
@@ -1496,7 +1496,7 @@ mod tests {
             draft.select_input(&node(ModelKind::Relay, "incoming"));
             draft.routes[0].select_relay(&node(ModelKind::Relay, "outgoing"));
         } else {
-            draft.routes[0].branch.choose_preserve();
+            draft.routes[0].branch.choose_unbranched();
         }
         if let Some(keyed) = draft.keyed_mut() {
             keyed.expressions = vec!["input.message".into()];
@@ -1516,9 +1516,6 @@ mod tests {
             for mode in [AckMode::Attached, AckMode::Detached] {
                 for collect in [false, true] {
                     let mut draft = complete(family);
-                    if family == ProcessorFamily::Reingestor {
-                        draft.routes[0].branch.choose_unbranched();
-                    }
                     draft.mode = mode;
                     let collection = if collect {
                         draft.from.collect = Some(InputCollectPolicy {
@@ -1711,7 +1708,7 @@ mod tests {
     }
 
     #[test]
-    fn reingestor_routes_preserve_or_repartition_independently() {
+    fn reingestor_routes_choose_unbranched_and_named_destinations_independently() {
         let mut draft = complete(ProcessorFamily::Reingestor);
         draft.add_route();
         draft.routes[1].select_relay(&node(ModelKind::Relay, "branched"));
@@ -1731,9 +1728,20 @@ mod tests {
         let built = draft
             .build_reingestor()
             .assured("complete reingestor builds");
-        assert_eq!(built.output_routes.routes[0].branch, None);
+        assert_eq!(
+            built.output_routes.routes[0].branch,
+            Some(OutputBranch::Unbranched)
+        );
         assert!(
             matches!(&built.output_routes.routes[1].branch, Some(OutputBranch::BranchedBy { branch, assignments }) if branch == &BranchName::parse("by_tenant").assured("valid branch") && assignments.len() == 1)
+        );
+        let statement = statement(&draft);
+        let preview = statement
+            .to_canonical_plexus()
+            .assured("both routes render");
+        assert_eq!(
+            parse_statement(&preview).assured("the preview is executable Plexus"),
+            statement
         );
     }
 

@@ -632,11 +632,11 @@ compares it with the workflows.
 | `client-conformance` | Check | The [host-binding](client-host-bindings.md#qualification-and-observability) and independent-client probes and every host suite's cluster tier against one- and three-node clusters, gated by the prepared boundary tiers and packaging smoke. Boundary tiers and Python cluster examples also run in ordinary CI. |
 | `bolero-random` | Check, through Bolero | Bolero's randomized properties and corpus replay, which a manual run of the Bolero workflow always runs |
 | `extra-doctests` | Check | Capability doctests |
-| `extra-miri` | Check | Miri over the expiry map |
-| `extra-mutation` | Check | Mutation tests of the expiry map |
+| `extra-miri` | Check | Miri over the expiry map and standalone relay channel |
+| `extra-mutation` | Check | Mutation tests of the expiry map and standalone relay channel |
 | `extra-runners` | Check | Python coverage of the reporters, gates and collectors: patch coverage, the ordinary merge, the CRAP report, the full union, the paced simulation policy, the release gate, the deployment controller, the kache contract, the connector matrix renderer, the test selection, the wasm-bindgen tool, the external binding chaos controls, the native collector, the client suite readers with the unit-test archive, and the primitive source validator |
 | `extra-compiler` | Check | Source contracts, compiler diagnostics, the Rust runner/gate/audit owners, paired API doctests, compiler cache qualification and the Python coverage of the ratchet's callers |
-| `extra-bench-smoke` | Check | Benchmark smoke tests |
+| `extra-bench-smoke` | Check | Benchmark smoke tests, including the standalone relay channel |
 | `extra-primitives` | Check | Primitive boundary conformance in ordinary, Shuttle, Loom and Turmoil modes, plus ordinary documentation and browser checks. `coverage-full` then requires those collections |
 | `extra-completion-walk` | Check | The Plexus completion walk |
 | `extra-connector-matrix` | Check | The Plexus connector declaration export |

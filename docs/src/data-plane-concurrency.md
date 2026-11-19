@@ -321,12 +321,14 @@ outbound slots, including candidates created during replacement. A partitioned r
 routing generation per partition, and a producer resolves its key's partition once, when it binds
 its branch channel, so no batch computes a partition or reaches a shared map. Replacing one
 partition's owner cancels only that partition's generation and the channels bound under it; the
-other partitions' producers keep their bindings. Eviction cancels the exact branch
-before withdrawing its allocation. Invalidation is scoped to the branch that ended: a relay owner
-invalidates its own relay's branch, and a processor, ingestor or reingestor invalidates the
-branches of the relays it publishes through for its key. Another relay's branch for the same key
-keeps its channels. An independently expiring receiver branch permits a still-live producer to
-bind a fresh channel after invalidation. The producer's own ending moves it to `Ended` and
+other partitions' producers keep their bindings. Each producer's branch has a cancellation token
+that releases its own waits and reconciles its unadmitted remote delivery. Producers of one
+relay on a node share the channel and its sequence for the key. Binding and releasing producers
+update one scalar on the retained branch handle. The last release marks the producer-only
+allocation retired before withdrawing it by identity. A racing binding either retains that
+allocation while it is live or obtains its successor. A relay owner keeps its routing channels
+until its own branch ends. An independently expiring owner branch permits a still-live producer
+to bind a fresh channel after invalidation. The producer's own ending moves it to `Ended` and
 prevents rebinding. Domain terminal teardown cancels the relay publication itself.
 
 Channel gates serialize encode, sequence assignment and dispatch for that channel only. Gate waits
@@ -1633,6 +1635,12 @@ registry; it cannot leave a request waiting on an ended exchange. The reader rou
 after the mismatch. Dropping its future, including task abortion, closes the remaining waiters and
 ends its exact event and attachment generation.
 
+Ending the registry releases its remaining waiters in ascending request-identity order before
+dropping the reader-ending notification. Registration and ordinary reply delivery retain their
+hash-map operations; only the ending path collects and sorts the remaining waiters. The order
+does not depend on the map's random hash seed. Completed and cancelled requests are already absent,
+and a repeated close retains the first typed ending cause and wakes nobody again.
+
 The exchange retains its reader handle until joining finishes, then clears it. A later close
 cannot poll that completed join again. Cancelling interruption before the join completes keeps
 the handle available for a later close to finish its cleanup.
@@ -1646,6 +1654,8 @@ and pending registry with registration and cancellation racing the mismatched re
 interleavings with a domain listing under the command's identity. Each requires every remaining
 waiter to be interrupted, its first typed cause to survive, and the later leadership frame to
 remain unread. They make no claim about real network scheduling.
+Both checks construct the production pending registry directly, including its ordinary random
+hash seed, and run through the nondeterminism gate.
 
 A restore stream captures its channel and session generation together. A foreign restore outcome
 ends that generation only if it still owns the current session, so an intervening replacement is
@@ -2092,6 +2102,58 @@ consumers that it delivers through. A consumer that registers meanwhile receives
 only, so the acknowledgement shares a publication reserves for its attached consumers always match
 its deliveries, and a routed delivery cannot resolve a share it
 never reserved.
+
+### Standalone weighted relay channel
+
+`nervix-relay-channel` supplies the shared broadcast log and byte budget for the
+planned relay integration. Callers supply positive weights and opaque, stable reader
+identities. Live relay fan-out still uses the per-consumer queues described above.
+
+A producer asks asynchronously for its item's whole weight before publishing it
+synchronously. Both granted reservations and unread items count against the capacity.
+The final reader of an item releases its charge. The send keeps its prepared item until
+it publishes. Cancelling it before publication drops the pending item and returns any
+granted charge. An oversized request returns an error, and a request that could
+fit goes to the back of the waiting line. The oldest eligible request gets the next
+reservation when its whole weight fits, even if there is room for a smaller request
+behind it. A capacity reduction can leave previously charged weight over the new
+limit. New grants wait for enough room under that limit, and requests now too large
+return their item with a size error. The waiter line uses an intrusive list with one
+granter at a time and wakes the individual senders whose outcomes change. When a
+grant takes the entire byte limit, returning an item's charge can also wake a bounded
+group of followers so the runtime can overlap scheduling with publication. The next
+follower can reschedule itself once. Each send stays pending until it receives its own grant.
+Grant order follows arrival at that line. Publication order follows the tail exchange,
+so producers that already hold grants may publish in either order.
+
+The producer prepares a reusable slot, atomically exchanges the tail for that slot,
+and links it from the previous tail with a release store. The exchange orders concurrent
+appends. The link makes the item visible to readers. A producer paused between those
+two synchronous steps can delay a reader at that position while later producers
+continue linking their entries. Reads at the gap report pending publication. A reader
+reports the end of a sealed log only after all admitted appends have finished and it has
+rechecked the link. Slots live in reusable blocks. Sender creation obtains the first
+block, so a parked sender can publish its first grant without allocating. The last
+reader to advance to the next slot releases the previous one. The tail stays live until a successor makes
+that release possible or the log is dropped.
+
+Membership changes seal a log and give later publications a new log with the new reader
+set. A sender keeps a reference to its last publication log and refreshes it when it
+observes a seal. Readers and the controller own the links between generations. Joining
+starts a reader in the new log. Leaving gives up its unread shares in the old logs.
+At standstill, the owner can hand out retained items, their exact charged
+weights, and the reader positions. Rebuilding retains each known reader's position,
+including when retained weight is above a shrunken limit. Admission can be stopped
+for this hand-out without recording the restored channel as permanently closed.
+
+The [registered reference property](./property-testing-and-fuzzing.md#behavioral-properties)
+checks the full retained state against an independent model. The Loom models exercise
+the production atomics for link visibility, retirement, seal completion, charge
+publication and wake-up. The Shuttle checks exercise the async entry points, including
+a delayed link with another producer completing ahead of it.
+`just test-relay-channel-mutants` checks that deliberate changes to admission, refund,
+delivery, reclamation and restoration fail their ordinary tests. Miri checks the same
+ordinary tests for invalid memory access and leaks.
 
 ## Failed Authentication Pacing
 

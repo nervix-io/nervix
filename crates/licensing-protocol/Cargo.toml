@@ -21,6 +21,7 @@ meticulous = { workspace = true }
 nervix-bounded-write = { workspace = true }
 nervix-crypto = { workspace = true }
 nervix-licensing-vocabulary = { workspace = true }
+nervix-primitives = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

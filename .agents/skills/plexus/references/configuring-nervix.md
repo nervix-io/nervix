@@ -173,7 +173,7 @@ Within the graph transaction, declare dependencies before consumers:
 4. clients, protocols, vhosts/endpoints, hash maps, and UDF declarations;
 5. relays, including materialized relays;
 6. ingestors;
-7. branch-preserving processors, generators, and reingestors;
+7. branch-preserving processors and generators, plus reingestors at parametrization boundaries;
 8. emitters;
 9. placement rules, after every runtime-node member they reference, including relays.
 

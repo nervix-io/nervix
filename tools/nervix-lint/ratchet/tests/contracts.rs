@@ -137,6 +137,42 @@ fn allowed_controls_and_required_refusals_keep_their_exact_verdicts() {
 }
 
 #[test]
+fn branch_inversions_point_to_each_resolved_collection_declaration() {
+    let case = Case::new("branch_inversion");
+    assert_eq!(
+        case.snippets("nervix::branch_inversion"),
+        [
+            "BTreeSet<BranchKey>",
+            "BTreeSet<BranchKey>",
+            "BranchDirectory",
+            "Lookup<BranchIncarnation, u32>",
+            "Lookup<Option<BranchKeyWrapper>, u32>",
+            "Vec<(BranchTask, PayloadRow)>",
+            "Vec<BranchTask>",
+            "lifetime",
+        ]
+    );
+    Case::new("branch_inversion_allowed").allowed();
+}
+
+#[test]
+fn branch_inversion_expectations_require_one_existing_declaration() {
+    let case = Case::new("branch_inversion_expectations");
+    for diagnostic in [
+        "Nervix exceptions require a reason-bearing expect",
+        "expectation is unfulfilled",
+        "covers 2 distinct operations",
+        "unknown Nervix source annotation",
+    ] {
+        case.refused(diagnostic);
+    }
+    assert_eq!(
+        case.snippets("nervix::branch_inversion"),
+        ["BTreeMap<BranchKey, usize>"],
+    );
+}
+
+#[test]
 fn fixed_contract_diagnostics_keep_cardinality_and_primary_lines() {
     let case = Case::new("constant_invalid");
     case.refused("nervix::invalid_contract");

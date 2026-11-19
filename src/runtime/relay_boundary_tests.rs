@@ -475,6 +475,7 @@ async fn concrete_relay_reuses_branch_collapse_for_runtime_consumers() {
         )
         .expect("a whole relay schedules its single unit");
     let mut relay_runtime = ConcreteRelayRuntime::new(ConcreteRelayRuntimeBuild {
+        delivery_lifetime: CancellationToken::new(),
         runtime: runtime.clone(),
         domain: domain.clone(),
         relay: relay.clone(),
@@ -1965,6 +1966,7 @@ async fn an_ended_producer_cannot_attach_to_a_recreated_relay_branch() {
     let runtime = Runtime::default();
     let services = test_relay_boundary_services();
     let mut producer = ConcreteRelayRuntime::new(ConcreteRelayRuntimeBuild {
+        delivery_lifetime: CancellationToken::new(),
         runtime,
         domain: domain("default"),
         relay: named("orders"),
@@ -1972,8 +1974,13 @@ async fn an_ended_producer_cannot_attach_to_a_recreated_relay_branch() {
         key: None,
     });
     producer.retire();
-    services.channels.retire(&None);
-    assert!(!services.channels.bind(&None, Unit::SINGLE).is_retired());
+    services.channels.retire_branch(&None);
+    assert!(
+        !services
+            .channels
+            .bind_relay(&None, Unit::SINGLE)
+            .is_retired()
+    );
     let (batch, completion) = presence_test_batch(None);
     assert!(producer.dispatch_boundary(&batch).await.is_err());
     assert!(matches!(completion.wait().await, AckOutcome::NoAck(_)));

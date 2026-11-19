@@ -253,7 +253,7 @@ fn junction_and_reingestor_render_ordered_route_and_state_controls() {
                 .branch
                 .select_branch(&node(ModelKind::Branch, "by_tenant"));
             draft.add_route();
-            draft.routes[1].branch.choose_preserve();
+            draft.routes[1].branch.choose_unbranched();
             draft.active_route = 0;
         });
         let reingestor = render();
@@ -346,14 +346,18 @@ fn processor_choices_follow_branch_schema_and_incoming_state_context() {
         );
         signals
             .reingestor
-            .update(|draft| draft.routes[0].branch.choose_preserve());
-        assert_eq!(
-            signals
-                .choice_query(ChoiceControl::ProcessorRouteRelay)
-                .assured("preserving input branch")
-                .target,
-            ChoiceTarget::ProcessorInputBranchRelay
+            .update(|draft| draft.routes[0].branch.choose_branched());
+        let destination = ChoiceValue::Model(node(ModelKind::Branch, "by_destination"));
+        select_choice(
+            signals,
+            ChoiceControl::ProcessorRouteBranch,
+            destination.clone(),
         );
+        let output = signals
+            .choice_query(ChoiceControl::ProcessorRouteRelay)
+            .assured("named route selected");
+        assert_eq!(output.target, ChoiceTarget::IngestBranchedRelay);
+        assert_eq!(output.dependencies[1].value, destination);
         signals
             .reingestor
             .update(|draft| draft.routes[0].branch.choose_unbranched());

@@ -186,6 +186,7 @@ impl Case {
             crate_name: "example".into(),
             crate_source: "src/lib.rs".into(),
             arguments: vec![self.text.clone()],
+            branch_inversions: Vec::new(),
             findings: vec![Finding {
                 rule: "nervix::sync_acquisition".into(),
                 receiver: self.text.clone(),

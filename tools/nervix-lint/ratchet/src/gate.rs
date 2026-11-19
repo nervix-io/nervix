@@ -1,9 +1,10 @@
 //! Repository tooling, outside the product layer order.
-//! Owns: the six structural debt counts, their downward-only baseline gate and the refusal of
+//! Owns: the architecture debt counts, their downward-only baseline gate and the refusal of
 //! authored cryptography outside AWS-LC, which no baseline admits.
 //! Depends on: source and compiler reports, the pinned analyzer, Cargo's release graph and Git.
 //! Must not know: product runtime execution or manually curated source locations.
 
+mod branches;
 mod graph;
 
 use std::{
@@ -15,15 +16,21 @@ use std::{
 
 use anyhow::{Context as _, Result, bail, ensure};
 use nervix_lint_report::source::{self, SourceInput};
+use serde::{Deserialize, Serialize};
 
 use crate::{crap, matrix};
 
 const BASELINE: &str = "debt-baseline.json";
 const LARGE_FILE_LINES: usize = 3000;
 const COMPLEXITY_LIMIT: f64 = 30.0;
-const COUNTS: [(&str, &str); 6] = [
+const BRANCH_INVERSIONS: &str = "branch_inversions";
+const COUNTS: [(&str, &str); 7] = [
     ("files_over_3000_lines", "Rust files longer than 3000 lines"),
     ("as_casts", "Rust cast expressions"),
+    (
+        BRANCH_INVERSIONS,
+        "collections that hold branch identities or branch-owned parts",
+    ),
     (
         "hidden_tunables",
         "numeric policy outside class-typed settings or fixed contracts",
@@ -41,6 +48,13 @@ const COUNTS: [(&str, &str); 6] = [
         "product dependency edges onto cryptography outside AWS-LC",
     ),
 ];
+
+#[derive(Debug, Eq, PartialEq, Deserialize, Serialize)]
+struct Baseline {
+    #[serde(flatten)]
+    counts: BTreeMap<String, usize>,
+    branch_inversion_sites: BTreeSet<String>,
+}
 
 #[derive(Clone, Debug, clap::Args)]
 pub struct Options {
@@ -271,15 +285,15 @@ fn refuse_authored_cryptography(sites: &[Site]) -> Result<()> {
     );
 }
 
-fn read_baseline(path: &Path) -> Result<BTreeMap<String, usize>> {
+fn read_baseline(path: &Path) -> Result<Baseline> {
     ensure!(
         path.exists(),
         "no baseline at {}. Run `just ratchet --update` to write one.",
         path.display()
     );
-    let baseline: BTreeMap<String, usize> = serde_json::from_slice(&fs::read(path)?)?;
+    let baseline: Baseline = serde_json::from_slice(&fs::read(path)?)?;
     let expected: BTreeSet<_> = COUNTS.iter().map(|(name, _)| *name).collect();
-    let actual: BTreeSet<_> = baseline.keys().map(String::as_str).collect();
+    let actual: BTreeSet<_> = baseline.counts.keys().map(String::as_str).collect();
     let missing = expected.difference(&actual).copied().collect::<Vec<_>>();
     let unknown = actual.difference(&expected).copied().collect::<Vec<_>>();
     ensure!(
@@ -298,20 +312,26 @@ fn read_baseline(path: &Path) -> Result<BTreeMap<String, usize>> {
             format!("; unknown {}", unknown.join(", "))
         }
     );
+    ensure!(
+        baseline.counts[BRANCH_INVERSIONS] == baseline.branch_inversion_sites.len(),
+        "the branch ownership baseline count must match its pinned declarations"
+    );
     Ok(baseline)
 }
 
 fn report(
     sites: &BTreeMap<String, Vec<Site>>,
-    baseline: &BTreeMap<String, usize>,
+    baseline: &Baseline,
+    branch_declarations: BTreeSet<String>,
     update: bool,
     path: &Path,
 ) -> Result<i32> {
+    let previous = &baseline.counts;
     let width = COUNTS.iter().map(|(name, _)| name.len()).max().unwrap_or(0);
     println!("Debt ratchet — every count may fall and none may rise.\n");
     for (name, description) in COUNTS {
         let current = sites[name].len();
-        let before = baseline[name];
+        let before = previous[name];
         let change = isize::try_from(current)? - isize::try_from(before)?;
         let marker = if change > 0 {
             "^^"
@@ -329,19 +349,19 @@ fn report(
     let risen: Vec<_> = COUNTS
         .iter()
         .map(|(name, _)| *name)
-        .filter(|name| sites[*name].len() > baseline[*name])
+        .filter(|name| sites[*name].len() > previous[*name])
         .collect();
     let fallen: Vec<_> = COUNTS
         .iter()
         .map(|(name, _)| *name)
-        .filter(|name| sites[*name].len() < baseline[*name])
+        .filter(|name| sites[*name].len() < previous[*name])
         .collect();
     if !fallen.is_empty() {
         println!(
             "These counts fell. Run `just ratchet --update` and commit the baseline with them:"
         );
         for name in &fallen {
-            println!("  {name}: {} -> {}", baseline[*name], sites[*name].len());
+            println!("  {name}: {} -> {}", previous[*name], sites[*name].len());
         }
         println!();
     }
@@ -350,9 +370,9 @@ fn report(
         for name in &risen {
             println!(
                 "  {name}: {} -> {} (+{}); `just ratchet --show {name}` lists the sites",
-                baseline[*name],
+                previous[*name],
                 sites[*name].len(),
-                sites[*name].len() - baseline[*name]
+                sites[*name].len() - previous[*name]
             );
         }
         for name in risen {
@@ -363,15 +383,23 @@ fn report(
         }
         return Ok(1);
     }
+    ensure!(
+        update || branch_declarations == baseline.branch_inversion_sites,
+        "branch ownership sites were retired; run `just ratchet --update` and commit their removal"
+    );
     if update {
         let counts: BTreeMap<_, _> = sites
             .iter()
-            .map(|(name, values)| (name, values.len()))
+            .map(|(name, values)| (name.clone(), values.len()))
             .collect();
-        fs::write(
+        crate::io::atomic_pretty_json(
             path,
-            format!("{}\n", serde_json::to_string_pretty(&counts)?),
-        )?;
+            &Baseline {
+                counts,
+                branch_inversion_sites: branch_declarations,
+            },
+        )
+        .map_err(|error| anyhow::anyhow!("cannot write the debt baseline: {error:?}"))?;
         println!(
             "Wrote {} from the current counts.",
             path.file_name().unwrap_or_default().to_string_lossy()
@@ -389,6 +417,8 @@ impl Options {
             self.update,
             self.show,
             || {
+                let baseline = read_baseline(&root.join(BASELINE))?;
+                branches::verify_previous_baseline(&root, &baseline.branch_inversion_sites)?;
                 let problems = source::provenance::check(&root)?;
                 ensure!(
                     problems.is_empty(),
@@ -411,10 +441,10 @@ impl Options {
                     show: false,
                     jobs: None,
                 };
-                compiler.run().map_err(|error| {
+                let report = compiler.run().map_err(|error| {
                     anyhow::anyhow!("compiler synchronization diagnostics failed: {error:?}")
                 })?;
-                Ok(())
+                branches::collect(&report)
             },
             || source_sites(&root, &target),
         )
@@ -426,12 +456,19 @@ fn execute(
     update: bool,
     show: Option<String>,
     provenance: impl FnOnce() -> Result<()>,
-    compiler: impl FnOnce() -> Result<()>,
+    compiler: impl FnOnce() -> Result<BTreeMap<String, Site>>,
     measure: impl FnOnce() -> Result<BTreeMap<String, Vec<Site>>>,
 ) -> Result<i32> {
     provenance()?;
-    compiler()?;
-    let sites = measure()?;
+    let branch_sites = compiler()?;
+    let path = root.join(BASELINE);
+    let baseline = read_baseline(&path)?;
+    branches::verify(&branch_sites, &baseline.branch_inversion_sites)?;
+    let branch_declarations = branch_sites.keys().cloned().collect();
+    let mut sites = measure()?;
+    let mut branch_locations: Vec<_> = branch_sites.into_values().collect();
+    branch_locations.sort_by(|left, right| (&left.path, left.line).cmp(&(&right.path, right.line)));
+    sites.insert(BRANCH_INVERSIONS.into(), branch_locations);
     if let Some(name) = show {
         if let Some(found) = sites.get(&name) {
             for site in found {
@@ -450,8 +487,7 @@ fn execute(
         );
         return Ok(2);
     }
-    let path = root.join(BASELINE);
-    report(&sites, &read_baseline(&path)?, update, &path)
+    report(&sites, &baseline, branch_declarations, update, &path)
 }
 
 #[cfg(test)]
@@ -478,11 +514,16 @@ mod tests {
             .collect()
     }
 
-    fn baseline(count: usize) -> BTreeMap<String, usize> {
-        COUNTS
-            .iter()
-            .map(|(name, _)| ((*name).into(), count))
-            .collect()
+    fn baseline(count: usize) -> Baseline {
+        Baseline {
+            counts: COUNTS
+                .iter()
+                .map(|(name, _)| ((*name).into(), count))
+                .collect(),
+            branch_inversion_sites: (0..count)
+                .map(|index| format!("owner::field_{index}"))
+                .collect(),
+        }
     }
 
     /// A Git repository whose one discovered source is `src/lib.rs`.
@@ -524,7 +565,7 @@ mod tests {
     fn baseline_requires_exactly_the_measured_count_names() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join(BASELINE);
-        fs::write(&path, r#"{"as_casts":0}"#).unwrap();
+        fs::write(&path, r#"{"as_casts":0,"branch_inversion_sites":[]}"#).unwrap();
         assert!(
             read_baseline(&path)
                 .unwrap_err()
@@ -532,7 +573,7 @@ mod tests {
                 .contains("missing")
         );
         let mut complete = baseline(0);
-        complete.insert("other".into(), 1);
+        complete.counts.insert("other".into(), 1);
         fs::write(&path, serde_json::to_string(&complete).unwrap()).unwrap();
         assert!(
             read_baseline(&path)
@@ -549,16 +590,37 @@ mod tests {
         let original = serde_json::to_string(&baseline(1)).unwrap();
         fs::write(&path, &original).unwrap();
         assert_eq!(
-            report(&counts(2), &read_baseline(&path).unwrap(), true, &path).unwrap(),
+            report(
+                &counts(2),
+                &read_baseline(&path).unwrap(),
+                baseline(2).branch_inversion_sites,
+                true,
+                &path
+            )
+            .unwrap(),
             1
         );
         assert_eq!(fs::read_to_string(&path).unwrap(), original);
         assert_eq!(
-            report(&counts(1), &read_baseline(&path).unwrap(), false, &path).unwrap(),
+            report(
+                &counts(1),
+                &read_baseline(&path).unwrap(),
+                baseline(1).branch_inversion_sites,
+                false,
+                &path
+            )
+            .unwrap(),
             0
         );
         assert_eq!(
-            report(&counts(0), &read_baseline(&path).unwrap(), true, &path).unwrap(),
+            report(
+                &counts(0),
+                &read_baseline(&path).unwrap(),
+                BTreeSet::new(),
+                true,
+                &path
+            )
+            .unwrap(),
             0
         );
         assert_eq!(read_baseline(&path).unwrap(), baseline(0));
@@ -599,6 +661,60 @@ mod tests {
                 .contains("compiler diagnostics failed")
         );
         assert_eq!(fs::read_to_string(path).unwrap(), original);
+    }
+
+    #[test]
+    fn a_new_branch_expectation_cannot_take_the_place_of_a_retired_one() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        let path = root.join(BASELINE);
+        let original = serde_json::to_string(&baseline(1)).unwrap();
+        fs::write(&path, &original).unwrap();
+        let replacement = Site {
+            path: "src/processor.rs".into(),
+            line: 11,
+            detail: "Processor::per_branch".into(),
+        };
+        let result = execute(
+            root,
+            true,
+            None,
+            || Ok(()),
+            || {
+                Ok(BTreeMap::from([(
+                    "Processor::per_branch".into(),
+                    replacement,
+                )]))
+            },
+            || Ok(counts(1)),
+        );
+        let error = result.unwrap_err().to_string();
+        assert!(error.contains("new branch ownership expectations are forbidden"));
+        assert!(error.contains("src/processor.rs:11: Processor::per_branch"));
+        assert_eq!(fs::read_to_string(path).unwrap(), original);
+    }
+
+    #[test]
+    fn retiring_a_branch_expectation_requires_removing_its_pin() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join(BASELINE);
+        let previous = baseline(1);
+        let error = report(&counts(0), &previous, BTreeSet::new(), false, &path).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("branch ownership sites were retired")
+        );
+        assert_eq!(
+            report(&counts(0), &previous, BTreeSet::new(), true, &path).unwrap(),
+            0
+        );
+        assert!(
+            read_baseline(&path)
+                .unwrap()
+                .branch_inversion_sites
+                .is_empty()
+        );
     }
 
     #[test]
@@ -677,7 +793,7 @@ mod tests {
             true,
             None,
             || Ok(()),
-            || Ok(()),
+            || Ok(BTreeMap::new()),
             || measure_sources(root, &target, &files, &[]),
         );
         assert!(result.unwrap_err().to_string().contains("is refused"));
@@ -708,7 +824,7 @@ mod tests {
         bolero::check!().with_type::<[u8; 32]>().for_each(|seed| {
             let directory = tempfile::tempdir().unwrap();
             let path = directory.path().join(BASELINE);
-            let values: BTreeMap<String, usize> = COUNTS
+            let mut counts: BTreeMap<String, usize> = COUNTS
                 .iter()
                 .enumerate()
                 .map(|(index, (name, _))| {
@@ -718,6 +834,14 @@ mod tests {
                     )
                 })
                 .collect();
+            let branch_count = usize::from(seed[20] % 8);
+            counts.insert(BRANCH_INVERSIONS.into(), branch_count);
+            let values = Baseline {
+                counts,
+                branch_inversion_sites: (0..branch_count)
+                    .map(|index| format!("owner::field_{index}_{}", seed[21 + index]))
+                    .collect(),
+            };
             fs::write(
                 &path,
                 format!("{}\n", serde_json::to_string_pretty(&values).unwrap()),

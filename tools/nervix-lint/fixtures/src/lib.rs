@@ -45,6 +45,16 @@ pub use tracing;
 #[derive(Debug, thiserror::Error)]
 #[error("the fixture operation failed")]
 pub struct FixtureFailure;
+
+#[derive(Clone, Copy, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct BranchKey(pub u32);
+pub struct BranchTask(pub u32);
+pub struct BranchIncarnation(pub u64);
+pub struct BranchSnapshot {
+    pub incarnation: u64,
+}
+pub struct PayloadRow(pub Vec<u8>);
+
 use nervix_primitives::{
     collections::DashMap,
     sync::{
@@ -187,4 +197,21 @@ pub async fn asynchronous_lock(lock: &nervix_primitives::sync::Mutex<u32>) {
     lock.try_lock().discarded(
         "the compiler fixture observes the try-lock API without deciding its runtime outcome",
     );
+}
+pub mod branch_ownership {
+    use std::collections::BTreeMap;
+
+    use crate::{BranchKey, BranchTask};
+
+    pub struct ParametrizerPartition {
+        pub registry: BTreeMap<BranchKey, BranchTask>,
+    }
+
+    pub struct BranchTable {
+        pub branches: BTreeMap<BranchKey, BranchTask>,
+    }
+
+    pub struct BranchTableView {
+        pub branches: BTreeMap<BranchKey, BranchTask>,
+    }
 }

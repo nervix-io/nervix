@@ -1331,6 +1331,7 @@ async fn branched_root_without_children_acks_success() {
         relays: [(
             root_relay.clone(),
             ConcreteRelayRuntime::new(ConcreteRelayRuntimeBuild {
+                delivery_lifetime: CancellationToken::new(),
                 runtime,
                 domain: root_domain,
                 relay: root_relay,

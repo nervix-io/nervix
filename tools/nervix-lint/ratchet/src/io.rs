@@ -26,6 +26,17 @@ pub fn read<T: DeserializeOwned>(path: &Path) -> Result<T> {
 }
 
 pub fn atomic_json(path: &Path, value: &impl Serialize) -> Result<()> {
+    let bytes = serde_json::to_vec(value).change_context(Error::Json { path: path.into() })?;
+    publish_json(path, bytes)
+}
+
+pub fn atomic_pretty_json(path: &Path, value: &impl Serialize) -> Result<()> {
+    let bytes =
+        serde_json::to_vec_pretty(value).change_context(Error::Json { path: path.into() })?;
+    publish_json(path, bytes)
+}
+
+fn publish_json(path: &Path, mut bytes: Vec<u8>) -> Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).change_context(Error::Io {
             operation: "create evidence directory",
@@ -33,7 +44,6 @@ pub fn atomic_json(path: &Path, value: &impl Serialize) -> Result<()> {
         })?;
     }
     let temporary = path.with_extension(format!("{}.tmp", std::process::id()));
-    let mut bytes = serde_json::to_vec(value).change_context(Error::Json { path: path.into() })?;
     bytes.push(b'\n');
     fs::write(&temporary, bytes).change_context(Error::Io {
         operation: "write evidence",

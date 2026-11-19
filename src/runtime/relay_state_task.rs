@@ -97,6 +97,13 @@ struct RelayStateRun {
     unit: Unit,
     partitioning: RelayPartitioning,
     state: MaterializedRelayStateOriginator,
+    #[cfg_attr(
+        nervix_lint,
+        expect(
+            nervix::branch_inversion,
+            reason = "relay and follower bookkeeping keeps its own branch entries; read the parametrizer partition in https://app.clickup.com/t/86bd1z0ty"
+        )
+    )]
     branches: MaterializedBranches,
     branch_capacity: Option<NonZeroUsize>,
     clock: DomainClock,

@@ -917,6 +917,20 @@ async fn relay_gate_holds_nonowner_dispatch_before_the_remote_slot() {
         .expect_err("the isolated test has no remote dispatcher");
 }
 
+#[test]
+fn an_interrupted_producer_leaves_a_fresh_sequence_for_the_next_producer() {
+    let services = test_relay_boundary_services();
+    let slot = services.ingress_slot(&None, Unit::SINGLE);
+    let previous = slot.next_delivery();
+
+    drop(InterruptedRelayDelivery(Some(&slot)));
+
+    assert!(!slot.cancellation().is_cancelled());
+    let successor = slot.next_delivery();
+    assert!(successor.channel_incarnation > previous.channel_incarnation);
+    assert_eq!(successor.sequence, 0);
+}
+
 #[nervix_primitives::test]
 async fn relay_gate_fails_buffered_owner_batch_when_its_attached_consumer_moves() {
     let domain = domain("default");

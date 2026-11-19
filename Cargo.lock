@@ -7949,6 +7949,7 @@ dependencies = [
  "nervix-bounded-write",
  "nervix-crypto",
  "nervix-licensing-vocabulary",
+ "nervix-primitives",
  "serde",
  "serde_json",
  "thiserror 2.0.21",
@@ -8180,6 +8181,18 @@ dependencies = [
  "nervix-primitives",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "nervix-relay-channel"
+version = "0.1.0-dev"
+dependencies = [
+ "bolero",
+ "criterion 0.5.1",
+ "intrusive-collections",
+ "meticulous",
+ "nervix-model-harness",
+ "nervix-primitives",
 ]
 
 [[package]]

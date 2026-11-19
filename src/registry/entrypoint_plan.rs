@@ -361,9 +361,6 @@ impl RouteBranchRetention {
 pub(crate) enum PlannedRouteBranch {
     /// The records leave unbranched for an unbranched relay.
     Unbranched,
-    /// The records keep the branch key their input arrived with. An ingestor's input arrives
-    /// unbranched.
-    Preserved(RouteBranchRetention),
     /// The records receive the branch key this program constructs.
     Constructed {
         retention: RouteBranchRetention,
@@ -393,7 +390,7 @@ impl PlannedRouteBranch {
     pub(crate) fn retention(&self) -> Option<&RouteBranchRetention> {
         match self {
             Self::Unbranched => None,
-            Self::Preserved(retention) | Self::Constructed { retention, .. } => Some(retention),
+            Self::Constructed { retention, .. } => Some(retention),
             Self::Inherited(branch) => Some(&branch.retention),
         }
     }
@@ -490,25 +487,21 @@ impl EntrypointRouteContext<'_> {
                 },
             ) if branch == relay_branch => {
                 let retention = RouteBranchRetention::of(relay, branch);
-                if assignments.is_empty() {
-                    PlannedRouteBranch::Preserved(retention)
-                } else {
-                    let branch_schema = compile_schema(branch_schema).arrow_schema();
-                    let program = LoweredBranchConstruction::new(
-                        assignments,
-                        branch_schema.as_ref(),
-                        output_schema.as_ref(),
-                        input,
-                    )
-                    .change_context(
-                        EntrypointPlanError::InvalidBranchConstruction {
-                            kind: owner.kind(),
-                            node: owner.identifier().clone(),
-                            relay: output.relay.clone(),
-                        },
-                    )?;
-                    PlannedRouteBranch::Constructed { retention, program }
-                }
+                let branch_schema = compile_schema(branch_schema).arrow_schema();
+                let program = LoweredBranchConstruction::new(
+                    assignments,
+                    branch_schema.as_ref(),
+                    output_schema.as_ref(),
+                    input,
+                )
+                .change_context(
+                    EntrypointPlanError::InvalidBranchConstruction {
+                        kind: owner.kind(),
+                        node: owner.identifier().clone(),
+                        relay: output.relay.clone(),
+                    },
+                )?;
+                PlannedRouteBranch::Constructed { retention, program }
             }
             _ => {
                 return Err(Report::new(EntrypointPlanError::RouteBranchMismatch {
@@ -751,9 +744,8 @@ mod tests {
     use super::*;
     use crate::registry::test_fixtures::{
         branch_for_relay, branch_name_for_relay, branch_schema, client_model, codec, ingestor,
-        ingestor_statement, ingestor_with_params, named, planned_entrypoints, reingestor,
-        reingestor_statement, relay, relay_branched_by_relay_branch, schema, unplaced_schedule,
-        wire_schema, with_inherit_all,
+        ingestor_statement, ingestor_with_params, named, planned_entrypoints, reingestor, relay,
+        relay_branched_by_relay_branch, schema, unplaced_schedule, wire_schema, with_inherit_all,
     };
 
     /// A payload relay the ingestor fills and a relay branched by its `value` field.
@@ -809,17 +801,9 @@ mod tests {
             &["value"],
         ));
         models.push(reingestor("rebranch", "events", "by_value", &["value"]));
-        let mut preserving = reingestor_statement("keep", "by_value", "by_value", &[]);
-        // Preserving the incoming branch declares the same branch without a SET.
-        preserving.output_routes.routes[0].branch = Some(OutputBranch::BranchedBy {
-            branch: branch_name_for_relay("by_value"),
-            assignments: Vec::new(),
-        });
-        models.push(Model::Reingestor(preserving));
-
         let plans = planned_entrypoints(models).assured("the fixture schedule plans");
 
-        assert_eq!(plans.routes().count(), 4);
+        assert_eq!(plans.routes().count(), 3);
         let unbranched = plans
             .ingestor(&named("unbranched_source"), Unit::FIRST_INSTANCE)
             .assured("the unbranched ingestor is planned");
@@ -856,14 +840,6 @@ mod tests {
         assert_eq!(
             route.ack_boundary,
             BranchInstanceAckBoundary::Reingestor(nervix_models::AckMode::Attached)
-        );
-
-        let keep = plans
-            .reingestor(&named("keep"))
-            .assured("the preserving reingestor is planned");
-        assert_eq!(
-            only_route(&keep.routes).branch,
-            PlannedRouteBranch::Preserved(by_value_retention())
         );
     }
 

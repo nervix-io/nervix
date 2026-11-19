@@ -130,7 +130,7 @@ reports = pathlib.Path(os.environ['NERVIX_LINT_REPORTS'])
 source = root / 'src/lib.rs'
 artifact = state / ('libexample-' + name + '.rmeta')
 artifact.write_text('current metadata')
-report = dict(compiler='qualified compiler', identity=os.environ['NERVIX_LINT_IDENTITY'], configuration=name, crate_name='example', crate_source=str(source), arguments=[], findings=[], audit=[], excluded_generated=0, excluded_external=0, complete=True)
+report = dict(compiler='qualified compiler', identity=os.environ['NERVIX_LINT_IDENTITY'], configuration=name, crate_name='example', crate_source=str(source), arguments=[], findings=[], branch_inversions=[], audit=[], excluded_generated=0, excluded_external=0, complete=True)
 if count >= int(os.environ.get('NERVIX_TEST_REPORT_AFTER', '1')):
     (reports / ('example-' + name + '.json')).write_text(json.dumps(report))
 records = reports / 'compilations'

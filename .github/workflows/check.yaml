@@ -695,7 +695,7 @@ jobs:
       - name: Setup Ruby for embedded native-gem tests
         uses: ruby/setup-ruby@v1
         with:
-          ruby-version: "3.3"
+          ruby-version: ${{ needs.scenarios-build.outputs.ruby-version }}
 
       - name: Setup Java for embedded JVM tests
         uses: actions/setup-java@v4
@@ -823,6 +823,8 @@ jobs:
       shards: ${{ steps.shards.outputs.shards }}
       # The tests job restores its archive at this physical checkout path.
       checkout: ${{ github.workspace }}
+      # Native Ruby test executables embed this interpreter's absolute library directory.
+      ruby-version: ${{ steps.ruby-version.outputs.version }}
     env:
       NO_COLOR: "1"
       CARGO_TERM_COLOR: never
@@ -953,6 +955,10 @@ jobs:
         uses: ruby/setup-ruby@v1
         with:
           ruby-version: "3.3"
+
+      - name: Record the Ruby version for restored tests
+        id: ruby-version
+        run: ruby -e 'puts "version=#{RUBY_VERSION}"' >> "${GITHUB_OUTPUT}"
 
       - name: Setup Java for embedded JVM tests
         uses: actions/setup-java@v4
@@ -1942,6 +1948,10 @@ jobs:
         if: contains(github.event.pull_request.labels.*.name, 'extra-miri')
         run: just test-expiry-map-miri
 
+      - name: Relay channel Miri
+        if: contains(github.event.pull_request.labels.*.name, 'extra-miri')
+        run: just test-relay-channel-miri
+
       - name: Runner diagnostics before Expiry map mutation tests
         if: contains(github.event.pull_request.labels.*.name, 'extra-mutation')
         uses: ./.github/actions/runner-diagnostics
@@ -1951,6 +1961,10 @@ jobs:
       - name: Expiry map mutation tests
         if: contains(github.event.pull_request.labels.*.name, 'extra-mutation')
         run: just test-expiry-map-mutants
+
+      - name: Relay channel mutation tests
+        if: contains(github.event.pull_request.labels.*.name, 'extra-mutation')
+        run: just test-relay-channel-mutants
 
       - name: Setup uv for runner coverage
         if: contains(github.event.pull_request.labels.*.name, 'extra-runners')

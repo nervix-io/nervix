@@ -1178,6 +1178,7 @@ impl RestoredMaterializedSnapshot {
             .change_context(MaterializedSnapshotError::Admission)?;
         executor
             .run_cpu(CpuClass::Bulk, charge, move |_charge, cancellation| {
+                #[cfg_attr(nervix_lint, expect(nervix::branch_inversion, reason = "materialized or emitter state groups its data by branch; move it to the branch in https://app.clickup.com/t/86bd1z3bd"))]
                 let mut branches = ahash::HashSet::with_capacity_and_hasher(
                     snapshot.records.len(),
                     ahash::RandomState::default(),

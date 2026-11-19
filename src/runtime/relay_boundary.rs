@@ -76,6 +76,13 @@ pub(super) type RelayBranchPresence = Arc<BranchPresence<BranchKey>>;
 #[derive(Debug, Clone)]
 pub(super) struct RelayBranchPresences {
     partitioning: RelayPartitioning,
+    #[cfg_attr(
+        nervix_lint,
+        expect(
+            nervix::branch_inversion,
+            reason = "relay and follower bookkeeping keeps its own branch entries; read the parametrizer partition in https://app.clickup.com/t/86bd1z0ty"
+        )
+    )]
     by_unit: BTreeMap<Unit, RelayBranchPresence>,
 }
 
@@ -181,6 +188,7 @@ pub(super) struct ConcreteRelayRuntime {
     /// bound, or why the branch names none.
     unit: Result<Unit, RelayPartitionError>,
     channels: RelayProducerChannels,
+    delivery_lifetime: CancellationToken,
 }
 
 enum RelayProducerChannels {
@@ -194,6 +202,7 @@ pub(super) struct ConcreteRelayRuntimeBuild {
     pub(super) domain: DomainName,
     pub(super) relay: RelayName,
     pub(super) services: Arc<RelayBoundaryServices>,
+    pub(super) delivery_lifetime: CancellationToken,
 }
 
 #[derive(Debug)]
@@ -580,6 +589,13 @@ pub(super) struct RelayOwnerTask {
 pub(super) struct RelayOwnerBranchState {
     /// The concrete branches this owner holds, each with its metric series, and the presence it
     /// publishes for them. Dropping it releases the presence.
+    #[cfg_attr(
+        nervix_lint,
+        expect(
+            nervix::branch_inversion,
+            reason = "relay membership or channel routing keeps its own branch collection; use the branch's relay channel in https://app.clickup.com/t/86bd1z226"
+        )
+    )]
     pub(super) instances: OwnedBranches<BranchKey, RelayMetricRecorders>,
     pub(super) global_metrics: RelayMetricsHandle,
     pub(super) physical_node_id: Option<ClusterNodeName>,
@@ -1464,6 +1480,13 @@ impl RelayBoundaryServices {
         )
     )]
     pub(super) fn held_branch_fingerprints(&self) -> BTreeSet<BranchKeyFingerprint> {
+        #[cfg_attr(
+            nervix_lint,
+            expect(
+                nervix::branch_inversion,
+                reason = "relay and follower bookkeeping keeps its own branch entries; read the parametrizer partition in https://app.clickup.com/t/86bd1z0ty"
+            )
+        )]
         let mut fingerprints = BTreeSet::new();
         for (_, presence) in self.branch_presences.iter() {
             let membership = presence.load();
@@ -1560,7 +1583,7 @@ impl RelayBoundaryServices {
         branch: &Option<BranchKey>,
         unit: Unit,
     ) -> StdArc<RelayOutboundSlot> {
-        self.channels.bind(branch, unit).ingress()
+        self.channels.bind_relay(branch, unit).ingress()
     }
 
     pub(super) fn outbound_slot(
@@ -1572,7 +1595,7 @@ impl RelayBoundaryServices {
         unit: Unit,
     ) -> StdArc<RelayOutboundSlot> {
         self.channels
-            .bind(branch, unit)
+            .bind_relay(branch, unit)
             .outbound(RelayOutboundChannel {
                 node_id: node_id.clone(),
                 relay: relay.clone(),
@@ -1589,7 +1612,7 @@ impl RelayBoundaryServices {
         relay: &RelayName,
     ) -> StdArc<channels::SubscriptionChannels> {
         self.channels
-            .bind(branch, unit)
+            .bind_relay(branch, unit)
             .subscriptions(snapshot, domain, relay)
     }
 
@@ -1598,7 +1621,7 @@ impl RelayBoundaryServices {
     }
 
     pub(super) fn remove_branch_slots(&self, branch: &Option<BranchKey>) {
-        self.channels.retire(branch);
+        self.channels.retire_branch(branch);
     }
 
     pub(super) async fn enqueue_owner_batch(
@@ -1658,6 +1681,7 @@ impl RelayBoundaryServices {
             unit,
             batch,
             self.ingress_slot(&batch.key, unit),
+            None,
         )
         .await
     }
@@ -1676,6 +1700,7 @@ impl RelayBoundaryServices {
         unit: Unit,
         batch: &RelayRecordBatch,
         ingress_slot: StdArc<RelayOutboundSlot>,
+        producer_lifetime: Option<&CancellationToken>,
     ) -> RelayDispatchResult {
         batch
             .keep_alive_while_pending(self.deliver_to_owner_on(
@@ -1683,7 +1708,7 @@ impl RelayBoundaryServices {
                 relay,
                 unit,
                 batch,
-                ingress_slot,
+                RelayDeliveryChannel::new(&ingress_slot, producer_lifetime),
             ))
             .await
     }
@@ -1694,15 +1719,22 @@ impl RelayBoundaryServices {
         relay: &RelayName,
         unit: Unit,
         batch: &RelayRecordBatch,
-        ingress_slot: StdArc<RelayOutboundSlot>,
+        channel: RelayDeliveryChannel<'_>,
     ) -> RelayDispatchResult {
-        let _unit_permit = match self.unit_dispatch_gate(unit) {
-            Some(gate) => Some(gate.acquire_dispatch().await),
-            None => None,
-        };
+        let unit_gate = self.unit_dispatch_gate(unit);
         let dispatch_gate = self.fanout.dispatch_gate();
-        let _dispatch_permit = dispatch_gate.acquire_dispatch().await;
-        let _branch_dispatch_permits = self.fanout.acquire_branch_dispatch_gates(&batch.key).await;
+        let permits = async {
+            let unit = match &unit_gate {
+                Some(gate) => Some(gate.acquire_dispatch().await),
+                None => None,
+            };
+            let relay = dispatch_gate.acquire_dispatch().await;
+            let branches = self.fanout.acquire_branch_dispatch_gates(&batch.key).await;
+            (unit, relay, branches)
+        };
+        let Some(_permits) = channel.while_producer_lives(permits).await else {
+            return reject_relay_delivery(batch, channel.cancellation_reason());
+        };
         let Some(owner_node) = self.owner_of(unit) else {
             for ack in batch.acks.iter() {
                 ack.no_ack("relay owner is unavailable");
@@ -1715,11 +1747,12 @@ impl RelayBoundaryServices {
             }
             return Err(Box::new(batch.clone()));
         };
-        let Some(_slot) = ingress_slot.lock_for_delivery().await else {
-            for ack in &batch.acks {
-                ack.no_ack("relay channel was retired");
-            }
-            return Err(Box::new(batch.clone()));
+        let Some(_slot) = channel
+            .while_producer_lives(channel.slot.lock_for_delivery())
+            .await
+            .flatten()
+        else {
+            return reject_relay_delivery(batch, channel.cancellation_reason());
         };
         // The delivery's records are stored before its body is encoded, so a delivery that waits
         // for room to store them holds no encoded body meanwhile.
@@ -1736,16 +1769,13 @@ impl RelayBoundaryServices {
                 forwarded,
                 deadline,
                 timing,
-                ingress_slot.cancellation().cancelled(),
+                channel.cancelled(),
             )
             .await;
         let mut remote_acks = match storage {
             Ok(RemoteAckStorage::Stored(registrations)) => registrations,
             Ok(RemoteAckStorage::Cancelled) => {
-                for ack in &batch.acks {
-                    ack.no_ack("relay channel was retired");
-                }
-                return Err(Box::new(batch.clone()));
+                return reject_relay_delivery(batch, channel.cancellation_reason());
             }
             Err(error) => {
                 warn!(
@@ -1763,16 +1793,13 @@ impl RelayBoundaryServices {
                 return Err(Box::new(batch.clone()));
             }
         };
-        let batch_ipc = match batch
-            .batch
-            .encode_arrow_ipc(
-                dispatcher.executor(),
-                nervix_execution::QueueAdmission::WaitForPlace,
-            )
-            .await
-        {
-            Ok(bytes) => bytes,
-            Err(error) => {
+        let encoding = batch.batch.encode_arrow_ipc(
+            dispatcher.executor(),
+            nervix_execution::QueueAdmission::WaitForPlace,
+        );
+        let batch_ipc = match channel.while_producer_lives(encoding).await {
+            Some(Ok(bytes)) => bytes,
+            Some(Err(error)) => {
                 for registration in remote_acks.registrations().iter().flatten() {
                     dispatcher.clear_pending_ack(registration);
                 }
@@ -1781,8 +1808,9 @@ impl RelayBoundaryServices {
                 }
                 return Err(Box::new(batch.clone()));
             }
+            None => return reject_relay_delivery(batch, channel.cancellation_reason()),
         };
-        let delivery = ingress_slot.next_delivery_with_policy(remote_acks.timing());
+        let delivery = channel.slot.next_delivery_with_policy(remote_acks.timing());
         let admission_result = dispatcher
             .dispatch_sliced_relay_payload(
                 &owner_node,
@@ -1801,7 +1829,7 @@ impl RelayBoundaryServices {
                     admission: None,
                 },
                 &batch.batch,
-                &ingress_slot,
+                channel,
                 deadline,
                 GrantCapacityRefusals::Hold,
                 Some(&mut remote_acks),
@@ -2096,7 +2124,7 @@ impl RelayBoundaryServices {
                         acks: remote_acks.clone(),
                     }),
                     &remote_batch.batch,
-                    &outbound_slot,
+                    RelayDeliveryChannel::new(&outbound_slot, None),
                     deadline,
                     GrantCapacityRefusals::Hold,
                     registration_owner.as_mut(),
@@ -2344,13 +2372,14 @@ impl ConcreteRelayRuntime {
             domain,
             relay,
             services,
+            delivery_lifetime,
         } = build;
         let unit = services
             .partitioning
             .unit_of(&key)
             .map_err(|refusal| refusal.current_context().clone());
         let channels = match &unit {
-            Ok(unit) => RelayProducerChannels::Bound(services.channels.bind(&key, *unit)),
+            Ok(unit) => RelayProducerChannels::Bound(services.channels.bind_producer(&key, *unit)),
             Err(_) => RelayProducerChannels::Ended,
         };
         Self {
@@ -2361,6 +2390,7 @@ impl ConcreteRelayRuntime {
             key,
             unit,
             channels,
+            delivery_lifetime,
         }
     }
 
@@ -2371,17 +2401,40 @@ impl ConcreteRelayRuntime {
             .unit_of(&key)
             .map_err(|error| error.current_context().clone());
         if self.unit != unit {
-            self.channels = match &unit {
-                Ok(unit) => RelayProducerChannels::Bound(self.services.channels.bind(&key, *unit)),
-                Err(_) => RelayProducerChannels::Ended,
+            let channels = match &unit {
+                Ok(unit) if !self.delivery_lifetime.is_cancelled() => {
+                    RelayProducerChannels::Bound(self.services.channels.bind_producer(&key, *unit))
+                }
+                _ => RelayProducerChannels::Ended,
             };
+            self.release_channels();
+            self.channels = channels;
             self.unit = unit;
         }
         self.key = key;
     }
 
     pub(super) fn retire(&mut self) {
-        self.channels = RelayProducerChannels::Ended;
+        self.delivery_lifetime.cancel();
+        self.release_channels();
+    }
+
+    fn release_channels(&mut self) {
+        if let RelayProducerChannels::Bound(channels) =
+            std::mem::replace(&mut self.channels, RelayProducerChannels::Ended)
+        {
+            self.services
+                .channels
+                .release_producer(&self.key, &channels);
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn retained_ingress(&self) -> Option<StdArc<RelayOutboundSlot>> {
+        match &self.channels {
+            RelayProducerChannels::Bound(channels) => Some(channels.ingress()),
+            RelayProducerChannels::Ended => None,
+        }
     }
 
     pub(super) async fn dispatch_boundary(
@@ -2399,16 +2452,18 @@ impl ConcreteRelayRuntime {
                 return Err(Box::new(batch.clone()));
             }
         };
+        if self.delivery_lifetime.is_cancelled() {
+            return reject_relay_delivery(batch, "relay producer lifetime ended");
+        }
         let RelayProducerChannels::Bound(channels) = &mut self.channels else {
-            for ack in batch.acks.iter() {
-                ack.no_ack("relay producer lifetime ended");
-            }
-            return Err(Box::new(batch.clone()));
+            return reject_relay_delivery(batch, "relay producer lifetime ended");
         };
         // The receiver's relay branch may expire independently of this producer. Its explicit
         // invalidation is a cold rebind; ending this producer never permits such a rebind.
         if channels.is_retired() {
-            *channels = self.services.channels.bind(&self.key, unit);
+            let successor = self.services.channels.bind_producer(&self.key, unit);
+            self.services.channels.release_producer(&self.key, channels);
+            *channels = successor;
             if channels.is_retired() {
                 for ack in batch.acks.iter() {
                     ack.no_ack("relay service lifetime ended");
@@ -2417,10 +2472,21 @@ impl ConcreteRelayRuntime {
             }
         }
         if self.runtime.owns_relay_unit(&self.services, unit) {
-            return self.services.enqueue_owner_batch(batch, unit).await;
+            return self
+                .delivery_lifetime
+                .run_until_cancelled(self.services.enqueue_owner_batch(batch, unit))
+                .await
+                .unwrap_or_else(|| reject_relay_delivery(batch, "relay producer lifetime ended"));
         }
         self.services
-            .dispatch_to_owner_on(&self.domain, &self.relay, unit, batch, channels.ingress())
+            .dispatch_to_owner_on(
+                &self.domain,
+                &self.relay,
+                unit,
+                batch,
+                channels.ingress(),
+                Some(&self.delivery_lifetime),
+            )
             .await
     }
 }
@@ -2583,6 +2649,13 @@ impl Runtime {
         partitioning: RelayPartitioning,
         shared: impl Fn(Unit) -> bool,
     ) -> error_stack::Result<RelayBranchPresences, StateIdentityError> {
+        #[cfg_attr(
+            nervix_lint,
+            expect(
+                nervix::branch_inversion,
+                reason = "relay and follower bookkeeping keeps its own branch entries; read the parametrizer partition in https://app.clickup.com/t/86bd1z0ty"
+            )
+        )]
         let mut by_unit = BTreeMap::new();
         for unit in partitioning.units() {
             let presence = if shared(unit) {
@@ -2615,6 +2688,13 @@ impl Runtime {
         if let Some(existing) = self.inner.relay_branch_presences.get(&placement) {
             return Ok(existing.clone());
         }
+        #[cfg_attr(
+            nervix_lint,
+            expect(
+                nervix::branch_inversion,
+                reason = "relay and follower bookkeeping keeps its own branch entries; read the parametrizer partition in https://app.clickup.com/t/86bd1z0ty"
+            )
+        )]
         let presence = Arc::new(BranchPresence::new());
         self.inner
             .relay_branch_presences
@@ -2623,6 +2703,13 @@ impl Runtime {
     }
 
     pub(in crate::runtime) fn clear_relay_branch_presences_for_domain(&self, domain: &DomainName) {
+        #[cfg_attr(
+            nervix_lint,
+            expect(
+                nervix::branch_inversion,
+                reason = "relay and follower bookkeeping keeps its own branch entries; read the parametrizer partition in https://app.clickup.com/t/86bd1z0ty"
+            )
+        )]
         let relays = self
             .inner
             .relay_branch_presences
@@ -2713,6 +2800,13 @@ impl Runtime {
         let expiration_scan_interval = self.inner.branch_instance_expiration_scan_interval;
         // Claiming before the task starts makes this owner the presence's only publisher from here
         // on: a predecessor that is still ending can no longer change what observers read.
+        #[cfg_attr(
+            nervix_lint,
+            expect(
+                nervix::branch_inversion,
+                reason = "relay membership or channel routing keeps its own branch collection; use the branch's relay channel in https://app.clickup.com/t/86bd1z226"
+            )
+        )]
         let instances = OwnedBranches::claim(presence);
         let task = nervix_primitives::task::spawn(async move {
             let mut branches = RelayOwnerBranchState {
@@ -2817,6 +2911,76 @@ impl Runtime {
         });
         Ok(RelayOwnerTask { shutdown, task })
     }
+}
+
+/// The ordered channel shared by senders and the optional lifetime of this particular sender.
+#[derive(Clone, Copy)]
+pub(super) struct RelayDeliveryChannel<'a> {
+    pub(super) slot: &'a RelayOutboundSlot,
+    producer_lifetime: Option<&'a CancellationToken>,
+}
+
+impl<'a> RelayDeliveryChannel<'a> {
+    pub(super) fn new(
+        slot: &'a RelayOutboundSlot,
+        producer_lifetime: Option<&'a CancellationToken>,
+    ) -> Self {
+        Self {
+            slot,
+            producer_lifetime,
+        }
+    }
+
+    pub(super) fn producer_ended(self) -> bool {
+        self.producer_lifetime
+            .is_some_and(|token| token.is_cancelled())
+    }
+
+    pub(super) fn has_producer(self) -> bool {
+        self.producer_lifetime.is_some()
+    }
+
+    fn cancellation_reason(self) -> &'static str {
+        if self.producer_ended() {
+            "relay producer lifetime ended"
+        } else {
+            "relay channel was retired"
+        }
+    }
+
+    pub(super) async fn while_producer_lives<T>(
+        self,
+        work: impl std::future::Future<Output = T>,
+    ) -> Option<T> {
+        match self.producer_lifetime {
+            Some(lifetime) => lifetime.run_until_cancelled(work).await,
+            None => Some(work.await),
+        }
+    }
+
+    pub(super) async fn cancelled(self) {
+        if let Some(lifetime) = self.producer_lifetime {
+            nervix_primitives::select! {
+                () = lifetime.cancelled() => {},
+                () = self.slot.cancellation().cancelled() => {},
+            }
+        } else {
+            self.slot.cancellation().cancelled().await;
+        }
+    }
+}
+
+impl Drop for ConcreteRelayRuntime {
+    fn drop(&mut self) {
+        self.release_channels();
+    }
+}
+
+fn reject_relay_delivery(batch: &RelayRecordBatch, reason: &'static str) -> RelayDispatchResult {
+    for ack in &batch.acks {
+        ack.no_ack(reason);
+    }
+    Err(Box::new(batch.clone()))
 }
 
 #[cfg(test)]

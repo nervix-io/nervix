@@ -48,6 +48,13 @@ pub(super) struct ReplicatedBranchLifecycle {
     assignment: SharedStateAssignment,
     /// Passive copies belong to this entity. The replica task publishes complete immutable
     /// values; pruning cannot acquire another entity's registry shard.
+    #[cfg_attr(
+        nervix_lint,
+        expect(
+            nervix::branch_inversion,
+            reason = "this branch collection supports checkpoints, partition transfers or state recovery; use the owning partition in https://app.clickup.com/t/86bd1z3ng"
+        )
+    )]
     passive: ArcSwap<PassiveCheckpoints>,
     /// Replaced whole, so a reader keeps the checkpoint it loaded without holding anything.
     latest: ArcSwapOption<BranchLifecycleCheckpoint>,
@@ -128,6 +135,7 @@ impl ReplicatedBranchLifecycle {
             {
                 return current.clone();
             }
+            #[cfg_attr(nervix_lint, expect(nervix::branch_inversion, reason = "this branch collection supports checkpoints, partition transfers or state recovery; use the owning partition in https://app.clickup.com/t/86bd1z3ng"))]
             let mut next = current.as_ref().clone();
             next.insert(placement.clone(), snapshot.clone());
             StdArc::new(next)
@@ -136,6 +144,7 @@ impl ReplicatedBranchLifecycle {
 
     pub(super) fn prune_passive_checkpoints(&self, branches: &NamedBranches) {
         self.passive.rcu(|current| {
+            #[cfg_attr(nervix_lint, expect(nervix::branch_inversion, reason = "this branch collection supports checkpoints, partition transfers or state recovery; use the owning partition in https://app.clickup.com/t/86bd1z3ng"))]
             let mut next = current.as_ref().clone();
             next.retain(|placement, _| {
                 placement.branch_key.is_none() || branches.names(placement.branch_key.as_ref())
@@ -154,6 +163,7 @@ impl ReplicatedBranchLifecycle {
     pub(super) fn purge_stale_passive_checkpoints(&self) {
         let assignment = self.assignment.load();
         self.passive.rcu(|current| {
+            #[cfg_attr(nervix_lint, expect(nervix::branch_inversion, reason = "this branch collection supports checkpoints, partition transfers or state recovery; use the owning partition in https://app.clickup.com/t/86bd1z3ng"))]
             let mut next = current.as_ref().clone();
             next.retain(|placement, _| {
                 assignment
@@ -176,6 +186,7 @@ impl ReplicatedBranchLifecycle {
         placement: &RuntimeStatePlacement,
     ) -> Option<PersistedRuntimeStateEntry> {
         let previous = self.passive.rcu(|current| {
+            #[cfg_attr(nervix_lint, expect(nervix::branch_inversion, reason = "this branch collection supports checkpoints, partition transfers or state recovery; use the owning partition in https://app.clickup.com/t/86bd1z3ng"))]
             let mut next = current.as_ref().clone();
             next.remove(placement);
             next
@@ -196,6 +207,13 @@ pub(super) struct AnnouncedCheckpoints {
     pub(super) lifecycle: Option<u64>,
     /// The newest checkpoint the owner announced for each branch. Unbranched work is the absent
     /// key.
+    #[cfg_attr(
+        nervix_lint,
+        expect(
+            nervix::branch_inversion,
+            reason = "this branch collection supports checkpoints, partition transfers or state recovery; use the owning partition in https://app.clickup.com/t/86bd1z3ng"
+        )
+    )]
     pub(super) branches: HashMap<Option<BranchKey>, AnnouncedCheckpoint>,
 }
 
@@ -228,6 +246,13 @@ pub(super) struct BranchLifecycleCheckpoint {
 pub(super) struct NamedBranches {
     /// Whether the entity held unbranched work, which has no concrete branch key.
     unbranched: bool,
+    #[cfg_attr(
+        nervix_lint,
+        expect(
+            nervix::branch_inversion,
+            reason = "this branch collection supports checkpoints, partition transfers or state recovery; use the owning partition in https://app.clickup.com/t/86bd1z3ng"
+        )
+    )]
     concrete: HashSet<BranchKey>,
 }
 

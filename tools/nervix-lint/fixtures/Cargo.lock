@@ -1078,6 +1078,7 @@ dependencies = [
  "shuttle-tokio",
  "shuttle-tokio-stream",
  "shuttle-tokio-util",
+ "socket2",
  "thiserror",
  "tokio",
  "tokio-stream",
