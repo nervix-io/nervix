@@ -178,7 +178,7 @@ fn planning_parameter_fence_preserves_existing_conflict_precedence() {
         start_version: 0,
         last_start: nervix_models::DomainStartPoint::Resume,
         clock: None,
-        stop_cause: None,
+        stop: None,
     });
     let applied = apply_consensus_command(
         &mut state,

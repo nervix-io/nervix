@@ -95,7 +95,41 @@ fn stop_cause(state: &StateMachineData, name: &str) -> Option<DomainStopCause> {
         .domains
         .get(&domain(name))
         .verified("the fixture created the domain")
-        .stop_cause
+        .stop_cause()
+}
+
+/// Requests the licensing stop of `name` and ends it once its work is at rest, as the leader's
+/// stop owner does, and returns the response to the request.
+fn stop_for_licensing(
+    state: &mut StateMachineData,
+    name: &str,
+    reason: LicensingStopReason,
+) -> ConsensusResponse {
+    let request = ConsensusCommand::RequestDomainStop {
+        domain_id: domain(name),
+        request: Box::new(nervix_models::StopRequest::Licensing(reason)),
+        mutation: None,
+    };
+    let requested = apply_consensus_command(state, &request);
+    let Some(began_at_revision) = state
+        .domains
+        .get(&domain(name))
+        .verified("the fixture created the domain")
+        .stopping()
+        .map(|stopping| stopping.began_at_revision)
+    else {
+        return requested.response;
+    };
+    let end = ConsensusCommand::EndDomainStop {
+        domain_id: domain(name),
+        began_at_revision,
+        ending: nervix_models::StopEnding::Completed,
+    };
+    assert_eq!(
+        apply_consensus_command(state, &end).response,
+        ConsensusResponse::Applied
+    );
+    requested.response
 }
 
 /// A cluster whose ephemeral activation is committed and has not expired, so the gate is open.
@@ -235,14 +269,43 @@ fn a_closed_gate_refuses_every_change_that_runs_a_domain_and_records_its_stops()
     );
 
     for name in ["running", "paused"] {
-        let stop = ConsensusCommand::StopDomain {
+        let request = ConsensusCommand::RequestDomainStop {
             domain_id: domain(name),
+            request: Box::new(nervix_models::StopRequest::Licensing(reason)),
             mutation: None,
-            cause: DomainStopCause::Licensing(reason),
         };
-        let applied = apply_consensus_command(&mut state, &stop);
+        let applied = apply_consensus_command(&mut state, &request);
         assert_eq!(applied.response, ConsensusResponse::Applied);
         assert!(applied.domains_changed);
+        assert_eq!(
+            state
+                .domains
+                .get(&domain(name))
+                .verified("created above")
+                .status,
+            DomainStatus::Stopping,
+            "the licensing request begins a stop that waits for the work in motion"
+        );
+        assert_eq!(
+            stop_cause(&state, name),
+            Some(DomainStopCause::Licensing(reason))
+        );
+        let began_at_revision = state
+            .domains
+            .get(&domain(name))
+            .verified("created above")
+            .stopping()
+            .verified("the domain is stopping, as asserted above")
+            .began_at_revision;
+        let end = ConsensusCommand::EndDomainStop {
+            domain_id: domain(name),
+            began_at_revision,
+            ending: nervix_models::StopEnding::Completed,
+        };
+        assert_eq!(
+            apply_consensus_command(&mut state, &end).response,
+            ConsensusResponse::Applied
+        );
         assert_eq!(
             state
                 .domains
@@ -257,16 +320,23 @@ fn a_closed_gate_refuses_every_change_that_runs_a_domain_and_records_its_stops()
         );
     }
     assert_eq!(stop_cause(&state, "idle"), None, "no stop committed for it");
-    // A later stop of a stopped domain keeps the cause of the stop that ended it.
-    let repeated = ConsensusCommand::StopDomain {
+    // A later stop request for a stopped domain changes nothing: it keeps the cause of the stop
+    // that ended it.
+    let repeated = ConsensusCommand::RequestDomainStop {
         domain_id: domain("running"),
+        request: Box::new(nervix_models::StopRequest::Operator {
+            reference: nervix_models::CommandExecutionReference::parse("later-stop")
+                .assured("the fixture reference is a valid literal"),
+            request: nervix_models::OperatorStopRequest {
+                requested_at: expiry(&state),
+                limit: None,
+            },
+        }),
         mutation: None,
-        cause: DomainStopCause::Operator,
     };
-    assert_eq!(
-        apply_consensus_command(&mut state, &repeated).response,
-        ConsensusResponse::Applied
-    );
+    let applied = apply_consensus_command(&mut state, &repeated);
+    assert_eq!(applied.response, ConsensusResponse::Applied);
+    assert!(!applied.domains_changed);
     assert_eq!(
         stop_cause(&state, "running"),
         Some(DomainStopCause::Licensing(reason))
@@ -298,13 +368,8 @@ fn only_a_new_activation_after_the_expiry_lifts_the_gate_and_starts_stay_explici
     let reason = LicensingStopReason::EphemeralExpired {
         expired_at: expires_at,
     };
-    let stop = ConsensusCommand::StopDomain {
-        domain_id: domain("tenant"),
-        mutation: None,
-        cause: DomainStopCause::Licensing(reason),
-    };
     assert_eq!(
-        apply_consensus_command(&mut state, &stop).response,
+        stop_for_licensing(&mut state, "tenant", reason),
         ConsensusResponse::Applied
     );
     assert_eq!(
@@ -344,14 +409,14 @@ fn only_a_new_activation_after_the_expiry_lifts_the_gate_and_starts_stay_explici
         .get(&domain("tenant"))
         .verified("created above");
     assert_eq!(tenant.status, DomainStatus::Stopped);
-    assert_eq!(tenant.stop_cause, Some(DomainStopCause::Licensing(reason)));
+    assert_eq!(tenant.stop_cause(), Some(DomainStopCause::Licensing(reason)));
     assert_eq!(start(&mut state, "tenant"), ConsensusResponse::Applied);
     let tenant = state
         .domains
         .get(&domain("tenant"))
         .verified("created above");
     assert_eq!(tenant.status, DomainStatus::Running);
-    assert_eq!(tenant.stop_cause, None);
+    assert_eq!(tenant.stop_cause(), None);
 }
 
 #[test]
@@ -386,7 +451,7 @@ fn a_closed_gate_refuses_a_pause_recovery_that_would_resume_the_domain() {
         .get(&domain("paused"))
         .verified("created above");
     assert_eq!(paused.status, DomainStatus::Paused);
-    assert_eq!(paused.stop_cause, None);
+    assert_eq!(paused.stop_cause(), None);
 }
 
 #[test]

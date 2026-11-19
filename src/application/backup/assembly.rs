@@ -501,7 +501,7 @@ mod tests {
                 Timestamp::from_unix_nanos(5_000),
                 nervix_models::DomainTimeRate::ONE,
             )),
-            stop_cause: None,
+            stop: None,
         }
     }
 

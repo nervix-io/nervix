@@ -1416,7 +1416,9 @@ table RestoredUsers {
 enum DomainStatus : ubyte {
   Stopped,
   Running,
-  Paused
+  Paused,
+  /// Intake has stopped and the work in motion finishes before the domain stops.
+  Stopping
 }
 
 /// One domain a restore recreates.

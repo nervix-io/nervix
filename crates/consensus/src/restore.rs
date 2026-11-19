@@ -411,8 +411,11 @@ pub(crate) fn apply_restore_step(
                     // stopped with the licensing cause, as the leader's stop would leave it.
                     match licensing_stop {
                         Some(reason) => {
-                            restored.stop_cause =
-                                Some(nervix_models::DomainStopCause::Licensing(reason));
+                            restored.stop = Some(nervix_models::DomainStop::Ended(
+                                nervix_models::DomainStopEnding::before_any_work(
+                                    nervix_models::DomainStopCause::Licensing(reason),
+                                ),
+                            ));
                         }
                         None => {
                             restored.status = nervix_models::DomainStatus::Running;
@@ -744,7 +747,7 @@ mod tests {
             start_version: 3,
             last_start: DomainStartPoint::Resume,
             clock: None,
-            stop_cause: None,
+            stop: None,
         }
     }
 
@@ -1147,7 +1150,7 @@ mod tests {
             .assured("restored domain exists");
         assert_eq!(restored.status, DomainStatus::Stopped);
         assert_eq!(
-            restored.stop_cause,
+            restored.stop_cause(),
             Some(nervix_models::DomainStopCause::Licensing(reason))
         );
         assert_eq!(restored.start_version, before.start_version);

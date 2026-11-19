@@ -719,7 +719,7 @@ impl Runtime {
                     }
                     continue;
                 }
-                if domain_clock.is_paused() {
+                if domain_clock.holds_intake() {
                     source_generation.clear();
                     pending_occurrence = None;
                     runtime
@@ -821,7 +821,7 @@ impl Runtime {
                     if !state_load_failed {
                         if source_gate.is_closed()
                             || runtime.local_intake_is_closed()
-                            || domain_clock.is_paused()
+                            || domain_clock.holds_intake()
                         {
                             continue;
                         }

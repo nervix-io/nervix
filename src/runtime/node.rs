@@ -97,6 +97,10 @@ pub(in crate::runtime) struct RuntimeInner {
         DashMap<DomainNodeUnitRef, Arc<AckRootTracker>, RandomState>,
     pub(in crate::runtime) generator_activity_by_domain:
         DashMap<DomainName, Arc<AtomicUsize>, RandomState>,
+    /// What this node's teardown of each stopped domain cut, kept until the stop's owner collects
+    /// it or the domain starts again.
+    pub(in crate::runtime) stop_ledgers:
+        DashMap<DomainName, domain_stop::StopLedgerEntry, RandomState>,
     pub(in crate::runtime) emitter_buffers:
         DashMap<DomainNodeUnitRef, Arc<AtomicUsize>, RandomState>,
     pub(in crate::runtime) force_flush_by_domain:

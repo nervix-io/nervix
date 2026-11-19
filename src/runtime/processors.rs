@@ -593,6 +593,35 @@ impl CompiledInferencerInputProgram {
 }
 
 impl RelayProcessorOperationNode {
+    /// Rows a reorderer holds until their release time, or records a correlator holds until their
+    /// partner arrives; other operations hold none this way.
+    pub(super) fn held_rows(&self) -> usize {
+        match self {
+            Self::Reorderer { output_buffers, .. } => {
+                let mut rows = 0_usize;
+                for buffer in output_buffers {
+                    let buffer_rows = usize::try_from(buffer.held_rows())
+                        .assured("rows a node holds in memory fit its address space");
+                    rows = rows
+                        .checked_add(buffer_rows)
+                        .assured("rows a node holds in memory are fewer than usize::MAX");
+                }
+                rows
+            }
+            Self::Correlator { state, .. } => state
+                .pending_left
+                .len()
+                .checked_add(state.pending_right.len())
+                .assured("records a node holds in memory are fewer than usize::MAX"),
+            Self::Deduplicator { .. }
+            | Self::WindowProcessor { .. }
+            | Self::Junction { .. }
+            | Self::Inferencer { .. }
+            | Self::StatefulInferencer { .. }
+            | Self::WasmProcessor { .. } => 0,
+        }
+    }
+
     pub(super) fn output_routes(&self) -> &RelayProcessorOutputsNode {
         match self {
             Self::Deduplicator { output_routes, .. }
@@ -875,6 +904,9 @@ impl ReordererOutputBatchFailure {
 pub(super) struct ReordererOutputBuffer {
     pending: Vec<ReordererPendingBatch>,
     estimated_bytes: u64,
+    /// The rows of every batch the route holds, kept as batches arrive and leave, so the branch
+    /// reports them without walking its batches.
+    held_rows: u64,
 }
 
 impl ReordererOutputBuffer {
@@ -888,6 +920,12 @@ impl ReordererOutputBuffer {
             .estimated_bytes
             .checked_add(batch.estimated_bytes())
             .assured("both counts estimate bytes of batches this node already holds in memory");
+        let batch_rows = u64::try_from(batch.record_batch().num_rows())
+            .assured("an addressable row count fits u64");
+        self.held_rows = self
+            .held_rows
+            .checked_add(batch_rows)
+            .assured("rows a node holds in memory are fewer than 2^64");
         self.pending.push(ReordererPendingBatch {
             received_at,
             row_order,
@@ -909,15 +947,7 @@ impl ReordererOutputBuffer {
 
     /// The rows of every batch this route holds.
     pub(super) fn held_rows(&self) -> u64 {
-        let mut rows = 0_u64;
-        for pending in &self.pending {
-            let batch_rows = u64::try_from(pending.batch.record_batch().num_rows())
-                .assured("an addressable row count fits u64");
-            rows = rows
-                .checked_add(batch_rows)
-                .assured("rows a node holds in memory are fewer than 2^64");
-        }
-        rows
+        self.held_rows
     }
 
     /// Copies the rows this route holds in arrival order, within `budget`: each row after those the
@@ -982,6 +1012,7 @@ impl ReordererOutputBuffer {
     pub(super) fn clear(&mut self) {
         self.pending.clear();
         self.estimated_bytes = 0;
+        self.held_rows = 0;
     }
 
     pub(super) fn take_ordered_batch(
@@ -990,6 +1021,7 @@ impl ReordererOutputBuffer {
         // The buffer empties here whether or not ordering succeeds, so every failure below hands
         // the drained batches back and their ACKs stay owned by exactly one place.
         self.estimated_bytes = 0;
+        self.held_rows = 0;
         let pending = std::mem::take(&mut self.pending);
 
         // Every buffered batch must carry one ordering key per Arrow row. Walking the buffer in

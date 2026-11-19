@@ -470,6 +470,10 @@ impl PersistentCommandRequest {
         match statement {
             Statement::CreateDomain(create) => BTreeSet::from([create.id.clone()]),
             Statement::DrainNode(_) => BTreeSet::new(),
+            // A STOP takes no lease. One consensus decision begins the domain's stop or joins the
+            // stop it is already in, refusing it while another execution holds the domain, so a
+            // second STOP joins the first rather than waiting for a lease the stop never releases.
+            Statement::StopDomain(_) => BTreeSet::new(),
             statement if statement.requires_domain_mutation_ownership() => {
                 self.domain.iter().cloned().collect()
             }
@@ -733,7 +737,7 @@ impl SessionServiceImpl {
                         start_version: 0,
                         last_start: DomainStartPoint::Resume,
                         clock: None,
-                        stop_cause: None,
+                        stop: None,
                     },
                 };
                 CommandExecutionEffect::CreateDomain {
@@ -776,6 +780,25 @@ impl SessionServiceImpl {
                 CommandExecutionEffect::DropNode {
                     identity,
                     member_at_admission: membership.contains_key(&drop.node_id),
+                }
+            }
+            PersistentCommandRequestBody::Statement {
+                source,
+                statement: Statement::StopDomain(stop),
+            } => {
+                let domain = request.domain.as_ref().ok_or_else(|| {
+                    Box::new(command_error("no active domain selected".to_string()))
+                })?;
+                let Some(current) = self.inner.consensus.current_domain(domain).await else {
+                    return Err(Box::new(command_error(format!(
+                        "domain '{}' does not exist",
+                        domain.as_str()
+                    ))));
+                };
+                CommandExecutionEffect::StopDomain {
+                    source: source.clone(),
+                    stop: stop.clone(),
+                    start_version: current.start_version,
                 }
             }
             PersistentCommandRequestBody::Statement { source, statement }
@@ -982,6 +1005,11 @@ impl SessionServiceImpl {
                 )
                 .await
             }
+            CommandExecutionEffect::StopDomain {
+                stop,
+                start_version,
+                ..
+            } => Box::pin(self.execute_stop(execution, stop, start_version)).await,
             CommandExecutionEffect::Statement { source, statement } => match *statement {
                 Statement::Backup(backup) => {
                     return Box::pin(self.execute_backup(execution, backup)).await;

@@ -712,7 +712,7 @@ mod tests {
                 start_version: 0,
                 last_start: nervix_models::DomainStartPoint::Resume,
                 clock: None,
-                stop_cause: None,
+                stop: None,
             },
         )]));
 
@@ -872,7 +872,7 @@ mod tests {
                 start_version: 0,
                 last_start: nervix_models::DomainStartPoint::Resume,
                 clock: None,
-                stop_cause: None,
+                stop: None,
             },
         )]));
 

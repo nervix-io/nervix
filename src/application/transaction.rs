@@ -2289,12 +2289,26 @@ impl SessionServiceImpl {
                     }),
                 )
             }
-            PlannedTransactionStepKind::StopDomain => (
-                command_ok(format!("stopped domain '{}'", domain_id.as_str())),
-                Some(TransactionStepEffect::StopDomain {
-                    inputs: Box::new(inputs),
-                }),
-            ),
+            PlannedTransactionStepKind::StopDomain => {
+                let limit = match transaction
+                    .statements
+                    .get(statement_index)
+                    .map(|statement| &statement.statement)
+                {
+                    Some(Statement::StopDomain(stop)) => stop.wait_limit,
+                    _ => None,
+                };
+                (
+                    command_ok(format!("stopped domain '{}'", domain_id.as_str())),
+                    Some(TransactionStepEffect::StopDomain {
+                        inputs: Box::new(inputs),
+                        request: Box::new(nervix_models::OperatorStopRequest {
+                            requested_at: current_timestamp(),
+                            limit,
+                        }),
+                    }),
+                )
+            }
             PlannedTransactionStepKind::ResetWasmState {
                 reset,
                 request,

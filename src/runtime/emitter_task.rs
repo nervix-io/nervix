@@ -1483,9 +1483,14 @@ impl EmitterTaskLoop<'_> {
                         completion.complete();
                         continue;
                     }
+                    // A scheduled retry owns publication: it publishes the buffer when it is due,
+                    // so a generation releases nothing here and completes at once.
+                    if self.state.retry.is_active() {
+                        completion.complete();
+                        continue;
+                    }
                     let publish_result = {
-                        let kind =
-                            EmitterPublishAttemptKind::from_retry(self.state.retry.is_active());
+                        let kind = EmitterPublishAttemptKind::from_retry(false);
                         let EmitterTaskState {
                             connector,
                             buffer,
@@ -1499,7 +1504,7 @@ impl EmitterTaskLoop<'_> {
                             backoff,
                         };
                         connector
-                            .flush_all(
+                            .flush_now(
                                 &self.connector_label,
                                 self.context,
                                 &mut control,

@@ -261,6 +261,7 @@ mod events;
 mod execution_build_error;
 mod fault_injection;
 mod filter_map;
+mod domain_stop;
 mod force_flush;
 mod forced_recovery_decision;
 mod generator;

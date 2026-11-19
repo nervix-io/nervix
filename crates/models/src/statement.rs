@@ -666,6 +666,8 @@ pub enum DomainStatus {
     Stopped,
     Running,
     Paused,
+    /// Intake has stopped and the work in motion finishes before the domain stops.
+    Stopping,
 }
 
 #[derive(
@@ -688,8 +690,9 @@ pub struct DomainState {
     pub start_version: u64,
     pub last_start: DomainStartPoint,
     pub clock: Option<DomainClockState>,
-    /// Why its committed stop ended the domain, kept while it stays stopped; a start clears it.
-    pub stop_cause: Option<crate::DomainStopCause>,
+    /// The stop the domain is in while it stops, or the one that ended it while it stays
+    /// stopped; a start clears it.
+    pub stop: Option<crate::DomainStop>,
 }
 
 #[derive(

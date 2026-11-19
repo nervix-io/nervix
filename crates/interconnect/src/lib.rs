@@ -36,6 +36,7 @@ use thiserror::Error;
 
 mod authentication;
 pub mod backup;
+pub mod domain_stop;
 mod capability_publication;
 mod relay_slicing;
 #[doc(hidden)]

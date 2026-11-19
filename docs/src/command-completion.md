@@ -404,10 +404,15 @@ changes pause and drain the domain. Success follows schedule application, owners
 readiness, and gate release. A no-op reapplies the current required state before returning.
 
 `START` waits until every listener and assigned ingestor has completed its startup boundary. `STOP`
-waits for remote ingestor and listener teardown, including when it stops the cluster's last running
-domain, for the last state write of every deduplicator and window branch it ends, and for the last
-checkpoint of every materialized relay and Kafka domain offset, written once the tasks that change
-it have ended.
+waits, with no limit of its own, until the domain's work in motion has come to rest, then for
+remote ingestor and listener teardown, including when it stops the cluster's last running domain,
+for the last state write of every deduplicator and window branch it ends, for the last checkpoint
+of every materialized relay and Kafka domain offset, written once the tasks that change it have
+ended, and for every node's report of what its teardown cut. Its answer says how the stop ended
+and what it cut; the durable command record keeps that answer, so a retry under the same execution
+reference recovers it. A `STOP` whose `ENFORCE AFTER` acts ends the tasks at once; one whose
+`CANCEL AFTER` acts fails with the cancelled answer. See [Stopping A
+Domain](./domains-and-time.md#stopping-a-domain).
 Paced-domain clock authority is part of the same revision. TLS-changing model effects wait for
 every affected listener to install the configuration. Each node installs the TLS VHOSTs of a
 runtime revision before it reports that revision prepared, and the command then confirms the

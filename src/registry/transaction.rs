@@ -170,6 +170,8 @@ pub(crate) enum TransactionPlanningError {
     DomainNotFound { domain: DomainName },
     #[error("domain '{domain}' is paused by a model alteration")]
     DomainPaused { domain: DomainName },
+    #[error("domain '{domain}' is stopping")]
+    DomainStopping { domain: DomainName },
     #[error("domain '{domain}' already has a model alteration in progress")]
     ConcurrentDomainAlter { domain: DomainName },
     #[error("domain '{domain}' is already running")]
@@ -289,6 +291,7 @@ impl TransactionPlanningError {
             | Self::ClusterParametersUnseeded
             | Self::DomainNotFound { .. }
             | Self::DomainPaused { .. }
+            | Self::DomainStopping { .. }
             | Self::ConcurrentDomainAlter { .. }
             | Self::DomainAlreadyRunning { .. }
             | Self::DomainAlreadyStopped { .. }
@@ -615,7 +618,7 @@ impl Registry {
                     };
                     let previous = domain_state.clone();
                     domain_state.status = DomainStatus::Running;
-                    domain_state.stop_cause = None;
+                    domain_state.clear_stop();
                     domain_state.last_start = start.start.clone();
                     domain_state.start_version =
                         domain_state.start_version.checked_add(1).ok_or_else(|| {
@@ -647,7 +650,11 @@ impl Registry {
                     operation = TransactionOperation::StopDomain {
                         domain: domain.clone(),
                     };
-                    domain_state.record_stop(nervix_models::DomainStopCause::Operator);
+                    // The step's stop ends with the domain stopped; how it ended is decided while
+                    // the step applies, and no later step plans against it.
+                    domain_state.status = DomainStatus::Stopped;
+                    domain_state.clock = None;
+                    domain_state.clear_stop();
                     reasons = vec![OperationImpactReason::DomainStop];
                     contribution = ImpactEffects {
                         lifecycle: CanonicalImpactSet::new([DomainLifecycleImpact {
@@ -1073,15 +1080,20 @@ fn pin_written_resource_versions(
     Ok(PinnedResourceVersions { mutation, bindings })
 }
 
+/// Refuses a step of a domain another execution holds: one a model alteration pauses, or one
+/// that is stopping, whose stop owns it until the stop ends or is called off.
 fn ensure_domain_not_paused(
     domain: &ControlDomainState,
 ) -> Result<(), Report<TransactionPlanningError>> {
-    if let DomainStatus::Paused = domain.status {
-        return Err(Report::new(TransactionPlanningError::DomainPaused {
+    match domain.status {
+        DomainStatus::Paused => Err(Report::new(TransactionPlanningError::DomainPaused {
             domain: domain.id.clone(),
-        }));
+        })),
+        DomainStatus::Stopping => Err(Report::new(TransactionPlanningError::DomainStopping {
+            domain: domain.id.clone(),
+        })),
+        DomainStatus::Running | DomainStatus::Stopped => Ok(()),
     }
-    Ok(())
 }
 
 /// Applies scheduling only to a complete mutation that changes the graph, retaining the

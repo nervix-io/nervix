@@ -66,11 +66,20 @@ Feature: A domain STOP lets the work already inside the domain finish
       """
       cut
       """
-    And HTTP receiver "slow" eventually captures requests that are
+    And HTTP receiver "slow" eventually captures one request that is
       """
       POST /events/acme/1
+      """
+    And HTTP receiver "slow" eventually captures one request that is
+      """
       POST /events/globex/2
+      """
+    And HTTP receiver "slow" eventually captures one request that is
+      """
       POST /events/acme/3
+      """
+    And HTTP receiver "slow" eventually captures one request that is
+      """
       POST /events/globex/4
       """
     And HTTP receiver "slow" has captured exactly 4 requests
@@ -247,7 +256,7 @@ Feature: A domain STOP lets the work already inside the domain finish
       START;
       """
     Then Kafka consumer group "stop_acked_group_{{test_id}}" eventually has 1 consumers
-    And within "5s" the observed broker receives exactly 8 messages
+    And the observed broker does not receive a payload within "3s"
 
     Examples:
       | cluster_size |
@@ -482,10 +491,13 @@ Feature: A domain STOP lets the work already inside the domain finish
       """
       [{"tenant":"acme","id":"2"}]
       """
-    Then HTTP receiver "slow" eventually captures requests that are
+    Then HTTP receiver "slow" eventually captures one request that is
+      """
+      POST /events/acme/2
+      """
+    And HTTP receiver "slow" captured one request that is
       """
       POST /events/acme/1
-      POST /events/acme/2
       """
     And HTTP receiver "slow" has captured exactly 2 requests
 
@@ -596,7 +608,8 @@ Feature: A domain STOP lets the work already inside the domain finish
         TO incoming INHERIT ALL BRANCHED BY by_tenant SET tenant = message.tenant
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE REORDERER order_rows FROM incoming BY input.seq MAX TIME 10m
-        BRANCHED BY by_tenant TO ordered INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
+        BRANCHED BY by_tenant TO ordered INHERIT ALL FLUSH EACH 1h MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG;
       CREATE SUBSCRIPTION ordered_rows TO ordered;
       START;
       """
@@ -834,7 +847,7 @@ Feature: A domain STOP lets the work already inside the domain finish
       """
     And within "2s" Kafka consumer group "stop_down_group_{{test_id}}" next offset for topic "stop_down_{{test_id}}" partition 0 is "below 1"
     # The destination recovers, and the acknowledged source delivers the cut record again.
-    When HTTP receiver "down" answers unscripted requests with "respond 204"
+    Given HTTP receiver "down" answers unscripted requests with "respond 204"
     And these Plexus commands are executed on the leader node
       """
       START;

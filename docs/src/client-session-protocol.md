@@ -2301,7 +2301,9 @@ With `RESUME`, complete publication, gate release and the transition to `Running
 generation and clock mapping precede the successful outcome. A client can immediately inspect
 that lifecycle or attach its clock. A dry run reports the planned lifecycle without activation.
 `DomainInfo` in `DomainList` and `DomainsChanged` carries a required `start_version` beside its
-status and pace. Wire verification rejects missing required lifecycle and generation fields;
+status and pace. Its status is `Stopped`, `Running`, `Paused` or `Stopping`: a stopping domain has
+stopped its intake and waits for its work in motion before it stops, and refuses every other
+change meanwhile. Wire verification rejects missing required lifecycle and generation fields;
 the decoder never invents a default generation.
 
 The call is not bounded by the request deadline, because an archive can take far longer to send

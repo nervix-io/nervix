@@ -368,7 +368,11 @@ impl DomainClockLifecycle {
             nervix_models::DomainStatus::Stopped => DomainClockInstallation::Stopped {
                 generation: state.start_version,
             },
-            nervix_models::DomainStatus::Running | nervix_models::DomainStatus::Paused => {
+            // A stopping domain's clock runs on: the work in motion still reads its time until
+            // the stop ends.
+            nervix_models::DomainStatus::Running
+            | nervix_models::DomainStatus::Paused
+            | nervix_models::DomainStatus::Stopping => {
                 match state.config.pace {
                     DomainPace::Unpaced => DomainClockInstallation::Installed {
                         generation: state.start_version,

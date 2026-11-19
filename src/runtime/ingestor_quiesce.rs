@@ -43,6 +43,10 @@ pub(in crate::runtime) enum IngestorQuiesceCause {
     MemoryPressure,
     #[strum(serialize = "shutdown")]
     Shutdown,
+    /// The domain is stopping: intake ends whatever the ingestor's `ON QUIESCE` declares, and the
+    /// work already admitted finishes.
+    #[strum(serialize = "domain stop")]
+    DomainStop,
 }
 
 impl IngestorQuiesceCause {
@@ -57,7 +61,7 @@ impl IngestorQuiesceCause {
     /// received still dispatches, and no quiesce buffer or drop policy acts on their behalf.
     fn stops_intake_regardless_of_mode(self) -> bool {
         match self {
-            Self::OwnershipHandoff | Self::Shutdown => true,
+            Self::OwnershipHandoff | Self::Shutdown | Self::DomainStop => true,
             Self::EntityHold | Self::DomainPause | Self::MemoryPressure => false,
         }
     }
@@ -70,6 +74,7 @@ struct IngestorQuiesceReasons {
     domain_pause: bool,
     memory_pressure: bool,
     shutdown: bool,
+    domain_stop: bool,
 }
 
 impl IngestorQuiesceReasons {
@@ -78,6 +83,8 @@ impl IngestorQuiesceReasons {
             Some(IngestorQuiesceCause::Shutdown)
         } else if self.ownership_handoffs > 0 {
             Some(IngestorQuiesceCause::OwnershipHandoff)
+        } else if self.domain_stop {
+            Some(IngestorQuiesceCause::DomainStop)
         } else if self.memory_pressure {
             Some(IngestorQuiesceCause::MemoryPressure)
         } else if self.domain_pause {
@@ -106,6 +113,7 @@ impl IngestorQuiesceReasons {
             IngestorQuiesceCause::DomainPause => self.domain_pause = true,
             IngestorQuiesceCause::MemoryPressure => self.memory_pressure = true,
             IngestorQuiesceCause::Shutdown => self.shutdown = true,
+            IngestorQuiesceCause::DomainStop => self.domain_stop = true,
         }
     }
 
@@ -126,6 +134,7 @@ impl IngestorQuiesceReasons {
             IngestorQuiesceCause::DomainPause => self.domain_pause = false,
             IngestorQuiesceCause::MemoryPressure => self.memory_pressure = false,
             IngestorQuiesceCause::Shutdown => self.shutdown = false,
+            IngestorQuiesceCause::DomainStop => self.domain_stop = false,
         }
     }
 }
@@ -1052,17 +1061,19 @@ impl IngestorQuiesceControl {
     }
 
     /// Held endpoint responses end when intake stops for shutdown or ownership handoff. A
-    /// resumable pause still lets an admitted request finish through its existing ACK root.
+    /// resumable pause still lets an admitted request finish through its existing ACK root, and so
+    /// does a domain's stop: its admitted message finishes before the stop ends, or the stop's
+    /// teardown ends the request's intake lifetime.
     pub(in crate::runtime) async fn wait_until_intake_stops(&self) {
         let mut observation = self.observation();
         loop {
             nervix_primitives::task::consume_budget().await;
-            if observation
-                .publication
-                .decision
-                .cause()
-                .is_some_and(IngestorQuiesceCause::stops_intake_regardless_of_mode)
-            {
+            if observation.publication.decision.cause().is_some_and(|cause| {
+                matches!(
+                    cause,
+                    IngestorQuiesceCause::Shutdown | IngestorQuiesceCause::OwnershipHandoff
+                )
+            }) {
                 return;
             }
             self.wait_for_change_since(&mut observation).await;
@@ -1351,6 +1362,44 @@ impl Runtime {
             "ingestor left quiesce"
         );
         true
+    }
+
+    /// Stops the intake of every ingestor of a stopping `domain`, whatever its `ON QUIESCE` mode.
+    pub(super) fn engage_domain_stop_intake(&self, domain: &DomainName) {
+        let ingestors = self
+            .inner
+            .ingestors
+            .iter()
+            .filter(|entry| &entry.key().entity.domain == domain)
+            .map(|entry| entry.key().clone())
+            .collect::<Vec<_>>();
+        for ingestor in ingestors {
+            self.engage_ingestor_quiesce(
+                domain,
+                &IngestorName::from(ingestor.entity.identifier()),
+                ingestor.unit,
+                IngestorQuiesceCause::DomainStop,
+            );
+        }
+    }
+
+    /// Resumes the intake a called-off stop of `domain` stopped.
+    pub(super) fn release_domain_stop_intake(&self, domain: &DomainName) {
+        let ingestors = self
+            .inner
+            .ingestor_quiescence
+            .iter()
+            .filter(|entry| &entry.key().entity.domain == domain)
+            .map(|entry| entry.key().clone())
+            .collect::<Vec<_>>();
+        for ingestor in ingestors {
+            self.release_ingestor_quiesce(
+                domain,
+                &IngestorName::from(ingestor.entity.identifier()),
+                ingestor.unit,
+                IngestorQuiesceCause::DomainStop,
+            );
+        }
     }
 
     pub(super) fn engage_domain_ingestor_quiesce(&self, domain: &DomainName) {

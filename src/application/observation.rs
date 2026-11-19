@@ -439,9 +439,7 @@ impl SessionServiceImpl {
             format!("domain: {}", domain.as_str()),
             format!("status: {:?}", domain_state.status).to_ascii_lowercase(),
         ];
-        if let Some(nervix_models::DomainStopCause::Licensing(reason)) = domain_state.stop_cause {
-            lines.push(format!("stopped by licensing: {reason}"));
-        }
+        lines.extend(self.describe_domain_stop(domain, &domain_state));
         lines.push(format!("start version: {}", domain_state.start_version));
         lines.push(format!("start point: {:?}", domain_state.last_start));
         if let Some(mapping) = &domain_state.clock {
@@ -2845,7 +2843,7 @@ mod tests {
                     start_version: 0,
                     last_start: nervix_models::DomainStartPoint::Resume,
                     clock: None,
-                    stop_cause: None,
+                    stop: None,
                 },
                 None,
                 nervix_licensing_vocabulary::Quota::Unlimited,

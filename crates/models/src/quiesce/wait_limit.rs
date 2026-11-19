@@ -44,3 +44,10 @@ impl WaitLimit {
         matches!(self, Self::Enforce { .. })
     }
 }
+
+impl std::fmt::Display for WaitLimit {
+    /// The clause as canonical Plexus writes it, such as `ENFORCE AFTER 30s`.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&crate::canonical::wait_limit_clause(*self))
+    }
+}

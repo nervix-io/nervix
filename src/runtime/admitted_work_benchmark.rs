@@ -227,7 +227,7 @@ impl TransformedEncodingBenchmark {
                 start_version: 0,
                 last_start: DomainStartPoint::Resume,
                 clock: None,
-                stop_cause: None,
+                stop: None,
             },
             &DomainClockAuthority::initial(),
         );

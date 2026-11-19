@@ -355,6 +355,9 @@ pub(super) struct RuntimeDomainState {
     pub(super) lifecycle_revision: u64,
     pub(super) clock: DomainClockLifecycle,
     pub(super) progress: watch::Sender<Option<ObservedDomainTick>>,
+    /// How this node tears the domain down for the stop that just ended it, while that stop's
+    /// report is not committed.
+    pub(super) stop_teardown: Option<super::domain_stop::StopTeardown>,
 }
 
 impl RuntimeDomainState {
@@ -549,6 +552,7 @@ impl Runtime {
                     lifecycle_revision: revision,
                     clock,
                     progress: watch::channel(None).0,
+                    stop_teardown: super::domain_stop::StopTeardown::of(state),
                 }
             });
             if entry.lifecycle_revision > revision {
@@ -562,9 +566,13 @@ impl Runtime {
             entry.mapping = state.clock.clone();
             entry.clock_authority = authority.clone();
             entry.lifecycle_revision = revision;
+            entry.stop_teardown = super::domain_stop::StopTeardown::of(state);
             entry.clock.synchronize(state, &authority);
             if generation_changed || matches!(state.status, nervix_models::DomainStatus::Stopped) {
                 entry.progress.send_replace(None);
+            }
+            if generation_changed {
+                self.forget_stop_ledger(domain, state.start_version);
             }
         }
         self.inner.domain_status_changed.send_modify(|version| {
@@ -1314,7 +1322,7 @@ mod tests {
                 start_version: 0,
                 last_start: nervix_models::DomainStartPoint::Resume,
                 clock: None,
-                stop_cause: None,
+                stop: None,
             },
         );
         runtime.sync_domains(&domains);

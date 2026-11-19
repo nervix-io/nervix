@@ -27,7 +27,7 @@ use nervix_interconnect::{
 use nervix_models::{
     ClusterNodeName, CoordinationIdentity, CreateDomain, CreateStatement, DomainClockState,
     DomainName, DomainStartPoint, DomainState, DomainStatus, DomainStopCause, QuiesceLevel,
-    StartDomain, StopDomain, TimestampError,
+    StartDomain, TimestampError,
 };
 use nervix_primitives::time::{Instant, interval};
 use thiserror::Error;
@@ -696,10 +696,15 @@ impl SessionServiceImpl {
                     // so the domain may not run again. Its pause ends in the licensing stop the
                     // leader would make once the lease is released, under this same lease, and
                     // the operation completes with the domain stopped until an operator starts it.
-                    let cause = DomainStopCause::Licensing(*reason);
+                    // The pause becomes the licensing stop's request, which drains what is
+                    // still in motion and is forced at the fixed time after the expiry.
                     self.inner
                         .consensus
-                        .stop_domain(domain.clone(), mutation, cause)
+                        .request_domain_stop(
+                            domain.clone(),
+                            nervix_models::StopRequest::Licensing(*reason),
+                            mutation,
+                        )
                         .await
                         .change_context_lazy(|| DomainAlterError::LicensingStop {
                             domain: domain.clone(),
@@ -761,7 +766,7 @@ impl SessionServiceImpl {
         if let Err(error) = self
             .inner
             .consensus
-            .stop_domain(domain_id.clone(), None, DomainStopCause::Operator)
+            .stop_domain_before_any_work(domain_id.clone(), None, DomainStopCause::Operator)
             .await
         {
             failures.push(format!("stopping it again failed: {error}"));
@@ -858,7 +863,7 @@ impl SessionServiceImpl {
             start_version: 0,
             last_start: DomainStartPoint::Resume,
             clock: None,
-            stop_cause: None,
+            stop: None,
         };
         match self
             .inner
@@ -1019,45 +1024,6 @@ impl SessionServiceImpl {
             }
         }
     }
-
-    pub(in crate::application) async fn stop_domain(
-        &self,
-        domain_id: &DomainName,
-        _stop: StopDomain,
-    ) -> CommandResult {
-        let Some(domain) = self.inner.consensus.current_domain(domain_id).await else {
-            return command_error(format!("domain '{}' does not exist", domain_id.as_str()));
-        };
-        if let DomainStatus::Stopped = domain.status {
-            return command_error(format!(
-                "domain '{}' is already stopped",
-                domain_id.as_str()
-            ));
-        }
-        match self
-            .inner
-            .consensus
-            .stop_domain(domain_id.clone(), None, DomainStopCause::Operator)
-            .await
-        {
-            Ok(()) => {
-                if let Err(error) = self.apply_current_cluster_state().await {
-                    return command_error(format!(
-                        "stopped domain '{}', but remote stopping did not complete: {error:#}",
-                        domain_id.as_str()
-                    ));
-                }
-                command_ok(format!("stopped domain '{}'", domain_id.as_str()))
-            }
-            Err(error) => {
-                self.consensus_report_response(
-                    &error,
-                    format!("failed to stop domain '{}'", domain_id.as_str()),
-                )
-                .await
-            }
-        }
-    }
 }
 
 #[cfg(test)]
@@ -1190,12 +1156,30 @@ mod tests {
         assert!(start.succeeded(), "{start:?}");
 
         probe.storage_fault().fail_next(
-            "stop-domain:default".to_string(),
+            "request-domain-stop:default".to_string(),
             StorageBoundary::BeforeCommit,
         );
-        let stop = service.stop_domain(&domain, StopDomain::default()).await;
-        assert!(!stop.succeeded(), "{stop:?}");
-        assert!(stop.message.contains("consensus storage"), "{stop:?}");
+        let request = nervix_models::StopRequest::Operator {
+            reference: nervix_models::CommandExecutionReference::parse("stop-default")
+                .assured("the test reference is a valid literal"),
+            request: nervix_models::OperatorStopRequest {
+                requested_at: nervix_models::Timestamp::from_unix_nanos(1),
+                limit: None,
+            },
+        };
+        let stop = service
+            .inner
+            .consensus
+            .request_domain_stop(domain.clone(), request, None)
+            .await;
+        let error = stop.expect_err("a stop request whose write fails is reported");
+        assert!(
+            matches!(
+                error.current_context(),
+                ConsensusError::Storage | ConsensusError::RaftStorage
+            ),
+            "{error:?}"
+        );
         assert!(matches!(
             service
                 .inner
@@ -1310,7 +1294,7 @@ mod tests {
             start_version: 0,
             last_start: DomainStartPoint::Resume,
             clock: None,
-            stop_cause: None,
+            stop: None,
         };
 
         let first = service

@@ -525,10 +525,10 @@ status, keeping the start version, start mode, clock, schedule and incremental s
 
 The current emitter Models carry explicit key expressions, source-partition routing and
 expression-only SQS FIFO groups. The dedicated database owns exactly four current keyspaces:
-`raft_runtime_entity_labels_inherited_topology_ratelimit_logs`,
-`raft_runtime_entity_labels_inherited_topology_ratelimit_meta`,
-`raft_runtime_entity_labels_inherited_topology_ratelimit_state`, and
-`raft_runtime_entity_labels_inherited_topology_ratelimit_snapshots`. Opening it validates the
+`raft_runtime_entity_labels_inherited_topology_ratelimit_stopping_logs`,
+`raft_runtime_entity_labels_inherited_topology_ratelimit_stopping_meta`,
+`raft_runtime_entity_labels_inherited_topology_ratelimit_stopping_state`, and
+`raft_runtime_entity_labels_inherited_topology_ratelimit_stopping_snapshots`. Opening it validates the
 complete keyspace namespace before reading any records. The committed cluster-parameter record
 stores ordered typed TLS cipher suites and key-exchange groups. Recovery validates their complete
 pair before returning the record. The parameters also carry the coherent remote acknowledgement

@@ -1414,6 +1414,12 @@ operator capacity. Its fixed constant states that a cancelled native mutation ca
 overtaken by the next operation. The ingestor control-call budget is the external client's
 `socket.timeout.ms`; [Connector Contract](connector-contract.md) owns that per-system value.
 
+The licensing stop's forced ending, `LICENSING_STOP_ENFORCE_AFTER`, is 60 seconds and a fixed
+constant, never a setting, flag or clause. It is a licensing restriction rather than a tunable: a
+temporary license is not meant to serve real traffic, and the cluster must be stopped one minute
+after its expiry. No test build shortens it. See [Stopping A
+Domain](./domains-and-time.md#stopping-a-domain).
+
 Sentry's 1,000,000-byte event limit is a fixed external ingestion contract. The connector
 vocabulary declares its one constant; [Sentry's event contract](emitters.md#sentry) defines which bytes
 count toward the limit.

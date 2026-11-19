@@ -173,6 +173,7 @@ impl Runtime {
                 in_flight_by_domain: DashMap::default(),
                 in_flight_by_ingestor: DashMap::default(),
                 generator_activity_by_domain: DashMap::default(),
+                stop_ledgers: DashMap::default(),
                 emitter_buffers: DashMap::default(),
                 force_flush_by_domain: DashMap::default(),
                 node_quiesce_counters: DashMap::default(),
@@ -849,6 +850,19 @@ impl Runtime {
         execution: DomainExecution,
         emitter_finish_deadline: Instant,
     ) {
+        // An enforced stop ends the domain's tasks at once and leaves the last snapshot of every
+        // branch state as it was.
+        let enforced = self
+            .stop_teardown(domain)
+            .is_some_and(|teardown| teardown.enforced);
+        let emitter_finish_deadline = if enforced {
+            Instant::now()
+        } else {
+            emitter_finish_deadline
+        };
+        if enforced {
+            self.inner.state_snapshot_tasks.abandon_last_writes(domain);
+        }
         self.inner.endpoint_intake_routes.withdraw_domain(domain);
         for emitter_task in execution.emitter_tasks.values() {
             emitter_task.finish_by(emitter_finish_deadline);
@@ -959,6 +973,7 @@ impl Runtime {
             .state_snapshot_tasks
             .wait_for_domain(domain)
             .await;
+        self.inner.state_snapshot_tasks.keep_last_writes(domain);
         let quiesce_keys = self
             .inner
             .node_quiesce_counters

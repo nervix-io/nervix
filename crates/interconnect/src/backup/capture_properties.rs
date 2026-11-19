@@ -147,7 +147,7 @@ const SECTION_KINDS: [CapturedStateSectionKind; 14] = [
     CapturedStateSectionKind::WindowArgumentColumns,
 ];
 
-pub(super) async fn assert_round_trip<M>(executor: &Executor, class: PoolClass, message: M)
+pub(crate) async fn assert_round_trip<M>(executor: &Executor, class: PoolClass, message: M)
 where
     M: RkyvMessage + Clone + Debug + PartialEq,
 {
@@ -172,7 +172,7 @@ fn assert_charges_released(executor: &Executor) {
     assert_eq!(snapshot.bulk_memory.reserved_bytes, 0);
 }
 
-fn property_runtime() -> nervix_primitives::runtime::Runtime {
+pub(crate) fn property_runtime() -> nervix_primitives::runtime::Runtime {
     nervix_primitives::runtime::Builder::new_current_thread()
         .enable_all()
         .build()

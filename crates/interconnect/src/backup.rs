@@ -215,7 +215,7 @@ impl InterconnectRequest for InstallRestoredStateRequest {
 }
 
 #[cfg(all(test, not(any(feature = "shuttle", feature = "turmoil"))))]
-mod capture_properties;
+pub(crate) mod capture_properties;
 
 #[cfg(all(test, not(any(feature = "shuttle", feature = "turmoil"))))]
 mod wire_properties {

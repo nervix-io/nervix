@@ -245,6 +245,11 @@ impl Runtime {
             if let nervix_models::DomainStatus::Paused = domain_status {
                 self.engage_domain_ingestor_quiesce(&domain.domain);
             }
+            // A stopping domain's intake ends on every node at once, whatever each ingestor's
+            // `ON QUIESCE` declares; its graph runs on while the work in motion finishes.
+            if let nervix_models::DomainStatus::Stopping = domain_status {
+                self.engage_domain_stop_intake(&domain.domain);
+            }
             let desired_passive_only =
                 matches!(domain_status, nervix_models::DomainStatus::Stopped);
             if !matches!(change.delta, ExecutionDelta::Unchanged)
@@ -306,6 +311,7 @@ impl Runtime {
                         .change_context_lazy(build)?;
                 }
                 self.release_domain_ingestor_quiesce(&domain.domain);
+                self.release_domain_stop_intake(&domain.domain);
             }
         }
         self.retain_assigned_wasm_modules(local_node_id, &revision_plan);

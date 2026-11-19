@@ -8136,13 +8136,13 @@ impl DomainView {
         )
     }
 
-    /// The statement that starts a stopped domain or stops a running one. A paused domain has
-    /// none.
+    /// The statement that starts a stopped domain or stops a running one. A paused domain, and a
+    /// stopping one whose stop is under way, have none.
     fn state_command(&self) -> Option<&'static str> {
         match self.status {
             DomainStatus::Running => Some("STOP;"),
             DomainStatus::Stopped => Some("START;"),
-            DomainStatus::Paused => None,
+            DomainStatus::Paused | DomainStatus::Stopping => None,
         }
     }
 
@@ -8152,6 +8152,7 @@ impl DomainView {
             DomainStatus::Running => "Stop domain",
             DomainStatus::Stopped => "Start domain",
             DomainStatus::Paused => "Domain lifecycle",
+            DomainStatus::Stopping => "Domain stopping",
         }
     }
 

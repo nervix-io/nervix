@@ -711,7 +711,8 @@ impl Runtime {
                 RuntimeStateKind::WindowProcessor,
                 RuntimeStateKind::Inferencer,
             ],
-            DomainStatus::Running | DomainStatus::Paused => &[
+            // A stopping domain still runs its graph until its stop ends.
+            DomainStatus::Running | DomainStatus::Paused | DomainStatus::Stopping => &[
                 RuntimeStateKind::WasmProcessor,
                 RuntimeStateKind::KafkaOffset,
                 RuntimeStateKind::BranchLru,
@@ -748,7 +749,8 @@ impl Runtime {
         let keys = self.lifecycle_keys(&current, &needed, cancellation)?;
         let mut branch_states = match status {
             DomainStatus::Stopped => Vec::new(),
-            DomainStatus::Running | DomainStatus::Paused => {
+            // A stopping domain still runs its graph until its stop ends.
+            DomainStatus::Running | DomainStatus::Paused | DomainStatus::Stopping => {
                 self.capture_published_branch_states(domain, primaries, &keys)
             }
         };
@@ -860,7 +862,8 @@ impl Runtime {
         }
         let materialized = match status {
             DomainStatus::Stopped => CapturedMaterializedState::Stored(stored_materialized),
-            DomainStatus::Running | DomainStatus::Paused => {
+            // A stopping domain still runs its graph until its stop ends.
+            DomainStatus::Running | DomainStatus::Paused | DomainStatus::Stopping => {
                 let mut materialized = Vec::new();
                 for state in self.inner.replicated_materialized_stream_states.iter() {
                     let placement = state.key();

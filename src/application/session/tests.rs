@@ -737,11 +737,13 @@ const UNANSWERED_WINDOW: Duration = Duration::from_millis(500);
 fn clocked_domain(start_version: u64, status: DomainStatus) -> DomainState {
     let clock = match status {
         DomainStatus::Stopped => None,
-        DomainStatus::Running | DomainStatus::Paused => Some(DomainClockState::new(
+        DomainStatus::Running | DomainStatus::Paused | DomainStatus::Stopping => {
+            Some(DomainClockState::new(
             Timestamp::from_unix_nanos(5),
             Timestamp::from_unix_nanos(1_000),
             DomainTimeRate::ONE,
-        )),
+        ))
+        }
     };
     DomainState {
         id: named("clocked"),
@@ -755,7 +757,7 @@ fn clocked_domain(start_version: u64, status: DomainStatus) -> DomainState {
         start_version,
         last_start: DomainStartPoint::Resume,
         clock,
-        stop_cause: None,
+        stop: None,
     }
 }
 

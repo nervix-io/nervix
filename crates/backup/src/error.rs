@@ -32,6 +32,10 @@ pub enum ArchiveWriteError {
     Write,
     #[error("the bytes supplied for section '{path}' differ from its manifest entry")]
     SectionMismatch { path: String },
+    /// A stopping domain holds requests and work in motion that no archive records; a backup
+    /// cut refuses it before reading it, so its record is never written.
+    #[error("domain '{domain}' is stopping, and a stopping domain has no archive record")]
+    StoppingDomain { domain: nervix_models::DomainName },
 }
 
 /// Why an archive was refused while it was read.

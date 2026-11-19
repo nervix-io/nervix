@@ -189,7 +189,13 @@ in place, and the holding units, which hold nothing by then, end without pausing
 stopped domain, a model or resource rebinding has no running work to pause and reports
 `DYNAMIC`, although the changed configuration still matters at the next start. Explicit `START`
 and `STOP` are individual `NO_PAUSE` steps with lifecycle effects; they determine whether later
-model steps plan against a running or stopped domain. [Resource Versions And Bindings](./resource-versions.md#classification-and-state-effects)
+model steps plan against a running or stopped domain. The transaction engages no pause for a `STOP`
+step, but the step drains: its effect makes the domain's stop request, under the transaction's
+mutation lease, and the step applies until that stop ends, which waits for the domain's work in
+motion as every graceful stop does ([Stopping A Domain](./domains-and-time.md#stopping-a-domain)).
+Its planned impact is the domain's lifecycle stop; it completes once the stop ended, enforced or
+not, and fails with the cancelled answer when its own `CANCEL AFTER` withdrew the request. Later
+steps plan against the stopped domain, whatever the stop cut. [Resource Versions And Bindings](./resource-versions.md#classification-and-state-effects)
 owns what each pinned resource version loads and which rebindings reset state.
 
 An automatic schedule change that moves work away from a node the leader has marked unavailable

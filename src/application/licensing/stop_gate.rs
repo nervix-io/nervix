@@ -9,7 +9,7 @@
 
 use error_stack::{Report, ResultExt as _};
 use nervix_client_wire::NoticeKind;
-use nervix_models::{DomainName, DomainStatus, DomainStopCause, LicensingStopReason};
+use nervix_models::{DomainName, DomainStatus, LicensingStopReason};
 use nervix_primitives::{sync::CancellationToken, time::sleep};
 use thiserror::Error;
 
@@ -108,6 +108,22 @@ impl SessionServiceImpl {
             if state.status == DomainStatus::Stopped {
                 continue;
             }
+            // A stopping domain takes the licensing request beside its operators' requests,
+            // whatever holds it; one that already holds it needs nothing more.
+            if let Some(stopping) = state.stopping() {
+                if stopping.licensing.is_some() {
+                    continue;
+                }
+                if let Err(error) = self.stop_domain_for_licensing(&domain, reason).await {
+                    complete = false;
+                    tracing::warn!(
+                        domain = domain.as_str(),
+                        error = %format_args!("{error:#}"),
+                        "the licensing stop could not join a stopping domain; it is retried"
+                    );
+                }
+                continue;
+            }
             // The stop would be refused while the lease is held; its release is an applied
             // change, which wakes the caller to stop the domain then.
             if self
@@ -148,7 +164,11 @@ impl SessionServiceImpl {
     ) -> Result<(), Report<LicensingStopError>> {
         self.inner
             .consensus
-            .stop_domain(domain.clone(), None, DomainStopCause::Licensing(reason))
+            .request_domain_stop(
+                domain.clone(),
+                nervix_models::StopRequest::Licensing(reason),
+                None,
+            )
             .await
             .change_context_lazy(|| LicensingStopError::Commit {
                 domain: domain.clone(),

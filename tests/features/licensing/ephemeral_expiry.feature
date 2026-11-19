@@ -283,3 +283,124 @@ Feature: Ephemeral activation expiry and the licensing stop gate
       | cluster_size | observer |
       | 1            | node-1   |
       | 3            | node-3   |
+
+  Scenario Outline: The licensing stop of a healthy domain ends gracefully well inside its fixed time on <cluster_size> nodes
+    Given an HTTPS licensing test service is available
+    And a <cluster_size> node nervix cluster is started
+    And the active domain is "{{domain}}"
+    When these Plexus commands are executed on the leader node
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      ACTIVATE LICENSE EPHEMERAL WITH KEY 'NVXK-TESTABCD-fixture-secret';
+      START;
+      """
+    Then the committed license decision is saved as placeholder "ephemeral"
+    And the ephemeral expiry of license placeholder "ephemeral" is saved as placeholder "expired_at"
+    And node "<observer>" eventually reports status containing "{{domain}} status=Running"
+    When the cluster licensing clock passes the "ephemeral" deadline
+    # Nothing is in motion, so the stop completes long before the licensing stop's fixed minute.
+    Then within "30s" node "<observer>" eventually reports status containing "{{domain}} status=Stopped"
+    When these Plexus commands are executed on node "<observer>"
+      """
+      DESCRIBE DOMAIN;
+      """
+    Then the last command output contains
+      """
+      status: stopped
+      stopped by licensing: ephemeral activation expired at {{expired_at}}
+      stop: every message in motion finished
+      """
+
+    Examples:
+      | cluster_size | observer |
+      | 1            | node-1   |
+      | 3            | node-3   |
+
+  @long_running
+  Scenario Outline: The licensing stop is forced at its fixed time while a publish is held on the wire, and no CANCEL calls it off, on <cluster_size> nodes
+    Given an HTTPS licensing test service is available
+    And Kafka is running
+    And HTTP receiver "stuck" is running
+    And HTTP receiver "stuck" answers unscripted requests with "hold response until released"
+    And a <cluster_size> node nervix cluster is started
+    And Kafka topic "licensed_stop_{{test_id}}" exists with 1 partitions
+    And the active domain is "{{domain}}"
+    When these Plexus commands are executed on the leader node
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      ACTIVATE LICENSE EPHEMERAL WITH KEY 'NVXK-TESTABCD-fixture-secret';
+      CREATE SCHEMA event ( id STRING );
+      CREATE JAQ JSON CODEC ingest_codec TO SCHEMA event
+        WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
+      CREATE RELAY outgoing SCHEMA event UNBRANCHED;
+      CREATE KAFKA CLIENT kafka_main CONFIG { 'bootstrap.servers' = '{{kafka_addr}}' };
+      CREATE KAFKA TOPIC INGESTOR ingestor
+        FROM kafka_main TOPIC 'licensed_stop_{{test_id}}'
+          OFFSET BY CONSUMER GROUP 'licensed_stop_group_{{test_id}}' START AT EARLIEST
+          MODE ACK SEQUENTIAL ACK TIMEOUT 5m RETRY POLICY BACKOFF 100ms MAX 1s
+        ON QUIESCE SUSPEND DECODE USING ingest_codec
+        TO outgoing INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE HTTP CLIENT stuck_api CONFIG {
+        'endpoint' = '{{http_receiver.stuck}}', 'timeout_ms' = 300000
+      };
+      CREATE HTTP REQUEST EMITTER published FROM outgoing
+        ATTACHED
+        TO stuck_api METHOD 'POST' PATH concat('/events/', input.id)
+          MODE ACK RETRY POLICY BACKOFF 100ms MAX 1s WITHOUT BODY
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      START;
+      """
+    Then the committed license decision is saved as placeholder "ephemeral"
+    And the ephemeral expiry of license placeholder "ephemeral" is saved as placeholder "expired_at"
+    And Kafka consumer group "licensed_stop_group_{{test_id}}" eventually has 1 consumers
+    When Kafka message is published to topic "licensed_stop_{{test_id}}"
+      """
+      [{"id":"1"}]
+      """
+    Then HTTP receiver "stuck" eventually receives at least 1 request
+    When the cluster licensing clock passes the "ephemeral" deadline
+    Then node "<observer>" eventually reports status containing "{{domain}} status=Stopping"
+    # An operator's request joins the licensing stop; its CANCEL withdraws only that request.
+    Given client "operator" is connected to the leader node
+    When client "operator" selects domain "{{domain}}"
+    And client "operator" fails to execute these Plexus commands
+      """
+      STOP CANCEL AFTER 1s;
+      """
+    Then the last command error contains
+      """
+      cancelled
+      """
+    When these Plexus commands are executed on node "<observer>"
+      """
+      DESCRIBE DOMAIN;
+      """
+    Then the last command output contains
+      """
+      status: stopping
+      """
+    # The publish never finishes, so the licensing stop is forced at its fixed time.
+    Then within "120s" node "<observer>" eventually reports status containing "{{domain}} status=Stopped"
+    When these Plexus commands are executed on node "<observer>"
+      """
+      DESCRIBE DOMAIN;
+      """
+    Then the last command output contains
+      """
+      stopped by licensing: ephemeral activation expired at {{expired_at}}
+      """
+    And the last command output contains
+      """
+      the licensing stop enforced the stop
+      """
+    And the last command output contains
+      """
+      emitter 'published'
+      """
+    And HTTP receiver "stuck" eventually sees the client abandon at least 1 unfinished response
+
+    Examples:
+      | cluster_size | observer |
+      | 1            | node-1   |
+      | 3            | node-3   |

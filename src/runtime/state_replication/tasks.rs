@@ -95,6 +95,9 @@ pub(in crate::runtime) struct StateSnapshotTasks {
     /// The snapshot tasks of every domain that has one. Each tracker is closed as it is created,
     /// so waiting for it returns as soon as it counts no task.
     domains: DashMap<DomainName, TaskTracker, RandomState>,
+    /// The domains an enforced stop tears down: each branch snapshot task of one of them ends
+    /// without its last write, so the domain keeps the last snapshot it took before the stop.
+    abandoned_last_writes: nervix_primitives::publication::ArcSwap<std::collections::BTreeSet<DomainName>>,
 }
 
 /// A tracker that counts its domain's snapshot tasks, closed so that waiting for it ends when no
@@ -154,6 +157,34 @@ impl StateSnapshotTasks {
     pub(in crate::runtime) fn close(&self) {
         self.stopping.cancel();
         self.tracker.close();
+    }
+
+    /// Has every branch snapshot task of `domain` end without its last write, as an enforced stop
+    /// tears the domain down.
+    pub(in crate::runtime) fn abandon_last_writes(&self, domain: &DomainName) {
+        self.abandoned_last_writes.rcu(|current| {
+            let mut next = current.as_ref().clone();
+            next.insert(domain.clone());
+            next
+        });
+    }
+
+    /// Whether a branch snapshot task of `domain` ends without its last write.
+    pub(in crate::runtime) fn abandons_last_write(&self, domain: &DomainName) -> bool {
+        self.abandoned_last_writes.load().contains(domain)
+    }
+
+    /// Lets the snapshot tasks of `domain` make their last writes again, once its enforced stop's
+    /// teardown is over.
+    pub(in crate::runtime) fn keep_last_writes(&self, domain: &DomainName) {
+        if !self.abandons_last_write(domain) {
+            return;
+        }
+        self.abandoned_last_writes.rcu(|current| {
+            let mut next = current.as_ref().clone();
+            next.remove(domain);
+            next
+        });
     }
 
     pub(in crate::runtime) async fn wait(&self) {
@@ -323,12 +354,18 @@ impl Runtime {
         let mut shutdown_rx = shutdown_tx.subscribe();
         let runtime_stopping = self.inner.state_snapshot_tasks.stopping();
         let domain = state.placement().domain.clone();
+        let task_domain = domain.clone();
         Some(self.inner.state_snapshot_tasks.spawn(&domain, async move {
             loop {
                 nervix_primitives::task::consume_budget().await;
                 nervix_primitives::select! {
                     changed = shutdown_rx.changed() => {
                         if changed.is_err() || *shutdown_rx.borrow() {
+                            // An enforced stop leaves the last snapshot as it was: the state the
+                            // branch published since may hold the effect of work the stop cut.
+                            if runtime.inner.state_snapshot_tasks.abandons_last_write(&task_domain) {
+                                break;
+                            }
                             if let Err(error) = state.request_publication(&snapshot_requests).await
                                 && (!R::REPORTS_FAILURES || reporter.failed(&runtime))
                             {
