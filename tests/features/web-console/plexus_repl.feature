@@ -1530,6 +1530,36 @@ Feature: Web console Plexus REPL
       | 1            |
       | 3            |
 
+  Scenario Outline: Web console keeps the operator's pane when it restores a relay tab
+    Given a <cluster_size> node nervix cluster is started
+    When these Plexus commands are executed on the leader node
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA metric ( value I32 );
+      CREATE RELAY raw_metrics SCHEMA metric UNBRANCHED;
+      START;
+      """
+    And the web console is opened on the leader node
+    Then selector ".graph-hit-layer" contains "raw_metrics"
+    When selector ".prompt-row input" is filled with "CREATE SUBSCRIPTION kept_pane TO raw_metrics;"
+    And selector ".prompt-row input" is pressed with "Enter"
+    Then selector ".subscription-tab.active[data-subscription-state='active']" contains "RAW_METRICS"
+    When the next web console session requests are held
+    And the web console loses its session connection
+    Then the replacement web console session requests are held
+    And selector ".subscription-tab[data-subscription-state='restoring']" contains "RAW_METRICS"
+    When selector ".repl-toolbar button:has-text('Plexus REPL')" is clicked
+    Then selector ".repl-toolbar button.tab.active" contains "PLEXUS REPL"
+    When the held replacement web console session requests are released
+    Then selector ".subscription-tab[data-subscription-state='active']" contains "RAW_METRICS"
+    And selector ".repl-toolbar button.tab.active" contains "PLEXUS REPL"
+    And selector ".terminal" contains "CREATE SUBSCRIPTION kept_pane TO raw_metrics;"
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
   @client_wire13
   Scenario: Closing an interrupted relay tab cancels its restoration
     Given a 1 node nervix cluster is started
