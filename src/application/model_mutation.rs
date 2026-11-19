@@ -1639,7 +1639,7 @@ impl SessionServiceImpl {
                                          {error:#}",
                                         domain.as_str()
                                     ));
-                                    self.defer_planned_ownership_handoff_release(
+                                    self.hold_planned_ownership_handoff_until_applied(
                                         &domain,
                                         handoff,
                                         error,
@@ -1813,7 +1813,7 @@ impl SessionServiceImpl {
                         Some(Box::pin(self.inner.consensus.current_runtime_revision()).await);
                     if let Err(error) = Box::pin(self.apply_current_cluster_state()).await {
                         if let Some(handoff) = ownership_handoff.take() {
-                            self.defer_planned_ownership_handoff_release(
+                            self.hold_planned_ownership_handoff_until_applied(
                                 &domain,
                                 handoff,
                                 &error,

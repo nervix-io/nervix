@@ -30,7 +30,7 @@ use nervix_primitives::{
 };
 use nonzero_ext::nonzero;
 
-use super::*;
+use super::{entity_swap_restore::EntitySwapJournal, *};
 
 /// One deduplicator between two unbranched relays of one schema.
 fn deduplicating_revision(domain: &DomainName) -> Arc<ExecutionRevision> {
@@ -269,6 +269,7 @@ async fn a_reassignment_names_the_execution_or_the_node_it_cannot_find() {
             std::slice::from_ref(&absent),
             Some(&local),
             &std::collections::BTreeSet::new(),
+            &mut EntitySwapJournal::new(None),
         )
         .await
         .expect_err("a reassignment needs the installed execution");
@@ -293,6 +294,7 @@ async fn a_reassignment_names_the_execution_or_the_node_it_cannot_find() {
             std::slice::from_ref(&absent),
             Some(&local),
             &std::collections::BTreeSet::new(),
+            &mut EntitySwapJournal::new(None),
         )
         .await
         .expect_err("a reassigned node its revision does not plan cannot be placed");

@@ -535,7 +535,7 @@ fn one_engagement_wakes_every_waiter_and_is_taken_once(deadline: Instant) {
         let domain = DomainName::parse("default").assured("the check names a valid domain");
         let relay = RelayName::parse("events").assured("the check names a valid relay");
         let gate = Arc::new(RelayDispatchGate::new());
-        let operation = Arc::new(EntityGateOperation::new(scope(&domain, &relay)));
+        let operation = Arc::new(EntityGateOperation::new(scope(&domain, &relay), deadline));
         let records = StdArc::new(OperationRecords::default());
 
         let waiters = (0..ENGAGEMENT_WAITERS)
@@ -662,7 +662,10 @@ fn one_failed_engagement_wakes_every_waiter_with_its_failure() {
     shuttle::future::block_on(async {
         let domain = DomainName::parse("default").assured("the check names a valid domain");
         let relay = RelayName::parse("events").assured("the check names a valid relay");
-        let operation = Arc::new(EntityGateOperation::new(scope(&domain, &relay)));
+        let operation = Arc::new(EntityGateOperation::new(
+            scope(&domain, &relay),
+            far_future_deadline(Instant::now()),
+        ));
         let records = StdArc::new(OperationRecords::default());
 
         let waiters = (0..ENGAGEMENT_WAITERS)
@@ -977,4 +980,52 @@ fn handoff_freeze_follows_admitted_route_flush() {
 #[test]
 fn shuttle_an_ownership_handoff_freezes_only_after_admitted_route_flush_completes() {
     explore(handoff_freeze_follows_admitted_route_flush);
+}
+
+fn a_renewal_racing_the_end_of_its_lease_either_keeps_the_hold_or_is_refused(anchor: Instant) {
+    shuttle::future::block_on(async {
+        let domain = DomainName::parse("default").assured("the check names a valid domain");
+        let relay = RelayName::parse("events").assured("the check names a valid relay");
+        // Every later comparison finds this end reached, so only a renewal keeps the lease.
+        let operation = Arc::new(EntityGateOperation::new(scope(&domain, &relay), anchor));
+        let expiry = nervix_primitives::task::spawn({
+            let operation = operation.clone();
+            async move { operation.run_lease_to_its_end().await }
+        });
+        let renewed_until = far_future_deadline(anchor);
+        let renewal = nervix_primitives::task::spawn({
+            let operation = operation.clone();
+            async move { operation.renew_lease(renewed_until) }
+        });
+
+        let renewed = renewal.await.assured("the renewal finishes");
+        if renewed {
+            assert!(
+                operation.lease_runs_at(anchor),
+                "a renewal the lease took keeps the hold until the renewed end"
+            );
+            // The coordinator stops renewing and the node stops, which ends the renewed lease.
+            operation.end_lease();
+        }
+        expiry.await.assured("the lease runs to its end");
+        assert!(
+            !operation.lease_runs_at(anchor),
+            "a lease that reached its end no longer holds"
+        );
+        assert!(
+            !operation.renew_lease(renewed_until),
+            "a lease that ended is never renewed again"
+        );
+    });
+}
+
+/// A renewal racing the end of a hold's lease either moves the end before the expiry reaches it,
+/// and the hold lasts, or finds the lease ended and is refused, never both: its coordinator never
+/// believes in a hold that has already let traffic through.
+#[test]
+fn shuttle_a_renewal_racing_the_end_of_its_lease_either_keeps_the_hold_or_is_refused() {
+    let anchor = Instant::now();
+    explore(move || {
+        a_renewal_racing_the_end_of_its_lease_either_keeps_the_hold_or_is_refused(anchor)
+    });
 }

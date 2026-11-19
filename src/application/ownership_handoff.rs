@@ -2640,12 +2640,7 @@ impl SessionServiceImpl {
             handoff.activation_deadline,
         )
         .await
-        .map_err(|timeout| {
-            Report::new(crate::runtime::RuntimeError::RuntimeRevisionPreparation {
-                revision,
-                pending_nodes: timeout.pending_nodes,
-            })
-        })
+        .map_err(|incomplete| incomplete.preparation_error(revision))
     }
 
     pub(in crate::application) async fn finish_planned_ownership_handoff(
@@ -2687,10 +2682,10 @@ impl SessionServiceImpl {
                 impact.uncertain(
                     attempt,
                     nervix_models::ImpactDiagnosticKind::Recovery,
-                    "ownership gate remains held until its lease deadline",
+                    "ownership gate remains held until every participant applies the move",
                 );
             }
-            handoff.gate.defer_release_to_lease_deadline();
+            self.keep_planned_ownership_handoff_until_applied(domain, handoff);
             return Err(error);
         }
         let hold_duration = handoff.started_at.elapsed();
@@ -2724,7 +2719,10 @@ impl SessionServiceImpl {
         Ok(())
     }
 
-    pub(in crate::application) fn defer_planned_ownership_handoff_release(
+    /// Keeps a committed handoff's hold after this node could not apply its revision, or saw a
+    /// participant fail to, until every participant applies it; see
+    /// [`Self::keep_planned_ownership_handoff_until_applied`].
+    pub(in crate::application) fn hold_planned_ownership_handoff_until_applied(
         &self,
         domain: &DomainName,
         handoff: PlannedOwnershipHandoff,
@@ -2743,7 +2741,8 @@ impl SessionServiceImpl {
                 hold_duration_millis = hold_duration.as_millis(),
                 promoted_replica = moved.promoted_replica,
                 error = error.as_str(),
-                "planned ownership handoff activation failed; gate remains held until its deadline"
+                "planned ownership handoff activation failed; gate remains held until every \
+                 participant applies it"
             );
         }
         if let (Some(impact), Some(attempt)) = (impact, handoff.gate.impact_attempt()) {
@@ -2755,10 +2754,141 @@ impl SessionServiceImpl {
             impact.uncertain(
                 attempt,
                 nervix_models::ImpactDiagnosticKind::Recovery,
-                "ownership gate remains held until its lease deadline",
+                "ownership gate remains held until every participant applies the move",
             );
         }
-        handoff.gate.defer_release_to_lease_deadline();
+        self.keep_planned_ownership_handoff_until_applied(domain, handoff);
+    }
+
+    /// Keeps a committed handoff's hold until every live participant has prepared the committed
+    /// runtime revision, then activates the moved units on their destinations and releases the
+    /// hold, in the background. The hold is renewed on every participant before each lease ends,
+    /// so a participant that keeps failing to apply the revision keeps the moved units paused,
+    /// never routed to a node that does not run them, for as long as this node coordinates. When
+    /// this node stops, a participant no longer holds the gate, or a participant restarted so the
+    /// handoff can never activate, the renewals stop and every remaining hold ends at its lease.
+    fn keep_planned_ownership_handoff_until_applied(
+        &self,
+        domain: &DomainName,
+        handoff: PlannedOwnershipHandoff,
+    ) {
+        let service = self.clone();
+        let domain = domain.clone();
+        drop(nervix_primitives::task::spawn(async move {
+            Box::pin(service.complete_held_ownership_handoff(domain, handoff)).await;
+        }));
+    }
+
+    async fn complete_held_ownership_handoff(
+        &self,
+        domain: DomainName,
+        mut handoff: PlannedOwnershipHandoff,
+    ) {
+        // The hold's lease is the one its engagement took, renewed half way through each time.
+        let renewal_interval = self.inner.runtime.entity_gate_deadline();
+        let Some(lease) = renewal_interval.checked_mul(2) else {
+            handoff.gate.defer_release_to_lease_deadline();
+            return;
+        };
+        let mut observer = self.inner.application_progress.observer();
+        loop {
+            nervix_primitives::task::consume_budget().await;
+            // A participant that restarted lost its hold and the handoff's preparation with it, so
+            // the handoff can never activate; renewing would only engage a new hold there.
+            if let Err(error) = self
+                .verify_planned_ownership_handoff_incarnations(&handoff)
+                .await
+            {
+                warn!(
+                    domain = domain.as_str(),
+                    error = %format_args!("{error:#}"),
+                    "a committed ownership handoff can no longer activate; every hold ends at \
+                     its lease"
+                );
+                handoff.gate.defer_release_to_lease_deadline();
+                return;
+            }
+            let refused = self.renew_cluster_entity_gates(&handoff.gate, lease).await;
+            if !refused.is_empty() {
+                for refusal in &refused {
+                    warn!(
+                        domain = domain.as_str(),
+                        node = %refusal.node,
+                        reason = refusal.reason.as_str(),
+                        "a participant no longer holds a committed ownership handoff; every \
+                         remaining hold ends at its lease"
+                    );
+                }
+                handoff.gate.defer_release_to_lease_deadline();
+                return;
+            }
+            let Some(renew_at) =
+                nervix_primitives::time::Instant::now().checked_add(renewal_interval)
+            else {
+                handoff.gate.defer_release_to_lease_deadline();
+                return;
+            };
+            handoff.activation_deadline = renew_at;
+            // Observed before the barrier reads progress, so a participant that applies the
+            // revision after this read wakes the wait below.
+            drop(observer.observe());
+            if self
+                .wait_for_ownership_handoff_participants(&handoff)
+                .await
+                .is_ok()
+            {
+                match self
+                    .activate_planned_ownership_handoff(&domain, &handoff)
+                    .await
+                {
+                    Ok(()) => {
+                        for moved in &handoff.moves {
+                            info!(
+                                domain = domain.as_str(),
+                                kind = moved.entity.kind.as_ref(),
+                                name = moved.entity.identifier.as_str(),
+                                former_owner = %moved.former_owner,
+                                destination = %moved.destination,
+                                hold_duration_millis = handoff.started_at.elapsed().as_millis(),
+                                "planned ownership handoff completed once every participant \
+                                 applied it"
+                            );
+                        }
+                        self.discard_attempted_ownership_handoff_preparations(
+                            &mut handoff.preparations,
+                        )
+                        .await;
+                        if let Err(error) = self
+                            .release_cluster_entity_gates_and_wait_recording(handoff.gate, None)
+                            .await
+                        {
+                            warn!(
+                                domain = domain.as_str(),
+                                error = %format_args!("{error:#}"),
+                                "failed to release a completed ownership handoff's hold"
+                            );
+                        }
+                        return;
+                    }
+                    Err(error) => {
+                        debug!(
+                            domain = domain.as_str(),
+                            error = %format_args!("{error:#}"),
+                            "retrying the activation of a committed ownership handoff"
+                        );
+                    }
+                }
+            }
+            nervix_primitives::select! {
+                biased;
+                _ = self.inner.drain_support_shutdown.cancelled() => {
+                    handoff.gate.defer_release_to_lease_deadline();
+                    return;
+                }
+                _ = nervix_primitives::time::sleep_until(renew_at) => {}
+                () = observer.changed() => {}
+            }
+        }
     }
 }
 

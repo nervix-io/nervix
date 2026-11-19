@@ -1,6 +1,6 @@
 //! Fault controls inside one node's entity swap, at the point where the swap replaces a named
-//! processor: its previous task, if this node ran one, has handed its branches over, and its
-//! replacement, if this node runs one, has not started yet.
+//! entity: its previous runtime, if this node ran one, has stopped, a processor's having handed its
+//! branches over, and its replacement, if this node runs one, has not started yet.
 //!
 //! Layer: test harness, outside the product layer order.
 //! - **Owns.** The swap faults a scenario arms for one node and domain: a pause that holds one swap
@@ -10,10 +10,7 @@
 
 #![cfg_attr(
     nervix_lint,
-    nervix::context(
-        outside,
-        reason = "owns test swap controls for one node and domain"
-    )
+    nervix::context(outside, reason = "owns test swap controls for one node and domain")
 )]
 
 use nervix_models::{ClusterNodeName, DomainName, NodeRef};
@@ -37,25 +34,25 @@ impl EntitySwapFaultKey {
     }
 }
 
-/// A pause that holds the next swap while it replaces `processor`.
+/// A pause that holds the next swap while it replaces `entity`.
 #[derive(Debug, Clone)]
 pub(super) struct EntitySwapReplacementPause {
-    processor: NodeRef,
+    entity: NodeRef,
     pause: Arc<TestPause>,
 }
 
 impl FaultInjection {
-    /// Makes every entity swap of `domain` on `node` fail while it replaces `processor`, until
+    /// Makes every entity swap of `domain` on `node` fail while it replaces `entity`, until
     /// [`Self::clear_entity_swap_failures_on`].
     pub fn fail_entity_swaps_while_replacing_on(
         &self,
         node: &ClusterNodeName,
         domain: &DomainName,
-        processor: NodeRef,
+        entity: NodeRef,
     ) {
         self.inner
             .entity_swap_replacement_failures
-            .insert(EntitySwapFaultKey::new(node, domain), processor);
+            .insert(EntitySwapFaultKey::new(node, domain), entity);
     }
 
     /// Lets the entity swaps of `domain` on `node` run without the failure armed above.
@@ -65,18 +62,18 @@ impl FaultInjection {
             .remove(&EntitySwapFaultKey::new(node, domain));
     }
 
-    /// Holds the next entity swap of `domain` on `node` while it replaces `processor`, until the
+    /// Holds the next entity swap of `domain` on `node` while it replaces `entity`, until the
     /// scenario releases it.
     pub fn pause_entity_swap_while_replacing_on(
         &self,
         node: &ClusterNodeName,
         domain: &DomainName,
-        processor: NodeRef,
+        entity: NodeRef,
     ) {
         self.inner.entity_swap_replacement_pauses.insert(
             EntitySwapFaultKey::new(node, domain),
             EntitySwapReplacementPause {
-                processor,
+                entity,
                 pause: Arc::new(TestPause::default()),
             },
         );
@@ -121,17 +118,17 @@ impl FaultInjection {
         armed.pause.clone()
     }
 
-    /// Holds a swap of `domain` on `node` that is replacing `processor`, when a scenario armed that
+    /// Holds a swap of `domain` on `node` that is replacing `entity`, when a scenario armed that
     /// pause, until the scenario releases it. The pause holds one swap.
     pub(crate) async fn pause_entity_swap_while_replacing_if_armed(
         &self,
         node: &ClusterNodeName,
         domain: &DomainName,
-        processor: &NodeRef,
+        entity: &NodeRef,
     ) {
         let key = EntitySwapFaultKey::new(node, domain);
         let pause = match self.inner.entity_swap_replacement_pauses.get(&key) {
-            Some(armed) if armed.processor == *processor => armed.pause.clone(),
+            Some(armed) if armed.entity == *entity => armed.pause.clone(),
             Some(_) | None => return,
         };
         pause.reach();
@@ -139,16 +136,16 @@ impl FaultInjection {
         self.inner.entity_swap_replacement_pauses.remove(&key);
     }
 
-    /// Whether a swap of `domain` on `node` that is replacing `processor` fails there.
+    /// Whether a swap of `domain` on `node` that is replacing `entity` fails there.
     pub(crate) fn entity_swap_fails_while_replacing(
         &self,
         node: &ClusterNodeName,
         domain: &DomainName,
-        processor: &NodeRef,
+        entity: &NodeRef,
     ) -> bool {
         let key = EntitySwapFaultKey::new(node, domain);
         match self.inner.entity_swap_replacement_failures.get(&key) {
-            Some(armed) => *armed == *processor,
+            Some(armed) => *armed == *entity,
             None => false,
         }
     }

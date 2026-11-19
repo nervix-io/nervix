@@ -71,11 +71,35 @@ impl Runtime {
             .fetch_add(1, Ordering::AcqRel);
     }
 
-    pub(in crate::runtime) fn purge_materialized_relay_state(
+    /// Deletes the stored state of every unit of `relay`. The state this node holds in memory
+    /// stays until [`Self::forget_materialized_relay_state`], so a swap that fails after this
+    /// deletion still finds it there.
+    pub(in crate::runtime) fn purge_stored_materialized_relay_state(
         &self,
         domain: &DomainName,
         relay: &RelayName,
     ) -> error_stack::Result<(), ExecutionBuildError> {
+        if let Some(store) = &self.inner.state_store {
+            store
+                .purge_entity(
+                    domain,
+                    RuntimeStateKind::MaterializedRelay,
+                    ModelKind::Relay,
+                    relay,
+                )
+                .change_context_lazy(|| ExecutionBuildError::PurgeNodeState {
+                    node: NodeRef::new(ModelKind::Relay, ModelName::from(relay)),
+                })?;
+        }
+        Ok(())
+    }
+
+    /// Drops the state this node holds in memory for every unit of `relay`, and its replication.
+    pub(in crate::runtime) fn forget_materialized_relay_state(
+        &self,
+        domain: &DomainName,
+        relay: &RelayName,
+    ) {
         let placements = self
             .inner
             .replicated_materialized_stream_states
@@ -93,26 +117,37 @@ impl Runtime {
                 .replicated_materialized_stream_states
                 .remove(&placement);
         }
+    }
+
+    /// Deletes the stored keyspace of `deduplicator`. The state this node holds in memory stays
+    /// until [`Self::forget_deduplicator_state`], so a swap that fails after this deletion still
+    /// finds it there.
+    pub(in crate::runtime) fn purge_stored_deduplicator_state(
+        &self,
+        domain: &DomainName,
+        deduplicator: &DeduplicatorName,
+    ) -> error_stack::Result<(), ExecutionBuildError> {
         if let Some(store) = &self.inner.state_store {
             store
                 .purge_entity(
                     domain,
-                    RuntimeStateKind::MaterializedRelay,
-                    ModelKind::Relay,
-                    relay,
+                    RuntimeStateKind::Deduplicator,
+                    ModelKind::Deduplicator,
+                    deduplicator,
                 )
                 .change_context_lazy(|| ExecutionBuildError::PurgeNodeState {
-                    node: NodeRef::new(ModelKind::Relay, ModelName::from(relay)),
+                    node: NodeRef::new(ModelKind::Deduplicator, ModelName::from(deduplicator)),
                 })?;
         }
         Ok(())
     }
 
-    pub(in crate::runtime) fn purge_deduplicator_state(
+    /// Drops the keyspace this node holds in memory for `deduplicator`, and its replication.
+    pub(in crate::runtime) fn forget_deduplicator_state(
         &self,
         domain: &DomainName,
         deduplicator: &DeduplicatorName,
-    ) -> error_stack::Result<(), ExecutionBuildError> {
+    ) {
         let placements = self
             .inner
             .replicated_deduplicator_states
@@ -128,18 +163,5 @@ impl Runtime {
             self.inner.state_replication_routing.retire(&placement);
             self.inner.replicated_deduplicator_states.remove(&placement);
         }
-        if let Some(store) = &self.inner.state_store {
-            store
-                .purge_entity(
-                    domain,
-                    RuntimeStateKind::Deduplicator,
-                    ModelKind::Deduplicator,
-                    deduplicator,
-                )
-                .change_context_lazy(|| ExecutionBuildError::PurgeNodeState {
-                    node: NodeRef::new(ModelKind::Deduplicator, ModelName::from(deduplicator)),
-                })?;
-        }
-        Ok(())
     }
 }

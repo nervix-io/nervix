@@ -21,7 +21,12 @@
 use error_stack::ResultExt as _;
 
 use super::{
-    partition_claims::UnitPartitionTransition, relay_repartition::InstalledRegistrations, *,
+    entity_swap::DeferredSwapWork,
+    entity_swap_restore::{EntitySwapJournal, EntitySwapStep, IngestorSwap, ReboundNodeSwap},
+    ingestor_start::RetiringIngestorInput,
+    partition_claims::UnitPartitionTransition,
+    relay_repartition::InstalledRegistrations,
+    *,
 };
 
 /// What one node has applied of the cluster schedule its leader publishes.
@@ -44,6 +49,25 @@ pub(in crate::runtime) enum ScheduleDeltaApplication {
     /// The delta replaces the domain's execution as a whole, which only a domain that is not
     /// running its previous revision in place takes.
     RebuildRequired,
+}
+
+/// What one entity swap replaces on this node, beside the revision it installs.
+struct SwapTargets<'a> {
+    entities: &'a [NodeRef],
+    explicitly_replaced: &'a BTreeSet<NodeRef>,
+    reassignments: &'a [NodeRef],
+    dynamic_updates: &'a [DynamicExecutionUpdate],
+    state_purges: &'a BTreeMap<NodeRef, Vec<nervix_models::StatePurge>>,
+    /// The revision the domain's execution ran before the swap.
+    installed: Option<&'a ExecutionRevision>,
+    local_node_id: Option<&'a ClusterNodeName>,
+}
+
+/// What publishing a swapped revision needs once every entity of it has been replaced.
+struct SwapPublication {
+    processor_plans: HashMap<NodeUnitRef, StdArc<PublishedProcessorPlan>>,
+    message_error_plans: Arc<BoundMessageErrorRoutes>,
+    materialized_routing_changed: bool,
 }
 
 impl ScheduleApplication {
@@ -184,13 +208,23 @@ impl Runtime {
 
         for (domain_id, change) in &revision_plan.domains {
             let domain = &change.revision;
-            let predecessor_matches =
-                self.inner
-                    .executions
-                    .get(domain_id)
-                    .is_some_and(|execution| {
-                        Some(execution.revision.source_digest) == change.predecessor_digest
-                    });
+            // An earlier attempt at this revision may have applied it to this domain before a
+            // later domain failed. The domain then runs its desired schedule already and takes no
+            // change, although it no longer matches the predecessor the delta was planned against.
+            let (already_applied, predecessor_matches) = match self.inner.executions.get(domain_id)
+            {
+                Some(execution) => (
+                    execution.revision.source_digest == domain.source_digest,
+                    Some(execution.revision.source_digest) == change.predecessor_digest,
+                ),
+                None => (false, false),
+            };
+            let predecessor_matches = predecessor_matches || already_applied;
+            let delta = if already_applied {
+                &ExecutionDelta::Unchanged
+            } else {
+                &change.delta
+            };
             let Some(domain_state) = self.inner.domains.get(domain_id) else {
                 continue;
             };
@@ -203,7 +237,7 @@ impl Runtime {
             }
             let desired_passive_only =
                 matches!(domain_status, nervix_models::DomainStatus::Stopped);
-            if !matches!(change.delta, ExecutionDelta::Unchanged)
+            if !matches!(delta, ExecutionDelta::Unchanged)
                 || !existing_domains.contains(&domain.domain)
                 || !predecessor_matches
                 || existing_passive_only.get(&domain.domain) != Some(&desired_passive_only)
@@ -214,7 +248,7 @@ impl Runtime {
                     && existing_passive_only.get(&domain.domain) == Some(&desired_passive_only)
                     && existing_start_versions.get(&domain.domain) == Some(&desired_start_version)
                 {
-                    Box::pin(self.apply_schedule_delta(domain, &change.delta)).await?
+                    Box::pin(self.apply_schedule_delta(domain, delta)).await?
                 } else {
                     ScheduleDeltaApplication::RebuildRequired
                 };
@@ -378,6 +412,7 @@ impl Runtime {
         reassignments: &[NodeRef],
         local_node_id: Option<&ClusterNodeName>,
         repartitioned: &BTreeSet<RelayName>,
+        journal: &mut EntitySwapJournal,
     ) -> error_stack::Result<bool, RuntimeError> {
         let Some(local_node_id) = local_node_id else {
             return Ok(false);
@@ -436,6 +471,7 @@ impl Runtime {
                 .intersection(&changed_units)
                 .copied()
                 .collect::<BTreeSet<_>>();
+            let step = journal.record(ReboundNodeSwap::new(entity.clone(), changed_units.clone()));
             if entity.kind == ModelKind::Ingestor {
                 for unit in previous_local_units.difference(&desired_local_units) {
                     let key = DomainNodeUnitRef::new(entity.in_domain(domain), *unit);
@@ -447,6 +483,7 @@ impl Runtime {
                         )
                         .await
                         .change_context_lazy(build)?;
+                        journal.step(step).record_ingestor_unit_stopped(*unit);
                     }
                     self.withdraw_ingestor_unit_metrics(
                         domain,
@@ -495,6 +532,9 @@ impl Runtime {
 
             if entity.kind == ModelKind::Relay && !repartitioned_relay {
                 let relay = RelayName::from(&entity.identifier);
+                // Every leaving unit's owner ends, even after one fails to drain: an owner that
+                // does not drain within its grace is aborted, and a restore starts each again.
+                let mut drain_failure = None;
                 for unit in previous_local_units.difference(&desired_local_units) {
                     let previous =
                         self.inner
@@ -506,13 +546,21 @@ impl Runtime {
                                     .remove(&RelayUnitRef::new(relay.clone(), *unit))
                             });
                     if let Some(task) = previous {
-                        task.stop(self.branch_task_stop_timeout())
-                            .await
-                            .change_context_lazy(|| ExecutionBuildError::DrainRelay {
-                                relay: relay.clone(),
-                            })
-                            .change_context_lazy(build)?;
+                        let stopped = task.stop(self.branch_task_stop_timeout()).await;
+                        journal.step(step).record_owner_stopped(*unit);
+                        if let Err(error) = stopped
+                            && drain_failure.is_none()
+                        {
+                            drain_failure = Some(error);
+                        }
                     }
+                }
+                if let Some(error) = drain_failure {
+                    return Err(error
+                        .change_context(ExecutionBuildError::DrainRelay {
+                            relay: relay.clone(),
+                        })
+                        .change_context(build()));
                 }
             }
             let previous_tasks = if let Some(mut execution) = self.inner.executions.get_mut(domain)
@@ -528,6 +576,9 @@ impl Runtime {
             } else {
                 Vec::new()
             };
+            if !previous_tasks.is_empty() {
+                journal.step(step).placement().record_aborted();
+            }
             for previous in previous_tasks {
                 nervix_primitives::task::consume_budget().await;
                 previous.abort().await;
@@ -622,6 +673,7 @@ impl Runtime {
             if let Some(relay) = materialized_relay.as_ref()
                 && !repartitioned_relay
             {
+                let mut stop_failure = None;
                 for unit in previous_local_units.intersection(&desired_local_units) {
                     let previous =
                         self.inner
@@ -635,17 +687,31 @@ impl Runtime {
                     let Some(task) = previous else {
                         continue;
                     };
-                    task.stop(self.task_stop_grace())
-                        .await
-                        .change_context_lazy(|| ExecutionBuildError::StopRelayStateTask {
-                            relay: relay.clone(),
-                        })
-                        .change_context_lazy(build)?;
-                    if let Some(services) = relay_services.as_ref()
+                    let stopped = task.stop(self.task_stop_grace()).await;
+                    let withdrawn = if let Some(services) = relay_services.as_ref()
                         && !desired_node.is_holding_unit(*unit)
                     {
                         services.remove_local_unit_runtime_consumer(AckMode::Detached, *unit);
+                        true
+                    } else {
+                        false
+                    };
+                    journal
+                        .step(step)
+                        .placement()
+                        .record_state_task_stopped(*unit, withdrawn);
+                    if let Err(error) = stopped
+                        && stop_failure.is_none()
+                    {
+                        stop_failure = Some(error);
                     }
+                }
+                if let Some(error) = stop_failure {
+                    return Err(error
+                        .change_context(ExecutionBuildError::StopRelayStateTask {
+                            relay: relay.clone(),
+                        })
+                        .change_context(build()));
                 }
             }
             let placement = self
@@ -658,13 +724,23 @@ impl Runtime {
                     Some(&changed_units),
                 )
                 .change_context_lazy(build)?;
-            let tasks = placement.tasks;
+            // The placement's tasks join the execution at once, so whatever fails below leaves
+            // them where a restore finds them.
+            if let Some(mut execution) = self.inner.executions.get_mut(domain) {
+                for (unit, tasks) in placement.tasks {
+                    execution
+                        .placement_tasks
+                        .insert(NodeUnitRef::new(entity.clone(), unit), tasks);
+                    journal.step(step).placement().record_installed(unit);
+                }
+            }
             // A node that keeps executing here keeps its task, while its placement has just
             // rebound the replicated state it owns to a new assignment generation. A Kafka ingestor
             // kept this way commits through the originator that generation issued.
             for (unit, originator) in placement.kafka_offset_states {
                 if previous_local_units.contains(&unit) && desired_local_units.contains(&unit) {
                     self.reissue_kafka_offset_originator(domain, entity, unit, originator);
+                    journal.step(step).placement().record_reissued_kafka(unit);
                 }
             }
 
@@ -681,6 +757,7 @@ impl Runtime {
                 // The state task of a unit this node stops owning ends here; a unit it keeps
                 // stopped its task before the placement. Each unit this node owns now starts a task
                 // with the originator its new assignment generation issued.
+                let mut stop_failure = None;
                 for unit in previous_local_units.difference(&desired_local_units) {
                     let previous =
                         self.inner
@@ -692,18 +769,32 @@ impl Runtime {
                                     .remove(&RelayUnitRef::new(relay.clone(), *unit))
                             });
                     if let Some(task) = previous {
-                        task.stop(self.task_stop_grace())
-                            .await
-                            .change_context_lazy(|| ExecutionBuildError::StopRelayStateTask {
-                                relay: relay.clone(),
-                            })
-                            .change_context_lazy(build)?;
-                        if let Some(services) = services.as_ref()
+                        let stopped = task.stop(self.task_stop_grace()).await;
+                        let withdrawn = if let Some(services) = services.as_ref()
                             && !desired_node.is_holding_unit(*unit)
                         {
                             services.remove_local_unit_runtime_consumer(AckMode::Detached, *unit);
+                            true
+                        } else {
+                            false
+                        };
+                        journal
+                            .step(step)
+                            .placement()
+                            .record_state_task_stopped(*unit, withdrawn);
+                        if let Err(error) = stopped
+                            && stop_failure.is_none()
+                        {
+                            stop_failure = Some(error);
                         }
                     }
+                }
+                if let Some(error) = stop_failure {
+                    return Err(error
+                        .change_context(ExecutionBuildError::StopRelayStateTask {
+                            relay: relay.clone(),
+                        })
+                        .change_context(build()));
                 }
                 for unit in &desired_local_units {
                     let Some(services) = services.clone() else {
@@ -718,6 +809,14 @@ impl Runtime {
                         })
                         .change_context(build()));
                     };
+                    let (receiver, registered) = if desired_node.is_holding_unit(*unit) {
+                        (services.dormant_unit_fan_in(AckMode::Detached, *unit), None)
+                    } else {
+                        (
+                            services.add_local_unit_runtime_consumer(AckMode::Detached, *unit),
+                            Some(services.clone()),
+                        )
+                    };
                     let task = self.spawn_relay_state_task(
                         domain,
                         RelayStateTaskSpec {
@@ -730,11 +829,7 @@ impl Runtime {
                                 .get(&relay)
                                 .verified("the domain plan covers every scheduled relay")
                                 .retention,
-                            receiver: if desired_node.is_holding_unit(*unit) {
-                                services.dormant_unit_fan_in(AckMode::Detached, *unit)
-                            } else {
-                                services.add_local_unit_runtime_consumer(AckMode::Detached, *unit)
-                            },
+                            receiver,
                             transition: UnitPartitionTransition::of(desired_node, *unit),
                             parked_capacity: services.owner_capacity(),
                         },
@@ -744,6 +839,10 @@ impl Runtime {
                             .relay_state_tasks
                             .insert(RelayUnitRef::new(relay.clone(), *unit), task);
                     }
+                    journal
+                        .step(step)
+                        .placement()
+                        .record_state_task_started(*unit, registered);
                 }
                 if let Some(mut execution) = self.inner.executions.get_mut(domain) {
                     execution.materialized_stream_owner_nodes.insert(
@@ -779,17 +878,8 @@ impl Runtime {
                             .relay_owner_tasks
                             .insert(RelayUnitRef::new(relay.clone(), *unit), task);
                     }
+                    journal.step(step).record_owner_started(*unit);
                 }
-            }
-
-            if !tasks.is_empty()
-                && let Some(mut execution) = self.inner.executions.get_mut(domain)
-            {
-                execution.placement_tasks.extend(
-                    tasks
-                        .into_iter()
-                        .map(|(unit, tasks)| (NodeUnitRef::new(entity.clone(), unit), tasks)),
-                );
             }
         }
         Ok(relay_states_moved)
@@ -896,128 +986,46 @@ impl Runtime {
         }
         self.force_flush_domain(domain);
 
-        Box::pin(self.stop_replaced_ingestor_layouts(domain, Some(&revision))).await?;
-
-        // Materialized relay state uses a start-version-qualified schema fingerprint. Install the
-        // desired fingerprints before constructing state so the post-swap stale-state purge does
-        // not discard the newly attached state instance.
-        self.install_state_identities(&revision);
         let installed = self
             .inner
             .executions
             .get(domain)
             .map(|execution| execution.revision.clone());
-        let repartitioned =
-            Box::pin(self.repartition_relays(domain, &revision, local_node_id)).await?;
-        let registrations = InstalledRegistrations::new(installed.as_deref(), &repartitioned);
-        let mut materialized_routing_changed = self
-            .rebind_reassigned_nodes(
-                domain,
-                &revision,
-                &reassignments,
+        let mut journal = EntitySwapJournal::new(installed.clone());
+        let replaced = Box::pin(self.replace_swapped_entities(
+            domain,
+            &revision,
+            SwapTargets {
+                entities,
+                explicitly_replaced: &explicitly_replaced,
+                reassignments: &reassignments,
+                dynamic_updates,
+                state_purges,
+                installed: installed.as_deref(),
                 local_node_id,
-                &repartitioned,
-            )
-            .await?;
-
-        for entity in entities {
-            nervix_primitives::task::consume_budget().await;
-            let replace_all = explicitly_replaced.contains(entity);
-            match entity.kind {
-                ModelKind::Relay => {
-                    Box::pin(self.swap_relay_entity(
-                        domain,
-                        entity,
-                        &revision,
-                        &registrations,
-                        local_node_id,
-                    ))
-                    .await?;
-                    materialized_routing_changed = true;
+            },
+            &mut retiring_ingestors,
+            &mut journal,
+        ))
+        .await;
+        let SwapPublication {
+            processor_plans,
+            message_error_plans,
+            materialized_routing_changed,
+        } = match replaced {
+            Ok(publication) => publication,
+            Err(error) => {
+                // The previous execution is back before the gate opens, so nothing reaches an
+                // entity between its replacement and its restore.
+                let restored = Box::pin(self.restore_entity_swap(domain, journal)).await;
+                local_gate_hold.release();
+                if restored {
+                    return Err(error);
                 }
-                ModelKind::Ingestor => {
-                    Box::pin(self.swap_ingestor_entity(
-                        domain,
-                        entity,
-                        &revision,
-                        &mut retiring_ingestors,
-                        local_node_id,
-                    ))
-                    .await?;
-                }
-                ModelKind::Emitter => {
-                    self.swap_emitter_entity(
-                        domain,
-                        entity,
-                        &revision,
-                        &registrations,
-                        replace_all,
-                        local_node_id,
-                    )
-                    .await?;
-                }
-                ModelKind::Reingestor => {
-                    Box::pin(self.swap_reingestor_entity(
-                        domain,
-                        entity,
-                        &revision,
-                        &registrations,
-                        local_node_id,
-                    ))
-                    .await?;
-                }
-                ModelKind::Generator => {
-                    Box::pin(self.swap_generator_entity(
-                        domain,
-                        entity,
-                        &revision,
-                        replace_all,
-                        local_node_id,
-                    ))
-                    .await?;
-                }
-                _ => {
-                    Box::pin(self.swap_processor_entity(
-                        domain,
-                        entity,
-                        &revision,
-                        &registrations,
-                        state_purges,
-                        replace_all,
-                        local_node_id,
-                    ))
-                    .await?;
-                }
+                return Err(error.change_context(RuntimeError::IncompleteSwapRestore {
+                    domain: domain.clone(),
+                }));
             }
-        }
-
-        self.apply_dynamic_model_updates(domain, &revision, dynamic_updates)
-            .await?;
-        let processor_plans = self
-            .bind_installed_processor_plans(domain, &revision)
-            .await?;
-        let message_error_plans = {
-            let Some(execution) = self.inner.executions.get(domain) else {
-                return Err(Report::new(ExecutionBuildError::ExecutionUnavailable {
-                    step: ExecutionStep::MessageErrorBinding,
-                })
-                .change_context(build()));
-            };
-            Arc::new(
-                BoundMessageErrorRoutes::bind(
-                    revision.message_errors.clone(),
-                    MessageErrorRouteBindingContext {
-                        immediate_minimum: self.data_plane_settings().immediate_flush_minimum(),
-                        vm_settings: self.inner.vm_settings,
-                        relay_services: &execution.relay_services,
-                        materialized_stream_specs: &execution.materialized_stream_specs,
-                        lookups: &execution.lookups,
-                        udfs: &execution.udfs,
-                    },
-                )
-                .change_context(ExecutionBuildError::BindMessageErrorRoutes)
-                .change_context_lazy(build)?,
-            )
         };
         let mut routing_published = false;
         if let Some(mut execution) = self.inner.executions.get_mut(domain) {
@@ -1056,6 +1064,211 @@ impl Runtime {
             self.inner.materialized_state_changed.notify_waiters();
         }
         local_gate_hold.release();
+        Ok(())
+    }
+
+    /// Replaces this node's runtime of everything `targets` swap, recording each step in
+    /// `journal`, and binds what publishing `revision` needs. It publishes nothing, so a swap that
+    /// fails here puts the previous execution back from the journal and leaves the routing the
+    /// domain last published in place.
+    async fn replace_swapped_entities(
+        &self,
+        domain: &DomainName,
+        revision: &Arc<ExecutionRevision>,
+        targets: SwapTargets<'_>,
+        retiring_ingestors: &mut BTreeMap<IngestorName, RetiringIngestorInput>,
+        journal: &mut EntitySwapJournal,
+    ) -> error_stack::Result<SwapPublication, RuntimeError> {
+        let build = || RuntimeError::build_domain_execution(domain);
+        let SwapTargets {
+            entities,
+            explicitly_replaced,
+            reassignments,
+            dynamic_updates,
+            state_purges,
+            installed,
+            local_node_id,
+        } = targets;
+        Box::pin(self.stop_replaced_ingestor_layouts_for_swap(domain, revision, journal)).await?;
+
+        // Materialized relay state uses a start-version-qualified schema fingerprint. Install the
+        // desired fingerprints before constructing state so the post-swap stale-state purge does
+        // not discard the newly attached state instance.
+        journal.record_step(EntitySwapStep::StateIdentities);
+        self.install_state_identities(revision);
+        let repartitioned =
+            Box::pin(self.repartition_relays(domain, revision, local_node_id, journal)).await?;
+        let registrations = InstalledRegistrations::new(installed, &repartitioned);
+        let mut materialized_routing_changed = Box::pin(self.rebind_reassigned_nodes(
+            domain,
+            revision,
+            reassignments,
+            local_node_id,
+            &repartitioned,
+            journal,
+        ))
+        .await?;
+
+        let mut deferred = DeferredSwapWork::default();
+        for entity in entities {
+            nervix_primitives::task::consume_budget().await;
+            let replace_all = explicitly_replaced.contains(entity);
+            match entity.kind {
+                ModelKind::Relay => {
+                    Box::pin(self.swap_relay_entity(
+                        domain,
+                        entity,
+                        revision,
+                        &registrations,
+                        local_node_id,
+                        journal,
+                        &mut deferred,
+                    ))
+                    .await?;
+                    materialized_routing_changed = true;
+                }
+                ModelKind::Ingestor => {
+                    Box::pin(self.swap_ingestor_entity(
+                        domain,
+                        entity,
+                        revision,
+                        retiring_ingestors,
+                        local_node_id,
+                        journal,
+                    ))
+                    .await?;
+                }
+                ModelKind::Emitter => {
+                    Box::pin(self.swap_emitter_entity(
+                        domain,
+                        entity,
+                        revision,
+                        &registrations,
+                        replace_all,
+                        local_node_id,
+                        journal,
+                    ))
+                    .await?;
+                }
+                ModelKind::Reingestor => {
+                    Box::pin(self.swap_reingestor_entity(
+                        domain,
+                        entity,
+                        revision,
+                        &registrations,
+                        local_node_id,
+                        journal,
+                    ))
+                    .await?;
+                }
+                ModelKind::Generator => {
+                    Box::pin(self.swap_generator_entity(
+                        domain,
+                        entity,
+                        revision,
+                        replace_all,
+                        local_node_id,
+                        journal,
+                    ))
+                    .await?;
+                }
+                _ => {
+                    Box::pin(self.swap_processor_entity(
+                        domain,
+                        entity,
+                        revision,
+                        &registrations,
+                        state_purges,
+                        replace_all,
+                        local_node_id,
+                        journal,
+                        &mut deferred,
+                    ))
+                    .await?;
+                }
+            }
+        }
+
+        // Each update a restore can take back is recorded before any of them applies.
+        for update in dynamic_updates {
+            match update {
+                DynamicExecutionUpdate::RelayCapacity { relay, .. } => {
+                    journal.record_step(EntitySwapStep::RelayCapacity {
+                        relay: relay.clone(),
+                    });
+                }
+                DynamicExecutionUpdate::EmitterFlush { emitter, .. } => {
+                    journal.record_step(EntitySwapStep::EmitterFlush {
+                        emitter: emitter.clone(),
+                    });
+                }
+                DynamicExecutionUpdate::Processor
+                | DynamicExecutionUpdate::WasmStateReset { .. }
+                | DynamicExecutionUpdate::VhostTlsVersion
+                | DynamicExecutionUpdate::PartitionTransitionRetired { .. } => {}
+            }
+        }
+        self.apply_dynamic_model_updates(domain, revision, dynamic_updates)
+            .await?;
+        let processor_plans = self
+            .bind_installed_processor_plans(domain, revision)
+            .await?;
+        let message_error_plans = {
+            let Some(execution) = self.inner.executions.get(domain) else {
+                return Err(Report::new(ExecutionBuildError::ExecutionUnavailable {
+                    step: ExecutionStep::MessageErrorBinding,
+                })
+                .change_context(build()));
+            };
+            Arc::new(
+                BoundMessageErrorRoutes::bind(
+                    revision.message_errors.clone(),
+                    MessageErrorRouteBindingContext {
+                        immediate_minimum: self.data_plane_settings().immediate_flush_minimum(),
+                        vm_settings: self.inner.vm_settings,
+                        relay_services: &execution.relay_services,
+                        materialized_stream_specs: &execution.materialized_stream_specs,
+                        lookups: &execution.lookups,
+                        udfs: &execution.udfs,
+                    },
+                )
+                .change_context(ExecutionBuildError::BindMessageErrorRoutes)
+                .change_context_lazy(build)?,
+            )
+        };
+        // Last: the state only the previous execution reads is deleted once nothing else can
+        // fail, and the units whose state it was start their replacements after it.
+        self.complete_deferred_swap_work(domain, &registrations, deferred, journal)?;
+        Ok(SwapPublication {
+            processor_plans,
+            message_error_plans,
+            materialized_routing_changed,
+        })
+    }
+
+    /// Stops the local units of every ingestor whose unit layout `desired` changes, recording
+    /// each in `journal`, before any of its prepared state is installed.
+    async fn stop_replaced_ingestor_layouts_for_swap(
+        &self,
+        domain: &DomainName,
+        desired: &ExecutionRevision,
+        journal: &mut EntitySwapJournal,
+    ) -> error_stack::Result<(), RuntimeError> {
+        let dispatcher = self.inner.remote_dispatcher.load_full();
+        for ingestor in self.replaced_ingestor_layouts(domain, Some(desired)) {
+            nervix_primitives::task::consume_budget().await;
+            let step = journal.record(IngestorSwap::new(ingestor.clone()));
+            for unit in self.running_ingestor_units(domain, &ingestor) {
+                nervix_primitives::task::consume_budget().await;
+                self.stop_ingestor_unit(domain, &ingestor, unit).await?;
+                journal.step(step).record_stopped(unit);
+            }
+            self.inner.metrics.remove_ingestor_metrics(
+                domain,
+                &ingestor,
+                dispatcher.as_deref().map(RemoteDispatcher::local_node_id),
+            );
+        }
         Ok(())
     }
 

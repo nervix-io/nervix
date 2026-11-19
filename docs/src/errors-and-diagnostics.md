@@ -425,8 +425,8 @@ the benchmark load generator.
 
 A report's plain `Display` is its current context alone. Its alternate form, `{error:#}`, is every
 context from the outermost to the cause, joined by `: `, as in `failed to start domain 'edge':
-failed to apply runtime revision 7: failed to build domain execution for 'edge': failed to load
-lookup 'zips': ...`. Runtime reporting renders every context in the report it receives, using
+node 'node-1' failed to apply runtime revision 7: failed to build domain execution for 'edge':
+failed to load lookup 'zips': ...`. Runtime reporting renders every context in the report it receives, using
 alternate `Display` (`{error:#}`), including report-bearing tracing fields. A failed command's
 message, a runtime event, a negative acknowledgement's reason, a domain's instantiation error, the
 CLI's text and JSON reports and the C binding's error message are that chain.

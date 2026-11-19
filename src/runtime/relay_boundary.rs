@@ -2188,6 +2188,42 @@ impl RelayBoundaryServices {
         RelayRuntimeFanIn::new(audience.new_receiver())
     }
 
+    /// A receiver for a runtime consumer of `unit` that this relay already counts, such as the
+    /// input of a task a failed swap starts again while its registration stayed in place. It
+    /// reads from the same audience a counted registration does and changes no count.
+    pub(super) fn registered_unit_runtime_fan_in(
+        &self,
+        mode: AckMode,
+        unit: Unit,
+    ) -> RelayRuntimeFanIn {
+        if unit == Unit::SINGLE {
+            return RelayRuntimeFanIn::new(self.fanout.runtime_consumer_receiver_for_mode(mode));
+        }
+        self.dormant_unit_fan_in(mode, unit)
+    }
+
+    /// The runtime consumers of `mode` a publication to `unit` counts on: those of the whole
+    /// relay and those of the unit.
+    #[cfg(test)]
+    pub(super) fn counted_unit_runtime_consumers(&self, mode: AckMode, unit: Unit) -> usize {
+        let whole = match mode {
+            AckMode::Attached => &self.attached_runtime_consumer_count,
+            AckMode::Detached => &self.detached_runtime_consumer_count,
+        }
+        .load(Ordering::Acquire);
+        let Some(consumers) = self.unit_runtime_consumers.get(&unit) else {
+            return whole;
+        };
+        let of_unit = match mode {
+            AckMode::Attached => &consumers.attached,
+            AckMode::Detached => &consumers.detached,
+        }
+        .load(Ordering::Acquire);
+        whole
+            .checked_add(of_unit)
+            .assured("registered consumers are held in memory")
+    }
+
     pub(super) fn remove_local_unit_runtime_consumer(&self, mode: AckMode, unit: Unit) {
         if unit == Unit::SINGLE {
             self.remove_local_runtime_consumer(mode);

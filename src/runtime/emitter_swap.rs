@@ -22,7 +22,12 @@
 
 use error_stack::ResultExt as _;
 
-use super::{emitter_supervision::EmitterInput, relay_repartition::InstalledRegistrations, *};
+use super::{
+    emitter_supervision::EmitterInput,
+    entity_swap_restore::{EmitterInputRegistration, EmitterUnitSwap, EntitySwapJournal},
+    relay_repartition::InstalledRegistrations,
+    *,
+};
 use crate::emitter_execution_plan::EmitterInputUnits;
 
 impl Runtime {
@@ -37,6 +42,7 @@ impl Runtime {
         registrations: &InstalledRegistrations<'_>,
         replace_all: bool,
         local_node_id: Option<&ClusterNodeName>,
+        journal: &mut EntitySwapJournal,
     ) -> error_stack::Result<(), RuntimeError> {
         let build = || RuntimeError::build_domain_execution(domain);
         let emitter_name = EmitterName::from(&entity.identifier);
@@ -74,6 +80,7 @@ impl Runtime {
         for unit in units {
             nervix_primitives::task::consume_budget().await;
             let owner = NodeUnitRef::new(entity.clone(), unit);
+            let step = journal.record(EmitterUnitSwap::new(owner.clone()));
             let old_task = {
                 let Some(mut execution) = self.inner.executions.get_mut(domain) else {
                     return Err(emitter_swap_unavailable());
@@ -96,6 +103,12 @@ impl Runtime {
                     })
                     .change_context(build()));
             }
+            if had_old_task {
+                journal.step(step).record_previous_stopped();
+            }
+            #[cfg(feature = "testing")]
+            self.hold_or_fail_entity_swap(domain, entity, local_node_id)
+                .await?;
 
             let executes_locally =
                 Self::scheduled_unit_executes_locally(desired_node, unit, local_node_id)
@@ -114,6 +127,34 @@ impl Runtime {
                 let Some(execution) = self.inner.executions.get_mut(domain) else {
                     return Err(emitter_swap_unavailable());
                 };
+                // Every input of the replacement has its relay boundary, and its dependencies
+                // bind, before any registration moves, so neither failure leaves a relay counting
+                // a consumer that has no receiver.
+                let replacement = if executes_locally {
+                    let mut boundaries = Vec::with_capacity(desired_emitter.inputs.len());
+                    for input in &desired_emitter.inputs {
+                        let Some(services) = execution.relay_services.get(&input.relay) else {
+                            return Err(Report::new(ExecutionBuildError::MissingRelayBoundary {
+                                relay: input.relay.clone(),
+                            })
+                            .change_context(build()));
+                        };
+                        boundaries.push((input, services.clone()));
+                    }
+                    let deps = self
+                        .emitter_task_deps(
+                            ExecutionBuildDeps::from_routing(
+                                domain,
+                                &execution,
+                                self.inner.vm_settings,
+                            ),
+                            &desired_emitter,
+                        )
+                        .change_context_lazy(build)?;
+                    Some((boundaries, deps))
+                } else {
+                    None
+                };
                 if had_old_task {
                     for input in &old_emitter.inputs {
                         let Some(services) = execution.relay_services.get(&input.relay) else {
@@ -127,6 +168,12 @@ impl Runtime {
                         match old_emitter.input_units(unit, input) {
                             EmitterInputUnits::WholeRelay => {
                                 services.remove_local_runtime_consumer(old_emitter.mode);
+                                journal
+                                    .step(step)
+                                    .record_withdrawn(EmitterInputRegistration::new(
+                                        input.relay.clone(),
+                                        None,
+                                    ));
                             }
                             EmitterInputUnits::Units(relay_units) => {
                                 for relay_unit in relay_units {
@@ -134,58 +181,64 @@ impl Runtime {
                                         old_emitter.mode,
                                         relay_unit,
                                     );
+                                    journal.step(step).record_withdrawn(
+                                        EmitterInputRegistration::new(
+                                            input.relay.clone(),
+                                            Some(relay_unit),
+                                        ),
+                                    );
                                 }
                             }
                         }
                     }
                 }
-                if !executes_locally {
-                    None
-                } else {
-                    let mut inputs = Vec::new();
-                    for input in &desired_emitter.inputs {
-                        let Some(services) = execution.relay_services.get(&input.relay) else {
-                            return Err(Report::new(ExecutionBuildError::MissingRelayBoundary {
-                                relay: input.relay.clone(),
-                            })
-                            .change_context(build()));
-                        };
-                        match desired_emitter.input_units(unit, input) {
-                            EmitterInputUnits::WholeRelay => inputs.push(EmitterInput {
-                                relay: input.relay.clone(),
-                                relay_unit: None,
-                                fan_in: services.add_local_runtime_consumer(desired_emitter.mode),
-                            }),
-                            EmitterInputUnits::Units(relay_units) => {
-                                for relay_unit in relay_units {
+                match replacement {
+                    None => None,
+                    Some((boundaries, deps)) => {
+                        let mut inputs = Vec::new();
+                        for (input, services) in boundaries {
+                            match desired_emitter.input_units(unit, input) {
+                                EmitterInputUnits::WholeRelay => {
+                                    let fan_in =
+                                        services.add_local_runtime_consumer(desired_emitter.mode);
+                                    journal.step(step).record_registered(
+                                        desired_emitter.mode,
+                                        services.clone(),
+                                        None,
+                                    );
                                     inputs.push(EmitterInput {
                                         relay: input.relay.clone(),
-                                        relay_unit: Some(relay_unit),
-                                        fan_in: services.add_local_unit_runtime_consumer(
+                                        relay_unit: None,
+                                        fan_in,
+                                    });
+                                }
+                                EmitterInputUnits::Units(relay_units) => {
+                                    for relay_unit in relay_units {
+                                        let fan_in = services.add_local_unit_runtime_consumer(
                                             desired_emitter.mode,
                                             relay_unit,
-                                        ),
-                                    });
+                                        );
+                                        journal.step(step).record_registered(
+                                            desired_emitter.mode,
+                                            services.clone(),
+                                            Some(relay_unit),
+                                        );
+                                        inputs.push(EmitterInput {
+                                            relay: input.relay.clone(),
+                                            relay_unit: Some(relay_unit),
+                                            fan_in,
+                                        });
+                                    }
                                 }
                             }
                         }
+                        Some(EmitterSpawnInputs {
+                            shutdown: execution.shutdown.clone(),
+                            codecs: execution.codecs.clone(),
+                            deps,
+                            inputs,
+                        })
                     }
-                    let deps = self
-                        .emitter_task_deps(
-                            ExecutionBuildDeps::from_routing(
-                                domain,
-                                &execution,
-                                self.inner.vm_settings,
-                            ),
-                            &desired_emitter,
-                        )
-                        .change_context_lazy(build)?;
-                    Some(EmitterSpawnInputs {
-                        shutdown: execution.shutdown.clone(),
-                        codecs: execution.codecs.clone(),
-                        deps,
-                        inputs,
-                    })
                 }
             };
             if let Some(spawn) = spawn {
@@ -206,6 +259,7 @@ impl Runtime {
                     return Err(emitter_swap_unavailable());
                 };
                 execution.emitter_tasks.insert(owner, task);
+                journal.step(step).record_started(desired_emitter.mode);
             }
             #[cfg(feature = "testing")]
             if had_old_task && !executes_locally {
