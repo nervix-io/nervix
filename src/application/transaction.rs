@@ -2379,8 +2379,7 @@ impl SessionServiceImpl {
             let activation_error = if reset_effect.is_some() {
                 None
             } else {
-                self.apply_current_cluster_state_recording_recovery(&actual, &advanced)
-                    .await
+                Box::pin(self.apply_current_cluster_state()).await.err()
             };
             if let Some(error) = &activation_error {
                 self.broadcast_error(format!(

@@ -36,38 +36,14 @@ pub(in crate::runtime) struct ScheduleApplication {
     applied_revision: Option<u64>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct RuntimeRecoveryExpansion {
-    pub(crate) domain: DomainName,
-    pub(crate) reason: String,
-    pub(crate) scope: Vec<NodeRef>,
-}
-
-#[derive(Debug)]
-pub(in crate::runtime) struct AppliedRuntimeRecoveryExpansions {
-    revision: u64,
-    expansions: Vec<RuntimeRecoveryExpansion>,
-}
-
-pub(in crate::runtime) struct ScheduleDeltaApplication {
-    applied_incrementally: bool,
-    recovery_expansion: Option<RuntimeRecoveryExpansion>,
-}
-
-impl ScheduleDeltaApplication {
-    fn incremental() -> Self {
-        Self {
-            applied_incrementally: true,
-            recovery_expansion: None,
-        }
-    }
-
-    fn rebuild_required() -> Self {
-        Self {
-            applied_incrementally: false,
-            recovery_expansion: None,
-        }
-    }
+/// How a domain's schedule delta reached its running execution.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::runtime) enum ScheduleDeltaApplication {
+    /// The running execution took the delta in place.
+    Incremental,
+    /// The delta replaces the domain's execution as a whole, which only a domain that is not
+    /// running its previous revision in place takes.
+    RebuildRequired,
 }
 
 impl ScheduleApplication {
@@ -146,27 +122,9 @@ impl Runtime {
         self.sync_committed_domains(revision, domains, domain_clock_authorities);
         // A failed application records nothing, so the same revision is applied again rather than
         // being suppressed as one this node already holds.
-        let recovery_expansions =
-            Box::pin(self.apply_cluster_schedule_locked(local_node_id, revision_plan, false))
-                .await?;
+        Box::pin(self.apply_cluster_schedule_locked(local_node_id, revision_plan, false)).await?;
         application.record_applied(revision);
-        self.inner
-            .applied_recovery_expansions
-            .store(Some(StdArc::new(AppliedRuntimeRecoveryExpansions {
-                revision,
-                expansions: recovery_expansions,
-            })));
         Ok(())
-    }
-
-    pub(crate) fn recovery_expansions(&self, revision: u64) -> Vec<RuntimeRecoveryExpansion> {
-        let Some(applied) = self.inner.applied_recovery_expansions.load_full() else {
-            return Vec::new();
-        };
-        if applied.revision != revision {
-            return Vec::new();
-        }
-        applied.expansions.clone()
     }
 
     pub(super) async fn apply_cluster_schedule_locked(
@@ -174,7 +132,7 @@ impl Runtime {
         local_node_id: &ClusterNodeName,
         revision_plan: PlannedClusterRevision,
         start_ingestors: bool,
-    ) -> error_stack::Result<Vec<RuntimeRecoveryExpansion>, RuntimeError> {
+    ) -> error_stack::Result<(), RuntimeError> {
         // Delta application and full rebuild each own substantial state. Poll them indirectly so
         // applying a cluster revision does not embed both state machines in this coordinator.
         let scheduled_domains = revision_plan
@@ -203,8 +161,6 @@ impl Runtime {
                 .map(|entry| (entry.key().clone(), entry.value().start_version))
                 .collect::<HashMap<_, _>>()
         };
-        let mut recovery_expansions = Vec::new();
-
         for domain in existing_domains.difference(&scheduled_domains) {
             match Box::pin(self.rebuild_domain_from_revision(
                 local_node_id,
@@ -258,20 +214,11 @@ impl Runtime {
                     && existing_passive_only.get(&domain.domain) == Some(&desired_passive_only)
                     && existing_start_versions.get(&domain.domain) == Some(&desired_start_version)
                 {
-                    Box::pin(self.apply_schedule_delta(
-                        local_node_id,
-                        domain,
-                        &change.delta,
-                        start_ingestors,
-                    ))
-                    .await?
+                    Box::pin(self.apply_schedule_delta(domain, &change.delta)).await?
                 } else {
-                    ScheduleDeltaApplication::rebuild_required()
+                    ScheduleDeltaApplication::RebuildRequired
                 };
-                if let Some(expansion) = delta_application.recovery_expansion {
-                    recovery_expansions.push(expansion);
-                }
-                if !delta_application.applied_incrementally {
+                if let ScheduleDeltaApplication::RebuildRequired = delta_application {
                     match Box::pin(self.rebuild_domain_from_revision(
                         local_node_id,
                         &domain.domain,
@@ -313,20 +260,20 @@ impl Runtime {
         // a route none of them publishes as missing rather than as not yet installed.
         self.inner.endpoint_intake_routes.mark_installed();
 
-        Ok(recovery_expansions)
+        Ok(())
     }
 
-    /// Applies a changed schedule without tearing the domain down when the delta allows it.
-    /// Returns `false` when the delta demands a full rebuild from the schedule instead.
+    /// Applies a changed schedule without tearing the domain down when the delta allows it, and
+    /// answers [`ScheduleDeltaApplication::RebuildRequired`] when the delta replaces the domain's
+    /// execution as a whole. An entity swap that fails is the delta's failure: the swap leaves the
+    /// entities it was replacing running, and nothing wider stands in for it.
     pub(super) async fn apply_schedule_delta(
         &self,
-        local_node_id: &ClusterNodeName,
         desired: &Arc<ExecutionRevision>,
         delta: &ExecutionDelta,
-        start_ingestors: bool,
     ) -> error_stack::Result<ScheduleDeltaApplication, RuntimeError> {
         match delta {
-            ExecutionDelta::Unchanged => Ok(ScheduleDeltaApplication::incremental()),
+            ExecutionDelta::Unchanged => Ok(ScheduleDeltaApplication::Incremental),
             ExecutionDelta::Dynamic(updates) => {
                 Box::pin(self.apply_dynamic_schedule_update(
                     &desired.domain,
@@ -334,59 +281,14 @@ impl Runtime {
                     updates,
                 ))
                 .await?;
-                Ok(ScheduleDeltaApplication::incremental())
+                Ok(ScheduleDeltaApplication::Incremental)
             }
             ExecutionDelta::EntitySwap(change) => {
-                #[cfg(feature = "testing")]
-                let swap_result = if self
-                    .inner
-                    .fault_injection
-                    .take_failed_entity_schedule_swap(local_node_id, &desired.domain)
-                {
-                    Err(Report::new(ExecutionBuildError::InjectedSwapFailure)
-                        .change_context(RuntimeError::build_domain_execution(&desired.domain)))
-                } else {
-                    Box::pin(self.swap_scheduled_nodes(&desired.domain, desired.clone(), change))
-                        .await
-                };
-                #[cfg(not(feature = "testing"))]
-                let swap_result =
-                    Box::pin(self.swap_scheduled_nodes(&desired.domain, desired.clone(), change))
-                        .await;
-                if let Err(error) = swap_result {
-                    // A failed emitter stop reinstalls its task with the emitter's held records.
-                    // Rebuilding here would tear that task down and hide its finish outcome.
-                    if matches!(
-                        error.downcast_ref::<ExecutionBuildError>(),
-                        Some(ExecutionBuildError::StopEmitter { .. })
-                    ) {
-                        return Err(error);
-                    }
-                    let reason = format!("{error:#}");
-                    warn!(
-                        domain = desired.domain.as_str(),
-                        error = reason.as_str(),
-                        "entity-level schedule apply failed; rebuilding domain"
-                    );
-                    Box::pin(self.rebuild_domain_from_revision(
-                        local_node_id,
-                        &desired.domain,
-                        Some(desired.clone()),
-                        start_ingestors,
-                    ))
+                Box::pin(self.swap_scheduled_nodes(&desired.domain, desired.clone(), change))
                     .await?;
-                    return Ok(ScheduleDeltaApplication {
-                        applied_incrementally: true,
-                        recovery_expansion: Some(RuntimeRecoveryExpansion {
-                            domain: desired.domain.clone(),
-                            reason,
-                            scope: desired.nodes.keys().cloned().collect(),
-                        }),
-                    });
-                }
-                Ok(ScheduleDeltaApplication::incremental())
+                Ok(ScheduleDeltaApplication::Incremental)
             }
-            ExecutionDelta::Rebuild => Ok(ScheduleDeltaApplication::rebuild_required()),
+            ExecutionDelta::Rebuild => Ok(ScheduleDeltaApplication::RebuildRequired),
         }
     }
 
@@ -1527,7 +1429,7 @@ impl Runtime {
                 let had_old_task = old_task.is_some();
                 let handoffs = if let Some(old_task) = old_task {
                     old_task
-                        .handoff(self.task_stop_grace())
+                        .handoff()
                         .await
                         .change_context_lazy(|| ExecutionBuildError::ProcessorHandoff {
                             node: entity.clone(),

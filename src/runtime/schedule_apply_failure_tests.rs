@@ -875,14 +875,11 @@ async fn an_emitter_swap_keeps_the_task_that_did_not_stop() {
              for stopping"
         )
     );
-    let node = ClusterNodeName::parse("node-1").assured("the test node is a valid name");
     let revision = test_execution_revision(&domain, emitting_nodes());
     let result = runtime
         .apply_schedule_delta(
-            &node,
             &revision,
             &ExecutionDelta::EntitySwap(swap_of(emitter.node.clone())),
-            true,
         )
         .await;
     let Err(error) = result else {

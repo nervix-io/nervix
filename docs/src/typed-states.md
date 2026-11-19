@@ -379,7 +379,7 @@ complete unsigned 64-bit range. Duration settings preserve their declared range 
 precision in eight bytes. Decoding validates the same declaration before publishing a parameter
 value.
 
-Consensus's `raft_runtime_entity_labels_inherited_topology_ratelimit_` keyspaces and current
+Consensus's `raft_runtime_entity_labels_inherited_topology_ratelimit_rebuildreasons_` keyspaces and current
 `ClusterState` metadata encoding, 41, identify its stored shapes, including the partition count of every resolved
 branch declaration in the committed schedule, the partition epoch the schedule records for each
 branch whose count changed, and the statements a transaction keeps, including per-entity

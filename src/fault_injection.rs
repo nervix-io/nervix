@@ -124,8 +124,8 @@ use domain_clock::DomainClockProgressPausePoint;
 pub use domain_resume::DomainResumeBoundary;
 use emitter_mode::EmitterFaultMode;
 use entity_drain::ForcedEntityDrainTimeout;
-use entity_swap::{EntitySwapFaultKey, EntitySwapReplacementPause};
 pub(crate) use entity_drain::ObservedEntityDrain;
+use entity_swap::{EntitySwapFaultKey, EntitySwapReplacementPause};
 use execution::NodeExecution;
 use handoff_gate_link::HandoffGateLink;
 use interest_visibility::InterestVisibilityRefusal;
@@ -245,8 +245,6 @@ struct FaultInjectionState {
     stale_owner_buffer_drain_reports: DashMap<(DomainName, ClusterNodeName), (), RandomState>,
     /// One-shot, domain-scoped timeouts consumed after the durable domain pause engages.
     forced_domain_drain_timeouts: DashMap<DomainName, (), RandomState>,
-    /// One-shot entity-swap failures consumed by the selected runtime node and domain.
-    failed_entity_schedule_swaps: DashMap<EntityScheduleSwapFailureKey, (), RandomState>,
     /// Entity-swap failures armed for one node and domain, met while a swap replaces the named
     /// processor, until the scenario clears them.
     entity_swap_replacement_failures: DashMap<EntitySwapFaultKey, NodeRef, RandomState>,
@@ -476,12 +474,6 @@ struct EntityGateResponsePauseKey {
     domain: DomainName,
 }
 
-#[derive(Debug, Clone, Hash, PartialEq, Eq)]
-struct EntityScheduleSwapFailureKey {
-    node: ClusterNodeName,
-    domain: DomainName,
-}
-
 /// The direction a record acknowledgement travels: from the node that resolved it back to the
 /// node that registered it.
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
@@ -571,7 +563,6 @@ impl Default for FaultInjection {
                 forced_entity_drain_timeouts: DashMap::default(),
                 stale_owner_buffer_drain_reports: DashMap::default(),
                 forced_domain_drain_timeouts: DashMap::default(),
-                failed_entity_schedule_swaps: DashMap::default(),
                 entity_swap_replacement_failures: DashMap::default(),
                 entity_swap_replacement_pauses: DashMap::default(),
                 transaction_binding_drops: DashMap::default(),
@@ -1236,13 +1227,6 @@ impl FaultInjection {
     /// Forces the next domain drain to time out after the durable pause has engaged.
     pub fn force_next_domain_drain_timeout(&self, domain: DomainName) {
         self.inner.forced_domain_drain_timeouts.insert(domain, ());
-    }
-
-    /// Fails the next incremental entity swap for `domain` on `node`.
-    pub fn fail_next_entity_schedule_swap_on(&self, node: ClusterNodeName, domain: DomainName) {
-        self.inner
-            .failed_entity_schedule_swaps
-            .insert(EntityScheduleSwapFailureKey { node, domain }, ());
     }
 
     pub fn drop_transaction_bindings_on(&self, node_id: ClusterNodeName) {
@@ -2240,20 +2224,6 @@ impl FaultInjection {
         self.inner
             .forced_domain_drain_timeouts
             .remove(domain)
-            .is_some()
-    }
-
-    pub(crate) fn take_failed_entity_schedule_swap(
-        &self,
-        node: &ClusterNodeName,
-        domain: &DomainName,
-    ) -> bool {
-        self.inner
-            .failed_entity_schedule_swaps
-            .remove(&EntityScheduleSwapFailureKey {
-                node: node.clone(),
-                domain: domain.clone(),
-            })
             .is_some()
     }
 

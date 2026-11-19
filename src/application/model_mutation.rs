@@ -1629,11 +1629,7 @@ impl SessionServiceImpl {
                         Ok(transaction) => {
                             self.pause_transaction_commit_if_armed(&transaction).await;
                             let activation_error =
-                                Box::pin(self.apply_current_cluster_state_recording_recovery(
-                                    transaction_step.actual,
-                                    &transaction,
-                                ))
-                                .await;
+                                Box::pin(self.apply_current_cluster_state()).await.err();
                             recorded_transaction = Some(transaction);
                             if let Some(handoff) = ownership_handoff.take() {
                                 if let Some(error) = &activation_error {
