@@ -1633,6 +1633,12 @@ registry; it cannot leave a request waiting on an ended exchange. The reader rou
 after the mismatch. Dropping its future, including task abortion, closes the remaining waiters and
 ends its exact event and attachment generation.
 
+Ending the registry releases its remaining waiters in ascending request-identity order before
+dropping the reader-ending notification. Registration and ordinary reply delivery retain their
+hash-map operations; only the ending path collects and sorts the remaining waiters. The order
+does not depend on the map's random hash seed. Completed and cancelled requests are already absent,
+and a repeated close retains the first typed ending cause and wakes nobody again.
+
 The exchange retains its reader handle until joining finishes, then clears it. A later close
 cannot poll that completed join again. Cancelling interruption before the join completes keeps
 the handle available for a later close to finish its cleanup.
@@ -1646,6 +1652,8 @@ and pending registry with registration and cancellation racing the mismatched re
 interleavings with a domain listing under the command's identity. Each requires every remaining
 waiter to be interrupted, its first typed cause to survive, and the later leadership frame to
 remain unread. They make no claim about real network scheduling.
+Both checks construct the production pending registry directly, including its ordinary random
+hash seed, and run through the nondeterminism gate.
 
 A restore stream captures its channel and session generation together. A foreign restore outcome
 ends that generation only if it still owns the current session, so an intervening replacement is
