@@ -14,6 +14,104 @@
 # changing the owner's ordering means revisiting its qualification.
 
 [[invariant]]
+claim = "Acquiring the forward link publishes the item that the sender prepared before exchanging the tail."
+id = "relay-channel.log.link-publication"
+package = "nervix-relay-channel"
+test = "log::loom_models::loom_forward_link_publishes_the_prepared_entry"
+
+[[qualification]]
+failure = "the link did not publish the ready item"
+id = "relay-channel.log.relaxed-link-read"
+invariant = "relay-channel.log.link-publication"
+original = "let next = from.next.load(Ordering::Acquire);"
+path = "crates/relay-channel/src/log.rs"
+weakened = "let next = from.next.load(Ordering::Relaxed);"
+
+[[invariant]]
+claim = "The reader that returns the final share acquires every earlier reader's use before taking the original and reclaiming the predecessor."
+id = "relay-channel.log.reader-retirement"
+package = "nervix-relay-channel"
+test = "log::loom_models::loom_last_reader_acquires_every_earlier_read"
+
+[[qualification]]
+failure = "last reader omitted an earlier read"
+id = "relay-channel.log.relaxed-reader-count"
+invariant = "relay-channel.log.reader-retirement"
+original = "slot.remaining.fetch_sub(1, Ordering::AcqRel)"
+path = "crates/relay-channel/src/log.rs"
+weakened = "slot.remaining.fetch_sub(1, Ordering::Relaxed)"
+
+[[invariant]]
+claim = "A reused quota slot publishes the retirement of its former key through each field, so an observer returns one whole quota decision."
+id = "relay-channel.budget.reuse"
+package = "nervix-relay-channel"
+test = "budget::loom_models::loom_reused_budget_slot_never_exposes_mixed_fields"
+
+[[qualification]]
+failure = "a recycled slot exposed state under its retired key"
+id = "relay-channel.budget.unchecked-key"
+invariant = "relay-channel.budget.reuse"
+original = "if self.current.load(Ordering::Acquire) == raw {"
+path = "crates/relay-channel/src/budget.rs"
+weakened = "if raw == key.bits() {"
+
+[[invariant]]
+claim = "A sealed generation with zero active publications acquires their forward links before reporting that it drained."
+id = "relay-channel.generation.finish-publication"
+package = "nervix-relay-channel"
+test = "generation::loom_models::loom_sealed_generation_never_hides_an_admitted_item"
+
+[[qualification]]
+failure = "the sealed generation hid an admitted item"
+id = "relay-channel.generation.relaxed-publication-end"
+invariant = "relay-channel.generation.finish-publication"
+original = "self.activity.fetch_sub(1, Ordering::AcqRel)"
+path = "crates/relay-channel/src/generation.rs"
+weakened = "self.activity.fetch_sub(1, Ordering::Relaxed)"
+
+[[invariant]]
+claim = "A reader arming its wait and a publisher returning its active permit meet through the activity word. The reader observes the link, or the publisher observes it waiting."
+id = "relay-channel.generation.reader-wake"
+package = "nervix-relay-channel"
+test = "generation::loom_models::loom_a_reader_waiting_for_a_link_observes_it_or_is_woken"
+
+[[qualification]]
+failure = "the forward link and the waiting-reader notification were both missed"
+id = "relay-channel.generation.relaxed-wait-arm"
+invariant = "relay-channel.generation.reader-wake"
+original = "self.activity.fetch_add(WAITER, Ordering::AcqRel)"
+path = "crates/relay-channel/src/generation.rs"
+weakened = "self.activity.fetch_add(WAITER, Ordering::Relaxed)"
+
+[[invariant]]
+claim = "The next reservation granter acquires the prior granter's writes to its exclusively owned queue before inspecting it."
+id = "relay-channel.waiters.granter-handover"
+package = "nervix-relay-channel"
+test = "waiters::loom_models::loom_the_next_granter_acquires_the_previous_granters_work"
+
+[[qualification]]
+failure = "the new granter missed the previous owner's writes"
+id = "relay-channel.waiters.relaxed-granter-end"
+invariant = "relay-channel.waiters.granter-handover"
+original = "compare_exchange(RUNNING, IDLE, Ordering::AcqRel, Ordering::Acquire)"
+path = "crates/relay-channel/src/waiters.rs"
+weakened = "compare_exchange(RUNNING, IDLE, Ordering::Relaxed, Ordering::Acquire)"
+
+[[invariant]]
+claim = "The capture owner acquires the releases of active handles before inspecting the now-exclusive channel."
+id = "relay-channel.capture.handle-release"
+package = "nervix-relay-channel"
+test = "channel::loom_models::loom_standstill_acquires_the_last_handle"
+
+[[qualification]]
+failure = "standstill missed the last handle's work"
+id = "relay-channel.capture.relaxed-standstill"
+invariant = "relay-channel.capture.handle-release"
+original = "access.fetch_or(0, Ordering::AcqRel)"
+path = "crates/relay-channel/src/channel/snapshot.rs"
+weakened = "access.fetch_or(0, Ordering::Relaxed)"
+
+[[invariant]]
 claim = "Under the unit's exclusive transaction scope, refund restores the exact prior GCRA horizon while an observer may read; this is one-location arithmetic, with no cross-location publication claim."
 id = "rate-limit.direct.exact-refund"
 package = "nervix-rate-limit"

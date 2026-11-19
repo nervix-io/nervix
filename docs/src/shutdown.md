@@ -760,7 +760,11 @@ owner publishes, so a promoted replica continues each branch from at least the g
 received. Recovery can skip updates made after that generation. Inference releases its input
 acknowledgement shares after dispatching output; another attached consumer can still hold the
 ingestor's position. A redelivered input invokes the model again, even when its update is already
-in the restored snapshot. A branch the recovered lifecycle
+in the restored snapshot. The model has also run, and its state advanced, for a row whose output a
+survivor refused because it had not yet started the consumer the failover gave it; the ingestor
+redelivers that row, and every refused attempt counts as an update (see [Planned Ownership
+Handoffs And Failover](control-plane.md#planned-ownership-handoffs-and-failover)). Inference is
+therefore at least once across failover. A branch the recovered lifecycle
 names, but whose tensors no surviving node holds, starts from its declared `INITIAL` tensors, and
 `SHOW CLUSTER STATUS` reports `state_recovery=reset` with `inferencer:missing_checkpoint`. When no
 surviving node holds the branch lifecycle either, as after losing an owner that had no replica,

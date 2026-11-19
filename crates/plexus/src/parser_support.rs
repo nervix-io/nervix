@@ -593,9 +593,8 @@ pub fn output_branch<'src>()
 -> impl Parser<'src, &'src [Token], OutputBranch, extra::Err<ParseError<'src>>> + Clone {
     let branched = kw_phrase2(Identifier::Branched, Identifier::By)
         .ignore_then(branch_ref())
-        .then(set_only_route_construction().or_not())
+        .then(set_only_route_construction())
         .try_map(|(branch, construction), span| {
-            let construction = construction.unwrap_or_default();
             if construction.inherit.is_some()
                 || construction.where_clause.is_some()
                 || !construction.invocations.is_empty()

@@ -892,6 +892,16 @@ promotes a live replica or chooses a fresh owner. Failover does not wait for the
 If a former owner disappears while a planned hold is active, that hold aborts without publishing its
 candidate; ordinary failover then relocates from the last committed schedule.
 
+Every survivor applies the failover revision on its own, and a partitioned branch promotes each
+unit's replica separately, so a relay unit and an attached consumer it routes to can continue on
+different survivors. A survivor can then route a batch to a survivor that has not yet started the
+consumer the revision gives it. A routed batch that finds no attached consumer of its relay on the
+node it reaches is refused: its record acknowledgements fail, and an ingestor with acknowledgements
+redelivers the records. Failover is therefore at least once, not exactly once. A stateful processor
+that applied a record before its output was refused applies the redelivered record again, as the
+[WASM replay contract](wasm-state.md#replay-duplicates-and-exactly-once) and a stateful inferencer's
+[forced recovery](shutdown.md#when-the-former-owner-is-gone) describe.
+
 Failover acts on a voter that gossip no longer reports live. A leader whose reconciliation has just
 started, as the first node to lead after a whole cluster restarts does, can reach a quorum before
 gossip has observed the other voters live. Each process's reconciliation task retains its live

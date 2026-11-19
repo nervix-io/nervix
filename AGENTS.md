@@ -631,8 +631,9 @@ keeps the chapter current in the same change. Where areas meet, each chapter kee
   encode unbranched execution with an empty string, empty map, zero-field schema, synthetic root
   branch or reserved user identifier.
 - Ingestors construct outgoing branches route by route.
-- Reingestors are branch-boundary nodes: each route may preserve the incoming branch, construct a
-  different branch or become unbranched.
+- Reingestors are branch-boundary nodes. Each route becomes unbranched or constructs a key for a
+  named parametrization distinct from every input relay's. Equal key schemas or values still
+  require the route to evaluate the destination's key assignments.
 - Junctions, deduplicators, reorderers, window processors, inferencers, WASM processors, correlators
   and generators preserve branch identity. Their branch declaration is node-wide, and every input
   and output uses that exact named branch.

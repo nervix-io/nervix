@@ -275,7 +275,6 @@ impl InheritDraft {
 pub(super) enum RouteBranchDraft {
     #[default]
     Unselected,
-    Preserve,
     Unbranched,
     Branched {
         branch: Option<SelectedReference<BranchName>>,
@@ -284,10 +283,6 @@ pub(super) enum RouteBranchDraft {
 }
 
 impl RouteBranchDraft {
-    pub(super) fn choose_preserve(&mut self) {
-        *self = Self::Preserve;
-    }
-
     pub(super) fn choose_unbranched(&mut self) {
         *self = Self::Unbranched;
     }
@@ -354,7 +349,7 @@ impl RouteBranchDraft {
 
     fn build(&self) -> error_stack::Result<OutputBranch, IngestRouteDraftError> {
         match self {
-            Self::Unselected | Self::Preserve => Err(Report::new(IngestRouteDraftError::Branching)),
+            Self::Unselected => Err(Report::new(IngestRouteDraftError::Branching)),
             Self::Unbranched => Ok(OutputBranch::Unbranched),
             Self::Branched {
                 branch,
@@ -366,7 +361,10 @@ impl RouteBranchDraft {
                         .ok_or_else(|| Report::new(IngestRouteDraftError::BranchChanged))?,
                     None => return Err(Report::new(IngestRouteDraftError::Branch)),
                 };
-                let mut built = Vec::new();
+                if assignments.is_empty() {
+                    return Err(Report::new(IngestRouteDraftError::BranchKeyAssignments));
+                }
+                let mut built = Vec::with_capacity(assignments.len());
                 for assignment in assignments {
                     built.push(assignment.build()?);
                 }
@@ -560,17 +558,6 @@ impl IngestRouteDraft {
         self.build_with_branch(None)
     }
 
-    pub(super) fn build_reingestor(
-        &self,
-    ) -> error_stack::Result<ProcessorOutput, IngestRouteDraftError> {
-        let branch = if let RouteBranchDraft::Preserve = self.branch {
-            None
-        } else {
-            Some(self.branch.build()?)
-        };
-        self.build_with_branch(branch)
-    }
-
     /// A set-only route of a window, correlator, generator, inferencer or WASM processor, which
     /// node-wide branching keeps on its source's branch. Such a route constructs every output
     /// field with `SET` and may filter with `WHERE`, so it reads neither an inheritance nor
@@ -685,6 +672,8 @@ pub(super) enum IngestRouteDraftError {
     Branch,
     #[error("The selected branch belongs to a changed context; select it again")]
     BranchChanged,
+    #[error("Add at least one branch key assignment")]
+    BranchKeyAssignments,
     #[error("Choose FLUSH IMMEDIATE or FLUSH EACH")]
     Flush,
     #[error("Enter the FLUSH EACH interval")]

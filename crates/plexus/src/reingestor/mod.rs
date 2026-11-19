@@ -332,13 +332,14 @@ mod tests {
     }
 
     #[test]
-    fn suggests_set_after_branched_by() {
-        let input = "CREATE REINGESTOR r FROM input TO output BRANCHED BY tenant_branch ";
-        let suggestions = suggest_create_reingestor(input, input.len());
-        assert!(suggestions.contains(&"SET".to_string()));
-        assert!(suggestions.contains(&"FLUSH EACH".to_string()));
-        assert!(!suggestions.contains(&"VALUES".to_string()));
-        assert!(!suggestions.contains(&"TTL".to_string()));
+    fn named_routes_complete_with_branch_key_assignments() {
+        for command in [
+            "CREATE REINGESTOR tested FROM incoming TO outgoing BRANCHED BY by_tenant ",
+            "ALTER REINGESTOR tested ADD ROUTE TO outgoing BRANCHED BY by_tenant ",
+            "ALTER REINGESTOR tested REPLACE ROUTE TO outgoing BRANCHED BY by_tenant ",
+        ] {
+            crate::conformance_support::assert_offers_exactly(command, &["SET"]);
+        }
     }
 
     #[test]

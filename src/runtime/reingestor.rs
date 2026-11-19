@@ -419,16 +419,6 @@ impl Runtime {
                 "the program selects rows of this batch, whose metadata has one entry for every \
                  row",
             );
-            let input_batch = batch.batch.take(&success_input_rows).map_err(|error| {
-                PlannedGeneralFailure::new(
-                    error.change_context(PlannedGeneralError::SelectBranchInputs),
-                    batch.acks.clone(),
-                )
-            })?;
-            let input_keys = success_input_rows
-                .iter()
-                .map(|row| batch.keys[*row].clone())
-                .collect::<Vec<_>>();
             let keys = match &output.branch {
                 BoundRouteBranch::Inherited(_) => {
                     return Err(PlannedGeneralFailure::new(
@@ -437,8 +427,17 @@ impl Runtime {
                     ));
                 }
                 BoundRouteBranch::Unbranched => vec![None; output_batch.batch().num_rows()],
-                BoundRouteBranch::Preserved => input_keys,
                 BoundRouteBranch::Constructed(branch_program) => {
+                    let input_batch = batch.batch.take(&success_input_rows).map_err(|error| {
+                        PlannedGeneralFailure::new(
+                            error.change_context(PlannedGeneralError::SelectBranchInputs),
+                            batch.acks.clone(),
+                        )
+                    })?;
+                    let input_keys = success_input_rows
+                        .iter()
+                        .map(|row| batch.keys[*row].clone())
+                        .collect::<Vec<_>>();
                     let outcomes = batch
                         .keep_alive_while_pending(evaluate_output_branch_program(
                             ProgramRun {

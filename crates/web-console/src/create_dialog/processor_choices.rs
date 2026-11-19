@@ -309,9 +309,7 @@ impl CreateSignals {
                 let Some(route) = draft.active_route() else {
                     return Err("Add a route before choosing an output relay");
                 };
-                if draft.family().declares_node_branch()
-                    || matches!(route.branch, RouteBranchDraft::Preserve)
-                {
+                if draft.family().declares_node_branch() {
                     let source = draft.source_relay_or(
                         "Choose an input relay before its output relay",
                         "Choose the materialized relay before its output relay",
@@ -341,9 +339,6 @@ impl CreateSignals {
                             "Select a domain before choosing an output relay",
                             20,
                         )
-                    }
-                    RouteBranchDraft::Preserve => {
-                        Err("Choose an input relay before its output relay")
                     }
                 }
             }

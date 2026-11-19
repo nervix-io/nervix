@@ -1761,7 +1761,7 @@ impl CreateSignals {
                     value: ChoiceValue::Domain(domain),
                 }];
                 let target = match &route.branch {
-                    RouteBranchDraft::Unselected | RouteBranchDraft::Preserve => {
+                    RouteBranchDraft::Unselected => {
                         return Err("Choose the route branch before its relay");
                     }
                     RouteBranchDraft::Unbranched => ChoiceTarget::IngestUnbranchedRelay,
