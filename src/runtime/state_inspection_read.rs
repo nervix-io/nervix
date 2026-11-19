@@ -151,6 +151,7 @@ impl Runtime {
                         .get(&captured_relay)
                         .ok_or_else(|| Report::new(StatePageReadError::NotReady))?;
                     let mut records = Vec::new();
+                    #[cfg_attr(nervix_lint, expect(nervix::branch_inversion, reason = "materialized or emitter state groups its data by branch; move it to the branch in https://app.clickup.com/t/86bd1z3bd"))]
                     let mut sources = Vec::new();
                     let mut source_charge = captured_executor
                         .try_reserve(MemoryClass::Bulk, 1)

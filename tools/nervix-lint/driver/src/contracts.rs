@@ -442,12 +442,24 @@ impl Flow {
                 // A normal expect records at least one occurrence, not its exact cardinality.
                 // Restrict it to an operation expression or its binding so unrelated new
                 // operations cannot inherit a function/module-wide suppression.
-                let narrow = matches!(
-                    cx.tcx.hir_node(node),
-                    rustc_hir::Node::Expr(_)
-                        | rustc_hir::Node::LetStmt(_)
-                        | rustc_hir::Node::Stmt(_)
-                );
+                let branch_declaration = matches!(cx.tcx.hir_node(node), rustc_hir::Node::Field(_))
+                    && arguments
+                        .iter()
+                        .filter_map(|item| item.meta_item())
+                        .all(|item| {
+                            item.has_name(Symbol::intern("reason"))
+                                || item.path.segments.len() == 2
+                                    && item.path.segments[0].ident.name.as_str() == "nervix"
+                                    && item.path.segments[1].ident.name.as_str()
+                                        == "branch_inversion"
+                        });
+                let narrow = branch_declaration
+                    || matches!(
+                        cx.tcx.hir_node(node),
+                        rustc_hir::Node::Expr(_)
+                            | rustc_hir::Node::LetStmt(_)
+                            | rustc_hir::Node::Stmt(_)
+                    );
                 if level.as_str() == "allow" || warnings || !reason || !narrow {
                     cx.tcx.emit_node_span_lint(
                         INVALID_CONTRACT,
@@ -455,7 +467,7 @@ impl Flow {
                         attribute.span(),
                         Message {
                             message: "Nervix exceptions require a reason-bearing expect on one \
-                                      operation or binding; blanket suppression is forbidden"
+                                      operation or declaration; blanket suppression is forbidden"
                                 .into(),
                         },
                     );

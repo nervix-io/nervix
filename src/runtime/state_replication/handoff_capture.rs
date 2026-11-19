@@ -123,9 +123,23 @@ impl Runtime {
                 .await?
         };
         let mut checkpoints = Vec::new();
+        #[cfg_attr(
+            nervix_lint,
+            expect(
+                nervix::branch_inversion,
+                reason = "this branch collection supports checkpoints, partition transfers or state recovery; use the owning partition in https://app.clickup.com/t/86bd1z3ng"
+            )
+        )]
         let mut described = Vec::new();
         // Branch states leave their maps before they are encoded, so an encode never holds a map
         // shard that a branch appearing or leaving elsewhere has to write.
+        #[cfg_attr(
+            nervix_lint,
+            expect(
+                nervix::branch_inversion,
+                reason = "this branch collection supports checkpoints, partition transfers or state recovery; use the owning partition in https://app.clickup.com/t/86bd1z3ng"
+            )
+        )]
         let mut deduplicators = Vec::new();
         for state in self.inner.replicated_deduplicator_states.iter() {
             if matches_entity(state.key()) {
@@ -138,6 +152,13 @@ impl Runtime {
                 .change_context(OwnershipHandoffError::Persistence)?;
             checkpoints.push((placement, snapshot));
         }
+        #[cfg_attr(
+            nervix_lint,
+            expect(
+                nervix::branch_inversion,
+                reason = "this branch collection supports checkpoints, partition transfers or state recovery; use the owning partition in https://app.clickup.com/t/86bd1z3ng"
+            )
+        )]
         let kafka_offsets = self
             .inner
             .replicated_kafka_offset_states
@@ -160,6 +181,13 @@ impl Runtime {
                     .change_context(OwnershipHandoffError::Persistence)?,
             ));
         }
+        #[cfg_attr(
+            nervix_lint,
+            expect(
+                nervix::branch_inversion,
+                reason = "this branch collection supports checkpoints, partition transfers or state recovery; use the owning partition in https://app.clickup.com/t/86bd1z3ng"
+            )
+        )]
         let materialized = self
             .inner
             .replicated_materialized_stream_states
@@ -191,6 +219,13 @@ impl Runtime {
                     .map_err(|error| OwnershipHandoffError::checkpoint(error.to_string()))?,
             ));
         }
+        #[cfg_attr(
+            nervix_lint,
+            expect(
+                nervix::branch_inversion,
+                reason = "this branch collection supports checkpoints, partition transfers or state recovery; use the owning partition in https://app.clickup.com/t/86bd1z3ng"
+            )
+        )]
         let mut windows = Vec::new();
         for state in self.inner.replicated_window_processor_states.iter() {
             if matches_entity(state.key()) {
@@ -205,6 +240,13 @@ impl Runtime {
                 .change_context(OwnershipHandoffError::Persistence)?;
             checkpoints.push((placement, snapshot));
         }
+        #[cfg_attr(
+            nervix_lint,
+            expect(
+                nervix::branch_inversion,
+                reason = "this branch collection supports checkpoints, partition transfers or state recovery; use the owning partition in https://app.clickup.com/t/86bd1z3ng"
+            )
+        )]
         let mut wasm_processors = Vec::new();
         for state in self.inner.replicated_wasm_processor_states.iter() {
             if matches_entity(state.key()) {
@@ -278,6 +320,13 @@ impl Runtime {
             self.expected_ownership_handoff_placements(domain, &scheduled, unit, &checkpoints)?;
         checkpoints.retain(|(placement, _)| expected.contains(placement));
         described.retain(|(placement, _)| expected.contains(placement));
+        #[cfg_attr(
+            nervix_lint,
+            expect(
+                nervix::branch_inversion,
+                reason = "this branch collection supports checkpoints, partition transfers or state recovery; use the owning partition in https://app.clickup.com/t/86bd1z3ng"
+            )
+        )]
         let captured = checkpoints
             .iter()
             .map(|(placement, _)| placement.clone())

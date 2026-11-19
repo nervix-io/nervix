@@ -26,6 +26,13 @@ use crate::{InterconnectRequest, InterconnectStreamRequest, PoolClass, RequestSu
 #[derive(Debug, Clone, PartialEq, Eq, Archive, Serialize, Deserialize)]
 pub struct MaterializedPartitionFilter {
     pub catalog: nervix_models::StateInspectionKeyCatalog,
+    #[cfg_attr(
+        nervix_lint,
+        expect(
+            nervix::branch_inversion,
+            reason = "processor or generator bookkeeping independently tracks branches; use branch-owned parts or the partition table in https://app.clickup.com/t/86bd1z1bj"
+        )
+    )]
     pub excluded: BTreeSet<BranchKeyFingerprint>,
 }
 
@@ -121,6 +128,13 @@ pub struct ReadProcessorStatePage {
     /// During a partition transition, request the complete selected branch catalog and omit
     /// copies whose authoritative publication the coordinator selected in another unit.
     /// Absent for ordinary reads, which require no catalog or additional selection work.
+    #[cfg_attr(
+        nervix_lint,
+        expect(
+            nervix::branch_inversion,
+            reason = "processor or generator bookkeeping independently tracks branches; use branch-owned parts or the partition table in https://app.clickup.com/t/86bd1z1bj"
+        )
+    )]
     pub partition_exclusions: Option<BTreeSet<BranchKeyFingerprint>>,
     pub after: Option<(Option<BranchKeyFingerprint>, u64)>,
     pub max_rows: u64,

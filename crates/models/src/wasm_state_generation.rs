@@ -347,6 +347,13 @@ pub enum WasmStateRecoveryAdmission {
 )]
 pub struct WasmStateRecoveries {
     #[serde(with = "scope_recoveries")]
+    #[cfg_attr(
+        nervix_lint,
+        expect(
+            nervix::branch_inversion,
+            reason = "processor or generator bookkeeping independently tracks branches; use branch-owned parts or the partition table in https://app.clickup.com/t/86bd1z1bj"
+        )
+    )]
     scopes: BTreeMap<WasmStateResetScope, WasmStateRecovery>,
 }
 
@@ -386,6 +393,13 @@ mod scope_recoveries {
         D: Deserializer<'de>,
     {
         let entries = Vec::<ScopeRecovery>::deserialize(deserializer)?;
+        #[cfg_attr(
+            nervix_lint,
+            expect(
+                nervix::branch_inversion,
+                reason = "processor or generator bookkeeping independently tracks branches; use branch-owned parts or the partition table in https://app.clickup.com/t/86bd1z1bj"
+            )
+        )]
         let mut scopes = BTreeMap::new();
         for entry in entries {
             if scopes.insert(entry.scope, entry.recovery).is_some() {
@@ -568,6 +582,13 @@ pub struct WasmStateGenerations {
     /// The concrete branches that started a lifetime of their own after `every_branch` was
     /// published. Each generation here is later than `every_branch`.
     #[serde(with = "branch_generations")]
+    #[cfg_attr(
+        nervix_lint,
+        expect(
+            nervix::branch_inversion,
+            reason = "processor or generator bookkeeping independently tracks branches; use branch-owned parts or the partition table in https://app.clickup.com/t/86bd1z1bj"
+        )
+    )]
     branches: BTreeMap<BranchKeyFingerprint, WasmStateGeneration>,
 }
 
@@ -610,6 +631,13 @@ mod branch_generations {
         D: Deserializer<'de>,
     {
         let entries = Vec::<BranchGeneration>::deserialize(deserializer)?;
+        #[cfg_attr(
+            nervix_lint,
+            expect(
+                nervix::branch_inversion,
+                reason = "processor or generator bookkeeping independently tracks branches; use branch-owned parts or the partition table in https://app.clickup.com/t/86bd1z1bj"
+            )
+        )]
         let mut branches = BTreeMap::new();
         for entry in entries {
             if branches.insert(entry.branch, entry.generation).is_some() {

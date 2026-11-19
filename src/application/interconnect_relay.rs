@@ -161,6 +161,13 @@ impl InterconnectRelayPayloadLane {
         runtime: Runtime,
         shutdown: CancellationToken,
     ) {
+        #[cfg_attr(
+            nervix_lint,
+            expect(
+                nervix::branch_inversion,
+                reason = "relay and follower bookkeeping keeps its own branch entries; read the parametrizer partition in https://app.clickup.com/t/86bd1z0ty"
+            )
+        )]
         let mut queued =
             HashMap::<InterconnectRelayChannel, VecDeque<InterconnectRelayPayload>>::default();
         let mut routing_by_domain = HashMap::<DomainName, SharedDomainRouting>::default();

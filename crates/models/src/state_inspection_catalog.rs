@@ -33,8 +33,26 @@ use crate::{BranchKeyFingerprint, InheritedPartitionOrigin};
 pub enum StateInspectionKeyCatalog {
     #[default]
     Unrequested,
-    Direct(BTreeSet<BranchKeyFingerprint>),
-    Inherited(Box<BTreeMap<BranchKeyFingerprint, Option<InheritedPartitionOrigin>>>),
+    Direct(
+        #[cfg_attr(
+            nervix_lint,
+            expect(
+                nervix::branch_inversion,
+                reason = "processor or generator bookkeeping independently tracks branches; use branch-owned parts or the partition table in https://app.clickup.com/t/86bd1z1bj"
+            )
+        )]
+        BTreeSet<BranchKeyFingerprint>,
+    ),
+    Inherited(
+        #[cfg_attr(
+            nervix_lint,
+            expect(
+                nervix::branch_inversion,
+                reason = "processor or generator bookkeeping independently tracks branches; use branch-owned parts or the partition table in https://app.clickup.com/t/86bd1z1bj"
+            )
+        )]
+        Box<BTreeMap<BranchKeyFingerprint, Option<InheritedPartitionOrigin>>>,
+    ),
 }
 
 impl StateInspectionKeyCatalog {
@@ -68,6 +86,13 @@ impl StateInspectionKeyCatalog {
                 keys.insert(key);
             }
             Self::Direct(keys) => {
+                #[cfg_attr(
+                    nervix_lint,
+                    expect(
+                        nervix::branch_inversion,
+                        reason = "processor or generator bookkeeping independently tracks branches; use branch-owned parts or the partition table in https://app.clickup.com/t/86bd1z1bj"
+                    )
+                )]
                 let mut positions = std::mem::take(keys)
                     .into_iter()
                     .map(|key| (key, None))

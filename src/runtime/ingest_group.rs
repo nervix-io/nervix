@@ -804,6 +804,13 @@ pub(super) struct IngestRouteCollector {
     metrics: MessageMetricsHandle,
     routing: Option<DomainRoutingCache>,
     pub(super) pending: PendingIngestGroup,
+    #[cfg_attr(
+        nervix_lint,
+        expect(
+            nervix::branch_inversion,
+            reason = "the entry point groups work by branch outside the parametrizer partition; move the work to its branch in https://app.clickup.com/t/86bd1z13v"
+        )
+    )]
     pub(super) routed: IndexMap<RoutedGroupKey, Vec<RelayMessage>, RandomState>,
     pub(super) flush_at: Option<Instant>,
     idle_flush: Duration,
@@ -999,6 +1006,13 @@ impl IngestRouteCollector {
     /// Groups by relay and branch key, preserving arrival order within each group.
     /// `RelayRecordBatch::from_messages` requires a uniform key per batch.
     pub(super) fn drain_groups(&mut self) -> Vec<RoutedGroup> {
+        #[cfg_attr(
+            nervix_lint,
+            expect(
+                nervix::branch_inversion,
+                reason = "the entry point groups work by branch outside the parametrizer partition; move the work to its branch in https://app.clickup.com/t/86bd1z13v"
+            )
+        )]
         let routed = std::mem::take(&mut self.routed);
         let mut groups = Vec::with_capacity(routed.len());
         for (key, messages) in routed {
@@ -1161,6 +1175,13 @@ impl BranchedEntrypointBatch {
             }));
         }
         let mut selections = Vec::<BranchedBranchSelection>::new();
+        #[cfg_attr(
+            nervix_lint,
+            expect(
+                nervix::branch_inversion,
+                reason = "the entry point groups work by branch outside the parametrizer partition; move the work to its branch in https://app.clickup.com/t/86bd1z13v"
+            )
+        )]
         let mut positions = HashMap::<Option<BranchKey>, usize>::default();
         for (index, key) in self.keys.iter().enumerate() {
             let key = key.clone();

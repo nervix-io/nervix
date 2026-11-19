@@ -315,6 +315,7 @@ class InventoryTests(unittest.TestCase):
             "models-archived-models",
             "scheduled-units",
             "execution-revision-units",
+            "branch-partition-hops",
             "models-archived-counts",
             "consensus-archived-counts",
             "registry-archived-models",

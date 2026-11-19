@@ -94,6 +94,13 @@ struct MessageErrorRouteTask {
     route: MessageErrorRouteKey,
     target: MessageErrorRouteTarget,
     flush_policy: RuntimeFlushPolicy,
+    #[cfg_attr(
+        nervix_lint,
+        expect(
+            nervix::branch_inversion,
+            reason = "error delivery accumulates work by branch; move that work to the branch in https://app.clickup.com/t/86bd1z3eg"
+        )
+    )]
     pending: HashMap<Option<BranchKey>, PendingMessageErrorDelivery>,
 }
 
@@ -331,6 +338,13 @@ impl MessageErrorRouteTask {
         let snapshot = domain_clock
             .snapshot()
             .map_err(|error| error.change_context(BranchBufferTimingError::LogicalDeadline))?;
+        #[cfg_attr(
+            nervix_lint,
+            expect(
+                nervix::branch_inversion,
+                reason = "error delivery accumulates work by branch; move that work to the branch in https://app.clickup.com/t/86bd1z3eg"
+            )
+        )]
         let mut keys = Vec::new();
         for (key, pending) in &self.pending {
             if pending.flush_timer.is_due(domain_clock, &snapshot)? {
@@ -345,6 +359,13 @@ impl MessageErrorRouteTask {
     }
 
     async fn flush_all(&mut self) {
+        #[cfg_attr(
+            nervix_lint,
+            expect(
+                nervix::branch_inversion,
+                reason = "error delivery accumulates work by branch; move that work to the branch in https://app.clickup.com/t/86bd1z3eg"
+            )
+        )]
         let keys = self.pending.keys().cloned().collect::<Vec<_>>();
         for key in keys {
             nervix_primitives::task::consume_budget().await;

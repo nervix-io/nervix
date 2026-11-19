@@ -30,7 +30,7 @@ use std::{
 use anyhow::{Context as _, bail};
 use meticulous::ResultExt as _;
 use nervix_lint_report::{
-    CompilerReport, Expansion, Finding, SiteId, SourceSpan,
+    BranchInversion, CompilerReport, Expansion, Finding, SiteId, SourceSpan,
     audit::{AuditCandidate, AuditPattern, KeyedOperation},
     rules,
 };
@@ -45,6 +45,7 @@ use rustc_lint_defs::impl_lint_pass;
 mod api;
 mod architecture;
 mod audit;
+mod branches;
 mod contracts;
 mod errors;
 
@@ -65,12 +66,13 @@ struct AcquisitionPass {
     errors: errors::ErrorRules,
     architecture: architecture::ArchitectureRules,
     audit: audit::Audit,
+    branches: branches::BranchRules,
     authored_files: BTreeMap<String, bool>,
     root: PathBuf,
     report: Arc<Mutex<CompilerReport>>,
 }
 
-impl_lint_pass!(AcquisitionPass => [SYNC_ACQUISITION, LIFECYCLE_CALL, UNKNOWN_EFFECT, INVALID_CONTRACT, errors::BARE_ERROR_SIGNATURE, errors::DISCARDED_OUTCOME, errors::BARE_PANIC, errors::REPLACED_ERROR, errors::PARTIAL_REPORT_FIELD, architecture::MODEL_IN_DATA_PLANE, architecture::PARSER_DEPENDENCY, architecture::CLUSTER_AWAIT, architecture::NODE_IDENTITY, architecture::INSTALLED_STATE, architecture::STATE_CONTRACT, api::CLAMPED_ARITHMETIC, api::COMBINATOR_CONTROL_FLOW]);
+impl_lint_pass!(AcquisitionPass => [SYNC_ACQUISITION, LIFECYCLE_CALL, UNKNOWN_EFFECT, INVALID_CONTRACT, errors::BARE_ERROR_SIGNATURE, errors::DISCARDED_OUTCOME, errors::BARE_PANIC, errors::REPLACED_ERROR, errors::PARTIAL_REPORT_FIELD, architecture::MODEL_IN_DATA_PLANE, architecture::PARSER_DEPENDENCY, architecture::CLUSTER_AWAIT, architecture::NODE_IDENTITY, architecture::INSTALLED_STATE, architecture::STATE_CONTRACT, api::CLAMPED_ARITHMETIC, api::COMBINATOR_CONTROL_FLOW, branches::BRANCH_INVERSION]);
 
 /// Why a span has no authored source location.
 enum Exclusion {
@@ -92,6 +94,40 @@ struct ResolvedCall<'tcx> {
 }
 
 impl AcquisitionPass {
+    fn record_branch_inversion(
+        &self,
+        cx: &LateContext<'_>,
+        node: rustc_hir::HirId,
+        declaration: String,
+        span: Span,
+    ) {
+        if let Some(span) = self.source_span(cx, span) {
+            let owner = match cx.tcx.hir_node(node) {
+                rustc_hir::Node::Field(field) => cx.tcx.parent(field.def_id.to_def_id()),
+                _ => node.owner.def_id.to_def_id(),
+            };
+            let expectation_reason = cx
+                .tcx
+                .lint_level_spec_at_node(branches::BRANCH_INVERSION, node)
+                .lint_id()
+                .and_then(|id| {
+                    cx.tcx
+                        .lint_expectations(())
+                        .iter()
+                        .find_map(|(candidate, expectation)| {
+                            (*candidate == id).then_some(expectation.reason).flatten()
+                        })
+                })
+                .map(|reason| reason.to_string());
+            self.report.lock().branch_inversions.push(BranchInversion {
+                owner: definition_path(cx.tcx, owner),
+                declaration,
+                span,
+                expectation_reason,
+            });
+        }
+    }
+
     fn authored(&mut self, cx: &LateContext<'_>, span: Span) -> bool {
         let file = cx
             .tcx
@@ -375,6 +411,9 @@ impl<'tcx> LateLintPass<'tcx> for AcquisitionPass {
     fn check_item(&mut self, cx: &LateContext<'tcx>, item: &'tcx rustc_hir::Item<'tcx>) {
         if self.authored(cx, item.span) {
             self.architecture.alias(cx, item, &mut self.flow);
+            if let Some((name, span)) = self.branches.item(cx, item, &mut self.flow) {
+                self.record_branch_inversion(cx, item.hir_id(), name, span);
+            }
             if let rustc_hir::ItemKind::Use(path, _) = item.kind {
                 for resolution in [path.res.type_ns, path.res.value_ns, path.res.macro_ns] {
                     if let Some(rustc_hir::def::Res::Def(_, definition)) = resolution {
@@ -428,6 +467,14 @@ impl<'tcx> LateLintPass<'tcx> for AcquisitionPass {
         self.flow.validate(cx, field.hir_id, false);
         if self.authored(cx, field.span) {
             self.architecture.field(cx, field, &mut self.flow);
+            if self.branches.field(cx, field, &mut self.flow) {
+                self.record_branch_inversion(
+                    cx,
+                    field.hir_id,
+                    field.ident.to_string(),
+                    field.ty.span,
+                );
+            }
         }
     }
 
@@ -472,6 +519,19 @@ impl<'tcx> LateLintPass<'tcx> for AcquisitionPass {
         if self.authored(cx, local.span) {
             self.architecture.binding(local);
             self.errors.binding(cx, local, &mut self.flow);
+            if let Some(span) = self.branches.binding(cx, local, &mut self.flow) {
+                let declaration =
+                    if let rustc_hir::PatKind::Binding(_, _, ident, None) = local.pat.kind {
+                        ident.to_string()
+                    } else {
+                        cx.tcx
+                            .sess
+                            .source_map()
+                            .span_to_snippet(local.pat.span)
+                            .unwrap_or_else(|_| "compiler-generated binding".into())
+                    };
+                self.record_branch_inversion(cx, local.hir_id, declaration, span);
+            }
         }
     }
     fn check_stmt(&mut self, cx: &LateContext<'tcx>, statement: &'tcx rustc_hir::Stmt<'tcx>) {
@@ -500,6 +560,17 @@ impl<'tcx> LateLintPass<'tcx> for AcquisitionPass {
             self.architecture.expression(cx, expression, &mut self.flow);
             self.errors.expression(cx, expression, &mut self.flow);
             api::expression(cx, expression, &mut self.flow);
+            if let Some(span) = self
+                .branches
+                .numeric_identity_use(cx, expression, &mut self.flow)
+            {
+                self.record_branch_inversion(
+                    cx,
+                    expression.hir_id,
+                    "branch number used as a key".into(),
+                    span,
+                );
+            }
         }
         if let ExprKind::Closure(closure) = expression.kind {
             let authored = self.authored(cx, expression.span);
@@ -705,6 +776,7 @@ impl Callbacks for Analysis {
                 architecture::STATE_CONTRACT,
                 api::CLAMPED_ARITHMETIC,
                 api::COMBINATOR_CONTROL_FLOW,
+                branches::BRANCH_INVERSION,
             ]);
             let inputs = IntoDynSyncSend(PassInputs {
                 root: root.clone(),
@@ -717,6 +789,7 @@ impl Callbacks for Analysis {
                     errors: errors::ErrorRules::new(inputs.root.clone()),
                     architecture: architecture::ArchitectureRules::default(),
                     audit: audit::Audit::default(),
+                    branches: branches::BranchRules::default(),
                     authored_files: BTreeMap::new(),
                     root: inputs.root.clone(),
                     report: inputs.report.clone(),
@@ -846,6 +919,7 @@ fn main() -> anyhow::Result<()> {
                 "-Wnervix::state_contract",
                 "-Wnervix::clamped_arithmetic",
                 "-Wnervix::combinator_control_flow",
+                "-Wnervix::branch_inversion",
             ]
             .map(String::from),
         );
@@ -858,6 +932,7 @@ fn main() -> anyhow::Result<()> {
         crate_source: source,
         arguments: arguments.clone(),
         findings: Vec::new(),
+        branch_inversions: Vec::new(),
         audit: Vec::new(),
         excluded_generated: 0,
         excluded_external: 0,

@@ -48,6 +48,13 @@ type MaterializedRoutes = GenericHashMap<
 
 #[derive(Clone, Default)]
 struct Routing {
+    #[cfg_attr(
+        nervix_lint,
+        expect(
+            nervix::branch_inversion,
+            reason = "this branch collection supports checkpoints, partition transfers or state recovery; use the owning partition in https://app.clickup.com/t/86bd1z3ng"
+        )
+    )]
     routes: Routes,
     assignments: Assignments,
     materialized: MaterializedRelays,
@@ -57,6 +64,13 @@ struct Routing {
 /// loads only its immutable index; dependency reads never scan node-wide state registries.
 #[derive(Clone)]
 pub(in crate::runtime) struct MaterializedRelayPublication {
+    #[cfg_attr(
+        nervix_lint,
+        expect(
+            nervix::branch_inversion,
+            reason = "this branch collection supports checkpoints, partition transfers or state recovery; use the owning partition in https://app.clickup.com/t/86bd1z3ng"
+        )
+    )]
     current: Arc<ArcSwap<MaterializedRoutes>>,
 }
 
@@ -135,6 +149,7 @@ impl MaterializedRelayPublication {
     )]
     fn install(&self, route: &Arc<StateReplicationRoute>) {
         self.current.rcu(|current| {
+            #[cfg_attr(nervix_lint, expect(nervix::branch_inversion, reason = "this branch collection supports checkpoints, partition transfers or state recovery; use the owning partition in https://app.clickup.com/t/86bd1z3ng"))]
             let mut next = current.as_ref().clone();
             if !route.is_current() {
                 return next;
@@ -157,6 +172,7 @@ impl MaterializedRelayPublication {
     )]
     fn retire(&self, ended: &Arc<StateReplicationRoute>) {
         self.current.rcu(|current| {
+            #[cfg_attr(nervix_lint, expect(nervix::branch_inversion, reason = "this branch collection supports checkpoints, partition transfers or state recovery; use the owning partition in https://app.clickup.com/t/86bd1z3ng"))]
             let mut next = current.as_ref().clone();
             if let Some(route) = next.get(&ended.placement.branch_key)
                 && Arc::ptr_eq(route, ended)
@@ -177,6 +193,7 @@ impl MaterializedRelayPublication {
     )]
     fn purge_stale(&self) {
         self.current.rcu(|current| {
+            #[cfg_attr(nervix_lint, expect(nervix::branch_inversion, reason = "this branch collection supports checkpoints, partition transfers or state recovery; use the owning partition in https://app.clickup.com/t/86bd1z3ng"))]
             let mut next = current.as_ref().clone();
             next.retain(|_, route| route.is_current());
             next

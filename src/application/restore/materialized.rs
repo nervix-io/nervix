@@ -147,6 +147,13 @@ pub(super) async fn prepare_materialized_checkpoint(
         .reserve(MemoryClass::Commands, identity_bytes.max(1))
         .await
         .change_context(MaterializedRestoreError::Admission)?;
+    #[cfg_attr(
+        nervix_lint,
+        expect(
+            nervix::branch_inversion,
+            reason = "this branch collection supports checkpoints, partition transfers or state recovery; use the owning partition in https://app.clickup.com/t/86bd1z3ng"
+        )
+    )]
     let mut branches = ahash::HashSet::new();
     // The archived fence describes its source process. The restored assignment establishes its
     // own authority; source fence numbers cannot authorize or block a different cluster.
@@ -350,7 +357,21 @@ struct SelectedRows {
 /// What a group's identity scan hands back: its kept rows, and the keys kept and seen so far.
 struct ScannedIdentities {
     selected: SelectedRows,
+    #[cfg_attr(
+        nervix_lint,
+        expect(
+            nervix::branch_inversion,
+            reason = "this branch collection supports checkpoints, partition transfers or state recovery; use the owning partition in https://app.clickup.com/t/86bd1z3ng"
+        )
+    )]
     kept: ahash::HashSet<BranchKeyFingerprint>,
+    #[cfg_attr(
+        nervix_lint,
+        expect(
+            nervix::branch_inversion,
+            reason = "this branch collection supports checkpoints, partition transfers or state recovery; use the owning partition in https://app.clickup.com/t/86bd1z3ng"
+        )
+    )]
     seen: ahash::HashSet<BranchKeyFingerprint>,
 }
 
@@ -364,6 +385,13 @@ struct RestoredRowSelection<'a> {
 }
 
 struct RestoredRowOwners {
+    #[cfg_attr(
+        nervix_lint,
+        expect(
+            nervix::branch_inversion,
+            reason = "this branch collection supports checkpoints, partition transfers or state recovery; use the owning partition in https://app.clickup.com/t/86bd1z3ng"
+        )
+    )]
     holders: BTreeMap<BranchKeyFingerprint, super::partitions::RestoredKeyHolder>,
     _reservations: Vec<nervix_execution::Reservation>,
 }
@@ -482,6 +510,13 @@ pub(super) async fn prepare_regrouped_materialized_checkpoint(
 ) -> Result<Option<StagedArtifact>, Report<MaterializedRestoreError>> {
     let executor = runtime.executor();
     let owners = inherited_row_owners(runtime, archive, archived, node, &declarations).await?;
+    #[cfg_attr(
+        nervix_lint,
+        expect(
+            nervix::branch_inversion,
+            reason = "this branch collection supports checkpoints, partition transfers or state recovery; use the owning partition in https://app.clickup.com/t/86bd1z3ng"
+        )
+    )]
     let mut kept = ahash::HashSet::new();
     let mut pieces = Vec::new();
     let mut records = 0_u64;
@@ -493,6 +528,13 @@ pub(super) async fn prepare_regrouped_materialized_checkpoint(
         branch_generation = branch_generation.max(source.descriptor.branch_generation);
         // One archived unit holds each key once; a second row of one key in it is a damaged
         // archive.
+        #[cfg_attr(
+            nervix_lint,
+            expect(
+                nervix::branch_inversion,
+                reason = "this branch collection supports checkpoints, partition transfers or state recovery; use the owning partition in https://app.clickup.com/t/86bd1z3ng"
+            )
+        )]
         let mut seen = ahash::HashSet::new();
         for group in source.groups {
             nervix_primitives::task::consume_budget().await;

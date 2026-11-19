@@ -133,6 +133,13 @@ struct ReingestorOutputBufferKey {
 }
 
 struct ReingestorOutputBuffers {
+    #[cfg_attr(
+        nervix_lint,
+        expect(
+            nervix::branch_inversion,
+            reason = "the entry point groups work by branch outside the parametrizer partition; move the work to its branch in https://app.clickup.com/t/86bd1z13v"
+        )
+    )]
     routes: Vec<IndexMap<Option<BranchKey>, ReingestorBranchOutputBuffer>>,
     quiesce: OutputBufferQuiesceGauge,
 }

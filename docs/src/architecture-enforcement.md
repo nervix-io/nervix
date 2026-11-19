@@ -55,7 +55,7 @@ declarations](connector-contract.md#entity-declarations) owns their inputs and l
 
 ## Rule Contracts
 
-The eighteen rule families below have one implementation each. The family name remains useful
+The rule families below have one implementation each. The family name remains useful
 for describing its purpose; a compiler family can emit more than one diagnostic where a missing
 contract and a violated contract require different corrections.
 
@@ -72,6 +72,7 @@ contract and a violated contract require different corrections.
 | `data_plane_cluster_awaits` | Recurring processing retains observations instead of awaiting cluster control access. | A lifecycle observation; reading an installed immutable publication. | Recurring work awaiting a declared cluster-access capability. | Compiler `cluster_await`; direct, bound-future, helper and trait fixtures. |
 | `string_node_ids` | Declared node identities use the shared typed vocabulary. [Typed States](typed-states.md#source-owned-identity-and-installation-contracts) owns the identity contract. | `ClusterNodeId`; an ordinary string unrelated to node identity. | A declared identity interface or field represented by a string. | Compiler `node_identity`; alias, interface, aggregate, field and metadata fixtures. |
 | `write_once_rwlock_fields` | Installation-only state is an installed value rather than replaceable locked absence. | An installed value; a genuinely mutable field with its lifetime reason. | An installed field containing an RwLock, or an unclassified candidate requiring review. | Compiler `installed_state` and `state_contract`; normalized representation, lifetime, review and exception fixtures. |
+| `branch_inversions` | The parametrizer partition owns branch membership and each branch holds its own runtime parts. [Branch-Owned Runtime](branch-owned-runtime.md) owns the rule. | One bound handle, branch identifiers carried in record payloads, and the parametrizer partition's registry, published table and local table view. | A processor's map from a branch key to its timers, a set of branch fingerprints, or a vector of branch tasks. | Compiler `branch_inversion`; normalized types, named collection declarations, wrapper and alias controls, exact candidate sites and narrow expectations; the gate checks source expectations before configuration selection and pins the existing sites. |
 | `clamped_arithmetic` | The resolved primitive integer or Duration API chooses saturation or wrapping instead of checked overflow. | Checked arithmetic; pointer wrapping; an Instant elapsed-time query; a specifically justified retry ceiling or modular mixer. | An integer/Duration saturating or wrapping operation without its actual arithmetic meaning. | Compiler `clamped_arithmetic`; integral and Duration owners, aliases, UFCS, callbacks, authored macros and narrow-expectation fixtures. |
 | `combinator_control_flow` | Canonical Option/Result adapters must not hide a branch or a sequence. | One transformation, an iterator pipeline, or an unrelated custom method. | `map_or`/`map_or_else`, successive governed adapters, or a governed adapter with a closure containing statements. | Compiler `combinator_control_flow`; canonical/custom receiver pairs, UFCS, closure structure, diagnostic cardinality and source spans. |
 | `as_casts` | Count actual Rust cast expressions, not words in imports, attributes or qualified paths. | `use Value as Alias`; `r#as`; `<Type as Trait>::item`; ordinary literals. | An expression using `as`, including a const expression nested in a qualified type. | Stable source parser; inactive cfg, raw identifiers, nested syntax, macro fragments and bounded source properties. Clippy independently denies conversions in its broader build scope. |
@@ -379,6 +380,15 @@ A semantic exception is a reason-bearing `expect` at one operation or binding, g
 blanket warning suppression, missing reason, unused expectation or expectation covering another
 operation fails. Arithmetic reasons state the actual ceiling, capacity or modular computation;
 “cannot overflow” does not justify wrapping. A retained defect names its repair task.
+
+A retained branch ownership defect carries its expectation on the field or binding that declares
+the collection. The compiler reports the resolved declaration and the reason even when its
+expectation is fulfilled. The gate uses the complete checked compiler matrix. It counts one
+declaration across build configurations, requires a repair task link, and compares each declaration
+with the recorded sites in `debt-baseline.json`. Replacing a recorded site with a different one
+fails even at the same total. `just ratchet --show branch_inversions` lists the current sites and
+their repair references. `just ratchet --update` drops the retired declarations from the baseline
+with their count.
 
 Source counts and refusals have no semantic exception channel. A current structural occurrence
 remains counted, or refused, until its owner changes it; a compiler expectation cannot hide its

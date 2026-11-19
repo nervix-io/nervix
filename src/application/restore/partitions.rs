@@ -111,6 +111,13 @@ impl<'a> PerKeySection<'a> {
 pub(in crate::application) struct RestoredPartitions<'a> {
     schedule: &'a DomainSchedule,
     /// Every key whose state the archive holds in the unit the restored count places it in.
+    #[cfg_attr(
+        nervix_lint,
+        expect(
+            nervix::branch_inversion,
+            reason = "this branch collection supports checkpoints, partition transfers or state recovery; use the owning partition in https://app.clickup.com/t/86bd1z3ng"
+        )
+    )]
     placed: HashMap<EntityKey, RestoredKeyHolder>,
 }
 
@@ -315,6 +322,7 @@ impl RegroupedLifecycle {
         executor
             .run_cpu(CpuClass::Bulk, charge, move |_charge, cancellation| {
                 let mut revision = 0_u64;
+                #[cfg_attr(nervix_lint, expect(nervix::branch_inversion, reason = "this branch collection supports checkpoints, partition transfers or state recovery; use the owning partition in https://app.clickup.com/t/86bd1z3ng"))]
                 let mut selected = IndexMap::<BranchKeyFingerprint, PlacedEntry>::new();
                 for lifecycle in &lifecycles {
                     revision = revision.max(lifecycle.revision);

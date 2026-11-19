@@ -21,6 +21,13 @@ use super::*;
 pub(in crate::application::observation) struct PartitionInspection {
     partitions: ResolvedBranchPartitions,
     catalogs: BTreeMap<Unit, nervix_models::StateInspectionKeyCatalog>,
+    #[cfg_attr(
+        nervix_lint,
+        expect(
+            nervix::branch_inversion,
+            reason = "processor or generator bookkeeping independently tracks branches; use branch-owned parts or the partition table in https://app.clickup.com/t/86bd1z1bj"
+        )
+    )]
     owners: BTreeMap<BranchKeyFingerprint, InspectionKeyOwner>,
     memory: Reservation,
     max_bytes: u64,
@@ -163,6 +170,13 @@ impl PartitionInspection {
             .catalogs
             .get(&unit)
             .ok_or(StateInspectionRejection::NotReady)?;
+        #[cfg_attr(
+            nervix_lint,
+            expect(
+                nervix::branch_inversion,
+                reason = "processor or generator bookkeeping independently tracks branches; use branch-owned parts or the partition table in https://app.clickup.com/t/86bd1z1bj"
+            )
+        )]
         let mut excluded = BTreeSet::new();
         for key in catalog.fingerprints() {
             if self.owners.get(key).is_none_or(|owner| owner.unit != unit) {

@@ -76,6 +76,13 @@ pub(super) type RelayBranchPresence = Arc<BranchPresence<BranchKey>>;
 #[derive(Debug, Clone)]
 pub(super) struct RelayBranchPresences {
     partitioning: RelayPartitioning,
+    #[cfg_attr(
+        nervix_lint,
+        expect(
+            nervix::branch_inversion,
+            reason = "relay and follower bookkeeping keeps its own branch entries; read the parametrizer partition in https://app.clickup.com/t/86bd1z0ty"
+        )
+    )]
     by_unit: BTreeMap<Unit, RelayBranchPresence>,
 }
 
@@ -580,6 +587,13 @@ pub(super) struct RelayOwnerTask {
 pub(super) struct RelayOwnerBranchState {
     /// The concrete branches this owner holds, each with its metric series, and the presence it
     /// publishes for them. Dropping it releases the presence.
+    #[cfg_attr(
+        nervix_lint,
+        expect(
+            nervix::branch_inversion,
+            reason = "relay membership or channel routing keeps its own branch collection; use the branch's relay channel in https://app.clickup.com/t/86bd1z226"
+        )
+    )]
     pub(super) instances: OwnedBranches<BranchKey, RelayMetricRecorders>,
     pub(super) global_metrics: RelayMetricsHandle,
     pub(super) physical_node_id: Option<ClusterNodeName>,
@@ -1464,6 +1478,13 @@ impl RelayBoundaryServices {
         )
     )]
     pub(super) fn held_branch_fingerprints(&self) -> BTreeSet<BranchKeyFingerprint> {
+        #[cfg_attr(
+            nervix_lint,
+            expect(
+                nervix::branch_inversion,
+                reason = "relay and follower bookkeeping keeps its own branch entries; read the parametrizer partition in https://app.clickup.com/t/86bd1z0ty"
+            )
+        )]
         let mut fingerprints = BTreeSet::new();
         for (_, presence) in self.branch_presences.iter() {
             let membership = presence.load();
@@ -2583,6 +2604,13 @@ impl Runtime {
         partitioning: RelayPartitioning,
         shared: impl Fn(Unit) -> bool,
     ) -> error_stack::Result<RelayBranchPresences, StateIdentityError> {
+        #[cfg_attr(
+            nervix_lint,
+            expect(
+                nervix::branch_inversion,
+                reason = "relay and follower bookkeeping keeps its own branch entries; read the parametrizer partition in https://app.clickup.com/t/86bd1z0ty"
+            )
+        )]
         let mut by_unit = BTreeMap::new();
         for unit in partitioning.units() {
             let presence = if shared(unit) {
@@ -2615,6 +2643,13 @@ impl Runtime {
         if let Some(existing) = self.inner.relay_branch_presences.get(&placement) {
             return Ok(existing.clone());
         }
+        #[cfg_attr(
+            nervix_lint,
+            expect(
+                nervix::branch_inversion,
+                reason = "relay and follower bookkeeping keeps its own branch entries; read the parametrizer partition in https://app.clickup.com/t/86bd1z0ty"
+            )
+        )]
         let presence = Arc::new(BranchPresence::new());
         self.inner
             .relay_branch_presences
@@ -2623,6 +2658,13 @@ impl Runtime {
     }
 
     pub(in crate::runtime) fn clear_relay_branch_presences_for_domain(&self, domain: &DomainName) {
+        #[cfg_attr(
+            nervix_lint,
+            expect(
+                nervix::branch_inversion,
+                reason = "relay and follower bookkeeping keeps its own branch entries; read the parametrizer partition in https://app.clickup.com/t/86bd1z0ty"
+            )
+        )]
         let relays = self
             .inner
             .relay_branch_presences
@@ -2713,6 +2755,13 @@ impl Runtime {
         let expiration_scan_interval = self.inner.branch_instance_expiration_scan_interval;
         // Claiming before the task starts makes this owner the presence's only publisher from here
         // on: a predecessor that is still ending can no longer change what observers read.
+        #[cfg_attr(
+            nervix_lint,
+            expect(
+                nervix::branch_inversion,
+                reason = "relay membership or channel routing keeps its own branch collection; use the branch's relay channel in https://app.clickup.com/t/86bd1z226"
+            )
+        )]
         let instances = OwnedBranches::claim(presence);
         let task = nervix_primitives::task::spawn(async move {
             let mut branches = RelayOwnerBranchState {
