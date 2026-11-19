@@ -1242,7 +1242,7 @@ mod tests {
         ProcessorOutputs, ReingestorName, RelayName,
     };
     use nervix_primitives::{
-        sync::{Arc, Mutex, mpsc, watch},
+        sync::{Arc, mpsc, watch},
         time::timeout,
     };
 
@@ -1553,8 +1553,7 @@ mod tests {
             wasm_state_reset: None,
             partition_transition: None,
         };
-        let mut instances =
-            BranchInstanceRegistry::<Option<BranchKey>, Mutex<BranchRuntime>>::new();
+        let mut instances = BranchInstanceRegistry::new();
         let (branch_sender, _) = mpsc::channel(1);
         let route_task = IngestorRouteTask {
             runtime_handle: runtime.clone(),

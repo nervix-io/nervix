@@ -115,6 +115,7 @@ fn inspections_racing_batches_and_the_end() {
         let task = StdArc::new(ProcessorBranchTask {
             input: unused_input,
             commands: commands.clone(),
+            delivery_lifetime: nervix_primitives::sync::CancellationToken::new(),
             task: nervix_primitives::sync::blocking::Mutex::new(None),
         });
         let (batches, batch_requests) = mpsc::channel(1);

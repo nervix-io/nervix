@@ -1298,7 +1298,7 @@ impl BranchExecutionRuntime {
     )]
     async fn enqueue_prepared_inputs(
         context: BranchExecutionDispatchContext<'_>,
-        instances: &mut BranchInstanceRegistry<Option<BranchKey>, Mutex<BranchRuntime>>,
+        instances: &mut EntrypointBranches,
         inputs: Vec<BranchedEntrypointInput>,
         lanes: &mut BranchDispatchLanes,
     ) {
@@ -1448,7 +1448,7 @@ impl BranchExecutionRuntime {
 
     async fn finish_dispatch(
         context: BranchExecutionDispatchContext<'_>,
-        instances: &mut BranchInstanceRegistry<Option<BranchKey>, Mutex<BranchRuntime>>,
+        instances: &mut EntrypointBranches,
         lanes: &mut BranchDispatchLanes,
         next_deadline: &mut Option<Timestamp>,
         completion: BranchDispatchCompletion,
@@ -1552,7 +1552,7 @@ impl BranchExecutionRuntime {
     #[cfg(test)]
     pub(super) async fn dispatch_prepared_inputs(
         context: BranchExecutionDispatchContext<'_>,
-        instances: &mut BranchInstanceRegistry<Option<BranchKey>, Mutex<BranchRuntime>>,
+        instances: &mut EntrypointBranches,
         inputs: Vec<BranchedEntrypointInput>,
     ) -> Option<Timestamp> {
         let BranchExecutionDispatchContext {
@@ -1658,8 +1658,7 @@ impl BranchExecutionRuntime {
                     reason = "the entry point groups work by branch outside the parametrizer partition; move the work to its branch in https://app.clickup.com/t/86bd1z13v"
                 )
             )]
-            let mut instances =
-                BranchInstanceRegistry::<Option<BranchKey>, Mutex<BranchRuntime>>::new();
+            let mut instances = EntrypointBranches::new();
             let mut last_persisted_lru_lsm = match nervix_primitives::expect_lint!(
                 nervix::lifecycle_call,
                 "task startup restores one branch lifecycle generation before accepting batches",
@@ -2066,6 +2065,33 @@ impl BranchExecutionRuntime {
     }
 }
 
+/// The branch lane can end delivery before it waits to take the branch's state lock.
+pub(super) struct BranchInstanceRuntime {
+    pub(super) delivery_lifetime: CancellationToken,
+    pub(super) state: Mutex<BranchRuntime>,
+}
+
+impl BranchInstanceRuntime {
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            bounded,
+            reason = "the retained branch serializes access to its own execution state",
+            key = "one concrete branch instance",
+            bound = "one admitted dispatch, tick, checkpoint or retirement holds the branch state"
+        )
+    )]
+    pub(super) async fn lock(&self) -> nervix_primitives::sync::MutexGuard<'_, BranchRuntime> {
+        self.state.lock().await
+    }
+
+    pub(super) fn into_inner(self) -> BranchRuntime {
+        self.state.into_inner()
+    }
+}
+
+type EntrypointBranches = BranchInstanceRegistry<Option<BranchKey>, BranchInstanceRuntime>;
+
 #[cfg_attr(
     nervix_lint,
     nervix::context(
@@ -2083,7 +2109,7 @@ pub(super) async fn expire_branch_instance_instances(
     template: &BranchInstanceTemplate,
     now: Timestamp,
     expiration_after: Duration,
-    instances: &mut BranchInstanceRegistry<Option<BranchKey>, Mutex<BranchRuntime>>,
+    instances: &mut EntrypointBranches,
 ) -> Vec<Option<BranchKey>> {
     #[cfg_attr(
         nervix_lint,
@@ -2104,7 +2130,7 @@ pub(super) async fn expire_branch_instance_instances(
                 Some(BranchEvictionReason::Ttl),
             )
         );
-        template.retire_branch_channels(&key);
+        state.delivery_lifetime.cancel();
         let mut branch = state.lock().await;
         branch.evict().await;
         debug!(
@@ -2134,7 +2160,7 @@ pub(super) async fn evict_branch_instance_instances_to_capacity(
     ingestor: &IngestorName,
     template: &BranchInstanceTemplate,
     max_instances: NonZeroUsize,
-    instances: &mut BranchInstanceRegistry<Option<BranchKey>, Mutex<BranchRuntime>>,
+    instances: &mut EntrypointBranches,
 ) -> Vec<Option<BranchKey>> {
     #[cfg_attr(
         nervix_lint,
@@ -2155,7 +2181,7 @@ pub(super) async fn evict_branch_instance_instances_to_capacity(
                 Some(BranchEvictionReason::Lru),
             )
         );
-        template.retire_branch_channels(&key);
+        state.delivery_lifetime.cancel();
         let mut branch = state.lock().await;
         branch.evict().await;
         debug!(
@@ -2183,7 +2209,7 @@ pub(super) async fn shutdown_all_branch_instance_instances(
     domain: &DomainName,
     ingestor: &IngestorName,
     branch: Option<&BranchName>,
-    instances: &mut BranchInstanceRegistry<Option<BranchKey>, Mutex<BranchRuntime>>,
+    instances: &mut EntrypointBranches,
 ) {
     for (key, state) in instances.drain() {
         runtime.observe_branch_instance_removed(domain, branch, &key, None);
@@ -2224,12 +2250,12 @@ pub(super) async fn restore_branch_instance_lru_snapshot(
     runtime: &Runtime,
     domain: &DomainName,
     template: &BranchInstanceTemplate,
-    instances: &mut BranchInstanceRegistry<Option<BranchKey>, Mutex<BranchRuntime>>,
+    instances: &mut EntrypointBranches,
 ) -> error_stack::Result<u64, BranchLruSnapshotError> {
     /// One branch the lifecycle names, built and not installed yet.
     struct RestoredBranch {
         lifetime: BranchInstanceSnapshotEntry<Option<BranchKey>>,
-        state: Mutex<BranchRuntime>,
+        state: BranchInstanceRuntime,
     }
 
     let placement = branch_lru_placement(runtime, domain, template)
@@ -2376,7 +2402,7 @@ pub(super) fn publish_branch_instance_lru_snapshot<V>(
 )]
 pub(super) async fn tick_due_branch_instance_branches(
     snapshot: &DomainExecutionSnapshot,
-    instances: &BranchInstanceRegistry<Option<BranchKey>, Mutex<BranchRuntime>>,
+    instances: &EntrypointBranches,
 ) -> Option<Timestamp> {
     let mut next = None;
     for instance in instances.states() {

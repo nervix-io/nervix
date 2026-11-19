@@ -856,7 +856,6 @@ async fn forget_key(
         &key,
         None,
     );
-    template.retire_branch_channels(&key);
     if let ProcessorBranchSlot::Live(task) = slot.as_ref() {
         stop_processor_branch_task(
             &context.domain,

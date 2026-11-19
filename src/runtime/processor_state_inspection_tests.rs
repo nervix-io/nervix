@@ -391,6 +391,7 @@ fn branch_channels() -> (ProcessorBranchTask, mpsc::Receiver<ProcessorBranchComm
     let branch = ProcessorBranchTask {
         input,
         commands,
+        delivery_lifetime: nervix_primitives::sync::CancellationToken::new(),
         task: nervix_primitives::sync::blocking::Mutex::new(None),
     };
     (branch, received)
