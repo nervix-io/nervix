@@ -9,7 +9,8 @@ CREATE SCHEMA chaos_stop_record (
   content STRING
 );
 
-CREATE JAQ JSON CODEC chaos_stop_unfold TO SCHEMA chaos_stop_record
+CREATE JAQ JSON CODEC chaos_stop_unfold
+  TO SCHEMA chaos_stop_record
   WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
 
 CREATE WIRE JSON SCHEMA chaos_stop_wire MODE STRICT (
@@ -95,8 +96,7 @@ CREATE KAFKA TOPIC INGESTOR chaos_stop_unacked
   ON GENERAL ERROR LOG;
 
 CREATE JUNCTION chaos_stop_collector
-  FROM chaos_stop_collected
-  COLLECT FOR 3m
+  FROM chaos_stop_collected COLLECT FOR 3m
   ATTACHED
   BRANCHED BY chaos_stop_branch
   TO chaos_stop_outgoing

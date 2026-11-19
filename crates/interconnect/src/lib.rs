@@ -36,8 +36,8 @@ use thiserror::Error;
 
 mod authentication;
 pub mod backup;
-pub mod domain_stop;
 mod capability_publication;
+pub mod domain_stop;
 mod relay_slicing;
 #[doc(hidden)]
 pub use relay_slicing::RelaySliceCursor;

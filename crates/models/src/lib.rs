@@ -279,7 +279,7 @@ pub use domain_clock::{
 pub use domain_stop::{
     DomainStop, DomainStopCause, DomainStopEnding, DomainStopReport, DomainStopping,
     LICENSING_STOP_ENFORCE_AFTER, NodeStopReport, OperatorStopRequest, StopCut, StopCutKind,
-    StopEnding, StopRequest, StopRequestAdmission, StopRequestId, StopWithdrawal,
+    StopCutReason, StopEnding, StopRequest, StopRequestAdmission, StopRequestId, StopWithdrawal,
 };
 pub use duration_text::{DurationTextError, parse_duration_text};
 pub use emitter::{

@@ -643,8 +643,9 @@ pub(super) struct BranchQuiesceDepths {
     pub(super) collected_inputs: usize,
     pub(super) pending_materialized: usize,
     pub(super) output_buffers: usize,
-    /// Rows a reorderer holds until their time, or records a correlator holds until their
-    /// partner, which no drain waits for and a stop cuts.
+    /// Rows a reorderer holds until their time, records a correlator holds until their partner,
+    /// or rows a window retains whose acknowledgements stay pending, which no drain waits for and
+    /// a stop cuts.
     pub(super) held_rows: usize,
 }
 

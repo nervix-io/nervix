@@ -1055,10 +1055,13 @@ counters stay at zero. Endpoints count their requests in `nervix_ingestor_endpoi
 and client producers keep the outcomes of [Client Ingestors](#client-ingestors).
 
 A tree that has already resolved keeps its outcome when the ingestor observes a stop at the same
-poll. Domain `STOP` applies independently on each node: a remote emitter can drop its buffered
-tree before the ingestor stops, producing a `failed` wait and a transport rejection instead of a
-`shutdown` wait and an unconfirmed stop position. Only a tree still unresolved when the stop ends
-its wait contributes to the unconfirmed-stop counter.
+poll. A domain's graceful `STOP` ends intake and lets the work in motion finish before any node
+tears the domain down, so a tree in motion resolves as it would have without the stop. What the
+stop cuts, held work and work an `ENFORCE` ends, ends as each node's teardown reaches it,
+independently on each node: a remote emitter can drop its held tree before the ingestor stops,
+producing a `failed` wait and a transport rejection instead of a `shutdown` wait and an unconfirmed
+stop position. Only a tree still unresolved when the stop ends its wait contributes to the
+unconfirmed-stop counter.
 
 An ACK timeout is not a failed tree. The tree that went silent is not resolved by the timeout: the
 ingestor rejects the batch, its transport presents the positions again, and the earlier delivery

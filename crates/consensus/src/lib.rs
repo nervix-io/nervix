@@ -123,6 +123,8 @@ pub use cluster_parameters::ClusterParameterPlanningInputs;
 mod connectivity_fault;
 mod domain_mutation;
 mod domain_pause_recovery;
+#[cfg(all(test, feature = "shuttle"))]
+mod domain_stop_shuttle_tests;
 mod durable_batch;
 mod leadership;
 mod lease_refusal;
@@ -1909,7 +1911,8 @@ impl StateMachineData {
         let admission = domain.request_stop(request.clone(), revision);
         Ok(matches!(
             admission,
-            nervix_models::StopRequestAdmission::Began | nervix_models::StopRequestAdmission::Joined
+            nervix_models::StopRequestAdmission::Began
+                | nervix_models::StopRequestAdmission::Joined
         ))
     }
 
@@ -6282,7 +6285,9 @@ enum DomainStopRequestConflict {
     LicensingGateOpen { domain: DomainName },
     #[error("domain '{domain}' stopped and began another stop since its drain was observed")]
     AnotherStop { domain: DomainName },
-    #[error("stop request '{request}' of domain '{domain}' was withdrawn before it enforced the stop")]
+    #[error(
+        "stop request '{request}' of domain '{domain}' was withdrawn before it enforced the stop"
+    )]
     EnforcerWithdrawn {
         domain: DomainName,
         request: nervix_models::StopRequestId,

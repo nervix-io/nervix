@@ -165,6 +165,113 @@ Feature: A domain STOP lets the work already inside the domain finish
       | 1            |
       | 3            |
 
+  # A deduplicator's keys and a window's rows have a saved form, so a STOP writes them and a START
+  # continues from them: nothing in motion at the stop is lost, and nothing is applied twice.
+  @graceful_stop_stateful_processors_continue
+  Scenario Outline: STOP then START across a deduplicator and a window continues without losing a message or applying one twice on <cluster_size> nodes
+    Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    And the active domain is "{{domain}}"
+    When these Plexus commands are executed on the leader node
+      """
+      CREATE SCHEMA reading ( tenant STRING, id STRING, value I64 );
+      CREATE SCHEMA history ( tenant STRING, samples I64, total I64 );
+      CREATE WIRE JSON SCHEMA reading_wire MODE STRICT ( tenant string, id string, value integer );
+      CREATE WIRE JSON CODEC reading_codec FROM WIRE SCHEMA reading_wire TO SCHEMA reading;
+      CREATE SCHEMA tenant_key ( tenant STRING );
+      CREATE BRANCH by_tenant SCHEMA tenant_key TTL 1h;
+      CREATE RELAY readings SCHEMA reading BRANCHED BY by_tenant;
+      CREATE RELAY unique_readings SCHEMA reading BRANCHED BY by_tenant;
+      CREATE RELAY histories SCHEMA history BRANCHED BY by_tenant;
+      CREATE VHOST edge stop-state-{{test_id}}.example.com;
+      CREATE HTTP ENDPOINT ingress ON edge PATH '/readings';
+      CREATE HTTP ENDPOINT INGESTOR reading_ingestor FROM ingress MODE NO ACK
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING reading_codec
+        TO readings INHERIT ALL BRANCHED BY by_tenant SET tenant = message.tenant
+        FLUSH EACH 20s MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE DEDUPLICATOR unique_ids
+        FROM readings
+        DEDUPLICATE ON input.id
+        MAX TIME 1h
+        BRANCHED BY by_tenant
+        TO unique_readings INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
+      CREATE WINDOW PROCESSOR collection_window FROM unique_readings
+        WIDTH 3 MESSAGES STEP 3 MESSAGES BRANCHED BY by_tenant
+        TO histories SET tenant = FIRST(input.tenant), samples = COUNT(input.value),
+          total = SUM(input.value)
+        ON MESSAGE ERROR LOG;
+      START;
+      """
+    When http payload is posted to node "node-1" with host "stop-state-{{test_id}}.example.com" path "/readings"
+      """
+      {"tenant":"acme","id":"a1","value":10}
+      """
+    And http payload is posted to node "node-1" with host "stop-state-{{test_id}}.example.com" path "/readings"
+      """
+      {"tenant":"globex","id":"g1","value":100}
+      """
+    And http payload is posted to node "node-1" with host "stop-state-{{test_id}}.example.com" path "/readings"
+      """
+      {"tenant":"acme","id":"a2","value":20}
+      """
+    And http payload is posted to node "node-1" with host "stop-state-{{test_id}}.example.com" path "/readings"
+      """
+      {"tenant":"globex","id":"g2","value":200}
+      """
+    # The records rest in the ingestor's route buffer, whose cadence the stop does not wait for:
+    # it flushes them through the deduplicator into the window, which retains two rows per branch.
+    When these Plexus commands are executed on the leader node
+      """
+      STOP;
+      """
+    Then the last command output contains
+      """
+      stopped domain '{{domain}}': every message in motion finished
+      """
+    # The rows rest in the window's saved state; only their acknowledgements, which nothing saves
+    # yet, are cut.
+    And the last command output contains
+      """
+      window_processor 'collection_window': acknowledgements pending for rows resting in a window (4)
+      """
+    When these Plexus commands are executed on the leader node
+      """
+      START;
+      """
+    And these Plexus commands are executed on the leader node
+      """
+      CREATE SUBSCRIPTION recovered_histories TO histories;
+      """
+    # A repeated id is one the restored deduplicator already passed, so it is not applied again.
+    And http payload is posted to node "node-1" with host "stop-state-{{test_id}}.example.com" path "/readings"
+      """
+      {"tenant":"acme","id":"a1","value":10}
+      """
+    And http payload is posted to node "node-1" with host "stop-state-{{test_id}}.example.com" path "/readings"
+      """
+      {"tenant":"acme","id":"a3","value":30}
+      """
+    And http payload is posted to node "node-1" with host "stop-state-{{test_id}}.example.com" path "/readings"
+      """
+      {"tenant":"globex","id":"g3","value":300}
+      """
+    # Each window holds exactly the three distinct readings of its branch: a lost row or a
+    # repeated one would change its total.
+    Then within "90s" the relay subscription receives exactly one payload for each fragment set
+      """
+      key={"tenant":"acme"} | "samples":3 | "total":60
+      key={"tenant":"globex"} | "samples":3 | "total":600
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
   @graceful_stop_processor_and_emitter_buffers
   Scenario Outline: A STOP flushes a processor's collector and route buffer and an emitter's buffer, delivering both sources exactly once on <cluster_size> nodes
     Given Kafka is running
@@ -312,6 +419,35 @@ Feature: A domain STOP lets the work already inside the domain finish
       STOP;
       """
     Then the background Plexus execution is still running after "3s"
+    # The domain and the cluster status show the stop, its request and what it waits for.
+    When these Plexus commands are executed on the leader node
+      """
+      DESCRIBE DOMAIN;
+      """
+    Then the last command output contains
+      """
+      status: stopping
+      """
+    And the last command output contains
+      """
+      emitter 'published': a publish on the wire
+      """
+    When these Plexus commands are executed on the leader node
+      """
+      SHOW CLUSTER STATUS;
+      """
+    Then the last command output contains
+      """
+      - {{domain}} status=Stopping
+      """
+    And the last command output contains
+      """
+      - {{domain}} requests: '
+      """
+    And the last command output contains
+      """
+      emitter 'published': a publish on the wire
+      """
     When these Plexus commands are executed on the leader node
       """
       STOP ENFORCE AFTER 0s;
@@ -643,7 +779,9 @@ Feature: A domain STOP lets the work already inside the domain finish
       START;
       """
     Then Kafka consumer group "stop_reorder_group_{{test_id}}" eventually has 1 consumers
-    And within "30s" DESCRIBE DOMAIN section "input_output" metric "messages_total" "sent" relay "incoming" across physical nodes totals 4
+    # The cut rows were answered "not processed", so the source sends all four again: the relay's
+    # cumulative count doubles.
+    And within "30s" DESCRIBE DOMAIN section "input_output" metric "messages_total" "sent" relay "incoming" across physical nodes totals 8
 
     Examples:
       | cluster_size |
@@ -848,7 +986,7 @@ Feature: A domain STOP lets the work already inside the domain finish
     And within "2s" Kafka consumer group "stop_down_group_{{test_id}}" next offset for topic "stop_down_{{test_id}}" partition 0 is "below 1"
     # The destination recovers, and the acknowledged source delivers the cut record again.
     Given HTTP receiver "down" answers unscripted requests with "respond 204"
-    And these Plexus commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       START;
       """

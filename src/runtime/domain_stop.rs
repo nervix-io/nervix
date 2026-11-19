@@ -123,9 +123,11 @@ impl StopTeardown {
     fn cut_of(self, entry: &StopWaitEntry) -> Option<StopCut> {
         let entity = entry.entity.as_ref()?;
         let kind = match entry.kind {
-            StopWaitKind::AdmittingIngestor
-            | StopWaitKind::ActiveGenerator
-            | StopWaitKind::AdmittingRelay => return None,
+            StopWaitKind::AdmittingIngestor | StopWaitKind::ActiveGenerator => return None,
+            // A batch that entered the relay while the teardown's view read it is in that relay
+            // when the relay is cut.
+            StopWaitKind::AdmittingRelay if self.enforced => StopCutKind::Enforced,
+            StopWaitKind::AdmittingRelay => StopCutKind::RelayBatches,
             StopWaitKind::RequiredWait => StopCutKind::RequiredWaitMessages,
             StopWaitKind::EmitterRetry => StopCutKind::EmitterUndelivered,
             StopWaitKind::RelayBatchesHeld => StopCutKind::RelayBatches,
@@ -133,6 +135,7 @@ impl StopTeardown {
             StopWaitKind::ProcessorHeld => match entity.kind {
                 nervix_models::ModelKind::Reorderer => StopCutKind::ReordererRows,
                 nervix_models::ModelKind::Correlator => StopCutKind::CorrelatorRecords,
+                nervix_models::ModelKind::WindowProcessor => StopCutKind::WindowAcknowledgements,
                 _ => StopCutKind::NodeBatches,
             },
             StopWaitKind::PublishOnTheWire => StopCutKind::Enforced,
@@ -320,6 +323,45 @@ impl Runtime {
         self.inner.domains.get(domain)?.stop_teardown
     }
 
+    /// Records what the teardown of every domain whose stop `domains` ended is about to cut, while
+    /// the domain's tasks still run: the committed revision that carries the ending also installs
+    /// the stopped domain clock, which ends a processor's branch on its own and with it the count
+    /// of what the branch held. A completed stop's teardown first lets a publish on the wire run to
+    /// its outcome. A domain this node runs no execution of, or whose teardown it already recorded,
+    /// needs nothing.
+    pub(in crate::runtime) async fn capture_stop_teardowns(
+        &self,
+        domains: &BTreeMap<DomainName, DomainState>,
+    ) {
+        for (domain, state) in domains {
+            nervix_primitives::task::consume_budget().await;
+            let Some(teardown) = StopTeardown::of(state) else {
+                continue;
+            };
+            let running = self
+                .inner
+                .executions
+                .get(domain)
+                .is_some_and(|execution| !execution.passive_only);
+            if !running {
+                continue;
+            }
+            let recorded = self
+                .inner
+                .stop_ledgers
+                .get(domain)
+                .is_some_and(|entry| entry.start_version == teardown.start_version);
+            if recorded {
+                continue;
+            }
+            self.begin_stop_ledger(domain, teardown);
+            if !teardown.enforced {
+                Box::pin(self.finish_publishes_on_the_wire(domain)).await;
+            }
+            self.record_stop_cuts(domain, teardown);
+        }
+    }
+
     /// Records that this node's teardown for the stop that ended `domain` at `start_version` has
     /// begun, so the stop's owner waits for its report.
     pub(in crate::runtime) fn begin_stop_ledger(&self, domain: &DomainName, teardown: StopTeardown) {
@@ -418,3 +460,7 @@ impl Runtime {
             .remove_if(domain, |_, entry| entry.start_version < start_version);
     }
 }
+
+#[cfg(test)]
+#[path = "domain_stop_tests.rs"]
+mod tests;

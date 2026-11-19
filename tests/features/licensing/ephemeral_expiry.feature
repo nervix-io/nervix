@@ -316,6 +316,70 @@ Feature: Ephemeral activation expiry and the licensing stop gate
       | 1            | node-1   |
       | 3            | node-3   |
 
+  # A STOP is not a pause: the licensing stop that ends a backup's pause ends the session of an
+  # ingestor whose BUFFER mode retained payloads in that pause, and lists them in the stop's report.
+  Scenario Outline: A licensing stop that ends a backup's pause discards what a paused BUFFER ingestor retained and lists it on <cluster_size> nodes
+    Given an HTTPS licensing test service is available
+    And a <cluster_size> node nervix cluster is started
+    And the active domain is "{{domain}}"
+    When these Plexus commands are executed on the leader node
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      ACTIVATE LICENSE EPHEMERAL WITH KEY 'NVXK-TESTABCD-fixture-secret';
+      CREATE SCHEMA event ( seq I64 );
+      CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( seq integer );
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
+      CREATE RELAY events SCHEMA event UNBRANCHED;
+      CREATE VHOST edge http-{{test_id}}-pause-buffer.example.com;
+      CREATE HTTP ENDPOINT events_endpoint ON edge PATH '/events';
+      CREATE HTTP ENDPOINT INGESTOR buffered
+        FROM events_endpoint MODE NO ACK
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
+        TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      START;
+      """
+    Then the committed license decision is saved as placeholder "ephemeral"
+    And the ephemeral expiry of license placeholder "ephemeral" is saved as placeholder "expired_at"
+    And node "<observer>" eventually reports status containing "{{domain}} status=Running"
+    Given the backup cut for domain "{{domain}}" will pause before its capture
+    Then the current leader node is saved as placeholder "leader"
+    When the CLI begins backing up "domain {{domain}} --timeout 120s" from node "{{leader}}" into "paused.nvxb" in the background
+    Then the backup cut for domain "{{domain}}" has reached its pause
+    # The backup holds the domain paused, so the ingestor's BUFFER mode retains what arrives.
+    When http payload is posted to node "node-1" with host "http-{{test_id}}-pause-buffer.example.com" path "/events"
+      """
+      {"seq":1}
+      """
+    And http payload is posted to node "node-1" with host "http-{{test_id}}-pause-buffer.example.com" path "/events"
+      """
+      {"seq":2}
+      """
+    And the cluster licensing clock passes the "ephemeral" deadline
+    Then node "<observer>" eventually describes this license without a selected domain
+      """
+      policy: stopped
+      """
+    # The backup's pause ends in the licensing stop rather than a resume.
+    When the backup cut pause for domain "{{domain}}" is released
+    Then the background CLI backup finishes
+    And the CLI backup succeeded with a JSON report naming domain "{{domain}}"
+    And within "30s" node "<observer>" eventually reports status containing "{{domain}} status=Stopped"
+    When these Plexus commands are executed on node "<observer>"
+      """
+      DESCRIBE DOMAIN;
+      """
+    Then the last command output contains
+      """
+      stopped by licensing: ephemeral activation expired at {{expired_at}}
+      stop: every message in motion finished; discarded with the ingestor session: node-1: ingestor 'buffered': payloads an ingestor's pause buffer retained (2)
+      """
+
+    Examples:
+      | cluster_size | observer |
+      | 1            | node-1   |
+      | 3            | node-3   |
+
   @long_running
   Scenario Outline: The licensing stop is forced at its fixed time while a publish is held on the wire, and no CANCEL calls it off, on <cluster_size> nodes
     Given an HTTPS licensing test service is available

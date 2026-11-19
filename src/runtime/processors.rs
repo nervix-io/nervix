@@ -593,8 +593,9 @@ impl CompiledInferencerInputProgram {
 }
 
 impl RelayProcessorOperationNode {
-    /// Rows a reorderer holds until their release time, or records a correlator holds until their
-    /// partner arrives; other operations hold none this way.
+    /// Rows a reorderer holds until their release time, records a correlator holds until their
+    /// partner arrives, or rows a window retains whose acknowledgements stay pending until further
+    /// input fills it; other operations hold none this way.
     pub(super) fn held_rows(&self) -> usize {
         match self {
             Self::Reorderer { output_buffers, .. } => {
@@ -613,8 +614,8 @@ impl RelayProcessorOperationNode {
                 .len()
                 .checked_add(state.pending_right.len())
                 .assured("records a node holds in memory are fewer than usize::MAX"),
+            Self::WindowProcessor { state, .. } => state.rows_with_pending_acknowledgements(),
             Self::Deduplicator { .. }
-            | Self::WindowProcessor { .. }
             | Self::Junction { .. }
             | Self::Inferencer { .. }
             | Self::StatefulInferencer { .. }

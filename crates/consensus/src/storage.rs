@@ -99,7 +99,8 @@ const KEYSPACE_LOGS: &str = "raft_runtime_entity_labels_inherited_topology_ratel
 const KEYSPACE_META: &str = "raft_runtime_entity_labels_inherited_topology_ratelimit_stopping_meta";
 const KEYSPACE_STATE_MACHINE: &str =
     "raft_runtime_entity_labels_inherited_topology_ratelimit_stopping_state";
-const KEYSPACE_SNAPSHOT: &str = "raft_runtime_entity_labels_inherited_topology_ratelimit_stopping_snapshots";
+const KEYSPACE_SNAPSHOT: &str =
+    "raft_runtime_entity_labels_inherited_topology_ratelimit_stopping_snapshots";
 const KEY_CLUSTER_IDENTITY: &[u8] = b"K";
 const KEY_LICENSING: &[u8] = b"L";
 /// Working memory reserved for ordinary metadata and log storage relative to its operation unit.

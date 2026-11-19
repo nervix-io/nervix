@@ -409,7 +409,10 @@ fn only_a_new_activation_after_the_expiry_lifts_the_gate_and_starts_stay_explici
         .get(&domain("tenant"))
         .verified("created above");
     assert_eq!(tenant.status, DomainStatus::Stopped);
-    assert_eq!(tenant.stop_cause(), Some(DomainStopCause::Licensing(reason)));
+    assert_eq!(
+        tenant.stop_cause(),
+        Some(DomainStopCause::Licensing(reason))
+    );
     assert_eq!(start(&mut state, "tenant"), ConsensusResponse::Applied);
     let tenant = state
         .domains

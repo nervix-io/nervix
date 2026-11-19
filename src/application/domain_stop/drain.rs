@@ -53,6 +53,15 @@ enum StopDrainError {
     },
 }
 
+/// What one pass of a stop's drain found.
+enum DrainPass {
+    /// The drain goes on from this round.
+    Continue(DrainRound),
+    /// A confirming round found every node at rest, every obligation complete and nothing moved
+    /// since the round before it.
+    Rested,
+}
+
 /// Where a drain stands between two rounds.
 enum DrainRound {
     /// Work in motion was visible at the last round, or a confirmation failed.
@@ -174,6 +183,49 @@ impl SessionServiceImpl {
         RoundViews { views }
     }
 
+    /// One pass of the drain from `round`: the round it asks for and, after a quiet releasing
+    /// round, the confirming round.
+    async fn stop_drain_pass(
+        &self,
+        domain: &DomainName,
+        coordination: &CoordinationIdentity,
+        round: DrainRound,
+    ) -> DrainPass {
+        let action = match &round {
+            DrainRound::Releasing => StopDrainAction::FlushMovingWork,
+            DrainRound::Confirming { .. } => StopDrainAction::Observe,
+        };
+        let views = self.stop_drain_round(domain, coordination, action).await;
+        self.inner.domain_stops.record_waits(domain, views.waits());
+        let quiet = views.quiet();
+        match round {
+            DrainRound::Confirming { motion } if quiet => {
+                if !views.obligations_complete() {
+                    DrainPass::Continue(DrainRound::Confirming { motion })
+                } else if views.motion() == motion {
+                    DrainPass::Rested
+                } else {
+                    DrainPass::Continue(DrainRound::Releasing)
+                }
+            }
+            DrainRound::Releasing if quiet => {
+                let confirming = self
+                    .stop_drain_round(domain, coordination, StopDrainAction::Confirm)
+                    .await;
+                if confirming.quiet() {
+                    DrainPass::Continue(DrainRound::Confirming {
+                        motion: confirming.motion(),
+                    })
+                } else {
+                    DrainPass::Continue(DrainRound::Releasing)
+                }
+            }
+            DrainRound::Confirming { .. } | DrainRound::Releasing => {
+                DrainPass::Continue(DrainRound::Releasing)
+            }
+        }
+    }
+
     /// The committed stopping record of `domain`, while it is still the stop that began at
     /// `began_at_revision`.
     async fn current_stop(&self, domain: &DomainName, began_at_revision: u64) -> Option<DomainStopping> {
@@ -218,10 +270,21 @@ fn due_enforcement(
     }
 }
 
-/// How long until an operator's clause acts, if one is still ahead; the licensing request's fixed
-/// time wakes the owner through the licensing time it commits instead.
+/// How long until a request's clause acts, if one is still ahead: an operator's clause at its
+/// instant, and the licensing request's fixed time as the physical clock places it. Only
+/// committed licensing time decides that the licensing stop is due, so once the physical clock
+/// has passed that time the owner waits for the licensing time it commits instead.
 fn until_next_clause(stopping: &DomainStopping, now: Timestamp) -> Option<Duration> {
-    let next = stopping.next_operator_limit()?;
+    let operator = stopping.next_operator_limit();
+    let licensing = match stopping.licensing_enforcement() {
+        Some(at) if at > now => Some(at),
+        Some(_) | None => None,
+    };
+    let next = match (operator, licensing) {
+        (Some(operator), Some(licensing)) => operator.min(licensing),
+        (Some(next), None) | (None, Some(next)) => next,
+        (None, None) => return None,
+    };
     let remaining = next.unix_nanos().checked_sub(now.unix_nanos())?;
     let remaining = u64::try_from(remaining.max(0)).ok()?;
     Some(Duration::from_nanos(remaining))
@@ -263,6 +326,7 @@ pub(super) async fn drain_stopping_domain(
                 .domain_stops
                 .waits(&domain)
                 .unwrap_or_default();
+            let mut withdrawn = true;
             for reference in cancelled {
                 service.inner.domain_stops.record_cancelled(
                     &reference,
@@ -283,7 +347,11 @@ pub(super) async fn drain_stopping_domain(
                         error = %format_args!("{error:#}"),
                         "the CANCEL of a stop request could not be committed; it is retried"
                     );
+                    withdrawn = false;
                 }
+            }
+            if !withdrawn {
+                sleep(service.cluster_parameters().domain_drain_poll_interval()).await;
             }
             continue;
         }
@@ -291,43 +359,31 @@ pub(super) async fn drain_stopping_domain(
             end_stop(&service, &domain, began_at_revision, StopEnding::Enforced { by }).await;
             return;
         }
-        let action = match &round {
-            DrainRound::Releasing => StopDrainAction::FlushMovingWork,
-            DrainRound::Confirming { .. } => StopDrainAction::Observe,
+        // A clause acts at its time even while a pass waits on a node that answers late: the pass
+        // is abandoned, and the loop reads the stop again and acts on the clause. An abandoned
+        // pass proves nothing, so the drain starts over from a releasing round.
+        let next_clause = until_next_clause(&stopping, now);
+        let pass = Box::pin(service.stop_drain_pass(&domain, &coordination, round));
+        let pass = match next_clause {
+            Some(until) => nervix_primitives::select! {
+                pass = pass => Some(pass),
+                () = sleep(until) => None,
+            },
+            None => Some(pass.await),
         };
-        let views = service.stop_drain_round(&domain, &coordination, action).await;
-        service
-            .inner
-            .domain_stops
-            .record_waits(&domain, views.waits());
-        let quiet = views.quiet();
-        round = match round {
-            DrainRound::Confirming { motion } if quiet => {
-                if !views.obligations_complete() {
-                    DrainRound::Confirming { motion }
-                } else if views.motion() == motion {
-                    end_stop(&service, &domain, began_at_revision, StopEnding::Completed).await;
-                    return;
-                } else {
-                    DrainRound::Releasing
-                }
+        let Some(pass) = pass else {
+            round = DrainRound::Releasing;
+            continue;
+        };
+        round = match pass {
+            DrainPass::Rested => {
+                end_stop(&service, &domain, began_at_revision, StopEnding::Completed).await;
+                return;
             }
-            DrainRound::Releasing if quiet => {
-                let confirming = service
-                    .stop_drain_round(&domain, &coordination, StopDrainAction::Confirm)
-                    .await;
-                if confirming.quiet() {
-                    DrainRound::Confirming {
-                        motion: confirming.motion(),
-                    }
-                } else {
-                    DrainRound::Releasing
-                }
-            }
-            DrainRound::Confirming { .. } | DrainRound::Releasing => DrainRound::Releasing,
+            DrainPass::Continue(next) => next,
         };
         let poll = service.cluster_parameters().domain_drain_poll_interval();
-        let wait = match until_next_clause(&stopping, now) {
+        let wait = match until_next_clause(&stopping, current_timestamp()) {
             Some(until) => poll.min(until),
             None => poll,
         };
@@ -529,6 +585,34 @@ mod tests {
         assert_eq!(
             due_enforcement(&licensing, at(0), Some(at(160))),
             Some(StopRequestId::Licensing)
+        );
+    }
+
+    #[test]
+    fn the_licensing_stops_fixed_time_bounds_the_owners_wait_until_the_physical_clock_passes_it() {
+        let licensing = stopping(&[], Some(100));
+        assert_eq!(
+            until_next_clause(&licensing, at(130)),
+            Some(Duration::from_secs(30))
+        );
+        // Past it, only the licensing time the cluster commits decides, and its commit wakes the
+        // owner.
+        assert_eq!(until_next_clause(&licensing, at(160)), None);
+        let both = stopping(&[("operator", 100, enforce(90))], Some(100));
+        assert_eq!(
+            until_next_clause(&both, at(120)),
+            Some(Duration::from_secs(40)),
+            "the licensing stop's fixed time comes before the operator's ENFORCE"
+        );
+    }
+
+    #[test]
+    fn clauses_that_act_at_the_same_instant_end_the_stop_once_by_the_operators_request() {
+        let together = stopping(&[("operator", 100, enforce(60))], Some(100));
+        assert_eq!(
+            due_enforcement(&together, at(160), Some(at(160))),
+            Some(StopRequestId::Operator(reference("operator"))),
+            "an operator's ENFORCE that acts with the licensing stop's fixed time names the ending"
         );
     }
 

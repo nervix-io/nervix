@@ -88,7 +88,6 @@ impl SnapshotCadence {
 /// execution, which leaves each branch's snapshot task making its last write, then tells each
 /// placement's checkpoint writer to make its own, and waits for the domain's tasks before it
 /// returns, so a stopped domain's checkpoints are on disk when its stop completes.
-#[derive(Default)]
 pub(in crate::runtime) struct StateSnapshotTasks {
     tracker: TaskTracker,
     stopping: CancellationToken,
@@ -97,7 +96,21 @@ pub(in crate::runtime) struct StateSnapshotTasks {
     domains: DashMap<DomainName, TaskTracker, RandomState>,
     /// The domains an enforced stop tears down: each branch snapshot task of one of them ends
     /// without its last write, so the domain keeps the last snapshot it took before the stop.
-    abandoned_last_writes: nervix_primitives::publication::ArcSwap<std::collections::BTreeSet<DomainName>>,
+    abandoned_last_writes:
+        nervix_primitives::publication::ArcSwap<std::collections::BTreeSet<DomainName>>,
+}
+
+impl Default for StateSnapshotTasks {
+    fn default() -> Self {
+        Self {
+            tracker: TaskTracker::default(),
+            stopping: CancellationToken::default(),
+            domains: DashMap::default(),
+            abandoned_last_writes: nervix_primitives::publication::ArcSwap::from_pointee(
+                std::collections::BTreeSet::new(),
+            ),
+        }
+    }
 }
 
 /// A tracker that counts its domain's snapshot tasks, closed so that waiting for it ends when no

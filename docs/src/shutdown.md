@@ -1027,17 +1027,23 @@ domain's intake as a terminating node stops its own, whatever each ingestor's `O
 while the graph and the domain clock keep running. The owner then drains across the cluster in
 rounds, as a backup cut does: each node that holds work in motion releases it with a force-flush
 generation, and once no node holds any, every node starts the generation that confirms nothing is
-still moving. The drain has no time limit: the domain drain timeout and the task grace bound neither
-it nor the publish attempts on the wire it waits for. Work that cannot move on, held by a `REQUIRED
-WAIT`, an emitter's retry, or a reorderer or correlator until its time or its partner, never holds
-it open. An emitter that a generation finds waiting for a retry completes the generation at once,
+still moving. A node that does not answer a round within the request's deadline holds the domain
+stopping, as one that holds work in motion does, and a request's clause still acts at its time: the
+owner abandons a round that a late node holds when an `ENFORCE AFTER`, a `CANCEL AFTER` or the
+licensing stop's fixed time comes due, acts on it, and drains again from a releasing round. The
+drain has no time limit: the domain drain timeout and the task grace bound neither it nor the
+publish attempts on the wire it waits for. Work that cannot move on, held by a `REQUIRED WAIT`, an
+emitter's retry, a reorderer or correlator until its time or its partner, or a window until further
+input fills it, never holds it open. An emitter that a generation finds waiting for a retry completes the generation at once,
 and one whose publish fails during a generation hands the records to its retry schedule rather than
 retrying inline. Only then does the owner commit the domain stopped, and each node tears the domain
 down.
 
 A completed stop's teardown first lets a publish already on the wire run to its outcome, records
 what it is about to cut, and then ends the domain's tasks with the final snapshot writes described
-above. An enforced stop's teardown, once a request's `ENFORCE AFTER` or the licensing stop's fixed
+above. Each node records its cut while the domain's tasks still run, before it installs the stopped
+domain clock that the same committed revision carries, because a branch that loses its clock ends
+on its own and with it the count of what it held. An enforced stop's teardown, once a request's `ENFORCE AFTER` or the licensing stop's fixed
 time has passed, records what it cuts and ends the tasks at once: emitters get no time to finish,
 and each deduplicator, window, inferencer and WASM processor branch keeps the last snapshot it took
 before the stop instead of writing what it published since. Each node keeps what its teardown cut,

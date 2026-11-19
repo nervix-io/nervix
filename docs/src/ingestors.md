@@ -475,7 +475,7 @@ The mode is consulted for resumable model-alteration `ENTITY_PAUSE` holds, `DOMA
 and memory-pressure shedding. A domain's `STOP` is not a pause: it stops the ingestor's intake
 whatever its mode, while the work the ingestor already admitted finishes, and payloads a `BUFFER`
 mode retained for a pause still open at the stop are discarded with the session and listed in the
-stop's answer. An endpoint answers a request it has not admitted `503`, and a request it admitted
+stop's answer as `discarded with the ingestor session`. An endpoint answers a request it has not admitted `503`, and a request it admitted
 before the stop gets its real answer once its message finishes. `STOP` and `DROP INGESTOR` terminate
 the ingestor session. Unexpected
 owner loss also terminates it immediately; volatile quiesce buffers and in-memory ACK state do not

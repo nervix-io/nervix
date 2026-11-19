@@ -302,10 +302,20 @@ impl StopCutKind {
         self.into()
     }
 
-    /// Whether this is held work whose kind cannot be saved yet, rather than work in motion an
-    /// enforcement cut.
-    pub fn cannot_be_saved_yet(self) -> bool {
-        !matches!(self, Self::Enforced)
+    /// Why a stop's teardown cuts what an entity holds of this kind.
+    pub fn reason(self) -> StopCutReason {
+        match self {
+            Self::Enforced => StopCutReason::Enforcement,
+            Self::IngestorPauseBuffer => StopCutReason::SessionEnded,
+            Self::WindowAcknowledgements
+            | Self::ReordererRows
+            | Self::CorrelatorRecords
+            | Self::RequiredWaitMessages
+            | Self::EmitterUndelivered
+            | Self::BranchLimitEntry
+            | Self::RelayBatches
+            | Self::NodeBatches => StopCutReason::NotSavedYet,
+        }
     }
 
     /// The kind as an answer and the domain's description name it.
@@ -323,6 +333,19 @@ impl StopCutKind {
             Self::IngestorPauseBuffer => "payloads an ingestor's pause buffer retained",
         }
     }
+}
+
+/// Why a stop's teardown cut what an entity held, which its answer reports in a clause of its
+/// own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StopCutReason {
+    /// An enforcement ended work that was still in motion.
+    Enforcement,
+    /// The kind has no saved form yet, so a stop cuts what it holds rather than wait for it.
+    NotSavedYet,
+    /// A stop ends an ingestor's session whatever its `ON QUIESCE` declares, and with it the
+    /// payloads a pause still open at the stop retained; no saved form is planned for them.
+    SessionEnded,
 }
 
 /// One entity's cut of one kind on one node.

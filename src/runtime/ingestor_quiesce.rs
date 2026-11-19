@@ -2783,5 +2783,141 @@ mod tests {
         fn shuttle_a_stop_ends_a_live_payload_waiting_for_extension_room() {
             check_interleavings(|| interrupted_live_delivery(LiveInterruption::Stop));
         }
+
+        /// How the payload a paused ingestor received while its stop engaged ended.
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        enum RacingPayload {
+            /// The pause's buffering mode retained it, before the stop's intake engaged.
+            Retained,
+            /// It dispatched as a payload the ingestor already received, which the stop's drain
+            /// waits for.
+            Dispatched,
+        }
+
+        fn received(bytes: &'static [u8]) -> BufferedIngestPayload {
+            BufferedIngestPayload::new(
+                bytes,
+                BufferedIngestMetadata::without_headers(),
+                Timestamp::from_unix_nanos(1),
+            )
+        }
+
+        /// A paused buffering ingestor whose domain begins stopping: the payload it receives
+        /// while the stop's intake engages is either retained by the pause, where it stays for
+        /// the stop's teardown to count and discard, or dispatched, never retained once the stop
+        /// holds; nothing retained replays into the stopping graph, polling ends and no endpoint
+        /// request is admitted. A stop that is called off resumes the domain, whose release of
+        /// both holds replays everything its pause retained.
+        fn intake_racing_the_stop_of_a_paused_buffering_ingestor() {
+            // A whole runtime is far heavier than one execution of this model needs, so the
+            // control takes the metrics it records into directly.
+            let metrics = RuntimeMetrics::default();
+            let metric_labels = metrics.register_ingestor_quiesce(
+                &domain("default"),
+                &named("paused_ingestor"),
+                nervix_models::Unit::SINGLE,
+                None,
+                nervix_models::IngestorEntityKind::Http(
+                    nervix_models::HttpIngestorEntity::Endpoint,
+                ),
+            );
+            let control = Arc::new(IngestorQuiesceControl::new(
+                IngestQuiesceMode::Buffer {
+                    max_size: "1MiB".to_string(),
+                    overflow: IngestQuiesceOverflow::DropOldest,
+                },
+                metrics,
+                metric_labels,
+            ));
+            control.engage(IngestorQuiesceCause::DomainPause);
+            assert!(matches!(
+                control.intake(received(b"retained"), false),
+                IngestorQuiesceIntake::Buffered
+            ));
+            let stop_engaged = Arc::new(AtomicBool::new(false));
+            let intake = thread::spawn({
+                let control = control.clone();
+                let stop_engaged = stop_engaged.clone();
+                move || {
+                    let after_stop = stop_engaged.load(Ordering::SeqCst);
+                    match control.intake(received(b"racing"), false) {
+                        IngestorQuiesceIntake::Buffered => {
+                            assert!(
+                                !after_stop,
+                                "a stopping ingestor retained a payload for its pause's \
+                                 buffering mode"
+                            );
+                            RacingPayload::Retained
+                        }
+                        IngestorQuiesceIntake::Dispatch(_) => RacingPayload::Dispatched,
+                        other => panic!(
+                            "a paused or stopping buffering ingestor neither retained nor \
+                             dispatched a payload it received: {other:?}"
+                        ),
+                    }
+                }
+            });
+            let stop = thread::spawn({
+                let control = control.clone();
+                let stop_engaged = stop_engaged.clone();
+                move || {
+                    control.engage(IngestorQuiesceCause::DomainStop);
+                    stop_engaged.store(true, Ordering::SeqCst);
+                    assert!(
+                        control.take_buffered().is_none(),
+                        "a stopping ingestor replayed what its pause retained"
+                    );
+                    assert_eq!(
+                        control.endpoint_admission(),
+                        Err(None),
+                        "a stopping ingestor admitted an endpoint request"
+                    );
+                    assert!(
+                        control.should_skip_poll(),
+                        "a stopping ingestor polled its source"
+                    );
+                }
+            });
+            let racing = intake.join().assured(
+                "Shuttle fails the whole execution when a model thread panics, so no join \
+                 observes one",
+            );
+            stop.join().assured(
+                "Shuttle fails the whole execution when a model thread panics, so no join \
+                 observes one",
+            );
+
+            // What the stop's teardown counts and discards is exactly what the pause retained.
+            let retained = match racing {
+                RacingPayload::Retained => 2,
+                RacingPayload::Dispatched => 1,
+            };
+            assert_eq!(control.counters().buffered_records, retained);
+            // A stopping domain keeps its pause's hold until it runs again, and releasing it
+            // alone leaves the stop's intake ended.
+            control.release(IngestorQuiesceCause::DomainPause);
+            assert!(
+                control.take_buffered().is_none(),
+                "releasing the pause's hold replayed retained payloads while the stop held"
+            );
+            control.release(IngestorQuiesceCause::DomainStop);
+            let mut replayed = 0_usize;
+            while let Some(delivery) = control.take_buffered() {
+                drop(delivery.finish());
+                replayed = replayed
+                    .checked_add(1)
+                    .assured("the model retains at most two payloads");
+            }
+            assert_eq!(
+                replayed, retained,
+                "a stop called off replays everything its pause retained"
+            );
+            assert_eq!(control.counters().buffered_records, 0);
+        }
+
+        #[test]
+        fn shuttle_a_payload_racing_the_stop_of_a_paused_buffering_ingestor_is_retained_for_the_cut_or_dispatched() {
+            check_interleavings(intake_racing_the_stop_of_a_paused_buffering_ingestor);
+        }
     }
 }

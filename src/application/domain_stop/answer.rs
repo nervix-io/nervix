@@ -9,7 +9,7 @@
 use nervix_interconnect::domain_stop::StopWaitEntry;
 use nervix_models::{
     DomainName, DomainStopCause, DomainStopEnding, DomainStopReport, DomainStopping,
-    NodeStopReport, StopCut, StopEnding, StopRequestId,
+    NodeStopReport, StopCut, StopCutReason, StopEnding, StopRequestId,
 };
 
 use super::{NodeStopWaits, StopWaits};
@@ -40,7 +40,8 @@ fn wait_text(entry: &StopWaitEntry) -> String {
 }
 
 /// The cuts of `report` that `select` keeps, node by node: `node: cut, cut; node: cut`.
-fn report_text(report: &DomainStopReport, select: impl Fn(&StopCut) -> bool) -> Option<String> {
+/// The cuts of every reporting node that the teardown made for `reason`, per node.
+fn report_text(report: &DomainStopReport, reason: StopCutReason) -> Option<String> {
     let mut nodes = Vec::new();
     for (node, node_report) in &report.nodes {
         let NodeStopReport::Reported { cuts } = node_report else {
@@ -48,7 +49,7 @@ fn report_text(report: &DomainStopReport, select: impl Fn(&StopCut) -> bool) -> 
         };
         let selected = cuts
             .iter()
-            .filter(|cut| select(cut))
+            .filter(|cut| cut.kind.reason() == reason)
             .map(cut_text)
             .collect::<Vec<_>>();
         if !selected.is_empty() {
@@ -74,11 +75,14 @@ pub(in crate::application) fn cut_clauses(report: Option<&DomainStopReport>) -> 
         return vec!["what its teardown cut is not reported yet".to_string()];
     };
     let mut clauses = Vec::new();
-    if let Some(enforced) = report_text(report, |cut| !cut.kind.cannot_be_saved_yet()) {
+    if let Some(enforced) = report_text(report, StopCutReason::Enforcement) {
         clauses.push(format!("cut by enforcement: {enforced}"));
     }
-    if let Some(held) = report_text(report, |cut| cut.kind.cannot_be_saved_yet()) {
+    if let Some(held) = report_text(report, StopCutReason::NotSavedYet) {
         clauses.push(format!("cut because it cannot be saved yet: {held}"));
+    }
+    if let Some(retained) = report_text(report, StopCutReason::SessionEnded) {
+        clauses.push(format!("discarded with the ingestor session: {retained}"));
     }
     if let Some(unreported) = unreported_text(report) {
         clauses.push(format!("not reported by {unreported}"));

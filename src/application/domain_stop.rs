@@ -61,10 +61,18 @@ pub(in crate::application) struct CancelledStop {
 /// The leader's view of the stops it owns: what each stopping domain waits for, and what each
 /// cancelled request was waiting for. Both are cold: the owner writes them once a round, and
 /// status reads and answers read them.
-#[derive(Default)]
 pub(in crate::application) struct DomainStops {
     waits: ArcSwap<BTreeMap<DomainName, StopWaits>>,
     cancelled: ArcSwap<BTreeMap<CommandExecutionReference, CancelledStop>>,
+}
+
+impl Default for DomainStops {
+    fn default() -> Self {
+        Self {
+            waits: ArcSwap::from_pointee(BTreeMap::new()),
+            cancelled: ArcSwap::from_pointee(BTreeMap::new()),
+        }
+    }
 }
 
 impl DomainStops {
@@ -113,6 +121,29 @@ impl DomainStops {
 }
 
 impl SessionServiceImpl {
+    /// The lines the cluster status gives every stopping domain: its requests, and what its stop
+    /// waits for, per node and entity, while this node owns it.
+    pub(in crate::application) async fn cluster_status_stop_lines(&self) -> Vec<String> {
+        let domains = self.inner.consensus.current_domains().await;
+        let mut lines = Vec::new();
+        for (domain, state) in &domains {
+            let Some(stopping) = state.stopping() else {
+                continue;
+            };
+            lines.push(format!(
+                "- {} requests: {}",
+                domain.as_str(),
+                answer::requests_text(stopping)
+            ));
+            let waits = match self.inner.domain_stops.waits(domain) {
+                Some(waits) => answer::waits_text(&waits),
+                None => "known to the stop's owner, the leader".to_string(),
+            };
+            lines.push(format!("  waits for: {waits}"));
+        }
+        lines
+    }
+
     /// The lines a domain's description gives its stop: a stopping domain's requests and what it
     /// waits for, per node and entity, while this node owns it; a stopped domain's cause, how its
     /// stop ended and what its teardown cut.

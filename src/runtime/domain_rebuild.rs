@@ -293,21 +293,6 @@ impl Runtime {
         start_ingestors: bool,
     ) -> error_stack::Result<(), RuntimeError> {
         let build = || RuntimeError::build_domain_execution(domain);
-        // The teardown of a running execution whose stop just ended records what it cuts before
-        // it cuts it. A completed stop's teardown first lets a publish on the wire run to its
-        // outcome.
-        let running = self
-            .inner
-            .executions
-            .get(domain)
-            .is_some_and(|execution| !execution.passive_only);
-        if running && let Some(teardown) = self.stop_teardown(domain) {
-            self.begin_stop_ledger(domain, teardown);
-            if !teardown.enforced {
-                Box::pin(self.finish_publishes_on_the_wire(domain)).await;
-            }
-            self.record_stop_cuts(domain, teardown);
-        }
         // Domain teardown, compilation, restoration, and startup are separate rebuild phases.
         // Their futures stay indirect to bound this coordinator's debug poll frame.
         let retiring =

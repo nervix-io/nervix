@@ -143,6 +143,7 @@ impl Runtime {
             return Ok(());
         }
 
+        Box::pin(self.capture_stop_teardowns(domains)).await;
         self.sync_committed_domains(revision, domains, domain_clock_authorities);
         // A failed application records nothing, so the same revision is applied again rather than
         // being suppressed as one this node already holds.

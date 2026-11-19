@@ -11,7 +11,7 @@
     nervix::layer(harness, reason = "owns the test harness boundary declared above")
 )]
 
-use meticulous::ResultExt as _;
+use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_execution::Executor;
 use nervix_models::{ClusterNodeName, ModelKind, ModelName, NodeRef, StopCutKind};
 
@@ -127,7 +127,10 @@ impl StopWireCase {
             RemoteOperationFailure::rejected(subject.clone()),
             RemoteOperationFailure::unavailable(subject.clone()),
             RemoteOperationFailure::not_ready(subject.clone()),
-            RemoteOperationFailure::failed(subject, "the stop's owner is not the leader".to_string()),
+            RemoteOperationFailure::failed(
+                subject,
+                "the stop's owner is not the leader".to_string(),
+            ),
         ]
     }
 }
@@ -207,12 +210,8 @@ fn bolero_domain_stop_messages_round_trip() {
                         Err::<StopDrainStatus, _>(failure.clone()),
                     )
                     .await;
-                    assert_round_trip(
-                        &executor,
-                        report_class,
-                        Err::<StopReportAnswer, _>(failure),
-                    )
-                    .await;
+                    assert_round_trip(&executor, report_class, Err::<StopReportAnswer, _>(failure))
+                        .await;
                 }
             });
         });

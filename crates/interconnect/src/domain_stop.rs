@@ -58,8 +58,9 @@ pub enum StopWaitKind {
     RelayBatchesHeld,
     /// Work a node holds while it waits on a full queue or takes nothing now.
     NodeWorkHeld,
-    /// Rows a reorderer holds until their release time, or records a correlator holds until
-    /// their partner arrives.
+    /// Rows a reorderer holds until their release time, records a correlator holds until their
+    /// partner arrives, or rows a window retains whose acknowledgements stay pending until
+    /// further input fills it.
     ProcessorHeld,
 }
 
@@ -97,7 +98,9 @@ impl StopWaitKind {
             Self::EmitterRetry => "records an emitter holds for a retry",
             Self::RelayBatchesHeld => "batches a relay holds for a consumer that takes nothing",
             Self::NodeWorkHeld => "work a node holds that cannot move on",
-            Self::ProcessorHeld => "rows or records a processor holds until their time or partner",
+            Self::ProcessorHeld => {
+                "rows or records a processor holds until their time, their partner or further input"
+            }
         }
     }
 }

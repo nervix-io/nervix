@@ -148,8 +148,10 @@ A `STOP` is graceful and has no time limit of its own. It runs in this order:
    a `REQUIRED WAIT` retains, records an emitter holds for a retry, rows a reorderer or correlator
    holds until their time or their partner, and work queued behind any of them. Until each kind
    has a saved form, the stop cuts it as stopping always has: its sources hear "not processed", so
-   an acknowledged source delivers it again after `START` and a `MODE NO ACK` source loses it. An
-   ingestor's pause buffer, retained for a pause still open at the stop, is discarded.
+   an acknowledged source delivers it again after `START` and a `MODE NO ACK` source loses it. The
+   rows a window retains stay in its saved state, but their pending acknowledgements are cut the
+   same way, so an acknowledged source delivers those rows again. An ingestor's pause buffer,
+   retained for a pause still open at the stop, is discarded.
 4. **The domain's tasks end** and the final snapshot is written. Apart from what step 3 cuts, a
    graceful stop negatively acknowledges nothing and drops nothing.
 
@@ -168,12 +170,17 @@ licensing time, which no `CANCEL` withdraws. While a domain stops, it refuses ev
 `START`, `ALTER`, transactions, `DROP`, `BACKUP` and relocation wait until the stop ends or is
 called off. A transaction's `STOP` step makes the same request and applies until its stop ends.
 
-Every answer says how the stop ended and what it cut, node by node and entity by entity:
-`stopped domain '<domain>': every message in motion finished; nothing was cut`, or the cuts of kinds
-that cannot be saved yet, or the work an enforcement cut, naming the request that enforced it.
+Every answer says how the stop ended and what it cut, node by node and entity by entity. A stop
+that cut nothing answers `stopped domain '<domain>': every message in motion finished`; an enforced
+one names the request that enforced it. A clause per reason then lists the cuts, each as
+`<node>: <kind> '<entity>': <what> (<count>)`: `cut by enforcement` for work in motion an
+enforcement ended, `cut because it cannot be saved yet` for the held kinds of step 3, and
+`discarded with the ingestor session` for what a paused ingestor's buffer retained.
 While the domain stops, `DESCRIBE DOMAIN` lists its stop requests and what the stop waits for per
-node and entity; once it stopped, it says how the stop ended and what was cut, until the next
-`START`.
+node and entity, and `SHOW CLUSTER STATUS` lists every stopping domain the same way under
+`[stops]`; what a stop waits for is known to its owner, the leader, so another node names the
+requests alone. Once the domain stopped, `DESCRIBE DOMAIN` says how the stop ended and what was
+cut, until the next `START`.
 
 Successful lifecycle commands are completion boundaries. `START` returns after every current live
 node has prepared the same revision and every configured listener and assigned ingestor has completed

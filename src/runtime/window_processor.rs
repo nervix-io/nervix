@@ -184,6 +184,25 @@ pub(super) struct WindowProcessorState {
     pub(super) accumulators: Vec<WindowAccumulator>,
 }
 
+impl WindowProcessorState {
+    /// The rows the window retains whose message still holds acknowledgement shares, parked
+    /// until further input fills the window: no drain waits for them, and a stop's teardown ends
+    /// them unresolved, so their source hears "not processed" while the rows stay in the
+    /// window's checkpoint.
+    pub(super) fn rows_with_pending_acknowledgements(&self) -> usize {
+        let mut rows = 0_usize;
+        for entry in &self.entries {
+            if entry.message.acks.is_empty() {
+                continue;
+            }
+            rows = rows
+                .checked_add(1)
+                .assured("rows a window retains in memory are fewer than usize::MAX");
+        }
+        rows
+    }
+}
+
 impl RetainedWindowRows for VecDeque<WindowEntry> {
     fn retained(&self) -> usize {
         self.len()

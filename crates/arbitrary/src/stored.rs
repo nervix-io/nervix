@@ -15,14 +15,14 @@ use nervix_models::{
     DomainClockState, DomainConfig, DomainName, DomainPace, DomainSchedule, DomainStartPoint,
     DomainState, DomainStatus, DomainStop, DomainStopCause, DomainStopEnding, DomainStopReport,
     DomainStopping, LicensingStopReason, Model, ModelName, NodeRef, NodeStopReport,
-    OperatorStopRequest, StopCut, StopCutKind, StopEnding, StopRequestId,
-    OwnershipStateComponent, OwnershipStateRecoveryOutcome, OwnershipStateReset,
-    OwnershipStateResetCause, OwnershipTransition, PlacementGroupSchedule,
+    OperatorStopRequest, OwnershipStateComponent, OwnershipStateRecoveryOutcome,
+    OwnershipStateReset, OwnershipStateResetCause, OwnershipTransition, PlacementGroupSchedule,
     RequestedResourceVersion, ResolvedBranching, ResourceId, ResourceNodeState, ResourceNodeStatus,
     ResourceReplicaKey, ResourceUpload, ResourceUploadIdentity, ResourceUploadKey,
     ResourceUploadState, ResourceVersion, RestoreStateAuthority, ScheduledNode, SchemaFingerprint,
-    Timestamp, WaitLimit, WasmSavedStateRejection, WasmStateRecoveryAdmission,
-    WasmStateRecoveryOutcome, WasmStateResetPhase, WasmStateResetReason, WasmStateResetScope,
+    StopCut, StopCutKind, StopEnding, StopRequestId, Timestamp, WaitLimit, WasmSavedStateRejection,
+    WasmStateRecoveryAdmission, WasmStateRecoveryOutcome, WasmStateResetPhase,
+    WasmStateResetReason, WasmStateResetScope,
 };
 
 use crate::Arbitrary;

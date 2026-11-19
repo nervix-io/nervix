@@ -76,8 +76,10 @@ to publish and stage their checkpoints, and reads the configuration while the cu
 the drain: the cut captures them as state. The leader resumes the domain and releases its lease
 before it copies the staged state into the final archive, and other domains continue
 independently. A stopped domain needs no pause: its owners read their stored checkpoints. A
-`WITHOUT PAUSE` capture takes no lease and reads the latest published checkpoints while the domain
-runs, and reports a live cut even for a stopped domain.
+stopping domain refuses the lease until its stop ends or is called off, so a backup that meets one
+is refused as one that meets any other held domain. A `WITHOUT PAUSE` capture takes no lease and
+reads the latest published checkpoints while the domain runs, and reports a live cut even for a
+stopped domain.
 
 Every state a cut archives comes from the node the domain's schedule names as that placement's
 primary, never from a replica's copy. A cut whose scheduled state owner the cluster does not report
