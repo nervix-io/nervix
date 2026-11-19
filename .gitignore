@@ -12,7 +12,6 @@ mutants.out*
 .nervix-deps
 .nervix_client_history
 .nervix_history
-.wrangler
 .venv
 docs/book
 __pycache__

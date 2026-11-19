@@ -32083,6 +32083,38 @@ async fn when_http_payload_begins_posting_in_the_background(
     world.background_http_publish = Some(AbortOnDropHandle::new(task));
 }
 
+/// Posts one payload in the background to an acknowledged endpoint, which answers once the graph
+/// acknowledges it. The post is made once: a refusal stays a failure of the background publish.
+#[when(
+    expr = "one http payload begins posting in the background with a completed graph \
+            acknowledgement to node {string} host {string} path {string}"
+)]
+async fn when_one_acknowledged_http_payload_begins_posting_in_the_background(
+    world: &mut ScenarioWorld,
+    node_id: String,
+    host: String,
+    path: String,
+    #[step] step: &Step,
+) {
+    assert!(
+        world.background_http_publish.is_none(),
+        "a background http publish is already active"
+    );
+    let node_id = expand_placeholders(world, &node_id);
+    let host = expand_placeholders(world, &host);
+    let path = expand_placeholders(world, &path);
+    let payload = expand_placeholders(world, docstring(step));
+    let publisher = world.cluster().acknowledged_http_publisher(
+        &node_id,
+        &host,
+        &path,
+        Duration::from_secs(30),
+    );
+    let task =
+        nervix_primitives::task::spawn(async move { publisher.publish_once(&payload).await });
+    world.background_http_publish = Some(AbortOnDropHandle::new(task));
+}
+
 #[then("the background http publish succeeds")]
 async fn then_the_background_http_publish_succeeds(world: &mut ScenarioWorld) {
     let task = world

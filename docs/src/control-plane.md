@@ -884,6 +884,13 @@ that applied a record before its output was refused applies the redelivered reco
 [WASM replay contract](wasm-state.md#replay-duplicates-and-exactly-once) and a stateful inferencer's
 [forced recovery](shutdown.md#when-the-former-owner-is-gone) describe.
 
+A survivor can also accept a batch before its own installation of the failover revision reaches the
+new route, and forward it to the lost owner. Such a batch never reached the lost owner, so it is
+neither refused nor redelivered: once the survivor has installed the route, the batch goes to the
+unit's new owner exactly once, without a negative acknowledgement. A batch the lost owner may have
+received before it stopped is still failed for redelivery; see
+[Cancellation And Branch Changes](./interconnect.md#cancellation-and-branch-changes).
+
 Failover acts on a voter that gossip no longer reports live. A leader whose reconciliation has just
 started, as the first node to lead after a whole cluster restarts does, can reach a quorum before
 gossip has observed the other voters live. Each process's reconciliation task retains its live
