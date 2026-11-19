@@ -250,7 +250,13 @@ CI_PRODUCERS: tuple[Producer, ...] = (
     Producer(
         name="bench-smoke",
         mode="ordinary",
-        prepare=("build-web-console", "wasm-processor-guests", "download-onnxruntime", "check-emitter-flush-graph"),
+        prepare=(
+            "build-web-console",
+            "wasm-processor-guests",
+            "download-onnxruntime",
+            "generate-test-onnx",
+            "check-emitter-flush-graph",
+        ),
         instrumented="bench-smoke-bodies",
         finish=(),
     ),

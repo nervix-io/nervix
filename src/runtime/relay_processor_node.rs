@@ -335,11 +335,10 @@ impl RelayProcessorNode {
     }
 
     pub(super) fn evict_inferencer_state(&mut self) {
-        if let RelayProcessorOperationNode::StatefulInferencer {
-            replicated_state, ..
-        } = &self.operation
+        if let RelayProcessorOperationNode::Inferencer { session, .. } = &self.operation
+            && let Some(carried) = session.carried()
         {
-            replicated_state.publish(None);
+            carried.evict();
         }
     }
 
@@ -351,14 +350,13 @@ impl RelayProcessorNode {
         )
     )]
     pub(super) fn retire_evicted_inferencer_state(&self, runtime: &Runtime) {
-        if let RelayProcessorOperationNode::StatefulInferencer {
-            replicated_state, ..
-        } = &self.operation
+        if let RelayProcessorOperationNode::Inferencer { session, .. } = &self.operation
+            && let Some(carried) = session.carried()
         {
             runtime
                 .inner
                 .state_replication_routing
-                .retire_inferencer(replicated_state);
+                .retire_inferencer(carried.publication());
         }
     }
 
@@ -1382,7 +1380,7 @@ impl RelayProcessorNode {
                     )
                     .await;
                 }
-                RelayProcessorOperationNode::StatefulInferencer {
+                RelayProcessorOperationNode::Inferencer {
                     output_routes,
                     resource,
                     resource_version,
@@ -1390,143 +1388,23 @@ impl RelayProcessorNode {
                     compiled_input_program,
                     prepared,
                     session,
-                    replicated_state,
-                    incarnation,
-                    snapshot_bytes,
                 } => {
-                    stateful_inferencer::admit_stateful_inferencer(
-                        stateful_inferencer::StatefulAdmissionContext {
-                            branch,
-                            processor: &self.processor,
-                            error_policies: &self.error_policies,
-                            output_routes,
-                            resource,
-                            resource_version: *resource_version,
-                            file,
-                            program: compiled_input_program,
-                            prepared,
-                            session,
-                            replicated_state,
-                            incarnation: *incarnation,
-                            snapshot_bytes: *snapshot_bytes,
-                            materialized_values: &materialized_values,
-                            execution_now,
-                        },
-                        batch,
-                    )
+                    inferencer_admission::InferencerAdmission {
+                        branch,
+                        processor: &self.processor,
+                        error_policies: &self.error_policies,
+                        output_routes,
+                        resource,
+                        resource_version: *resource_version,
+                        file,
+                        program: &compiled_input_program.program,
+                        prepared,
+                        session,
+                        materialized_values: &materialized_values,
+                        execution_now,
+                    }
+                    .admit(batch)
                     .await;
-                }
-                RelayProcessorOperationNode::Inferencer {
-                    output_routes,
-                    resource,
-                    resource_version,
-                    file,
-                    inputs,
-                    output_schema,
-                    compiled_input_program,
-                    output_buffers,
-                    session,
-                } => {
-                    if output_buffers.len() != output_routes.routes.len() {
-                        branch.runtime.handle_internal_processor_error_for_acks(
-                            &branch.domain,
-                            self.kind,
-                            &self.processor,
-                            &self.error_policies,
-                            batch.acks.iter(),
-                            &Report::new(RelayProcessorError::OutputBufferCount {
-                                buffers: output_buffers.len(),
-                                routes: output_routes.routes.len(),
-                            }),
-                        );
-                        return;
-                    }
-                    let domain_clock = branch.domain_clock.clone();
-                    let flush_snapshot = match domain_clock.snapshot() {
-                        Ok(snapshot) => snapshot,
-                        Err(error) => {
-                            branch.runtime.handle_internal_processor_error_for_acks(
-                                &branch.domain,
-                                self.kind,
-                                &self.processor,
-                                &self.error_policies,
-                                batch.acks.iter(),
-                                &error.change_context(RouteOutputError::BufferClock),
-                            );
-                            return;
-                        }
-                    };
-                    let route_batches = batch.into_attached_fanout(output_routes.routes.len());
-                    let mut due_outputs = Vec::new();
-                    for (output_index, route_batch) in route_batches.into_iter().enumerate() {
-                        let output_buffer = &mut output_buffers[output_index];
-                        output_buffer.push(route_batch);
-                        let output = &mut output_routes.routes[output_index];
-                        match output.schedule_input_flush(
-                            &domain_clock,
-                            &flush_snapshot,
-                            output_buffer.estimated_bytes(),
-                        ) {
-                            Ok(Some(true)) => due_outputs.push(output_index),
-                            Ok(Some(false)) => {}
-                            Ok(None) => {
-                                branch.runtime.handle_internal_processor_error_for_acks(
-                                    &branch.domain,
-                                    self.kind,
-                                    &self.processor,
-                                    &self.error_policies,
-                                    output_buffer
-                                        .pending
-                                        .iter()
-                                        .flat_map(|batch| batch.acks.iter()),
-                                    &Report::new(RouteOutputError::MissingFlushPolicy {
-                                        relay: output.relay.clone(),
-                                    }),
-                                );
-                                output_buffer.clear();
-                            }
-                            Err(error) => {
-                                branch.runtime.handle_internal_processor_error_for_acks(
-                                    &branch.domain,
-                                    self.kind,
-                                    &self.processor,
-                                    &self.error_policies,
-                                    output_buffer
-                                        .pending
-                                        .iter()
-                                        .flat_map(|batch| batch.acks.iter()),
-                                    &error.change_context(RouteOutputError::StartFlushDeadline {
-                                        relay: output.relay.clone(),
-                                    }),
-                                );
-                                output_buffer.clear();
-                                output.clear_flush_timer();
-                            }
-                        }
-                    }
-                    for output_index in due_outputs {
-                        flush_branch_inferencer_output(
-                            InferencerFlushContext {
-                                branch,
-                                node_kind: self.kind,
-                                processor: &self.processor,
-                                error_policies: &self.error_policies,
-                                output_routes,
-                                resource,
-                                resource_version: *resource_version,
-                                file,
-                                inputs,
-                                output_schema,
-                                compiled_input_program,
-                                session,
-                                materialized_state: &self.materialized_state,
-                                execution_now,
-                            },
-                            &mut output_buffers[output_index],
-                            output_index,
-                        )
-                        .await;
-                    }
                 }
                 RelayProcessorOperationNode::WasmProcessor {
                     output_routes,
@@ -1638,8 +1516,10 @@ impl RelayProcessorNode {
                         replicated_state.generations.mark_live_dirty();
                     }
                 }
+                // A route of these processors holds already-computed output, which the routes'
+                // own due flush above releases.
                 RelayProcessorOperationNode::Junction { .. }
-                | RelayProcessorOperationNode::StatefulInferencer { .. } => {}
+                | RelayProcessorOperationNode::Inferencer { .. } => {}
                 RelayProcessorOperationNode::Reorderer {
                     output_routes,
                     max_time,
@@ -1743,68 +1623,6 @@ impl RelayProcessorNode {
                             },
                             &action,
                             message,
-                        )
-                        .await;
-                    }
-                }
-                RelayProcessorOperationNode::Inferencer {
-                    output_routes,
-                    resource,
-                    resource_version,
-                    file,
-                    inputs,
-                    output_schema,
-                    compiled_input_program,
-                    output_buffers,
-                    session,
-                } => {
-                    let mut due_outputs = Vec::new();
-                    for (output_index, output_buffer) in output_buffers.iter().enumerate() {
-                        if output_buffer.pending.is_empty() {
-                            continue;
-                        }
-                        match output_routes.routes[output_index]
-                            .flush_deadline_due(&domain_clock, snapshot)
-                        {
-                            Ok(true) => due_outputs.push(output_index),
-                            Ok(false) => {}
-                            Err(error) => {
-                                branch.runtime.handle_internal_processor_error_for_acks(
-                                    &branch.domain,
-                                    self.kind,
-                                    &self.processor,
-                                    &self.error_policies,
-                                    output_buffer
-                                        .pending
-                                        .iter()
-                                        .flat_map(|batch| batch.acks.iter()),
-                                    &error.change_context(RouteOutputError::InspectFlushDeadline {
-                                        relay: output_routes.routes[output_index].relay.clone(),
-                                    }),
-                                );
-                            }
-                        }
-                    }
-                    for output_index in due_outputs {
-                        flush_branch_inferencer_output(
-                            InferencerFlushContext {
-                                branch,
-                                node_kind: self.kind,
-                                processor: &self.processor,
-                                error_policies: &self.error_policies,
-                                output_routes,
-                                resource,
-                                resource_version: *resource_version,
-                                file,
-                                inputs,
-                                output_schema,
-                                compiled_input_program,
-                                session,
-                                materialized_state: &self.materialized_state,
-                                execution_now: now,
-                            },
-                            &mut output_buffers[output_index],
-                            output_index,
                         )
                         .await;
                     }
@@ -2143,7 +1961,6 @@ impl RelayProcessorNode {
             | RelayProcessorOperationNode::Reorderer { .. }
             | RelayProcessorOperationNode::Correlator { .. }
             | RelayProcessorOperationNode::Inferencer { .. }
-            | RelayProcessorOperationNode::StatefulInferencer { .. }
             | RelayProcessorOperationNode::WasmProcessor { .. } => Ok(()),
         }
     }
@@ -2155,14 +1972,10 @@ impl RelayProcessorNode {
         purpose: ProcessorCheckpointPurpose,
     ) -> OwnershipHandoffResult<()> {
         match &mut self.operation {
-            RelayProcessorOperationNode::StatefulInferencer {
-                session,
-                replicated_state,
-                incarnation,
-                snapshot_bytes,
-                ..
-            } => {
-                replicated_state.publish_session(session, *incarnation, *snapshot_bytes);
+            RelayProcessorOperationNode::Inferencer { session, .. } => {
+                if let Some(carried) = session.carried() {
+                    carried.publish();
+                }
                 Ok(())
             }
             RelayProcessorOperationNode::Deduplicator { keyspace, .. } => {
@@ -2218,13 +2031,18 @@ impl RelayProcessorNode {
             RelayProcessorOperationNode::WindowProcessor {
                 replicated_state, ..
             } => PublishedBranchState::WindowProcessor(replicated_state.clone()),
-            RelayProcessorOperationNode::StatefulInferencer {
-                replicated_state, ..
-            } => PublishedBranchState::Inferencer(replicated_state.clone()),
+            RelayProcessorOperationNode::Inferencer { session, .. } => {
+                let Some(carried) = session.carried() else {
+                    return SpawnedSnapshotTask {
+                        task: None,
+                        requests: None,
+                    };
+                };
+                PublishedBranchState::Inferencer(carried.publication().clone())
+            }
             RelayProcessorOperationNode::Junction { .. }
             | RelayProcessorOperationNode::Reorderer { .. }
             | RelayProcessorOperationNode::Correlator { .. }
-            | RelayProcessorOperationNode::Inferencer { .. }
             | RelayProcessorOperationNode::WasmProcessor { .. } => {
                 return SpawnedSnapshotTask {
                     task: None,
@@ -2233,15 +2051,14 @@ impl RelayProcessorNode {
             }
         };
         let (request_tx, request_rx) = mpsc::channel(PROCESSOR_REQUEST_CAPACITY);
-        let task = if let RelayProcessorOperationNode::StatefulInferencer { session, .. } =
-            &self.operation
+        let task = if let RelayProcessorOperationNode::Inferencer { session, .. } = &self.operation
+            && let Some(carried) = session.carried()
         {
-            let metrics = session.state_metrics();
             runtime.spawn_published_branch_state_snapshot_task(
                 shutdown_tx,
                 published,
                 request_tx,
-                metrics,
+                carried.metrics(),
             )
         } else {
             runtime.spawn_published_branch_state_snapshot_task(
@@ -2281,8 +2098,7 @@ impl RelayProcessorNode {
                 .chain(state.pending_right.iter())
                 .map(|entry| checked_add_duration_to_timestamp(entry.received_at, *max_time))
                 .min(),
-            RelayProcessorOperationNode::Inferencer { .. }
-            | RelayProcessorOperationNode::StatefulInferencer { .. } => None,
+            RelayProcessorOperationNode::Inferencer { .. } => None,
             RelayProcessorOperationNode::WasmProcessor { instance, .. } => {
                 wasm_instance_next_deadline(instance.as_deref())
             }

@@ -2045,8 +2045,8 @@ it:
   executor's borrowed `AcceptedWork` contract. The class semaphore preserves arrival order ahead
   of later requests. The owner takes no further input while waiting, holds no queue lock across
   the wait, and preserves its processor state. Teardown drops the future within its existing
-  grace or drain deadline, returning the wait's charge and place. A stateful inferencer obtains
-  its queue place before handing its native session to a job. Logical deadlines due during the
+  grace or drain deadline, returning the wait's charge and place. An inferencer obtains its queue
+  place before handing its native session to a job. Logical deadlines due during the
   wait are handled before the branch takes another input. Borrowed ACK scopes renew active and
   retained rows without copying their sets; window acknowledgement parking and endpoint absolute
   deadlines keep their existing meaning. The branch stop grace covers both queuing STOP and
@@ -3225,22 +3225,25 @@ after a session restart and closed by a domain restart. The Roto scenario takes 
 builder's lock in every `push`, `push_null` and `finish` of an admitted function call, for a
 selected, a dropped and an absent value. The TLS rebinding scenario replaces the HTTPS listener's
 TLS configuration on every node as a TLS VHOST is created and rebound, while each connection the
-background HTTPS posts open reads it. The inferencer scenario takes a branch's ONNX session lock
-for each batch of two interleaved branches. Each of the three runs on one and three nodes. On three
+background HTTPS posts open reads it. The batched inferencer scenario admits interleaved batches of
+two concrete branches through their relays and branch tasks. Each of the three runs on one and
+three nodes. On three
 nodes with a replica, the deduplicator, window and guest-save restore scenarios leave the owner's
 lifecycle and branch checkpoint announcements with the replica's lifecycle handle, where the
 replica task takes them under the same lock.
 
-The stateful inferencer instead owns its native session exclusively in the concrete branch task.
-Each admitted row awaits one extension-class executor job, which returns the session even when
-the model refuses the row. The previous tensor generation remains installed until all successor
-state and public output tensors validate; successor tensors move from ONNX output handles into
-the next generation without Arrow decoding. Route timers dispatch the already constructed
-results and never invoke the model. INITIAL tensors are prepared before publication and shared
-immutably by new branches. No tracked lock or shared-map protocol is added: Deloxide, Shuttle,
-Loom and Turmoil do not observe the opaque native operator. The ordinary public scenarios in
-`inferencer_state.feature` exercise ordered, interleaved branches on one and three nodes, different
-route cadences, filtered and refused inputs, and atomic state preservation after a native failure.
+Every inferencer owns its native session exclusively in the concrete branch task, with no lock.
+Each admitted batch awaits extension-class executor jobs that the session moves into and comes back
+from, even when the model refuses a message; a job that panics loses the session, and the branch
+loads it again for its next batch. The previous tensor generation remains installed until all
+successor state and public output tensors of a message validate; successor tensors move from ONNX
+output handles into the next generation without Arrow decoding. Route timers dispatch the already
+constructed results and never invoke the model. INITIAL tensors are prepared before publication and
+shared immutably by new branches. No tracked lock or shared-map protocol is involved: Deloxide,
+Shuttle, Loom and Turmoil do not observe the opaque native operator. The ordinary public scenarios
+in `inferencer_state.feature` and `inferencer_admission.feature` exercise ordered, interleaved
+branches on one and three nodes, different route cadences, filtered and refused inputs, and atomic
+state preservation after a native failure.
 
 The ONNX inspection admission scenario saturates the leader's bulk workers and wait queue, observes
 the typed CREATE INFERENCER refusal, releases the occupancy and creates the same inferencer on one
