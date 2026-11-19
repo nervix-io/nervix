@@ -255,6 +255,7 @@ mod endpoint;
 mod endpoint_acknowledgement;
 mod endpoint_route_table;
 mod entity_gate;
+mod entity_swap;
 mod entrypoint_routes;
 mod error;
 mod events;
