@@ -11,6 +11,8 @@ computing its destination key, or send the record onward unbranched. The registr
 destination parametrization's name with every input relay's. The scheduler can place the units that
 serve a partition on different cluster nodes.
 
-The [repository rule](../../AGENTS.md#a-branch-owns-its-runtime) defines the ownership and partition
-contracts. [Architecture Rules And The Debt Ratchet](architecture-enforcement.md) describes their
-enforcement during the move to branch-owned runtime.
+The
+[repository rule](https://github.com/nervix-io/nervix/blob/main/AGENTS.md#a-branch-owns-its-runtime)
+defines the ownership and partition contracts.
+[Architecture Rules And The Debt Ratchet](architecture-enforcement.md) describes their enforcement
+during the move to branch-owned runtime.

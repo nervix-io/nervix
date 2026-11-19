@@ -848,11 +848,12 @@ jobs:
 
       - name: Publish Book
         env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CLOUDFLARE_ZONE_ID: ${{ secrets.CLOUDFLARE_ZONE_ID }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          BOOK_R2_API_TOKEN: ${{ secrets.BOOK_R2_API_TOKEN }}
+          BOOK_R2_ACCOUNT_ID: ${{ secrets.BOOK_R2_ACCOUNT_ID }}
+          BOOK_ZONE_ID: ${{ secrets.BOOK_ZONE_ID }}
+          BOOK_R2_BUCKET: ${{ vars.BOOK_R2_BUCKET }}
         run: |
-          just publish-book "${{ steps.docs.outputs.target }}" "$CLOUDFLARE_ZONE_ID"
+          just publish-book "${{ steps.docs.outputs.target }}" "$BOOK_ZONE_ID" snapshot "$BOOK_R2_BUCKET"
 
       - name: Publish docs link to build summary
         run: |

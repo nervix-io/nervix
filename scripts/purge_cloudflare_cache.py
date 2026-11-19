@@ -29,9 +29,9 @@ def main() -> int:
     parser.add_argument("--zone-id", required=True, help="Cloudflare zone id")
     args = parser.parse_args()
 
-    api_token = os.environ.get("CLOUDFLARE_API_TOKEN")
+    api_token = os.environ.get("BOOK_R2_API_TOKEN")
     if api_token is None:
-        raise SystemExit("CLOUDFLARE_API_TOKEN must be set")
+        raise SystemExit("BOOK_R2_API_TOKEN must be set")
 
     purge_everything(args.zone_id, api_token)
     return 0

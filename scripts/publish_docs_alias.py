@@ -56,12 +56,12 @@ def main() -> int:
     parser.add_argument("--zone-id", required=True, help="Cloudflare zone id to purge")
     args = parser.parse_args()
 
-    api_token = os.environ.get("CLOUDFLARE_API_TOKEN")
+    api_token = os.environ.get("BOOK_R2_API_TOKEN")
     if api_token is None:
-        raise SystemExit("CLOUDFLARE_API_TOKEN must be set")
-    account_id = os.environ.get("CLOUDFLARE_ACCOUNT_ID")
+        raise SystemExit("BOOK_R2_API_TOKEN must be set")
+    account_id = os.environ.get("BOOK_R2_ACCOUNT_ID")
     if account_id is None:
-        raise SystemExit("CLOUDFLARE_ACCOUNT_ID must be set")
+        raise SystemExit("BOOK_R2_ACCOUNT_ID must be set")
 
     source = Path(args.source)
     if not source.is_dir():
