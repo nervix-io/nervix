@@ -581,6 +581,13 @@
           "shard": 17,
           "budget_minutes": 10,
           "run": ["emitter-owner-crash", "--connector-metrics", "--nodes", "3"]
+        },
+        {
+          "id": "graceful-stop",
+          "shard": 17,
+          "budget_minutes": 12,
+          "note": "the chaos reproduction of Graceful Lifecycle 01",
+          "run": ["graceful-stop"]
         }
       ]
     }
