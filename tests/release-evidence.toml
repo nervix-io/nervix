@@ -113,13 +113,13 @@ name = "extra-doctests"
 
 [[method]]
 checks = ["extra-tests"]
-description = "Miri over the expiry map"
+description = "Miri over the expiry map and the standalone relay channel"
 label = "extra-miri"
 name = "extra-miri"
 
 [[method]]
 checks = ["extra-tests"]
-description = "Mutation tests of the expiry map"
+description = "Mutation tests of the expiry map and the standalone relay channel"
 label = "extra-mutation"
 name = "extra-mutation"
 
