@@ -1316,8 +1316,7 @@ test-list-conversions *args: build-deps
 
 # Create domains, users and resources through the web console's popup forms on in-process one- and
 # three-node clusters, with rejected, queued, recovered and pending submissions, and with only the
-# in-process server's prerequisites. The input is an absolute glob, so Cucumber reads the feature
-# file instead of walking the checkout; a literal path is no glob and selects nothing.
+# in-process server's prerequisites.
 [positional-arguments]
 test-visual-create *args: build-web-console wasm-processor-guests download-onnxruntime
     #!/usr/bin/env bash
@@ -1327,7 +1326,7 @@ test-visual-create *args: build-web-console wasm-processor-guests download-onnxr
         --input "$PWD/tests/features/web-console/visual_create{,}.feature" "$@"
 
 # Create ingestors through the web console's visual form on in-process one- and three-node clusters,
-# their RATE LIMIT rows included. The input is an absolute glob, as `test-visual-create` explains.
+# their RATE LIMIT rows included.
 [positional-arguments]
 test-visual-create-ingestor *args: build-web-console wasm-processor-guests download-onnxruntime
     #!/usr/bin/env bash
@@ -1367,8 +1366,7 @@ test-placement-members *args: build-web-console download-onnxruntime
 
 # Create placement rules, use the contextual create actions and build a complete graph in one
 # transaction through the web console's visual forms on in-process one- and three-node clusters,
-# with only the in-process server's prerequisites. The input is an absolute glob, so Cucumber
-# reads the two feature files instead of walking the checkout.
+# with only the in-process server's prerequisites.
 [positional-arguments]
 test-visual-placement-graph *args: build-web-console wasm-processor-guests download-onnxruntime
     #!/usr/bin/env bash
