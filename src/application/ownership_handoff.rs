@@ -18,7 +18,7 @@
 )]
 
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, btree_map},
     time::Duration,
 };
 
@@ -82,6 +82,90 @@ pub(in crate::application) struct PlannedOwnershipHandoff {
     pub(in crate::application) started_at: nervix_primitives::time::Instant,
     preparation_deadline: nervix_primitives::time::Instant,
     activation_deadline: nervix_primitives::time::Instant,
+}
+
+/// The frozen cut of each old unit a regrouped reader's moves read, by unit.
+type FrozenIngestorUnitSources =
+    BTreeMap<NodeUnitRef, Vec<nervix_interconnect::OwnershipHandoffCheckpoint>>;
+
+/// What every capture and preparation request of one planned handoff carries.
+struct PlannedHandoffRequestScope<'a> {
+    coordination: &'a CoordinationIdentity,
+    operation_id: &'a str,
+    domain: &'a DomainName,
+    node_incarnations: &'a BTreeMap<ClusterNodeName, ClusterNodeIncarnation>,
+    base_schedule_fingerprint: [u8; 32],
+    target_schedule_fingerprint: [u8; 32],
+    preparation_deadline: nervix_primitives::time::Instant,
+}
+
+impl PlannedHandoffRequestScope<'_> {
+    fn incarnation(&self, node: &ClusterNodeName) -> ClusterNodeIncarnation {
+        *self
+            .node_incarnations
+            .get(node)
+            .verified("every handoff participant was found in live gossip before the handoff")
+    }
+
+    fn preparation_request(
+        &self,
+        moved: &PlannedOwnershipMove,
+        input: nervix_interconnect::OwnershipHandoffInput,
+    ) -> RemotePrepareOwnershipHandoffStateRequest {
+        RemotePrepareOwnershipHandoffStateRequest {
+            coordination: self.coordination.clone(),
+            operation_id: self.operation_id.to_string(),
+            source: moved.former_owner.clone(),
+            destination: moved.destination.clone(),
+            source_incarnation: self.incarnation(&moved.former_owner),
+            destination_incarnation: self.incarnation(&moved.destination),
+            domain: self.domain.clone(),
+            unit: moved.unit,
+            entity: moved.entity.clone(),
+            base_schedule_fingerprint: self.base_schedule_fingerprint,
+            target_schedule_fingerprint: self.target_schedule_fingerprint,
+            input,
+        }
+    }
+
+    fn failure(&self, reason: String) -> Report<DomainAlterError> {
+        Report::new(DomainAlterError::EntityGate {
+            domain: self.domain.clone(),
+            operation: EntityGatePurpose::OwnershipHandoff.operation_name(),
+            reason,
+        })
+    }
+}
+
+/// How the capture of one planned move ended: with its input, its failure, or the deadline.
+struct PlannedMoveCapture<'a> {
+    moved: &'a PlannedOwnershipMove,
+    capture: Result<
+        OwnershipHandoffResult<nervix_interconnect::OwnershipHandoffInput>,
+        nervix_primitives::time::error::Elapsed,
+    >,
+}
+
+/// A planned move whose input was captured and is ready to prepare.
+struct CapturedPlannedMove<'a> {
+    moved: &'a PlannedOwnershipMove,
+    input: nervix_interconnect::OwnershipHandoffInput,
+}
+
+/// How the preparation of one planned move ended on its destination and replicas.
+struct PlannedMovePreparation<'a> {
+    moved: &'a PlannedOwnershipMove,
+    preparation: Result<OwnershipHandoffResult<()>, nervix_primitives::time::error::Elapsed>,
+}
+
+/// How the capture of one old unit's frozen cut ended.
+struct FrozenSourceCapture<'a> {
+    key: &'a NodeUnitRef,
+    source: &'a PlannedOwnershipMove,
+    capture: Result<
+        OwnershipHandoffResult<Vec<nervix_interconnect::OwnershipHandoffCheckpoint>>,
+        nervix_primitives::time::error::Elapsed,
+    >,
 }
 
 struct ClusterOwnershipHandoffPreparations {
@@ -1219,140 +1303,28 @@ impl SessionServiceImpl {
             domain,
             target_schedule_fingerprint,
         );
-        let mut captured_units = BTreeMap::new();
-        for moved in &moves {
-            nervix_primitives::task::consume_budget().await;
-            let capture = nervix_primitives::time::timeout_at(
-                preparation_deadline,
-                self.capture_planned_ownership_input(
-                    &preparations,
-                    moved,
-                    &node_incarnations,
-                    base_schedule_fingerprint,
-                    &mut captured_units,
-                ),
+        let scope = PlannedHandoffRequestScope {
+            coordination: &coordination,
+            operation_id: &operation_id,
+            domain,
+            node_incarnations: &node_incarnations,
+            base_schedule_fingerprint,
+            target_schedule_fingerprint,
+            preparation_deadline,
+        };
+        if let Err(error) = self
+            .prepare_planned_ownership_moves(&scope, &mut preparations, &moves)
+            .await
+        {
+            self.discard_attempted_ownership_handoff_preparations(&mut preparations)
+                .await;
+            self.release_failed_ownership_gate(
+                gate,
+                impact.as_ref().map(|(impact, _)| *impact),
+                &error,
             )
             .await;
-            let input = match capture {
-                Ok(Ok(checkpoints)) => checkpoints,
-                Ok(Err(reason)) => {
-                    self.discard_attempted_ownership_handoff_preparations(&mut preparations)
-                        .await;
-                    let error = Report::new(DomainAlterError::EntityGate {
-                        domain: domain.clone(),
-                        operation: EntityGatePurpose::OwnershipHandoff.operation_name(),
-                        reason: format!(
-                            "failed to capture {} '{}' on source node '{}': {reason}",
-                            moved.entity.kind.as_str(),
-                            moved.entity.identifier.as_str(),
-                            moved.former_owner
-                        ),
-                    });
-                    self.release_failed_ownership_gate(
-                        gate,
-                        impact.as_ref().map(|(impact, _)| *impact),
-                        &error,
-                    )
-                    .await;
-                    return Err(error);
-                }
-                Err(_) => {
-                    self.discard_attempted_ownership_handoff_preparations(&mut preparations)
-                        .await;
-                    let error = Report::new(DomainAlterError::EntityGate {
-                        domain: domain.clone(),
-                        operation: EntityGatePurpose::OwnershipHandoff.operation_name(),
-                        reason: format!(
-                            "timed out capturing {} '{}' on source node '{}'",
-                            moved.entity.kind.as_str(),
-                            moved.entity.identifier.as_str(),
-                            moved.former_owner
-                        ),
-                    });
-                    self.release_failed_ownership_gate(
-                        gate,
-                        impact.as_ref().map(|(impact, _)| *impact),
-                        &error,
-                    )
-                    .await;
-                    return Err(error);
-                }
-            };
-
-            preparations.record_attempt(moved);
-            let result = nervix_primitives::time::timeout_at(
-                preparation_deadline,
-                self.prepare_planned_ownership_input(
-                    moved,
-                    &node_incarnations,
-                    RemotePrepareOwnershipHandoffStateRequest {
-                        coordination: coordination.clone(),
-                        operation_id: operation_id.clone(),
-                        source: moved.former_owner.clone(),
-                        destination: moved.destination.clone(),
-                        source_incarnation: *node_incarnations
-                            .get(&moved.former_owner)
-                            .verified("every former owner was found in live gossip above"),
-                        destination_incarnation: *node_incarnations
-                            .get(&moved.destination)
-                            .verified("every destination was found in live gossip above"),
-                        domain: domain.clone(),
-                        unit: moved.unit,
-                        entity: moved.entity.clone(),
-                        base_schedule_fingerprint,
-                        target_schedule_fingerprint,
-                        input,
-                    },
-                ),
-            )
-            .await;
-            match result {
-                Ok(Ok(())) => {}
-                Ok(Err(reason)) => {
-                    self.discard_attempted_ownership_handoff_preparations(&mut preparations)
-                        .await;
-                    let error = Report::new(DomainAlterError::EntityGate {
-                        domain: domain.clone(),
-                        operation: EntityGatePurpose::OwnershipHandoff.operation_name(),
-                        reason: format!(
-                            "failed to prepare {} '{}' from node '{}' on node '{}': {reason}",
-                            moved.entity.kind.as_str(),
-                            moved.entity.identifier.as_str(),
-                            moved.former_owner,
-                            moved.destination
-                        ),
-                    });
-                    self.release_failed_ownership_gate(
-                        gate,
-                        impact.as_ref().map(|(impact, _)| *impact),
-                        &error,
-                    )
-                    .await;
-                    return Err(error);
-                }
-                Err(_) => {
-                    self.discard_attempted_ownership_handoff_preparations(&mut preparations)
-                        .await;
-                    let error = Report::new(DomainAlterError::EntityGate {
-                        domain: domain.clone(),
-                        operation: EntityGatePurpose::OwnershipHandoff.operation_name(),
-                        reason: format!(
-                            "timed out preparing {} '{}' from node '{}' on node '{}'",
-                            moved.entity.kind.as_str(),
-                            moved.entity.identifier.as_str(),
-                            moved.former_owner,
-                            moved.destination
-                        ),
-                    });
-                    self.release_failed_ownership_gate(
-                        gate,
-                        impact.as_ref().map(|(impact, _)| *impact),
-                        &error,
-                    )
-                    .await;
-                    return Err(error);
-                }
-            }
+            return Err(error);
         }
         #[cfg(feature = "testing")]
         self.inner
@@ -1423,33 +1395,200 @@ impl SessionServiceImpl {
         Ok(Some(handoff))
     }
 
+    /// Captures every move of a planned handoff and prepares it on its destination and replicas.
+    ///
+    /// The moves proceed at the same time, each within the preparation deadline, so preparing a
+    /// handoff takes about as long as its slowest move rather than the sum of its moves. Doing them
+    /// one after another made a reader regrouped from twelve units into sixteen wait for every one
+    /// of its sixteen moves, each reading all twelve old units, in turn.
+    ///
+    /// A capture only reads, so the first failed capture ends the step at once. A preparation
+    /// persists on its recipients, so every attempt is recorded before any preparation starts, and
+    /// after a failure the preparations already started finish, or reach the deadline, before the
+    /// caller discards the attempts.
+    async fn prepare_planned_ownership_moves(
+        &self,
+        scope: &PlannedHandoffRequestScope<'_>,
+        preparations: &mut ClusterOwnershipHandoffPreparations,
+        moves: &[PlannedOwnershipMove],
+    ) -> Result<(), Report<DomainAlterError>> {
+        let frozen_sources = self
+            .capture_frozen_ingestor_unit_sources(scope, moves)
+            .await?;
+        let mut captures = FuturesUnordered::new();
+        for moved in moves {
+            let frozen_sources = &frozen_sources;
+            captures.push(async move {
+                let capture = nervix_primitives::time::timeout_at(
+                    scope.preparation_deadline,
+                    self.capture_planned_ownership_input(scope, moved, frozen_sources),
+                )
+                .await;
+                PlannedMoveCapture { moved, capture }
+            });
+        }
+        let mut captured = Vec::with_capacity(moves.len());
+        while let Some(PlannedMoveCapture { moved, capture }) = captures.next().await {
+            nervix_primitives::task::consume_budget().await;
+            match capture {
+                Ok(Ok(input)) => captured.push(CapturedPlannedMove { moved, input }),
+                Ok(Err(reason)) => {
+                    return Err(scope.failure(format!(
+                        "failed to capture {} '{}' on source node '{}': {reason}",
+                        moved.entity.kind.as_str(),
+                        moved.entity.identifier.as_str(),
+                        moved.former_owner
+                    )));
+                }
+                Err(_) => {
+                    return Err(scope.failure(format!(
+                        "timed out capturing {} '{}' on source node '{}'",
+                        moved.entity.kind.as_str(),
+                        moved.entity.identifier.as_str(),
+                        moved.former_owner
+                    )));
+                }
+            }
+        }
+        for captured_move in &captured {
+            preparations.record_attempt(captured_move.moved);
+        }
+        let mut preparing = FuturesUnordered::new();
+        for CapturedPlannedMove { moved, input } in captured {
+            let request = scope.preparation_request(moved, input);
+            preparing.push(async move {
+                let preparation = nervix_primitives::time::timeout_at(
+                    scope.preparation_deadline,
+                    self.prepare_planned_ownership_input(moved, scope.node_incarnations, request),
+                )
+                .await;
+                PlannedMovePreparation { moved, preparation }
+            });
+        }
+        let mut failure = None;
+        while let Some(PlannedMovePreparation { moved, preparation }) = preparing.next().await {
+            nervix_primitives::task::consume_budget().await;
+            let error = match preparation {
+                Ok(Ok(())) => continue,
+                Ok(Err(reason)) => scope.failure(format!(
+                    "failed to prepare {} '{}' from node '{}' on node '{}': {reason}",
+                    moved.entity.kind.as_str(),
+                    moved.entity.identifier.as_str(),
+                    moved.former_owner,
+                    moved.destination
+                )),
+                Err(_) => scope.failure(format!(
+                    "timed out preparing {} '{}' from node '{}' on node '{}'",
+                    moved.entity.kind.as_str(),
+                    moved.entity.identifier.as_str(),
+                    moved.former_owner,
+                    moved.destination
+                )),
+            };
+            if failure.is_none() {
+                failure = Some(error);
+            }
+        }
+        match failure {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
+    }
+
+    /// Captures, once each and all at the same time, the frozen cut of every old unit a regrouped
+    /// reader's moves read.
+    ///
+    /// Every move of such a reader projects every one of these cuts for its own new unit, so the
+    /// cuts are captured before the moves rather than by whichever move reaches a unit first.
+    async fn capture_frozen_ingestor_unit_sources(
+        &self,
+        scope: &PlannedHandoffRequestScope<'_>,
+        moves: &[PlannedOwnershipMove],
+    ) -> Result<FrozenIngestorUnitSources, Report<DomainAlterError>> {
+        let mut sources = BTreeMap::<NodeUnitRef, PlannedOwnershipMove>::new();
+        for moved in moves {
+            let PlannedOwnershipInput::IngestorUnits(layout) = &moved.input else {
+                continue;
+            };
+            for (unit, node) in &layout.sources {
+                let key = NodeUnitRef::new(moved.entity.clone(), *unit);
+                if let btree_map::Entry::Vacant(entry) = sources.entry(key) {
+                    let mut source = moved.clone();
+                    source.unit = *unit;
+                    source.former_owner = node.clone();
+                    entry.insert(source);
+                }
+            }
+        }
+        let mut captures = FuturesUnordered::new();
+        for (key, source) in &sources {
+            captures.push(async move {
+                let capture = nervix_primitives::time::timeout_at(
+                    scope.preparation_deadline,
+                    self.capture_ownership_handoff_state(
+                        scope,
+                        source,
+                        scope.incarnation(&source.former_owner),
+                        nervix_interconnect::OwnershipHandoffSelection::Unit,
+                    ),
+                )
+                .await;
+                FrozenSourceCapture {
+                    key,
+                    source,
+                    capture,
+                }
+            });
+        }
+        let mut frozen = FrozenIngestorUnitSources::new();
+        while let Some(FrozenSourceCapture {
+            key,
+            source,
+            capture,
+        }) = captures.next().await
+        {
+            nervix_primitives::task::consume_budget().await;
+            match capture {
+                Ok(Ok(checkpoints)) => {
+                    frozen.insert(key.clone(), checkpoints);
+                }
+                Ok(Err(reason)) => {
+                    return Err(scope.failure(format!(
+                        "failed to capture {} '{}' on source node '{}': {reason}",
+                        source.entity.kind.as_str(),
+                        source.entity.identifier.as_str(),
+                        source.former_owner
+                    )));
+                }
+                Err(_) => {
+                    return Err(scope.failure(format!(
+                        "timed out capturing {} '{}' on source node '{}'",
+                        source.entity.kind.as_str(),
+                        source.entity.identifier.as_str(),
+                        source.former_owner
+                    )));
+                }
+            }
+        }
+        Ok(frozen)
+    }
+
     async fn capture_planned_ownership_input(
         &self,
-        preparations: &ClusterOwnershipHandoffPreparations,
+        scope: &PlannedHandoffRequestScope<'_>,
         moved: &PlannedOwnershipMove,
-        incarnations: &BTreeMap<ClusterNodeName, ClusterNodeIncarnation>,
-        base_schedule_fingerprint: [u8; 32],
-        captured_units: &mut BTreeMap<
-            NodeUnitRef,
-            Vec<nervix_interconnect::OwnershipHandoffCheckpoint>,
-        >,
+        frozen_sources: &FrozenIngestorUnitSources,
     ) -> OwnershipHandoffResult<nervix_interconnect::OwnershipHandoffInput> {
         use nervix_interconnect::{
             IngestorUnitSelection, OwnershipHandoffInput, OwnershipHandoffSelection,
             OwnershipHandoffSource,
         };
-        let incarnation = |node: &ClusterNodeName| {
-            *incarnations
-                .get(node)
-                .verified("every handoff participant has a bound incarnation")
-        };
         match &moved.input {
             PlannedOwnershipInput::Unit => Ok(OwnershipHandoffInput::Unit(
                 self.capture_ownership_handoff_state(
-                    preparations,
+                    scope,
                     moved,
-                    incarnation(&moved.former_owner),
-                    base_schedule_fingerprint,
+                    scope.incarnation(&moved.former_owner),
                     OwnershipHandoffSelection::Unit,
                 )
                 .await?,
@@ -1461,32 +1600,19 @@ impl SessionServiceImpl {
                 };
                 let mut sources = Vec::with_capacity(layout.sources.len());
                 for (unit, node) in &layout.sources {
+                    nervix_primitives::task::consume_budget().await;
                     let mut source = moved.clone();
                     source.unit = *unit;
                     source.former_owner = node.clone();
-                    let key = NodeUnitRef::new(moved.entity.clone(), *unit);
-                    if !captured_units.contains_key(&key) {
-                        let checkpoints = self
-                            .capture_ownership_handoff_state(
-                                preparations,
-                                &source,
-                                incarnation(node),
-                                base_schedule_fingerprint,
-                                OwnershipHandoffSelection::Unit,
-                            )
-                            .await?;
-                        captured_units.insert(key.clone(), checkpoints);
-                    }
-                    let captured = captured_units
-                        .get(&key)
-                        .verified("the frozen source cut was captured above")
+                    let captured = frozen_sources
+                        .get(&NodeUnitRef::new(moved.entity.clone(), *unit))
+                        .verified("every source unit's frozen cut is captured before the moves")
                         .clone();
                     let checkpoints = self
                         .capture_ownership_handoff_state(
-                            preparations,
+                            scope,
                             &source,
-                            incarnation(node),
-                            base_schedule_fingerprint,
+                            scope.incarnation(node),
                             OwnershipHandoffSelection::IngestorUnits {
                                 selection,
                                 checkpoints: captured,
@@ -1495,7 +1621,7 @@ impl SessionServiceImpl {
                         .await?;
                     sources.push(OwnershipHandoffSource {
                         node: node.clone(),
-                        incarnation: incarnation(node),
+                        incarnation: scope.incarnation(node),
                         unit: *unit,
                         checkpoints,
                     });
@@ -1505,7 +1631,7 @@ impl SessionServiceImpl {
                     schema_fingerprint: layout.schema_fingerprint,
                     kafka_offsets: layout.kafka_offsets,
                     recipient: moved.destination.clone(),
-                    recipient_incarnation: incarnation(&moved.destination),
+                    recipient_incarnation: scope.incarnation(&moved.destination),
                     sources,
                 })
             }
@@ -1538,15 +1664,15 @@ impl SessionServiceImpl {
 
     async fn capture_ownership_handoff_state(
         &self,
-        preparations: &ClusterOwnershipHandoffPreparations,
+        scope: &PlannedHandoffRequestScope<'_>,
         moved: &PlannedOwnershipMove,
         source_incarnation: ClusterNodeIncarnation,
-        base_schedule_fingerprint: [u8; 32],
         selection: nervix_interconnect::OwnershipHandoffSelection,
     ) -> OwnershipHandoffResult<Vec<nervix_interconnect::OwnershipHandoffCheckpoint>> {
-        let coordination = &preparations.coordination;
-        let operation_id = preparations.operation_id.as_str();
-        let domain = &preparations.domain;
+        let coordination = scope.coordination;
+        let operation_id = scope.operation_id;
+        let domain = scope.domain;
+        let base_schedule_fingerprint = scope.base_schedule_fingerprint;
         Self::verify_ownership_handoff_node_incarnation(
             &self.live_node_incarnations().await,
             &moved.former_owner,
@@ -1749,66 +1875,83 @@ impl SessionServiceImpl {
         response.map_err(|failure| OwnershipHandoffError::participant(failure.to_string()))
     }
 
+    /// Confirms every prepared move of `handoff`, the moves at the same time. A confirmation only
+    /// checks what its node holds, so the first failure ends the step at once.
     async fn confirm_planned_ownership_handoff(
         &self,
         handoff: &PlannedOwnershipHandoff,
     ) -> OwnershipHandoffResult<()> {
+        let mut confirmations = FuturesUnordered::new();
         for moved in &handoff.moves {
+            confirmations.push(self.confirm_planned_ownership_move(handoff, moved));
+        }
+        while let Some(confirmation) = confirmations.next().await {
             nervix_primitives::task::consume_budget().await;
-            let request = RemoteConfirmOwnershipHandoffStateRequest {
-                coordination: handoff.gate.coordination.clone(),
-                operation_id: handoff.operation_id.clone(),
-                source: moved.former_owner.clone(),
-                destination: moved.destination.clone(),
-                source_incarnation: *handoff
-                    .node_incarnations
-                    .get(&moved.former_owner)
-                    .verified("every planned former owner has a bound incarnation"),
-                destination_incarnation: *handoff
-                    .node_incarnations
-                    .get(&moved.destination)
-                    .verified("every planned destination has a bound incarnation"),
-                domain: handoff.gate.domain.clone(),
-                unit: moved.unit,
-                entity: moved.entity.clone(),
-                base_schedule_fingerprint: handoff.base_schedule_fingerprint,
-                target_schedule_fingerprint: handoff.target_schedule_fingerprint,
-                participant: nervix_interconnect::OwnershipHandoffParticipant::Destination,
-            };
-            let sources = match &moved.input {
-                PlannedOwnershipInput::Unit => vec![(moved.unit, moved.former_owner.clone())],
-                PlannedOwnershipInput::IngestorUnits(layout) => layout.sources.clone(),
-            };
-            let mut grouped = BTreeMap::<ClusterNodeName, Vec<Unit>>::new();
-            for (unit, node) in sources {
-                grouped.entry(node).or_default().push(unit);
-            }
-            for (node, units) in grouped {
-                let mut confirmation = request.clone();
-                confirmation.participant =
-                    nervix_interconnect::OwnershipHandoffParticipant::Source {
-                        incarnation: *handoff
-                            .node_incarnations
-                            .get(&node)
-                            .verified("every source has a bound incarnation"),
-                        node: node.clone(),
-                        units,
-                    };
-                self.confirm_ownership_handoff_on_node(
-                    &node,
-                    confirmation,
-                    handoff.preparation_deadline,
-                )
-                .await?;
-            }
+            confirmation?;
+        }
+        Ok(())
+    }
+
+    /// Confirms one prepared move: on every node that holds one of its source units, then on its
+    /// destination.
+    async fn confirm_planned_ownership_move(
+        &self,
+        handoff: &PlannedOwnershipHandoff,
+        moved: &PlannedOwnershipMove,
+    ) -> OwnershipHandoffResult<()> {
+        let request = RemoteConfirmOwnershipHandoffStateRequest {
+            coordination: handoff.gate.coordination.clone(),
+            operation_id: handoff.operation_id.clone(),
+            source: moved.former_owner.clone(),
+            destination: moved.destination.clone(),
+            source_incarnation: *handoff
+                .node_incarnations
+                .get(&moved.former_owner)
+                .verified("every planned former owner has a bound incarnation"),
+            destination_incarnation: *handoff
+                .node_incarnations
+                .get(&moved.destination)
+                .verified("every planned destination has a bound incarnation"),
+            domain: handoff.gate.domain.clone(),
+            unit: moved.unit,
+            entity: moved.entity.clone(),
+            base_schedule_fingerprint: handoff.base_schedule_fingerprint,
+            target_schedule_fingerprint: handoff.target_schedule_fingerprint,
+            participant: nervix_interconnect::OwnershipHandoffParticipant::Destination,
+        };
+        let sources = match &moved.input {
+            PlannedOwnershipInput::Unit => vec![(moved.unit, moved.former_owner.clone())],
+            PlannedOwnershipInput::IngestorUnits(layout) => layout.sources.clone(),
+        };
+        let mut grouped = BTreeMap::<ClusterNodeName, Vec<Unit>>::new();
+        for (unit, node) in sources {
+            grouped.entry(node).or_default().push(unit);
+        }
+        for (node, units) in grouped {
             nervix_primitives::task::consume_budget().await;
+            let mut confirmation = request.clone();
+            confirmation.participant = nervix_interconnect::OwnershipHandoffParticipant::Source {
+                incarnation: *handoff
+                    .node_incarnations
+                    .get(&node)
+                    .verified("every source has a bound incarnation"),
+                node: node.clone(),
+                units,
+            };
             self.confirm_ownership_handoff_on_node(
-                &moved.destination,
-                request,
+                &node,
+                confirmation,
                 handoff.preparation_deadline,
             )
             .await?;
         }
+        nervix_primitives::task::consume_budget().await;
+        self.confirm_ownership_handoff_on_node(
+            &moved.destination,
+            request,
+            handoff.preparation_deadline,
+        )
+        .await?;
         Ok(())
     }
 

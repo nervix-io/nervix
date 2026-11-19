@@ -7286,6 +7286,46 @@ scenario = "A growing Kafka topology preserves keyed state when a producer moves
 selections = ["deloxide-stress"]
 
 [[workload]]
+coverage = "Production planned ownership handoff of a regrouped reader: concurrent per-move capture, preparation and confirmation, concurrent source reads of each preparation, schedule publication and native checkpoint transfer. Broker I/O, async observation and routing publications are outside detector evidence."
+examples = 2
+feature = "tests/features/runtime/inherited_partitions.feature"
+id = "scenario.inherited-growth-slow-handoff-reads"
+invariant = "A growing topology's regrouping handoff finishes within one entity gate deadline while every checkpoint read is slow, and the new epoch's readers deliver once, without a tracked deadlock."
+invocation = "scenarios"
+scenario = "A growing Kafka topology is published within the entity gate deadline when every handoff checkpoint read is slow"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: Production planned ownership handoff of a regrouped reader: concurrent per-move capture, preparation and confirmation, concurrent source reads of each preparation, schedule publication and native checkpoint transfer. Broker I/O, async observation and routing publications are outside detector evidence."
+examples = 2
+feature = "tests/features/runtime/inherited_partitions.feature"
+id = "stress.inherited-growth-slow-handoff-reads"
+invariant = "A growing topology's regrouping handoff finishes within one entity gate deadline while every checkpoint read is slow, and the new epoch's readers deliver once, without a tracked deadlock."
+invocation = "stress-scenarios"
+scenario = "A growing Kafka topology is published within the entity gate deadline when every handoff checkpoint read is slow"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Production planned ownership handoff of a regrouped reader that times out capturing, discards its attempt and releases its gate on every attempt, then succeeds on a later attempt: concurrent per-move capture, preparation and confirmation, schedule publication and native checkpoint transfer. Broker I/O, async observation and routing publications are outside detector evidence."
+examples = 2
+feature = "tests/features/runtime/inherited_partitions.feature"
+id = "scenario.inherited-growth-handoff-timeout-retry"
+invariant = "A regrouping handoff that times out leaves the readers on the previous layout, a later attempt publishes the growth, and every record is delivered once, without a tracked deadlock."
+invocation = "scenarios"
+scenario = "A growing Kafka topology whose handoff times out keeps the previous layout until a later attempt publishes it"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: Production planned ownership handoff of a regrouped reader that times out capturing, discards its attempt and releases its gate on every attempt, then succeeds on a later attempt: concurrent per-move capture, preparation and confirmation, schedule publication and native checkpoint transfer. Broker I/O, async observation and routing publications are outside detector evidence."
+examples = 2
+feature = "tests/features/runtime/inherited_partitions.feature"
+id = "stress.inherited-growth-handoff-timeout-retry"
+invariant = "A regrouping handoff that times out leaves the readers on the previous layout, a later attempt publishes the growth, and every record is delivered once, without a tracked deadlock."
+invocation = "stress-scenarios"
+scenario = "A growing Kafka topology whose handoff times out keeps the previous layout until a later attempt publishes it"
+selections = ["deloxide-stress"]
+
+[[workload]]
 coverage = "Production source-instance lifecycle, branch runtime and ACK owners, schedule publication and native checkpoint transfer; restore additionally traverses captured materialized rows and epoch/provenance installation. Broker I/O, async observation and routing publications are outside detector evidence."
 examples = 2
 feature = "tests/features/runtime/inherited_partitions.feature"
