@@ -621,6 +621,18 @@ enum SubscriptionOrigin {
     Create { attempt: u64, draft_revision: u64 },
 }
 
+impl SubscriptionOrigin {
+    /// Whether the opened tab becomes the pane the console shows. An operator who typed,
+    /// submitted or resubscribed a subscription is looking for its rows; a restoration follows a
+    /// lost connection the operator did not ask for, so the pane they selected stays in view.
+    fn selects_opened_tab(self) -> bool {
+        match self {
+            Self::Console | Self::Create { .. } => true,
+            Self::Restoration => false,
+        }
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ClockRequestOrigin {
     Automatic,
@@ -3812,7 +3824,7 @@ fn apply_subscribe_outcome(
                     },
                 });
                 requests.hold_again(issued);
-            } else if opened {
+            } else if opened && origin.selects_opened_tab() {
                 signals.active_subscription_tab.set(Some(tab_id));
             }
             if let SubscriptionOrigin::Create {
@@ -9976,6 +9988,48 @@ mod tests {
             assert!(signals.subscription_tabs.with_untracked(|tabs| {
                 matches!(&tabs[0].state, SubscriptionTabState::Open(_))
             }));
+        });
+    }
+
+    #[test]
+    fn a_restored_tab_keeps_the_pane_the_operator_selected() {
+        Owner::new().with(|| {
+            for selected in [None, Some(1)] {
+                let signals =
+                    subscription_signals(SubscriptionTabState::Restoring(test_restoration()));
+                signals.active_subscription_tab.set(selected);
+                let mut requests = SessionRequests::new(Some(SESSION_LIMITS));
+                let stream = test_stream();
+                apply_subscribe_outcome(
+                    signals,
+                    &mut requests,
+                    SubscriptionStarted {
+                        tab_id: 1,
+                        statement: "CREATE SUBSCRIPTION live TO orders;",
+                        origin: SubscriptionOrigin::Restoration,
+                    },
+                    SubscribeOutcome {
+                        disposition: SubscribeDisposition::Opened(Box::new(SubscriptionOpened {
+                            subscription: stream.subscription.clone(),
+                            domain: DomainName::parse("tenant").assured("the test domain is valid"),
+                            relay: nervix_models::RelayName::parse("orders")
+                                .assured("the test relay is valid"),
+                            subscription_type: SubscriptionType::Row,
+                            schema: stream.schema,
+                        })),
+                        message: String::new(),
+                        diagnostics: Vec::new(),
+                    },
+                );
+                assert!(signals.subscription_tabs.with_untracked(|tabs| {
+                    matches!(&tabs[0].state, SubscriptionTabState::Open(_))
+                }));
+                assert_eq!(
+                    signals.active_subscription_tab.get_untracked(),
+                    selected,
+                    "a restoration the operator did not ask for leaves the selected pane shown"
+                );
+            }
         });
     }
 
