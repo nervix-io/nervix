@@ -59,9 +59,10 @@ async fn a_delivery_to_the_relay_owner_reports_its_records_alive_while_it_waits(
     }
 
     drop(lease);
-    delivery
-        .await
-        .expect_err("the isolated test has no remote dispatcher");
+    assert!(
+        matches!(delivery.await, OwnerDelivery::Failed(_)),
+        "the isolated test has no remote dispatcher"
+    );
     assert!(matches!(completion.wait().await, AckOutcome::NoAck(_)));
 }
 

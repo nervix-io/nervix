@@ -1469,6 +1469,12 @@ impl Runtime {
     )]
     /// Hands `batch` to the owner of the unit of `relay` its key lands in: this node's owner buffer
     /// of that unit when this node owns it, and otherwise a delivery to the unit's owner.
+    ///
+    /// A route change can move the unit while a delivery to its former owner has not reached that
+    /// owner. The rows no owner admitted then follow the unit to its owner on the new route once
+    /// that route is in force: the next delivery waits at the unit's dispatch gate, which the change
+    /// holds until it has installed the route. Each further delivery follows another such change,
+    /// so the rows go round at most once per route change that happens while they travel.
     pub(in crate::runtime) async fn ingest_stream_boundary_message(
         &self,
         domain: &DomainName,
@@ -1486,10 +1492,25 @@ impl Runtime {
                 return Err(Box::new(batch.clone()));
             }
         };
-        if !self.owns_relay_unit(services, unit) {
-            return services.dispatch_to_owner(domain, relay, batch, unit).await;
+        let mut rerouted: Option<Box<RelayRecordBatch>> = None;
+        loop {
+            nervix_primitives::task::consume_budget().await;
+            let pending = match &rerouted {
+                Some(rows) => rows.as_ref(),
+                None => batch,
+            };
+            if self.owns_relay_unit(services, unit) {
+                return services.enqueue_owner_batch(pending, unit).await;
+            }
+            let delivery = services
+                .dispatch_to_owner(domain, relay, pending, unit)
+                .await;
+            match delivery {
+                OwnerDelivery::Admitted => return Ok(()),
+                OwnerDelivery::Failed(rows) => return Err(rows),
+                OwnerDelivery::Rerouted(rows) => rerouted = Some(rows),
+            }
         }
-        services.enqueue_owner_batch(batch, unit).await
     }
 
     /// Executes the collected ingest group, then builds one Arrow batch per (relay,

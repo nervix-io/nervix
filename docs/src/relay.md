@@ -253,7 +253,9 @@ Operationally that means:
   aggregate expressions in ordered `SET` assignments
 - batches remain branch-local until a `REINGESTOR` or `EMITTER` boundary changes the routing behavior
 - a producer on a nonowner cluster node serializes a batch once and holds one fixed ingress slot
-  until the owner admits it into the relay buffer
+  until the owner admits it into the relay buffer; when a failover route change retires that slot
+  before the batch reached the owner, the producer delivers it again, once, to the owner on the new
+  route
 - the owner serializes an admitted batch at most once for its remote runtime consumers and once for
   remote session subscriptions, and shares each serialized body across the destination nodes; every
   local runtime consumer on a node shares that node's delivery, and a session subscription on a node

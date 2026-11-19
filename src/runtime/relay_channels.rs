@@ -434,6 +434,12 @@ impl RelayBranchChannels {
             || self.routing.load().is_cancelled()
     }
 
+    /// Whether this branch incarnation still lives: neither evicted nor closed with its relay. A
+    /// live branch whose channel ended lost only that channel's route.
+    pub(super) fn is_live(&self) -> bool {
+        !self.retired.is_cancelled() && !self.closed.is_cancelled()
+    }
+
     fn routes(&self) -> StdArc<BranchRoutes> {
         let mut current = self.routes.load_full();
         loop {

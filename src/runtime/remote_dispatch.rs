@@ -23,10 +23,10 @@
 
 use error_stack::ResultExt as _;
 use futures_util::future::Either;
-use nervix_interconnect::{RelayGrantRefusal, TransportError};
+use nervix_interconnect::{RelayGrantRefusal, RelaySendProgress, TransportError};
 
 use super::{
-    relay_boundary::RelayDeliveryChannel,
+    relay_boundary::{RelayDeliveryChannel, UnusedRelayPosition},
     relay_send_attempts::{
         GrantCapacityRefusals, RelaySendAttempts, RelaySendFailure, RelaySendStep,
     },
@@ -140,6 +140,13 @@ pub(super) enum RemoteDispatchError {
     },
     #[error("the outcome of relay delivery {sequence} on node '{target}' is indeterminate")]
     AdmissionIndeterminate {
+        target: ClusterNodeName,
+        sequence: u64,
+    },
+    /// No send of the delivery started an exchange with its receiver, so the receiver holds no
+    /// attempt of it and cannot have admitted any of its rows.
+    #[error("relay delivery {sequence} never reached node '{target}'")]
+    Unreached {
         target: ClusterNodeName,
         sequence: u64,
     },
@@ -341,8 +348,10 @@ pub(super) struct PendingRemoteAckDelivery {
 pub(super) enum RemoteAckStorage {
     /// The records are stored and travel with the delivery under these registrations.
     Stored(PendingRemoteAckDelivery),
-    /// The delivery's producer or channel ended while it waited for room to store them.
-    Cancelled,
+    /// The delivery's producer or channel ended while it waited for room to store them. Nothing
+    /// was stored, and the shares it handed over come back unresolved: whatever ends the delivery
+    /// resolves them, so that a delivery its batch carries on elsewhere leaves no share pending.
+    Cancelled { unstored: Vec<AckSet> },
 }
 
 /// The producer can be aborted while admission is unresolved, so its shared channel must start
@@ -380,6 +389,16 @@ impl PendingRemoteAckDelivery {
         self.registry
             .admit_acks(&self.registrations[self.admitted_rows..rows]);
         self.admitted_rows = rows;
+    }
+
+    /// Hands the records no receiver admitted back to the delivery that carries them next, when
+    /// this delivery never reached its receiver: their forwarded shares end, and the records stay
+    /// undecided rather than failing as a delivery that ended before admission fails them.
+    pub(super) fn release_unadmitted(mut self) {
+        for registration in self.registrations[self.admitted_rows..].iter().flatten() {
+            self.registry.release_ack(registration.ack_id);
+        }
+        self.admitted_rows = self.registrations.len();
     }
 }
 
@@ -489,12 +508,14 @@ impl RemoteDispatcher {
             .registry
             .store_acks(receiver.clone(), acks, deadline, timing, cancelled)
             .await?;
-        let RecordStorage::Stored {
-            registrations: ids,
-            timing,
-        } = storage
-        else {
-            return Ok(RemoteAckStorage::Cancelled);
+        let (ids, timing) = match storage {
+            RecordStorage::Stored {
+                registrations,
+                timing,
+            } => (registrations, timing),
+            RecordStorage::Cancelled { acks } => {
+                return Ok(RemoteAckStorage::Cancelled { unstored: acks });
+            }
         };
         let registrations = ids
             .into_iter()
@@ -655,7 +676,14 @@ impl RemoteDispatcher {
         capacity_refusals: GrantCapacityRefusals,
     ) -> error_stack::Result<(), RemoteDispatchError> {
         if channel.slot.cancellation().is_cancelled() {
+            // Nothing of this delivery was sent, so its receiver holds no attempt of it, and the
+            // channel's next delivery takes its unused position.
+            drop(UnusedRelayPosition::new(channel.slot, payload.delivery));
             return Err(Report::new(RemoteDispatchError::BranchEvicted {
+                target: node_id.clone(),
+                sequence: payload.delivery.sequence,
+            })
+            .change_context(RemoteDispatchError::Unreached {
                 target: node_id.clone(),
                 sequence: payload.delivery.sequence,
             }));
@@ -666,9 +694,15 @@ impl RemoteDispatcher {
             .relay_cancellation_guard(node_id.clone(), delivery);
         let (registration, admission) = self.register_pending_relay_admission()?;
         payload.admission = Some(registration.clone());
+        let progress = RelaySendProgress::default();
         let dispatch_result = {
-            let dispatch =
-                self.dispatch_relay_payload(node_id, payload, deadline, capacity_refusals);
+            let dispatch = self.dispatch_relay_payload(
+                node_id,
+                payload,
+                deadline,
+                capacity_refusals,
+                &progress,
+            );
             tokio::pin!(dispatch);
             nervix_primitives::select! {
                 biased;
@@ -699,6 +733,19 @@ impl RemoteDispatcher {
             ) {
                 cancellation_guard.disarm();
                 return Err(error);
+            }
+            if !progress.exchange_started() {
+                // The receiver holds no attempt of this delivery, so there is nothing to cancel
+                // or reconcile there, and asking a receiver that is gone would only hold this
+                // delivery, and the dispatch permits its sender holds, until the request times
+                // out. The delivery's position on its channel was never used, so the channel's
+                // next delivery takes it.
+                cancellation_guard.disarm();
+                drop(UnusedRelayPosition::new(channel.slot, delivery));
+                return Err(error.change_context(RemoteDispatchError::Unreached {
+                    target: node_id.clone(),
+                    sequence: delivery.sequence,
+                }));
             }
             let resolution = self
                 .resolve_failed_relay_admission(
@@ -1033,6 +1080,7 @@ impl RemoteDispatcher {
         payload: &RelayPayload,
         deadline: Instant,
         capacity_refusals: GrantCapacityRefusals,
+        progress: &RelaySendProgress,
     ) -> error_stack::Result<(), RemoteDispatchError> {
         let mut attempts = RelaySendAttempts::new(
             Instant::now(),
@@ -1046,7 +1094,7 @@ impl RemoteDispatcher {
             let sent = nervix_primitives::time::timeout_at(
                 attempts.attempt_deadline(),
                 self.interconnect
-                    .send(node_id, Envelope::RelayPayload(payload.clone())),
+                    .send_relay(node_id, payload.clone(), progress),
             )
             .await;
             let error = match sent {
