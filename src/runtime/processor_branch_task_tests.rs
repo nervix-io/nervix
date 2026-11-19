@@ -784,6 +784,178 @@ async fn detached_branch_publishes_buffered_route_output_before_it_stops() {
         .expect("the fixture relay owner stops");
 }
 
+/// A junction branch with one route to `routed_orders` on an hour-long cadence, holding `buffered`
+/// batches in that route, and the relay owner of its output.
+async fn junction_branch_holding(
+    runtime: &Runtime,
+    domain: &DomainName,
+    buffered: usize,
+) -> (BranchRuntime, RelayOwnerTask) {
+    let processor = named::<ModelName>("route_orders");
+    let output = named::<RelayName>("routed_orders");
+    let fanout = RelayBoundaryFanout::direct_with_capacity(nonzero_capacity(2));
+    let services = Arc::new(RelayBoundaryServices::new(
+        fanout,
+        1,
+        0,
+        Vec::new(),
+        None,
+        RelayBranchPresences::single(Arc::new(BranchPresence::new())),
+        nervix_primitives::sync::Arc::new(crate::runtime_ack::AckRootTracker::default()),
+    ));
+    let owner = runtime
+        .spawn_relay_owner_task(
+            domain,
+            &output,
+            Unit::SINGLE,
+            services.clone(),
+            RelayRetention::default(),
+        )
+        .expect("a whole relay schedules its single unit");
+    let mut template = junction_branch_template(processor.as_str(), "orders");
+    template
+        .relays
+        .insert(output.clone(), RelayProcessorRelayTemplate { services });
+    let junction = template
+        .processors
+        .get_mut(&processor)
+        .expect("the fixture declares its junction");
+    let RelayProcessorOperationTemplate::Junction { output_routes } = &mut junction.operation
+    else {
+        panic!("the fixture must declare a junction");
+    };
+    output_routes.routes.push(RelayProcessorOutputTemplate {
+        output_relay: output,
+        construction: nervix_models::RouteConstruction::default(),
+        flush_policy: Some(RuntimeFlushPolicy::Each {
+            interval: Duration::from_secs(3600),
+            max_batch_size: 1024 * 1024,
+        }),
+        message_error_policy: MessageErrorPolicy::Log,
+        compiled_program: None,
+    });
+    let domain_clock = runtime
+        .bind_domain_clock(domain)
+        .expect("the fixture installs a running unpaced clock");
+    let mut branch = template
+        .instantiate(runtime, domain, None, 1)
+        .await
+        .expect("the junction fixture instantiates")
+        .into_inner();
+    let node = branch
+        .processors
+        .get_mut(&processor)
+        .expect("the fixture instantiates its junction");
+    let RelayProcessorOperationNode::Junction { output_routes } = &mut node.operation else {
+        panic!("the fixture must instantiate a junction");
+    };
+    let route = output_routes
+        .routes
+        .first_mut()
+        .expect("the junction instantiates the route its template declares");
+    for _ in 0..buffered {
+        route
+            .enqueue(
+                quiesce_test_batch(),
+                &domain_clock,
+                &domain_clock
+                    .snapshot()
+                    .expect("the fixture installs a running unpaced clock"),
+            )
+            .expect("an hour-long cadence arms its route deadline");
+    }
+    (branch, owner)
+}
+
+/// Runs `branch` until a detach stop ends it, as a domain's teardown ends each branch.
+async fn detach_branch(runtime: &Runtime, domain: &DomainName, branch: BranchRuntime) {
+    let processor = named::<ModelName>("route_orders");
+    let (_input_sender, input) = mpsc::channel(1);
+    let (commands, command_rx) = mpsc::channel(1);
+    commands
+        .send(ProcessorBranchCommand::Stop(
+            ProcessorBranchStopMode::Detach,
+        ))
+        .await
+        .expect("the stop command queues before the branch task runs");
+    let (snapshot_shutdown, _) = watch::channel(false);
+    timeout(
+        Duration::from_secs(2),
+        run_processor_branch_task(
+            ProcessorRuntimeContext::new(runtime.clone(), domain.clone()),
+            ProcessorBranchRunIdentity {
+                processor: processor.clone(),
+                incarnation: 1,
+            },
+            branch,
+            input,
+            command_rx,
+            runtime.node_quiesce_counters(domain, NodeRef::new(ModelKind::Junction, &processor)),
+            ProcessorSnapshotTask {
+                shutdown_tx: snapshot_shutdown,
+                task: None,
+                requests: None,
+            },
+        ),
+    )
+    .await
+    .expect("a detached branch task stops");
+}
+
+/// A stopped domain's clock stops before its teardown ends each branch. A branch the stop's drain
+/// emptied loses nothing without that clock, so its end reports no error.
+#[nervix_primitives::test]
+async fn a_drained_branch_ends_without_its_clock_and_reports_nothing() {
+    let runtime = Runtime::default();
+    let domain = domain("default");
+    install_unpaced_test_domain(&runtime, &domain);
+    let (branch, owner) = junction_branch_holding(&runtime, &domain, 0).await;
+    let mut events = runtime.events().subscribe();
+    runtime
+        .domain_clock_lifecycle(&domain)
+        .expect("the fixture installs the domain's clock")
+        .stop(0);
+
+    detach_branch(&runtime, &domain, branch).await;
+
+    match events.try_recv() {
+        Err(nervix_primitives::sync::broadcast::error::TryRecvError::Empty) => {}
+        other => panic!("a drained branch reported an error as it ended: {other:?}"),
+    }
+    owner
+        .stop(Duration::from_secs(1))
+        .await
+        .expect("the fixture relay owner stops");
+}
+
+/// A branch that still holds accepted output when its clock stops cannot publish it, and says so.
+#[nervix_primitives::test]
+async fn a_branch_holding_output_reports_what_it_cannot_publish_without_its_clock() {
+    let runtime = Runtime::default();
+    let domain = domain("default");
+    install_unpaced_test_domain(&runtime, &domain);
+    let (branch, owner) = junction_branch_holding(&runtime, &domain, 1).await;
+    let mut events = runtime.events().subscribe();
+    runtime
+        .domain_clock_lifecycle(&domain)
+        .expect("the fixture installs the domain's clock")
+        .stop(0);
+
+    detach_branch(&runtime, &domain, branch).await;
+
+    let RuntimeEvent::Error(message) = events
+        .try_recv()
+        .expect("a branch that loses its accepted output reports it");
+    assert!(
+        message.contains("stopped without its clock and cannot publish its accepted output"),
+        "unexpected report: {message}"
+    );
+    owner
+        .stop(Duration::from_secs(1))
+        .await
+        .expect("the fixture relay owner stops");
+}
+
 #[nervix_primitives::test]
 async fn processor_handoff_drains_ready_batches_from_every_input() {
     let runtime = Runtime::default();

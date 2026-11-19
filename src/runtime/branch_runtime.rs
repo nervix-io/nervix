@@ -548,6 +548,26 @@ impl BranchRuntime {
         }
     }
 
+    /// Whether `processor_id` still holds output it accepted and has not published: input its
+    /// collectors hold, or batches its routes buffer. What it holds back until its time, its
+    /// partner or further input, and messages waiting on materialized state, are none of it.
+    pub(super) fn processor_holds_unpublished_output(&self, processor_id: &ModelName) -> bool {
+        let Some(processor) = self.processors.get(processor_id) else {
+            return false;
+        };
+        let collected = processor
+            .input_collectors
+            .values()
+            .any(|collector| collector.pending_len() != 0);
+        let routed = processor
+            .operation
+            .output_routes()
+            .routes
+            .iter()
+            .any(|output| !output.pending.is_empty());
+        collected || routed
+    }
+
     pub(super) fn processor_has_pending_materialized(&self, processor_id: &ModelName) -> bool {
         self.processors
             .get(processor_id)
@@ -1701,11 +1721,16 @@ impl BranchExecutionRuntime {
             let restored_snapshot = match domain_clock.snapshot() {
                 Ok(snapshot) => snapshot,
                 Err(error) => {
-                    runtime_handle.events().report_error(format!(
-                        "branch runtime for ingestor '{}' in domain '{}' lost its clock: {error:#}",
-                        ingestor.as_str(),
-                        domain.as_str(),
-                    ));
+                    // A stopped domain's clock ends the route with its stop; any other loss of
+                    // the clock is a failure.
+                    if !error.current_context().is_stopped() {
+                        runtime_handle.events().report_error(format!(
+                            "branch runtime for ingestor '{}' in domain '{}' lost its clock: \
+                             {error:#}",
+                            ingestor.as_str(),
+                            domain.as_str(),
+                        ));
+                    }
                     return;
                 }
             };
@@ -1735,12 +1760,16 @@ impl BranchExecutionRuntime {
                 let snapshot = match domain_clock.snapshot() {
                     Ok(snapshot) => snapshot,
                     Err(error) => {
-                        runtime_handle.events().report_error(format!(
-                            "branch runtime for ingestor '{}' in domain '{}' lost its clock: \
-                             {error:#}",
-                            ingestor.as_str(),
-                            domain.as_str(),
-                        ));
+                        // A stopped domain's clock ends the route with its stop; any other loss
+                        // of the clock is a failure.
+                        if !error.current_context().is_stopped() {
+                            runtime_handle.events().report_error(format!(
+                                "branch runtime for ingestor '{}' in domain '{}' lost its clock: \
+                                 {error:#}",
+                                ingestor.as_str(),
+                                domain.as_str(),
+                            ));
+                        }
                         break;
                     }
                 };

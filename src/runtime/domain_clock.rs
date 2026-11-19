@@ -81,6 +81,14 @@ pub(crate) enum DomainClockAccessError {
     },
 }
 
+impl DomainClockAccessError {
+    /// Whether the clock's generation stopped, as the stop of its domain ends it: the tasks bound
+    /// to it end with it, which is no failure of theirs.
+    pub(crate) fn is_stopped(&self) -> bool {
+        matches!(self, Self::Stopped { .. })
+    }
+}
+
 #[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DomainClockArithmetic {
     #[error("logical-time projection")]

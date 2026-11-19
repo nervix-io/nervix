@@ -420,11 +420,16 @@ pub(super) async fn run_processor_node_runtime(
         let snapshot = match domain_clock.snapshot() {
             Ok(snapshot) => snapshot,
             Err(error) => {
-                runtime_handle.events().report_error(format!(
-                    "processor '{}' in domain '{}' lost its clock: {error:#}",
-                    processor.as_str(),
-                    domain.as_str(),
-                ));
+                // The clock of a domain whose stop ended it stops before its tasks end, so the
+                // processor ends with it, and each branch reports what it could not publish. Any
+                // other loss of the clock is a failure.
+                if !error.current_context().is_stopped() {
+                    runtime_handle.events().report_error(format!(
+                        "processor '{}' in domain '{}' lost its clock: {error:#}",
+                        processor.as_str(),
+                        domain.as_str(),
+                    ));
+                }
                 break;
             }
         };
@@ -1399,11 +1404,16 @@ async fn run_processor_branch_task(
         let execution_snapshot = match domain_clock.snapshot() {
             Ok(snapshot) => snapshot,
             Err(error) => {
-                runtime_handle.events().report_error(format!(
-                    "processor branch '{}' in domain '{}' lost its clock: {error:#}",
-                    processor.as_str(),
-                    domain.as_str(),
-                ));
+                // A stopped domain's clock stops before its tasks end; the branch ends with it,
+                // and its finalization reports what it could not publish. Any other loss of the
+                // clock is a failure.
+                if !error.current_context().is_stopped() {
+                    runtime_handle.events().report_error(format!(
+                        "processor branch '{}' in domain '{}' lost its clock: {error:#}",
+                        processor.as_str(),
+                        domain.as_str(),
+                    ));
+                }
                 stop_mode = Some(ProcessorBranchStopMode::Detach);
                 break;
             }
@@ -1638,15 +1648,20 @@ async fn run_processor_branch_task(
         Some(ProcessorBranchStopMode::Detach) | None => match domain_clock.snapshot() {
             Ok(snapshot) => Some(snapshot),
             Err(error) => {
-                runtime_handle.events().report_error(format!(
-                    "processor branch '{}' in domain '{}' stopped without its clock and cannot \
-                     publish its accepted output: {error:#}",
-                    processor.as_str(),
-                    domain.as_str(),
-                ));
-                // Without a clock the processor produces no output. Running its collected input
-                // still reports each batch through the processor's error policy.
-                branch.flush_processor_collected_inputs(&processor).await;
+                // Without a clock the processor produces no output. A branch whose stop drained
+                // it holds none to lose; what it holds back for its time, its partner or further
+                // input is what the stop cuts and reports.
+                if branch.processor_holds_unpublished_output(&processor) {
+                    runtime_handle.events().report_error(format!(
+                        "processor branch '{}' in domain '{}' stopped without its clock and \
+                         cannot publish its accepted output: {error:#}",
+                        processor.as_str(),
+                        domain.as_str(),
+                    ));
+                    // Running its collected input still reports each batch through the
+                    // processor's error policy.
+                    branch.flush_processor_collected_inputs(&processor).await;
+                }
                 None
             }
         },

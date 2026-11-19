@@ -16,9 +16,10 @@ use std::collections::BTreeMap;
 
 use nervix_interconnect::domain_stop::StopReportAnswer;
 use nervix_models::{
-    ClusterNodeName, ClusterSchedule, CommandExecutionReference, CreateRelay, CreateSchema,
-    DomainSchedule, DomainStatus, DomainStop, DomainStopCause, DomainStopEnding, DomainStopping,
-    OperatorStopRequest, ParseAsType, RelayBranching, RelayName, SchemaField, SchemaName,
+    AckMode, BranchSelection, ClusterNodeName, ClusterSchedule, CommandExecutionReference,
+    CreateJunction, CreateRelay, CreateSchema, DomainSchedule, DomainStatus, DomainStop,
+    DomainStopCause, DomainStopEnding, DomainStopping, OperatorStopRequest, ParseAsType,
+    ProcessorInputs, ProcessorOutputs, RelayBranching, RelayName, SchemaField, SchemaName,
     StopEnding, StopRequestId, Timestamp,
 };
 use nonzero_ext::nonzero;
@@ -35,8 +36,27 @@ fn state(status: DomainStatus, stop: Option<DomainStop>) -> DomainState {
     state
 }
 
+fn relay(name: &str, schema: &SchemaName) -> nervix_models::ScheduledNode {
+    scheduled_model(nervix_models::Model::Relay(CreateRelay {
+        labels: Default::default(),
+        name: named::<RelayName>(name),
+        schema: schema.clone(),
+        buffer: nonzero!(2usize),
+        branching: RelayBranching::unbranched(),
+        materialized_state: None,
+    }))
+}
+
+/// A relay of events and a junction forwarding them to another, whose branch task the stop's
+/// teardown ends.
 fn schedule() -> ClusterSchedule {
     let schema = named::<SchemaName>("event");
+    let mut routes = ProcessorOutputs::single(named("forwarded"));
+    routes.routes[0].construction.inherit = Some(nervix_models::Inheritance::All);
+    let routes = routes.with_flush_policy(nervix_models::FlushPolicy::Each {
+        interval: "1h".to_string(),
+        max_batch_size: "1MiB".to_string(),
+    });
     ClusterSchedule::from_iter([DomainSchedule::new(
         domain(DOMAIN),
         vec![
@@ -50,19 +70,25 @@ fn schedule() -> ClusterSchedule {
                     sensitive: false,
                 }],
             })),
-            scheduled_model(nervix_models::Model::Relay(CreateRelay {
+            relay("events", &schema),
+            relay("forwarded", &schema),
+            scheduled_model(nervix_models::Model::Junction(CreateJunction {
                 labels: Default::default(),
-                name: named::<RelayName>("events"),
-                schema,
-                buffer: nonzero!(2usize),
-                branching: RelayBranching::unbranched(),
-                materialized_state: None,
+                name: named("forward"),
+                from: ProcessorInputs::single(named("events")),
+                output_routes: routes,
+                branched_by: BranchSelection::unbranched(),
+                mode: AckMode::Attached,
+                filter_where: None,
+                materialized_state: Vec::new(),
             })),
         ],
         Vec::new(),
     )])
 }
 
+/// Applies the committed revision, then lets the domain's tasks run until each waits, as a node's
+/// running tasks do between two revisions.
 async fn apply(runtime: &Runtime, revision: u64, state: DomainState) {
     runtime
         .apply_cluster_state(
@@ -74,6 +100,9 @@ async fn apply(runtime: &Runtime, revision: u64, state: DomainState) {
         )
         .await
         .expect("the committed revision applies");
+    for _ in 0..64 {
+        nervix_primitives::task::yield_now().await;
+    }
 }
 
 #[nervix_primitives::test]
@@ -135,6 +164,7 @@ async fn a_stopping_domain_runs_its_tasks_until_its_stop_ends() {
         resolved: vec![StopRequestId::Operator(reference)],
         report: None,
     };
+    let mut events = runtime.events().subscribe();
     apply(
         &runtime,
         3,
@@ -145,6 +175,12 @@ async fn a_stopping_domain_runs_its_tasks_until_its_stop_ends() {
         *tasks.borrow_and_update(),
         "the committed ending signals the domain's tasks"
     );
+    // A drained branch holds no accepted output, so its end without a running clock loses
+    // nothing and reports no error.
+    match events.try_recv() {
+        Err(nervix_primitives::sync::broadcast::error::TryRecvError::Empty) => {}
+        other => panic!("a graceful stop's teardown raised a runtime event: {other:?}"),
+    }
     assert!(
         runtime
             .inner
