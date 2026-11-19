@@ -23,6 +23,8 @@ source "${script_dir}/image-package-check.sh"
 source "${script_dir}/verifier-self-check.sh"
 # shellcheck source=instance-owners.sh
 source "${script_dir}/instance-owners.sh"
+# shellcheck source=expected-failure.sh
+source "${script_dir}/expected-failure.sh"
 
 usage() {
     cat <<EOF
@@ -86,6 +88,11 @@ Options:
                          quorum-loss under temporary-quorum-loss).
   --plan FILE            mixed-instability explicit action plan instead of a seeded one.
   --max-memory-bytes, --max-recovery-backlog and --max-pending also bound mixed-instability.
+  --expect-failure SYMPTOM[,SYMPTOM...]
+                         Record the run against an image that still has the defect as the
+                         expected failure: exit 0 only when the scenario's verdict fails as a product
+                         failure naming every listed symptom; repeatable. Only a scenario whose
+                         verdict names symptoms takes it.$(scenario_symptom_usage)
   --verifier-self-check RECORD
                          Adopt the record of the verifier self-check a suite executed instead of
                          executing tests/self-test.sh; refused unless it passed on this worker,
@@ -100,6 +107,27 @@ setup_error() {
     setup_error_message="$*"
     printf 'chaos setup error: %s\n' "$*" >&2
     exit 2
+}
+
+# The symptoms each scenario's verdict can name, which --expect-failure may list. A scenario not
+# named here has a verdict that names none, so it cannot be expected to fail.
+declare -A scenario_verdict_symptoms=()
+
+# Prints the symptoms the verdict of SCENARIO can name, one per line, or nothing.
+scenario_symptom_list() {
+    local listed=()
+    read -r -d '' -a listed <<<"${scenario_verdict_symptoms[$1]:-}" || true
+    ((${#listed[@]} == 0)) || printf '%s\n' "${listed[@]}"
+}
+
+# The usage lines that list each scenario's symptoms, in the help's option column.
+scenario_symptom_usage() {
+    local named
+    while IFS= read -r named; do
+        [[ -n "${named}" ]] || continue
+        printf '\n%s' "$(printf '%s names %s.' "${named}" "$(scenario_symptom_list "${named}" | paste -sd ' ' -)" \
+            | fold -s -w 72 | sed 's/ *$//; s/^/                         /')"
+    done < <(printf '%s\n' "${!scenario_verdict_symptoms[@]}" | sort)
 }
 
 image_ref=""
@@ -150,6 +178,9 @@ records_option_set=false
 timeout_option_set=false
 mixed_option_set=false
 limit_option_set=false
+# The symptoms --expect-failure names: a run of an image that still has the defect passes as its
+# expected failure only when the scenario's verdict fails with every one of them.
+expected_failure_symptoms=()
 # Every option the command line gave, so a replay can refuse the ones that would change the
 # recorded experiment.
 given_options=()
@@ -246,6 +277,15 @@ while [[ "$#" -gt 0 ]]; do
         --connector-metrics)
             connector_metrics=true
             shift
+            ;;
+        --expect-failure)
+            [[ "$#" -ge 2 && -n "$2" ]] || setup_error '--expect-failure requires a symptom'
+            IFS=, read -r -a listed_symptoms <<<"$2"
+            for listed_symptom in "${listed_symptoms[@]}"; do
+                [[ -n "${listed_symptom}" ]] || setup_error "--expect-failure lists an empty symptom: $2"
+                expected_failure_symptoms+=("${listed_symptom}")
+            done
+            shift 2
             ;;
         --outage-seconds)
             [[ "$#" -ge 2 ]] || setup_error '--outage-seconds requires a value'
@@ -444,6 +484,17 @@ case "${scenario}" in
     baseline | rolling-restart | leader-crash | follower-crash | ingestor-owner-crash | ingestor-instances-owner-crash | emitter-owner-crash | pause-resume | partition-recovery | degraded-links | backup | backup-cycles | backup-fault | restore-fresh-cluster | restore-fault | restore-volume | stale-follower | former-owner-restart | cluster-restart | stateful | endpoints | binding-endpoints | lifetimes | domain-time | mixed-instability) ;;
     *) setup_error "unknown scenario: ${scenario}" ;;
 esac
+# An expected failure names symptoms of the scenario's own verdict; a scenario whose verdict names
+# none cannot be expected to fail.
+if ((${#expected_failure_symptoms[@]} > 0)); then
+    scenario_symptoms="$(scenario_symptom_list "${scenario}")"
+    [[ -n "${scenario_symptoms}" ]] \
+        || setup_error "--expect-failure applies only to a scenario whose verdict names symptoms, not ${scenario}"
+    for expected_symptom in "${expected_failure_symptoms[@]}"; do
+        grep -Fxq -- "${expected_symptom}" <<<"${scenario_symptoms}" \
+            || setup_error "${scenario} names no symptom ${expected_symptom}; it names $(paste -sd ' ' - <<<"${scenario_symptoms}")"
+    done
+fi
 [[ "${node_count}" == "1" || "${node_count}" == "3" ]] \
     || setup_error '--nodes must be 1 or 3'
 if [[ "${connector_metrics}" == true ]]; then
@@ -1712,6 +1763,10 @@ finish() {
                     \( -name 'result.json' -o -name 'recovered.json' -o -name 'hold-*.json' -o -name 'nodes.json' \) \
                     -size +0c 2>/dev/null | sort)
             fi
+            # The symptoms a scenario's verdict named (expected-failure.sh).
+            if [[ -s "${artifact_dir}/results/symptoms.json" ]]; then
+                evidence_paths+=(results/symptoms.json)
+            fi
             local case_directory
             for case_directory in stale former-owner restart stateful endpoints lifetimes domain-time mixed; do
                 [[ -d "${artifact_dir}/${case_directory}" ]] || continue
@@ -1755,6 +1810,40 @@ finish() {
             >"${artifact_dir}/results/finding.json"
     fi
 
+    # A run expected to fail records an image that still has the defect (expected-failure.sh). It
+    # passes as that expected failure only when its scenario's verdict failed as a product failure
+    # naming every expected symptom; the finding above keeps the evidence of that failure. A run that
+    # passed shows the defect did not reproduce and fails, establishing no product failure; any other
+    # failure keeps its own category and status.
+    local expected_outcome=""
+    local expected_record=null
+    if ((${#expected_failure_symptoms[@]} > 0)); then
+        expected_record="$(expected_failure_record "${status}" "${failure_category}" \
+            "${current_phase}" "${scenario}" "${signal_name}" "${artifact_dir}/results/symptoms.json" \
+            "${expected_failure_symptoms[@]}")" \
+            || expected_record="$(jq -nc '{outcome: "other-failure", reason: "the expected failure could not be judged"}')"
+        expected_outcome="$(jq -r '.outcome' <<<"${expected_record}")"
+        case "${expected_outcome}" in
+            reproduced)
+                status=0
+                printf 'expected failure reproduced: the %s verdict failed with %s\n' "${scenario}" \
+                    "$(jq -r '.observed | join(", ")' <<<"${expected_record}")"
+                ;;
+            not-reproduced)
+                status=1
+                failure_category=unclassified
+                current_phase='expected failure'
+                printf 'expected failure not reproduced: the run passed, so the image did not show %s\n' \
+                    "${expected_failure_symptoms[*]}" >&2
+                ;;
+            other-failure)
+                printf 'expected failure not reproduced: the run failed as %s in phase %s; expected symptoms missing: %s\n' \
+                    "${failure_category}" "${current_phase}" \
+                    "$(jq -r '(.missing // []) | join(", ")' <<<"${expected_record}")" >&2
+                ;;
+        esac
+    fi
+
     local cleanup_status=0
     local retained=false
     if [[ "${keep_resources}" == true ]]; then
@@ -1773,6 +1862,8 @@ finish() {
     local final_status="passed"
     if [[ "${status}" -ne 0 ]]; then
         final_status="failed"
+    elif [[ "${expected_outcome}" == reproduced ]]; then
+        final_status="expected-failure"
     fi
     if [[ -n "${signal_name}" ]]; then
         final_status="interrupted"
@@ -1789,6 +1880,7 @@ finish() {
         --argjson resources_retained "${retained}" \
         --argjson teardown_seconds "$((SECONDS - teardown_started))" \
         --argjson teardown_reserve_seconds "${teardown_reserve_seconds}" \
+        --argjson expected_failure "${expected_record}" \
         '.status = $status
          | .final_phase = $phase
          | .finished_at = $finished_at
@@ -1797,7 +1889,8 @@ finish() {
          | .teardown_seconds = $teardown_seconds
          | .teardown_reserve_seconds = $teardown_reserve_seconds
          | if $signal == "" then . else .signal = $signal end
-         | if $setup_error == "" then . else .setup_error = $setup_error end' \
+         | if $setup_error == "" then . else .setup_error = $setup_error end
+         | if $expected_failure == null then . else .expected_failure = $expected_failure end' \
         "${artifact_dir}/manifest.json" >"${manifest_tmp}" \
         && mv "${manifest_tmp}" "${artifact_dir}/manifest.json"
 
@@ -2034,12 +2127,13 @@ output_has_all_records() {
 }
 
 # Records a continuous load the scenario starts: the Compose SERVICE that runs it, the TOPIC it
-# produces to, its interval and where the run will leave its pacing verdict.
+# produces to, its paced shape and interval and where the run will leave its pacing verdict. A burst
+# load (burst-load.sh) declares the shape burst instead, with no interval and no pacing verdict.
 manifest_load() {
     local service="$1" topic="$2" interval_ms="$3"
     # The dollars in this jq filter are jq variables, not shell expansion.
     # shellcheck disable=SC2016
-    update_manifest '.loads += [{service: $service, topic: $topic, interval_ms: $interval_ms, pacing: ("results/" + $service + "-pacing.json")}]' \
+    update_manifest '.loads += [{service: $service, topic: $topic, shape: "paced", interval_ms: $interval_ms, pacing: ("results/" + $service + "-pacing.json")}]' \
         --arg service "${service}" --arg topic "${topic}" --argjson interval_ms "${interval_ms}"
 }
 
