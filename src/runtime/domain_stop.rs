@@ -364,7 +364,11 @@ impl Runtime {
 
     /// Records that this node's teardown for the stop that ended `domain` at `start_version` has
     /// begun, so the stop's owner waits for its report.
-    pub(in crate::runtime) fn begin_stop_ledger(&self, domain: &DomainName, teardown: StopTeardown) {
+    pub(in crate::runtime) fn begin_stop_ledger(
+        &self,
+        domain: &DomainName,
+        teardown: StopTeardown,
+    ) {
         self.inner.stop_ledgers.insert(
             domain.clone(),
             StopLedgerEntry {
@@ -382,7 +386,8 @@ impl Runtime {
             nervix_primitives::task::consume_budget().await;
             let mut on_the_wire = false;
             for waits in self.inner.emitter_confirmation_waits.iter() {
-                if &waits.key().entity.domain == domain && waits.value().load(Ordering::Acquire) != 0
+                if &waits.key().entity.domain == domain
+                    && waits.value().load(Ordering::Acquire) != 0
                 {
                     on_the_wire = true;
                     break;

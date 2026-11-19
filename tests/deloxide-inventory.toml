@@ -4100,6 +4100,37 @@ workloads = [
 ]
 
 [[owner]]
+gap = "The listed workloads reach the call deadline's lock through every bounded call's wait, which reads the deadline whenever it wakes. A progress report restarts a deadline only once a request outlasts a quarter of its silence budget, which no lane workload does, so the restart's acquisition is exercised only by the client-core unit tests and Shuttle checks and by request_progress.feature, outside the lane."
+path = "crates/client-core/src/call_deadline.rs"
+workloads = [
+  "scenario.restore-attempt-history",
+  "stress.restore-attempt-history",
+  "stress.restore-attempt-history-restore",
+  "scenario.client-restore-reply-validation",
+  "stress.client-restore-reply-validation",
+  "stress.client-restore-reply-validation-restore",
+  "scenario.client-foreign-execution",
+  "stress.client-foreign-execution",
+  "scenario.client-reply-kind",
+  "stress.client-reply-kind",
+  "scenario.restore-codec-rejection",
+  "stress.restore-codec-rejection",
+  "stress.restore-codec-rejection-restore",
+  "paced.reopen-generation",
+  "paced.delayed-refusal",
+  "scenario.backup-lease-release-recovery",
+  "scenario.backup-native-recovery",
+  "scenario.backup-multi-domain-wait",
+  "scenario.client-wire-backup-outage",
+  "stress.paced.reopen-generation",
+  "stress.paced.delayed-refusal",
+  "stress.backup-lease-release-recovery",
+  "stress.backup-native-recovery",
+  "stress.backup-multi-domain-wait",
+  "stress.client-wire-backup-outage",
+]
+
+[[owner]]
 path = "crates/client-core/src/client.rs"
 workloads = [
   "scenario.restore-attempt-history",

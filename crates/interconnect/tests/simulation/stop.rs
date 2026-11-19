@@ -103,7 +103,12 @@ fn cuts(kind: ModelKind, name: &str, cut: StopCutKind, items: u64) -> Vec<StopCu
 }
 
 fn prompt_cuts() -> Vec<StopCut> {
-    cuts(ModelKind::Reorderer, "ordered", StopCutKind::ReordererRows, 2)
+    cuts(
+        ModelKind::Reorderer,
+        "ordered",
+        StopCutKind::ReordererRows,
+        2,
+    )
 }
 
 fn late_cuts() -> Vec<StopCut> {
@@ -290,7 +295,10 @@ fn stop_with_a_late_node(run: ScenarioRun) -> Result<(), SimulationError> {
                     assert!(releasing_view.moving());
                     let started = Instant::now();
                     let held = transport
-                        .request(&late, drain(&coordination, StopDrainAction::FlushMovingWork))
+                        .request(
+                            &late,
+                            drain(&coordination, StopDrainAction::FlushMovingWork),
+                        )
                         .await;
                     assert!(unanswered(&held), "held view outcome: {held:?}");
                     assert!(
@@ -493,7 +501,10 @@ fn stop_with_a_late_node(run: ScenarioRun) -> Result<(), SimulationError> {
             nervix_primitives::time::timeout(RUN_DEADLINE, async {
                 while *finished.borrow() < 3 {
                     nervix_primitives::task::consume_budget().await;
-                    finished.changed().await.assured("the fixture hosts remain alive");
+                    finished
+                        .changed()
+                        .await
+                        .assured("the fixture hosts remain alive");
                 }
             })
             .await

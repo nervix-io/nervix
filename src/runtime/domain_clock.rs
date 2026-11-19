@@ -372,27 +372,25 @@ impl DomainClockLifecycle {
             // the stop ends.
             nervix_models::DomainStatus::Running
             | nervix_models::DomainStatus::Paused
-            | nervix_models::DomainStatus::Stopping => {
-                match state.config.pace {
-                    DomainPace::Unpaced => DomainClockInstallation::Installed {
+            | nervix_models::DomainStatus::Stopping => match state.config.pace {
+                DomainPace::Unpaced => DomainClockInstallation::Installed {
+                    generation: state.start_version,
+                    source: DomainClockSource::Unpaced,
+                },
+                DomainPace::Paced { period, skew } => match (&state.clock, authority.owner()) {
+                    (Some(mapping), Some(_)) => DomainClockInstallation::Installed {
                         generation: state.start_version,
-                        source: DomainClockSource::Unpaced,
-                    },
-                    DomainPace::Paced { period, skew } => match (&state.clock, authority.owner()) {
-                        (Some(mapping), Some(_)) => DomainClockInstallation::Installed {
-                            generation: state.start_version,
-                            source: DomainClockSource::Paced {
-                                mapping: mapping.clone(),
-                                period,
-                                skew,
-                            },
-                        },
-                        (None, _) | (_, None) => DomainClockInstallation::Uninstalled {
-                            generation: state.start_version,
+                        source: DomainClockSource::Paced {
+                            mapping: mapping.clone(),
+                            period,
+                            skew,
                         },
                     },
-                }
-            }
+                    (None, _) | (_, None) => DomainClockInstallation::Uninstalled {
+                        generation: state.start_version,
+                    },
+                },
+            },
         };
         self.replace_with_task_state(installation, Some(DomainTaskState::from(state)));
     }

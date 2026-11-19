@@ -1756,11 +1756,14 @@ impl StateMachineData {
     fn domain_planning_inputs(&self, domain: &DomainName) -> DomainPlanningInputs {
         // A stop's requests, ending and report decide nothing a transaction plans, and a step after
         // a `STOP` step cannot know how the stop will end, so the record is no planning input.
-        let state = self.domains.get(domain).map(|state| {
-            let mut planned = state.clone();
-            planned.stop = None;
-            Box::new(planned)
-        });
+        let state = match self.domains.get(domain) {
+            Some(state) => {
+                let mut planned = state.clone();
+                planned.stop = None;
+                Some(Box::new(planned))
+            }
+            None => None,
+        };
         DomainPlanningInputs {
             parameters: self.parameters,
             domain: domain.clone(),

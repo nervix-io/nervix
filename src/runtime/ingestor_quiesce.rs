@@ -1068,12 +1068,17 @@ impl IngestorQuiesceControl {
         let mut observation = self.observation();
         loop {
             nervix_primitives::task::consume_budget().await;
-            if observation.publication.decision.cause().is_some_and(|cause| {
-                matches!(
-                    cause,
-                    IngestorQuiesceCause::Shutdown | IngestorQuiesceCause::OwnershipHandoff
-                )
-            }) {
+            if observation
+                .publication
+                .decision
+                .cause()
+                .is_some_and(|cause| {
+                    matches!(
+                        cause,
+                        IngestorQuiesceCause::Shutdown | IngestorQuiesceCause::OwnershipHandoff
+                    )
+                })
+            {
                 return;
             }
             self.wait_for_change_since(&mut observation).await;
@@ -2844,8 +2849,8 @@ mod tests {
                         IngestorQuiesceIntake::Buffered => {
                             assert!(
                                 !after_stop,
-                                "a stopping ingestor retained a payload for its pause's \
-                                 buffering mode"
+                                "a stopping ingestor retained a payload for its pause's buffering \
+                                 mode"
                             );
                             RacingPayload::Retained
                         }
@@ -2916,7 +2921,8 @@ mod tests {
         }
 
         #[test]
-        fn shuttle_a_payload_racing_the_stop_of_a_paused_buffering_ingestor_is_retained_for_the_cut_or_dispatched() {
+        fn shuttle_a_payload_racing_the_stop_of_a_paused_buffering_ingestor_is_retained_for_the_cut_or_dispatched()
+         {
             check_interleavings(intake_racing_the_stop_of_a_paused_buffering_ingestor);
         }
     }

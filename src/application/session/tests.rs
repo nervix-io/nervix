@@ -739,10 +739,10 @@ fn clocked_domain(start_version: u64, status: DomainStatus) -> DomainState {
         DomainStatus::Stopped => None,
         DomainStatus::Running | DomainStatus::Paused | DomainStatus::Stopping => {
             Some(DomainClockState::new(
-            Timestamp::from_unix_nanos(5),
-            Timestamp::from_unix_nanos(1_000),
-            DomainTimeRate::ONE,
-        ))
+                Timestamp::from_unix_nanos(5),
+                Timestamp::from_unix_nanos(1_000),
+                DomainTimeRate::ONE,
+            ))
         }
     };
     DomainState {

@@ -213,7 +213,14 @@ impl SessionServiceImpl {
                 transaction.id
             ));
         };
-        let start_version = inputs.state().map(|state| state.start_version).unwrap_or(0);
+        let Some(state) = inputs.state() else {
+            return Some(format!(
+                "transaction '{}' planned its STOP step without the state of domain '{}'",
+                transaction.id,
+                inputs.domain().as_str()
+            ));
+        };
+        let start_version = state.start_version;
         let answer = self
             .wait_for_stop_request(
                 inputs.domain(),

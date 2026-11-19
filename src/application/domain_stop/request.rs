@@ -24,8 +24,9 @@ use crate::application::{
 enum StopResolution {
     /// The stop still holds the request.
     Waiting,
-    /// The stop that held the request ended, and its report is committed.
-    Ended(CommandResult),
+    /// The stop that held the request ended, and its report is committed. Boxed, so the states
+    /// a waiting request reads on every applied revision stay small.
+    Ended(Box<CommandResult>),
     /// The request was withdrawn: its `CANCEL` acted.
     Withdrawn,
     /// The domain no longer exists.
@@ -66,10 +67,7 @@ impl SessionServiceImpl {
             .is_some_and(|stopping| stopping.holds(&own));
         if !resolved_already && !held_already {
             if current.status == DomainStatus::Stopped {
-                return command_error(format!(
-                    "domain '{}' is already stopped",
-                    domain.as_str()
-                ));
+                return command_error(format!("domain '{}' is already stopped", domain.as_str()));
             }
             let requested_at = execution.admitted_at().unwrap_or_else(current_timestamp);
             let request = StopRequest::Operator {
@@ -98,10 +96,7 @@ impl SessionServiceImpl {
                     .stop_ending()
                     .is_some_and(|ending| ending.resolved.contains(&own))
             {
-                return command_error(format!(
-                    "domain '{}' is already stopped",
-                    domain.as_str()
-                ));
+                return command_error(format!("domain '{}' is already stopped", domain.as_str()));
             }
             if let Err(error) = self.apply_current_cluster_state().await {
                 tracing::warn!(
@@ -131,7 +126,7 @@ impl SessionServiceImpl {
             nervix_primitives::task::consume_budget().await;
             match self.stop_resolution(domain, &own, start_version).await {
                 StopResolution::Waiting => {}
-                StopResolution::Ended(result) => return result,
+                StopResolution::Ended(result) => return *result,
                 StopResolution::Missing => {
                     return command_error(format!(
                         "domain '{}' was dropped while it stopped",
@@ -170,10 +165,10 @@ impl SessionServiceImpl {
             return StopResolution::Missing;
         };
         if state.start_version != start_version {
-            return StopResolution::Ended(command_ok(format!(
+            return StopResolution::Ended(Box::new(command_ok(format!(
                 "stopped domain '{}'; it has been started again since",
                 domain.as_str()
-            )));
+            ))));
         }
         if let Some(stopping) = state.stopping() {
             if stopping.holds(own) {
@@ -188,7 +183,9 @@ impl SessionServiceImpl {
             if ending.report.is_none() {
                 return StopResolution::Waiting;
             }
-            return StopResolution::Ended(command_ok(stopped_answer(domain, ending, own)));
+            return StopResolution::Ended(Box::new(command_ok(stopped_answer(
+                domain, ending, own,
+            ))));
         }
         StopResolution::Withdrawn
     }

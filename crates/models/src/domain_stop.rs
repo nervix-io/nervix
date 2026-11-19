@@ -27,8 +27,8 @@ use crate::{
     nervix::constant(
         fixed,
         reason = "a licensing restriction, not a tunable: a temporary license must leave the \
-                  cluster stopped one minute after its expiry, so no setting, flag, clause or test \
-                  build shortens or lengthens it"
+                  cluster stopped one minute after its expiry, so no setting, flag, clause or \
+                  test build shortens or lengthens it"
     )
 )]
 pub const LICENSING_STOP_ENFORCE_AFTER: Duration = Duration::from_secs(60);
@@ -526,7 +526,10 @@ impl crate::DomainState {
 
     /// Withdraws an operator's request whose `CANCEL` acted. The last request's withdrawal calls
     /// the stop off: the domain runs on with nothing cut.
-    pub fn withdraw_stop_request(&mut self, reference: &CommandExecutionReference) -> StopWithdrawal {
+    pub fn withdraw_stop_request(
+        &mut self,
+        reference: &CommandExecutionReference,
+    ) -> StopWithdrawal {
         let Some(DomainStop::Stopping(stopping)) = &mut self.stop else {
             return StopWithdrawal::NotHeld;
         };
@@ -630,7 +633,9 @@ mod tests {
     }
 
     fn expiry() -> LicensingStopReason {
-        LicensingStopReason::EphemeralExpired { expired_at: at(100) }
+        LicensingStopReason::EphemeralExpired {
+            expired_at: at(100),
+        }
     }
 
     #[test]
@@ -739,7 +744,10 @@ mod tests {
             ]
         );
         assert_eq!(ending.report, None);
-        assert!(!state.end_stop(StopEnding::Completed), "a stopped domain has no stop to end");
+        assert!(
+            !state.end_stop(StopEnding::Completed),
+            "a stopped domain has no stop to end"
+        );
         assert!(state.record_stop_report(DomainStopReport::default()));
         assert!(
             !state.record_stop_report(DomainStopReport::default()),
@@ -797,11 +805,21 @@ mod tests {
         let mut state = domain(DomainStatus::Running);
         state.record_stop_before_any_work(DomainStopCause::Operator);
         assert_eq!(state.status, DomainStatus::Stopped);
-        let ending = state.stop_ending().expect("the rollback records its ending");
+        let ending = state
+            .stop_ending()
+            .expect("the rollback records its ending");
         assert!(ending.resolved.is_empty());
-        assert!(ending.report.as_ref().is_some_and(DomainStopReport::cut_nothing));
+        assert!(
+            ending
+                .report
+                .as_ref()
+                .is_some_and(DomainStopReport::cut_nothing)
+        );
         let kept = state.stop.clone();
         state.record_stop_before_any_work(DomainStopCause::Licensing(expiry()));
-        assert_eq!(state.stop, kept, "a stopped domain keeps the stop that ended it");
+        assert_eq!(
+            state.stop, kept,
+            "a stopped domain keeps the stop that ended it"
+        );
     }
 }

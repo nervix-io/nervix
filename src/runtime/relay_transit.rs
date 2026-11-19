@@ -214,7 +214,11 @@ impl RelayAdmissions {
     pub(super) fn total(&self) -> u64 {
         let mut total = 0_u64;
         for reading in self.relays.values() {
-            total = total.wrapping_add(reading.admissions);
+            total = nervix_primitives::expect_lint!(
+                nervix::clamped_arithmetic,
+                "the total is a movement witness compared only for equality, so it wraps",
+                total.wrapping_add(reading.admissions)
+            );
         }
         total
     }

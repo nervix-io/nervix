@@ -157,7 +157,10 @@ impl SessionServiceImpl {
             lines.push(cause);
         }
         if let Some(stopping) = state.stopping() {
-            lines.push(format!("stop requests: {}", answer::requests_text(stopping)));
+            lines.push(format!(
+                "stop requests: {}",
+                answer::requests_text(stopping)
+            ));
             if let Some(waits) = self.inner.domain_stops.waits(domain) {
                 lines.push(format!("stop waits for: {}", answer::waits_text(&waits)));
                 if let Some(held) = answer::held_text(&waits) {
@@ -246,13 +249,13 @@ pub(in crate::application) async fn run(service: SessionServiceImpl, shutdown: C
                     continue;
                 };
                 let task = match work {
-                    StopWork::Drain { began_at_revision } => nervix_primitives::task::spawn(
-                        drain::drain_stopping_domain(
+                    StopWork::Drain { began_at_revision } => {
+                        nervix_primitives::task::spawn(drain::drain_stopping_domain(
                             service.clone(),
                             domain.clone(),
                             began_at_revision,
-                        ),
-                    ),
+                        ))
+                    }
                     StopWork::Report { start_version } => nervix_primitives::task::spawn(
                         drain::collect_stop_report(service.clone(), domain.clone(), start_version),
                     ),

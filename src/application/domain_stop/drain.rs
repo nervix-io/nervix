@@ -68,7 +68,9 @@ enum DrainRound {
     Releasing,
     /// No node held work in motion, and every node started the confirming generation; each
     /// node's motion as its confirming view counted it.
-    Confirming { motion: BTreeMap<ClusterNodeName, u64> },
+    Confirming {
+        motion: BTreeMap<ClusterNodeName, u64>,
+    },
 }
 
 /// What a round found.
@@ -97,9 +99,10 @@ impl RoundViews {
     }
 
     fn obligations_complete(&self) -> bool {
-        self.views
-            .values()
-            .all(|view| view.as_ref().is_some_and(|view| view.flush_obligations == 0))
+        self.views.values().all(|view| {
+            view.as_ref()
+                .is_some_and(|view| view.flush_obligations == 0)
+        })
     }
 
     fn motion(&self) -> BTreeMap<ClusterNodeName, u64> {
@@ -167,7 +170,10 @@ impl SessionServiceImpl {
         let mut views = BTreeMap::new();
         for node in self.stop_drain_nodes(domain).await {
             nervix_primitives::task::consume_budget().await;
-            let view = match self.stop_drain_view(&node, domain, coordination, action).await {
+            let view = match self
+                .stop_drain_view(&node, domain, coordination, action)
+                .await
+            {
                 Ok(view) => Some(view),
                 Err(error) => {
                     tracing::debug!(
@@ -228,7 +234,11 @@ impl SessionServiceImpl {
 
     /// The committed stopping record of `domain`, while it is still the stop that began at
     /// `began_at_revision`.
-    async fn current_stop(&self, domain: &DomainName, began_at_revision: u64) -> Option<DomainStopping> {
+    async fn current_stop(
+        &self,
+        domain: &DomainName,
+        began_at_revision: u64,
+    ) -> Option<DomainStopping> {
         let state = self.inner.consensus.current_domain(domain).await?;
         let stopping = state.stopping()?;
         (stopping.began_at_revision == began_at_revision).then(|| stopping.clone())
@@ -356,7 +366,13 @@ pub(super) async fn drain_stopping_domain(
             continue;
         }
         if let Some(by) = due_enforcement(&stopping, now, service.committed_licensing_time()) {
-            end_stop(&service, &domain, began_at_revision, StopEnding::Enforced { by }).await;
+            end_stop(
+                &service,
+                &domain,
+                began_at_revision,
+                StopEnding::Enforced { by },
+            )
+            .await;
             return;
         }
         // A clause acts at its time even while a pass waits on a node that answers late: the pass
@@ -553,7 +569,10 @@ mod tests {
     #[test]
     fn a_plain_stop_is_never_enforced() {
         let plain = stopping(&[("plain", 10, None)], None);
-        assert_eq!(due_enforcement(&plain, at(1_000_000), Some(at(1_000_000))), None);
+        assert_eq!(
+            due_enforcement(&plain, at(1_000_000), Some(at(1_000_000))),
+            None
+        );
         assert_eq!(until_next_clause(&plain, at(10)), None);
     }
 

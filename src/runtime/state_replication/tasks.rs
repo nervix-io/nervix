@@ -100,19 +100,6 @@ pub(in crate::runtime) struct StateSnapshotTasks {
         nervix_primitives::publication::ArcSwap<std::collections::BTreeSet<DomainName>>,
 }
 
-impl Default for StateSnapshotTasks {
-    fn default() -> Self {
-        Self {
-            tracker: TaskTracker::default(),
-            stopping: CancellationToken::default(),
-            domains: DashMap::default(),
-            abandoned_last_writes: nervix_primitives::publication::ArcSwap::from_pointee(
-                std::collections::BTreeSet::new(),
-            ),
-        }
-    }
-}
-
 /// A tracker that counts its domain's snapshot tasks, closed so that waiting for it ends when no
 /// task is left rather than when an owner closes it.
 fn closed_domain_tracker() -> TaskTracker {
@@ -1542,6 +1529,22 @@ impl Runtime {
         self.inner
             .passive_runtime_state_snapshots
             .retain(|placement, _| &placement.domain != domain);
+    }
+}
+
+// An explicit `Default`, because the modeled `ArcSwap` of a Shuttle build has none of its own. It
+// follows every other implementation of this module, so theirs keep the identities the branch
+// ownership baseline pins.
+impl Default for StateSnapshotTasks {
+    fn default() -> Self {
+        Self {
+            tracker: TaskTracker::default(),
+            stopping: CancellationToken::default(),
+            domains: DashMap::default(),
+            abandoned_last_writes: nervix_primitives::publication::ArcSwap::from_pointee(
+                std::collections::BTreeSet::new(),
+            ),
+        }
     }
 }
 

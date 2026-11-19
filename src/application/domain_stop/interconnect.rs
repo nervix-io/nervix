@@ -10,9 +10,7 @@
 use error_stack::Report;
 use nervix_interconnect::{
     HandlerRegistrationError, RemoteOperationFailure, RemoteOperationSubject, Transport,
-    domain_stop::{
-        StopDrainRequest, StopDrainStatus, StopReportAnswer, StopReportRequest,
-    },
+    domain_stop::{StopDrainRequest, StopDrainStatus, StopReportAnswer, StopReportRequest},
 };
 use nervix_models::{ClusterNodeName, DomainName};
 
