@@ -1299,7 +1299,9 @@ the session already holds the attachment, so the client follows the clock on tha
 its frames from then on.
 
 Closing the native client's request registry also wakes its exchange reader, even while the
-transport remains live and silent. The reader stops routing frames before it interrupts that
+transport remains live and silent. It releases the remaining registered waiters in ascending
+request-identity order before notifying that reader, while retaining the first ending cause.
+The reader stops routing frames before it interrupts that
 generation's attachments and event queues. A subscription or clock reader already waiting there
 can therefore open the next session; it does not need another command, a later back-off timer, or
 a transport failure to make progress. An unanswered reopening ends its session; the
