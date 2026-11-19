@@ -183,20 +183,23 @@ pub(super) struct ProcessorOutputBatchScope {
     pub(super) shared: SharedBatchColumns,
 }
 
-/// Ordinary dispatch carries no additional source state; inference retains its admitted row.
+/// The message a route failure reports as its `input`. Ordinary dispatch reports the dispatched
+/// row itself; an inferencer reports the admitted message its generated row came from.
 pub(super) trait ProcessorOutputErrorSource: Copy {
-    fn original_row(&self) -> Option<&RuntimeRow>;
+    fn error_input(
+        &self,
+        dispatched: &RelayRecordBatch,
+        row: usize,
+    ) -> error_stack::Result<RuntimeRow, relay_batch::RelayRecordBatchError>;
 }
 
 impl ProcessorOutputErrorSource for () {
-    fn original_row(&self) -> Option<&RuntimeRow> {
-        None
-    }
-}
-
-impl ProcessorOutputErrorSource for &RuntimeRow {
-    fn original_row(&self) -> Option<&RuntimeRow> {
-        Some(*self)
+    fn error_input(
+        &self,
+        dispatched: &RelayRecordBatch,
+        row: usize,
+    ) -> error_stack::Result<RuntimeRow, relay_batch::RelayRecordBatchError> {
+        dispatched.runtime_row(row)
     }
 }
 
@@ -272,9 +275,9 @@ pub(super) async fn evaluate_processor_output_events(
     for (output_row, input_row) in executed.selected_rows.iter().enumerate() {
         if let Some(side_error) = executed.batch.errors().row(output_row).first() {
             let partial_output = captured_partial_output(&executed.batch, output_row);
-            let record = match error_source.original_row() {
-                Some(record) => record.clone(),
-                None => batch.runtime_row(input_row).map_err(|error| {
+            let record = error_source
+                .error_input(batch, input_row)
+                .map_err(|error| {
                     PlannedGeneralFailure::new(
                         error.change_context(PlannedGeneralError::MaterializeErrorInput {
                             operation,
@@ -282,8 +285,7 @@ pub(super) async fn evaluate_processor_output_events(
                         }),
                         batch.acks.clone(),
                     )
-                })?,
-            };
+                })?;
             message_errors.push(PendingProcessorOutputMessageError {
                 row: input_row,
                 key: batch.keys[input_row].clone(),
@@ -355,16 +357,6 @@ pub(super) async fn dispatch_processor_output(
     output_index: usize,
 ) -> Option<Vec<AckSet>> {
     dispatch_selected_processor_outputs(context, outputs, batch, Some(output_index), true, ()).await
-}
-
-/// A one-row model result keeps the admitted Arrow row for route error capture.
-pub(super) async fn dispatch_inferencer_result(
-    context: ProcessorOutputDispatchContext<'_>,
-    outputs: &mut RelayProcessorOutputsNode,
-    batch: RelayRecordBatch,
-    original_row: &RuntimeRow,
-) -> Option<Vec<AckSet>> {
-    dispatch_selected_processor_outputs(context, outputs, batch, None, false, original_row).await
 }
 
 pub(super) async fn dispatch_selected_processor_outputs(

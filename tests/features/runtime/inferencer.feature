@@ -563,7 +563,8 @@ Feature: Inferencer resources
       CREATE UNPACED DOMAIN {{domain}};
       """
     # Each length-one vector row is 24B and the length-two row is 40B under runtime Arrow
-    # payload accounting. Their 24B + 40B + 24B total reaches the 88B boundary only at row 3.
+    # payload accounting. Their 24B + 40B + 24B total reaches the 88B collection boundary only at
+    # row 3, so the model receives the three rows as one input batch.
     When these Plexus commands are executed on the leader node
       """
       CREATE RESOURCE inference;
@@ -586,6 +587,7 @@ Feature: Inferencer resources
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
       CREATE INFERENCER score_sequence_batch FROM sequences
+        COLLECT FOR 1h MAX BATCH SIZE 88B
         USING RESOURCE inference VERSION 1
         FILE 'models/dynamic_batch_score.onnx'
         INPUTS { "features" <tensor_type>[BATCH, DYNAMIC, 2] = input.features, "mask" <tensor_type>[BATCH, DYNAMIC, 2] = input.mask }
@@ -593,7 +595,7 @@ Feature: Inferencer resources
         UNBRANCHED
         TO scored_sequences
         SET scores = scores
-        FLUSH EACH 1h MAX BATCH SIZE 88B
+        FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG;
       """
     And these Plexus commands are executed on the leader node
@@ -729,7 +731,7 @@ Feature: Inferencer resources
       CREATE UNPACED DOMAIN {{domain}};
       """
     # Each row has two fixed-size F32 pairs and accounts for 16B. Three rows reach the 48B
-    # boundary exactly, so neither of the first two inputs can start inference early.
+    # collection boundary exactly, so neither of the first two inputs reaches the model alone.
     When these Plexus commands are executed on the leader node
       """
       CREATE RESOURCE inference;
@@ -758,6 +760,7 @@ Feature: Inferencer resources
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
       CREATE INFERENCER batch_score_messages FROM features
+        COLLECT FOR 1h MAX BATCH SIZE 48B
         USING RESOURCE inference VERSION 1
         FILE 'models/batch_score.onnx'
         INPUTS { "features" <tensor_type>[BATCH, 2] = input.features, "mask" <tensor_type>[BATCH, 2] = input.mask }
@@ -765,7 +768,7 @@ Feature: Inferencer resources
         UNBRANCHED
         TO scored
         SET scores = scores
-        FLUSH EACH 1h MAX BATCH SIZE 48B
+        FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG;
       """
     And these Plexus commands are executed on the leader node
@@ -823,7 +826,8 @@ Feature: Inferencer resources
       CREATE UNPACED DOMAIN {{domain}};
       """
     # Arrow 58.4 accounts this one-row input as 284B: 260B for padding Utf8, 8B for tenant
-    # Utf8, and 8B for each fixed-size F32 pair. Two batches total 568B and cross 512B.
+    # Utf8, and 8B for each fixed-size F32 pair. Two batches of one branch total 568B and cross
+    # the 512B collection boundary, so each branch's model call covers its own two rows.
     When these Plexus commands are executed on the leader node
       """
       CREATE RESOURCE inference;
@@ -859,6 +863,7 @@ Feature: Inferencer resources
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
       CREATE INFERENCER branch_batch_score FROM features
+        COLLECT FOR 1h MAX BATCH SIZE 512B
         USING RESOURCE inference VERSION 1
         FILE 'models/batch_score.onnx'
         INPUTS { "features" <tensor_type>[BATCH, 2] = input.features, "mask" <tensor_type>[BATCH, 2] = input.mask }
@@ -866,7 +871,7 @@ Feature: Inferencer resources
         BRANCHED BY by_tenant
         TO scored
         SET scores = scores
-        FLUSH EACH 1h MAX BATCH SIZE 512B
+        FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG;
       """
     And these Plexus commands are executed on the leader node

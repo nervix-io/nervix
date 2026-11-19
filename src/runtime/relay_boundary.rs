@@ -91,7 +91,7 @@ impl RelayBranchPresences {
     }
 
     /// The presence of a relay that is not divided into partitions: its one `Single` unit's.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "benchmarks"))]
     pub(super) fn single(presence: RelayBranchPresence) -> Self {
         Self {
             partitioning: RelayPartitioning::Whole,

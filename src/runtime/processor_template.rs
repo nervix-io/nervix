@@ -274,44 +274,11 @@ impl RelayProcessorOperationNode {
                     resource,
                     resource_version,
                     file,
-                    inputs,
-                    output_schema,
-                    compiled_input_program,
-                    ..
-                },
-                RelayProcessorOperationTemplate::Inferencer {
-                    output_routes: desired_outputs,
-                    resource: desired_resource,
-                    resource_version: desired_resource_version,
-                    file: desired_file,
-                    inputs: desired_inputs,
-                    output_schema: desired_output_schema,
-                    compiled_input_program: desired_compiled_input_program,
-                },
-            ) => {
-                if resource != desired_resource
-                    || resource_version != desired_resource_version
-                    || file != desired_file
-                    || inputs != desired_inputs
-                    || output_schema != desired_output_schema
-                {
-                    return Err(Report::new(ProcessorTemplateError::InferencerSession));
-                }
-                *compiled_input_program = desired_compiled_input_program.clone();
-                output_routes.apply_template(desired_outputs)?;
-                Ok(())
-            }
-            (
-                Self::StatefulInferencer {
-                    output_routes,
-                    resource,
-                    resource_version,
-                    file,
                     compiled_input_program,
                     prepared,
                     ..
                 },
-                RelayProcessorOperationTemplate::StatefulInferencer {
+                RelayProcessorOperationTemplate::Inferencer {
                     output_routes: desired_outputs,
                     resource: desired_resource,
                     resource_version: desired_version,
@@ -656,31 +623,6 @@ impl RelayProcessorTemplate {
                     resource,
                     resource_version,
                     file,
-                    inputs,
-                    output_schema,
-                    compiled_input_program,
-                } => {
-                    let output_routes = Self::instantiate_outputs(output_routes);
-                    let output_buffers = (0..output_routes.routes.len())
-                        .map(|_| InferencerOutputBuffer::default())
-                        .collect();
-                    RelayProcessorOperationNode::Inferencer {
-                        output_routes,
-                        resource: resource.clone(),
-                        resource_version: *resource_version,
-                        file: file.clone(),
-                        inputs: inputs.clone(),
-                        output_schema: output_schema.clone(),
-                        compiled_input_program: compiled_input_program.clone(),
-                        output_buffers,
-                        session: None,
-                    }
-                }
-                RelayProcessorOperationTemplate::StatefulInferencer {
-                    output_routes,
-                    resource,
-                    resource_version,
-                    file,
                     compiled_input_program,
                     prepared,
                     ..
@@ -688,43 +630,49 @@ impl RelayProcessorTemplate {
                     let prepared = prepared
                         .as_ref()
                         .ok_or_else(|| Report::new(ProcessorTemplateError::InferencerSession))?;
-                    let context = || ProcessorTemplateError::ReplicatedState {
-                        kind: self.kind,
-                        processor: self.processor.clone(),
-                        branch: BranchScope::from(key),
+                    let carried = match &prepared.state {
+                        Some(state) => {
+                            let context = || ProcessorTemplateError::ReplicatedState {
+                                kind: self.kind,
+                                processor: self.processor.clone(),
+                                branch: BranchScope::from(key),
+                            };
+                            let placement = runtime
+                                .state_placement_for_unit(
+                                    domain,
+                                    RuntimeStateKind::Inferencer,
+                                    self.kind,
+                                    &self.processor,
+                                    unit,
+                                    key.clone(),
+                                )
+                                .change_context_lazy(context)?;
+                            let publication = runtime
+                                .replicated_inferencer_state(placement, &state.plan)
+                                .await
+                                .change_context_lazy(context)?;
+                            let metrics =
+                                runtime.inferencer_state_metrics(domain, &self.processor, unit);
+                            let snapshot_bytes =
+                                state.plan.snapshot_bytes().change_context_lazy(context)?;
+                            Some(inferencer::CarriedState::restore(
+                                publication,
+                                state,
+                                incarnation,
+                                snapshot_bytes,
+                                metrics,
+                            ))
+                        }
+                        None => None,
                     };
-                    let placement = runtime
-                        .state_placement_for_unit(
-                            domain,
-                            RuntimeStateKind::Inferencer,
-                            self.kind,
-                            &self.processor,
-                            unit,
-                            key.clone(),
-                        )
-                        .change_context_lazy(context)?;
-                    let replicated_state = runtime
-                        .replicated_inferencer_state(placement, &prepared.state)
-                        .await
-                        .change_context_lazy(context)?;
-                    let metrics = runtime.inferencer_state_metrics(domain, &self.processor, unit);
-                    let session =
-                        Box::new(replicated_state.restore_session(prepared, incarnation, metrics));
-                    let snapshot_bytes = prepared
-                        .state
-                        .snapshot_bytes()
-                        .change_context_lazy(context)?;
-                    RelayProcessorOperationNode::StatefulInferencer {
+                    RelayProcessorOperationNode::Inferencer {
                         output_routes: Self::instantiate_outputs(output_routes),
                         resource: resource.clone(),
                         resource_version: *resource_version,
                         file: file.clone(),
                         compiled_input_program: compiled_input_program.clone(),
-                        session,
-                        replicated_state,
-                        incarnation,
-                        snapshot_bytes,
                         prepared: prepared.clone(),
+                        session: Box::new(inferencer::InferenceSession::new(carried)),
                     }
                 }
                 RelayProcessorOperationTemplate::WasmProcessor {
@@ -780,7 +728,9 @@ impl RelayProcessorTemplate {
 }
 
 impl BranchInstanceTemplate {
-    pub(super) async fn prepare_stateful_inferencers(
+    /// Prepare every inferencer's shared definition: its output schema and, for an inferencer
+    /// that declares `STATE`, the initial generation every new branch starts from.
+    pub(super) async fn prepare_inferencers(
         &mut self,
         executor: &nervix_execution::Executor,
         udfs: Option<&UdfExecutor>,
@@ -788,26 +738,28 @@ impl BranchInstanceTemplate {
     ) -> error_stack::Result<(), planning::PlanningError> {
         for processor in self.processors.values_mut() {
             nervix_primitives::task::consume_budget().await;
-            if let RelayProcessorOperationTemplate::StatefulInferencer {
+            if let RelayProcessorOperationTemplate::Inferencer {
                 inputs,
                 output_schema,
+                mode,
                 state,
                 prepared,
                 ..
             } = &mut processor.operation
             {
                 *prepared = Some(Arc::new(
-                    inferencer::PreparedStatefulInference::prepare(
+                    inferencer::PreparedInference::prepare(
                         executor,
                         inputs,
                         output_schema,
-                        state,
+                        *mode,
+                        state.as_ref(),
                         udfs,
                         vm_settings,
                     )
                     .await
                     .change_context_lazy(|| {
-                        planning::PlanningError::PrepareInferencerState {
+                        planning::PlanningError::PrepareInferencer {
                             node: processor.processor.clone(),
                         }
                     })?,

@@ -190,7 +190,7 @@ inputs. Keep placeholders obvious and list provisioning that must happen outside
 | Suppress repeated keys for a time bound | `DEDUPLICATOR` |
 | Order records by expressions within a time bound | `REORDERER` |
 | Produce width/step aggregates | `WINDOW PROCESSOR` |
-| Run an ONNX model | `INFERENCER` |
+| Run an ONNX model | `INFERENCER`; read `Runtime Nodes` → `Execution` for when the model runs and how a `BATCH` model takes its batch from `COLLECT FOR` |
 | Carry ONNX state between rows of each branch | `INFERENCER`; read `Runtime Nodes` → `State tensors` for the fixed-shape, initialization and reset contract |
 | Run custom guest processing | `WASM PROCESSOR` |
 | Reuse trusted batch-column logic inside expressions | `UDF` |

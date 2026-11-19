@@ -2318,7 +2318,7 @@ scenario = "Rebinding a VHOST to another version of its TLS bundle refreshes eve
 selections = ["deloxide", "deloxide-order"]
 
 [[workload]]
-coverage = "The ONNX session lock of a batched inferencer whose model runs for interleaved concrete branches."
+coverage = "Relay delivery and branch tasks of a batched inferencer whose model runs once for each collected batch of two interleaved concrete branches. Each branch task owns its ONNX session without a lock, so the model run itself holds no tracked lock."
 examples = 2
 feature = "tests/features/runtime/inferencer.feature"
 id = "scenario.inferencer-branch-batches"
@@ -2858,7 +2858,7 @@ scenario = "Rebinding a VHOST to another version of its TLS bundle refreshes eve
 selections = ["deloxide-stress"]
 
 [[workload]]
-coverage = "Under scheduling stress: the ONNX session lock of a batched inferencer whose model runs for interleaved concrete branches."
+coverage = "Under scheduling stress: relay delivery and branch tasks of a batched inferencer whose model runs once for each collected batch of two interleaved concrete branches. Each branch task owns its ONNX session without a lock, so the model run itself holds no tracked lock."
 examples = 2
 feature = "tests/features/runtime/inferencer.feature"
 id = "stress.inferencer-branch-batches"
@@ -4993,13 +4993,6 @@ workloads = [
   "stress.client-alter-drain",
   "scenario.backup-parked-wait-slow-reads",
   "stress.backup-parked-wait-slow-reads",
-]
-
-[[owner]]
-path = "src/runtime/inferencer.rs"
-workloads = [
-  "scenario.inferencer-branch-batches",
-  "stress.inferencer-branch-batches",
 ]
 
 [[owner]]

@@ -584,6 +584,45 @@ the mapped input must still be required and have the model's exact `F32` element
 from the one version it stores, so a later upload of the resource does not change the scoring
 model; see [Versioning](resources.md#versioning).
 
+### Execution
+
+Every inferencer, with or without `STATE`, runs its model once for each batch it admits, before
+any route. It evaluates `INPUTS` over the whole batch, runs the model, and appends the outputs to
+every route's buffer. Every route receives that one result, and a route's `FLUSH` decides only when
+the route dispatches what it holds; no route runs the model again. `FILTER WHERE` rows never reach
+the model, and materialized dependencies resolve before admission, so every route of a batch reads
+the values resolved when the batch was admitted.
+
+The tensor declarations select one of two execution modes:
+
+- **One message at a time**, when no tensor declares `BATCH`: one model call for each admitted
+  message, in arrival order. A message the model refuses, or whose outputs the declaration does
+  not describe, fails alone.
+- **Batched**, when every tensor declares one `BATCH` axis: one model call for each group of the
+  admitted batch's messages whose mapped tensors share one concrete shape, the messages joined
+  along the `BATCH` axis in arrival order. The model's batch is the admitted batch: a relay batch,
+  or the batch `COLLECT FOR` releases. Size model batches with
+  `COLLECT FOR <duration> MAX BATCH SIZE <bytes>` on the input; a route's `FLUSH` dispatches results
+  and never forms a model batch. A call the model refuses fails its messages together through the
+  inferencer's general error policy, which reports them with a value-free diagnostic and
+  acknowledges them negatively.
+
+In both modes, a message whose `INPUTS` evaluation fails, or whose mapped values do not form the
+declared tensors, fails alone. A message that fails alone reaches each route's `ON MESSAGE ERROR`
+with a value-free diagnostic, and the messages around it are delivered.
+
+Model calls run on the node's bounded extension workers. A full extension class holds the admitted
+batch until a place frees, without failing it, and the branch keeps its session while it waits. One
+message at a time, a message's working set is its mapped input, the native copy the model reads, its
+public outputs and any carried state; a message whose working set exceeds the configured relay
+operation limit fails alone through the general error policy, and the other messages of the batch
+run in admitted jobs whose working sets fit that limit. A batched call cannot be divided, so it runs
+whole and is charged at most that limit.
+
+Acknowledgements wait for dispatch: the inferencer releases its share of a message once every route
+has taken or buffered its own. A route failure's error record carries the admitted input message as
+`input`, never the generated tensors.
+
 ### State tensors
 
 A model can carry state between rows of one concrete branch. Declare each state input and its
@@ -614,13 +653,11 @@ every ONNX input and output must be bound exactly once, including both sides of 
 Both model state ports must match the declared shape; a dynamic ONNX axis may be instantiated with
 the fixed size the declaration supplies.
 
-Each branch invokes the model once for each admitted row, in arrival order. All state successors
-advance together after a successful invocation. A failed `INPUTS` expression or model invocation
-uses `ON MESSAGE ERROR` and leaves the preceding state intact; `FILTER WHERE` runs before the
-model, so a filtered row changes no state. Materialized dependencies resolve before admission.
-Every output route receives the same generated result, and its `FLUSH` controls dispatch without
-invoking the model again. Acknowledgements wait for dispatch. Without `STATE`, inference keeps its
-flush-time execution and supports the existing per-message and batched tensor declarations.
+`STATE` is a variation of [one message at a time](#execution): each branch invokes the model once
+for each admitted message, in arrival order, and carries its tensors from one message to the next.
+All state successors advance together after a message the model accepts. A message that fails
+alone leaves the preceding state intact, and `FILTER WHERE` runs before the model, so a filtered
+row changes no state.
 
 Each admitted batch publishes an immutable tensor generation. Nervix persists the newest
 generation on the runtime state snapshot interval and once more during a graceful stop; replicas
@@ -661,9 +698,9 @@ State ports are internal model inputs and outputs, not fields available to route
 
 The declared state must fit one configured runtime snapshot section, including its shape and
 framing metadata. Nervix checks the derived bound at `CREATE` before storing the inferencer and
-again while preparing INITIAL before publishing the processor plan. Native row
-execution uses the bounded extension workers; mapped input and public output conversion also
-respect the configured relay operation limit. The state is retained once per active branch;
+again while preparing INITIAL before publishing the processor plan. A message's working set
+includes the carried state, so the state counts against the relay operation limit
+[Execution](#execution) applies to every message. The state is retained once per active branch;
 use the branch's `MAX INSTANCES` to bound the number of live copies.
 
 ### Inspect inference configuration and state

@@ -470,8 +470,9 @@ subscription predicates and state inspection; ingestion-boundary admission follo
 own contract.
 
 An accepted owner can acquire a charged CPU queue place before transferring mutable state into a
-job. The stateful inferencer does this before taking its native session out of the branch. Dropping
-the full-queue wait leaves that session installed and returns the charge. After submission,
+job. Every inferencer does this before moving its branch's native session into the job that runs
+its model on the extension workers; the job hands the session back with its outcome. Dropping the
+full-queue wait leaves that session installed and returns the charge. After submission,
 cancellation follows the same queued and running job rules as every other admitted run.
 
 The storage submission adapter and each job's invocation carry explicit dispatch contracts for

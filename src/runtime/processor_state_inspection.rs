@@ -314,7 +314,6 @@ impl RelayProcessorNode {
             | RelayProcessorOperationNode::WindowProcessor { .. }
             | RelayProcessorOperationNode::Junction { .. }
             | RelayProcessorOperationNode::Inferencer { .. }
-            | RelayProcessorOperationNode::StatefulInferencer { .. }
             | RelayProcessorOperationNode::WasmProcessor { .. } => {
                 Err(Report::new(BranchStateReadError::Unsupported))
             }
