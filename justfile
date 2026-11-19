@@ -67,7 +67,12 @@ fuzz-plan count="3":
 prepare-archive-counts-fuzz: (prepare-bolero "registry-archived-models")
 
 # Run all registered properties with bounded randomized cases and source-adjacent corpus replay.
-test-bolero filter="": bolero-deps
+# Native snapshot properties load the CPU runtime in their test process.
+test-bolero filter="": bolero-deps download-onnxruntime
+    #!/usr/bin/env bash
+    set -euo pipefail
+    ORT_DYLIB_PATH="${ORT_DYLIB_PATH:-$(bash scripts/download_onnxruntime.sh --print-path)}"
+    export ORT_DYLIB_PATH
     python3 -m scripts.bolero test {{ quote(filter) }}
 
 # Run selected registered owners with their canonical case, corpus and execution checks. Global

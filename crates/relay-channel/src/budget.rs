@@ -334,11 +334,14 @@ impl Writer {
         weight: NonZeroU64,
         returned: Option<NonZeroU64>,
     ) -> (Admission, bool) {
+        let returned_weight = match returned {
+            Some(weight) => weight.get(),
+            None => 0,
+        };
         let mut observed = self.budget.current.load(Ordering::Acquire);
         while observed & DIRECT != 0 {
             let limit = (observed >> SIZE_BITS) & SIZE_MASK;
             let used = observed & SIZE_MASK;
-            let returned_weight = returned.map_or(0, NonZeroU64::get);
             let remaining = used
                 .checked_sub(returned_weight)
                 .assured("the returned reservation is still charged");
@@ -351,11 +354,15 @@ impl Writer {
             debug_assert_ne!(State::direct_waiting(observed), 0);
             // Returning the charge and adding the new one both stay within the used field.
             // The head has one waiting count to take out of the adjacent field.
-            let next = observed
+            let after_return = observed
                 .checked_sub(returned_weight)
-                .and_then(|word| word.checked_add(weight.get()))
-                .and_then(|word| word.checked_sub(WAIT_UNIT))
-                .verified("the head fits and owns one waiting count");
+                .verified("the returned charge fits within the used field");
+            let after_grant = after_return
+                .checked_add(weight.get())
+                .verified("the head fits within the limit");
+            let next = after_grant
+                .checked_sub(WAIT_UNIT)
+                .verified("the head owns one waiting count");
             match self.budget.current.compare_exchange_weak(
                 observed,
                 next,
