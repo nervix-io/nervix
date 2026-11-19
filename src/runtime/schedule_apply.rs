@@ -1536,6 +1536,26 @@ impl Runtime {
                 } else {
                     Vec::new()
                 };
+                // A scenario holds or fails the swap here, where this node replaces the unit: its
+                // previous task, if any, has handed its branches over and its replacement, if any,
+                // has not started.
+                #[cfg(feature = "testing")]
+                if (had_old_task || executes_locally)
+                    && let Some(local_node_id) = local_node_id
+                {
+                    self.inner
+                        .fault_injection
+                        .pause_entity_swap_while_replacing_if_armed(local_node_id, domain, entity)
+                        .await;
+                    if self
+                        .inner
+                        .fault_injection
+                        .entity_swap_fails_while_replacing(local_node_id, domain, entity)
+                    {
+                        return Err(Report::new(ExecutionBuildError::InjectedSwapFailure)
+                            .change_context(build()));
+                    }
+                }
 
                 let Some(mut execution) = self.inner.executions.get_mut(domain) else {
                     return Err(processor_swap_unavailable());

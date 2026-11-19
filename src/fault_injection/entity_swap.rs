@@ -1,0 +1,155 @@
+//! Fault controls inside one node's entity swap, at the point where the swap replaces a named
+//! processor: its previous task, if this node ran one, has handed its branches over, and its
+//! replacement, if this node runs one, has not started yet.
+//!
+//! Layer: test harness, outside the product layer order.
+//! - **Owns.** The swap faults a scenario arms for one node and domain: a pause that holds one swap
+//!   at that point, and a failure that makes every swap fail there until the scenario clears it.
+//! - **Depends on.** Vocabulary identities and the shared test pause.
+//! - **Must not know.** Schedules, swap ordering, execution state or the runtime.
+
+#![cfg_attr(
+    nervix_lint,
+    nervix::context(
+        outside,
+        reason = "owns test swap controls for one node and domain"
+    )
+)]
+
+use nervix_models::{ClusterNodeName, DomainName, NodeRef};
+use nervix_primitives::sync::Arc;
+
+use super::{FaultInjection, TestPause};
+
+/// The node and domain whose entity swaps a fault applies to.
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+pub(super) struct EntitySwapFaultKey {
+    node: ClusterNodeName,
+    domain: DomainName,
+}
+
+impl EntitySwapFaultKey {
+    fn new(node: &ClusterNodeName, domain: &DomainName) -> Self {
+        Self {
+            node: node.clone(),
+            domain: domain.clone(),
+        }
+    }
+}
+
+/// A pause that holds the next swap while it replaces `processor`.
+#[derive(Debug, Clone)]
+pub(super) struct EntitySwapReplacementPause {
+    processor: NodeRef,
+    pause: Arc<TestPause>,
+}
+
+impl FaultInjection {
+    /// Makes every entity swap of `domain` on `node` fail while it replaces `processor`, until
+    /// [`Self::clear_entity_swap_failures_on`].
+    pub fn fail_entity_swaps_while_replacing_on(
+        &self,
+        node: &ClusterNodeName,
+        domain: &DomainName,
+        processor: NodeRef,
+    ) {
+        self.inner
+            .entity_swap_replacement_failures
+            .insert(EntitySwapFaultKey::new(node, domain), processor);
+    }
+
+    /// Lets the entity swaps of `domain` on `node` run without the failure armed above.
+    pub fn clear_entity_swap_failures_on(&self, node: &ClusterNodeName, domain: &DomainName) {
+        self.inner
+            .entity_swap_replacement_failures
+            .remove(&EntitySwapFaultKey::new(node, domain));
+    }
+
+    /// Holds the next entity swap of `domain` on `node` while it replaces `processor`, until the
+    /// scenario releases it.
+    pub fn pause_entity_swap_while_replacing_on(
+        &self,
+        node: &ClusterNodeName,
+        domain: &DomainName,
+        processor: NodeRef,
+    ) {
+        self.inner.entity_swap_replacement_pauses.insert(
+            EntitySwapFaultKey::new(node, domain),
+            EntitySwapReplacementPause {
+                processor,
+                pause: Arc::new(TestPause::default()),
+            },
+        );
+    }
+
+    /// Waits until the swap armed above holds at its replacement pause.
+    pub async fn wait_for_entity_swap_replacement_pause(
+        &self,
+        node: &ClusterNodeName,
+        domain: &DomainName,
+    ) {
+        let pause = self.entity_swap_replacement_pause(node, domain);
+        pause.wait_until_reached().await;
+    }
+
+    /// Releases the swap held at its replacement pause.
+    pub fn release_entity_swap_replacement_pause(
+        &self,
+        node: &ClusterNodeName,
+        domain: &DomainName,
+    ) {
+        let pause = self.entity_swap_replacement_pause(node, domain);
+        pause.release();
+    }
+
+    fn entity_swap_replacement_pause(
+        &self,
+        node: &ClusterNodeName,
+        domain: &DomainName,
+    ) -> Arc<TestPause> {
+        let Some(armed) = self
+            .inner
+            .entity_swap_replacement_pauses
+            .get(&EntitySwapFaultKey::new(node, domain))
+        else {
+            panic!(
+                "no entity swap replacement pause is armed for domain '{}' on node '{}'",
+                domain.as_str(),
+                node.as_str()
+            );
+        };
+        armed.pause.clone()
+    }
+
+    /// Holds a swap of `domain` on `node` that is replacing `processor`, when a scenario armed that
+    /// pause, until the scenario releases it. The pause holds one swap.
+    pub(crate) async fn pause_entity_swap_while_replacing_if_armed(
+        &self,
+        node: &ClusterNodeName,
+        domain: &DomainName,
+        processor: &NodeRef,
+    ) {
+        let key = EntitySwapFaultKey::new(node, domain);
+        let pause = match self.inner.entity_swap_replacement_pauses.get(&key) {
+            Some(armed) if armed.processor == *processor => armed.pause.clone(),
+            Some(_) | None => return,
+        };
+        pause.reach();
+        pause.wait_until_released().await;
+        self.inner.entity_swap_replacement_pauses.remove(&key);
+    }
+
+    /// Whether a swap of `domain` on `node` that is replacing `processor` fails there.
+    pub(crate) fn entity_swap_fails_while_replacing(
+        &self,
+        node: &ClusterNodeName,
+        domain: &DomainName,
+        processor: &NodeRef,
+    ) -> bool {
+        let key = EntitySwapFaultKey::new(node, domain);
+        match self.inner.entity_swap_replacement_failures.get(&key) {
+            Some(armed) => *armed == *processor,
+            None => false,
+        }
+    }
+}

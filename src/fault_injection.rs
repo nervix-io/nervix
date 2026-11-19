@@ -65,6 +65,7 @@ mod emitter_mode;
 mod entity_drain;
 #[cfg(test)]
 mod entity_drain_tests;
+mod entity_swap;
 mod execution;
 mod explicit_commit;
 mod handoff_gate_link;
@@ -123,6 +124,7 @@ use domain_clock::DomainClockProgressPausePoint;
 pub use domain_resume::DomainResumeBoundary;
 use emitter_mode::EmitterFaultMode;
 use entity_drain::ForcedEntityDrainTimeout;
+use entity_swap::{EntitySwapFaultKey, EntitySwapReplacementPause};
 pub(crate) use entity_drain::ObservedEntityDrain;
 use execution::NodeExecution;
 use handoff_gate_link::HandoffGateLink;
@@ -245,6 +247,13 @@ struct FaultInjectionState {
     forced_domain_drain_timeouts: DashMap<DomainName, (), RandomState>,
     /// One-shot entity-swap failures consumed by the selected runtime node and domain.
     failed_entity_schedule_swaps: DashMap<EntityScheduleSwapFailureKey, (), RandomState>,
+    /// Entity-swap failures armed for one node and domain, met while a swap replaces the named
+    /// processor, until the scenario clears them.
+    entity_swap_replacement_failures: DashMap<EntitySwapFaultKey, NodeRef, RandomState>,
+    /// One-swap pauses armed for one node and domain, held while a swap replaces the named
+    /// processor.
+    entity_swap_replacement_pauses:
+        DashMap<EntitySwapFaultKey, EntitySwapReplacementPause, RandomState>,
     transaction_binding_drops: DashMap<ClusterNodeName, (), RandomState>,
     /// One-shot waits, keyed by a stopping node, that the leader spends before it releases the
     /// cordon that node's own graceful shutdown drain set.
@@ -563,6 +572,8 @@ impl Default for FaultInjection {
                 stale_owner_buffer_drain_reports: DashMap::default(),
                 forced_domain_drain_timeouts: DashMap::default(),
                 failed_entity_schedule_swaps: DashMap::default(),
+                entity_swap_replacement_failures: DashMap::default(),
+                entity_swap_replacement_pauses: DashMap::default(),
                 transaction_binding_drops: DashMap::default(),
                 delayed_shutdown_cordon_releases: DashMap::default(),
                 delayed_ingestor_confirmations: DashMap::default(),
