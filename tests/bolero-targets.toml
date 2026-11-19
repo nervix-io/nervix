@@ -3327,6 +3327,21 @@ test_target = "lib"
 
 [[target]]
 case_timeout_seconds = 10
+corpus = "crates/relay-channel/src/tests/__fuzz__/tests__reference__bolero_channel_matches_reference_and_restores_the_rest_of_the_sequence/corpus"
+domain_version = 1
+features = []
+id = "relay-channel-operations"
+invariant = "The weighted channel matches an independent FIFO admission and broadcast model at every step and preserves every retained item, charge and reader position across capture and restoration, including after shrink, cancellation, membership changes and closure."
+manifest = "Cargo.toml"
+max_input_bytes = 192
+package = "nervix-relay-channel"
+random_iterations = 128
+source = "crates/relay-channel/src/tests/reference.rs"
+test = "tests::reference::bolero_channel_matches_reference_and_restores_the_rest_of_the_sequence"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
 corpus = "src/application/authentication/pacing/__fuzz__/application__authentication__pacing__tests__bolero_quota_reanchoring_preserves_governors_complete_state/corpus"
 domain_version = 1
 features = []

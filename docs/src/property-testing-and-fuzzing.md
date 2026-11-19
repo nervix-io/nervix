@@ -279,6 +279,7 @@ deterministic checks of their projections without introducing a second report sh
 | `typed-hidden-tunables` | `nervix-lint-report` complete numeric policy site equality and source/site JSON round trips | bounded numeric constants, literal capacities, inactive and macro source, fixed contracts and test exclusions with exact locations, v1 | 256 | 32 bytes |
 | `typed-non-aws-lc-crypto` | `nervix-lint-report` complete authored cryptography site equality and source/site JSON round trips | bounded crate imports and renames, provider and entropy paths inside and outside the boundary, inactive, macro and tracing-argument source, nonempty BLAKE3 purposes and empty-purpose controls, look-alike paths and test exclusions with exact locations, v2 | 256 | 32 bytes |
 | `expiry-map-operations` | `nervix-expiry-map` operation sequences against an `IndexMap` reference: iteration order, lengths, oldest entry, lookups, renewal, shared key allocations and one drop per value | up to 480 weighted insert, shared insert, keyed and oldest removal, lookup, renewal, shared-key copy and clear steps over 96 keys, v2 | 256 | 1024 bytes |
+| `relay-channel-operations` | Standalone weighted channel against a FIFO admission and broadcast reference: send results, read order, exact charge, retained content and each reader's position after restoration | up to 64 sends, polls, cancellations, reads, membership changes, resizes, closes and round trips with up to four reader identities, v1 | 128 | 192 bytes |
 | `authentication-quota-clock` | `nervix-server` authentication bucket reanchoring against a persistent governor limiter: every decision, exact wait and complete theoretical arrival mark | rates 1–256 and up to 511 monotonic steps with repeated instants, nanosecond/refill boundaries and week-long idle advances, v1 | 256 | 512 bytes |
 | `rate-limit-quota-bounds` | `nervix-rate-limit` quota construction and replenishment against a wide-integer oracle | raw and bounded count, nanosecond period and burst, including zero, maximum burst and horizon overflow, v1 | 256 | 32 bytes |
 | `rate-limit-capacity` | `nervix-rate-limit` the unit capacity a read budget asks for agrees with admission at the same instant and with the instant it names | up to three direct clauses of bounded count, nanosecond period and burst, with forward clock steps and waits taken at their named instants, v1 | 256 | 64 bytes |
@@ -587,7 +588,12 @@ recorded boundary, not a claim:
 
 Registered properties also hold behavioral contracts against independent references:
 
-- **Operation sequences.** `expiry-map-operations` drives the expiry map with weighted operation
+- **Operation sequences.** `relay-channel-operations` uses an independent queue of requested
+  reservations and an ordered list with an unread set per item. It checks typed send results,
+  each read and the exact charge. Round trips compare every retained item and reader position,
+  then continue on the rebuilt channel. The corpus includes a live shrink with queued requests
+  and a round trip with readers at different positions.
+  `expiry-map-operations` drives the expiry map with weighted operation
   sequences against an `IndexMap` model and a ledger that counts every stored value's drops. Miri
   runs the same property through `just test-expiry-map-miri`, which lifts Miri's isolation so
   Bolero reads its checked-in corpus, with four random cases of at most 512 input bytes; every step

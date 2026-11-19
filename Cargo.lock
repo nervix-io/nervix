@@ -8184,6 +8184,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "nervix-relay-channel"
+version = "0.1.0-dev"
+dependencies = [
+ "bolero",
+ "criterion 0.5.1",
+ "intrusive-collections",
+ "meticulous",
+ "nervix-model-harness",
+ "nervix-primitives",
+]
+
+[[package]]
 name = "nervix-roto"
 version = "0.1.0-dev"
 dependencies = [

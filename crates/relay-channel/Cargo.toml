@@ -1,0 +1,28 @@
+[package]
+description = "A weighted broadcast channel with ordered, cancellable reservations"
+edition.workspace = true
+license-file.workspace = true
+name = "nervix-relay-channel"
+version.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+default = []
+loom = ["nervix-model-harness/loom", "nervix-primitives/loom"]
+shuttle = ["nervix-model-harness/shuttle", "nervix-primitives/shuttle"]
+
+[dependencies]
+intrusive-collections = { workspace = true }
+meticulous = { workspace = true }
+nervix-primitives = { workspace = true, features = ["native"] }
+
+[dev-dependencies]
+bolero = { workspace = true }
+criterion = { workspace = true }
+nervix-model-harness = { workspace = true }
+
+[[bench]]
+harness = false
+name = "weighted"
