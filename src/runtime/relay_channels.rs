@@ -35,7 +35,21 @@ enum RelayBranchBinding {
 }
 
 /// The relay's own channel use ends through its branch owner, independently of local producers.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the value below retirement marks relay ownership without counting a producer"
+    )
+)]
 const RETAINED_BY_RELAY: usize = usize::MAX - 1;
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the maximum count value is reserved for an allocation that can no longer bind"
+    )
+)]
 const RETIRED_BINDINGS: usize = usize::MAX;
 
 #[derive(Debug)]
