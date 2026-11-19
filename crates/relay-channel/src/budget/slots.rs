@@ -20,8 +20,22 @@ use super::State;
 
 // One block covers the benchmark's maximum producer and reader count together. Additional
 // blocks grow the index in the same units and keep every published slot at a stable address.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "Budget slot keys resolve to stable addresses using this fixed block layout."
+    )
+)]
 const SLOTS_PER_BLOCK: usize = 64;
 // The budget word's top bit identifies a decision represented directly in that word.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "The upper generation bit is reserved for the inline budget tag."
+    )
+)]
 const GENERATION_LIMIT: u32 = u32::MAX >> 1;
 
 #[derive(Clone, Copy)]

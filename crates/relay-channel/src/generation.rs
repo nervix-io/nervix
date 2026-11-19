@@ -33,9 +33,37 @@ use crate::{
 // The same word records the seal, active appenders and sleeping readers. The lower word
 // counts appenders and the upper word counts sleeping readers, with its top bit for the seal.
 // Both counts cover billions of independent handles even on a 32-bit host.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "Sealing sets the high bit without changing either count in the activity word."
+    )
+)]
 const SEALED: u64 = 1 << (u64::BITS - 1);
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "One waiting reader adds the first bit above the appender count."
+    )
+)]
 const WAITER: u64 = 1 << u32::BITS;
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "The low 32 bits of the activity word count active appenders."
+    )
+)]
 const ACTIVE_MASK: u64 = WAITER - 1;
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "Waiting readers occupy the field between the appender count and the seal."
+    )
+)]
 const WAITING_MASK: u64 = SEALED - WAITER;
 
 pub(super) struct Generation<T> {

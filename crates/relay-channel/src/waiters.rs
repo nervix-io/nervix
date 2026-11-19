@@ -32,14 +32,50 @@ use crate::budget::{Admission, Budget, State, Writer};
 
 // The granter claims the list and its write slot only while RUNNING is set. A signal racing an
 // active granter leaves WORK set so the active granter observes it before handing over.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "A granter's idle state has neither the ownership bit nor the work bit set."
+    )
+)]
 const IDLE: u8 = 0;
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "The low bit grants exclusive access to the intrusive list."
+    )
+)]
 const RUNNING: u8 = 1;
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "The second bit records work without transferring ownership of the list."
+    )
+)]
 const WORK: u8 = 2;
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "An active granter with outstanding work retains both bits."
+    )
+)]
 const RUNNING_WITH_WORK: u8 = 0b11;
 
 // An item using the entire byte limit serializes consecutive sends. The drain benchmark
 // qualified an eight-task wake batch including the granted request. The cap keeps wake work
 // independent of the length of the waiting line.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "The full-buffer handoff holds one granted request and seven followers in a \
+                  fixed-size batch of eight waiter references."
+    )
+)]
 const FOLLOWER_WAKE_LIMIT: usize = 7;
 
 struct Turns(AtomicU8);

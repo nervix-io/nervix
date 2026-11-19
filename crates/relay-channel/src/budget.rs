@@ -26,11 +26,54 @@ use self::slots::{Key, Slots};
 // one word. The other representation retains full u64 weights, all waiter counts, and the
 // ending states. Two 27-bit sizes cover limits up to just under 128 MiB while leaving nine
 // bits for up to 511 parked producers. Larger values use the same admission rules.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "The top budget bit distinguishes inline states from slot keys."
+    )
+)]
 const DIRECT: u64 = 1 << (u64::BITS - 1);
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "The inline layout uses two 27-bit weights and a nine-bit waiter count."
+    )
+)]
 const SIZE_BITS: u32 = 27;
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "This mask reads one complete weight field of the inline layout."
+    )
+)]
 const SIZE_MASK: u64 = (1 << SIZE_BITS) - 1;
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "The inline waiter count begins above both weight fields."
+    )
+)]
 const WAIT_SHIFT: u32 = SIZE_BITS * 2;
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "One queued request occupies one unit of the inline wait field."
+    )
+)]
 const WAIT_UNIT: u64 = 1 << WAIT_SHIFT;
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "The waiter count fills the bits below the representation tag and above the \
+                  weights."
+    )
+)]
 const WAIT_MASK: u64 = (DIRECT - 1) >> WAIT_SHIFT;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

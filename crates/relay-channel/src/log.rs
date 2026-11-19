@@ -38,6 +38,14 @@ use crate::channel::{SavedEntry, Standstill};
 
 // The allocation and reuse scan are amortized over this many entries. A writer owns
 // the positions in its active block, so it can prepare a slot without modifying a shared cursor.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "This is the length of the block's slot array and the boundary at which a writer \
+                  may reuse storage."
+    )
+)]
 const ENTRIES_PER_BLOCK: usize = 32;
 
 pub(super) struct Entry<T> {
