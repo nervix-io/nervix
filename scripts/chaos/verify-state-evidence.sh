@@ -45,7 +45,10 @@ with no replay. With a fault, every output before it counts the same way, and co
 branch's records before the milestone. After the fault a branch may continue from a restored
 count C, its first count then C + 1: C must hold every record before the milestone. A periodic
 checkpoint skips the updates after it, and redeliveries can already be counted in the checkpoint,
-including callbacks whose outputs were not observed. Distinct source records do not bound C.
+including callbacks whose outputs were not observed. A survivor that refuses a routed output
+before it has started its consumer leaves the row counted, and the source redelivers the row,
+which counts again on every attempt. Failover is at least once, so distinct source records do not
+bound C.
 Every count after the fault that does not
 follow its branch's previous count by one, including an output a former owner delivered before its
 fence took effect, starts again from such a C. The counts that end the run advance by one per
