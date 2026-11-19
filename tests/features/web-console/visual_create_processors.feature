@@ -240,16 +240,19 @@ Feature: Web console visual junction and reingestor creation
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA visual_partition_event (tenant STRING, message STRING);
       CREATE SCHEMA visual_partition_key (tenant STRING);
+      CREATE BRANCH visual_incoming_tenant SCHEMA visual_partition_key TTL 5m;
       CREATE BRANCH visual_by_tenant SCHEMA visual_partition_key TTL 5m;
       CREATE WIRE JSON SCHEMA visual_partition_wire MODE STRICT (tenant string, message string);
       CREATE WIRE JSON CODEC visual_partition_codec FROM WIRE SCHEMA visual_partition_wire TO SCHEMA visual_partition_event;
-      CREATE RELAY visual_partition_input SCHEMA visual_partition_event UNBRANCHED;
+      CREATE RELAY visual_partition_input SCHEMA visual_partition_event BRANCHED BY visual_incoming_tenant;
       CREATE RELAY visual_partition_output SCHEMA visual_partition_event BRANCHED BY visual_by_tenant;
       CREATE VHOST visual_partition_host partition-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT visual_partition_endpoint ON visual_partition_host PATH '/partition';
       CREATE HTTP ENDPOINT INGESTOR visual_partition_ingestor FROM visual_partition_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING visual_partition_codec
-        TO visual_partition_input INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
+        TO visual_partition_input INHERIT ALL
+        BRANCHED BY visual_incoming_tenant SET tenant = message.tenant
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
       """
     And the web console is opened on the leader node
@@ -267,7 +270,7 @@ Feature: Web console visual junction and reingestor creation
     And selector ".create-processor-branch-fields .create-choice-search" is filled with "tenant"
     Then selector ".create-processor-branch-fields [data-value='tenant']" exists
     When selector ".create-processor-branch-fields [data-value='tenant']" is clicked
-    And selector ".create-processor-branch-assignment-expression" is filled with "input.tenant"
+    And selector ".create-processor-branch-assignment-expression" is filled with "LOWER(input.tenant)"
     And selector ".create-processor-route-relay .create-choice-search" is filled with "visual_partition_output"
     Then selector ".create-processor-route-relay [data-value='visual_partition_output']" exists
     When selector ".create-processor-route-relay [data-value='visual_partition_output']" is clicked
@@ -275,6 +278,7 @@ Feature: Web console visual junction and reingestor creation
     And selector ".create-processor-flush [data-flush='immediate']" is clicked
     And selector ".create-processor-message-error [data-error='log']" is clicked
     Then selector ".create-preview" contains "CREATE REINGESTOR visual_partition_stage"
+    And selector ".create-preview" contains "BRANCHED BY visual_by_tenant SET tenant = lower(input.tenant)"
     When selector ".create-submit" is clicked
     Then selector ".create-status" contains "Completed"
     When selector ".create-close" is clicked
@@ -289,7 +293,7 @@ Feature: Web console visual junction and reingestor creation
       """
     And http payload is posted to host "partition-{{test_id}}.example.com" path "/partition"
       """
-      {"tenant":"b","message":"second"}
+      {"tenant":"B","message":"second"}
       """
     And http payload is posted to host "partition-{{test_id}}.example.com" path "/partition"
       """
@@ -298,7 +302,7 @@ Feature: Web console visual junction and reingestor creation
     Then within "5s" the relay subscription receives payloads containing all fragments
       """
       "tenant":"a" | "message":"first"
-      "tenant":"b" | "message":"second"
+      "tenant":"B" | "message":"second"
       "tenant":"a" | "message":"third"
       """
 

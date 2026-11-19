@@ -74,10 +74,11 @@ Nervix is not a durable event log for every in-flight row. If hot-path message o
 Branch grouping is native runtime isolation based on explicit `CREATE BRANCH` declarations. A
 branch declares the branch-key schema shape with `SCHEMA <schema>`, TTL, its partition count, and
 optional eviction policy. The branch name is part of its identity: differently named branches remain incompatible
-even when they reference the same schema. Ingestor routes construct keys with `BRANCHED BY
-<branch> SET ...`; reingestor routes preserve the input key, construct another named branch, or
-become unbranched. Relays and branch-preserving processors use that exact named branch or declare
-`UNBRANCHED`. Relay presence, processor buffers, deduplicator state, window state, and materialized
+even when they reference the same schema. Ingestor and reingestor routes construct keys with
+`BRANCHED BY <branch> SET ...` or send records unbranched. A reingestor's named destination must
+differ from the parametrizations of all its inputs. Relays and branch-preserving processors use
+their exact named branch or declare `UNBRANCHED`. Relay presence, processor buffers, deduplicator
+state, window state, and materialized
 entries remain scoped to one concrete branch; batches for those branches share the declared
 relay's owner buffer, or the buffer of the owner of their partition.
 

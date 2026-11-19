@@ -426,9 +426,11 @@ composition passes those typed choices to the connector without inventing a posi
 provisioned cursor. A reingestor binds its source predicates and
 incoming-branch materialized dependencies before attaching relay inputs. Initial build, entity
 swap, reassignment, memory-pressure resume, and Kafka domain-offset placement all use those
-typed contracts. Route plans decide whether output is unbranched, preserves an incoming key, or
-constructs a new key; the actual branch state remains local to each concrete branch. Transport
-headers remain connector-owned and enter a relay only when copied into schema-backed fields.
+typed contracts. Entrypoint route plans carry either an unbranched destination or a program that
+constructs its key. Each reingestor destination parametrization is validated against every input
+relay's parametrization before planning. Branch state remains local to each concrete branch.
+Transport headers remain connector-owned and enter a relay only when copied into schema-backed
+fields.
 
 An input that owns external session state is retired from its previous typed plan after its ingestor
 tasks stop. `IngestorStartPlan` decides whether the ingestor changed, independently of codec or route
