@@ -264,9 +264,9 @@ representations and every generated location in ordinary and sanitizer execution
 ## Host Memory Admission
 
 An analysis compilation needs about the memory of rustc's own check of its target, and the server
-library's dwarfs every other. Its diagnostic analysis reaches about 21.72 GiB, while other crates
-stay below the 4 GiB threshold. Its 24 GiB reservation covers the measured peak with room for
-variation between builds. Every configuration builds in a directory of its own, and up to four
+library's dwarfs every other. Its diagnostic analysis has peaked just over 24 GiB in CI, while other
+crates stay below the 4 GiB threshold. Its 25 GiB reservation accounts for that peak when the host
+admits compilations. Every configuration builds in a directory of its own, and up to four
 configurations analyze at once, a
 bound `--jobs` or `NERVIX_TYPED_RATCHET_JOBS` sets otherwise; the evidence keeps the declared order
 whatever order they end in, and once one analysis fails no configuration starts another.
