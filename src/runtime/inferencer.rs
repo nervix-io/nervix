@@ -1,8 +1,10 @@
-//! ONNX invocation at the data-plane boundary.
+//! ONNX inference at the data-plane boundary.
 //!
 //! Layer: data plane.
-//! Owns: native sessions, tensor invocation, branch-owned explicit state, safe diagnostics, and
-//! the startup probe of what the process's ONNX Runtime library reports about itself.
+//! Owns: the one inference implementation every inferencer runs, with or without `STATE`: native
+//! sessions, tensor conversion at the Arrow boundary, branch-owned explicit state, safe
+//! diagnostics, and the startup probe of what the process's ONNX Runtime library reports about
+//! itself.
 //! Depends on: typed tensor plans, Arrow batches, the bounded executor and ONNX Runtime.
 //! Must not know: semantic Models, graph validation or placement decisions.
 
@@ -15,35 +17,29 @@
     )
 )]
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
-use ahash::{HashMap, HashMapExt};
 use arch_into::ArchInto as _;
 use error_stack::{Report, ResultExt as _};
 use meticulous::OptionExt as _;
 use nervix_execution::{Cancellation, CpuClass, Executor, MemoryClass};
 use nervix_models::{
-    CudaProviderRegistration, Detected, ExecutionProviders, InferencerExecutionMode,
-    InferencerTensorDeclaration, InferencerTensorDimension, InferencerTensorMapping,
+    CudaProviderRegistration, Detected, ExecutionProviders, InferencerTensorDimension,
     InferencerTensorSchema, OnnxRuntime, OnnxRuntimeDetection, PropertyText, UndetectedReason,
 };
-use nervix_primitives::{
-    sync::{Arc, StdArc, blocking::Mutex},
-    unmodeled::sync::OnceLock,
-};
-use ordered_float::OrderedFloat;
-use ort::{
-    environment::Environment,
-    session::{Session, SessionInputValue},
-    value::Tensor,
-};
+use nervix_primitives::{sync::StdArc, unmodeled::sync::OnceLock};
+use ort::{environment::Environment, session::Session};
 
-use crate::runtime_schema::{RuntimeRecordBatch, RuntimeValue};
+use crate::runtime_schema::RuntimeValue;
 
+mod columns;
+mod session;
 mod stateful;
-pub(super) use stateful::{NativeGeneration, PreparedStatefulInference, StatefulInferenceSession};
+pub(super) use session::{InferenceRun, InferenceSession, MessageRefusal, PreparedInference};
+pub(super) use stateful::{CarriedState, NativeGeneration};
 
-/// Every way ONNX inference fails, from loading a model to reshaping one tensor axis.
+/// Every way ONNX inference fails, from loading a model to reshaping one tensor axis. A model's
+/// refusal keeps only ONNX Runtime's status: its native text can quote tensor values.
 #[derive(Debug, thiserror::Error)]
 pub(super) enum InferencerError {
     #[error("failed to initialize ONNX session")]
@@ -54,36 +50,60 @@ pub(super) enum InferencerError {
     LoadExecution,
     #[error("the node's bounded execution did not run the ONNX model")]
     RunExecution,
+    #[error("the node's bounded execution did not prepare the INITIAL tensors")]
+    InitialExecution,
     #[error("the caller stopped waiting between two ONNX model invocations")]
     Cancelled,
-    #[error("cannot execute ONNX inference for an empty message batch")]
-    EmptyMessageBatch,
-    #[error("per-message ONNX invocation has invalid routing")]
-    InvalidPerMessageRouting,
-    #[error("ONNX output tensor '{tensor}' omitted message row {row}")]
-    OmittedMessageRow { tensor: String, row: usize },
-    #[error("ONNX input tensor '{tensor}' mapped value is missing")]
-    MissingInputValue { tensor: String },
-    #[error("failed to read ONNX input tensor '{tensor}'")]
-    ReadInputValue { tensor: String },
-    #[error("failed to build ONNX input '{tensor}'")]
-    BuildInput { tensor: String },
-    #[error("ONNX model invocation failed")]
-    Invocation,
-    #[error("ONNX invocation omitted output tensor '{tensor}'")]
-    OmittedOutputTensor { tensor: String },
-    #[error("failed to extract ONNX output tensor '{tensor}' as F32")]
-    ExtractOutput { tensor: String },
-    #[error("ONNX output tensor '{tensor}' returned a negative shape {shape:?}")]
-    NegativeOutputShape { tensor: String, shape: Vec<i64> },
+    #[error("the branch's ONNX session was not loaded")]
+    SessionUnavailable,
+    #[error("the ONNX model refused the batched call with status {status:?}")]
+    Refused { status: ort::ErrorCode },
+    #[error("model port '{port}' is unavailable")]
+    Port { port: String },
+    #[error("a batched model reads a STATE port")]
+    BatchWithState,
+    #[error("failed to prepare INITIAL tensors")]
+    Initial,
+    #[error("published state tensor {index} is unavailable or has an invalid type")]
+    StateTensor { index: usize },
+    #[error(
+        "the declared state holds {bytes} bytes, exceeding one configured snapshot section \
+         ({limit} bytes)"
+    )]
+    StateSize { bytes: u64, limit: u64 },
+    #[error("the inference working set exceeds the configured relay operation limit")]
+    WorkingSet,
+    #[error("input tensor '{port}' is unavailable")]
+    InputPort { port: String },
+    #[error("input tensor '{port}' contains null values")]
+    NullInput { port: String },
+    #[error("input tensor '{port}' has an invalid Arrow type {actual:?}")]
+    InputType {
+        port: String,
+        actual: arrow_schema::DataType,
+    },
+    #[error("input tensor '{port}' has an invalid shape")]
+    InputShape { port: String },
+    #[error("failed to build a native input tensor")]
+    BuildInput,
+    #[error("model output '{port}' has an invalid tensor type or shape")]
+    OutputTensor { port: String },
+    #[error("ONNX output tensor returned a negative shape {shape:?}")]
+    NegativeOutputShape { shape: Vec<i64> },
+    #[error("output tensor has an invalid Arrow type {actual:?}")]
+    OutputType { actual: arrow_schema::DataType },
+    #[error("output tensor size exceeds the supported size")]
+    OutputSize,
+    #[error("failed to build the output Arrow arrays")]
+    OutputArray,
+    #[error("failed to build the output Arrow batch")]
+    OutputBatch,
     #[error("batched tensor schema has no dimensions")]
     BatchedSchemaWithoutDimensions,
     #[error("batched tensor schema has no BATCH axis")]
     MissingBatchAxis,
     #[error("tensor slice rank {actual} does not match declared rank {expected}")]
     SliceRankMismatch { actual: usize, expected: usize },
-    #[error("batched tensor rank {actual} does not match declared rank {expected}")]
-    BatchedRankMismatch { actual: usize, expected: usize },
     #[error("tensor shape {shape:?} does not match declared dimensions {dimensions:?}")]
     ShapeDimensionCountMismatch {
         shape: Vec<usize>,
@@ -101,15 +121,6 @@ pub(super) enum InferencerError {
         actual: usize,
         batch_size: usize,
     },
-    #[error("cannot join an empty tensor batch")]
-    EmptyTensorBatch,
-    #[error(
-        "batched DYNAMIC tensor slices must have one concrete shape; got {first:?} and {other:?}"
-    )]
-    RaggedBatchSlices {
-        first: Vec<usize>,
-        other: Vec<usize>,
-    },
     #[error("batched tensor outer element count overflowed")]
     OuterCountOverflow,
     #[error("batched tensor inner element count overflowed")]
@@ -120,9 +131,7 @@ pub(super) enum InferencerError {
     SliceValueCount { actual: usize, expected: usize },
     #[error("batched tensor joined element count overflowed")]
     JoinedCountOverflow,
-    #[error("batched tensor output element count overflowed")]
-    OutputCountOverflow,
-    #[error("batched output contains {actual} values, expected {expected}")]
+    #[error("batched tensor holds {actual} values, expected {expected}")]
     BatchedValueCount { actual: usize, expected: usize },
     #[error("tensor element requires F32, got {value:?}")]
     ElementRequiresF32 { value: RuntimeValue },
@@ -142,21 +151,6 @@ pub(super) enum InferencerError {
     },
     #[error("cannot infer an inner DYNAMIC axis from an empty outer vector")]
     InnerDynamicFromEmpty,
-    #[error("scalar tensor has unexpected remaining shape {shape:?}")]
-    ScalarRemainingShape { shape: Vec<usize> },
-    #[error("scalar tensor contains {actual} values, expected 1")]
-    ScalarValueCount { actual: usize },
-    #[error("tensor value has fewer axes than its schema")]
-    FewerAxesThanSchema,
-    #[error("tensor axis has length {size}, expected {expected}")]
-    AxisLength {
-        size: usize,
-        expected: std::num::NonZeroU32,
-    },
-    #[error("tensor child element count overflowed")]
-    ChildCountOverflow,
-    #[error("tensor element count overflowed")]
-    ElementCountOverflow,
     #[error("tensor contains {actual} values, expected {expected} for shape {shape:?}")]
     ValueCountForShape {
         actual: usize,
@@ -469,19 +463,6 @@ fn report_native_diagnostic(
     }
 }
 
-#[derive(Clone)]
-pub(super) struct OnnxInferencerSession {
-    session: Arc<Mutex<Session>>,
-}
-
-impl std::fmt::Debug for OnnxInferencerSession {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("OnnxInferencerSession")
-            .finish_non_exhaustive()
-    }
-}
-
 /// What loading a model is charged. ONNX Runtime allocates a session's memory itself and keeps it
 /// for as long as the inferencer holds the session, which no transient budget can stand for, so
 /// the charge only admits the load onto the bulk workers.
@@ -494,382 +475,22 @@ impl std::fmt::Debug for OnnxInferencerSession {
 )]
 const SESSION_LOAD_RESERVATION_BYTES: u64 = 1;
 
-impl OnnxInferencerSession {
-    /// Load the model at `path` on the node's bulk workers: reading and optimizing a model is a
-    /// whole-file operation that must not hold a data or control worker.
-    pub(super) async fn load(
-        executor: &Executor,
-        path: &Path,
-    ) -> error_stack::Result<Self, InferencerError> {
-        let path = path.to_path_buf();
-        let reservation = executor
-            .reserve(MemoryClass::Bulk, SESSION_LOAD_RESERVATION_BYTES)
-            .await
-            .change_context(InferencerError::LoadExecution)?;
-        let loaded = executor
-            .accepted_work()
-            .run_cpu(CpuClass::Bulk, reservation, move |_charge, cancellation| {
-                cancellation
-                    .check()
-                    .change_context(InferencerError::Cancelled)?;
-                let environment =
-                    onnx_environment().change_context(InferencerError::InitializeSession)?;
-                let mut builder = Session::builder(environment)
-                    .change_context(InferencerError::InitializeSession)?
-                    .with_intra_threads(1)
-                    .map_err(ort::Error::<()>::from)
-                    .change_context(InferencerError::InitializeSession)?
-                    .with_inter_threads(1)
-                    .map_err(ort::Error::<()>::from)
-                    .change_context(InferencerError::InitializeSession)?;
-                builder
-                    .commit_from_file(&path)
-                    .change_context_lazy(|| InferencerError::LoadModel { path: path.clone() })
-            })
-            .await
-            .change_context(InferencerError::LoadExecution)?;
-        let session = loaded?;
-        Ok(Self {
-            session: Arc::new(Mutex::new(session)),
-        })
-    }
-
-    /// Run the model over `batch` on the node's data workers, charged the bytes the batch's
-    /// columns hold, which is the usual order of the tensors they become and the model returns.
-    /// The run checks between model invocations whether its caller stopped waiting.
-    #[cfg_attr(
-        nervix_lint,
-        nervix::context(
-            bounded,
-            reason = "the branch retains its ONNX session while the admitted CPU job uses it",
-            key = "one branch inference session",
-            bound = "one admitted batch kernel call at a time; its memory charge precedes \
-                     execution and the guard never crosses await"
-        )
-    )]
-    pub(super) async fn execute(
-        &self,
-        executor: &Executor,
-        batch: &RuntimeRecordBatch,
-        inputs: &[InferencerTensorMapping],
-        output_schema: &[InferencerTensorDeclaration],
-        mode: InferencerExecutionMode,
-    ) -> error_stack::Result<Vec<Vec<RuntimeValue>>, InferencerError> {
-        let prepared = PreparedExecution::from_batch(batch, inputs, output_schema, mode)?;
-        let charge = batch
-            .estimated_bytes()
-            .min(executor.limits().relay_decoded_bytes.as_u64());
-        let reservation = executor
-            .reserve(MemoryClass::Relay, charge)
-            .await
-            .change_context(InferencerError::RunExecution)?;
-        let session = Arc::clone(&self.session);
-        executor
-            .accepted_work()
-            .run_cpu(CpuClass::Data, reservation, move |_charge, cancellation| {
-                prepared.run(&mut session.lock(), cancellation)
-            })
-            .await
-            .change_context(InferencerError::RunExecution)?
-    }
-}
-
-struct PreparedExecution {
-    invocations: Vec<PreparedInvocation>,
-    output_schema: Vec<InferencerTensorDeclaration>,
-    message_count: usize,
-    mode: InferencerExecutionMode,
-}
-
-impl PreparedExecution {
-    fn from_batch(
-        batch: &RuntimeRecordBatch,
-        inputs: &[InferencerTensorMapping],
-        output_schema: &[InferencerTensorDeclaration],
-        mode: InferencerExecutionMode,
-    ) -> error_stack::Result<Self, InferencerError> {
-        let message_count = batch.batch().num_rows();
-        if message_count == 0 {
-            return Err(Report::new(InferencerError::EmptyMessageBatch));
-        }
-        let invocations = match mode {
-            InferencerExecutionMode::PerMessage => (0..message_count)
-                .map(|message_index| PreparedInvocation::for_row(message_index, batch, inputs))
-                .collect::<Result<Vec<_>, _>>()?,
-            InferencerExecutionMode::Batched => {
-                PreparedInvocation::for_shape_batches(batch, inputs)?
-            }
-        };
-        Ok(Self {
-            invocations,
-            output_schema: output_schema.to_vec(),
-            message_count,
-            mode,
-        })
-    }
-
-    fn run(
-        self,
-        session: &mut Session,
-        cancellation: &Cancellation,
-    ) -> error_stack::Result<Vec<Vec<RuntimeValue>>, InferencerError> {
-        let mut columns = self
-            .output_schema
-            .iter()
-            .map(|_| vec![None; self.message_count])
-            .collect::<Vec<Vec<Option<RuntimeValue>>>>();
-        match self.mode {
-            InferencerExecutionMode::PerMessage => {
-                for invocation in self.invocations {
-                    cancellation
-                        .check()
-                        .change_context(InferencerError::Cancelled)?;
-                    let [message_index] = invocation.message_indices.as_slice() else {
-                        return Err(Report::new(InferencerError::InvalidPerMessageRouting));
-                    };
-                    let message_index = *message_index;
-                    let output_tensors = invocation.run(session, &self.output_schema, 1)?;
-                    for (column, (declaration, tensor)) in columns
-                        .iter_mut()
-                        .zip(self.output_schema.iter().zip(output_tensors))
-                    {
-                        column[message_index] = Some(
-                            declaration
-                                .schema
-                                .runtime_value_from_tensor(&tensor.values, &tensor.shape)?,
-                        );
-                    }
-                }
-            }
-            InferencerExecutionMode::Batched => {
-                for invocation in self.invocations {
-                    cancellation
-                        .check()
-                        .change_context(InferencerError::Cancelled)?;
-                    let message_indices = invocation.message_indices.clone();
-                    let batch_size = message_indices.len();
-                    let output_tensors =
-                        invocation.run(session, &self.output_schema, batch_size)?;
-                    for (column, (declaration, tensor)) in columns
-                        .iter_mut()
-                        .zip(self.output_schema.iter().zip(output_tensors))
-                    {
-                        let slices = declaration.schema.split_batch_values(
-                            &tensor.values,
-                            batch_size,
-                            &tensor.shape,
-                        )?;
-                        let slice_shape = declaration.schema.shape_without_batch(&tensor.shape)?;
-                        for (message_index, values) in message_indices.iter().zip(slices) {
-                            column[*message_index] = Some(
-                                declaration
-                                    .schema
-                                    .runtime_value_from_tensor(&values, &slice_shape)?,
-                            );
-                        }
-                    }
-                }
-            }
-        }
-        let mut outputs = Vec::with_capacity(columns.len());
-        for (column_index, column) in columns.into_iter().enumerate() {
-            let mut values = Vec::with_capacity(column.len());
-            for (row, value) in column.into_iter().enumerate() {
-                let value = value.ok_or_else(|| {
-                    Report::new(InferencerError::OmittedMessageRow {
-                        tensor: self.output_schema[column_index].tensor.clone(),
-                        row,
-                    })
-                })?;
-                values.push(value);
-            }
-            outputs.push(values);
-        }
-        Ok(outputs)
-    }
-}
-
-struct PreparedInvocation {
-    inputs: Vec<PreparedTensor>,
-    message_indices: Vec<usize>,
-}
-
-impl PreparedInvocation {
-    fn for_row(
-        message_index: usize,
-        batch: &RuntimeRecordBatch,
-        mappings: &[InferencerTensorMapping],
-    ) -> error_stack::Result<Self, InferencerError> {
-        let mut inputs = Vec::with_capacity(mappings.len());
-        for mapping in mappings {
-            let value = mapped_input_value(batch, message_index, mapping)?;
-            let tensor = mapping.schema.tensor_from_runtime_value(&value)?;
-            inputs.push(PreparedTensor {
-                name: mapping.tensor.clone(),
-                shape: tensor.shape,
-                values: tensor.values,
-            });
-        }
-        Ok(Self {
-            inputs,
-            message_indices: vec![message_index],
-        })
-    }
-
-    fn for_shape_batches(
-        batch: &RuntimeRecordBatch,
-        mappings: &[InferencerTensorMapping],
-    ) -> error_stack::Result<Vec<Self>, InferencerError> {
-        let mut groups = HashMap::<Vec<Vec<usize>>, Vec<usize>>::new();
-        for message_index in 0..batch.batch().num_rows() {
-            let mut shapes = Vec::with_capacity(mappings.len());
-            for mapping in mappings {
-                let value = mapped_input_value(batch, message_index, mapping)?;
-                shapes.push(mapping.schema.tensor_from_runtime_value(&value)?.shape);
-            }
-            groups.entry(shapes).or_default().push(message_index);
-        }
-        groups
-            .into_values()
-            .map(|message_indices| Self::for_batch(batch, mappings, message_indices))
-            .collect()
-    }
-
-    fn for_batch(
-        batch: &RuntimeRecordBatch,
-        mappings: &[InferencerTensorMapping],
-        message_indices: Vec<usize>,
-    ) -> error_stack::Result<Self, InferencerError> {
-        let mut inputs = Vec::with_capacity(mappings.len());
-        for mapping in mappings {
-            let mut slices = Vec::with_capacity(message_indices.len());
-            for message_index in &message_indices {
-                let value = mapped_input_value(batch, *message_index, mapping)?;
-                slices.push(mapping.schema.tensor_from_runtime_value(&value)?);
-            }
-            let shape = mapping
-                .schema
-                .batch_shape(&slices[0].shape, message_indices.len())?;
-            inputs.push(PreparedTensor {
-                name: mapping.tensor.clone(),
-                shape,
-                values: mapping.schema.join_batch_values(&slices)?,
-            });
-        }
-        Ok(Self {
-            inputs,
-            message_indices,
-        })
-    }
-
-    fn run(
-        self,
-        session: &mut Session,
-        output_schema: &[InferencerTensorDeclaration],
-        batch_size: usize,
-    ) -> error_stack::Result<Vec<ExecutedTensor>, InferencerError> {
-        let mut inputs = Vec::with_capacity(self.inputs.len());
-        for tensor in self.inputs {
-            let value =
-                Tensor::from_array((tensor.shape, tensor.values)).change_context_lazy(|| {
-                    InferencerError::BuildInput {
-                        tensor: tensor.name.clone(),
-                    }
-                })?;
-            inputs.push((tensor.name, SessionInputValue::from(value)));
-        }
-        let session_outputs = session
-            .run(inputs)
-            .change_context(InferencerError::Invocation)?;
-        let mut executed = Vec::with_capacity(output_schema.len());
-        for declaration in output_schema {
-            let output = session_outputs.get(&declaration.tensor).ok_or_else(|| {
-                Report::new(InferencerError::OmittedOutputTensor {
-                    tensor: declaration.tensor.clone(),
-                })
-            })?;
-            let (shape, values) = output.try_extract_tensor::<f32>().change_context_lazy(|| {
-                InferencerError::ExtractOutput {
-                    tensor: declaration.tensor.clone(),
-                }
-            })?;
-            let shape = shape
-                .iter()
-                .map(|dimension| usize::try_from(*dimension))
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(|_| {
-                    Report::new(InferencerError::NegativeOutputShape {
-                        tensor: declaration.tensor.clone(),
-                        shape: shape.as_ref().to_vec(),
-                    })
-                })?;
-            declaration.schema.validate_concrete_shape(
-                &shape,
-                batch_size,
-                declaration.schema.batch_axis().is_some(),
-            )?;
-            executed.push(ExecutedTensor {
-                shape,
-                values: values.to_vec(),
-            });
-        }
-        Ok(executed)
-    }
-}
-
-/// Read the value one tensor mapping projects for a message, which every invocation shape needs
-/// before it can build a tensor from it.
-fn mapped_input_value(
-    batch: &RuntimeRecordBatch,
-    message_index: usize,
-    mapping: &InferencerTensorMapping,
-) -> error_stack::Result<RuntimeValue, InferencerError> {
-    let value = batch
-        .value(message_index, &mapping.tensor)
-        .change_context_lazy(|| InferencerError::ReadInputValue {
-            tensor: mapping.tensor.clone(),
-        })?;
-    value.ok_or_else(|| {
-        Report::new(InferencerError::MissingInputValue {
-            tensor: mapping.tensor.clone(),
-        })
-    })
-}
-
-struct PreparedTensor {
-    name: String,
-    shape: Vec<usize>,
-    values: Vec<f32>,
-}
-
-struct ExecutedTensor {
-    shape: Vec<usize>,
-    values: Vec<f32>,
-}
-
 struct RuntimeTensorSlice {
     shape: Vec<usize>,
     values: Vec<f32>,
 }
 
+/// Tensor-shape rules of a declared tensor schema: reading a configuration constant as a tensor,
+/// and checking concrete shapes against the declared axes.
 trait RuntimeTensorSchema {
     fn tensor_from_runtime_value(
         &self,
         value: &RuntimeValue,
     ) -> error_stack::Result<RuntimeTensorSlice, InferencerError>;
-    fn runtime_value_from_tensor(
-        &self,
-        values: &[f32],
-        shape: &[usize],
-    ) -> error_stack::Result<RuntimeValue, InferencerError>;
     fn batch_shape(
         &self,
         slice_shape: &[usize],
         batch_size: usize,
-    ) -> error_stack::Result<Vec<usize>, InferencerError>;
-    fn shape_without_batch(
-        &self,
-        shape: &[usize],
     ) -> error_stack::Result<Vec<usize>, InferencerError>;
     fn validate_concrete_shape(
         &self,
@@ -877,16 +498,6 @@ trait RuntimeTensorSchema {
         batch_size: usize,
         include_batch: bool,
     ) -> error_stack::Result<(), InferencerError>;
-    fn join_batch_values(
-        &self,
-        slices: &[RuntimeTensorSlice],
-    ) -> error_stack::Result<Vec<f32>, InferencerError>;
-    fn split_batch_values(
-        &self,
-        values: &[f32],
-        batch_size: usize,
-        shape: &[usize],
-    ) -> error_stack::Result<Vec<Vec<f32>>, InferencerError>;
     fn tensor_from_dimensions(
         &self,
         dimensions: &[InferencerTensorDimension],
@@ -896,12 +507,6 @@ trait RuntimeTensorSchema {
         &self,
         dimensions: &[InferencerTensorDimension],
     ) -> error_stack::Result<Vec<usize>, InferencerError>;
-    fn runtime_value_from_dimensions(
-        &self,
-        dimensions: &[InferencerTensorDimension],
-        values: &[f32],
-        shape: &[usize],
-    ) -> error_stack::Result<RuntimeValue, InferencerError>;
 }
 
 impl RuntimeTensorSchema for InferencerTensorSchema {
@@ -910,14 +515,6 @@ impl RuntimeTensorSchema for InferencerTensorSchema {
         value: &RuntimeValue,
     ) -> error_stack::Result<RuntimeTensorSlice, InferencerError> {
         self.tensor_from_dimensions(&self.dimensions, value)
-    }
-
-    fn runtime_value_from_tensor(
-        &self,
-        values: &[f32],
-        shape: &[usize],
-    ) -> error_stack::Result<RuntimeValue, InferencerError> {
-        self.runtime_value_from_dimensions(&self.dimensions, values, shape)
     }
 
     fn batch_shape(
@@ -949,24 +546,6 @@ impl RuntimeTensorSchema for InferencerTensorSchema {
         }
         self.validate_concrete_shape(&shape, batch_size, true)?;
         Ok(shape)
-    }
-
-    fn shape_without_batch(
-        &self,
-        shape: &[usize],
-    ) -> error_stack::Result<Vec<usize>, InferencerError> {
-        let batch_axis = self
-            .batch_axis()
-            .ok_or_else(|| Report::new(InferencerError::MissingBatchAxis))?;
-        if shape.len() != self.dimensions.len() {
-            return Err(Report::new(InferencerError::BatchedRankMismatch {
-                actual: shape.len(),
-                expected: self.dimensions.len(),
-            }));
-        }
-        let mut result = shape.to_vec();
-        result.remove(batch_axis);
-        Ok(result)
     }
 
     fn validate_concrete_shape(
@@ -1009,94 +588,6 @@ impl RuntimeTensorSchema for InferencerTensorSchema {
             }
         }
         Ok(())
-    }
-
-    fn join_batch_values(
-        &self,
-        slices: &[RuntimeTensorSlice],
-    ) -> error_stack::Result<Vec<f32>, InferencerError> {
-        let first = slices
-            .first()
-            .ok_or_else(|| Report::new(InferencerError::EmptyTensorBatch))?;
-        if let Some(slice) = slices.iter().find(|slice| slice.shape != first.shape) {
-            return Err(Report::new(InferencerError::RaggedBatchSlices {
-                first: first.shape.clone(),
-                other: slice.shape.clone(),
-            }));
-        }
-        let shape = self.batch_shape(&first.shape, slices.len())?;
-        let batch_axis = self
-            .batch_axis()
-            .ok_or_else(|| Report::new(InferencerError::MissingBatchAxis))?;
-        let outer = shape[..batch_axis]
-            .iter()
-            .try_fold(1_usize, |count, size| count.checked_mul(*size))
-            .ok_or_else(|| Report::new(InferencerError::OuterCountOverflow))?;
-        let inner = shape[batch_axis + 1..]
-            .iter()
-            .try_fold(1_usize, |count, size| count.checked_mul(*size))
-            .ok_or_else(|| Report::new(InferencerError::InnerCountOverflow))?;
-        let expected_slice_len = outer
-            .checked_mul(inner)
-            .ok_or_else(|| Report::new(InferencerError::SliceCountOverflow))?;
-        if let Some(actual) = slices
-            .iter()
-            .map(|slice| slice.values.len())
-            .find(|actual| *actual != expected_slice_len)
-        {
-            return Err(Report::new(InferencerError::SliceValueCount {
-                actual,
-                expected: expected_slice_len,
-            }));
-        }
-        let joined_len = expected_slice_len
-            .checked_mul(slices.len())
-            .ok_or_else(|| Report::new(InferencerError::JoinedCountOverflow))?;
-        let mut joined = Vec::with_capacity(joined_len);
-        for outer_index in 0..outer {
-            for slice in slices {
-                let start = outer_index * inner;
-                joined.extend_from_slice(&slice.values[start..start + inner]);
-            }
-        }
-        Ok(joined)
-    }
-
-    fn split_batch_values(
-        &self,
-        values: &[f32],
-        batch_size: usize,
-        shape: &[usize],
-    ) -> error_stack::Result<Vec<Vec<f32>>, InferencerError> {
-        self.validate_concrete_shape(shape, batch_size, true)?;
-        let batch_axis = self
-            .batch_axis()
-            .ok_or_else(|| Report::new(InferencerError::MissingBatchAxis))?;
-        let outer = shape[..batch_axis].iter().product::<usize>();
-        let inner = shape[batch_axis + 1..].iter().product::<usize>();
-        let expected = outer
-            .checked_mul(batch_size)
-            .and_then(|count| count.checked_mul(inner));
-        let Some(expected) = expected else {
-            return Err(Report::new(InferencerError::OutputCountOverflow));
-        };
-        if values.len() != expected {
-            return Err(Report::new(InferencerError::BatchedValueCount {
-                actual: values.len(),
-                expected,
-            }));
-        }
-        let slice_len = outer
-            .checked_mul(inner)
-            .ok_or_else(|| Report::new(InferencerError::SliceCountOverflow))?;
-        let mut slices = vec![Vec::with_capacity(slice_len); batch_size];
-        for outer_index in 0..outer {
-            for (batch_index, slice) in slices.iter_mut().enumerate() {
-                let start = (outer_index * batch_size + batch_index) * inner;
-                slice.extend_from_slice(&values[start..start + inner]);
-            }
-        }
-        Ok(slices)
     }
 
     fn tensor_from_dimensions(
@@ -1189,69 +680,6 @@ impl RuntimeTensorSchema for InferencerTensorSchema {
         }
         Ok(shape)
     }
-
-    fn runtime_value_from_dimensions(
-        &self,
-        dimensions: &[InferencerTensorDimension],
-        values: &[f32],
-        shape: &[usize],
-    ) -> error_stack::Result<RuntimeValue, InferencerError> {
-        let Some((dimension, remaining)) = dimensions.split_first() else {
-            let [] = shape else {
-                return Err(Report::new(InferencerError::ScalarRemainingShape {
-                    shape: shape.to_vec(),
-                }));
-            };
-            let [value] = values else {
-                return Err(Report::new(InferencerError::ScalarValueCount {
-                    actual: values.len(),
-                }));
-            };
-            return Ok(RuntimeValue::F32(OrderedFloat(*value)));
-        };
-        if let InferencerTensorDimension::Batch = dimension {
-            return self.runtime_value_from_dimensions(remaining, values, shape);
-        }
-        let Some((&size, child_shape)) = shape.split_first() else {
-            return Err(Report::new(InferencerError::FewerAxesThanSchema));
-        };
-        if let InferencerTensorDimension::Fixed(expected) = dimension
-            && size != expected.get().arch_into()
-        {
-            return Err(Report::new(InferencerError::AxisLength {
-                size,
-                expected: *expected,
-            }));
-        }
-        let child_len = child_shape
-            .iter()
-            .try_fold(1_usize, |count, size| count.checked_mul(*size))
-            .ok_or_else(|| Report::new(InferencerError::ChildCountOverflow))?;
-        let expected_len = size
-            .checked_mul(child_len)
-            .ok_or_else(|| Report::new(InferencerError::ElementCountOverflow))?;
-        if values.len() != expected_len {
-            return Err(Report::new(InferencerError::ValueCountForShape {
-                actual: values.len(),
-                expected: expected_len,
-                shape: shape.to_vec(),
-            }));
-        }
-        let mut children = Vec::with_capacity(size);
-        for index in 0..size {
-            let start = index * child_len;
-            children.push(self.runtime_value_from_dimensions(
-                remaining,
-                &values[start..start + child_len],
-                child_shape,
-            )?);
-        }
-        match dimension {
-            InferencerTensorDimension::Fixed(_) => Ok(RuntimeValue::Array(children)),
-            InferencerTensorDimension::Dynamic => Ok(RuntimeValue::Vec(children)),
-            InferencerTensorDimension::Batch => unreachable!(),
-        }
-    }
 }
 
 #[cfg(test)]
@@ -1260,26 +688,21 @@ impl RuntimeTensorSchema for InferencerTensorSchema {
     nervix::layer(harness, reason = "test module remains outside product execution")
 )]
 mod tests {
-    use meticulous::ResultExt as _;
-    use nervix_execution::{CpuClass, Executor};
+    use nervix_execution::Executor;
     use nervix_models::{
-        InferencerExecutionMode, InferencerTensorDeclaration, InferencerTensorDimension,
-        InferencerTensorElementType, InferencerTensorMapping, InferencerTensorRepresentation,
-        InferencerTensorSchema, ParseAsType,
+        InferencerTensorDimension, InferencerTensorElementType, InferencerTensorMapping,
+        InferencerTensorRepresentation, InferencerTensorSchema, ParseAsType,
     };
     use nonzero_ext::nonzero;
     use ordered_float::OrderedFloat;
 
-    use super::{
-        OnnxInferencerSession, OnnxRuntimeProbe, PreparedExecution, PreparedInvocation,
-        RuntimeTensorSchema, RuntimeTensorSlice,
-    };
+    use super::{OnnxRuntimeProbe, RuntimeTensorSchema};
     use crate::{
         runtime::{
-            CompiledInferencerInputProgram, FilledCpuClass, single_worker_executor,
+            CompiledInferencerInputProgram,
             test_fixtures::{expression, named, test_schema},
         },
-        runtime_schema::{RuntimeRecordBatch, RuntimeRow, RuntimeValue, test_runtime_row},
+        runtime_schema::RuntimeValue,
     };
 
     #[test]
@@ -1347,15 +770,11 @@ mod tests {
     }
 
     #[test]
-    fn multidimensional_tensor_conversion_preserves_nested_array_shape() {
-        let schema = InferencerTensorSchema {
-            representation: InferencerTensorRepresentation::Dense,
-            element_type: InferencerTensorElementType::F32,
-            dimensions: vec![
-                InferencerTensorDimension::Fixed(nonzero!(2u32)),
-                InferencerTensorDimension::Fixed(nonzero!(3u32)),
-            ],
-        };
+    fn a_constant_tensor_keeps_its_nested_array_shape_and_row_major_values() {
+        let schema = dense(vec![
+            InferencerTensorDimension::Fixed(nonzero!(2u32)),
+            InferencerTensorDimension::Fixed(nonzero!(3u32)),
+        ]);
         let value = RuntimeValue::Array(vec![
             RuntimeValue::Array(vec![
                 RuntimeValue::F32(OrderedFloat(1.0)),
@@ -1373,24 +792,14 @@ mod tests {
 
         assert_eq!(tensor.shape, vec![2, 3]);
         assert_eq!(tensor.values, vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
-        assert_eq!(
-            schema
-                .runtime_value_from_tensor(&tensor.values, &tensor.shape)
-                .unwrap(),
-            value
-        );
     }
 
     #[test]
     fn dynamic_dense_tensor_rejects_ragged_vectors() {
-        let schema = InferencerTensorSchema {
-            representation: InferencerTensorRepresentation::Dense,
-            element_type: InferencerTensorElementType::F32,
-            dimensions: vec![
-                InferencerTensorDimension::Dynamic,
-                InferencerTensorDimension::Dynamic,
-            ],
-        };
+        let schema = dense(vec![
+            InferencerTensorDimension::Dynamic,
+            InferencerTensorDimension::Dynamic,
+        ]);
         let value = RuntimeValue::Vec(vec![
             RuntimeValue::Vec(vec![RuntimeValue::F32(OrderedFloat(1.0))]),
             RuntimeValue::Vec(vec![
@@ -1400,45 +809,6 @@ mod tests {
         ]);
 
         assert!(schema.tensor_from_runtime_value(&value).is_err());
-    }
-
-    #[test]
-    fn non_leading_batch_axis_preserves_message_slices() {
-        let schema = InferencerTensorSchema {
-            representation: InferencerTensorRepresentation::Dense,
-            element_type: InferencerTensorElementType::F32,
-            dimensions: vec![
-                InferencerTensorDimension::Fixed(nonzero!(2u32)),
-                InferencerTensorDimension::Batch,
-                InferencerTensorDimension::Fixed(nonzero!(3u32)),
-            ],
-        };
-        let slices = vec![
-            RuntimeTensorSlice {
-                shape: vec![2, 3],
-                values: vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
-            },
-            RuntimeTensorSlice {
-                shape: vec![2, 3],
-                values: vec![10.0, 20.0, 30.0, 40.0, 50.0, 60.0],
-            },
-        ];
-
-        let joined = schema.join_batch_values(&slices).unwrap();
-
-        assert_eq!(
-            joined,
-            vec![
-                1.0, 2.0, 3.0, 10.0, 20.0, 30.0, 4.0, 5.0, 6.0, 40.0, 50.0, 60.0
-            ]
-        );
-        assert_eq!(
-            schema.split_batch_values(&joined, 2, &[2, 2, 3]).unwrap(),
-            slices
-                .into_iter()
-                .map(|slice| slice.values)
-                .collect::<Vec<_>>()
-        );
     }
 
     fn dense(dimensions: Vec<InferencerTensorDimension>) -> InferencerTensorSchema {
@@ -1493,44 +863,6 @@ mod tests {
     }
 
     #[test]
-    fn tensor_values_reject_shapes_the_schema_does_not_describe() {
-        let scalar = dense(Vec::new());
-        assert_eq!(
-            failure(scalar.runtime_value_from_tensor(&[1.0], &[1])),
-            "scalar tensor has unexpected remaining shape [1]"
-        );
-        assert_eq!(
-            failure(scalar.runtime_value_from_tensor(&[1.0, 2.0], &[])),
-            "scalar tensor contains 2 values, expected 1"
-        );
-
-        let pair = dense(vec![InferencerTensorDimension::Fixed(nonzero!(2u32))]);
-        assert_eq!(
-            failure(pair.runtime_value_from_tensor(&[1.0, 2.0], &[])),
-            "tensor value has fewer axes than its schema"
-        );
-        assert_eq!(
-            failure(pair.runtime_value_from_tensor(&[1.0, 2.0, 3.0], &[3])),
-            "tensor axis has length 3, expected 2"
-        );
-
-        let dynamic = dense(vec![InferencerTensorDimension::Dynamic]);
-        assert_eq!(
-            failure(dynamic.runtime_value_from_tensor(&[1.0], &[2])),
-            "tensor contains 1 values, expected 2 for shape [2]"
-        );
-
-        let rows_of_pairs = dense(vec![
-            InferencerTensorDimension::Dynamic,
-            InferencerTensorDimension::Fixed(nonzero!(2u32)),
-        ]);
-        assert_eq!(
-            failure(rows_of_pairs.runtime_value_from_tensor(&[1.0, 2.0, 3.0], &[1, 3])),
-            "tensor axis has length 3, expected 2"
-        );
-    }
-
-    #[test]
     fn batched_tensor_shapes_reject_mismatched_ranks_and_dimensions() {
         let schema = dense(vec![
             InferencerTensorDimension::Batch,
@@ -1539,10 +871,6 @@ mod tests {
         assert_eq!(
             failure(schema.batch_shape(&[2, 1], 3)),
             "tensor slice rank 2 does not match declared rank 1"
-        );
-        assert_eq!(
-            failure(schema.shape_without_batch(&[3])),
-            "batched tensor rank 1 does not match declared rank 2"
         );
         assert_eq!(
             failure(schema.validate_concrete_shape(&[3], 3, true)),
@@ -1556,65 +884,11 @@ mod tests {
             failure(schema.validate_concrete_shape(&[4, 2], 3, true)),
             "tensor shape [4, 2] has batch dimension 4, expected 3"
         );
-    }
-
-    #[test]
-    fn batched_tensor_values_reject_ragged_and_missized_slices() {
-        let schema = dense(vec![
-            InferencerTensorDimension::Batch,
-            InferencerTensorDimension::Dynamic,
-        ]);
-        let slice = |shape: Vec<usize>, values: Vec<f32>| RuntimeTensorSlice { shape, values };
         assert_eq!(
-            failure(schema.join_batch_values(&[
-                slice(vec![2], vec![1.0, 2.0]),
-                slice(vec![3], vec![1.0, 2.0, 3.0]),
-            ])),
-            "batched DYNAMIC tensor slices must have one concrete shape; got [2] and [3]"
-        );
-        assert_eq!(
-            failure(schema.join_batch_values(&[
-                slice(vec![2], vec![1.0, 2.0]),
-                slice(vec![2], vec![1.0, 2.0, 3.0]),
-            ])),
-            "batched tensor slice contains 3 values, expected 2"
-        );
-        assert_eq!(
-            failure(schema.split_batch_values(&[1.0, 2.0, 3.0], 2, &[2, 2])),
-            "batched output contains 3 values, expected 4"
-        );
-    }
-
-    #[test]
-    fn prepared_executions_reject_empty_batches_and_missing_inputs() {
-        let row = test_runtime_row([("score".to_string(), RuntimeValue::F32(OrderedFloat(1.0)))]);
-        let batch = RuntimeRecordBatch::from_rows(row.batch().schema(), std::iter::once(&row))
-            .expect("one test row should form a batch");
-        let mapping = InferencerTensorMapping {
-            tensor: "missing".to_string(),
-            schema: dense(Vec::new()),
-            expression: expression("input.score"),
-        };
-        assert_eq!(
-            failure(PreparedInvocation::for_row(
-                0,
-                &batch,
-                std::slice::from_ref(&mapping)
-            )),
-            "ONNX input tensor 'missing' mapped value is missing"
-        );
-
-        let empty =
-            RuntimeRecordBatch::from_rows(row.batch().schema(), std::iter::empty::<&RuntimeRow>())
-                .expect("no test rows should form an empty batch");
-        assert_eq!(
-            failure(PreparedExecution::from_batch(
-                &empty,
-                &[],
-                &[],
-                InferencerExecutionMode::PerMessage,
-            )),
-            "cannot execute ONNX inference for an empty message batch"
+            schema
+                .batch_shape(&[2], 3)
+                .expect("a pair joins along the leading BATCH axis"),
+            vec![3, 2]
         );
     }
 
@@ -1636,132 +910,5 @@ mod tests {
             )),
             "inferencer 'score_events' tensor name 'not a field' is not a valid field"
         );
-    }
-
-    /// A model whose one output returns its `matrix` input unchanged.
-    fn identity_model() -> std::path::PathBuf {
-        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/fixtures/onnx/matrix_identity.onnx")
-    }
-
-    fn matrix_value() -> RuntimeValue {
-        let row = |values: [f32; 3]| {
-            RuntimeValue::Array(
-                values
-                    .into_iter()
-                    .map(|value| RuntimeValue::F32(OrderedFloat(value)))
-                    .collect(),
-            )
-        };
-        RuntimeValue::Array(vec![row([1.0, 2.0, 3.0]), row([4.0, 5.0, 6.0])])
-    }
-
-    fn matrix_batch() -> RuntimeRecordBatch {
-        let row = test_runtime_row([("matrix".to_string(), matrix_value())]);
-        RuntimeRecordBatch::from_rows(row.batch().schema(), std::iter::once(&row))
-            .expect("one test row should form a batch")
-    }
-
-    fn matrix_schema() -> nervix_models::InferencerTensorSchema {
-        dense(vec![
-            InferencerTensorDimension::Fixed(nonzero!(2u32)),
-            InferencerTensorDimension::Fixed(nonzero!(3u32)),
-        ])
-    }
-
-    fn matrix_input() -> InferencerTensorMapping {
-        InferencerTensorMapping {
-            tensor: "matrix".to_string(),
-            schema: matrix_schema(),
-            expression: expression("input.matrix"),
-        }
-    }
-
-    fn transformed_output() -> InferencerTensorDeclaration {
-        InferencerTensorDeclaration {
-            tensor: "transformed".to_string(),
-            schema: matrix_schema(),
-        }
-    }
-
-    #[nervix_primitives::test]
-    async fn a_model_loads_on_the_bulk_workers_and_runs_on_the_data_workers() {
-        let executor = Executor::default();
-        let session = OnnxInferencerSession::load(&executor, &identity_model())
-            .await
-            .expect("the identity model loads");
-        assert_eq!(executor.snapshot().bulk_cpu.completed, 1);
-
-        let outputs = session
-            .execute(
-                &executor,
-                &matrix_batch(),
-                &[matrix_input()],
-                &[transformed_output()],
-                InferencerExecutionMode::PerMessage,
-            )
-            .await
-            .expect("the identity model runs");
-
-        assert_eq!(outputs, vec![vec![matrix_value()]]);
-        let snapshot = executor.snapshot();
-        assert_eq!(snapshot.data_cpu.admitted, 1);
-        assert_eq!(snapshot.data_cpu.completed, 1);
-        assert_eq!(snapshot.bulk_memory.reserved_bytes, 0);
-        assert_eq!(snapshot.relay_memory.reserved_bytes, 0);
-    }
-
-    #[nervix_primitives::test]
-    async fn accepted_work_model_run_keeps_its_rows_while_waiting() {
-        let session = OnnxInferencerSession::load(&Executor::default(), &identity_model())
-            .await
-            .expect("the identity model loads");
-        let executor = single_worker_executor();
-        let filled_data = FilledCpuClass::fill(&executor, CpuClass::Data).await;
-
-        let batch = matrix_batch();
-        let inputs = [matrix_input()];
-        let outputs = [transformed_output()];
-        let mut run = Box::pin(session.execute(
-            &executor,
-            &batch,
-            &inputs,
-            &outputs,
-            InferencerExecutionMode::PerMessage,
-        ));
-        assert!(
-            futures_util::poll!(run.as_mut()).is_pending(),
-            "an accepted model run must wait without becoming an inference failure"
-        );
-        filled_data.release().await;
-        let output = run
-            .await
-            .assured("the accepted model run succeeds after room frees");
-        assert_eq!(output.len(), batch.batch().num_rows());
-        assert_eq!(executor.snapshot().data_cpu.refused, 0);
-    }
-    #[nervix_primitives::test]
-    async fn accepted_work_model_load_keeps_the_retained_flush_while_bulk_is_full() {
-        let executor = single_worker_executor();
-        let path = identity_model();
-        let session = crate::runtime::test_fixtures::accepted_work_after_cpu_room(
-            &executor,
-            CpuClass::Bulk,
-            OnnxInferencerSession::load(&executor, &path),
-        )
-        .await
-        .assured("the retained model flush waits for its initial session");
-        let output = session
-            .execute(
-                &executor,
-                &matrix_batch(),
-                &[matrix_input()],
-                &[transformed_output()],
-                InferencerExecutionMode::PerMessage,
-            )
-            .await
-            .assured("the loaded session runs the retained input");
-        assert_eq!(output, vec![vec![matrix_value()]]);
-        assert_eq!(executor.snapshot().bulk_cpu.refused, 0);
     }
 }

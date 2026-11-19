@@ -93,8 +93,8 @@ pub(in crate::runtime) enum PlanningError {
     },
     #[error("failed to prepare the bound WASM module for processor '{node}'")]
     PrepareWasmProcessor { node: ModelName },
-    #[error("failed to prepare initial ONNX state for inferencer '{node}'")]
-    PrepareInferencerState { node: ModelName },
+    #[error("failed to prepare inferencer '{node}'")]
+    PrepareInferencer { node: ModelName },
     #[error("{kind:?} '{node}' input relay '{relay}' has no resolved branching")]
     MissingInputBranching {
         kind: ModelKind,
@@ -491,6 +491,7 @@ fn materialize_nodes(
                     inputs,
                     state,
                     output_schema,
+                    mode,
                 } => {
                     let Some(input_relay) = node.input_relays.first() else {
                         return Err(Report::new(PlanningError::MissingInputRelay {
@@ -505,67 +506,36 @@ fn materialize_nodes(
                             relay: input_relay.clone(),
                         }));
                     };
-                    if let Some(state) = state {
-                        let compiled_input_program =
-                            CompiledInferencerInputProgram::compile_stateful(
-                                &node.processor,
-                                inputs,
-                                input_schema,
-                                udfs,
-                                vm_settings,
-                            )
-                            .change_context_lazy(|| {
-                                PlanningError::InferencerInputCompilation {
-                                    node: node.processor.clone(),
-                                    relay: input_relay.clone(),
-                                }
-                            })?;
-                        RelayProcessorOperationTemplate::StatefulInferencer {
-                            output_routes: materialize_outputs(
-                                node.kind,
-                                &node.processor,
-                                output_routes,
-                                FlushPolicyRequirement::Required,
-                                immediate_minimum,
-                            )?,
-                            resource: resource.clone(),
-                            resource_version: *resource_version,
-                            file: file.clone(),
-                            inputs: inputs.clone(),
-                            output_schema: output_schema.clone(),
-                            state: state.clone(),
-                            compiled_input_program: Box::new(compiled_input_program),
-                            prepared: None,
+                    let compiled_input_program = CompiledInferencerInputProgram::compile(
+                        &node.processor,
+                        inputs,
+                        input_schema,
+                        udfs,
+                        vm_settings,
+                    )
+                    .change_context_lazy(|| {
+                        PlanningError::InferencerInputCompilation {
+                            node: node.processor.clone(),
+                            relay: input_relay.clone(),
                         }
-                    } else {
-                        let compiled_input_program = CompiledInferencerInputProgram::compile(
+                    })?;
+                    RelayProcessorOperationTemplate::Inferencer {
+                        output_routes: materialize_outputs(
+                            node.kind,
                             &node.processor,
-                            inputs,
-                            input_schema,
-                            udfs,
-                            vm_settings,
-                        )
-                        .map_err(|reason| {
-                            reason.change_context(PlanningError::InferencerInputCompilation {
-                                node: node.processor.clone(),
-                                relay: input_relay.clone(),
-                            })
-                        })?;
-                        RelayProcessorOperationTemplate::Inferencer {
-                            output_routes: materialize_outputs(
-                                node.kind,
-                                &node.processor,
-                                output_routes,
-                                FlushPolicyRequirement::Required,
-                                immediate_minimum,
-                            )?,
-                            resource: resource.clone(),
-                            resource_version: *resource_version,
-                            file: file.clone(),
-                            inputs: inputs.clone(),
-                            output_schema: output_schema.clone(),
-                            compiled_input_program,
-                        }
+                            output_routes,
+                            FlushPolicyRequirement::Required,
+                            immediate_minimum,
+                        )?,
+                        resource: resource.clone(),
+                        resource_version: *resource_version,
+                        file: file.clone(),
+                        inputs: inputs.clone(),
+                        output_schema: output_schema.clone(),
+                        mode: *mode,
+                        state: state.clone(),
+                        compiled_input_program: Box::new(compiled_input_program),
+                        prepared: None,
                     }
                 }
                 BranchedProcessorOperationSpec::WasmProcessor {
@@ -746,6 +716,48 @@ pub(in crate::runtime) fn materialize_processor_instance_template(
         wasm_state_reset: unit_revision.reset().cloned(),
         partition_transition: None,
     })
+}
+
+/// Materializes, binds and prepares the branch template of `node` as a published plan revision
+/// does, with immediate routes due at once, for owner tests and benchmarks that drive one concrete
+/// branch without a schedule.
+#[cfg(any(test, feature = "benchmarks"))]
+pub(in crate::runtime) async fn bound_test_template(
+    runtime: &Runtime,
+    node: &BranchedProcessorNodeSpec,
+    relay_schemas: &HashMap<RelayName, Arc<CompiledSchema>>,
+    relay_services: &HashMap<RelayName, Arc<RelayBoundaryServices>>,
+) -> error_stack::Result<BranchInstanceTemplate, PlanningError> {
+    let mut template = materialize_processor_instance_template(
+        node,
+        Unit::SINGLE,
+        &ProcessorUnitRevision::Stateless,
+        relay_schemas,
+        relay_services,
+        None,
+        ProcessorTemplateSettings {
+            vm: runtime.inner.vm_settings,
+            immediate_flush_minimum: Duration::ZERO,
+        },
+    )?;
+    // The fixture graph declares every relay unbranched.
+    let mut relay_branchings = HashMap::default();
+    for relay in relay_schemas.keys() {
+        relay_branchings.insert(relay.clone(), ResolvedBranching::Unbranched);
+    }
+    bind_processor_template_programs(
+        &mut template,
+        relay_schemas,
+        &relay_branchings,
+        &HashMap::default(),
+        &HashMap::default(),
+        None,
+        runtime.inner.vm_settings,
+    )?;
+    template
+        .prepare_inferencers(runtime.executor(), None, runtime.inner.vm_settings)
+        .await?;
+    Ok(template)
 }
 
 fn bind_processor_template_programs(
@@ -980,12 +992,6 @@ fn bind_processor_template_programs(
                 }
             }
             RelayProcessorOperationTemplate::Inferencer {
-                output_routes,
-                inputs,
-                output_schema,
-                ..
-            }
-            | RelayProcessorOperationTemplate::StatefulInferencer {
                 output_routes,
                 inputs,
                 output_schema,
@@ -1280,11 +1286,7 @@ pub(in crate::runtime) async fn bind_published_processor_plans(
                     runtime.inner.vm_settings,
                 )?;
                 template
-                    .prepare_stateful_inferencers(
-                        runtime.executor(),
-                        udfs,
-                        runtime.inner.vm_settings,
-                    )
+                    .prepare_inferencers(runtime.executor(), udfs, runtime.inner.vm_settings)
                     .await?;
                 template
                     .prepare_wasm_processors(runtime, domain)

@@ -109,23 +109,25 @@ impl IngestorQuiesceReasons {
         }
     }
 
-    fn release(&mut self, cause: IngestorQuiesceCause) {
+    fn release(&mut self, cause: IngestorQuiesceCause) -> bool {
         match cause {
             IngestorQuiesceCause::EntityHold => {
                 self.entity_holds = self.entity_holds.checked_sub(1).verified(
                     "the entity gate hold that engaged this control is released once, by the one \
                      caller that took it out of the hold map",
                 );
+                true
             }
             IngestorQuiesceCause::OwnershipHandoff => {
                 self.ownership_handoffs = self.ownership_handoffs.checked_sub(1).verified(
                     "the entity gate hold that engaged this control is released once, by the one \
                      caller that took it out of the hold map",
                 );
+                true
             }
-            IngestorQuiesceCause::DomainPause => self.domain_pause = false,
-            IngestorQuiesceCause::MemoryPressure => self.memory_pressure = false,
-            IngestorQuiesceCause::Shutdown => self.shutdown = false,
+            IngestorQuiesceCause::DomainPause => std::mem::take(&mut self.domain_pause),
+            IngestorQuiesceCause::MemoryPressure => std::mem::take(&mut self.memory_pressure),
+            IngestorQuiesceCause::Shutdown => std::mem::take(&mut self.shutdown),
         }
     }
 }
@@ -342,9 +344,9 @@ impl IngestorQuiescePublication {
     }
 
     /// Releasing the last engaged reason makes a mode declared during the hold active.
-    fn releasing(&self, cause: IngestorQuiesceCause) -> Self {
+    fn releasing(&self, cause: IngestorQuiesceCause) -> (Self, bool) {
         let mut reasons = self.reasons;
-        reasons.release(cause);
+        let released = reasons.release(cause);
         let mut modes = self.modes.clone();
         if reasons.active().is_none() {
             if let Some(pending) = modes.pending.take() {
@@ -352,7 +354,7 @@ impl IngestorQuiescePublication {
             }
             modes.active_supported_by_connector = true;
         }
-        Self::new(reasons, modes)
+        (Self::new(reasons, modes), released)
     }
 
     /// While a reason is engaged, the mode in effect when the hold began keeps governing it and
@@ -855,9 +857,18 @@ impl IngestorQuiesceControl {
         self.changed.notify_waiters();
     }
 
-    pub(super) fn release(&self, cause: IngestorQuiesceCause) {
-        self.published.rcu(|current| current.releasing(cause));
+    /// Releases `cause` and reports whether that reason was held in the publication it replaced.
+    pub(super) fn release(&self, cause: IngestorQuiesceCause) -> bool {
+        let mut released = false;
+        self.published.rcu(|current| {
+            let (next, was_held) = current.releasing(cause);
+            // If the publication races another update, `rcu` runs this closure again. The
+            // result belongs to the update that actually publishes.
+            released = was_held;
+            next
+        });
         self.changed.notify_waiters();
+        released
     }
 
     fn decision(&self) -> IngestorQuiesceDecision {
@@ -1343,7 +1354,9 @@ impl Runtime {
         let Some(control) = self.ingestor_quiesce_control(domain, ingestor, unit) else {
             return false;
         };
-        control.release(cause);
+        if !control.release(cause) {
+            return false;
+        }
         info!(
             domain = domain.as_str(),
             ingestor = ingestor.as_str(),
@@ -1517,17 +1530,19 @@ impl Runtime {
         else {
             return false;
         };
-        self.release_ingestor_quiesce(
+        let released = self.release_ingestor_quiesce(
             &key.entity.domain,
             &IngestorName::from(key.entity.identifier()),
             key.unit,
             IngestorQuiesceCause::MemoryPressure,
         );
-        info!(
-            domain = key.entity.domain.as_str(),
-            ingestor = key.entity.identifier().as_str(),
-            "resumed ingestor after memory pressure"
-        );
+        if released {
+            info!(
+                domain = key.entity.domain.as_str(),
+                ingestor = key.entity.identifier().as_str(),
+                "resumed ingestor after memory pressure"
+            );
+        }
         true
     }
 
@@ -1622,8 +1637,50 @@ mod tests {
         atomic::{AtomicBool, Ordering},
         watch,
     };
+    use tracing::instrument::WithSubscriber as _;
 
     use super::*;
+    use crate::captured_logs::CapturedLogs;
+
+    #[test]
+    fn domain_pause_release_logs_only_an_engaged_pause() {
+        let runtime = Runtime::default();
+        let domain = domain("default");
+        let ingestor = named("paused_ingestor");
+        let control =
+            test_ingestor_quiesce_control(&runtime, &domain, &ingestor, IngestQuiesceMode::Suspend);
+        let key = DomainNodeUnitRef::new(
+            DomainNodeRef::node_in(domain.clone(), ModelKind::Ingestor, ingestor),
+            Unit::SINGLE,
+        );
+        runtime
+            .inner
+            .ingestor_quiescence
+            .insert(key, control.clone());
+
+        let logs = CapturedLogs::of(|| runtime.release_domain_ingestor_quiesce(&domain));
+        assert_eq!(control.cause(), None);
+        assert_eq!(control.mode(), IngestQuiesceMode::Suspend);
+        assert!(
+            !logs.contains(" INFO "),
+            "a domain pause that never engaged must produce no info log: {logs}"
+        );
+
+        control.engage(IngestorQuiesceCause::DomainPause);
+        assert_eq!(control.cause(), Some(IngestorQuiesceCause::DomainPause));
+        let logs = CapturedLogs::of(|| {
+            runtime.release_domain_ingestor_quiesce(&domain);
+            runtime.release_domain_ingestor_quiesce(&domain);
+        });
+        assert_eq!(control.cause(), None);
+        let mut lines = logs.lines().filter(|line| line.contains(" INFO "));
+        let Some(line) = lines.next() else {
+            panic!("the engaged pause must log its release: {logs}");
+        };
+        assert!(line.contains("ingestor left quiesce"), "{line}");
+        assert!(line.contains("cause=\"domain pause\""), "{line}");
+        assert!(lines.next().is_none(), "the pause released once: {logs}");
+    }
 
     #[test]
     fn ownership_handoff_stops_new_intake_and_dispatches_already_admitted_payloads() {
@@ -2248,7 +2305,11 @@ mod tests {
                 .and_then(|control| control.cause()),
             Some(IngestorQuiesceCause::MemoryPressure)
         );
-        assert!(runtime.resume_one_ingestor_after_memory_pressure().await);
+        let resumed = runtime
+            .resume_one_ingestor_after_memory_pressure()
+            .with_subscriber(CapturedLogs::default().subscriber())
+            .await;
+        assert!(resumed);
         assert!(
             !runtime.resume_one_ingestor_after_memory_pressure().await,
             "the pause clears once the last ingestor resumes"
