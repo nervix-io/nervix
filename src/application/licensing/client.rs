@@ -51,8 +51,6 @@ pub(super) enum LicensingRequestError {
     Admission,
     #[error("licensing request could not be committed before submission")]
     Consensus,
-    #[error("licensing trust anchors have not been provisioned in this build")]
-    Unprovisioned,
     #[error("the license key does not have the declared public identifier and secret format")]
     LicenseKey,
     #[error("licensing request ended with its leadership tenure")]
@@ -121,9 +119,6 @@ impl<'a> LicensingClient<'a> {
             .inner
             .licensing_test_support
             .environment(executor.limits().management_event_bytes.as_u64());
-        if !environment.is_provisioned() {
-            return Err(Report::new(LicensingRequestError::Unprovisioned));
-        }
         let dns = service
             .inner
             .runtime
@@ -604,7 +599,6 @@ fn failed_attempt(error: &LicensingRequestError) -> (bool, Option<crate::licensi
         | LicensingRequestError::Signing
         | LicensingRequestError::Consensus => (true, None),
         LicensingRequestError::Client
-        | LicensingRequestError::Unprovisioned
         | LicensingRequestError::LicenseKey
         | LicensingRequestError::Leadership
         | LicensingRequestError::Shutdown => (false, None),

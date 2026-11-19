@@ -214,6 +214,13 @@ path = "crates/crypto/src/jws.rs"
 reason = "The maintained library's provider is a process default that must outlive individual model executions; a foreign provider is refused."
 
 [[permission]]
+items = ["sync::LazyLock"]
+limit = "Parsing the embedded bundle stays outside every model; the value is immutable and no protocol assertion relies on when it is first read."
+owner = "The licensing protocol's production trust bundle."
+path = "crates/licensing-protocol/src/trust.rs"
+reason = "The build's embedded production anchors are parsed once per process and shared by every licensing environment for the process lifetime, including across model executions."
+
+[[permission]]
 items = ["sync::OnceLock"]
 limit = "Creating the process's ONNX Runtime environment is outside every model."
 owner = "The ONNX inferencer's session loading and model inspection."

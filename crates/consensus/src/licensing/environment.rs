@@ -5,9 +5,9 @@
 //! - **Depends on.** The protocol's build bundle and the executor's declared byte capacity.
 //! - **Must not know.** Requests, clocks, graph state or operational licensing policy.
 
-use std::num::NonZeroUsize;
+use std::{borrow::Cow, num::NonZeroUsize};
 
-use error_stack::{Report, ResultExt as _};
+use error_stack::ResultExt as _;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_licensing_protocol::{
     document::DocumentLimits,
@@ -31,7 +31,9 @@ pub const LICENSING_SERVICE: &str = "https://licensing.nervix.io";
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LicensingEnvironment {
     service: Url,
-    bundle: Option<EmbeddedTrustBundle>,
+    /// Production borrows the build's process-wide anchors; only a testing environment owns its
+    /// fixture's bundle.
+    bundle: Cow<'static, EmbeddedTrustBundle>,
     document_bytes: NonZeroUsize,
 }
 
@@ -51,7 +53,7 @@ impl LicensingEnvironment {
         Self {
             service: Url::parse(LICENSING_SERVICE)
                 .assured("compiled service is an absolute HTTPS URL"),
-            bundle: nervix_licensing_protocol::trust::PRODUCTION_TRUST_BUNDLE.clone(),
+            bundle: Cow::Borrowed(EmbeddedTrustBundle::production()),
             document_bytes: NonZeroUsize::new(
                 usize::try_from(document_bytes)
                     .assured("the executor's validated management capacity fits this host"),
@@ -68,16 +70,13 @@ impl LicensingEnvironment {
     ) -> Self {
         Self {
             service,
-            bundle: Some(bundle),
+            bundle: Cow::Owned(bundle),
             document_bytes,
         }
     }
 
     pub fn service(&self) -> &Url {
         &self.service
-    }
-    pub fn is_provisioned(&self) -> bool {
-        self.bundle.is_some()
     }
 
     pub fn limits(&self) -> DocumentLimits {
@@ -94,11 +93,7 @@ impl LicensingEnvironment {
         &self,
         documents: &TrustDocuments,
     ) -> error_stack::Result<TrustState, LicenseDecisionError> {
-        let bundle = self
-            .bundle
-            .as_ref()
-            .ok_or_else(|| Report::new(LicenseDecisionError::Trust))?;
-        TrustState::build(bundle, documents, self.limits())
+        TrustState::build(&self.bundle, documents, self.limits())
             .change_context(LicenseDecisionError::Trust)
     }
 }
