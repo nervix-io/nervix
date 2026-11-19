@@ -20,6 +20,7 @@
 use std::{
     cell::RefCell,
     collections::{BTreeMap, BTreeSet, VecDeque},
+    ffi::OsString,
     fmt,
     fs::{OpenOptions, create_dir_all},
     io::{Read as _, Write},
@@ -28,7 +29,7 @@ use std::{
     os::unix::process::{CommandExt as _, ExitStatusExt as _},
     panic::{AssertUnwindSafe, catch_unwind, resume_unwind},
     path::{Path, PathBuf},
-    process::{Command, Output, Stdio},
+    process::{Command, ExitCode, Output, Stdio, Termination as _},
     str::FromStr,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -52,7 +53,6 @@ use cucumber::{
     given, then, when,
     writer::{self, Stats as _},
 };
-use error_stack::Report;
 use futures_util::{
     StreamExt as _, TryStreamExt,
     future::{join_all, try_join_all},
@@ -99,7 +99,7 @@ use nervix_recovery::Discarded as _;
 use nervix_server::{
     FaultInjection, ModelPublicationRefusalKind, SchedulerMode, WasmStateResetRequestError,
     application::{
-        AppError, InternalTransportMode, NODE_TAGS_OPTION, SettingOverride, ShutdownPhaseOutcome,
+        InternalTransportMode, NODE_TAGS_OPTION, SettingOverride, ShutdownPhaseOutcome,
         run_server_process,
     },
     memory_pressure::MemoryPressureConfig,
@@ -37869,10 +37869,14 @@ async fn then_node_eventually_reports_interconnect_status(
         .expect("interconnect status did not converge");
 }
 
-fn main() -> Result<(), Report<AppError>> {
+/// Cucumber polls steps on this thread. A debug build can exceed the default 8 MiB process stack
+/// when a step polls a Pulsar publish.
+const SCENARIO_RUNNER_STACK_BYTES: usize = 16 * 1024 * 1024;
+
+fn main() -> ExitCode {
     // A process started under the server's name is the server, and none of the suite below runs.
     let helper_scope = match ProcessProgram::of_this_process() {
-        ProcessProgram::Server => return run_server_process(),
+        ProcessProgram::Server => return run_server_process().report(),
         ProcessProgram::DependencyLifecycleHelper { scope } => Some(scope),
         ProcessProgram::Suite => None,
     };
@@ -37885,6 +37889,30 @@ fn main() -> Result<(), Report<AppError>> {
     // installed once for the whole process before any tracked lock or runtime worker exists.
     #[cfg(feature = "deloxide")]
     start_deadlock_diagnostics();
+
+    if let Some(scope) = helper_scope {
+        run_scenario_process(Some(scope));
+        return ExitCode::SUCCESS;
+    }
+
+    let runner = nervix_primitives::thread::Builder::new()
+        .name("scenario-runner".to_string())
+        .stack_size(SCENARIO_RUNNER_STACK_BYTES)
+        .spawn(|| run_scenario_process(None));
+    let runner = match runner {
+        Ok(runner) => runner,
+        Err(error) => {
+            eprintln!("failed to start the scenario runner thread: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    if let Err(payload) = runner.join() {
+        resume_unwind(payload);
+    }
+    ExitCode::SUCCESS
+}
+
+fn run_scenario_process(helper_scope: Option<OsString>) {
     let parallelism = TestParallelism::detect();
     let runtime = nervix_primitives::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -37916,12 +37944,11 @@ fn main() -> Result<(), Report<AppError>> {
     if let SuiteOutcome::TimedOut(_) = &outcome {
         eprintln!("{dependency_teardown}");
         outcome.end_process();
-        return Ok(());
+        return;
     }
 
     assert!(dependency_teardown.is_clean(), "{dependency_teardown}");
     outcome.end_process();
-    Ok(())
 }
 
 /// The environment variable naming the directory a diagnostic scenario binary records its deadlock
