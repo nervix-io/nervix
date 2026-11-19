@@ -616,7 +616,8 @@ the tab is open. It reports **Failed** with the server's reason, such as a relay
 exists, a filter the server cannot compile, or an open transaction, and then no tab remains and the
 draft stays editable. A name an open tab already uses fails before anything is sent. After a
 reconnect or leader change, the console restores each open tab once under its name; the form does
-not submit it again.
+not submit it again. A restoration never changes which pane is shown: the REPL or the tab the
+operator selected stays in view while its tabs are restored.
 
 The console restores its tabs before it attaches the session's transaction again, because a session
 that holds a transaction refuses subscriptions, so an open transaction does not keep a tab from
