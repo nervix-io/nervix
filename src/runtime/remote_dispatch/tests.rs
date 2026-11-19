@@ -910,11 +910,14 @@ async fn relay_gate_holds_nonowner_dispatch_before_the_remote_slot() {
     );
 
     drop(lease);
-    timeout(Duration::from_secs(1), dispatch)
+    let delivery = timeout(Duration::from_secs(1), dispatch)
         .await
         .expect("releasing the gate should wake the nonowner dispatch")
-        .expect("dispatch task should join")
-        .expect_err("the isolated test has no remote dispatcher");
+        .expect("dispatch task should join");
+    assert!(
+        matches!(delivery, OwnerDelivery::Failed(_)),
+        "the isolated test has no remote dispatcher"
+    );
 }
 
 #[test]

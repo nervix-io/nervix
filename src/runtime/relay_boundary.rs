@@ -23,6 +23,7 @@
 
 use super::{
     relay_channel::{RelayAudience, RelayConsumerSelection, RelayPublication},
+    remote_dispatch::RemoteDispatchError,
     *,
 };
 
@@ -42,6 +43,19 @@ pub(super) use routed::{
 #[cfg(all(test, feature = "shuttle"))]
 #[path = "relay_boundary_shuttle_tests.rs"]
 mod shuttle_tests;
+
+/// How a delivery of a batch to the owner of its relay unit on another node ended.
+#[derive(Debug)]
+pub(super) enum OwnerDelivery {
+    /// The owner admitted every row of the batch.
+    Admitted,
+    /// The rows no owner admitted, whose acknowledgements the delivery failed.
+    Failed(Box<RelayRecordBatch>),
+    /// The unit's route changed before the delivery reached the owner it had named, so no owner
+    /// admitted these rows. Their acknowledgements are untouched, and they go to the unit's owner
+    /// on its current route.
+    Rerouted(Box<RelayRecordBatch>),
+}
 
 pub(super) const RELAY_BUFFER_DIRECTION_CONCRETE: &str = "concrete";
 /// A channel that carried no batch this long, counted from its opening or its last batch, opens a
@@ -1578,6 +1592,9 @@ impl RelayBoundaryServices {
         self.fanout.deactivate_owner_buffer(unit, buffer);
     }
 
+    /// The ingress channel of `branch` on the current route, which an owner delivery of the relay
+    /// itself takes once it holds its dispatch permits.
+    #[cfg(test)]
     pub(super) fn ingress_slot(
         &self,
         branch: &Option<BranchKey>,
@@ -1658,6 +1675,13 @@ impl RelayBoundaryServices {
         RelayOwnerBatchCompletion::new(self.transit_for_unit(unit).clone())
     }
 
+    /// Delivers `batch` to the owner of `unit` on another node.
+    ///
+    /// The owner reports the batch's records alive to their sources once it has admitted them, and
+    /// not before. Until then this node holds them on their sources' behalf, so it reports them
+    /// alive itself while the delivery waits for its gates, its channel, the storage of its
+    /// records, a grant or the owner's admission. An ingestor's `ACK TIMEOUT` therefore measures how
+    /// long its records make no progress, not how long they take to reach their owner.
     #[cfg_attr(
         nervix_lint,
         nervix::context(
@@ -1674,53 +1698,45 @@ impl RelayBoundaryServices {
         relay: &RelayName,
         batch: &RelayRecordBatch,
         unit: Unit,
-    ) -> RelayDispatchResult {
-        self.dispatch_to_owner_on(
-            domain,
-            relay,
-            unit,
-            batch,
-            self.ingress_slot(&batch.key, unit),
-            None,
-        )
-        .await
+    ) -> OwnerDelivery {
+        let branch = self.channels.bind_relay(&batch.key, unit);
+        self.dispatch_to_owner_through(domain, relay, unit, batch, &branch, None)
+            .await
     }
 
-    /// Delivers `batch` to the relay's owner through `ingress_slot`.
-    ///
-    /// The owner reports the batch's records alive to their sources once it has admitted them, and
-    /// not before. Until then this node holds them on their sources' behalf, so it reports them
-    /// alive itself while the delivery waits for its gates, its channel, the storage of its
-    /// records, a grant or the owner's admission. An ingestor's `ACK TIMEOUT` therefore measures how
-    /// long its records make no progress, not how long they take to reach their owner.
-    async fn dispatch_to_owner_on(
+    /// Delivers `batch` to the owner of `unit` on another node through the channels of the branch
+    /// incarnation `branch`, as [`Self::dispatch_to_owner`] does, for the producer whose own
+    /// lifetime `producer_lifetime` names when it has one.
+    async fn dispatch_to_owner_through(
         &self,
         domain: &DomainName,
         relay: &RelayName,
         unit: Unit,
         batch: &RelayRecordBatch,
-        ingress_slot: StdArc<RelayOutboundSlot>,
+        branch: &RelayBranchChannels,
         producer_lifetime: Option<&CancellationToken>,
-    ) -> RelayDispatchResult {
+    ) -> OwnerDelivery {
         batch
-            .keep_alive_while_pending(self.deliver_to_owner_on(
+            .keep_alive_while_pending(self.deliver_to_owner(
                 domain,
                 relay,
                 unit,
                 batch,
-                RelayDeliveryChannel::new(&ingress_slot, producer_lifetime),
+                branch,
+                producer_lifetime,
             ))
             .await
     }
 
-    async fn deliver_to_owner_on(
+    async fn deliver_to_owner(
         &self,
         domain: &DomainName,
         relay: &RelayName,
         unit: Unit,
         batch: &RelayRecordBatch,
-        channel: RelayDeliveryChannel<'_>,
-    ) -> RelayDispatchResult {
+        branch: &RelayBranchChannels,
+        producer_lifetime: Option<&CancellationToken>,
+    ) -> OwnerDelivery {
         let unit_gate = self.unit_dispatch_gate(unit);
         let dispatch_gate = self.fanout.dispatch_gate();
         let permits = async {
@@ -1732,27 +1748,37 @@ impl RelayBoundaryServices {
             let branches = self.fanout.acquire_branch_dispatch_gates(&batch.key).await;
             (unit, relay, branches)
         };
-        let Some(_permits) = channel.while_producer_lives(permits).await else {
-            return reject_relay_delivery(batch, channel.cancellation_reason());
+        let permits = match producer_lifetime {
+            Some(lifetime) => lifetime.run_until_cancelled(permits).await,
+            None => Some(permits.await),
+        };
+        let Some(_permits) = permits else {
+            return reject_owner_delivery(batch, "relay producer lifetime ended");
         };
         let Some(owner_node) = self.owner_of(unit) else {
-            for ack in batch.acks.iter() {
-                ack.no_ack("relay owner is unavailable");
-            }
-            return Err(Box::new(batch.clone()));
+            return reject_owner_delivery(batch, "relay owner is unavailable");
         };
         let Some(dispatcher) = &self.remote_dispatcher else {
-            for ack in batch.acks.iter() {
-                ack.no_ack("remote dispatcher is unavailable for relay owner delivery");
-            }
-            return Err(Box::new(batch.clone()));
+            return reject_owner_delivery(
+                batch,
+                "remote dispatcher is unavailable for relay owner delivery",
+            );
         };
+        if owner_node == *dispatcher.local_node_id() {
+            // A route change that the gates held this delivery back for moved the unit to this
+            // node. Its owner buffer here takes the batch.
+            return OwnerDelivery::Rerouted(Box::new(batch.clone()));
+        }
+        // The channel is taken under the gates, so it belongs to the route the owner above was
+        // read from, including a route change the gates held this delivery back for.
+        let ingress_slot = branch.ingress();
+        let channel = RelayDeliveryChannel::new(&ingress_slot, producer_lifetime);
         let Some(_slot) = channel
             .while_producer_lives(channel.slot.lock_for_delivery())
             .await
             .flatten()
         else {
-            return reject_relay_delivery(batch, channel.cancellation_reason());
+            return self.end_unsent_owner_delivery(unit, branch, batch, channel);
         };
         // The delivery's records are stored before its body is encoded, so a delivery that waits
         // for room to store them holds no encoded body meanwhile.
@@ -1774,8 +1800,14 @@ impl RelayBoundaryServices {
             .await;
         let mut remote_acks = match storage {
             Ok(RemoteAckStorage::Stored(registrations)) => registrations,
-            Ok(RemoteAckStorage::Cancelled) => {
-                return reject_relay_delivery(batch, channel.cancellation_reason());
+            Ok(RemoteAckStorage::Cancelled { unstored }) => {
+                // Nothing was stored for the owner, so the shares this delivery forwarded end
+                // here, and each record keeps only the shares its batch holds, which the batch's
+                // next delivery or its failure decides.
+                for forwarded in unstored {
+                    forwarded.ack_success();
+                }
+                return self.end_unsent_owner_delivery(unit, branch, batch, channel);
             }
             Err(error) => {
                 warn!(
@@ -1790,7 +1822,7 @@ impl RelayBoundaryServices {
                 for ack in &batch.acks {
                     ack.no_ack(reason.clone());
                 }
-                return Err(Box::new(batch.clone()));
+                return OwnerDelivery::Failed(Box::new(batch.clone()));
             }
         };
         let encoding = batch.batch.encode_arrow_ipc(
@@ -1806,9 +1838,9 @@ impl RelayBoundaryServices {
                 for ack in batch.acks.iter() {
                     ack.no_ack(format!("{error:#}"));
                 }
-                return Err(Box::new(batch.clone()));
+                return OwnerDelivery::Failed(Box::new(batch.clone()));
             }
-            None => return reject_relay_delivery(batch, channel.cancellation_reason()),
+            None => return reject_owner_delivery(batch, channel.cancellation_reason()),
         };
         let delivery = channel.slot.next_delivery_with_policy(remote_acks.timing());
         let admission_result = dispatcher
@@ -1835,38 +1867,73 @@ impl RelayBoundaryServices {
                 Some(&mut remote_acks),
             )
             .await;
-        if let Err(error) = admission_result {
-            warn!(
+        let Err(error) = admission_result else {
+            return OwnerDelivery::Admitted;
+        };
+        let admitted = remote_acks.admitted_rows();
+        let remaining = batch
+            .acks
+            .len()
+            .checked_sub(admitted)
+            .verified("the admission owner counts rows of this batch");
+        let unadmitted = Box::new(
+            batch
+                .slice(admitted, remaining)
+                .verified("the unadmitted suffix lies within this batch"),
+        );
+        if let RemoteDispatchError::Unreached { .. } = error.current_context()
+            && channel.slot.cancellation().is_cancelled()
+            && !channel.producer_ended()
+            && branch.is_live()
+        {
+            // A route change retired the channel while the delivery was still trying to reach
+            // the owner it had named, and nothing of it reached that owner. The rows no owner
+            // admitted go to the unit's owner on the new route instead.
+            debug!(
                 domain = domain.as_str(),
                 relay = relay.as_str(),
                 scope = %BranchScope::from(&batch.key),
-                target_node = %owner_node,
-                error = %format_args!("{error:#}"),
-                "failed to admit relay batch on its owner"
+                former_owner = %owner_node,
+                rows = remaining,
+                "relay batch follows its unit's new route before reaching its former owner"
             );
-            let reason = format!("{error:#}");
-            for registration in remote_acks.registrations()[remote_acks.admitted_rows()..]
-                .iter()
-                .flatten()
-            {
-                dispatcher.clear_pending_ack(registration);
-            }
-            for ack in batch.acks[remote_acks.admitted_rows()..].iter() {
-                ack.no_ack(reason.clone());
-            }
-            let admitted = remote_acks.admitted_rows();
-            let remaining = batch
-                .acks
-                .len()
-                .checked_sub(admitted)
-                .verified("the admission owner counts rows of this batch");
-            return Err(Box::new(
-                batch
-                    .slice(admitted, remaining)
-                    .verified("the unadmitted suffix lies within this batch"),
-            ));
+            remote_acks.release_unadmitted();
+            return OwnerDelivery::Rerouted(unadmitted);
         }
-        Ok(())
+        warn!(
+            domain = domain.as_str(),
+            relay = relay.as_str(),
+            scope = %BranchScope::from(&batch.key),
+            target_node = %owner_node,
+            error = %format_args!("{error:#}"),
+            "failed to admit relay batch on its owner"
+        );
+        let reason = format!("{error:#}");
+        for registration in remote_acks.registrations()[admitted..].iter().flatten() {
+            dispatcher.clear_pending_ack(registration);
+        }
+        for ack in batch.acks[admitted..].iter() {
+            ack.no_ack(reason.clone());
+        }
+        OwnerDelivery::Failed(unadmitted)
+    }
+
+    /// Ends a delivery whose channel ended before the delivery sent anything on it. While a route
+    /// change is being installed for the unit of a live branch, and the producer still lives, the
+    /// batch goes to the owner that change installs: the change holds the unit's dispatch gate, so
+    /// the next delivery waits for it there. Otherwise the producer, the channel's branch or its
+    /// relay ended, and the batch fails.
+    fn end_unsent_owner_delivery(
+        &self,
+        unit: Unit,
+        branch: &RelayBranchChannels,
+        batch: &RelayRecordBatch,
+        channel: RelayDeliveryChannel<'_>,
+    ) -> OwnerDelivery {
+        if !channel.producer_ended() && branch.is_live() && self.dispatch_is_fenced(unit) {
+            return OwnerDelivery::Rerouted(Box::new(batch.clone()));
+        }
+        reject_owner_delivery(batch, channel.cancellation_reason())
     }
 
     pub(super) fn observe_owner_buffer_length(&self, unit: Unit, metrics: &RelayMetricsHandle) {
@@ -2046,8 +2113,8 @@ impl RelayBoundaryServices {
                     .await;
                 match storage {
                     Ok(RemoteAckStorage::Stored(owner)) => Some(owner),
-                    Ok(RemoteAckStorage::Cancelled) => {
-                        for ack in batch.acks.iter() {
+                    Ok(RemoteAckStorage::Cancelled { unstored }) => {
+                        for ack in unstored.iter().chain(batch.acks.iter()) {
                             ack.no_ack("relay channel lifetime ended");
                         }
                         return Err(Box::new(batch.clone()));
@@ -2459,35 +2526,56 @@ impl ConcreteRelayRuntime {
             return reject_relay_delivery(batch, "relay producer lifetime ended");
         };
         // The receiver's relay branch may expire independently of this producer. Its explicit
-        // invalidation is a cold rebind; ending this producer never permits such a rebind.
-        if channels.is_retired() {
+        // invalidation is a cold rebind; ending this producer never permits such a rebind. A
+        // branch whose route alone changed is still live: its delivery waits at the unit's
+        // dispatch gate for the route that change installs.
+        if !channels.is_live() {
             let successor = self.services.channels.bind_producer(&self.key, unit);
             self.services.channels.release_producer(&self.key, channels);
             *channels = successor;
-            if channels.is_retired() {
+            if !channels.is_live() {
                 for ack in batch.acks.iter() {
                     ack.no_ack("relay service lifetime ended");
                 }
                 return Err(Box::new(batch.clone()));
             }
         }
-        if self.runtime.owns_relay_unit(&self.services, unit) {
-            return self
-                .delivery_lifetime
-                .run_until_cancelled(self.services.enqueue_owner_batch(batch, unit))
-                .await
-                .unwrap_or_else(|| reject_relay_delivery(batch, "relay producer lifetime ended"));
+        // As Runtime::ingest_stream_boundary_message does, the rows a route change moved away from
+        // their former owner before they reached it follow the unit to its new owner.
+        let mut rerouted: Option<Box<RelayRecordBatch>> = None;
+        loop {
+            nervix_primitives::task::consume_budget().await;
+            let pending = match &rerouted {
+                Some(rows) => rows.as_ref(),
+                None => batch,
+            };
+            if self.runtime.owns_relay_unit(&self.services, unit) {
+                let enqueued = self
+                    .delivery_lifetime
+                    .run_until_cancelled(self.services.enqueue_owner_batch(pending, unit))
+                    .await;
+                return match enqueued {
+                    Some(result) => result,
+                    None => reject_relay_delivery(pending, "relay producer lifetime ended"),
+                };
+            }
+            let delivery = self
+                .services
+                .dispatch_to_owner_through(
+                    &self.domain,
+                    &self.relay,
+                    unit,
+                    pending,
+                    channels,
+                    Some(&self.delivery_lifetime),
+                )
+                .await;
+            match delivery {
+                OwnerDelivery::Admitted => return Ok(()),
+                OwnerDelivery::Failed(rows) => return Err(rows),
+                OwnerDelivery::Rerouted(rows) => rerouted = Some(rows),
+            }
         }
-        self.services
-            .dispatch_to_owner_on(
-                &self.domain,
-                &self.relay,
-                unit,
-                batch,
-                channels.ingress(),
-                Some(&self.delivery_lifetime),
-            )
-            .await
     }
 }
 
@@ -2983,6 +3071,14 @@ fn reject_relay_delivery(batch: &RelayRecordBatch, reason: &'static str) -> Rela
     Err(Box::new(batch.clone()))
 }
 
+/// Fails every record of an owner delivery for `reason`, as [`reject_relay_delivery`] does.
+fn reject_owner_delivery(batch: &RelayRecordBatch, reason: &'static str) -> OwnerDelivery {
+    for ack in &batch.acks {
+        ack.no_ack(reason);
+    }
+    OwnerDelivery::Failed(Box::new(batch.clone()))
+}
+
 #[cfg(test)]
 #[path = "relay_boundary_tests.rs"]
 mod tests;
@@ -2990,6 +3086,10 @@ mod tests;
 #[cfg(test)]
 #[path = "relay_boundary_keepalive_tests.rs"]
 mod keepalive_tests;
+
+#[cfg(all(test, feature = "testing"))]
+#[path = "relay_boundary_reroute_tests.rs"]
+mod reroute_tests;
 
 #[cfg(all(test, feature = "shuttle"))]
 #[path = "relay_branch_presence_shuttle_tests.rs"]

@@ -80,9 +80,12 @@ async fn runtime_report_chain_detached_relay_delivery_log() {
     ))
     .await
     .assured("a detached delivery reports its failure without rejecting the local batch");
+    // A transport that is shutting down starts no exchange, so the delivery reports that it never
+    // reached its receiver, with the send failure beneath, and asks that receiver nothing.
     assert_eq!(
         logs.next("detached remote delivery failed").fields["error"],
-        "failed to cancel relay delivery 0 on node 'node-2': transport is shutting down"
+        "relay delivery 0 never reached node 'node-2': failed to send a remote payload to node \
+         'node-2': transport is shutting down"
     );
 }
 
