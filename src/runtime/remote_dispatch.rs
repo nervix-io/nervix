@@ -26,6 +26,7 @@ use futures_util::future::Either;
 use nervix_interconnect::{RelayGrantRefusal, TransportError};
 
 use super::{
+    relay_boundary::RelayDeliveryChannel,
     relay_send_attempts::{
         GrantCapacityRefusals, RelaySendAttempts, RelaySendFailure, RelaySendStep,
     },
@@ -340,8 +341,22 @@ pub(super) struct PendingRemoteAckDelivery {
 pub(super) enum RemoteAckStorage {
     /// The records are stored and travel with the delivery under these registrations.
     Stored(PendingRemoteAckDelivery),
-    /// The delivery's channel ended while it waited for room to store them.
+    /// The delivery's producer or channel ended while it waited for room to store them.
     Cancelled,
+}
+
+/// The producer can be aborted while admission is unresolved, so its shared channel must start
+/// a fresh sequence before another producer can use the gate again.
+struct InterruptedRelayDelivery<'a>(Option<&'a RelayOutboundSlot>);
+
+impl Drop for InterruptedRelayDelivery<'_> {
+    fn drop(&mut self) {
+        if let Some(slot) = self.0
+            && !slot.cancellation().is_cancelled()
+        {
+            slot.reopen_delivery_channel();
+        }
+    }
 }
 
 impl PendingRemoteAckDelivery {
@@ -572,67 +587,74 @@ impl RemoteDispatcher {
         &self,
         node_id: &ClusterNodeName,
         payload: &mut RelayPayload,
-        branch_channel: &RelayOutboundSlot,
+        channel: RelayDeliveryChannel<'_>,
         deadline: Instant,
         capacity_refusals: GrantCapacityRefusals,
     ) -> error_stack::Result<(), RemoteDispatchError> {
-        let result = self
-            .dispatch_admitted_relay_attempt(
+        let mut interrupted =
+            InterruptedRelayDelivery(channel.has_producer().then_some(channel.slot));
+        let result = async {
+            let result = self
+                .dispatch_admitted_relay_attempt(
+                    node_id,
+                    payload,
+                    channel,
+                    deadline,
+                    capacity_refusals,
+                )
+                .await;
+            let Err(error) = result else {
+                return Ok(());
+            };
+            if !matches!(
+                error.current_context(),
+                RemoteDispatchError::GrantRefused {
+                    refusal: RelayGrantRefusal::ChannelUnopened,
+                    ..
+                }
+            ) || payload.delivery.sequence == 0
+            {
+                return Err(error);
+            }
+            if Instant::now() >= deadline {
+                return Err(
+                    error.change_context(RemoteDispatchError::AdmissionTotalTimeout {
+                        target: node_id.clone(),
+                        timeout: payload.ack_timing.remote_relay_total_timeout,
+                    }),
+                );
+            }
+            // No body was granted. Retain this payload and its ACKs under the held channel gate.
+            // A fresh channel starts at zero, so it can need no further reopening attempt.
+            Err::<(), _>(error).discarded(
+                "the unopened channel admitted no body; its one fresh-channel attempt supplies \
+                 the outcome",
+            );
+            channel.slot.reopen_delivery_channel();
+            payload.delivery = channel.slot.next_delivery_with_policy(payload.ack_timing);
+            self.dispatch_admitted_relay_attempt(
                 node_id,
                 payload,
-                branch_channel,
+                channel,
                 deadline,
                 capacity_refusals,
             )
-            .await;
-        let Err(error) = result else {
-            return Ok(());
-        };
-        if !matches!(
-            error.current_context(),
-            RemoteDispatchError::GrantRefused {
-                refusal: RelayGrantRefusal::ChannelUnopened,
-                ..
-            }
-        ) || payload.delivery.sequence == 0
-        {
-            return Err(error);
+            .await
         }
-        if Instant::now() >= deadline {
-            return Err(
-                error.change_context(RemoteDispatchError::AdmissionTotalTimeout {
-                    target: node_id.clone(),
-                    timeout: payload.ack_timing.remote_relay_total_timeout,
-                }),
-            );
-        }
-        // No body was granted. Retain this payload and its ACKs under the held channel gate.
-        // A fresh channel starts at zero, so it can need no further reopening attempt.
-        Err::<(), _>(error).discarded(
-            "the unopened channel admitted no body; its one fresh-channel attempt supplies the \
-             outcome",
-        );
-        branch_channel.reopen_delivery_channel();
-        payload.delivery = branch_channel.next_delivery_with_policy(payload.ack_timing);
-        self.dispatch_admitted_relay_attempt(
-            node_id,
-            payload,
-            branch_channel,
-            deadline,
-            capacity_refusals,
-        )
-        .await
+        .await;
+        interrupted.0 = None;
+        result
     }
 
     async fn dispatch_admitted_relay_attempt(
         &self,
         node_id: &ClusterNodeName,
         payload: &mut RelayPayload,
-        branch_channel: &RelayOutboundSlot,
+        channel: RelayDeliveryChannel<'_>,
         deadline: Instant,
         capacity_refusals: GrantCapacityRefusals,
     ) -> error_stack::Result<(), RemoteDispatchError> {
-        if branch_channel.cancellation().is_cancelled() {
+        if channel.slot.cancellation().is_cancelled() {
             return Err(Report::new(RemoteDispatchError::BranchEvicted {
                 target: node_id.clone(),
                 sequence: payload.delivery.sequence,
@@ -651,7 +673,7 @@ impl RemoteDispatcher {
             nervix_primitives::select! {
                 biased;
                 result = &mut dispatch => result,
-                () = branch_channel.cancellation().cancelled() => {
+                () = channel.cancelled() => {
                     Err(Report::new(RemoteDispatchError::BranchEvicted {
                         target: node_id.clone(),
                         sequence: delivery.sequence,
@@ -691,7 +713,7 @@ impl RemoteDispatcher {
                 FailedRelayAdmissionResolution::Admitted => Ok(()),
                 FailedRelayAdmissionResolution::Failed(error) => Err(error),
                 FailedRelayAdmissionResolution::Indeterminate(error) => {
-                    branch_channel.reopen_delivery_channel();
+                    channel.slot.reopen_delivery_channel();
                     Err(error)
                 }
             };
@@ -707,7 +729,7 @@ impl RemoteDispatcher {
         let result = nervix_primitives::select! {
             biased;
             result = &mut admission => result,
-            () = branch_channel.cancellation().cancelled() => {
+            () = channel.cancelled() => {
                 Err(Report::new(RemoteDispatchError::BranchEvicted {
                     target: node_id.clone(),
                     sequence: delivery.sequence,
@@ -729,7 +751,7 @@ impl RemoteDispatcher {
                 FailedRelayAdmissionResolution::Admitted => Ok(()),
                 FailedRelayAdmissionResolution::Failed(error) => Err(error),
                 FailedRelayAdmissionResolution::Indeterminate(error) => {
-                    branch_channel.reopen_delivery_channel();
+                    channel.slot.reopen_delivery_channel();
                     Err(error)
                 }
             };
@@ -984,7 +1006,7 @@ impl RemoteDispatcher {
                         admission: None,
                     },
                     &batch.batch,
-                    &outbound_slot,
+                    RelayDeliveryChannel::new(&outbound_slot, None),
                     deadline,
                     GrantCapacityRefusals::GiveUp,
                     None,

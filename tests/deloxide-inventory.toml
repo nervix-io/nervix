@@ -1524,9 +1524,9 @@ selections = ["deloxide", "deloxide-order", "deloxide-stress"]
 test = "application::model_validation::tests::deloxide_onnx_metadata_inspection"
 
 [[workload]]
-coverage = "Processor and entrypoint branch expiry and LRU eviction, which end the channels their lanes publish through and stop each processor branch task under its tracked task guard."
+coverage = "Processor and entrypoint branch expiry and LRU eviction, including shared channel retention, last producer release and the tracked task guard used to stop processor branches."
 id = "owner.branch-lane-channel-retirement"
-invariant = "One fresh diagnostic process expires and evicts processor and entrypoint branches, ends only the channels each lane publishes through, and records no finding."
+invariant = "One fresh diagnostic process expires and evicts processor and entrypoint branches. Relay channels stay live for surviving producers and end with their last producer. The workload records no finding."
 invocation = "owner-tests"
 selections = ["deloxide", "deloxide-order", "deloxide-stress"]
 test = "runtime::processor_template::branch_lane_channel_tests::deloxide_branch_lane_channel_retirement"

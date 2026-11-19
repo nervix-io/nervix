@@ -7,7 +7,7 @@
 
 use error_stack::{Report, ResultExt as _};
 
-use super::*;
+use super::{branch_runtime::BranchInstanceRuntime, *};
 
 /// Every way applying a refreshed template to a running processor, or instantiating a processor
 /// for a branch, fails.
@@ -848,24 +848,6 @@ impl BranchInstanceTemplate {
         Ok(())
     }
 
-    /// End the delivery channels this branch lane publishes through for `key`, and every delivery
-    /// still waiting for admission on them, because the lane's branch for that key has ended. A
-    /// recreated branch binds fresh channels. The channels another relay holds for the same key
-    /// belong to that relay's own branch, which ends only with its own expiry or eviction.
-    #[cfg_attr(
-        nervix_lint,
-        nervix::context(
-            recurring,
-            reason = "branch expiry scans and capacity admission end the channels of each branch \
-                      they release"
-        )
-    )]
-    pub(super) fn retire_branch_channels(&self, key: &Option<BranchKey>) {
-        for relay in self.relays.values() {
-            relay.services.remove_branch_slots(key);
-        }
-    }
-
     #[cfg_attr(
         nervix_lint,
         nervix::context(
@@ -880,7 +862,8 @@ impl BranchInstanceTemplate {
         domain: &DomainName,
         key: Option<BranchKey>,
         incarnation: u64,
-    ) -> error_stack::Result<Mutex<BranchRuntime>, ProcessorTemplateError> {
+    ) -> error_stack::Result<BranchInstanceRuntime, ProcessorTemplateError> {
+        let delivery_lifetime = CancellationToken::new();
         let relays = self
             .relays
             .iter()
@@ -893,6 +876,7 @@ impl BranchInstanceTemplate {
                         relay: relay.clone(),
                         services: template.services.clone(),
                         key: key.clone(),
+                        delivery_lifetime: delivery_lifetime.clone(),
                     }),
                 )
             })
@@ -1009,7 +993,7 @@ impl BranchInstanceTemplate {
                 runtime.branch_metrics_mark(domain, processor.kind, &processor.processor),
             );
         }
-        Ok(Mutex::new(BranchRuntime {
+        let state = Mutex::new(BranchRuntime {
             key,
             runtime: runtime.clone(),
             domain: domain.clone(),
@@ -1031,7 +1015,11 @@ impl BranchInstanceTemplate {
                 processor_inputs,
                 processor_outputs,
             },
-        }))
+        });
+        Ok(BranchInstanceRuntime {
+            delivery_lifetime,
+            state,
+        })
     }
 }
 
