@@ -315,6 +315,8 @@ fn open_statement_tail(statement: &Statement, tokens: &[Token], normalized: &str
         }
     } else if matches!(statement, Statement::CreateDomain(_)) {
         vec![";".to_string()]
+    } else if let Statement::StopDomain(stop) = &statement {
+        crate::domain::stop_domain_tail(stop)
     } else if (normalized.starts_with("RELOCATE ")
         || normalized.starts_with("DESCRIBE RELOCATION "))
         && normalized.ends_with(" PREFERENCES")

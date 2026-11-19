@@ -554,7 +554,11 @@ pub struct StartDomain {
     RkyvSerialize,
     RkyvDeserialize,
 )]
-pub struct StopDomain;
+pub struct StopDomain {
+    /// How long the stop may wait for the work in motion before it is forced through or called
+    /// off. Absent, the stop waits without a limit of its own.
+    pub wait_limit: Option<crate::WaitLimit>,
+}
 
 #[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,

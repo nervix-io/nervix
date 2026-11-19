@@ -27,10 +27,12 @@ use crate::{
 mod commit;
 mod impact;
 mod inspection;
+mod wait_limit;
 
 pub use commit::*;
 pub use impact::*;
 pub use inspection::*;
+pub use wait_limit::*;
 
 #[derive(
     Debug,

@@ -1193,7 +1193,7 @@ mod tests {
             "stop-domain:default".to_string(),
             StorageBoundary::BeforeCommit,
         );
-        let stop = service.stop_domain(&domain, StopDomain).await;
+        let stop = service.stop_domain(&domain, StopDomain::default()).await;
         assert!(!stop.succeeded(), "{stop:?}");
         assert!(stop.message.contains("consensus storage"), "{stop:?}");
         assert!(matches!(

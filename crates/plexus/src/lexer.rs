@@ -139,6 +139,8 @@ pub enum Identifier {
     Begin,
     Start,
     Stop,
+    Enforce,
+    Cancel,
     Describe,
     Lookup,
     Upload,

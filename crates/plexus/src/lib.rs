@@ -89,6 +89,7 @@ pub mod udf;
 pub mod upload_resource;
 pub mod user;
 pub mod vhost;
+mod wait_limit;
 pub mod wasm_processor;
 pub mod window_processor;
 

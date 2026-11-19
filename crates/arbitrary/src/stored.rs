@@ -19,8 +19,8 @@ use nervix_models::{
     RequestedResourceVersion, ResolvedBranching, ResourceId, ResourceNodeState, ResourceNodeStatus,
     ResourceReplicaKey, ResourceUpload, ResourceUploadIdentity, ResourceUploadKey,
     ResourceUploadState, ResourceVersion, RestoreStateAuthority, ScheduledNode, SchemaFingerprint,
-    Timestamp, WasmSavedStateRejection, WasmStateRecoveryAdmission, WasmStateRecoveryOutcome,
-    WasmStateResetPhase, WasmStateResetReason, WasmStateResetScope,
+    Timestamp, WaitLimit, WasmSavedStateRejection, WasmStateRecoveryAdmission,
+    WasmStateRecoveryOutcome, WasmStateResetPhase, WasmStateResetReason, WasmStateResetScope,
 };
 
 use crate::Arbitrary;
@@ -726,6 +726,21 @@ impl Arbitrary<'_> {
                 timestamp: Timestamp::from_unix_nanos(self.entropy.any_i64()),
                 time_rate: self.time_rate(),
             },
+        }
+    }
+
+    /// The limit a waiting operation takes: none, or an ending forced through or called off after
+    /// a duration, at once (zero) or after any span a Plexus duration literal reads back.
+    pub fn wait_limit(&mut self) -> Option<WaitLimit> {
+        let after = if self.entropy.flag() {
+            std::time::Duration::ZERO
+        } else {
+            std::time::Duration::from_nanos(self.entropy.any_u64())
+        };
+        match self.entropy.byte() % 3 {
+            0 => None,
+            1 => Some(WaitLimit::Enforce { after }),
+            _ => Some(WaitLimit::Cancel { after }),
         }
     }
 

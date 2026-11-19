@@ -389,7 +389,7 @@ pub use quiesce::{
     TransactionLifecycle, TransactionModelTransition, TransactionOperation,
     TransactionOperationAdmission, TransactionOperationNumber, TransactionOperationRange,
     TransactionPosition, TransactionPreviewIdentity, TransactionResolvedDomainStart,
-    TransactionStatus, TransactionStatusError,
+    TransactionStatus, TransactionStatusError, WaitLimit,
 };
 pub use rebind_resource::{RebindResource, RebindResourceMembers, RebindResourceSelection};
 pub use remote::{

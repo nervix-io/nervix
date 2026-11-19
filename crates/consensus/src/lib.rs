@@ -10415,7 +10415,7 @@ mod tests {
                 .assured("the test append reference contains only admitted characters"),
             expected_position: 0,
             source: "STOP".to_string(),
-            statement: Statement::StopDomain(nervix_models::StopDomain),
+            statement: Statement::StopDomain(nervix_models::StopDomain::default()),
         });
         transaction
             .queue(
@@ -10475,7 +10475,7 @@ mod tests {
                 .assured("the test append reference contains only admitted characters"),
             expected_position: 0,
             source: "STOP".to_string(),
-            statement: Statement::StopDomain(nervix_models::StopDomain),
+            statement: Statement::StopDomain(nervix_models::StopDomain::default()),
         });
         assert!(matches!(
             transaction
@@ -11370,7 +11370,7 @@ mod tests {
             Statement::StartDomain(nervix_models::StartDomain {
                 start: DomainStartPoint::Resume,
             }),
-            Statement::StopDomain(nervix_models::StopDomain),
+            Statement::StopDomain(nervix_models::StopDomain::default()),
         ]
         .into_iter()
         .enumerate()

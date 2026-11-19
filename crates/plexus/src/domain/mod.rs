@@ -25,6 +25,7 @@ use crate::{
         domain_clock_period_lit, domain_name, duration_lit, if_not_exists_clause, into_parse_error,
         kw, kw_phrase2, lex_input, string_lit, suggestions_from_errors, tok, word_raw,
     },
+    wait_limit::{WAIT_LIMIT_CLAUSES, wait_limit_clause},
 };
 
 fn float_lit<'src>()
@@ -128,8 +129,19 @@ pub fn start_domain_parser<'src>()
 pub fn stop_domain_parser<'src>()
 -> impl Parser<'src, &'src [Token], StopDomain, extra::Err<ParseError<'src>>> + Clone {
     kw(Identifier::Stop)
+        .ignore_then(wait_limit_clause().or_not())
         .then_ignore(tok(Token::Semicolon).or_not())
-        .to(StopDomain)
+        .map(|wait_limit| StopDomain { wait_limit })
+}
+
+/// The clauses that may still follow a complete `STOP`, as completion offers them: a `STOP`
+/// without a wait limit can still take one.
+pub(crate) fn stop_domain_tail(stop: &StopDomain) -> Vec<String> {
+    let mut tail = vec![";".to_string()];
+    if stop.wait_limit.is_none() {
+        tail.extend(WAIT_LIMIT_CLAUSES.map(str::to_string));
+    }
+    tail
 }
 
 pub fn parse_create_domain(
@@ -177,10 +189,12 @@ pub fn suggest_domain_statement(input: &str, cursor: usize) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use meticulous::ResultExt as _;
     use nervix_models::{
         DomainClockPeriod, DomainClockSkew, DomainPace, DomainStartPoint, DomainTimeRate,
-        Statement, Timestamp,
+        Statement, Timestamp, WaitLimit,
     };
 
     use crate::statement::{parse_statement, suggest_statement};
@@ -324,9 +338,93 @@ mod tests {
     #[test]
     fn parses_stop_without_trailing_semicolon() {
         let parsed = parse_statement("STOP").expect("must parse");
-        let Statement::StopDomain(_) = parsed else {
+        let Statement::StopDomain(stop) = parsed else {
             panic!("expected stop domain");
         };
+        assert_eq!(stop.wait_limit, None);
+    }
+
+    #[rstest::rstest]
+    #[case::enforce("STOP ENFORCE AFTER 30s;", WaitLimit::Enforce { after: Duration::from_secs(30) })]
+    #[case::cancel("STOP CANCEL AFTER 2m;", WaitLimit::Cancel { after: Duration::from_secs(120) })]
+    #[case::enforce_at_once("STOP ENFORCE AFTER 0s;", WaitLimit::Enforce { after: Duration::ZERO })]
+    #[case::lower_case("stop cancel after 1500ms", WaitLimit::Cancel { after: Duration::from_millis(1500) })]
+    #[case::spanned_duration(
+        "STOP ENFORCE AFTER 1 min 30s;",
+        WaitLimit::Enforce { after: Duration::from_secs(90) }
+    )]
+    fn parses_stop_with_a_wait_limit(#[case] source: &str, #[case] expected: WaitLimit) {
+        let parsed = parse_statement(source).expect("must parse");
+        let Statement::StopDomain(stop) = parsed else {
+            panic!("expected stop domain");
+        };
+        assert_eq!(stop.wait_limit, Some(expected));
+        let canonical = Statement::StopDomain(stop.clone())
+            .to_canonical_plexus()
+            .expect("a parsed stop renders");
+        let Statement::StopDomain(reparsed) =
+            parse_statement(&canonical).expect("the canonical stop must parse")
+        else {
+            panic!("expected stop domain");
+        };
+        assert_eq!(reparsed, stop);
+    }
+
+    #[rstest::rstest]
+    #[case::both_clauses("STOP ENFORCE AFTER 1s CANCEL AFTER 2s;")]
+    #[case::both_clauses_reversed("STOP CANCEL AFTER 2s ENFORCE AFTER 1s;")]
+    #[case::enforce_without_after("STOP ENFORCE 1s;")]
+    #[case::cancel_without_after("STOP CANCEL 1s;")]
+    #[case::missing_duration("STOP ENFORCE AFTER;")]
+    #[case::bare_word_duration("STOP CANCEL AFTER soon;")]
+    #[case::negative_duration("STOP ENFORCE AFTER -1s;")]
+    #[case::repeated_clause("STOP ENFORCE AFTER 1s ENFORCE AFTER 2s;")]
+    #[case::clause_before_stop("ENFORCE AFTER 1s STOP;")]
+    fn rejects_malformed_stop_wait_limits(#[case] source: &str) {
+        assert!(
+            parse_statement(source).is_err(),
+            "{source} must not parse as a stop"
+        );
+    }
+
+    #[test]
+    fn suggests_wait_limits_after_stop() {
+        for input in ["STOP ", "stop "] {
+            assert_eq!(
+                suggest_statement(input, input.len()),
+                [";", "CANCEL AFTER", "ENFORCE AFTER"]
+            );
+            assert_eq!(
+                crate::client_statement::suggest_client_statement(input, input.len()),
+                [";", "CANCEL AFTER", "ENFORCE AFTER"]
+            );
+        }
+    }
+
+    #[test]
+    fn a_stop_with_a_wait_limit_offers_only_its_termination() {
+        for input in ["STOP ENFORCE AFTER 30s ", "STOP CANCEL AFTER 0s "] {
+            assert_eq!(suggest_statement(input, input.len()), [";"]);
+            assert_eq!(
+                crate::client_statement::suggest_client_statement(input, input.len()),
+                [";"]
+            );
+        }
+    }
+
+    #[test]
+    fn completes_a_wait_limit_phrase_from_its_prefix() {
+        assert_eq!(suggest_statement("STOP EN", 7), ["ENFORCE AFTER"]);
+        assert_eq!(suggest_statement("STOP CAN", 8), ["CANCEL AFTER"]);
+    }
+
+    #[test]
+    fn a_wait_limit_belongs_to_stop_and_leaks_into_no_other_lifecycle_statement() {
+        assert!(!suggest_statement("START ", 6).contains(&"ENFORCE AFTER".to_string()));
+        assert!(!suggest_statement("START ", 6).contains(&"CANCEL AFTER".to_string()));
+        assert!(
+            !suggest_statement("CREATE DOMAIN prod ", 19).contains(&"ENFORCE AFTER".to_string())
+        );
     }
 
     #[test]

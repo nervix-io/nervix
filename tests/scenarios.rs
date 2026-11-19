@@ -18606,6 +18606,48 @@ async fn then_the_background_plexus_execution_succeeds(world: &mut ScenarioWorld
     world.last_command_output = Some(output);
 }
 
+/// The background execution must not finish within `duration`. A STOP that waits for a publish
+/// on the wire keeps its statement waiting for as long as that publish does, so an answer that
+/// arrives during the window is an answer that came too early. The step fails with how the
+/// execution ended when it finished inside the window.
+#[then(expr = "the background Plexus execution is still running after {string}")]
+async fn then_the_background_plexus_execution_is_still_running_after(
+    world: &mut ScenarioWorld,
+    duration: String,
+) {
+    let window = parse_duration_text(&duration).expect("the step's window is a valid duration");
+    let task = world
+        .background_plexus
+        .as_mut()
+        .verified("a preceding step started a background Plexus execution");
+    if let Ok(outcome) = nervix_primitives::time::timeout(window, task).await {
+        panic!(
+            "the background Plexus execution finished within {duration} while it was meant to \
+             keep waiting: {outcome:?}"
+        );
+    }
+}
+
+#[then(expr = "within {string} the background Plexus execution reaches a successful outcome")]
+async fn then_within_the_background_plexus_execution_reaches_a_successful_outcome(
+    world: &mut ScenarioWorld,
+    within: String,
+) {
+    let bound = parse_duration_text(&within).expect("the step's bound is a valid duration");
+    let task = world
+        .background_plexus
+        .take()
+        .verified("a preceding step started a background Plexus execution");
+    let output = nervix_primitives::time::timeout(bound, task)
+        .await
+        .unwrap_or_else(|_| {
+            panic!("the background Plexus execution did not finish within {within}")
+        })
+        .assured("the background Plexus task is owned by this scenario")
+        .unwrap_or_else(|error| panic!("the background Plexus execution failed: {error}"));
+    world.last_command_output = Some(output);
+}
+
 #[then("the background Plexus execution does not report success")]
 async fn then_background_plexus_execution_does_not_report_success(world: &mut ScenarioWorld) {
     let task = world
@@ -19089,6 +19131,43 @@ async fn given_named_client_is_connected_to_node(
     node_id: String,
 ) {
     connect_named_client_to_node(world, name, node_id, Vec::new(), false).await;
+}
+
+/// Connects a named client whose request and retry deadlines are both `timeout`, so a scenario can
+/// show a command that the server keeps answering with progress outlasting them.
+#[given(
+    expr = "client {string} is connected to node {string} with request and retry timeouts of \
+            {string}"
+)]
+async fn given_named_client_is_connected_to_node_with_timeouts(
+    world: &mut ScenarioWorld,
+    name: String,
+    node_id: String,
+    timeout: String,
+) {
+    let timeout = parse_duration_text(&timeout).expect("the step's timeout is a valid duration");
+    let node_id = expand_placeholders(world, &node_id);
+    let grpc_uri = world
+        .cluster()
+        .grpc_uri(&node_id)
+        .expect("failed to resolve client node gRPC URI");
+    let name = expand_placeholders(world, &name);
+    let mut options =
+        client_connect_options(&grpc_uri).expect("failed to build client tls options");
+    options.request_timeout = timeout;
+    options.retry_timeout = timeout;
+    let client = Client::connect_with_options(&grpc_uri, client_domain(&world.domain), options)
+        .await
+        .unwrap_or_else(|error| {
+            panic!("failed to connect client '{name}' to '{grpc_uri}': {error}")
+        });
+    assert!(
+        world
+            .transaction_clients
+            .insert(name.clone(), client)
+            .is_none(),
+        "client '{name}' is already connected"
+    );
 }
 
 #[given(expr = "client {string} is connected to node {string} with cluster seeds")]
