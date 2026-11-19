@@ -121,6 +121,7 @@ pub(super) enum ProcessorBranchCommand {
 pub(super) struct ProcessorBranchTask {
     pub(super) input: mpsc::Sender<ProcessorBranchInput>,
     pub(super) commands: mpsc::Sender<ProcessorBranchCommand>,
+    pub(super) delivery_lifetime: CancellationToken,
     /// The branch's task. It is ended when this handle is dropped, so a branch never outlives the
     /// processor task that owns it: a processor task ended before it could stop its branches, as a
     /// shutdown grace ends one, ends every branch with it rather than leaving them running without
@@ -1183,6 +1184,7 @@ pub(super) async fn spawn_processor_branch_task(
 pub(super) struct PreparedProcessorBranch {
     context: ProcessorRuntimeContext,
     branch: BranchRuntime,
+    delivery_lifetime: CancellationToken,
     incarnation: u64,
 }
 
@@ -1217,13 +1219,14 @@ impl PreparedProcessorBranch {
         };
         let template = published_template.unwrap_or_else(|| StdArc::new(template.clone()));
         let branch_key = key.clone();
-        let mut branch = template
+        let instance = template
             .instantiate(&context.runtime_handle, &context.domain, key, incarnation)
             .await
             .change_context_lazy(|| ProcessorBranchTaskError::Instantiate {
                 branch: BranchScope::from(&branch_key),
-            })?
-            .into_inner();
+            })?;
+        let delivery_lifetime = instance.delivery_lifetime.clone();
+        let mut branch = instance.into_inner();
         if template.owner.node.kind == ModelKind::WindowProcessor
             && let ProcessorBranchLifetime::Appeared = lifetime
         {
@@ -1240,6 +1243,7 @@ impl PreparedProcessorBranch {
         Ok(Self {
             context,
             branch,
+            delivery_lifetime,
             incarnation,
         })
     }
@@ -1259,6 +1263,7 @@ impl PreparedProcessorBranch {
         let Self {
             context,
             mut branch,
+            delivery_lifetime,
             incarnation,
         } = self;
         let processor = branch.owner.node.identifier.clone();
@@ -1298,6 +1303,7 @@ impl PreparedProcessorBranch {
         ProcessorBranchTask {
             input: input_tx,
             commands: command_tx,
+            delivery_lifetime,
             task: nervix_primitives::sync::blocking::Mutex::new(Some(AbortOnDropHandle::new(task))),
         }
     }
@@ -1708,6 +1714,9 @@ pub(super) async fn stop_processor_branch_task(
     grace: Duration,
 ) {
     let processor = processor.into();
+    if matches!(&mode, ProcessorBranchStopMode::Evict) {
+        entry.delivery_lifetime.cancel();
+    }
     let mut task = None;
     let stopped = nervix_primitives::time::timeout(grace, async {
         entry
@@ -1874,7 +1883,6 @@ pub(super) async fn expire_processor_branch_instances(
                 Some(BranchEvictionReason::Ttl),
             )
         );
-        template.retire_branch_channels(&key);
         if let Some(task) = entry.live() {
             nervix_primitives::expect_lint!(
                 nervix::lifecycle_call,
@@ -1928,7 +1936,6 @@ pub(super) async fn evict_processor_branch_instances_to_capacity(
                 Some(BranchEvictionReason::Lru),
             )
         );
-        template.retire_branch_channels(&key);
         if let Some(task) = entry.live() {
             nervix_primitives::expect_lint!(
                 nervix::lifecycle_call,

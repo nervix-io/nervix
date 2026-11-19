@@ -28,6 +28,16 @@ type Branches =
 type Destinations =
     GenericHashMap<RelayOutboundChannel, StdArc<RelayOutboundSlot>, RandomState, DefaultSharedPtr>;
 
+#[derive(Clone, Copy)]
+enum RelayBranchBinding {
+    Producer,
+    Relay,
+}
+
+/// The relay's own channel use ends through its branch owner, independently of local producers.
+const RETAINED_BY_RELAY: usize = usize::MAX - 1;
+const RETIRED_BINDINGS: usize = usize::MAX;
+
 #[derive(Debug)]
 pub(super) struct RelayChannels {
     #[cfg_attr(
@@ -98,6 +108,7 @@ impl RoutingGenerations {
 /// allowing an evicted producer to attach to a recreated incarnation of the same branch key.
 #[derive(Debug)]
 pub(super) struct RelayBranchChannels {
+    bindings: AtomicUsize,
     retired: CancellationToken,
     closed: CancellationToken,
     routing: StdArc<ArcSwap<CancellationToken>>,
@@ -137,34 +148,79 @@ impl RelayChannels {
         }
     }
 
+    /// Retains the channels for the relay's own use until its branch owner retires the key.
+    pub(super) fn bind(&self, key: &Option<BranchKey>, unit: Unit) -> StdArc<RelayBranchChannels> {
+        self.bind_as(key, unit, RelayBranchBinding::Relay)
+    }
+
+    pub(super) fn bind_producer(
+        &self,
+        key: &Option<BranchKey>,
+        unit: Unit,
+    ) -> StdArc<RelayBranchChannels> {
+        self.bind_as(key, unit, RelayBranchBinding::Producer)
+    }
+
+    pub(super) fn release_producer(
+        &self,
+        key: &Option<BranchKey>,
+        branch: &StdArc<RelayBranchChannels>,
+    ) {
+        if branch.release_producer() {
+            self.retire_published(key, branch);
+        }
+    }
+
     /// The channels of branch `key`, which `unit` of the relay owns.
     ///
     /// A unit the relay is not scheduled as has no routing generation, so its channels are bound
     /// already retired and refuse every delivery.
-    pub(super) fn bind(&self, key: &Option<BranchKey>, unit: Unit) -> StdArc<RelayBranchChannels> {
+    fn bind_as(
+        &self,
+        key: &Option<BranchKey>,
+        unit: Unit,
+        binding: RelayBranchBinding,
+    ) -> StdArc<RelayBranchChannels> {
         let Some(routing) = self.routing.of(unit) else {
             let retired = StdArc::new(RelayBranchChannels::new(
                 StdArc::new(ArcSwap::from_pointee(CancellationToken::new())),
                 self.closed.clone(),
+                binding,
             ));
             retired.retire();
             return retired;
         };
-        if self.closed.is_cancelled() {
-            return StdArc::new(RelayBranchChannels::new(routing, self.closed.clone()));
-        }
         let mut current = self.branches.load_full();
-        if let Some(branch) = current.get(key) {
-            return branch.clone();
-        }
-        let branch = StdArc::new(RelayBranchChannels::new(routing, self.closed.clone()));
+        let mut candidate = None;
         loop {
             if self.closed.is_cancelled() {
+                let branch = candidate.unwrap_or_else(|| {
+                    StdArc::new(RelayBranchChannels::new(
+                        routing,
+                        self.closed.clone(),
+                        binding,
+                    ))
+                });
+                branch.retire();
                 return branch;
             }
-            if let Some(winner) = current.get(key) {
-                return winner.clone();
+            if let Some(branch) = current.get(key) {
+                if branch.retain(binding) {
+                    return branch.clone();
+                }
+                // Finish withdrawing this exact allocation if the last producer has already
+                // ended it. A racing binder must never revive its slots.
+                self.retire_published(key, branch);
+                current = self.branches.load_full();
+                continue;
             }
+            let branch = candidate.get_or_insert_with(|| {
+                StdArc::new(RelayBranchChannels::new(
+                    routing.clone(),
+                    self.closed.clone(),
+                    binding,
+                ))
+            });
             // A persistent map copies only this key's path, independently of sibling branches.
             #[cfg_attr(
                 nervix_lint,
@@ -178,25 +234,28 @@ impl RelayChannels {
             let observed = self.branches.compare_and_swap(&current, StdArc::new(next));
             if StdArc::ptr_eq(&current, &observed) {
                 if self.closed.is_cancelled() {
-                    self.retire(key);
+                    self.retire_published(key, branch);
                 }
-                return branch;
+                return branch.clone();
             }
             current = StdArc::clone(&observed);
         }
     }
 
     pub(super) fn retire(&self, key: &Option<BranchKey>) {
-        let mut current = self.branches.load_full();
-        let Some(branch) = current.get(key).cloned() else {
-            return;
-        };
+        if let Some(branch) = self.branches.load_full().get(key) {
+            self.retire_published(key, branch);
+        }
+    }
+
+    fn retire_published(&self, key: &Option<BranchKey>, branch: &StdArc<RelayBranchChannels>) {
         branch.retire();
+        let mut current = self.branches.load_full();
         loop {
             let Some(published) = current.get(key) else {
                 return;
             };
-            if !StdArc::ptr_eq(published, &branch) {
+            if !StdArc::ptr_eq(published, branch) {
                 return;
             }
             #[cfg_attr(
@@ -293,14 +352,62 @@ impl BranchRoutes {
 }
 
 impl RelayBranchChannels {
-    fn new(routing: StdArc<ArcSwap<CancellationToken>>, closed: CancellationToken) -> Self {
+    fn new(
+        routing: StdArc<ArcSwap<CancellationToken>>,
+        closed: CancellationToken,
+        binding: RelayBranchBinding,
+    ) -> Self {
         let routes = ArcSwap::from_pointee(BranchRoutes::new(routing.load_full()));
         Self {
+            bindings: AtomicUsize::new(match binding {
+                RelayBranchBinding::Producer => 1,
+                RelayBranchBinding::Relay => RETAINED_BY_RELAY,
+            }),
             retired: CancellationToken::new(),
             closed,
             routing,
             routes,
         }
+    }
+
+    fn retain(&self, binding: RelayBranchBinding) -> bool {
+        if self.bindings.load(Ordering::Relaxed) == RETAINED_BY_RELAY {
+            return true;
+        }
+        self.bindings
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                match (current, binding) {
+                    (RETIRED_BINDINGS, _) => None,
+                    (RETAINED_BY_RELAY, _) | (_, RelayBranchBinding::Relay) => {
+                        Some(RETAINED_BY_RELAY)
+                    }
+                    (count, RelayBranchBinding::Producer) => Some(
+                        count
+                            .checked_add(1)
+                            .filter(|next| *next < RETAINED_BY_RELAY)
+                            .assured("each relay producer occupies memory"),
+                    ),
+                }
+            })
+            .is_ok()
+    }
+
+    /// The last release and the next binding compete on this one scalar. After retirement,
+    /// retained handles may only finish cancelling and withdrawing this allocation.
+    fn release_producer(&self) -> bool {
+        self.bindings.try_update(
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+            |current| match current {
+                RETIRED_BINDINGS | RETAINED_BY_RELAY => None,
+                1 => Some(RETIRED_BINDINGS),
+                count => Some(
+                    count
+                        .checked_sub(1)
+                        .assured("only a retained producer releases a binding"),
+                ),
+            },
+        ) == Ok(1)
     }
 
     pub(super) fn is_retired(&self) -> bool {
@@ -429,6 +536,7 @@ impl RelayBranchChannels {
     }
 
     fn retire(&self) {
+        self.bindings.store(RETIRED_BINDINGS, Ordering::Relaxed);
         self.retired.cancel();
         self.routes.load().lifetime.cancel();
     }

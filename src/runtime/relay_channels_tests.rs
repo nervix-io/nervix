@@ -143,12 +143,29 @@ fn bolero_relay_sequences_preserve_exact_lifetimes_and_order() {
 fn withdrawal_releases_the_branch_after_its_last_producer_ends() {
     let channels = RelayChannels::default();
     let key = string_branch_key("tenant", "acme");
-    let retained = channels.bind(&key, Unit::SINGLE);
+    let retained = channels.bind_producer(&key, Unit::SINGLE);
     let weak = StdArc::downgrade(&retained);
-    channels.retire(&key);
+    channels.release_producer(&key, &retained);
     assert!(weak.upgrade().is_some());
     drop(retained);
     assert!(weak.upgrade().is_none());
+}
+
+#[test]
+fn a_relays_routes_outlive_its_local_producers() {
+    let channels = RelayChannels::default();
+    let key = string_branch_key("tenant", "acme");
+    let producer = channels.bind_producer(&key, Unit::SINGLE);
+    let relay = channels.bind(&key, Unit::SINGLE);
+    let outbound = relay.outbound(channel());
+    assert!(StdArc::ptr_eq(&producer, &relay));
+
+    channels.release_producer(&key, &producer);
+    assert!(!outbound.cancellation().is_cancelled());
+    assert!(StdArc::ptr_eq(&relay, &channels.bind(&key, Unit::SINGLE)));
+
+    channels.retire(&key);
+    assert!(outbound.cancellation().is_cancelled());
 }
 
 #[nervix_primitives::test]

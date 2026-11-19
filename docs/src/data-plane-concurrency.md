@@ -321,12 +321,14 @@ outbound slots, including candidates created during replacement. A partitioned r
 routing generation per partition, and a producer resolves its key's partition once, when it binds
 its branch channel, so no batch computes a partition or reaches a shared map. Replacing one
 partition's owner cancels only that partition's generation and the channels bound under it; the
-other partitions' producers keep their bindings. Eviction cancels the exact branch
-before withdrawing its allocation. Invalidation is scoped to the branch that ended: a relay owner
-invalidates its own relay's branch, and a processor, ingestor or reingestor invalidates the
-branches of the relays it publishes through for its key. Another relay's branch for the same key
-keeps its channels. An independently expiring receiver branch permits a still-live producer to
-bind a fresh channel after invalidation. The producer's own ending moves it to `Ended` and
+other partitions' producers keep their bindings. Each producer's branch has a cancellation token
+that releases its own waits and reconciles its unadmitted remote delivery. Producers of one
+relay on a node share the channel and its sequence for the key. Binding and releasing producers
+update one scalar on the retained branch handle. The last release marks the producer-only
+allocation retired before withdrawing it by identity. A racing binding either retains that
+allocation while it is live or obtains its successor. A relay owner keeps its routing channels
+until its own branch ends. An independently expiring owner branch permits a still-live producer
+to bind a fresh channel after invalidation. The producer's own ending moves it to `Ended` and
 prevents rebinding. Domain terminal teardown cancels the relay publication itself.
 
 Channel gates serialize encode, sequence assignment and dispatch for that channel only. Gate waits

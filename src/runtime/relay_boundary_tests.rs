@@ -475,6 +475,7 @@ async fn concrete_relay_reuses_branch_collapse_for_runtime_consumers() {
         )
         .expect("a whole relay schedules its single unit");
     let mut relay_runtime = ConcreteRelayRuntime::new(ConcreteRelayRuntimeBuild {
+        delivery_lifetime: CancellationToken::new(),
         runtime: runtime.clone(),
         domain: domain.clone(),
         relay: relay.clone(),
@@ -1965,6 +1966,7 @@ async fn an_ended_producer_cannot_attach_to_a_recreated_relay_branch() {
     let runtime = Runtime::default();
     let services = test_relay_boundary_services();
     let mut producer = ConcreteRelayRuntime::new(ConcreteRelayRuntimeBuild {
+        delivery_lifetime: CancellationToken::new(),
         runtime,
         domain: domain("default"),
         relay: named("orders"),

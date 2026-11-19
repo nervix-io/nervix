@@ -89,6 +89,31 @@ fn shuttle_first_binding_has_one_winner_and_routing_retirement_cancels_every_slo
 }
 
 #[test]
+fn shuttle_binding_racing_the_last_producer_keeps_a_live_channel() {
+    check_interleavings(|| {
+        let channels = Arc::new(RelayChannels::default());
+        let first = channels.bind_producer(&None, Unit::SINGLE);
+        let first_slot = first.ingress();
+        let later = channels.clone();
+        let producer = thread::spawn(move || later.bind_producer(&None, Unit::SINGLE));
+
+        channels.release_producer(&None, &first);
+        let survivor = producer.join().assured(JOINS);
+        let survivor_slot = survivor.ingress();
+        assert!(!survivor_slot.cancellation().is_cancelled());
+        assert_eq!(
+            first_slot.cancellation().is_cancelled(),
+            !StdArc::ptr_eq(&first, &survivor),
+            "the next binding keeps the channel only if it joined before the last release"
+        );
+
+        channels.release_producer(&None, &survivor);
+        assert!(survivor_slot.cancellation().is_cancelled());
+        assert!(channels.branches.load().is_empty());
+    });
+}
+
+#[test]
 fn shuttle_branch_retirement_racing_a_route_refresh_never_revives_a_retained_producer() {
     check_interleavings(|| {
         let channels = Arc::new(RelayChannels::default());
