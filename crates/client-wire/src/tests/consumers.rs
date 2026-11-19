@@ -67,6 +67,7 @@ fn consumer_requests_round_trip_with_exact_fields_and_decisions() {
         let message = ClientMessage {
             request_id: request(40 + u64::try_from(offset).expect("sample index fits u64")),
             request: request_body,
+            progress: None,
         };
         assert_eq!(round_trip_client(&message), message);
     }
@@ -191,6 +192,7 @@ fn bolero_native_emitter_frames_round_trip() {
                 let message = ClientMessage {
                     request_id: request(300 + u64::try_from(index).expect("sample index fits")),
                     request: request_body,
+                    progress: None,
                 };
                 assert_eq!(round_trip_client(&message), message);
             }

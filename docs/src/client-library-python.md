@@ -52,7 +52,9 @@ Leaving the `with` block releases the session; see [Lifetimes And Memory](#lifet
 `seeds` lists further servers the session may reach, tried when the server does not answer and used
 again when the session reconnects. Every timeout is in seconds: `connect_timeout` bounds opening one
 connection, `request_timeout` one request, `retry_timeout` a call with all of its retries and
-redirects, and `backup_wait_timeout` a backup's wait for its archive.
+redirects, and `backup_wait_timeout` a backup's wait for its archive. The request and call timeouts
+count only time without the answer or a server progress report, which restarts them, so a
+long-running statement such as a waiting `STOP` is still answered.
 
 ```python
 {{#include ../../tests/client_conformance/python/suite/cluster/test_connect.py:seeds}}

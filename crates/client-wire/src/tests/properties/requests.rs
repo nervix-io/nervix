@@ -12,7 +12,7 @@
 
 use std::collections::BTreeSet;
 
-use meticulous::ResultExt as _;
+use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::{
     ClientConsumerLimits, ClientProducerLimits, ImpactPlanningBasis, TransactionInspectionTarget,
     TransactionPosition, TransactionPreviewIdentity,
@@ -31,6 +31,7 @@ impl WireValues<'_> {
         let mut messages = client_messages();
         for message in &mut messages {
             message.request_id = self.request_id();
+            message.progress = self.progress_interval();
             match &mut message.request {
                 ClientRequest::Command(command) => {
                     command.query = self.arbitrary.string();
@@ -185,6 +186,23 @@ impl WireValues<'_> {
             }
         }
         messages
+    }
+}
+
+impl WireValues<'_> {
+    /// No reports, or an interval at the shortest the protocol allows, at the longest its field
+    /// holds, or anywhere between.
+    fn progress_interval(&mut self) -> Option<crate::ProgressInterval> {
+        let milliseconds = match self.arbitrary.entropy().byte() % 4 {
+            0 => return None,
+            1 => 100,
+            2 => u64::MAX,
+            _ => self.arbitrary.entropy().any_u64().max(100),
+        };
+        Some(
+            crate::ProgressInterval::new(std::time::Duration::from_millis(milliseconds))
+                .assured("every generated interval is at least the protocol's shortest"),
+        )
     }
 }
 

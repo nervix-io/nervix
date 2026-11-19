@@ -45,8 +45,8 @@ use error_stack::Report;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_client_wire::{
     AttachDomainClockRequest, ClientMessage, ClientRequest, ConsumerId,
-    DomainClockAttachDisposition, OpenEmitterDisposition, OpenIngestorDisposition, ReplyBody,
-    SubscribeDisposition, SubscriptionEndReason, SubscriptionRefusal,
+    DomainClockAttachDisposition, OpenEmitterDisposition, OpenIngestorDisposition,
+    ProgressInterval, ReplyBody, SubscribeDisposition, SubscriptionEndReason, SubscriptionRefusal,
 };
 use nervix_models::DomainName;
 use nervix_primitives::{
@@ -62,7 +62,7 @@ use crate::{
         DomainClockAttachments, DomainClockRestorationCause,
     },
     error::{ClientError, RequestKind},
-    exchange::{EventTargets, Exchange, ExchangeRequests, PendingRequest},
+    exchange::{EventTargets, Exchange, ExchangeRequests, PendingRequest, RequestSilence},
     producer::{Answered, ProducerInner},
     subscriptions::{DesiredSubscriptions, RestoreAttempt, SubscriptionRestorationCause},
 };
@@ -165,6 +165,7 @@ impl RestorationChannel {
         let message = ClientMessage {
             request_id: registered.request_id,
             request,
+            progress: Some(ProgressInterval::within(self.request_timeout)),
         };
         let frame = match message.encode(&self.requests.limits) {
             Ok(frame) => frame,
@@ -182,17 +183,17 @@ impl RestorationChannel {
 
     /// Waits for the reply of a request `send` sent.
     ///
-    /// A request that outlives the request timeout is the only sign that the session is dead, so
-    /// it ends every request still waiting on the exchange, exactly as any other request does.
+    /// A request that goes the request timeout without its reply or a report that the server
+    /// still serves it is the only sign that the session is dead, so it ends every request still
+    /// waiting on the exchange, exactly as any other request does.
     async fn reply(
         &self,
         sent: error_stack::Result<PendingRequest, ClientError>,
         kind: RequestKind,
     ) -> error_stack::Result<ReplyBody, ClientError> {
         let mut waiter = sent?;
-        let Ok(received) =
-            nervix_primitives::time::timeout(self.request_timeout, waiter.receive()).await
-        else {
+        let mut silence = RequestSilence::starting_now(self.request_timeout);
+        let Ok(received) = waiter.reply_within(&mut silence, None).await else {
             self.requests.pending.lock().close();
             return Err(Report::new(ClientError::RequestDeadline { request: kind }));
         };

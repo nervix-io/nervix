@@ -19,6 +19,8 @@ mod foreign_execution;
 #[cfg(not(feature = "shuttle"))]
 mod host_stack;
 #[cfg(not(feature = "shuttle"))]
+mod progress;
+#[cfg(not(feature = "shuttle"))]
 mod reply_kind;
 #[cfg(not(feature = "shuttle"))]
 mod reports;

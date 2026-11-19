@@ -2099,6 +2099,13 @@ table RequestRejected {
   message: string (required);
 }
 
+/// The server still serves the request its Reply's request_id names. It completes nothing: the
+/// request's terminal reply follows it. The server sends one at the interval the request's
+/// ClientMessage.progress_interval_ms asked for, and only for a request that asked. A client restarts
+/// its wait for the request at each one, and ignores one for a request it no longer waits on: one
+/// queued just before the terminal reply can arrive after it.
+table RequestProgress {}
+
 /// One part of a reply too large for a single frame. The parts of one reply share its request_id
 /// and total_bytes, arrive in order with contiguous offsets starting at zero, and concatenate to a
 /// complete ServerMessage frame holding a Reply with the same request_id and a body that is not a
@@ -2444,7 +2451,8 @@ union ReplyBody {
   OpenEmitterOutcome,
   ReadEmitterBatchOutcome,
   SettleEmitterBatchOutcome,
-  CloseEmitterOutcome
+  CloseEmitterOutcome,
+  RequestProgress
 }
 
 table Reply {
@@ -2905,6 +2913,10 @@ table ClientMessage {
   /// Non-zero, and never reused within one session.
   request_id: ulong;
   request: ClientRequest (required);
+  /// How often the server reports, while it serves this request, that it still does: it sends a
+  /// RequestProgress reply at least this often from when it takes the request until it queues the
+  /// request's terminal reply. In milliseconds, at least 100. Absent: the client asks for none.
+  progress_interval_ms: ulong = null;
 }
 
 /// Root of a server frame ("NXEL").

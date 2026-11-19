@@ -48,6 +48,7 @@ pub mod grpc;
 mod impact;
 mod limits;
 mod producer;
+mod progress;
 mod reply;
 mod request;
 mod resource;
@@ -112,6 +113,7 @@ pub use producer::{
     OpenIngestorOutcome, OpenIngestorRequest, ProducerAdmissionChanged, ProducerEnded, ProducerId,
     ProducerOpened, SubmissionOutcome, SubmitBatchRequest,
 };
+pub use progress::{ProgressInterval, RequestProgress};
 pub use reply::{
     CancelOutcome, CancelState, CancellationStage, InspectionOutcome, RequestCancelled,
     RequestRejected, RequestRejection, SubscribeDisposition, SubscribeOutcome, SubscriptionOpened,

@@ -108,6 +108,7 @@ impl UnreadSession {
                 request: ClientRequest::Cancel(CancelRequest {
                     target: RequestId::new(NonZeroU64::MAX),
                 }),
+                progress: None,
             };
             let frame = message
                 .encode(&SessionLimits::DEFAULT)

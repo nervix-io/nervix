@@ -1012,6 +1012,8 @@ func serverLines(frame []byte, fields, keys []field) ([]string, error) {
 			}
 			return []string{fmt.Sprintf("REPLY %d EMITTER_CLOSE disposition=%s message=%s", id,
 				session.EnumNamesEmitterCloseDisposition[*disposition], text(outcome.Message()))}, nil
+		case session.ReplyBodyRequestProgress:
+			return []string{fmt.Sprintf("REPLY %d PROGRESS", id)}, nil
 		}
 		return nil, fmt.Errorf("the corpus holds no %s reply", value.BodyType())
 	case session.ServerBodySubscriptionRows:
@@ -1136,6 +1138,17 @@ func clientLines(frame []byte) ([]string, error) {
 		return nil, err
 	}
 	message := session.GetRootAsClientMessage(frame, 0)
+	lines, err := clientRequestLines(message)
+	if err != nil {
+		return nil, err
+	}
+	if progress := message.ProgressIntervalMs(); progress != nil {
+		lines = append(lines, fmt.Sprintf("REQUEST %d PROGRESS_INTERVAL ms=%d", message.RequestId(), *progress))
+	}
+	return lines, nil
+}
+
+func clientRequestLines(message *session.ClientMessage) ([]string, error) {
 	id := message.RequestId()
 	var table tableOf
 	if err := union(message.Request, &table); err != nil {

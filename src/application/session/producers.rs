@@ -36,7 +36,7 @@ use meticulous::OptionExt as _;
 use nervix_client_wire::{
     CloseIngestorDisposition, CloseIngestorOutcome, CloseIngestorRequest, OpenIngestorDisposition,
     OpenIngestorOutcome, OpenIngestorRequest, ProducerAdmissionChanged, ProducerEnded, ProducerId,
-    ProducerOpened, ReplyBody, RequestId, SubmissionOutcome, SubmitBatchRequest,
+    ProducerOpened, ProgressInterval, ReplyBody, RequestId, SubmissionOutcome, SubmitBatchRequest,
 };
 use nervix_models::{
     ClientOutcomeUncertainty, ClientProducerEndReason, ClientProducerGrant, ClientProducerRefusal,
@@ -526,8 +526,13 @@ impl SessionProducers {
 impl SessionShared {
     /// Takes one batch from the client. It never waits for the batch's outcome, which the
     /// producer's pump sends.
-    pub(super) async fn submit_batch(&self, request_id: RequestId, submit: SubmitBatchRequest) {
-        if let Err(rejection) = self.register(request_id, InFlightKind::Submission) {
+    pub(super) async fn submit_batch(
+        &self,
+        request_id: RequestId,
+        submit: SubmitBatchRequest,
+        progress: Option<ProgressInterval>,
+    ) {
+        if let Err(rejection) = self.register(request_id, InFlightKind::Submission, progress) {
             self.reject(request_id, rejection).await;
             return;
         }
@@ -552,7 +557,7 @@ impl SessionShared {
 
     /// Closes a producer. Its pump answers once every batch it submitted has its outcome.
     pub(super) async fn close_producer(&self, request_id: RequestId, close: CloseIngestorRequest) {
-        if let Err(rejection) = self.register(request_id, InFlightKind::Request) {
+        if let Err(rejection) = self.register(request_id, InFlightKind::Request, None) {
             self.reject(request_id, rejection).await;
             return;
         }

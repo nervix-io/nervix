@@ -180,6 +180,7 @@ async fn a_browser_session_exchanges_one_frame_per_binary_message() {
         ClientMessage {
             request_id: request_id(1),
             request: ClientRequest::ListDomains,
+            progress: None,
         },
         ClientMessage {
             request_id: request_id(2),
@@ -187,6 +188,7 @@ async fn a_browser_session_exchanges_one_frame_per_binary_message() {
                 SuggestRequest::new("CREATE ü".to_string(), 7, None)
                     .assured("byte 7 starts a character"),
             ),
+            progress: None,
         },
     ];
     for request in &requests {

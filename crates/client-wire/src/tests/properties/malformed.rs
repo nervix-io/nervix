@@ -176,6 +176,7 @@ fn discriminators(bytes: &[u8]) {
             request_id: 1,
             request_type: wire::ClientRequest(tag),
             request: Some(request.as_union_value()),
+            progress_interval_ms: None,
         },
     );
     let encoded = finish_raw(builder, root, ClientFrame::IDENTIFIER);

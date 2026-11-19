@@ -21,13 +21,15 @@ pub(crate) struct ConnectionArgs {
     /// Deadline of each connection attempt.
     #[arg(long = client_caps::ClientConnectTimeout::NAME, env = "NERVIX_CLI_CONNECT_TIMEOUT", global = true, default_value = humantime::format_duration(client_caps::ClientConnectTimeout::default_value(&())).to_string(), value_parser = nervix_models::parse_duration_text)]
     pub(crate) connect_timeout: Duration,
-    /// Deadline of each request.
+    /// How long each request may go without its reply or a server progress report.
     #[arg(long = client_caps::ClientRequestTimeout::NAME, env = "NERVIX_CLI_REQUEST_TIMEOUT", global = true, default_value = humantime::format_duration(client_caps::ClientRequestTimeout::default_value(&())).to_string(), value_parser = nervix_models::parse_duration_text)]
     pub(crate) request_timeout: Duration,
-    /// Total recovery deadline across redirects and reconnects.
+    /// How long each call may go, across redirects and reconnects, without its answer or a server
+    /// progress report.
     #[arg(long = client_caps::ClientRetryTimeout::NAME, env = "NERVIX_CLI_RETRY_TIMEOUT", global = true, default_value = humantime::format_duration(client_caps::ClientRetryTimeout::default_value(&())).to_string(), value_parser = nervix_models::parse_duration_text)]
     pub(crate) retry_timeout: Duration,
-    /// Total backup wait across cuts, redirects and reconnects.
+    /// How long a backup may go, across cuts, redirects and reconnects, without its answer or a
+    /// server progress report.
     #[arg(long = client_caps::ClientBackupWaitTimeout::NAME, env = "NERVIX_CLI_BACKUP_WAIT_TIMEOUT", global = true, default_value = humantime::format_duration(client_caps::ClientBackupWaitTimeout::default_value(&())).to_string(), value_parser = nervix_models::parse_duration_text)]
     pub(crate) backup_wait_timeout: Duration,
     /// Initial reconnect and recovery delay.

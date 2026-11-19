@@ -1843,7 +1843,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/client-wire/src/tests/properties/__fuzz__/tests__properties__requests__bolero_client_requests_keep_complete_values/corpus"
-domain_version = 20
+domain_version = 21
 features = []
 id = "client-requests"
 invariant = "Every current typed client request decodes to its complete original value, including identities, positions, schemas, a restoration's expected schema and opaque payloads."
@@ -1858,7 +1858,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/client-wire/src/tests/properties/__fuzz__/tests__properties__replies__bolero_replies_keep_complete_values/corpus"
-domain_version = 21
+domain_version = 22
 features = []
 id = "client-replies"
 invariant = "Every current reply family decodes to the complete original typed value, including dispositions, typed subscribe and clock attach refusals, diagnostics, metadata, the WASM state envelope tables with every checkpoint stage, reset scope, phase, reason and readiness, recovery outcome and rejection, entry counts and pinned binding, and client I/O."

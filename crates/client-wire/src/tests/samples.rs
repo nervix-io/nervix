@@ -242,6 +242,7 @@ pub(crate) fn client_messages() -> Vec<ClientMessage> {
         .map(|(request_body, id)| ClientMessage {
             request_id: request(id),
             request: request_body,
+            progress: None,
         })
         .collect()
 }

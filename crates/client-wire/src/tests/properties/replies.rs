@@ -320,6 +320,30 @@ pub(super) fn check(bytes: &[u8]) -> BTreeSet<wire::ReplyBody> {
         drop(frame);
         assert_eq!(decoded, original);
         assert_eq!(round_trip_reply(&decoded), original);
+        // A progress report for the same request completes nothing: it decodes as progress for
+        // exactly that request and never as a reply.
+        let progress = crate::RequestProgress {
+            request_id: original.request_id,
+        };
+        let frame = progress
+            .encode(&SessionLimits::DEFAULT)
+            .assured("a progress report fits one default frame")
+            .verify(&SessionLimits::DEFAULT)
+            .assured("an encoded progress report verifies");
+        covered.insert(
+            frame
+                .root()
+                .body_as_reply()
+                .verified("a progress report is a typed reply root")
+                .body_type(),
+        );
+        assert_eq!(frame.request_id(), Some(original.request_id));
+        let ServerMessage::Progress(decoded) =
+            ServerMessage::decode(&frame).assured("a valid progress report decodes")
+        else {
+            panic!("a progress report remains progress");
+        };
+        assert_eq!(decoded, progress);
     }
     covered
 }

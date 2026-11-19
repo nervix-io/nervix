@@ -45,6 +45,7 @@ pub(in crate::application) mod grpc;
 pub(in crate::application) mod outbound;
 mod outcome;
 mod producers;
+mod progress;
 mod restore;
 mod upload;
 pub(in crate::application) mod websocket;
@@ -56,7 +57,7 @@ pub(in crate::application) mod websocket;
 )]
 mod tests;
 
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, time::Duration};
 
 use error_stack::Report;
 use futures_util::{Stream, StreamExt as _};
@@ -68,8 +69,8 @@ use nervix_client_wire::{
     DomainClockAttachDisposition, DomainClockAttachOutcome, DomainClockAttachRefusal,
     DomainClockDetachDisposition, DomainClockDetachOutcome, DomainList, DomainSelection,
     EncodedFrame, InspectTransactionRequest, InspectionOutcome, MAX_IN_FLIGHT_REQUESTS,
-    OpenEmitterRequest, OpenIngestorRequest, ReadEmitterBatchRequest, Reply, ReplyBody,
-    ReplyDelivery, RequestCancelled, RequestId, RequestRejected, RequestRejection,
+    OpenEmitterRequest, OpenIngestorRequest, ProgressInterval, ReadEmitterBatchRequest, Reply,
+    ReplyBody, ReplyDelivery, RequestCancelled, RequestId, RequestRejected, RequestRejection,
     SelectDomainRequest, ServerFrame, SessionEndReason, SessionEnding, SessionLimits,
     SettleEmitterBatchRequest, SubscribeDisposition, SubscribeOutcome, SubscribeRequest,
     SubscriptionRefusal, SubscriptionType, SuggestRequest, UnsubscribeDisposition,
@@ -82,11 +83,12 @@ use nervix_models::{
 use nervix_plexus::client_statement::{ClientStatement, ParsedClientStatement};
 use nervix_primitives::{
     sync::{
-        Arc,
+        Arc, Notify,
         blocking::{Mutex, RwLock},
         mpsc, watch,
     },
     task::AbortHandle,
+    time::Instant,
 };
 use tracing::{debug, warn};
 
@@ -180,6 +182,21 @@ struct InFlight {
     /// The task serving a request that runs beside the ordered lane. An ordered request has none.
     task: Option<AbortHandle>,
     kind: InFlightKind,
+    /// When the request is next reported in progress, for a request that asked for reports.
+    progress: Option<ProgressSchedule>,
+}
+
+/// How often one in-flight request is reported in progress, and when it is reported next.
+#[derive(Debug, Clone, Copy)]
+struct ProgressSchedule {
+    every: Duration,
+    due: Instant,
+}
+
+/// The requests whose progress report is due now, and when the next one falls due.
+struct DueProgress {
+    requests: Vec<RequestId>,
+    next: Option<Instant>,
 }
 
 /// What an in-flight entry answers for.
@@ -277,6 +294,8 @@ pub(super) struct SessionShared {
     transport: SessionTransport,
     delivery: SessionDelivery,
     in_flight: Mutex<InFlightRequests>,
+    /// Wakes the progress task when a request that asked for progress reports is registered.
+    progress_changed: Notify,
     /// The session as the ordered lane last left it, for the requests that run beside it.
     view: RwLock<SessionView>,
     /// The domain whose observations the session receives.
@@ -459,6 +478,7 @@ impl SessionShared {
         &self,
         request_id: RequestId,
         kind: InFlightKind,
+        progress: Option<ProgressInterval>,
     ) -> Result<Arc<RequestAdmission>, RequestRejected> {
         let mut in_flight = self.in_flight.lock();
         if in_flight.entries.contains_key(&request_id) {
@@ -485,15 +505,66 @@ impl SessionShared {
                 .verified("the count is below the in-flight limit, checked above");
         }
         let admission = Arc::new(RequestAdmission::default());
+        // A client chooses the interval, so one too long for any instant to fall due at asks for
+        // no report the session could ever send.
+        let progress = match progress {
+            Some(interval) => {
+                Instant::now()
+                    .checked_add(interval.get())
+                    .map(|due| ProgressSchedule {
+                        every: interval.get(),
+                        due,
+                    })
+            }
+            None => None,
+        };
         in_flight.entries.insert(
             request_id,
             InFlight {
                 admission: admission.clone(),
                 task: None,
                 kind,
+                progress,
             },
         );
+        drop(in_flight);
+        if progress.is_some() {
+            self.progress_changed.notify_one();
+        }
         Ok(admission)
+    }
+
+    /// Takes the requests whose progress report is due at `now`, schedules each one's next report
+    /// an interval later, and says when the earliest report still to come falls due.
+    fn take_due_progress(&self, now: Instant) -> DueProgress {
+        let mut in_flight = self.in_flight.lock();
+        let mut requests = Vec::new();
+        let mut next: Option<Instant> = None;
+        for (request_id, entry) in &mut in_flight.entries {
+            let Some(schedule) = entry.progress else {
+                continue;
+            };
+            let due = if schedule.due <= now {
+                requests.push(*request_id);
+                // A report whose successor no instant can hold is the request's last.
+                let Some(due) = now.checked_add(schedule.every) else {
+                    entry.progress = None;
+                    continue;
+                };
+                entry.progress = Some(ProgressSchedule {
+                    every: schedule.every,
+                    due,
+                });
+                due
+            } else {
+                schedule.due
+            };
+            next = Some(match next {
+                Some(earliest) if earliest <= due => earliest,
+                _ => due,
+            });
+        }
+        DueProgress { requests, next }
     }
 
     /// Records the task serving a request that runs beside the ordered lane, so a cancellation
@@ -658,6 +729,7 @@ impl SessionServiceImpl {
                     .assured("the class validates the native subscription row count"),
             },
             in_flight: Mutex::new(InFlightRequests::default()),
+            progress_changed: Notify::new(),
             view: RwLock::new(subscriptions.view()),
             selection,
             producers: SessionProducers::default(),
@@ -675,6 +747,10 @@ impl SessionServiceImpl {
             .inner
             .service_tasks
             .spawn(events::run_session_events(shared.clone()));
+        let progress = self
+            .inner
+            .service_tasks
+            .spawn(progress::run_request_progress(shared.clone()));
 
         let mut closed_cleanly = false;
         let mut node_stopping = false;
@@ -745,6 +821,7 @@ impl SessionServiceImpl {
         shared.abandon_in_flight();
         drop(ordered_tx);
         events.abort();
+        progress.abort();
         let finished = lane.await;
         let mut subscriptions = match finished {
             Ok(Some(subscriptions)) => subscriptions,
@@ -790,6 +867,7 @@ async fn accept_frame(
     let ClientMessage {
         request_id,
         request,
+        progress,
     } = message;
     shared.traffic().request(
         shared.transport,
@@ -801,7 +879,7 @@ async fn accept_frame(
             return true;
         }
         ClientRequest::SubmitBatch(submit) => {
-            shared.submit_batch(request_id, submit).await;
+            shared.submit_batch(request_id, submit, progress).await;
             return true;
         }
         ClientRequest::CloseIngestor(close) => {
@@ -853,7 +931,7 @@ async fn accept_frame(
             RoutedRequest::Concurrent(ConcurrentRequest::Inspect(inspect))
         }
     };
-    let admission = match shared.register(request_id, InFlightKind::Request) {
+    let admission = match shared.register(request_id, InFlightKind::Request, progress) {
         Ok(admission) => admission,
         Err(rejection) => {
             shared.reject(request_id, rejection).await;

@@ -2,7 +2,7 @@
 //! or oversized requests are refused with a typed error.
 
 use flatbuffers::{FlatBufferBuilder, WIPOffset};
-use meticulous::ResultExt as _;
+use meticulous::{OptionExt as _, ResultExt as _};
 
 use super::{
     fixtures::{
@@ -76,6 +76,7 @@ fn a_field_reference_round_trips_as_a_choice_dependency() {
             ],
             String::new(),
         )),
+        progress: None,
     };
     assert_eq!(round_trip_client(&message), message);
 }
@@ -99,6 +100,7 @@ fn a_codec_field_choice_round_trips_with_its_domain_and_codec() {
             ],
             "id".to_string(),
         )),
+        progress: None,
     };
     assert_eq!(round_trip_client(&message), message);
 }
@@ -127,6 +129,7 @@ fn processor_relay_choices_round_trip_with_the_first_input_reference() {
                 ],
                 "orders".to_string(),
             )),
+            progress: None,
         };
         assert_eq!(round_trip_client(&message), message);
     }
@@ -151,6 +154,7 @@ fn generator_materialized_relay_choices_round_trip_with_and_without_a_branch() {
                 dependencies,
                 "notifications".to_string(),
             )),
+            progress: None,
         };
         assert_eq!(round_trip_client(&message), message);
     }
@@ -167,6 +171,7 @@ fn placement_member_choices_round_trip_with_their_domain() {
             }],
             "scor".to_string(),
         )),
+        progress: None,
     };
     assert_eq!(round_trip_client(&message), message);
 }
@@ -208,6 +213,7 @@ fn bolero_processor_choice_request_round_trip() {
             let message = ClientMessage {
                 request_id: request(u64::from(byte(8)) + 1),
                 request: ClientRequest::Choice(choice),
+                progress: None,
             };
             assert_eq!(round_trip_client(&message), message);
         });
@@ -219,6 +225,7 @@ fn request_identity_spans_its_full_range() {
         let message = ClientMessage {
             request_id: request(id),
             request: ClientRequest::ListDomains,
+            progress: None,
         };
         assert_eq!(round_trip_client(&message), message);
     }
@@ -236,6 +243,7 @@ fn raw_message<'fbb>(
             request_id,
             request_type,
             request: Some(request_value),
+            progress_interval_ms: None,
         },
     )
 }
@@ -361,6 +369,7 @@ fn an_absent_transaction_position_differs_from_position_zero() {
             expected_transaction_position: None,
             expected_preview: None,
         }),
+        progress: None,
     };
     assert_eq!(round_trip_client(&message), message);
     if let ClientRequest::Command(command) = &mut message.request {
@@ -441,6 +450,7 @@ fn suggestion_pages_round_trip_with_a_bounded_size_and_continuation() {
     let message = ClientMessage {
         request_id: request(1),
         request: ClientRequest::Suggest(request_value),
+        progress: None,
     };
     assert_eq!(round_trip_client(&message), message);
     let invalid = SuggestRequest::new(String::new(), 0, None)
@@ -585,6 +595,7 @@ fn string_limits_are_inclusive_on_both_sides() {
             expected_transaction_position: None,
             expected_preview: None,
         }),
+        progress: None,
     };
     let exact = message("q".repeat(32))
         .encode(&limited)
@@ -629,6 +640,7 @@ fn names_are_limited_by_their_own_grammar() {
         request: ClientRequest::SelectDomain(crate::SelectDomainRequest {
             domain: name(&"d".repeat(128)),
         }),
+        progress: None,
     };
     assert_eq!(round_trip_client(&message), message);
 }
@@ -668,6 +680,7 @@ fn emitter_choices_preserve_each_target_dependency_order_and_cursor_identity() {
         let message = ClientMessage {
             request_id: request(7),
             request: ClientRequest::Choice(choice),
+            progress: None,
         };
         assert_eq!(round_trip_client(&message), message);
     }
@@ -680,4 +693,85 @@ fn emitter_choices_preserve_each_target_dependency_order_and_cursor_identity() {
             assert_eq!(target.emitter_reference_entity(), Some(kind));
         }
     }
+}
+
+#[test]
+fn a_progress_interval_round_trips_at_its_edges() {
+    for milliseconds in [100, 101, 30_000, u64::MAX] {
+        let interval = crate::ProgressInterval::new(std::time::Duration::from_millis(milliseconds))
+            .assured("the interval is at least the shortest one the protocol allows");
+        let message = ClientMessage {
+            request_id: request(milliseconds),
+            request: ClientRequest::ListDomains,
+            progress: Some(interval),
+        };
+        assert_eq!(round_trip_client(&message), message);
+    }
+}
+
+#[test]
+fn a_progress_interval_shorter_than_the_protocol_allows_is_refused() {
+    for milliseconds in [0, 1, 99] {
+        let mut builder = FlatBufferBuilder::new();
+        let list = wire::ListDomainsRequest::create(&mut builder, &wire::ListDomainsRequestArgs {});
+        let root = wire::ClientMessage::create(
+            &mut builder,
+            &wire::ClientMessageArgs {
+                request_id: 7,
+                request_type: wire::ClientRequest::ListDomainsRequest,
+                request: Some(list.as_union_value()),
+                progress_interval_ms: Some(milliseconds),
+            },
+        );
+        let frame = raw_client(finish_raw(builder, root, "NXCM"));
+        assert_eq!(
+            decode_error(ClientMessage::decode(&frame)),
+            WireDecodeError::InvalidValue {
+                field: "ClientMessage.progress_interval_ms",
+                kind: "progress interval of at least 100 milliseconds",
+            },
+            "{milliseconds} ms is below the protocol's shortest interval"
+        );
+    }
+}
+
+#[test]
+fn a_client_derives_four_reports_per_wait_and_never_less_than_the_shortest_interval() {
+    use std::time::Duration;
+    assert_eq!(
+        crate::ProgressInterval::within(Duration::from_secs(120)).get(),
+        Duration::from_secs(30)
+    );
+    assert_eq!(
+        crate::ProgressInterval::within(Duration::from_secs(2)).get(),
+        Duration::from_millis(500)
+    );
+    for wait in [
+        Duration::ZERO,
+        Duration::from_millis(1),
+        Duration::from_millis(399),
+    ] {
+        assert_eq!(
+            crate::ProgressInterval::within(wait).get(),
+            crate::ProgressInterval::SHORTEST
+        );
+    }
+    assert_eq!(
+        crate::ProgressInterval::within(Duration::MAX).get(),
+        Duration::from_millis(u64::MAX)
+    );
+}
+
+#[test]
+fn a_progress_report_decodes_as_progress_and_never_as_a_reply() {
+    let progress = crate::RequestProgress {
+        request_id: request(42),
+    };
+    let frame = progress
+        .encode(&limits())
+        .assured("a progress report fits every session frame");
+    let crate::ServerMessage::Progress(decoded) = super::fixtures::decode_server(frame) else {
+        panic!("a progress report must decode as progress");
+    };
+    assert_eq!(decoded, progress);
 }

@@ -60,7 +60,7 @@ impl ObservedFrame {
                     None
                 }
             }
-            ServerMessage::Event(_) => None,
+            ServerMessage::Event(_) | ServerMessage::Progress(_) => None,
         }
     }
 }

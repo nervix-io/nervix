@@ -315,9 +315,10 @@ impl ReportedLeader {
             }) => Self::of_disposition(outcome.disposition),
             // Every other event and reply, and a part of a reply too large for one frame, names no
             // leader.
-            ServerMessage::Event(_) | ServerMessage::Reply(_) | ServerMessage::TransferPart(_) => {
-                None
-            }
+            ServerMessage::Event(_)
+            | ServerMessage::Reply(_)
+            | ServerMessage::TransferPart(_)
+            | ServerMessage::Progress(_) => None,
         }
     }
 

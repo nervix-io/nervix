@@ -1157,6 +1157,7 @@ impl SessionRequests {
         let message = ClientMessage {
             request_id,
             request: issued.request.client_request(),
+            progress: None,
         };
         self.in_flight.insert(
             request_id,
@@ -1301,6 +1302,9 @@ impl SessionRequests {
                 None => Routed::Untracked,
             },
             ServerMessage::TransferPart(part) => self.assemble(&part),
+            // The console asks for no progress reports, since it never gives up waiting for a
+            // reply, so a report answers no request it tracks.
+            ServerMessage::Progress(_) => Routed::Untracked,
         }
     }
 

@@ -105,7 +105,11 @@ Every call is bounded by `ConnectOptions`: `connect_timeout` for each connection
 seconds by default), `request_timeout` for each request (120 seconds), and `retry_timeout` for the
 call with all of its retries and redirects (120 seconds). `BACKUP` uses `backup_wait_timeout`
 instead for its command wait and reply (ten minutes), shared across every domain cut, redirect and
-reconnect. All deadline and retry-backoff durations must be between one millisecond and 24 hours. A call whose deadline passes before a
+reconnect. Every request asks the server for progress reports while it serves the request, and
+each report starts the request's and its call's deadlines again, so these deadlines bound how long a
+wait goes without its answer or a report rather than how long the command may run: a `STOP` that
+waits for the domain's work in motion is answered however long it takes. All deadline and
+retry-backoff durations must be between one millisecond and 24 hours. A call whose deadline passes before a
 command's outcome is known fails with `ClientError::UncertainCommand`, which names the execution
 reference. An `https://` server is verified only against `ca_certificate_pem`: the client loads no
 system roots, so a TLS connection needs the certificate authority that signed the server's

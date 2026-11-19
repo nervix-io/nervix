@@ -501,6 +501,22 @@ whose request no longer waits, because its caller stopped waiting, is not this v
 completes no request, and the reader still follows the subscription, clock or producer it opens,
 as it does for every late reply.
 
+### Progress Reports
+
+A client that bounds how long it waits for a request asks the server to report while it still
+serves the request. `ClientMessage.progress_interval_ms` names how often, in milliseconds, at least
+100; a request without it asks for no reports, and a shorter interval is refused with
+`RequestRejected` as an invalid request. From when the session takes the request until it queues
+the request's terminal reply, the session sends a `RequestProgress` reply under the request's
+identity at that interval, whichever lane serves the request and however long it waits there,
+including behind another request in the ordered lane. A report completes nothing and carries
+nothing: the request's terminal reply still follows it. The client restarts its wait for the request
+at each report, so a request the server keeps serving for longer than the client's own deadline is
+still answered, while a server that stops reporting, a session that ends and a transport that breaks
+still end the wait as they would without reports. A report queued just before the request's
+terminal reply can arrive after that reply, so a client ignores a report for a request it no longer
+waits on; such a report is never the violation above.
+
 ### Two Lanes
 
 A session serves each request on one of two lanes:
@@ -1225,7 +1241,12 @@ The Rust client bounds each connection attempt by `connect_timeout` (10 seconds 
 request by `request_timeout` (120 seconds), and each public call, including all of its retries and
 redirects, by `retry_timeout` (120 seconds). A `BACKUP` takes `backup_wait_timeout` in place of
 both: its replies and every redirect and reconnect it makes share that one deadline, so a backup
-keeps reconnecting through an outage longer than `retry_timeout`. A request that outlives
+keeps reconnecting through an outage longer than `retry_timeout`. Every request it sends asks for
+[progress reports](#progress-reports) four times per the shorter of its request wait and its call's
+budget, never more often than every 100 milliseconds. The request and call deadlines are silence
+deadlines: each report starts both again, so a command the server keeps serving, such as a `STOP`
+that waits for the work in motion, is answered however long it takes, and a deadline passes only
+once neither the answer nor a report arrived within it. A request that goes silent for
 `request_timeout` causes the client to end every request still waiting on that session, and the
 next request opens a new one. This also bounds a stalled application wait when transport keepalive
 still succeeds. While an

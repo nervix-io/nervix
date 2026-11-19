@@ -47,7 +47,9 @@ explicit authority.
 address's scheme. A session initially opened over TLS never falls back to plaintext. `seeds`
 supplies alternate server URIs. Timeouts are seconds: `connect_timeout` bounds one connection,
 `request_timeout` one request, `retry_timeout` the call's retries and redirects, and
-`backup_wait_timeout` the wait for an archive. Optional connection keywords accept `nil`.
+`backup_wait_timeout` the wait for an archive. The request and call timeouts count only time
+without the answer or a server progress report, which restarts them, so a long-running statement
+such as a waiting `STOP` is still answered. Optional connection keywords accept `nil`.
 
 ```ruby
 {{#include ../../tests/client_conformance/ruby/suite/cluster/commands_test.rb:seeds}}

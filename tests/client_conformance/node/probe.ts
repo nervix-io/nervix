@@ -1329,6 +1329,8 @@ function serverLines(frame: Uint8Array, schema: OpenedSchema): string[] {
           const outcome = member(reply.body(new wire.CloseEmitterOutcome()) as wire.CloseEmitterOutcome | null);
           return [`REPLY ${id} EMITTER_CLOSE disposition=${wire.EmitterCloseDisposition[member(outcome.disposition())]} message=${text(bytesOf((encoding) => outcome.message(encoding)))}`];
         }
+        case wire.ReplyBody.RequestProgress:
+          return [`REPLY ${id} PROGRESS`];
         default:
           throw new Error(`the corpus holds no ${wire.ReplyBody[reply.bodyType()]} reply`);
       }
@@ -1399,6 +1401,15 @@ function serverLines(frame: Uint8Array, schema: OpenedSchema): string[] {
 
 function clientLines(frame: Uint8Array): string[] {
   const message = wire.ClientMessage.getRootAsClientMessage(frameBuffer(frame, 'NXCM'));
+  const lines = clientRequestLines(message);
+  const progress = message.progressIntervalMs();
+  if (progress !== null) {
+    lines.push(`REQUEST ${message.requestId()} PROGRESS_INTERVAL ms=${progress}`);
+  }
+  return lines;
+}
+
+function clientRequestLines(message: wire.ClientMessage): string[] {
   const id = message.requestId();
   switch (message.requestType()) {
     case wire.ClientRequest.CommandRequest: {
