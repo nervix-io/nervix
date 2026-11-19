@@ -271,6 +271,13 @@ pub(super) fn request_wasm_guest_state_reset(
 /// because asking is never proof that a new lifetime became durable.
 #[derive(Default)]
 pub(in crate::runtime) struct PendingGuestWasmStateResets {
+    #[cfg_attr(
+        nervix_lint,
+        expect(
+            nervix::branch_inversion,
+            reason = "processor or generator bookkeeping independently tracks branches; use branch-owned parts or the partition table in https://app.clickup.com/t/86bd1z1bj"
+        )
+    )]
     requests: DashMap<GuestWasmStateResetBranch, GuestWasmStateResetRequest, RandomState>,
     /// Wakes the coordinator that drains `requests`.
     arrived: Notify,

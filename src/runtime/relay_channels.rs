@@ -30,6 +30,13 @@ type Destinations =
 
 #[derive(Debug)]
 pub(super) struct RelayChannels {
+    #[cfg_attr(
+        nervix_lint,
+        expect(
+            nervix::branch_inversion,
+            reason = "relay membership or channel routing keeps its own branch collection; use the branch's relay channel in https://app.clickup.com/t/86bd1z226"
+        )
+    )]
     branches: ArcSwap<Branches>,
     closed: CancellationToken,
     routing: RoutingGenerations,
@@ -159,6 +166,13 @@ impl RelayChannels {
                 return winner.clone();
             }
             // A persistent map copies only this key's path, independently of sibling branches.
+            #[cfg_attr(
+                nervix_lint,
+                expect(
+                    nervix::branch_inversion,
+                    reason = "relay membership or channel routing keeps its own branch collection; use the branch's relay channel in https://app.clickup.com/t/86bd1z226"
+                )
+            )]
             let mut next = (*current).clone();
             next.insert(key.clone(), branch.clone());
             let observed = self.branches.compare_and_swap(&current, StdArc::new(next));
@@ -185,6 +199,13 @@ impl RelayChannels {
             if !StdArc::ptr_eq(published, &branch) {
                 return;
             }
+            #[cfg_attr(
+                nervix_lint,
+                expect(
+                    nervix::branch_inversion,
+                    reason = "relay membership or channel routing keeps its own branch collection; use the branch's relay channel in https://app.clickup.com/t/86bd1z226"
+                )
+            )]
             let mut next = (*current).clone();
             next.remove(key);
             let observed = self.branches.compare_and_swap(&current, StdArc::new(next));

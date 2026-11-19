@@ -214,6 +214,13 @@ pub(super) struct IngestorRouteTask {
     pub(super) ingestor: IngestorName,
     pub(super) template: IngestorRouteTemplate,
     pub(super) branch_sender: mpsc::Sender<BranchedEntrypointInput>,
+    #[cfg_attr(
+        nervix_lint,
+        expect(
+            nervix::branch_inversion,
+            reason = "the entry point groups work by branch outside the parametrizer partition; move the work to its branch in https://app.clickup.com/t/86bd1z13v"
+        )
+    )]
     pub(super) pending: HashMap<Option<BranchKey>, PendingIngestorRouteBatch>,
     /// Reports the depth of `pending` to this route's owning node, so a drain sees route output
     /// that has left the ingest group but has not yet reached branch execution.
@@ -250,7 +257,21 @@ struct QueuedBranchDispatch {
     )
 )]
 struct BranchDispatchLanes {
+    #[cfg_attr(
+        nervix_lint,
+        expect(
+            nervix::branch_inversion,
+            reason = "the entry point groups work by branch outside the parametrizer partition; move the work to its branch in https://app.clickup.com/t/86bd1z13v"
+        )
+    )]
     active: HashSet<Option<BranchKey>>,
+    #[cfg_attr(
+        nervix_lint,
+        expect(
+            nervix::branch_inversion,
+            reason = "the entry point groups work by branch outside the parametrizer partition; move the work to its branch in https://app.clickup.com/t/86bd1z13v"
+        )
+    )]
     queued: HashMap<Option<BranchKey>, VecDeque<QueuedBranchDispatch>>,
     pending: FuturesUnordered<PendingBranchDispatch>,
 }
@@ -1014,6 +1035,13 @@ impl IngestorRouteTask {
         let snapshot = domain_clock
             .snapshot()
             .map_err(|error| error.change_context(BranchBufferTimingError::LogicalDeadline))?;
+        #[cfg_attr(
+            nervix_lint,
+            expect(
+                nervix::branch_inversion,
+                reason = "the entry point groups work by branch outside the parametrizer partition; move the work to its branch in https://app.clickup.com/t/86bd1z13v"
+            )
+        )]
         let mut keys = Vec::new();
         for (key, pending) in &self.pending {
             if pending.flush_timer.is_due(domain_clock, &snapshot)? {
@@ -1028,6 +1056,13 @@ impl IngestorRouteTask {
     }
 
     pub(super) async fn flush_all(&mut self) {
+        #[cfg_attr(
+            nervix_lint,
+            expect(
+                nervix::branch_inversion,
+                reason = "the entry point groups work by branch outside the parametrizer partition; move the work to its branch in https://app.clickup.com/t/86bd1z13v"
+            )
+        )]
         let keys = self.pending.keys().cloned().collect::<Vec<_>>();
         for key in keys {
             nervix_primitives::task::consume_budget().await;
@@ -1616,6 +1651,13 @@ impl BranchExecutionRuntime {
                     return;
                 }
             };
+            #[cfg_attr(
+                nervix_lint,
+                expect(
+                    nervix::branch_inversion,
+                    reason = "the entry point groups work by branch outside the parametrizer partition; move the work to its branch in https://app.clickup.com/t/86bd1z13v"
+                )
+            )]
             let mut instances =
                 BranchInstanceRegistry::<Option<BranchKey>, Mutex<BranchRuntime>>::new();
             let mut last_persisted_lru_lsm = match nervix_primitives::expect_lint!(
@@ -2043,6 +2085,13 @@ pub(super) async fn expire_branch_instance_instances(
     expiration_after: Duration,
     instances: &mut BranchInstanceRegistry<Option<BranchKey>, Mutex<BranchRuntime>>,
 ) -> Vec<Option<BranchKey>> {
+    #[cfg_attr(
+        nervix_lint,
+        expect(
+            nervix::branch_inversion,
+            reason = "the entry point groups work by branch outside the parametrizer partition; move the work to its branch in https://app.clickup.com/t/86bd1z13v"
+        )
+    )]
     let mut expired_keys = Vec::new();
     for (key, state) in instances.expire(now, expiration_after) {
         nervix_primitives::expect_lint!(
@@ -2087,6 +2136,13 @@ pub(super) async fn evict_branch_instance_instances_to_capacity(
     max_instances: NonZeroUsize,
     instances: &mut BranchInstanceRegistry<Option<BranchKey>, Mutex<BranchRuntime>>,
 ) -> Vec<Option<BranchKey>> {
+    #[cfg_attr(
+        nervix_lint,
+        expect(
+            nervix::branch_inversion,
+            reason = "the entry point groups work by branch outside the parametrizer partition; move the work to its branch in https://app.clickup.com/t/86bd1z13v"
+        )
+    )]
     let mut evicted_keys = Vec::new();
     for (key, state) in instances.evict_lru_to_capacity(max_instances) {
         nervix_primitives::expect_lint!(

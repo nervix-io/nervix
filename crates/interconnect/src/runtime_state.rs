@@ -318,6 +318,13 @@ pub struct BranchCheckpointPage {
     /// Where the replica stands once it applied this page.
     pub cursor: BranchCheckpointCursor,
     /// The branches whose state went away.
+    #[cfg_attr(
+        nervix_lint,
+        expect(
+            nervix::branch_inversion,
+            reason = "this branch collection supports checkpoints, partition transfers or state recovery; use the owning partition in https://app.clickup.com/t/86bd1z3ng"
+        )
+    )]
     pub removed: Vec<nervix_models::RemoteBranchKey>,
     /// The branch checkpoints that changed, each at its newest revision. A branch whose state went
     /// away and was registered again appears in both lists, and its checkpoint is the newer fact.

@@ -736,6 +736,13 @@ impl Runtime {
         }
         // A branch-local checkpoint takes its typed key from its entity's captured lifecycle. Only
         // the branches with such a checkpoint, or with a published generation, are looked up.
+        #[cfg_attr(
+            nervix_lint,
+            expect(
+                nervix::branch_inversion,
+                reason = "this branch collection supports checkpoints, partition transfers or state recovery; use the owning partition in https://app.clickup.com/t/86bd1z3ng"
+            )
+        )]
         let mut needed = ahash::HashSet::default();
         for checkpoint in &current {
             if checkpoint.placement.state.kind().is_branch_local() {
@@ -752,6 +759,13 @@ impl Runtime {
                 self.capture_published_branch_states(domain, primaries, &keys)
             }
         };
+        #[cfg_attr(
+            nervix_lint,
+            expect(
+                nervix::branch_inversion,
+                reason = "this branch collection supports checkpoints, partition transfers or state recovery; use the owning partition in https://app.clickup.com/t/86bd1z3ng"
+            )
+        )]
         let mut published = ahash::HashSet::default();
         for captured in &branch_states {
             published.insert(BranchStateIdentity {
@@ -930,6 +944,13 @@ impl Runtime {
         for identity in needed {
             nodes.insert(&identity.node);
         }
+        #[cfg_attr(
+            nervix_lint,
+            expect(
+                nervix::branch_inversion,
+                reason = "this branch collection supports checkpoints, partition transfers or state recovery; use the owning partition in https://app.clickup.com/t/86bd1z3ng"
+            )
+        )]
         let mut keys = ahash::HashMap::default();
         for checkpoint in current {
             let stored = &checkpoint.placement;
@@ -983,6 +1004,13 @@ impl Runtime {
         domain: &DomainName,
         primaries: &ahash::HashSet<NodeUnitRef>,
     ) -> Vec<BranchStateIdentity> {
+        #[cfg_attr(
+            nervix_lint,
+            expect(
+                nervix::branch_inversion,
+                reason = "this branch collection supports checkpoints, partition transfers or state recovery; use the owning partition in https://app.clickup.com/t/86bd1z3ng"
+            )
+        )]
         let mut identities = Vec::new();
         for state in self.inner.replicated_deduplicator_states.iter() {
             if let Some(identity) =

@@ -92,6 +92,13 @@ impl WasmStateRecoveryRequest {
     )
 )]
 pub(in crate::runtime) struct RaisedWasmStateRecoveries {
+    #[cfg_attr(
+        nervix_lint,
+        expect(
+            nervix::branch_inversion,
+            reason = "processor or generator bookkeeping independently tracks branches; use branch-owned parts or the partition table in https://app.clickup.com/t/86bd1z1bj"
+        )
+    )]
     raised: DashMap<RuntimeStatePlacement, (), RandomState>,
 }
 

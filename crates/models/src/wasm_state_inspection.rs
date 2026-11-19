@@ -364,6 +364,13 @@ impl WasmUnitStateSelection {
         };
         let reset = scheduled.wasm_state_reset.as_ref();
         let reset_generation = reset.map(|reset| generations.of_reset_scope(reset.scope()));
+        #[cfg_attr(
+            nervix_lint,
+            expect(
+                nervix::branch_inversion,
+                reason = "processor or generator bookkeeping independently tracks branches; use branch-owned parts or the partition table in https://app.clickup.com/t/86bd1z1bj"
+            )
+        )]
         let mut entries = BTreeMap::<WasmStateEntryKey, WasmBranchStateInspection>::new();
         let mut checkpoint_counts = WasmCheckpointCounts::default();
         let mut reset_checkpoint_confirmed = false;

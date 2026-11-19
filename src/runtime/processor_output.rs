@@ -129,7 +129,21 @@ pub(super) fn pending_output_batches_by_key(
             metadata_rows: metadata.len(),
         }));
     }
+    #[cfg_attr(
+        nervix_lint,
+        expect(
+            nervix::branch_inversion,
+            reason = "processor or generator bookkeeping independently tracks branches; use branch-owned parts or the partition table in https://app.clickup.com/t/86bd1z1bj"
+        )
+    )]
     let mut groups = Vec::<(Option<BranchKey>, Vec<usize>)>::new();
+    #[cfg_attr(
+        nervix_lint,
+        expect(
+            nervix::branch_inversion,
+            reason = "processor or generator bookkeeping independently tracks branches; use branch-owned parts or the partition table in https://app.clickup.com/t/86bd1z1bj"
+        )
+    )]
     let mut positions = HashMap::<Option<BranchKey>, usize>::default();
     for (row, key) in keys.into_iter().enumerate() {
         if let Some(position) = positions.get(&key).copied() {

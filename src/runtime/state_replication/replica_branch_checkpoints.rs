@@ -33,11 +33,32 @@ pub(super) struct ReplicaBranchCheckpoints {
     /// Where the task stands in the owner's catalog, absent before it read the catalog.
     cursor: Option<BranchCheckpointCursor>,
     /// The owner's catalog as the pages the task read describe it.
+    #[cfg_attr(
+        nervix_lint,
+        expect(
+            nervix::branch_inversion,
+            reason = "this branch collection supports checkpoints, partition transfers or state recovery; use the owning partition in https://app.clickup.com/t/86bd1z3ng"
+        )
+    )]
     owner: HashMap<Option<BranchKey>, OwnerCheckpoint>,
     /// What this node holds of each branch the task looked at. A branch the task has not looked
     /// at since it started is absent: its step reads what this node holds first.
+    #[cfg_attr(
+        nervix_lint,
+        expect(
+            nervix::branch_inversion,
+            reason = "this branch collection supports checkpoints, partition transfers or state recovery; use the owning partition in https://app.clickup.com/t/86bd1z3ng"
+        )
+    )]
     held: HashMap<Option<BranchKey>, Held>,
     /// The branches to look at in the next round, and why.
+    #[cfg_attr(
+        nervix_lint,
+        expect(
+            nervix::branch_inversion,
+            reason = "this branch collection supports checkpoints, partition transfers or state recovery; use the owning partition in https://app.clickup.com/t/86bd1z3ng"
+        )
+    )]
     pending: HashMap<Option<BranchKey>, PendingBranch>,
 }
 
@@ -186,6 +207,13 @@ impl ReplicaBranchCheckpoints {
     ) {
         self.held
             .retain(|branch, _| Self::may_install(current, branch.as_ref()));
+        #[cfg_attr(
+            nervix_lint,
+            expect(
+                nervix::branch_inversion,
+                reason = "this branch collection supports checkpoints, partition transfers or state recovery; use the owning partition in https://app.clickup.com/t/86bd1z3ng"
+            )
+        )]
         let mut newly_named = Vec::new();
         for branch in self.owner.keys() {
             let named_before = match previous {
