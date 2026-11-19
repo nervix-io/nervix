@@ -23,7 +23,12 @@ Feature: Cluster licensing release and transfer
   Scenario Outline: Release is committed while the service is unreachable and local rotation remains available on <cluster_size> nodes
     Given an HTTPS licensing test service has bounded offline allowance
     And a <cluster_size> node nervix cluster is started
-    When a persistent license is activated through the running quorum
+    # Keep the retry delay inside the scenario's 40-second observation window after repeated failures.
+    When these Plexus commands are executed on the leader node
+      """
+      ALTER CLUSTER SET LICENSING_RETRY_BACKOFF_MAX = 2s;
+      """
+    And a persistent license is activated through the running quorum
     And the licensing service becomes unreachable
     And these Plexus commands are executed on the leader node
       """
@@ -44,7 +49,14 @@ Feature: Cluster licensing release and transfer
       CREATE UNPACED DOMAIN released_free_policy;
       """
     When the cluster is restarted
-    And the licensing service clock catches up with the cluster
+    # Reproduce the two transport failures after restart that exposed the timing bug.
+    Then the current leader node is saved as placeholder "release_leader"
+    And node "{{release_leader}}" observability metric "nervix_licensing_requests_total" with labels eventually reaches at least 2
+      """
+      operation="activation.release"
+      outcome="unreachable"
+      """
+    When the licensing service clock catches up with the cluster
     And the licensing service becomes reachable
     Then node "node-1" eventually describes this license without a selected domain
       """
