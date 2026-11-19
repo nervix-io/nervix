@@ -63,6 +63,7 @@ pub(super) enum CommandPausePoint {
         step: RestoreStep,
     },
     BackupDownload(ClusterNodeName),
+    MaterializedSnapshotOpening(DomainNodeRef),
     RestoreStatePublication {
         domain: DomainName,
         coordinator: ClusterNodeName,
