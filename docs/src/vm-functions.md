@@ -79,7 +79,12 @@ excludes injected calls and `write_header`. VM lowering and registry validation
 still decide whether a call is valid for its arguments. The parser carries the ingestor or emitter kind
 with header-function expectations. The resolver adds `read_header` and `read_headers` only for a
 ingestor that can read headers, and `write_header` only for an emitter that can write them. UDF candidates
-come from the selected domain's Models after the session's queued transaction changes.
+come from the selected domain's Models after the session's queued transaction changes. In a window
+route's `SET` value, the parser carries the window's `WIDTH` and `MAX STATE SIZE` and the builtin
+calls the position is written inside. The resolver adds each collection aggregate whose
+`WindowCollectionBound` the window declares, spelled as the `WindowAggregateFunction` declaration
+spells it, unless one of those calls is itself a window aggregate, whose argument admits none.
+Registry validation refuses an undeclared bound through the same `WindowCollectionBound`.
 
 Registry planning converts the validated scheduled Models into typed processor specifications.
 Before a node revision is installed, runtime plan binding lowers every processor expression against
@@ -1208,8 +1213,9 @@ and diagnostics.
   scalar operand.
 
 Registry validation compiles the same route with the same compiler when the processor is applied.
-It also rejects arguments containing `BYTES`, checks the sketch budget, and requires a message
-`WIDTH` or `MAX STATE SIZE` for `COLLECT_VEC`. Collection refuses a nullable argument with a typed
+It also rejects arguments containing `BYTES`, checks the sketch budget, and requires the bound the
+declaration's `WindowCollectionBound` names for each collection: a message `WIDTH` or
+`MAX STATE SIZE` for `COLLECT_VEC`, and a count-only `WIDTH` for `COLLECT_ARRAY`. Collection refuses a nullable argument with a typed
 route error and a `coalesce` instruction. `COLLECT_VEC` injects a required `VEC` whose non-null
 item has the argument's exact type, including a nested array or vector. For `COLLECT_ARRAY`, the
 vocabulary projects a positive message width only from a count-only bound. Validation refuses

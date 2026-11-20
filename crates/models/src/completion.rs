@@ -13,15 +13,32 @@
 )]
 
 use crate::{
-    BranchName, CodecWireFormat, CreateRelay, EmitterEntityKind, IngestorEntityKind,
-    IngestorReferenceKind, ModelKind, RelayBranching, RelayName, SchemaName, WireSchemaName,
+    BranchName, BuiltinFunctionName, CodecWireFormat, CreateRelay, EmitterEntityKind,
+    IngestorEntityKind, IngestorReferenceKind, ModelKind, RelayBranching, RelayName, SchemaName,
+    WindowBound, WindowStateLimit, WireSchemaName,
 };
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum BuiltinFunctionScope {
     Ordinary,
     IngestorEntity(IngestorEntityKind),
     EmitterInvocation(EmitterEntityKind),
+    /// The value a window processor route's `SET` assigns, where the window's aggregates stand
+    /// beside the ordinary functions.
+    WindowRoute(WindowRouteValue),
+}
+
+/// What the builtins of a window route's `SET` value depend on: the bound its window declares,
+/// which decides the aggregates a route may call, and the builtin calls the position is written
+/// inside, since an aggregate's argument admits no aggregate.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct WindowRouteValue {
+    /// The window's `WIDTH`.
+    pub width: WindowBound,
+    /// The window's `MAX STATE SIZE`, or that it declares none.
+    pub state_limit: WindowStateLimit,
+    /// The builtin calls whose arguments hold the position, outermost first.
+    pub enclosing_calls: Vec<BuiltinFunctionName>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]

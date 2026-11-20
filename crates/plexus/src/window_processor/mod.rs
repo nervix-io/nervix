@@ -17,7 +17,7 @@ use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::{
     AckMode, BranchSelection, CreateStatement, CreateWindowProcessor, Expression,
     MaterializedStateDependency, ProcessorInputs, WindowBound, WindowProcessorName,
-    WindowStateLimit, parse_duration_text,
+    WindowRouteValue, WindowStateLimit, parse_duration_text,
 };
 
 use crate::{
@@ -26,8 +26,10 @@ use crate::{
         LexedInput, ParseError, ParseFromSourceError, ack_mode, boxed_choice, branch_selection,
         byte_size_lit, duration_lit, explicit_processor_outputs, filter_where_clause,
         from_relay_clauses, if_not_exists_clause, into_parse_error, kw, kw_phrase2, kw_phrase3,
-        lex_input, materialized_state_dependencies, suggest_from, window_processor_name,
+        lex_input, materialized_state_dependencies, output_route_head, suggest_from,
+        window_processor_name,
     },
+    semantic_program::{open_assignment, open_builtin_calls},
 };
 
 /// The count in a `<n> MESSAGES` window bound. Narrower than the shared integer parser: a window
@@ -287,6 +289,41 @@ pub fn create_window_processor_parser<'src>()
                 )
             })
             .boxed()
+    })
+}
+
+/// What the value a route's `SET` assigns may call where `tokens` end, when they begin a window
+/// processor statement and end inside the assignments of one of its routes: the bound the window
+/// declares, which decides its aggregates, and the builtin calls the position is written inside.
+///
+/// The statement is read with its own clauses up to the `SET` of the route being written, after
+/// every route it already completed. A position in the route's `WHERE` or message-error policy, or
+/// before the routes, is not inside those assignments.
+pub(crate) fn route_value(tokens: &[Token]) -> Option<WindowRouteValue> {
+    /// Where the assignments of the route being written begin, with its window's bound.
+    struct RouteAssignments {
+        width: WindowBound,
+        state_limit: WindowStateLimit,
+        start: usize,
+    }
+
+    let route = declaration()
+        .then_ignore(explicit_processor_outputs().or_not())
+        .then_ignore(output_route_head())
+        .then_ignore(kw(Identifier::Set))
+        .map_with(|declaration, extra| RouteAssignments {
+            width: declaration.width,
+            state_limit: declaration.state_limit,
+            start: extra.span().end,
+        })
+        .lazy()
+        .parse(tokens)
+        .into_output()?;
+    let assignment = open_assignment(tokens.get(route.start..)?)?;
+    Some(WindowRouteValue {
+        width: route.width,
+        state_limit: route.state_limit,
+        enclosing_calls: open_builtin_calls(assignment),
     })
 }
 

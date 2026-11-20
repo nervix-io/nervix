@@ -133,6 +133,7 @@ pub use command::{
 };
 pub use completion::{
     BuiltinFunctionScope, CodecDirection, RelayQuestion, RelayRule, SemanticReference,
+    WindowRouteValue,
 };
 pub use connector::{
     AcknowledgementConfirmation, AzureBlobConfigEntry, BufferBound, BufferCapacity, BufferOverflow,
