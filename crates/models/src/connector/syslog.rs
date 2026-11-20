@@ -233,7 +233,7 @@ const SYSLOG_LISTENER_BOUNDS: DeclaredBounds = DeclaredBounds {
         DeclaredBuffer {
             holds: "frames read from TCP and TLS connections",
             bound: BufferBound::Bounded {
-                capacity: BufferCapacity::Setting("node capability syslog-intake-queue-capacity"),
+                capacity: BufferCapacity::NodeSetting("syslog-intake-queue-capacity"),
                 overflow: BufferOverflow::Backpressure,
             },
         },
@@ -627,7 +627,7 @@ mod tests {
         assert_eq!(
             buffers[3].bound,
             BufferBound::Bounded {
-                capacity: BufferCapacity::Setting("node capability syslog-intake-queue-capacity"),
+                capacity: BufferCapacity::NodeSetting("syslog-intake-queue-capacity"),
                 overflow: BufferOverflow::Backpressure,
             }
         );

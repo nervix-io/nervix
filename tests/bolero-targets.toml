@@ -1378,10 +1378,10 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/interconnect/src/__fuzz__/runtime_state__replication_properties__bolero_runtime_state_replication_messages_round_trip/corpus"
-domain_version = 19
+domain_version = 20
 features = []
 id = "runtime-state-replication-wire"
-invariant = "Every current runtime-state request and reply retains its complete placement, state/schema/generation, model kind, ordered branch fields and nested float bits, counters, captured recovery budget, checkpoint length/digest, listing and refusal variant through its production pool-class codec, releasing all charges."
+invariant = "Every current runtime-state request and reply retains its complete placement, state/schema/generation, model kind, ordered branch fields and nested float bits, counters, captured recovery budget and round identity, checkpoint length/digest, listing and refusal variant through its production pool-class codec, releasing all charges."
 manifest = "Cargo.toml"
 max_input_bytes = 2048
 package = "nervix-interconnect"
@@ -1393,7 +1393,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/interconnect/src/__fuzz__/runtime_state__replication_properties__bolero_damaged_runtime_state_replication_messages_fail_typed/corpus"
-domain_version = 19
+domain_version = 20
 features = []
 id = "runtime-state-replication-malformed"
 invariant = "Bounded damaged current runtime-state requests and responses either decode or fail with a typed decode outcome; empty frames and zero-byte encoding limits refuse every message kind, and no command or bulk charge survives."

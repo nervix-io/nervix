@@ -1,9 +1,11 @@
 //! Server command-line groups, the settings they convert into and the forms they render.
 //!
 //! Test harness outside the product layer order.
-//! - **Owns.** Assertions about the options groups, their names, headings and defaults, and the
-//!   rendering of settings back into options.
-//! - **Depends on.** The command-line module under test and the application test fixtures.
+//! - **Owns.** Assertions about the options groups, their names, headings and defaults, the
+//!   rendering of settings back into options, and that every node setting a connector declaration
+//!   names is one of those options.
+//! - **Depends on.** The command-line module under test, the application test fixtures and the
+//!   connector declarations' bounds.
 //! - **Must not know.** Production ownership beyond the module under test.
 
 use std::{collections::BTreeSet, time::Duration};
@@ -432,6 +434,28 @@ fn every_settings_option_is_named_by_its_definition_and_read_from_its_environmen
     }
 
     assert_eq!(names, SETTING_NAMES.into_iter().collect::<BTreeSet<_>>());
+}
+
+#[test]
+fn every_node_setting_a_connector_declaration_names_is_a_settings_option() {
+    let mut named = BTreeSet::new();
+    for kind in nervix_models::IngestorEntityKind::all() {
+        named.extend(kind.capabilities().bounds.node_settings());
+    }
+    for kind in nervix_models::EmitterEntityKind::all() {
+        named.extend(kind.capabilities().bounds.node_settings());
+    }
+    assert!(
+        !named.is_empty(),
+        "connector declarations name node settings, so this check is not vacuous"
+    );
+
+    let options: BTreeSet<&str> = SETTING_NAMES.into_iter().collect();
+    let undeclared: Vec<&str> = named.difference(&options).copied().collect();
+    assert!(
+        undeclared.is_empty(),
+        "connector declarations name node settings the node does not declare: {undeclared:?}"
+    );
 }
 
 #[test]

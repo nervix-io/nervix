@@ -13,14 +13,15 @@
 //! The capability matrix renders these declarations. Each deadline key an entity's waits name is
 //! also a runtime capability, so the capability inventory names a scenario in which a peer that
 //! stops answering during a wait that key bounds surfaces as the entity's transient status within
-//! that bound.
+//! that bound. A node setting a bound names belongs to the node, which declares it; the server's
+//! settings tests hold every such name to a setting the node actually reads.
 
 #![cfg_attr(
     nervix_lint,
     nervix::layer(vocabulary, reason = "owns the vocabulary boundary declared above")
 )]
 
-use std::time::Duration;
+use std::{collections::BTreeSet, time::Duration};
 
 use strum::{AsRefStr, EnumIter, IntoStaticStr};
 
@@ -69,6 +70,25 @@ impl DeclaredBounds {
         }
         keys
     }
+
+    /// The node settings the entity's buffers and waits name, each once.
+    pub fn node_settings(&self) -> BTreeSet<&'static str> {
+        let mut settings = BTreeSet::new();
+        for buffer in self.buffers {
+            let BufferBound::Bounded { capacity, .. } = buffer.bound else {
+                continue;
+            };
+            if let Some(setting) = capacity.node_setting() {
+                settings.insert(setting);
+            }
+        }
+        for wait in self.waits {
+            if let Some(setting) = wait.bound.node_setting() {
+                settings.insert(setting);
+            }
+        }
+        settings
+    }
 }
 
 /// One buffer a connector holds between its transport and the host.
@@ -101,8 +121,22 @@ pub enum BufferCapacity {
     Bytes(u64),
     /// The statement clause or client key that sets it, as a statement writes it.
     Setting(&'static str),
+    /// The node setting that sets it on each node, named as its definition names it: its
+    /// command-line flag without the leading dashes. An operator chooses it when the node starts,
+    /// and no statement or client key changes it.
+    NodeSetting(&'static str),
     /// The driver's own default, which no Nervix key sets, as the matrix states it.
     Driver(&'static str),
+}
+
+impl BufferCapacity {
+    /// The node setting that sets the capacity, where one does.
+    pub fn node_setting(&self) -> Option<&'static str> {
+        match self {
+            Self::NodeSetting(setting) => Some(*setting),
+            Self::Items { .. } | Self::Bytes(_) | Self::Setting(_) | Self::Driver(_) => None,
+        }
+    }
 }
 
 /// What happens to what does not fit in a full buffer.
@@ -124,6 +158,10 @@ pub enum BufferOverflow {
     PeerDiscards,
     /// The request is refused immediately; its sender owns retry.
     RefuseRequest,
+    /// A request above the bound is refused as too large, and nothing of it reaches the host.
+    /// Unlike [`Self::RefuseRequest`], the refusal is final: the same request sent again is
+    /// refused again, so its sender has to send less instead of retrying.
+    RefuseOversized,
     /// A response that exceeds the bound fails the poll that read it: the ingestor reports the
     /// failure as its transient error, and the next poll reads again.
     FailPoll,
@@ -161,6 +199,14 @@ pub enum WaitBound {
     },
     /// A fixed physical bound that Nervix sets.
     Fixed(Duration),
+    /// A node setting that bounds the wait on each node, named as its definition names it (its
+    /// command-line flag without the leading dashes), and what ending the wait does, as the matrix
+    /// states it. An operator chooses it when the node starts, and no statement or client key
+    /// changes it; unlike a [`DeadlineKey`], it is no client's to set.
+    NodeSetting {
+        setting: &'static str,
+        expiry: &'static str,
+    },
     /// The driver's own default, which no Nervix key sets, as the matrix states it.
     Driver(&'static str),
     /// Nothing ends the wait yet: a peer that stops answering holds it until the host stops the
@@ -174,6 +220,20 @@ impl WaitBound {
         match self {
             Self::Key { key, .. } => Some(*key),
             Self::Clause(_)
+            | Self::ClientKey { .. }
+            | Self::Fixed(_)
+            | Self::NodeSetting { .. }
+            | Self::Driver(_)
+            | Self::Unbounded => None,
+        }
+    }
+
+    /// The node setting that ends the wait, where one does.
+    pub fn node_setting(&self) -> Option<&'static str> {
+        match self {
+            Self::NodeSetting { setting, .. } => Some(*setting),
+            Self::Key { .. }
+            | Self::Clause(_)
             | Self::ClientKey { .. }
             | Self::Fixed(_)
             | Self::Driver(_)
@@ -315,10 +375,85 @@ mod tests {
                     wait: "an answer",
                     bound: WaitBound::Driver("500 ms"),
                 },
+                DeclaredWait {
+                    wait: "a request head",
+                    bound: WaitBound::NodeSetting {
+                        setting: "listener-header-timeout",
+                        expiry: "closes the connection without an answer",
+                    },
+                },
             ],
             driver_limits: &["one request at a time"],
         };
         assert_eq!(unkeyed.deadline_keys(), Vec::new());
+    }
+
+    #[test]
+    fn each_node_setting_a_buffer_or_a_wait_names_is_listed_once() {
+        let listener = DeclaredBounds {
+            buffers: &[
+                DeclaredBuffer {
+                    holds: "a request body",
+                    bound: BufferBound::Bounded {
+                        capacity: BufferCapacity::NodeSetting("http-body-bytes"),
+                        overflow: BufferOverflow::RefuseOversized,
+                    },
+                },
+                DeclaredBuffer {
+                    holds: "unresolved requests",
+                    bound: BufferBound::Bounded {
+                        capacity: BufferCapacity::Setting("MODE ACK MAX"),
+                        overflow: BufferOverflow::RefuseRequest,
+                    },
+                },
+                DeclaredBuffer {
+                    holds: "frames read ahead",
+                    bound: BufferBound::Unbounded,
+                },
+            ],
+            waits: &[
+                DeclaredWait {
+                    wait: "a request head",
+                    bound: WaitBound::NodeSetting {
+                        setting: "listener-header-timeout",
+                        expiry: "closes the connection without an answer",
+                    },
+                },
+                DeclaredWait {
+                    wait: "a request body",
+                    bound: WaitBound::NodeSetting {
+                        setting: "http-body-timeout",
+                        expiry: "refuses the request as timed out",
+                    },
+                },
+                DeclaredWait {
+                    wait: "the rest of a request body",
+                    bound: WaitBound::NodeSetting {
+                        setting: "http-body-timeout",
+                        expiry: "refuses the request as timed out",
+                    },
+                },
+                DeclaredWait {
+                    wait: "an acknowledgement",
+                    bound: WaitBound::Clause("ACK TIMEOUT"),
+                },
+            ],
+            driver_limits: &[],
+        };
+        assert_eq!(
+            listener.node_settings(),
+            BTreeSet::from([
+                "http-body-bytes",
+                "http-body-timeout",
+                "listener-header-timeout"
+            ])
+        );
+        assert_eq!(listener.deadline_keys(), Vec::new());
+        assert!(
+            RuntimeCapability::of_bounds(listener).is_empty(),
+            "a node setting is no client deadline key, so it adds no stalled-peer check"
+        );
+        assert_eq!(KEYED.node_settings(), BTreeSet::new());
     }
 
     #[test]

@@ -117,12 +117,14 @@ Feature: Signed license activation
     And a 3 node nervix cluster is started
     Then the current leader node is saved as placeholder "activation_leader"
     And a node other than placeholder "activation_leader" is saved as placeholder "activation_successor"
+    Given node "{{activation_successor}}" refuses its next license activation because it cannot confirm its lease
     Given leadership moves from node "{{activation_leader}}" to node "{{activation_successor}}" under its next durably admitted command
     When these Plexus commands are executed on the leader node
       """
       ACTIVATE LICENSE PERSISTENT WITH KEY 'NVXK-TESTABCD-fixture-secret';
       """
     Then the leadership move under the durably admitted command completed
+    And node "{{activation_successor}}" refused a license activation because it could not confirm its lease
     And node "{{activation_successor}}" eventually describes this license without a selected domain
       """
       mode: activated

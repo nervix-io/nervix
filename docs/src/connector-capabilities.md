@@ -80,8 +80,8 @@ Client CONFIG keys below come from the same declaration used by validation, comp
 | Every live node | yes |  |
 | Position class | none |  |
 | Acknowledgement confirmation | none |  |
-| Buffers | a request body: unbounded<br>unresolved requests under MODE ACK, per node and ingestor: set by MODE ACK MAX; when full, immediately refuses the request for its sender to retry |  |
-| Network waits | a client's request head and body: unbounded<br>graph acknowledgement under MODE ACK: `ACK TIMEOUT, or the exact intake lifetime ending` |  |
+| Buffers | a request body: set by node setting `--http-body-bytes`; when exceeded, refuses the request as too large; the same request sent again is refused again<br>the request input of every HTTP endpoint connection on the node together, read buffers included: set by node setting `--execution-intake-memory-bytes`; when full, immediately refuses the request for its sender to retry<br>unresolved requests under MODE ACK, per node and ingestor: set by MODE ACK MAX; when full, immediately refuses the request for its sender to retry |  |
+| Network waits | a client's request head: node setting `--listener-header-timeout`; at the bound, closes the connection without an answer<br>a client's request body: node setting `--http-body-timeout`; at the bound, refuses the request as timed out<br>graph acknowledgement under MODE ACK: `ACK TIMEOUT, or the exact intake lifetime ending` |  |
 | Driver limits | Request heads above 100 headers are refused. |  |
 | Stalled-peer checks | None: no client deadline key bounds a wait. |  |
 
@@ -405,7 +405,7 @@ Client CONFIG keys below come from the same declaration used by validation, comp
 | Every live node | yes |  |
 | Position class | none |  |
 | Acknowledgement confirmation | none |  |
-| Buffers | UDP datagrams admitted after a fixed 65,535-byte receive scratch buffer: set by max_message_size; when full, drops and counts what does not fit<br>TCP and TLS frame assembly across unlimited connections (max_message_size + 11 bytes per connection; an oversized frame closes only that connection): unbounded<br>completed TCP and TLS frames waiting for the intake queue (one frame per connection, at most max_message_size bytes; unlimited connections): unbounded<br>frames read from TCP and TLS connections: set by node capability syslog-intake-queue-capacity; when full, holds back what fills it |  |
+| Buffers | UDP datagrams admitted after a fixed 65,535-byte receive scratch buffer: set by max_message_size; when full, drops and counts what does not fit<br>TCP and TLS frame assembly across unlimited connections (max_message_size + 11 bytes per connection; an oversized frame closes only that connection): unbounded<br>completed TCP and TLS frames waiting for the intake queue (one frame per connection, at most max_message_size bytes; unlimited connections): unbounded<br>frames read from TCP and TLS connections: set by node setting `--syslog-intake-queue-capacity`; when full, holds back what fills it |  |
 | Network waits | the TLS handshake of an accepted connection: `connect_timeout_ms`; 30s when omitted<br>reading a connection: `idle_timeout_ms`; unbounded when omitted |  |
 | Driver limits | Datagrams wait in the kernel's UDP receive buffer, which drops what does not fit. |  |
 | Stalled-peer checks | `STALLED PEER connect_timeout_ms`<br>`STALLED PEER idle_timeout_ms` |  |

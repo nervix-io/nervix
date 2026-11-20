@@ -158,6 +158,8 @@ pub use leadership::LeadershipObservation;
 #[cfg(any(test, feature = "testing"))]
 pub use lease_refusal::CommandWrite;
 use lease_refusal::LeaseRefusal;
+#[cfg(feature = "testing")]
+use lease_refusal::RefusalTarget;
 pub use restore::{
     RestoreExecution, RestoreStateInstallationError, RestoreStateRetention, RestoreStepEffect,
     RestoredResource,
@@ -2588,7 +2590,10 @@ impl ConsensusTestProbe {
         reference: nervix_models::CommandExecutionReference,
         write: CommandWrite,
     ) {
-        self.inner.lease_refusal.arm(reference, write).await;
+        self.inner
+            .lease_refusal
+            .arm(RefusalTarget::Command { reference, write })
+            .await;
     }
 
     /// Whether this node refused `reference`'s `write` as the refusal armed for it.
@@ -2597,7 +2602,27 @@ impl ConsensusTestProbe {
         reference: &nervix_models::CommandExecutionReference,
         write: CommandWrite,
     ) -> bool {
-        self.inner.lease_refusal.delivered(reference, write).await
+        let target = RefusalTarget::Command {
+            reference: reference.clone(),
+            write,
+        };
+        self.inner.lease_refusal.delivered(&target).await
+    }
+
+    /// Refuse this node's next license activation proposal as an unconfirmed leader lease.
+    pub async fn refuse_next_license_activation_as_lapsed_lease(&self) {
+        self.inner
+            .lease_refusal
+            .arm(RefusalTarget::LicenseActivation)
+            .await;
+    }
+
+    /// Whether this node's activation proposal reached the armed refusal.
+    pub async fn license_activation_refused_as_lapsed_lease(&self) -> bool {
+        self.inner
+            .lease_refusal
+            .delivered(&RefusalTarget::LicenseActivation)
+            .await
     }
 
     fn record_append_stream_open(&self, target: &ClusterNodeName) {
