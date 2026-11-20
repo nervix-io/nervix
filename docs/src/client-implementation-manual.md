@@ -739,7 +739,8 @@ remain the schema the ingestor declares; a payload field cannot replace the auth
 
 - **E-1.** A client MUST open a `TO CLIENT` emitter with `OpenEmitterRequest`, naming its domain,
   emitter and exact ordered output fields, including optionality and sensitivity. It MUST supply
-  nonzero batch and byte limits; the requested byte limit MUST hold one maximum-sized IPC batch.
+  nonzero batch and byte limits, a batch limit no larger than 1,024; the requested byte limit MUST
+  hold one maximum-sized IPC batch.
   An open inside a transaction is refused. The open's `request_id` becomes its `ConsumerId`.
 - **E-2.** A client MUST continue reading transport frames while an application waits for
   consumer credit or processes an output batch. A pending `ReadEmitterBatchRequest` does not
