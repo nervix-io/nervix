@@ -22,6 +22,8 @@
     )
 )]
 
+#[path = "ingestor_allowance.rs"]
+mod allowance;
 #[path = "ingestor_control.rs"]
 mod control;
 #[path = "ingestor_rejection.rs"]
@@ -40,6 +42,7 @@ use std::{
     time::Duration,
 };
 
+use allowance::KafkaAllowanceHold;
 use async_trait::async_trait;
 use control::{CommitTask, ControlBudget, KafkaControl};
 use error_stack::{Report, ResultExt as _};
@@ -48,7 +51,7 @@ use nervix_connector::{
     BrokerIngestorConnector, IngestMessageHeaders, IngestMessageMetadata, IngestMetadataRow,
     IngestMetadataValues, IngestRowHeaders, IngestTransportPosition, IngestorAckPolicy,
     IngestorBatch, IngestorBatchRequest, IngestorConnector, IngestorError, IngestorMessage,
-    IngestorReadCancellation, IngestorResult, IngestorResume,
+    IngestorReadCancellation, IngestorReadHold, IngestorResult, IngestorResume,
 };
 use nervix_execution::Executor;
 use nervix_models::{
@@ -288,6 +291,9 @@ impl KafkaTopicIngestorOffsetMode {
 pub struct KafkaGroupPartitionRead {
     partitions: nervix_models::ExternalPartitionSet,
     pending: Option<KafkaOffsetPosition>,
+    /// While this reader supports allowance holds, remembers the partitions whose native
+    /// pause belongs to topology. An allowance returning must not reopen those partitions.
+    paused_for_topology: Option<BTreeSet<i32>>,
 }
 
 impl KafkaGroupPartitionRead {
@@ -295,6 +301,7 @@ impl KafkaGroupPartitionRead {
         Self {
             partitions,
             pending: None,
+            paused_for_topology: None,
         }
     }
 
@@ -308,6 +315,9 @@ impl KafkaGroupPartitionRead {
         group_id: &str,
     ) -> Result<(), Report<KafkaTopicIngestorError>> {
         if let Some(position) = self.pending.clone() {
+            if let Some(paused) = &mut self.paused_for_topology {
+                paused.insert(position.partition);
+            }
             control
                 .run(consumer, {
                     let position = position.clone();
@@ -436,6 +446,8 @@ pub struct KafkaTopicIngestorPlan {
     pub config: Vec<ClientConfigEntry>,
     pub topic: KafkaTopicName,
     pub offset_mode: KafkaTopicIngestorOffsetMode,
+    /// The host can deliberately hold reads back while the driver remains active.
+    pub maintain_rate_limit_holds: bool,
 }
 
 #[derive(Debug, Error)]
@@ -445,6 +457,10 @@ pub enum KafkaTopicIngestorError {
          committed", connector = ConnectorKind::Kafka
     )]
     PausePartition { topic: String, partition: i32 },
+    #[error("failed to pause {connector} topic '{topic}' for an ingestor read allowance", connector = ConnectorKind::Kafka)]
+    PauseForAllowance { topic: String },
+    #[error("failed to resume {connector} topic '{topic}' once the ingestor read allowance returned", connector = ConnectorKind::Kafka)]
+    ResumeAfterAllowance { topic: String },
     #[error("failed to store a {connector} group's next unread offset", connector = ConnectorKind::Kafka)]
     StoreGroupOffset,
     #[error("scheduled {connector} partition {partition} exceeds the transport's signed coordinate", connector = ConnectorKind::Kafka)]
@@ -787,6 +803,7 @@ pub struct KafkaTopicIngestor {
     instance_index: u64,
     assignment: KafkaConsumerAssignment,
     observed_generation: Option<u64>,
+    allowance_hold: Option<KafkaAllowanceHold>,
     /// A conversion failure after a gathered prefix, reported by the next admitted read.
     pending_read_error: Option<Report<KafkaTopicIngestorError>>,
 }
@@ -804,17 +821,35 @@ impl IngestorConnector for KafkaTopicIngestor {
             .change_context(IngestorError::Open { connector: KAFKA })?;
         let consumer = KafkaConsumerHandle::create(&config, plan.executor.clone())
             .change_context(IngestorError::Open { connector: KAFKA })?;
+        let mut offset_mode = plan.offset_mode.clone();
+        let allowance_hold = if let KafkaTopicIngestorOffsetMode::ConsumerGroup {
+            committed_partitions,
+            ..
+        } = &mut offset_mode
+            && plan.maintain_rate_limit_holds
+        {
+            if let Some(partitions) = committed_partitions {
+                partitions.paused_for_topology = Some(BTreeSet::new());
+            }
+            Some(
+                KafkaAllowanceHold::new(&config)
+                    .change_context(IngestorError::Open { connector: KAFKA })?,
+            )
+        } else {
+            None
+        };
         Ok(Self {
             control,
             consumer,
             settings: plan.settings,
             topic: plan.topic.clone(),
-            offset_mode: plan.offset_mode.clone(),
+            offset_mode,
             commits: GroupCommits::new(COMMIT_ANSWER_DEADLINE),
             rejections_outstanding: false,
             instance_index,
             assignment: KafkaConsumerAssignment::default(),
             observed_generation: None,
+            allowance_hold,
             pending_read_error: None,
         })
     }
@@ -827,6 +862,9 @@ impl IngestorConnector for KafkaTopicIngestor {
     }
 
     async fn suspend(&mut self) -> IngestorResult<()> {
+        self.finish_allowance_poll()
+            .await
+            .change_context(IngestorError::Suspend { connector: KAFKA })?;
         self.finish_unadmitted_partition()
             .await
             .change_context(IngestorError::Suspend { connector: KAFKA })?;
@@ -856,6 +894,9 @@ impl IngestorConnector for KafkaTopicIngestor {
                 })
                 .await
                 .change_context(IngestorError::Resume { connector: KAFKA })?;
+            if let Some(hold) = &mut self.allowance_hold {
+                hold.subscribed();
+            }
             return Ok(IngestorResume::Ready);
         }
 
@@ -879,6 +920,9 @@ impl IngestorConnector for KafkaTopicIngestor {
     }
 
     async fn close(&mut self) -> IngestorResult<()> {
+        self.finish_allowance_poll()
+            .await
+            .change_context(IngestorError::Close { connector: KAFKA })?;
         self.finish_unadmitted_partition()
             .await
             .change_context(IngestorError::Close { connector: KAFKA })?;
@@ -903,6 +947,14 @@ impl BrokerIngestorConnector for KafkaTopicIngestor {
     type Message = KafkaTopicIngestorMessage;
     type Position = KafkaOffsetPosition;
 
+    fn hold_maintenance(&mut self) -> Option<&mut dyn IngestorReadHold> {
+        if self.allowance_hold.is_some() {
+            Some(self)
+        } else {
+            None
+        }
+    }
+
     async fn next_batch(
         &mut self,
         request: IngestorBatchRequest,
@@ -915,6 +967,21 @@ impl BrokerIngestorConnector for KafkaTopicIngestor {
         }
         if let Some(error) = self.pending_read_error.take() {
             return Err(error.change_context(IngestorError::Read { connector: KAFKA }));
+        }
+        if self
+            .allowance_hold
+            .as_ref()
+            .is_some_and(KafkaAllowanceHold::is_paused)
+        {
+            let Some(resumed) = cancellation
+                .unless_cancelled(self.resume_after_allowance())
+                .await
+            else {
+                return Ok(IngestorBatch::Interrupted {
+                    gathered: Vec::new(),
+                });
+            };
+            resumed.change_context(IngestorError::Read { connector: KAFKA })?;
         }
         let first = match &mut self.offset_mode {
             KafkaTopicIngestorOffsetMode::Domain { .. } => {
@@ -948,6 +1015,9 @@ impl BrokerIngestorConnector for KafkaTopicIngestor {
                 message
             }
         };
+        if let Some(hold) = &mut self.allowance_hold {
+            hold.polled();
+        }
         let first = first
             .change_context(IngestorError::Read { connector: KAFKA })?
             .detach();
@@ -994,10 +1064,16 @@ impl BrokerIngestorConnector for KafkaTopicIngestor {
                 }
             }
         }
+        if let Some(hold) = &mut self.allowance_hold {
+            hold.polled();
+        }
         Ok(IngestorBatch::Messages(messages))
     }
 
     async fn acknowledge(&mut self, positions: &[Self::Position]) -> IngestorResult<()> {
+        self.finish_allowance_poll()
+            .await
+            .change_context(IngestorError::Acknowledge { connector: KAFKA })?;
         let positions = latest_positions(positions);
         match &self.offset_mode {
             // The driver commits the positions it delivered on its own cadence, so acknowledging
@@ -1039,6 +1115,9 @@ impl BrokerIngestorConnector for KafkaTopicIngestor {
     }
 
     async fn reject(&mut self, positions: &[Self::Position]) -> IngestorResult<()> {
+        self.finish_allowance_poll()
+            .await
+            .change_context(IngestorError::Reject { connector: KAFKA })?;
         let starts = earliest_message_offsets(positions)
             .change_context(IngestorError::Reject { connector: KAFKA })?;
         // A consumer group can revoke a partition before its rewound records are read again, and

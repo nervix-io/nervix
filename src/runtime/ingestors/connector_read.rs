@@ -171,7 +171,6 @@ where
 }
 
 /// How a hold before a read ended.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum AllowanceHoldEnd {
     /// The allowance returns now. The loop starts its next turn, which asks for its budget again.
     Returned,
@@ -181,6 +180,8 @@ pub(super) enum AllowanceHoldEnd {
     Restarting,
     /// The ingestor stops.
     Stopping,
+    /// The connector reported a failure while servicing the held transport.
+    Failed(Report<IngestorError>),
 }
 
 /// What ended one wait of a hold before the allowance returned.
@@ -188,6 +189,25 @@ enum HoldInterruption {
     Flush,
     Restart,
     Stop,
+    Failed(Report<IngestorError>),
+}
+
+/// Borrows the transport for one wait, so the same intake can wait again later.
+pub(super) fn reborrow_maintenance<'wait>(
+    maintenance: &'wait mut Option<&mut dyn IngestorReadHold>,
+) -> Option<&'wait mut dyn IngestorReadHold> {
+    let transport = maintenance.as_deref_mut()?;
+    Some(transport)
+}
+
+pub(super) async fn maintain_held_transport(
+    maintenance: Option<&mut dyn IngestorReadHold>,
+    until: Instant,
+) -> Report<IngestorError> {
+    match maintenance {
+        Some(maintenance) => maintenance.maintain(until).await,
+        None => future::pending().await,
+    }
 }
 
 /// Holds the loop back before its next read until `until`, when the unit's `RATE LIMIT` allowance
@@ -195,15 +215,18 @@ enum HoldInterruption {
 ///
 /// The hold is a deadline on the boundary's timer, after which the loop asks its budget again. A
 /// flush that falls due meanwhile needs nothing from the ingestor, so the host flushes and keeps
-/// holding. A quiesce change or a stop needs the loop back and ends the hold. The host counts every
-/// hold and how long it lasted.
+/// holding. The connector can service its transport without taking a record meanwhile. A quiesce
+/// change or a stop needs the loop back and ends the hold. The host counts every hold and how
+/// long it lasted.
 pub(super) async fn hold_for_allowance(
     host: &mut IngestorHost,
     shutdown: &mut watch::Receiver<bool>,
     until: Instant,
+    maintenance: Option<&mut dyn IngestorReadHold>,
 ) -> AllowanceHoldEnd {
     let started = Instant::now();
     host.record_rate_limit_hold_started();
+    let mut maintenance = pin!(maintain_held_transport(maintenance, until));
     let end = loop {
         nervix_primitives::task::consume_budget().await;
         let next_flush = host.next_flush();
@@ -218,6 +241,7 @@ pub(super) async fn hold_for_allowance(
                 }
                 () = host.wait_for_quiesce_change() => HoldInterruption::Restart,
                 () = wait_for_flush(next_flush) => HoldInterruption::Flush,
+                error = &mut maintenance => HoldInterruption::Failed(error),
             }
         };
         match timeout_at(until, interrupted).await {
@@ -225,6 +249,7 @@ pub(super) async fn hold_for_allowance(
             Ok(HoldInterruption::Restart) => break AllowanceHoldEnd::Restarting,
             Ok(HoldInterruption::Stop) => break AllowanceHoldEnd::Stopping,
             Ok(HoldInterruption::Flush) => flush_for_lifecycle(host).await,
+            Ok(HoldInterruption::Failed(error)) => break AllowanceHoldEnd::Failed(error),
         }
     };
     host.record_rate_limit_hold_ended(started.elapsed());

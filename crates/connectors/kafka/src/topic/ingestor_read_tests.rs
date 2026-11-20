@@ -8,11 +8,12 @@ use std::{num::NonZeroUsize, time::Duration};
 use error_stack::Report;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_connector::{
-    BrokerIngestorConnector, IngestorBatch, IngestorBatchRequest, IngestorMessage,
-    IngestorReadCancellation, RetainedIngestMetadata, RetainedIngestMetadataValue as Value,
+    BrokerIngestorConnector, IngestorBatch, IngestorBatchRequest, IngestorConnector,
+    IngestorMessage, IngestorReadCancellation, IngestorResume, RetainedIngestMetadata,
+    RetainedIngestMetadataValue as Value,
 };
-use nervix_models::{IngestorMetadataType, Timestamp};
-use nervix_primitives::time::{Instant, sleep};
+use nervix_models::{ClientConfigEntry, IngestorMetadataType, Timestamp};
+use nervix_primitives::time::{Instant, sleep, timeout};
 use rdkafka::{
     config::ClientConfig,
     producer::{FutureProducer, FutureRecord},
@@ -20,11 +21,72 @@ use rdkafka::{
 
 use super::{
     KafkaGroupCommit, KafkaTopicIngestorError,
-    commit_tests::{READ_DEADLINE, cluster, publish, read_positions, subscribed_ingestor},
+    commit_tests::{READ_DEADLINE, cluster, plan, publish, read_positions, subscribed_ingestor},
 };
 
 /// How long a test lets the consumer fetch before it reads again.
 const FETCH_INTERVAL: Duration = Duration::from_millis(10);
+
+#[nervix_primitives::test]
+async fn a_held_group_poll_preserves_the_next_position_until_an_admitted_read() {
+    let broker = cluster();
+    publish(&broker).await;
+    publish(&broker).await;
+    let mut plan = plan(&broker, KafkaGroupCommit::EachAcknowledgedBatch);
+    plan.maintain_rate_limit_holds = true;
+    for key in ["session.timeout.ms", "max.poll.interval.ms"] {
+        plan.config.push(ClientConfigEntry {
+            key: key.to_owned(),
+            value: "6000".to_owned(),
+        });
+    }
+    let mut ingestor = super::KafkaTopicIngestor::open(&plan, 0)
+        .await
+        .assured("the limited consumer accepts its group configuration");
+    let resumed = ingestor
+        .resume()
+        .await
+        .assured("the group subscribes to the broker's topic");
+    assert!(matches!(resumed, IngestorResume::Ready));
+    let first = read_positions(&mut ingestor).await;
+    assert_eq!(first[0].offset, 1);
+    ingestor
+        .acknowledge(&first)
+        .await
+        .assured("the broker commits the first read");
+
+    let executor = &plan.executor;
+    let before_hold = executor.snapshot().connector_storage.completed;
+    let held = ingestor
+        .hold_maintenance()
+        .assured("a limited group consumer services its membership during a hold");
+    let hold_deadline = Instant::now()
+        .checked_add(READ_DEADLINE)
+        .assured("the test's short hold fits the monotonic clock");
+    let observe_hold = async {
+        while executor.snapshot().connector_storage.completed < before_hold + 2 {
+            sleep(FETCH_INTERVAL).await;
+        }
+    };
+    nervix_primitives::select! {
+        failed = held.maintain(hold_deadline) => {
+            panic!("servicing the held group should continue without taking a record: {failed:?}");
+        }
+        observed = timeout(READ_DEADLINE, observe_hold) => {
+            observed.assured("the assignment query and a held poll each execute");
+        }
+    }
+
+    let second = read_positions(&mut ingestor).await;
+    assert_eq!(
+        second[0].offset, 2,
+        "the held poll left the next record unread"
+    );
+    ingestor
+        .acknowledge(&second)
+        .await
+        .assured("the broker commits the next admitted read");
+}
 
 #[nervix_primitives::test]
 async fn a_record_whose_timestamp_no_datetime_holds_is_read_between_its_neighbours() {

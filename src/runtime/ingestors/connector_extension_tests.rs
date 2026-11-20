@@ -338,13 +338,16 @@ async fn an_unacknowledged_batch_waits_for_the_extension_workers_when_its_ingest
     let taken_in = nervix_primitives::task::spawn(async move {
         let payload = br#"{"user_id":7}"#.to_vec();
         let intake = host
-            .intake_unacknowledged(vec![IngestorIntakeMessage {
-                payload: &payload,
-                metadata: IngestMetadataRow::headers(
-                    &NoIngestHeaders,
-                    &nervix_connector::NoIngestMetadata(0),
-                ),
-            }])
+            .intake_unacknowledged(
+                vec![IngestorIntakeMessage {
+                    payload: &payload,
+                    metadata: IngestMetadataRow::headers(
+                        &NoIngestHeaders,
+                        &nervix_connector::NoIngestMetadata(0),
+                    ),
+                }],
+                None,
+            )
             .await;
         (host, intake)
     });
@@ -381,13 +384,16 @@ async fn take_in_unacknowledged(
     user_id: i64,
 ) -> IngestorIntakeResult<()> {
     let payload = format!(r#"{{"user_id":{user_id}}}"#).into_bytes();
-    host.intake_unacknowledged(vec![IngestorIntakeMessage {
-        payload: &payload,
-        metadata: IngestMetadataRow::headers(
-            &NoIngestHeaders,
-            &nervix_connector::NoIngestMetadata(0),
-        ),
-    }])
+    host.intake_unacknowledged(
+        vec![IngestorIntakeMessage {
+            payload: &payload,
+            metadata: IngestMetadataRow::headers(
+                &NoIngestHeaders,
+                &nervix_connector::NoIngestMetadata(0),
+            ),
+        }],
+        None,
+    )
     .await
 }
 
@@ -742,13 +748,16 @@ async fn take_in_acknowledged(
     user_id: i64,
 ) -> IngestorIntakeResult<IngestorBatchAcknowledgement> {
     let payload = format!(r#"{{"user_id":{user_id}}}"#).into_bytes();
-    host.intake_acknowledged(vec![IngestorIntakeMessage {
-        payload: &payload,
-        metadata: IngestMetadataRow::headers(
-            &NoIngestHeaders,
-            &nervix_connector::NoIngestMetadata(0),
-        ),
-    }])
+    host.intake_acknowledged(
+        vec![IngestorIntakeMessage {
+            payload: &payload,
+            metadata: IngestMetadataRow::headers(
+                &NoIngestHeaders,
+                &nervix_connector::NoIngestMetadata(0),
+            ),
+        }],
+        None,
+    )
     .await
 }
 

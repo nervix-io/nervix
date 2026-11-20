@@ -16,7 +16,8 @@
 use std::{collections::VecDeque, future};
 
 use nervix_connector::{
-    IngestMessageHeaders, IngestMetadataRow, IngestorReadCancellation, IngestorResult,
+    IngestMessageHeaders, IngestMetadataRow, IngestorReadCancellation, IngestorReadHold,
+    IngestorResult,
 };
 use nervix_primitives::sync::blocking::Mutex;
 
@@ -213,6 +214,7 @@ impl IngestorHostServices for ConfirmingHost {
     async fn intake_unacknowledged(
         &mut self,
         _messages: Vec<IngestorIntakeMessage<'_>>,
+        _maintenance: Option<&mut dyn IngestorReadHold>,
     ) -> IngestorIntakeResult<()> {
         panic!("the check's ingestor reads in an acknowledged mode");
     }
@@ -220,6 +222,7 @@ impl IngestorHostServices for ConfirmingHost {
     async fn intake_acknowledged(
         &mut self,
         messages: Vec<IngestorIntakeMessage<'_>>,
+        _maintenance: Option<&mut dyn IngestorReadHold>,
     ) -> IngestorIntakeResult<IngestorBatchAcknowledgement> {
         let mut completions = Vec::with_capacity(messages.len());
         for _ in &messages {
@@ -484,7 +487,7 @@ async fn individual_settlement_keeps_each_drain_guard_until_its_transport_confir
             payload: vec![u8::try_from(position).assured("the check uses positions below 256")],
         })
         .collect();
-    let batch = IndividualBatch::intake(&mut host, messages, Duration::from_secs(1)).await;
+    let batch = IndividualBatch::intake(&mut host, messages, Duration::from_secs(1), None).await;
     let result = batch
         .settle(
             &mut connector,

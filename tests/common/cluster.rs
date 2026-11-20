@@ -2589,6 +2589,57 @@ impl Cluster {
         }
     }
 
+    /// Checks the broker's group state over the whole observation window, including that a
+    /// member which leaves and rejoins is not mistaken for uninterrupted membership.
+    pub(crate) async fn assert_kafka_consumer_group_keeps_member(
+        &self,
+        group: &str,
+        duration: Duration,
+    ) -> io::Result<()> {
+        let inspect = || {
+            let dependencies = self.dependencies.clone();
+            let group = group.to_owned();
+            async move {
+                nervix_primitives::task::spawn_blocking(move || {
+                    inspect_kafka_consumer_group(&dependencies, &group, |info| {
+                        let members = info.members().iter().map(|member| member.id().to_owned());
+                        (info.state().to_owned(), members.collect::<Vec<_>>())
+                    })
+                })
+                .await
+                .map_err(io::Error::other)?
+            }
+        };
+        let initial = PhaseDeadline::after(STATUS_WAIT_BUDGET)
+            .poll_until(
+                POLL_INTERVAL,
+                |_| inspect(),
+                |(state, members)| state == "Stable" && members.len() == 1,
+            )
+            .await
+            .map_err(|observed| {
+                io::Error::other(format!(
+                    "Kafka consumer group '{group}' did not start with one stable member: \
+                     {observed:?}"
+                ))
+            })?;
+        let observation = PhaseDeadline::after(duration);
+        loop {
+            observation.pause(POLL_INTERVAL).await;
+            let actual = inspect().await?;
+            if actual != initial {
+                return Err(io::Error::other(format!(
+                    "Kafka consumer group '{group}' changed after {:?}: expected {initial:?}, \
+                     observed {actual:?}",
+                    observation.elapsed()
+                )));
+            }
+            if observation.has_passed() {
+                return Ok(());
+            }
+        }
+    }
+
     /// Whether the Kafka broker knows `topic`. The metadata request names the topic from a
     /// consumer, which never lets the broker create it.
     pub(crate) fn kafka_topic_exists(&self, topic: &str) -> io::Result<bool> {
@@ -7394,6 +7445,14 @@ fn kafka_consumer_group_member_count(
     dependencies: &DependencyEndpoints,
     group: &str,
 ) -> io::Result<usize> {
+    inspect_kafka_consumer_group(dependencies, group, |info| info.members().len())
+}
+
+fn inspect_kafka_consumer_group<T>(
+    dependencies: &DependencyEndpoints,
+    group: &str,
+    read: impl FnOnce(&nervix_connector_kafka::testing_rdkafka::groups::GroupInfo) -> T,
+) -> io::Result<T> {
     let mut client_config = kafka_client_config(dependencies)?;
     let consumer: BaseConsumer = client_config
         .set(
@@ -7410,7 +7469,7 @@ fn kafka_consumer_group_member_count(
         .iter()
         .find(|info| info.name() == group)
         .ok_or_else(|| io::Error::other(format!("kafka consumer group '{group}' not found")))?;
-    Ok(info.members().len())
+    Ok(read(info))
 }
 
 /// The consumer groups the Kafka broker lists. A group with neither members nor committed offsets
