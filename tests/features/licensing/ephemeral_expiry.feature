@@ -283,3 +283,134 @@ Feature: Ephemeral activation expiry and the licensing stop gate
       | cluster_size | observer |
       | 1            | node-1   |
       | 3            | node-3   |
+
+  Scenario Outline: A closed stop gate refuses a joining node, keeps the members through a restart and admits the node after a new activation on <cluster_size> nodes
+    Given an HTTPS licensing test service allows one ephemeral activation
+    And a <cluster_size> node nervix cluster is started
+    When these Plexus commands are executed on the leader node
+      """
+      ACTIVATE LICENSE EPHEMERAL WITH KEY 'NVXK-TESTABCD-fixture-secret';
+      """
+    Then the committed license decision is saved as placeholder "first_activation"
+    And the ephemeral expiry of license placeholder "first_activation" is saved as placeholder "expired_at"
+    When both licensing clocks pass the "ephemeral" deadline
+    Then node "<observer>" eventually describes this license without a selected domain
+      """
+      policy: stopped
+      processing: stopped by licensing: ephemeral activation expired at {{expired_at}}
+      """
+    When the cluster is restarted
+    Then node "<observer>" eventually describes this license without a selected domain
+      """
+      policy: stopped
+      processing: stopped by licensing: ephemeral activation expired at {{expired_at}}
+      """
+    And node "<observer>" eventually reports raft voters "<voters>"
+    And the current leader node is saved as placeholder "licensing_leader"
+    When these Plexus commands fail with "licensing quota 'cluster.domains' refused usage"
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    Then the last command error contains
+      """
+      (stopped)
+      """
+    And node "{{licensing_leader}}" observability metric "nervix_licensing_admissions_refused_total" with labels eventually reaches at least 1
+      """
+      condition="cluster.domains"
+      state="stopped"
+      """
+    When node "<joining_node>" attempts to join
+    Then node "<joining_node>" refused to join because "licensing quota 'cluster.nodes' refused usage: limit <cluster_size>, current <cluster_size>, requested 1 (stopped)"
+    And node "{{licensing_leader}}" observability metric "nervix_licensing_admissions_refused_total" with labels eventually reaches at least 1
+      """
+      condition="cluster.nodes"
+      state="stopped"
+      """
+    And node "<observer>" eventually reports raft voters "<voters>"
+    When these Plexus commands are executed on node "<observer>"
+      """
+      DESCRIBE CLUSTER;
+      """
+    Then the last command output contains
+      """
+      node: <observer>
+      """
+    When these Plexus commands are executed through the client on node "{{licensing_leader}}"
+      """
+      REFRESH LICENSE;
+      """
+    Then node "<observer>" eventually describes this license without a selected domain
+      """
+      status: expired
+      policy: stopped
+      """
+    And the licensing service marks placeholder "first_activation" expired and frees its slot
+    When these Plexus commands are executed through the client on node "{{licensing_leader}}"
+      """
+      ACTIVATE LICENSE EPHEMERAL WITH KEY 'NVXK-TESTABCD-fixture-secret';
+      """
+    Then node "<observer>" eventually describes this license without a selected domain
+      """
+      policy: licensed fresh
+      processing: running
+      """
+    When node "<joining_node>" attempts to join
+    Then node "<joining_node>" joined the cluster
+    And node "<observer>" eventually reports raft voters "<voters_after>"
+
+    Examples:
+      | cluster_size | observer | joining_node | voters               | voters_after                |
+      | 1            | node-1   | node-2       | node-1               | node-1,node-2               |
+      | 3            | node-3   | node-4       | node-1,node-2,node-3 | node-1,node-2,node-3,node-4 |
+
+  # Dropping a member needs the other two to keep a quorum, so this case runs on three nodes only.
+  # The node reduction's grace outlives the ephemeral expiry, so the dropped member still counts as
+  # a replacement the transition protects when it returns; the closed gate refuses it all the same.
+  # The dropped member's own storage still lists it as a voter, so only its stop tells a refused
+  # return apart from an admitted one.
+  Scenario: A closed stop gate refuses the return of a member a node reduction protects as a replacement
+    Given an HTTPS licensing test service allows one ephemeral activation
+    And a 3 node nervix cluster is started
+    When these Plexus commands are executed on the leader node
+      """
+      ACTIVATE LICENSE EPHEMERAL WITH KEY 'NVXK-TESTABCD-fixture-secret';
+      """
+    Then the committed license decision is saved as placeholder "first_activation"
+    And the ephemeral expiry of license placeholder "first_activation" is saved as placeholder "expired_at"
+    When the licensing service sets the node quota to 1 with 172800 seconds of grace
+    And these Plexus commands are executed on the leader node
+      """
+      REFRESH LICENSE;
+      """
+    Then node "node-1" eventually describes this license without a selected domain
+      """
+      quota cluster.nodes: 3 of 1
+      transitions active: 1
+      """
+    When both licensing clocks pass the "ephemeral" deadline
+    Then node "node-1" eventually describes this license without a selected domain
+      """
+      policy: stopped
+      transitions active: 0
+      """
+    And the current leader node is saved as placeholder "licensing_leader"
+    And a node other than placeholder "licensing_leader" is saved as placeholder "protected_node"
+    When node "{{protected_node}}" is stopped
+    Then node "{{licensing_leader}}" eventually reports status containing "raft member '{{protected_node}}' is marked unavailable"
+    When these Plexus commands are executed through the client on node "{{licensing_leader}}"
+      """
+      DROP NODE {{protected_node}};
+      """
+    And node "{{protected_node}}" attempts to rejoin
+    Then node "{{protected_node}}" refused to join because "licensing quota 'cluster.nodes' refused usage: limit 2, current 2, requested 1 (stopped)"
+    And node "{{licensing_leader}}" observability metric "nervix_licensing_admissions_refused_total" with labels eventually reaches at least 1
+      """
+      condition="cluster.nodes"
+      state="stopped"
+      """
+    And node "{{licensing_leader}}" eventually describes this license without a selected domain
+      """
+      policy: stopped
+      processing: stopped by licensing: ephemeral activation expired at {{expired_at}}
+      """
