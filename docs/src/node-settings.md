@@ -1372,10 +1372,19 @@ The compiler accepts this contract on a constant, including an associated consta
 source scanner validates the gate before excluding a constant, including inactive code. The
 reason remains reviewed evidence; neither parser nor compiler proves its prose true.
 
-The one-minute and fifteen-minute metric EMA windows, their decay conversion and the published
-connector-interaction duration buckets are fixed observation contracts. Their declarations carry
-the fixed reasons in the metric owners; they are not node settings. The current resolution is
-documented in [Metrics And Observability](metrics-and-observability.md#connector-interactions).
+The one-minute and fifteen-minute metric EMA windows, their decay conversion, the steps of the
+percentile windows, the unit and precision of the HDR histograms that metric snapshots carry, the
+published histogram buckets and the published connector-interaction duration buckets are fixed
+observation contracts. Their declarations carry the fixed reasons in the metric owners; they are
+not node settings. The current resolution is documented in
+[Metrics And Observability](metrics-and-observability.md#connector-interactions).
+
+The per-session bounds of the [client session protocol](client-session-protocol.md) (requests in
+flight, producers, consumers and batch credit), the chunk bounds both peers of a stream check, the
+process exit statuses and the forced-exit report bound of [Shutdown](shutdown.md#exit-status), and
+the absence markers of packed atomic encodings are fixed the same way, each at its owner. A memory
+charge that mirrors a buffer sized by `--execution-bulk-chunk-bytes` derives from the resolved bulk
+chunk rather than repeating its default.
 
 `just ratchet --show hidden_tunables` lists the temporary count's sites. It counts numeric
 `const` items of types `Duration`, `usize`, `u64`, `u32`, `u16`, `u8`, `i64`, `i32`, `f64`,

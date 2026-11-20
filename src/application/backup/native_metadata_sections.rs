@@ -51,9 +51,6 @@ use crate::{
     },
 };
 
-/// The bulk memory streaming one section holds: the staged file's buffered block.
-const SECTION_WRITER_BYTES: u64 = 64 * 1024;
-
 /// Why a captured native checkpoint did not become its archive section. No variant carries a
 /// value from the checkpoint.
 #[derive(Debug, Error)]
@@ -185,8 +182,13 @@ impl SessionServiceImpl {
             .reserve(MemoryClass::RestoreMetadata, conversion_bytes)
             .await
             .map_err(|error| refusal(domain, error))?;
+        // The bulk memory streaming one section holds: the staged writer's output buffer, one bulk
+        // chunk of this node's executor.
         let working = executor
-            .reserve(MemoryClass::Bulk, SECTION_WRITER_BYTES)
+            .reserve(
+                MemoryClass::Bulk,
+                executor.limits().bulk_chunk_bytes.as_u64(),
+            )
             .await
             .map_err(|error| refusal(domain, error))?;
         let writer = self

@@ -45,8 +45,32 @@ pub(in crate::application) struct RequestAdmission {
     cancelled: Notify,
 }
 
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the derived default starts the packed admission byte at zero, which reads as \
+                  pending"
+    )
+)]
 const PENDING: u8 = 0;
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the packed admission byte records admission as a value distinct from pending \
+                  and cancelled"
+    )
+)]
 const ADMITTED: u8 = 1;
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the packed admission byte records cancellation as a value distinct from pending \
+                  and admitted"
+    )
+)]
 const CANCELLED: u8 = 2;
 
 impl RequestAdmission {

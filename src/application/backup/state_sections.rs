@@ -15,9 +15,11 @@
     )
 )]
 
+use arch_into::ArchInto as _;
 use error_stack::{Report, ResultExt as _};
+use meticulous::OptionExt as _;
 use nervix_backup::{ArchiveRecord, SectionContent, SectionPath, StateField, WasmStateDescriptor};
-use nervix_execution::MemoryClass;
+use nervix_execution::{Executor, MemoryClass};
 use nervix_interconnect::{
     RemoteOperationFailure, RuntimeState, StatePlacementEnvelope, StateSchema,
 };
@@ -29,11 +31,21 @@ use super::{
 };
 use crate::{
     application::session_service::SessionServiceImpl,
-    runtime::{CapturedGuestSave, SnapshotStagingError, StagedArtifact},
+    runtime::{CapturedGuestSave, RESTORE_STATE_CHUNK_BYTES, SnapshotStagingError, StagedArtifact},
 };
 
-/// A segmented checkpoint block, the transfer block and the staged writer's output buffer.
-const GUEST_WRITER_BYTES: u64 = 3 * 64 * 1024;
+/// The bulk memory streaming one guest save holds: the segmented checkpoint reader's block and the
+/// transfer block, one persisted checkpoint segment each, and the staged writer's output buffer,
+/// one bulk chunk of `executor`.
+fn guest_writer_bytes(executor: &Executor) -> u64 {
+    let segment_bytes: u64 = RESTORE_STATE_CHUNK_BYTES.arch_into();
+    let segment_blocks_bytes = segment_bytes
+        .checked_mul(2)
+        .assured("two 64 KiB persisted checkpoint segments fit u64");
+    segment_blocks_bytes
+        .checked_add(executor.limits().bulk_chunk_bytes.as_u64())
+        .assured("two 64 KiB segments beside a bulk chunk validated to fit u32 fit u64")
+}
 
 impl SessionServiceImpl {
     /// A save superseded by a scheduled generation never opens its checkpoint payload. Only one
@@ -156,7 +168,7 @@ impl SessionServiceImpl {
                 ))
             })?;
         let working = executor
-            .reserve(MemoryClass::Bulk, GUEST_WRITER_BYTES)
+            .reserve(MemoryClass::Bulk, guest_writer_bytes(&executor))
             .await
             .map_err(|error| {
                 error.change_context(failure_context(
