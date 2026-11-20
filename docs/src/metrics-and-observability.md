@@ -344,8 +344,10 @@ resets its counters.
 Request operations are `activation.create`, `activation.refresh`, `activation.release`,
 `activation.rotate_key` and `events.subscribe`. Outcomes are `committed`, `rejected_by_cluster`,
 `refused_by_service`, `unreachable` and `timeout`. Refusal states are `within_grace`, `over_limit`,
-`lapsed` and `stopped`. Connectivity and request families are leader-local. Free mode supplies no
-decision or deadline and makes no licensing request. The shipped unlimited quotas produce no
+`lapsed` and `stopped`. A leader counts a refused newcomer run once: it keeps that run's verdict
+without judging it again while gossip still shows it. Connectivity and request families are
+leader-local. Free mode supplies no decision or deadline and makes no licensing request. The
+shipped unlimited quotas produce no
 admission refusals. An activated record supplies its committed revision and existing signed
 deadlines. Deadline ticks change the state gauge without rewriting those deadlines.
 Released mode keeps its decision revision, reports `releasing` and exposes `next_grant` until the

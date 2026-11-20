@@ -358,7 +358,11 @@ found it compatible with the record of every live voter whose run it accepted. T
 other candidate outside the membership and logs why once while the reason holds: at `debug` while
 the candidate has published no record the leader can read, and at `warn` with the voter and the
 mismatch when it cannot run beside a voter. It refuses the run of a voter that cannot run beside an
-older voter's run the same way, without changing the membership.
+older voter's run the same way, without changing the membership. A run outside the membership that
+the leader refused for the cluster's node quota stays outside for as long as gossip shows it, even
+once the quota would admit a newcomer;
+[Licensing Admission Refusals](errors-and-diagnostics.md#licensing-admission-refusals) describes
+that refusal.
 [Prerequisites At Join](node-settings.md#prerequisites-at-join) describes the verdicts the leader
 publishes and what a refused node does. Each membership reconciliation gives a blocking learner
 catch-up attempt ten seconds. Promotion to voter is proposed only after that attempt reports the

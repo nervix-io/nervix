@@ -4056,8 +4056,13 @@ uses the same constraint. Existing-domain updates and `IF NOT EXISTS` observatio
 ordinary outcomes.
 
 A membership-quota refusal is carried in the leader's typed admission verdict for that node run.
-The joining node's existing supervision reports it and stops the refused newcomer. Licensing never
-removes a committed member, and a returning member does not consume another quota slot.
+The joining node's existing supervision reports it and stops the refused newcomer. The leader keeps
+that verdict for the run, without judging it again, until the run is no longer an admission
+candidate: the failure detector keeps a stopped run live in gossip for several of its heartbeat
+intervals, and a member admitted after its run stopped would never run. A policy that admits
+newcomers again therefore admits the node's next run, not the refused one, and the leader counts
+the refused run once in `nervix_licensing_admissions_refused_total`. Licensing never removes a
+committed member, and a returning member does not consume another quota slot.
 
 ### Licensing Stop Gate Refusals
 
