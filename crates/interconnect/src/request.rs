@@ -43,11 +43,12 @@ use thiserror::Error;
 use super::{
     ActivateOwnershipHandoffStateRequest, CaptureOwnershipHandoffStateRequest,
     ConfirmOwnershipHandoffStateRequest, ControlEnvelope, DescribeIngestorRequest,
-    DiscardOwnershipHandoffStateRequest, DomainClockProgressRequest,
-    ForcedOwnershipRecoveryPreparation, IngestorDescribeEnvelope, OwnershipHandoffCheckpoint,
-    OwnershipHandoffResponse, PoolClass, PrepareForcedOwnershipRecoveryRequest,
-    PrepareOwnershipHandoffStateRequest, ReconcileOwnershipHandoffPreparationsRequest,
-    RemoteOperationFailure, RemoteOperationFailureKind, Transport, TransportError, wire,
+    DiscardForcedOwnershipRecoveryRequest, DiscardOwnershipHandoffStateRequest,
+    DomainClockProgressRequest, ForcedOwnershipRecoveryPreparation, IngestorDescribeEnvelope,
+    OwnershipHandoffCheckpoint, OwnershipHandoffResponse, PoolClass,
+    PrepareForcedOwnershipRecoveryRequest, PrepareOwnershipHandoffStateRequest,
+    ReconcileOwnershipHandoffPreparationsRequest, RemoteOperationFailure,
+    RemoteOperationFailureKind, Transport, TransportError, wire,
 };
 use crate::{
     connection::{
@@ -2111,6 +2112,22 @@ impl InterconnectRequest for PrepareForcedOwnershipRecoveryRequest {
     const NAME: &'static str = "prepare_forced_ownership_recovery";
     const CLASS: PoolClass = PoolClass::Replication;
     const DEADLINE: crate::RequestDeadline = crate::RequestDeadline::Transfer;
+
+    fn coordination_identity(&self) -> Option<&CoordinationIdentity> {
+        Some(&self.round.coordination)
+    }
+}
+
+impl InterconnectRequest for DiscardForcedOwnershipRecoveryRequest {
+    type Response = OwnershipHandoffResponse<()>;
+
+    const NAME: &'static str = "discard_forced_ownership_recovery";
+    const CLASS: PoolClass = PoolClass::Replication;
+    const DEADLINE: crate::RequestDeadline = crate::RequestDeadline::Transfer;
+
+    fn coordination_identity(&self) -> Option<&CoordinationIdentity> {
+        Some(&self.preparation.round.coordination)
+    }
 }
 
 impl InterconnectRequest for ActivateOwnershipHandoffStateRequest {

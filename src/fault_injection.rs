@@ -67,6 +67,7 @@ mod entity_drain;
 mod entity_drain_tests;
 mod execution;
 mod explicit_commit;
+mod forced_recovery;
 mod handoff_gate_link;
 mod interest_visibility;
 mod licensing;
@@ -368,6 +369,8 @@ struct FaultInjectionState {
     /// A destination pauses after making a handoff preparation durable but before returning its
     /// response, reproducing an ambiguous prepare RPC outcome.
     ownership_handoff_prepare_response_pauses: DashMap<String, Arc<TestPause>, RandomState>,
+    forced_recovery_pauses:
+        DashMap<DomainName, Arc<forced_recovery::ForcedRecoveryPause>, RandomState>,
     /// Runtime and harness waiters clone a pause so it remains alive after its map guard drops.
     domain_clock_progress_pauses:
         DashMap<DomainClockProgressPausePoint, Arc<TestPause>, RandomState>,
@@ -610,6 +613,7 @@ impl Default for FaultInjection {
                 ingestor_dispatch_pauses: DashMap::default(),
                 ownership_handoff_preparation_pauses: DashMap::default(),
                 ownership_handoff_prepare_response_pauses: DashMap::default(),
+                forced_recovery_pauses: DashMap::default(),
                 domain_clock_progress_pauses: DashMap::default(),
                 domain_clock_authority_proposal_rejections: DashMap::default(),
                 wasm_checkpoint_pauses: DashMap::default(),
