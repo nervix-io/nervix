@@ -13316,6 +13316,65 @@ async fn when_directed_health_probes_fail(
         .fail_health_responses_between(&probing_node_id, &responding_node_id);
 }
 
+#[given("the first forced recovery publication is paused")]
+fn given_first_forced_recovery_publication_is_paused(world: &mut ScenarioWorld) {
+    let domain = nervix_models::DomainName::try_from(world.domain.as_str())
+        .expect("the scenario domain name is valid");
+    world
+        .fault_injection
+        .pause_first_forced_recovery_publication(domain);
+}
+
+#[then("the first forced recovery publication reaches its pause")]
+async fn then_first_forced_recovery_publication_reaches_its_pause(world: &mut ScenarioWorld) {
+    let domain = nervix_models::DomainName::try_from(world.domain.as_str())
+        .expect("the scenario domain name is valid");
+    nervix_primitives::time::timeout(
+        Duration::from_secs(60),
+        world
+            .fault_injection
+            .wait_for_forced_recovery_publication_pause(&domain),
+    )
+    .await
+    .expect("the leader did not reach the forced recovery publication pause");
+}
+
+#[when("the first forced recovery publication is released")]
+fn when_first_forced_recovery_publication_is_released(world: &mut ScenarioWorld) {
+    let domain = nervix_models::DomainName::try_from(world.domain.as_str())
+        .expect("the scenario domain name is valid");
+    world
+        .fault_injection
+        .release_forced_recovery_publication(&domain);
+}
+
+#[then(expr = "{int} forced recovery preparation round reached publication")]
+fn then_forced_recovery_preparation_rounds(world: &mut ScenarioWorld, expected: usize) {
+    let domain = nervix_models::DomainName::try_from(world.domain.as_str())
+        .expect("the scenario domain name is valid");
+    assert_eq!(
+        world
+            .fault_injection
+            .forced_recovery_preparation_rounds(&domain),
+        expected,
+        "forced recovery preparation rounds for domain '{domain}'"
+    );
+}
+
+#[then("the destination discards the rejected forced recovery preparation")]
+async fn then_destination_discards_rejected_forced_recovery(world: &mut ScenarioWorld) {
+    let domain = nervix_models::DomainName::try_from(world.domain.as_str())
+        .expect("the scenario domain name is valid");
+    nervix_primitives::time::timeout(
+        Duration::from_secs(30),
+        world
+            .fault_injection
+            .wait_for_forced_recovery_discard(&domain),
+    )
+    .await
+    .expect("the destination did not discard the rejected forced recovery preparation");
+}
+
 #[when(expr = "runtime installation on node {string} is paused")]
 async fn when_runtime_installation_is_paused(world: &mut ScenarioWorld, node_id: String) {
     let node_id = expand_placeholders(world, &node_id);
@@ -37894,11 +37953,38 @@ async fn then_node_eventually_reports_interconnect_status(
     peer_node_id: String,
     expected_status: String,
 ) {
+    let node_id = expand_placeholders(world, &node_id);
+    let peer_node_id = expand_placeholders(world, &peer_node_id);
+    let expected_status = expand_placeholders(world, &expected_status);
     world
         .cluster()
         .wait_for_interconnect_status(&node_id, &peer_node_id, &expected_status)
         .await
         .expect("interconnect status did not converge");
+}
+
+#[then(expr = "node {string} eventually stops probing {string}")]
+async fn then_node_stops_probing_peer(world: &mut ScenarioWorld, node_id: String, peer: String) {
+    let node_id = expand_placeholders(world, &node_id);
+    let peer = expand_placeholders(world, &peer);
+    let deadline = PhaseDeadline::after(Duration::from_secs(30));
+    loop {
+        nervix_primitives::task::consume_budget().await;
+        let status = world.cluster().status_text(&node_id, deadline).await;
+        if let Ok(status) = &status
+            && status
+                .lines()
+                .any(|line| line == format!("raft.id: {node_id}"))
+            && crate::common::cluster::interconnect_status_from_text(status, &peer).is_none()
+        {
+            return;
+        }
+        assert!(
+            !deadline.has_passed(),
+            "node '{node_id}' kept probing '{peer}': {status:?}"
+        );
+        deadline.pause(Duration::from_millis(100)).await;
+    }
 }
 
 fn main() -> Result<(), Report<AppError>> {

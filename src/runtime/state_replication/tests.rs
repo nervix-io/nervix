@@ -595,6 +595,10 @@ async fn stopped_wasm_ownership_recovery_preserves_the_complete_checkpoint_inven
     let result = runtime
         .prepare_forced_ownership_recovery(
             nervix_interconnect::PrepareForcedOwnershipRecoveryRequest {
+                round: nervix_interconnect::ForcedOwnershipRecoveryRound {
+                    leader_term: 1,
+                    coordination: CoordinationIdentity::new(source.clone(), 1, 1),
+                },
                 recovery_budget: nervix_models::ClusterParameterDuration::try_from(
                     nervix_models::ClusterParameterValues::default().forced_recovery_budget(),
                 )
@@ -1280,6 +1284,9 @@ fn forced_recovery_refuses_missing_or_stale_preparation_without_changing_state()
         destination_incarnation: ClusterNodeIncarnation::new(43),
         ..prepared_recovery
     };
+    store
+        .discard_forced_recovery_preparation(&changed_incarnation)
+        .expect("discarding a different attempt is an idempotent success");
     let stale_incarnation = store
         .activate_forced_recovery(
             &changed_incarnation,
@@ -1295,6 +1302,9 @@ fn forced_recovery_refuses_missing_or_stale_preparation_without_changing_state()
         target_schedule_fingerprint: [10; 32],
         ..prepared_recovery
     };
+    store
+        .discard_forced_recovery_preparation(&changed_fingerprint)
+        .expect("discarding a different target schedule preserves the staged record");
     let stale_fingerprint = store
         .activate_forced_recovery(
             &changed_fingerprint,
@@ -1305,6 +1315,22 @@ fn forced_recovery_refuses_missing_or_stale_preparation_without_changing_state()
     assert!(matches!(
         stale_fingerprint.current_context(),
         RuntimePersistenceError::ForcedRecoveryPreparationMismatch
+    ));
+    for _ in 0..2 {
+        store
+            .discard_forced_recovery_preparation(&prepared_recovery)
+            .expect("discarding the exact preparation is durable and retryable");
+    }
+    let discarded = store
+        .activate_forced_recovery(
+            &prepared_recovery,
+            ForcedRuntimeStateRecoveryAuthorization::PreparedCheckpoints,
+            None,
+        )
+        .expect_err("the discarded attempt must not leave staged checkpoints");
+    assert!(matches!(
+        discarded.current_context(),
+        RuntimePersistenceError::MissingForcedRecoveryPreparation
     ));
     assert_eq!(
         store
