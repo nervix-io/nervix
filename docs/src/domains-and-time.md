@@ -187,7 +187,18 @@ cut, until the next `START`.
 Successful lifecycle commands are completion boundaries. `START` returns after every current live
 node has prepared the same revision and every configured listener and assigned ingestor has completed
 startup. `STOP` returns once its stop ended and every node that ran the domain reported what its
-teardown cut, including when it is the last running domain. A graceful stop's teardown has every
+teardown cut, including when it is the last running domain.
+
+`START` commits the domain running before the cluster activates it, and nothing undoes that
+commit. Once every live node has prepared the revision, each node starts the domain's ingestors
+and takes input at once; `START` itself waits for the slowest live node to report the revision
+ready. A node that is not ready by the readiness deadline, the node-unavailability timeout plus
+the runtime readiness propagation bound, keeps `START` waiting: the leader applies the revision
+again and waits once more, while the domain runs on every node that started it. When applying the
+revision on the leader fails for another reason, such as an ingestor there that cannot reach its
+source, `START` answers with that failure, but the domain stays running and every node keeps
+applying the revision, so the ingestor joins once its source is reachable. A `START` that waits
+or fails stops nothing and cuts nothing; only `STOP` stops the domain. A graceful stop's teardown has every
 deduplicator and window branch write the state it published last, and the records of every
 materialized relay and the domain offsets of every Kafka ingestor written as they stood once the
 tasks that change them ended, so a backup taken as soon as `STOP` returns holds that state. A

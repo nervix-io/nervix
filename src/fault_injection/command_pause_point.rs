@@ -44,6 +44,10 @@ pub(super) enum CommandPausePoint {
     InitialClusterParameters(ClusterNodeName),
     ForcedRecoveryMissingSchedule(ClusterNodeName),
     RuntimePreparation(ClusterNodeName),
+    RuntimeReadiness {
+        node: ClusterNodeName,
+        domain: DomainName,
+    },
     ApplicationRevisionResponse(ClusterNodeName),
     ApplicationProgressReport(ClusterNodeName),
     ReferenceLookup(ClusterNodeName),
