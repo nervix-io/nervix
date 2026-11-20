@@ -4042,6 +4042,11 @@ binding has reached its expiry. A stale admitted command cannot release a later 
 These conflicts change no identity, decision or grant. Service refusals retain their protocol
 problem kind; signature, trust and binding refusals retain the shared verifier's typed cause.
 
+When a leadership refusal interrupts the application of an admitted activation, the session
+classifies it from the typed consensus cause and recovers the command under its original reference.
+Definitive activation proposal failures retain the licensing operation context and record a cluster
+rejection.
+
 `LicensingRefusal` retains the quota name, effective limit, current usage, requested amount and
 refusal state. Quota arithmetic creates its report at the refusal; policy handles preserve it,
 and the admission owner adds its domain or membership context with `change_context`. It keeps

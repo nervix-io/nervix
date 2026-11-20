@@ -766,6 +766,12 @@ seconds while the answer remains unknown, and keeps processing session messages 
 Held commands retain their issue order, and the selected domain, clock and subscription tabs keep
 their existing attachments. Only a terminal disposition is rendered as the command's outcome.
 
+When leadership moves or the leader cannot confirm its lease while applying an admitted
+`ACTIVATE LICENSE`, the command stays pending under its original execution reference. The client
+receives `OutcomeUnknown` with the `LeadershipLost` cause while recovery is pending. Nervix resumes
+using the verified decision saved with the command. It preserves the original creation request
+identity recorded by the licensing service.
+
 For a WASM state reset, loss of Raft leadership during generation publication leaves the durable
 step applying under its original reference. The request can wait for recovery or answer
 `OutcomeUnknown` if its coordinator no longer leads; it does not retain a failed outcome merely
