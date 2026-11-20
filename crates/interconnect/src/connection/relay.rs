@@ -29,6 +29,32 @@ use futures_util::StreamExt as _;
 
 use super::*;
 
+/// Whether the sends of one relay delivery started an exchange with its receiver.
+///
+/// A send records the start immediately before it registers the delivery's outbound attempt and
+/// asks the receiver for a grant, which is the first step of a delivery that a receiver can act
+/// on. The sender reads it once a send has ended or been abandoned. A delivery whose sends never
+/// started an exchange left no attempt on its receiver, so the receiver cannot have admitted it
+/// and the sender may hand the delivery to another receiver.
+#[derive(Debug, Default)]
+pub struct RelaySendProgress {
+    exchange_started: AtomicBool,
+}
+
+impl RelaySendProgress {
+    /// Whether a send of the delivery started an exchange, so that its receiver may hold an
+    /// attempt of it.
+    pub fn exchange_started(&self) -> bool {
+        // Relaxed: the send that records the start runs on the sender's task, which awaits it or
+        // drops it before reading, and that orders the store before this load.
+        self.exchange_started.load(Ordering::Relaxed)
+    }
+
+    fn record_exchange_start(&self) {
+        self.exchange_started.store(true, Ordering::Relaxed);
+    }
+}
+
 impl TransportState {
     pub(crate) async fn cancel_relay(
         &self,
@@ -192,10 +218,11 @@ impl TransportState {
         Ok(response.status)
     }
 
-    pub(super) async fn send_relay(
+    pub(crate) async fn send_relay(
         &self,
         node_id: &ClusterNodeName,
         payload: RelayPayload,
+        progress: &RelaySendProgress,
     ) -> Result<(), Report<TransportError>> {
         let timeout_duration = self.options.request_timeout;
         let deadline = Instant::now()
@@ -259,6 +286,9 @@ impl TransportState {
             .relay_owner
             .as_ref()
             .assured("a leased connection completed its authenticated binding");
+        // Everything before this point stayed on this node. From here the delivery has an outbound
+        // attempt and its grant request may reach the receiver.
+        progress.record_exchange_start();
         if relay_owner.register_outbound(
             &outbound_key,
             management.connection.peer_epoch,

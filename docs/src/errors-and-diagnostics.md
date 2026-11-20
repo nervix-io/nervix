@@ -1826,7 +1826,7 @@ timeout.
 The shared ONNX environment reports native diagnostics with a static message, the native severity
 and code site. It preserves the `ort::logging` tracing target and the `ort` span's identity and
 location. Native diagnostic text may contain tensor values, so it never enters the log, including
-under trace logging; this projection applies to model inspection and both inference modes.
+under trace logging; this projection applies to model inspection and both execution modes.
 
 Stateful inferencer validation names the inferencer and offending port when a declaration repeats
 a port, uses a non-fixed state axis, mixes `BATCH` with `STATE`, or supplies an `INITIAL` expression
@@ -1834,17 +1834,26 @@ that reads fields, is nondeterministic, or has the wrong type, shape or nullabil
 validation checks both ports of each state pair and requires complete input and output coverage.
 These are configuration refusals before activation.
 
-At stateful admission, an `INPUTS` row error or model refusal goes through that route's
-`ON MESSAGE ERROR` policy with the original input and captured materialized-state snapshot. It
-does not advance the branch's tensors or discard other rows of the input batch. A worker admission
-refusal that evaluated nothing remains an execution failure, with its typed cause; it is not a
-model rejection. A route construction error occurs after the model's successful invocation and
-does not undo that invocation. A later flush dispatches its buffered outputs without running the
-model again.
+Every inferencer runs its model at admission. A message that fails alone, because its `INPUTS`
+evaluation fails, its mapped values do not form the declared tensors, the model refuses it, its
+outputs do not match their declaration, or its outputs exceed the relay operation limit, goes
+through each route's `ON MESSAGE ERROR` policy with the original input and captured
+materialized-state snapshot. Its error is value-free: a model refusal keeps only ONNX Runtime's
+status (`the ONNX model refused this row with status ...`), and no native message text or tensor
+value is copied into the error, the log, an event or an acknowledgement reason. It does not advance
+the branch's tensors or discard other rows of the input batch. A batched call the model refuses
+fails its messages through the inferencer's general error policy with
+`InferencerError::Refused { status }` beneath `InferencerAdmissionError::Execute`, again without
+the native text. A message whose working set exceeds the relay operation limit fails through the
+general error policy with `InferencerError::WorkingSet`. A worker admission refusal that evaluated
+nothing remains an execution failure, with its typed cause; it is not a model rejection. A route
+construction error occurs after the model's successful invocation and does not undo that
+invocation; its error record carries the admitted input message as `input`. A later flush
+dispatches its buffered outputs without running the model again.
 
 Inference inspection uses the shared typed state-inspection refusals. A stateless inferencer is
 `NOT_MATERIALIZED`; missing installed state or an unavailable owner is refused rather than replaced
-with zeros. Native tensor access retains `StatefulInferenceError::StateTensor { index }` beneath the
+with zeros. Native tensor access retains `InferencerError::StateTensor { index }` beneath the
 page's typed column error. Invalid positions and changed publication cuts refuse continuation;
 row, byte, descriptor and executor admission bounds keep their existing typed outcomes.
 
@@ -2401,7 +2410,7 @@ Each failure reports its owner's typed context above the cause it kept:
   execution time that cannot be read, a `DEDUPLICATE ON` or reorderer `BY` key whose input cannot
   be built or whose expressions fail, an input batch that does not decode into messages, and output
   buffers that do not match the routes.
-- `CorrelatorError`, `WindowProcessorError` and `InferencerOutputError` for the steps of a
+- `CorrelatorError`, `WindowProcessorError` and `InferencerAdmissionError` for the steps of a
   correlator, a window processor and an inferencer, and `WasmInstanceError` and `WasmOutputError`
   for a WASM processor's instance and the output its guest emitted. The VM, Arrow, ONNX or relay
   batch failure stays beneath. A WASM output route's FILTER-MAP reports the `PlannedGeneralError`

@@ -18,11 +18,11 @@ use ahash::{HashMap, HashSet};
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::{
     AckMode, BranchName, CorrelationTimeoutAction, CorrelationTimeoutPolicy, CorrelatorMatchPolicy,
-    CreateBranch, ErrorPolicies, FlushPolicy, GeneralErrorPolicy, InferencerTensorDeclaration,
-    InferencerTensorMapping, MessageErrorPolicy, Model, ModelKind, ModelName, NodeRef,
-    ProcessorInputWhere, ProcessorInputs, ProcessorOutput as ModelProcessorOutput,
-    ProcessorOutputs as ModelProcessorOutputs, RelayName, ResolvedBranching, ResourceName,
-    ScheduledNodes, SchemaFingerprint, WindowBound,
+    CreateBranch, ErrorPolicies, FlushPolicy, GeneralErrorPolicy, InferencerExecutionMode,
+    InferencerTensorDeclaration, InferencerTensorMapping, MessageErrorPolicy, Model, ModelKind,
+    ModelName, NodeRef, ProcessorInputWhere, ProcessorInputs,
+    ProcessorOutput as ModelProcessorOutput, ProcessorOutputs as ModelProcessorOutputs, RelayName,
+    ResolvedBranching, ResourceName, ScheduledNodes, SchemaFingerprint, WindowBound,
 };
 use nervix_primitives::sync::Arc;
 
@@ -122,6 +122,9 @@ pub(crate) enum BranchedProcessorOperationSpec {
         inputs: Vec<InferencerTensorMapping>,
         state: Option<InferencerStatePlan>,
         output_schema: Vec<InferencerTensorDeclaration>,
+        /// One message at a time, or one call per group of messages when the tensors declare
+        /// `BATCH`, as validation derived it from the tensor declarations.
+        mode: InferencerExecutionMode,
     },
     WasmProcessor {
         output_routes: BranchedProcessorOutputsSpec,
@@ -583,6 +586,10 @@ pub(crate) fn branched_node_specs_from_models(
                         inputs: inferencer.inputs.clone(),
                         state: InferencerStatePlan::from_validated(&inferencer.state),
                         output_schema: inferencer.output_schema.clone(),
+                        mode: inferencer.execution_mode().verified(
+                            "registry validation refuses an inferencer whose tensors derive no \
+                             execution mode",
+                        ),
                     },
                 };
                 processors.push(processor_node_spec(

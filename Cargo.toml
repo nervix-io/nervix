@@ -335,6 +335,11 @@ harness = false
 name = "window_collection"
 required-features = ["benchmarks"]
 
+[[bench]]
+harness = false
+name = "inferencer"
+required-features = ["benchmarks"]
+
 [workspace]
 members = [
   ".",

@@ -308,9 +308,12 @@ holds its source back may write repeatable `RATE LIMIT <count> [OF <measure>] PE
 
 `CREATE DOMAIN <name>` is the short spelling for `CREATE UNPACED DOMAIN <name>`.
 
-`CREATE INFERENCER` may declare model-carried `STATE` between `INPUTS` and `OUTPUT SCHEMA`.
-The [Inferencer](processors.md#state-tensors) section defines its port pairs, fixed tensor shapes,
-initial expressions, per-branch invocation order and reset behavior.
+Every inferencer runs its model once for each admitted batch, before any route, one message at a
+time or, when its tensors declare `BATCH`, one call per group of equally shaped messages; see
+[Execution](processors.md#execution). `CREATE INFERENCER` may declare model-carried `STATE` between
+`INPUTS` and `OUTPUT SCHEMA`. The [Inferencer](processors.md#state-tensors) section defines its
+port pairs, fixed tensor shapes, initial expressions, per-branch invocation order and reset
+behavior.
 
 Named placement rules claim directed corridors or use `DOMAIN WIDE` to cover every eligible hop.
 Ordinary rank precedence selects each hop's policy, and validation checks that policy against its
@@ -540,7 +543,10 @@ Larger batches genuinely pay only at boundaries that do work per batch rather th
   compression ratio.
 - Iceberg emitters append every flush to one staging file per commit and make one commit per
   `COMMIT EACH ... MAX SIZE` boundary, so commit sizes set file counts and Parquet file sizes.
-- Inferencers whose tensor shapes declare a batch dimension run one model invocation per batch.
+- Inferencers whose tensor shapes declare a batch dimension run one model invocation per group of
+  equally shaped messages in each admitted batch. The admitted batch is a relay batch or a
+  `COLLECT FOR` release, so `COLLECT FOR ... MAX BATCH SIZE` on the input sizes the model's batch;
+  a route's `FLUSH` only dispatches results the model already produced.
 - WASM processors serialize one Arrow IPC payload per batch, and cluster interconnect sends one
   frame per batch, with a fixed 8 MiB frame limit.
 

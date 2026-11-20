@@ -621,7 +621,7 @@ class InventoryTests(unittest.TestCase):
             "client-consumer-stream-frames": 14,
             "client-consumer-stream-frames-malformed": 14,
             "inferencer-describe-envelope": 1,
-            "inferencer-tensor-columns": 1,
+            "inferencer-tensor-columns": 2,
             "inferencer-state-snapshots": 1,
             "backup-inferencer-values": 7,
             "backup-inferencer-malformed": 7,

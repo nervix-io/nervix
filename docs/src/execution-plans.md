@@ -149,13 +149,18 @@ the broker topic's partition count without deriving a key from branch identity. 
 plans always hold an expression. The evaluated key, partition and group remain with the retained
 payload through packing and retries.
 
-An inferencer's state specification records its validated port pairs, fixed element counts,
-initial expressions and static tensor bytes per branch. Node-local binding materializes the initial
-tensors before publishing the processor template. Each concrete branch starts with that immutable
-initial generation and exclusively owns its successors. Stateful admission runs the model once per
-row before output-route buffering; native state outputs become the next invocation's inputs without
-an Arrow round trip. Route flushes dispatch already-computed output. The stateless inferencer keeps
-its existing flush-time execution. A stateful branch publishes its native tensor generation after
+An inferencer's specification carries its execution mode, one message at a time or batched, which
+registry validation derived from the tensor declarations, and its optional state specification.
+Every inferencer lowers to one processor template and one branch operation, with or without state.
+The state specification records its validated port pairs, fixed element counts, initial
+expressions and static tensor bytes per branch. Node-local binding prepares each inferencer's
+shared definition before publishing the processor template, materializing the initial tensors of
+one that carries state. Each concrete branch starts with that immutable initial generation and
+exclusively owns its successors. Admission runs the model once per admitted batch before
+output-route buffering, one message at a time in arrival order or one call per group of equally
+shaped messages; native state outputs become the next invocation's inputs without an Arrow round
+trip. Route flushes dispatch already-computed output and never run the model. A stateful branch
+publishes its native tensor generation after
 each admitted batch through the shared periodic branch-state owner. Its placement includes the
 schema fingerprint and the typed fingerprint of its resource, pinned version, file and state
 declarations. Restore selects the newest snapshot for that exact identity and branch incarnation;

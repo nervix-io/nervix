@@ -19,12 +19,12 @@ use std::num::NonZeroU32;
 use nervix_models::{
     BranchSelection, CorrelationTimeoutAction, CorrelationTimeoutPolicy, CorrelatorMatchPolicy,
     CreateDeduplicator, CreateInferencer, CreateJunction, CreateSchema, CreateWasmProcessor,
-    CreateWindowProcessor, DurationTextError, EmitterEntity, InferencerTensorDeclaration,
-    InferencerTensorDimension, InferencerTensorElementType, InferencerTensorMapping,
-    InferencerTensorRepresentation, InferencerTensorSchema, ParseAsType, ProcessorOutput,
-    ProcessorOutputs, RelayBranching, SchemaField, WasmProcessorLimits, WasmRejectedStatePolicy,
-    WindowBound, ZeroMqEmitter, ZeroMqIngestMode, ZeroMqIngestor, ZeroMqPullIngestor,
-    ZeroMqPushEmitter,
+    CreateWindowProcessor, DurationTextError, EmitterEntity, InferencerExecutionMode,
+    InferencerTensorDeclaration, InferencerTensorDimension, InferencerTensorElementType,
+    InferencerTensorMapping, InferencerTensorRepresentation, InferencerTensorSchema, ParseAsType,
+    ProcessorOutput, ProcessorOutputs, RelayBranching, SchemaField, WasmProcessorLimits,
+    WasmRejectedStatePolicy, WindowBound, ZeroMqEmitter, ZeroMqIngestMode, ZeroMqIngestor,
+    ZeroMqPullIngestor, ZeroMqPushEmitter,
 };
 use nervix_primitives::sync::Arc;
 use nonzero_ext::nonzero;
@@ -73,6 +73,7 @@ fn inferencer_node(input_relays: Vec<RelayName>) -> BranchedProcessorSpec {
             inputs: Vec::new(),
             state: None,
             output_schema: Vec::new(),
+            mode: InferencerExecutionMode::PerMessage,
         },
     }
 }
@@ -274,6 +275,7 @@ fn eager_binding_prepares_every_processor_family_before_publication() {
                 tensor: "score".to_string(),
                 schema: inferencer_tensor_schema(nonzero!(1u32)),
             }],
+            mode: InferencerExecutionMode::PerMessage,
         },
     );
     let wasm = processor_spec(
@@ -1132,6 +1134,7 @@ fn inferencer_input_mappings_compile_when_template_is_materialized() {
                 tensor: "score".to_string(),
                 schema: inferencer_tensor_schema(nonzero!(1u32)),
             }],
+            mode: InferencerExecutionMode::PerMessage,
         },
     };
     let mut relay_schemas = HashMap::default();

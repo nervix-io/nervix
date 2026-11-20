@@ -460,7 +460,7 @@ impl Runtime {
 
     /// Installs `domains` as a committed revision would, each with the same assigned test clock
     /// authority, for tests of the runtime and of the edges that observe it.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "benchmarks"))]
     pub(crate) fn sync_domains(&self, domains: &BTreeMap<DomainName, DomainState>) {
         let authority = DomainClockAuthority::assigned(
             nervix_models::DomainClockAuthorityRevision::INITIAL,
@@ -480,7 +480,7 @@ impl Runtime {
 
     /// The committed revision a test installation stands for: newer than every lifecycle this
     /// runtime holds, as each revision a node installs is newer than the ones it installed before.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "benchmarks"))]
     fn next_test_lifecycle_revision(&self) -> u64 {
         let newest = self
             .inner

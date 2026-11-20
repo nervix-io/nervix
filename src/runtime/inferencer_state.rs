@@ -20,7 +20,7 @@ use nervix_primitives::sync::Arc;
 use super::{
     PersistedRuntimeStateEntry, RuntimePersistenceError, RuntimeStateOperationError,
     RuntimeStatePlacement, RuntimeStateResult, RuntimeStateStore,
-    inferencer::{NativeGeneration, PreparedStatefulInference, StatefulInferenceSession},
+    inferencer::NativeGeneration,
     published_generation::{Generation, PublishedGenerations},
     replicated_branch_state::{BranchSnapshotCodec, ReplicatedBranchState},
     snapshot_staging::SnapshotStaging,
@@ -39,6 +39,21 @@ pub(super) struct InferencerGeneration {
     pub(in crate::runtime) incarnation: u64,
     pub(in crate::runtime) generation: Arc<NativeGeneration>,
     snapshot_bytes: u64,
+}
+
+impl InferencerGeneration {
+    /// The generation a branch of `incarnation` publishes, with the bytes its snapshot takes.
+    pub(in crate::runtime) fn new(
+        incarnation: u64,
+        generation: Arc<NativeGeneration>,
+        snapshot_bytes: u64,
+    ) -> Self {
+        Self {
+            incarnation,
+            generation,
+            snapshot_bytes,
+        }
+    }
 }
 
 impl ReplicatedInferencerState {
@@ -90,43 +105,6 @@ impl ReplicatedInferencerState {
             placement,
             PublishedGenerations::restored(revision, value),
         ))
-    }
-
-    pub(super) fn restore_session(
-        &self,
-        prepared: &PreparedStatefulInference,
-        incarnation: u64,
-        metrics: crate::metrics::InferencerStateMetrics,
-    ) -> StatefulInferenceSession {
-        let mut session =
-            prepared.instantiate(metrics.track_branch(prepared.state.bytes_per_branch));
-        let published = self.generations.load();
-        let restored = published
-            .value
-            .as_ref()
-            .is_some_and(|value| value.incarnation == incarnation);
-        metrics.initialized(restored);
-        if let Some(value) = &published.value {
-            if value.incarnation == incarnation {
-                session.restore_generation(value.generation.clone());
-            } else {
-                self.publish(None);
-            }
-        }
-        session
-    }
-
-    pub(super) fn publish_session(
-        &self,
-        session: &StatefulInferenceSession,
-        incarnation: u64,
-        snapshot_bytes: u64,
-    ) {
-        self.publish(Some(InferencerGeneration {
-            incarnation,
-            generation: session.generation(),
-            snapshot_bytes,
-        }));
     }
 
     pub(super) async fn snapshot_after(

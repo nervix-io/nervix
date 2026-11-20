@@ -470,8 +470,9 @@ subscription predicates and state inspection; ingestion-boundary admission follo
 own contract.
 
 An accepted owner can acquire a charged CPU queue place before transferring mutable state into a
-job. The stateful inferencer does this before taking its native session out of the branch. Dropping
-the full-queue wait leaves that session installed and returns the charge. After submission,
+job. Every inferencer does this before moving its branch's native session into the job that runs
+its model on the extension workers; the job hands the session back with its outcome. Dropping the
+full-queue wait leaves that session installed and returns the charge. After submission,
 cancellation follows the same queued and running job rules as every other admitted run.
 
 The storage submission adapter and each job's invocation carry explicit dispatch contracts for
@@ -528,6 +529,7 @@ paths remain visible.
 | Shared Loom participant launcher | `thread::Builder` | Loom's five slots, including coordinator and body, the branch limit and runner watchdog; participants end within one model execution |
 | Benchmark load driver | `thread::Builder`, `thread::scope` | One joined summary poller per drain owner, and one scoped watermark query per configured partition, each with the request timeout within the driver deadline |
 | Turmoil scenario runner | `thread::Builder` | One scheduler per disposable attempt; physical run and cleanup deadlines, a normal join, and a failed process when either deadline is missed |
+| Cucumber scenario suite runner | `thread::Builder` | One thread with a 16 MiB stack per suite process. The main thread joins it after the scenario run and bounded teardown. A watchdog timeout exits the process after bounded cleanup. |
 | Plexus completion walk | `thread::Builder`, `thread::scope` | At most the configured jobs per finite frontier; every worker is joined before the next level |
 | Public C binding probes and external Kafka member | `thread::spawn`, `thread::scope`, `thread::Builder` as listed for each file | Fixed probe participants joined within their bounded call and cancellation waits; one Kafka poller per member, stopped and joined when the member drops |
 

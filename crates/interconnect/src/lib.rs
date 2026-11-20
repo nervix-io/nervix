@@ -66,6 +66,7 @@ pub use authentication::TransportClock;
 pub use connection::{
     ChargedItem, DuplexCodec, DuplexItems, DuplexReceiver, DuplexResponses, DuplexSendProgress,
     DuplexSender, EncodedMessage, IncomingByteStream, RelayAdmission, RelayCancellationGuard,
+    RelaySendProgress,
 };
 pub use entropy::TransportEntropy;
 pub use identity::{JoinTerms, TlsConfigBundle, TransportIdentity};
@@ -1226,6 +1227,19 @@ impl Transport {
         envelope: Envelope,
     ) -> Result<(), Report<TransportError>> {
         self.inner.send(peer_node_id, envelope).await
+    }
+
+    /// Send one relay payload, as [`Self::send`] does, and record in `progress` whether the send
+    /// started an exchange with `peer_node_id`. A sender that must learn whether a failed or
+    /// abandoned delivery can have reached its receiver keeps one `progress` across every send of
+    /// that delivery and reads it afterwards.
+    pub async fn send_relay(
+        &self,
+        peer_node_id: &ClusterNodeName,
+        payload: RelayPayload,
+        progress: &RelaySendProgress,
+    ) -> Result<(), Report<TransportError>> {
+        self.inner.send_relay(peer_node_id, payload, progress).await
     }
 
     pub async fn cancel_relay(

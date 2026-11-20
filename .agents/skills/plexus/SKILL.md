@@ -221,6 +221,10 @@ the graph; otherwise use conspicuous placeholders and state the assumptions.
 - Processing: filtering, construction, Roto UDFs, deduplication, ordering, windows, inference,
   WASM fuel and linear-memory budgets, correlation, materialized state, lookup, generation, or
   repartitioning.
+- For any inferencer, read `Runtime Nodes` → `Inferencer` → `Execution` before choosing tensor
+  shapes or routes: the model runs once per admitted batch before any route, a `BATCH` model's batch
+  is the input batch, so size it with `COLLECT FOR ... MAX BATCH SIZE` rather than a route's
+  `FLUSH`, and one message at a time a refused row fails alone through `ON MESSAGE ERROR`.
 - For inference with model-carried state, read `Runtime Nodes` → `Inferencer` → `State tensors`
   and `Shutdown And Recovery` → `What Survives` before choosing port bindings, initialization,
   branch isolation or recovery guarantees. Check the snapshot-section bound and branch retention;

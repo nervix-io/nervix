@@ -91,8 +91,10 @@ pub(super) enum RecordStorage {
         registrations: Vec<Option<u64>>,
         timing: RemoteAckTiming,
     },
-    /// The delivery stopped needing them while it waited for room to store them.
-    Cancelled,
+    /// The delivery stopped needing them while it waited for room to store them. Nothing was
+    /// stored, and the shares the delivery handed over come back unresolved, for whatever ends the
+    /// delivery to decide.
+    Cancelled { acks: Vec<AckSet> },
 }
 
 enum CorrelationSlot {
@@ -501,9 +503,9 @@ impl RemoteDispatchRegistry {
     /// the relay budget has no room for them.
     ///
     /// The wait reads the budget rather than queueing in it, as a receiver's watch charge does, and
-    /// ends without storing anything as soon as `cancelled` resolves. Records larger than the whole
-    /// budget, or still without room at `deadline`, are refused with the budget's refusal beneath
-    /// `CorrelationMemory`.
+    /// ends without storing anything as soon as `cancelled` resolves, handing `acks` back. Records
+    /// larger than the whole budget, or still without room at `deadline`, are refused with the
+    /// budget's refusal beneath `CorrelationMemory`.
     pub(super) async fn store_acks(
         &self,
         receiver: ClusterNodeName,
@@ -523,7 +525,7 @@ impl RemoteDispatchRegistry {
             .await
             .change_context(RemoteDispatchError::CorrelationMemory)?;
         let RelayMemoryHolding::Charged(memory) = holding else {
-            return Ok(RecordStorage::Cancelled);
+            return Ok(RecordStorage::Cancelled { acks });
         };
         let registrations =
             self.register_charged_acks(receiver, acks, memory, timing, Instant::now)?;
@@ -781,6 +783,17 @@ impl RemoteDispatchRegistry {
 
     pub(super) fn clear_ack(&self, id: u64) {
         drop(self.take(id));
+    }
+
+    /// Ends the forwarded share of a record whose delivery never reached its receiver, without
+    /// deciding the record: the record's own share stays with the delivery that carries it next,
+    /// and that delivery's outcome decides it.
+    pub(super) fn release_ack(&self, id: u64) {
+        match self.take(id) {
+            Some(RetiredCorrelation::Record(pending)) => pending.acks.ack_success(),
+            Some(RetiredCorrelation::Admission(admission)) => drop(admission),
+            None => {}
+        }
     }
 
     #[cfg(test)]

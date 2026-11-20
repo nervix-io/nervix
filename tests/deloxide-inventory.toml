@@ -500,6 +500,26 @@ scenario = "Partitioned dependency reads resolve each keys materialized owner lo
 selections = ["deloxide-stress"]
 
 [[workload]]
+coverage = "Three nodes exercise the tracked partition and relay registrations and the materialized snapshot cache through a remote dependency read. The test pause and transport waits use untracked async primitives."
+examples = 1
+feature = "tests/features/runtime/processor_partitions.feature"
+id = "scenario.processor-partitions-snapshot-replacement"
+invariant = "A partitioned junction delivers its waiting event with the exact preference after a second reader seals a replacement for its described snapshot."
+invocation = "scenarios"
+scenario = "A partitioned dependency read survives replacement of its sealed snapshot"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: Three nodes exercise the tracked partition and relay registrations and the materialized snapshot cache through a remote dependency read. The test pause and transport waits use untracked async primitives."
+examples = 1
+feature = "tests/features/runtime/processor_partitions.feature"
+id = "stress.processor-partitions-snapshot-replacement"
+invariant = "A partitioned junction delivers its waiting event with the exact preference after a second reader seals a replacement for its described snapshot."
+invocation = "stress-scenarios"
+scenario = "A partitioned dependency read survives replacement of its sealed snapshot"
+selections = ["deloxide-stress"]
+
+[[workload]]
 coverage = "Production partition supervisors, scoped relay registrations, dispatch fences and checkpoint ownership acquire selected blocking locks; transport waits and guest internals remain outside detector evidence."
 examples = 1
 feature = "tests/features/cluster/processor_partition_recovery.feature"
@@ -2318,7 +2338,7 @@ scenario = "Rebinding a VHOST to another version of its TLS bundle refreshes eve
 selections = ["deloxide", "deloxide-order"]
 
 [[workload]]
-coverage = "The ONNX session lock of a batched inferencer whose model runs for interleaved concrete branches."
+coverage = "Relay delivery and branch tasks of a batched inferencer whose model runs once for each collected batch of two interleaved concrete branches. Each branch task owns its ONNX session without a lock, so the model run itself holds no tracked lock."
 examples = 2
 feature = "tests/features/runtime/inferencer.feature"
 id = "scenario.inferencer-branch-batches"
@@ -2858,7 +2878,7 @@ scenario = "Rebinding a VHOST to another version of its TLS bundle refreshes eve
 selections = ["deloxide-stress"]
 
 [[workload]]
-coverage = "Under scheduling stress: the ONNX session lock of a batched inferencer whose model runs for interleaved concrete branches."
+coverage = "Under scheduling stress: relay delivery and branch tasks of a batched inferencer whose model runs once for each collected batch of two interleaved concrete branches. Each branch task owns its ONNX session without a lock, so the model run itself holds no tracked lock."
 examples = 2
 feature = "tests/features/runtime/inferencer.feature"
 id = "stress.inferencer-branch-batches"
@@ -4993,13 +5013,6 @@ workloads = [
   "stress.client-alter-drain",
   "scenario.backup-parked-wait-slow-reads",
   "stress.backup-parked-wait-slow-reads",
-]
-
-[[owner]]
-path = "src/runtime/inferencer.rs"
-workloads = [
-  "scenario.inferencer-branch-batches",
-  "stress.inferencer-branch-batches",
 ]
 
 [[owner]]
