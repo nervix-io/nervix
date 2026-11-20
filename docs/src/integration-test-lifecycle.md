@@ -2538,16 +2538,15 @@ cause.
 Cleanup receives the remaining node startup budget, and the product's shutdown deadline cannot
 restart it. A node gives back its consensus fault registration itself once its consensus has
 stopped, and once the task ends, cleanup gives back only the registration of a task that panicked
-or was cancelled before that point. A
-transient failure may then move the selected listeners to fresh ports and pause one second before
-another launch, provided the same budget still has time. A bind failure preserves unrelated
-addresses; a readiness timeout selects all seven ports.
+or was cancelled before that point. A transient failure may then move the selected listeners to
+fresh ports and pause one second before another launch, provided the same budget still has time. A
+bind failure preserves unrelated addresses; a readiness timeout selects all seven ports.
 
 A node still stopping when that budget expires keeps its task, its shutdown coordinator, its
 database and its listeners until its own shutdown has finished, and its fault registration until
-its consensus has stopped. The startup
-reports exhaustion, and cluster teardown waits for that node or leaves it stopping under its
-keeper. It never launches a replacement into resources a running predecessor still holds.
+its consensus has stopped. The startup reports exhaustion, and cluster teardown waits for that node
+or leaves it stopping under its keeper. It never launches a replacement into resources a running
+predecessor still holds.
 
 The startup ends in one of four ways, each reported with the node, its budget, the time spent, and
 the record of every attempt:

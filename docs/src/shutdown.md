@@ -1111,11 +1111,10 @@ dropped. The registry and runtime database is released separately after the serv
 handles. Terminal teardown does not finish until both database locks have been released, whatever
 asked the node to stop: a termination signal, the caller embedding it, a failed listener, a refused
 initialization, or the cluster refusing its join. A node whose start fails after it opened its
-stores releases both locks
-the same way before it returns. In a build with the `testing` feature, the fault injection also
-keeps an observer of each running node's consensus state. The node gives that observer back itself
-as soon as its consensus has stopped, so nothing it registered holds the consensus database once
-it has returned, and the same node can start again in the same process; see
+stores releases both locks the same way before it returns. In a build with the `testing` feature,
+the fault injection also keeps an observer of each running node's consensus state. The node gives
+that observer back itself as soon as its consensus has stopped, so nothing it registered holds the
+consensus database once it has returned, and the same node can start again in the same process; see
 [Integration Test Lifecycle](./integration-test-lifecycle.md#cluster-teardown). See
 [Consensus Storage And Replication](./consensus-storage-and-replication.md) for the write, replay,
 retention, and snapshot contracts behind this barrier.
