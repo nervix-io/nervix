@@ -2593,12 +2593,18 @@ contract.
 
 ## Ingestor Instance Observation And Intake Gates
 
-An ingestor describe request carries its exact `Unit`. The receiver resolves the current owner
-for that unit and reports only its ingestor lifetime, readiness and transient state. The control
-plane composes the logical description from all scheduled unit owners. The ingestor envelope
-also carries its complete ordered source-interaction metric lines, preserving the local counter
-and duration projection through remote inspection. The current wire fingerprint includes this
-required field.
+An ingestor describe request carries its exact `Unit`. The serving owner reports that unit's
+lifetime, readiness, transient state and metrics. The reply includes typed intake counters and
+the ordered `source_metrics` strings for reads, polls, endpoint outcomes, acknowledgements,
+lifecycle and declared events. The asking node uses the strings for display and assembles the
+description from the scheduled unit owners. The current wire fingerprint includes the required
+field.
+
+Remote emitter inspection fetches the owner-rendered `destination:` lines in the metrics reply.
+For an instanced emitter, the control plane obtains the observations from the nodes that execute
+its units. The labels retain their physical node and instance. [Connector Interaction
+Metrics](metrics-and-observability.md#connector-interaction-metrics) owns both sections' line
+formats and series lifetimes.
 
 Entity-gate engagement and drain-status requests carry `EntityGateTargets`: complete logical
 entities for model changes, or exact `NodeUnitRef` units for ownership transfer. Lease identity
