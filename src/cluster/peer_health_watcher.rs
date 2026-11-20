@@ -127,6 +127,7 @@ mod tests {
                         .parse()
                         .assured("the test endpoint is valid"),
                 )],
+                &std::collections::BTreeSet::new(),
                 now,
                 freshness,
             )

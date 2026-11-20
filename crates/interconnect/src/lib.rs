@@ -67,6 +67,7 @@ pub use authentication::TransportClock;
 pub use connection::{
     ChargedItem, DuplexCodec, DuplexItems, DuplexReceiver, DuplexResponses, DuplexSendProgress,
     DuplexSender, EncodedMessage, IncomingByteStream, RelayAdmission, RelayCancellationGuard,
+    RelaySendProgress,
 };
 pub use entropy::TransportEntropy;
 pub use identity::{JoinTerms, TlsConfigBundle, TransportIdentity};
@@ -612,7 +613,14 @@ pub struct ConfirmOwnershipHandoffStateRequest {
 }
 
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ForcedOwnershipRecoveryRound {
+    pub leader_term: u64,
+    pub coordination: CoordinationIdentity,
+}
+
+#[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PrepareForcedOwnershipRecoveryRequest {
+    pub round: ForcedOwnershipRecoveryRound,
     /// The coordinator captures this budget from the policy that planned the transition.
     pub recovery_budget: nervix_models::ClusterParameterDuration,
     pub operation_id: String,
@@ -624,6 +632,11 @@ pub struct PrepareForcedOwnershipRecoveryRequest {
     pub unit: Unit,
     pub base_schedule_fingerprint: [u8; 32],
     pub target_schedule_fingerprint: [u8; 32],
+}
+
+#[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DiscardForcedOwnershipRecoveryRequest {
+    pub preparation: PrepareForcedOwnershipRecoveryRequest,
 }
 
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
@@ -1226,6 +1239,19 @@ impl Transport {
         envelope: Envelope,
     ) -> Result<(), Report<TransportError>> {
         self.inner.send(peer_node_id, envelope).await
+    }
+
+    /// Send one relay payload, as [`Self::send`] does, and record in `progress` whether the send
+    /// started an exchange with `peer_node_id`. A sender that must learn whether a failed or
+    /// abandoned delivery can have reached its receiver keeps one `progress` across every send of
+    /// that delivery and reads it afterwards.
+    pub async fn send_relay(
+        &self,
+        peer_node_id: &ClusterNodeName,
+        payload: RelayPayload,
+        progress: &RelaySendProgress,
+    ) -> Result<(), Report<TransportError>> {
+        self.inner.send_relay(peer_node_id, payload, progress).await
     }
 
     pub async fn cancel_relay(

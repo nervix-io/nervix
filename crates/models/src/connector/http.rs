@@ -293,12 +293,24 @@ const HTTP_REQUEST_INGESTOR_BOUNDS: DeclaredBounds = DeclaredBounds {
     ],
 };
 
-/// What the connector of a HTTP ENDPOINT holds and how long it waits.
+/// What the connector of a HTTP ENDPOINT holds and how long it waits. The node's listener bounds
+/// each request by its listener and intake settings before the endpoint dispatches it.
 const HTTP_ENDPOINT_INGESTOR_BOUNDS: DeclaredBounds = DeclaredBounds {
     buffers: &[
         DeclaredBuffer {
             holds: "a request body",
-            bound: BufferBound::Unbounded,
+            bound: BufferBound::Bounded {
+                capacity: BufferCapacity::NodeSetting("http-body-bytes"),
+                overflow: BufferOverflow::RefuseOversized,
+            },
+        },
+        DeclaredBuffer {
+            holds: "the request input of every HTTP endpoint connection on the node together, \
+                    read buffers included",
+            bound: BufferBound::Bounded {
+                capacity: BufferCapacity::NodeSetting("execution-intake-memory-bytes"),
+                overflow: BufferOverflow::RefuseRequest,
+            },
         },
         DeclaredBuffer {
             holds: "unresolved requests under MODE ACK, per node and ingestor",
@@ -310,8 +322,18 @@ const HTTP_ENDPOINT_INGESTOR_BOUNDS: DeclaredBounds = DeclaredBounds {
     ],
     waits: &[
         DeclaredWait {
-            wait: "a client's request head and body",
-            bound: WaitBound::Unbounded,
+            wait: "a client's request head",
+            bound: WaitBound::NodeSetting {
+                setting: "listener-header-timeout",
+                expiry: "closes the connection without an answer",
+            },
+        },
+        DeclaredWait {
+            wait: "a client's request body",
+            bound: WaitBound::NodeSetting {
+                setting: "http-body-timeout",
+                expiry: "refuses the request as timed out",
+            },
         },
         DeclaredWait {
             wait: "graph acknowledgement under MODE ACK",
@@ -963,5 +985,62 @@ mod tests {
             HTTP_DEFAULT_MAX_BODY_SIZE
         );
         assert_eq!(every.keywords, "EVERY");
+    }
+
+    #[test]
+    fn an_endpoint_declares_the_node_settings_that_bound_each_request() {
+        let bounds = HttpEndpointIngestor::CAPABILITIES.bounds;
+        let [body, intake, unresolved] = bounds.buffers else {
+            panic!(
+                "an HTTP endpoint declares a request body, the node's intake pool and the \
+                 requests MODE ACK leaves unresolved"
+            );
+        };
+        assert_eq!(
+            body.bound,
+            BufferBound::Bounded {
+                capacity: BufferCapacity::NodeSetting("http-body-bytes"),
+                overflow: BufferOverflow::RefuseOversized,
+            }
+        );
+        assert_eq!(
+            intake.bound,
+            BufferBound::Bounded {
+                capacity: BufferCapacity::NodeSetting("execution-intake-memory-bytes"),
+                overflow: BufferOverflow::RefuseRequest,
+            }
+        );
+        assert_eq!(
+            unresolved.bound,
+            BufferBound::Bounded {
+                capacity: BufferCapacity::Setting("MODE ACK MAX"),
+                overflow: BufferOverflow::RefuseRequest,
+            }
+        );
+        let [head, request_body, acknowledgement] = bounds.waits else {
+            panic!(
+                "an HTTP endpoint waits for a request head, its body and, under MODE ACK, the \
+                 graph's acknowledgement"
+            );
+        };
+        assert_eq!(
+            head.bound,
+            WaitBound::NodeSetting {
+                setting: "listener-header-timeout",
+                expiry: "closes the connection without an answer",
+            }
+        );
+        assert_eq!(
+            request_body.bound,
+            WaitBound::NodeSetting {
+                setting: "http-body-timeout",
+                expiry: "refuses the request as timed out",
+            }
+        );
+        assert_eq!(
+            acknowledgement.bound,
+            WaitBound::Clause("ACK TIMEOUT, or the exact intake lifetime ending")
+        );
+        assert_eq!(bounds.deadline_keys(), Vec::new());
     }
 }

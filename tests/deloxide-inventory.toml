@@ -500,6 +500,26 @@ scenario = "Partitioned dependency reads resolve each keys materialized owner lo
 selections = ["deloxide-stress"]
 
 [[workload]]
+coverage = "Three nodes exercise the tracked partition and relay registrations and the materialized snapshot cache through a remote dependency read. The test pause and transport waits use untracked async primitives."
+examples = 1
+feature = "tests/features/runtime/processor_partitions.feature"
+id = "scenario.processor-partitions-snapshot-replacement"
+invariant = "A partitioned junction delivers its waiting event with the exact preference after a second reader seals a replacement for its described snapshot."
+invocation = "scenarios"
+scenario = "A partitioned dependency read survives replacement of its sealed snapshot"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: Three nodes exercise the tracked partition and relay registrations and the materialized snapshot cache through a remote dependency read. The test pause and transport waits use untracked async primitives."
+examples = 1
+feature = "tests/features/runtime/processor_partitions.feature"
+id = "stress.processor-partitions-snapshot-replacement"
+invariant = "A partitioned junction delivers its waiting event with the exact preference after a second reader seals a replacement for its described snapshot."
+invocation = "stress-scenarios"
+scenario = "A partitioned dependency read survives replacement of its sealed snapshot"
+selections = ["deloxide-stress"]
+
+[[workload]]
 coverage = "Production partition supervisors, scoped relay registrations, dispatch fences and checkpoint ownership acquire selected blocking locks; transport waits and guest internals remain outside detector evidence."
 examples = 1
 feature = "tests/features/cluster/processor_partition_recovery.feature"

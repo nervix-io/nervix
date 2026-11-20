@@ -211,6 +211,7 @@ impl Runtime {
                 prepared_runtime_state_handoffs,
                 activated_runtime_state_handoffs: DashMap::default(),
                 prepared_forced_runtime_state_recoveries: DashMap::default(),
+                rejected_forced_recovery_round: watch::channel((0, 0)).0,
                 prepared_runtime_state_snapshots: DashMap::default(),
                 relay_branch_presences: DashMap::default(),
                 partition_holdings: Default::default(),

@@ -1156,8 +1156,10 @@ message-error acknowledgements alive while a connector request is pending, givin
 ingestor `ACK TIMEOUT` multiple chances to observe progress. Record storage waits for room before the
 delivery's body is encoded, as [Held Deliveries](#held-deliveries) describes; refusing it is typed
 and occurs before the delivery is sent. Cancellation before admission resolves every held share
-negatively and returns its position. Completion of the last record returns the delivery storage and
-its charge.
+negatively and returns its position, except that a delivery a route change carries on to the
+unit's new owner before it reached its former one releases its held shares and leaves its rows'
+acknowledgements to that next delivery. Completion of the last record returns the delivery storage
+and its charge.
 
 The receiver charges a batch's watches before it decodes the batch and before runtime admission.
 While the relay budget has no room for them, typically because the watches of earlier batches are
@@ -1280,8 +1282,12 @@ way a receiver's watch charge does: it reads the budget every 10 milliseconds, r
 release notification, and never queues in the budget. It waits inside the delivery's channel, so
 the deliveries of one channel keep their order, and before the body is encoded, so a delivery
 waiting for record storage holds no encoded body. Ending the delivery's channel, by evicting its
-branch or retiring its route, ends the wait and resolves the rows' shares negatively. Only a charge
-larger than the whole budget, or one still without room when the delivery's bound passes, is
+branch or retiring its route, ends the wait without storing anything and hands the shares it was
+given back to the delivery, which resolves them negatively. While a route change being installed
+retires the route of a live branch whose producer still runs, the delivery instead releases those
+shares and its rows go on to the unit's owner on the new route with their acknowledgements
+undecided, as [Cancellation And Branch Changes](#cancellation-and-branch-changes) describes. Only a
+charge larger than the whole budget, or one still without room when the delivery's bound passes, is
 refused, as `CorrelationMemory` with the budget's typed `AdmissionError` beneath it.
 
 One five-minute bound covers the whole delivery: storing its records, holding its grant, and
@@ -1332,6 +1338,14 @@ budget holds, the least recently used watermarks go first, as
 [Bounded Correlation And Peer Owners](#bounded-correlation-and-peer-owners) describes. A sender
 that then resumes or reconciles a forgotten channel is answered `Retired`, treats the delivery as
 indeterminate, and reopens the channel under a fresh incarnation.
+
+A delivery has something to reconcile only once one of its sends started an exchange: a send
+records that start immediately before it registers the delivery's outbound attempt and sends the
+grant request, the first step a receiver can act on. A send that ends or is abandoned earlier, while
+it still waits for a connection to the receiver, leaves no attempt there. The sender keeps that
+record across every send of one delivery (`RelaySendProgress`). When a delivery ends without any of
+its sends having started an exchange, the sender asks the receiver nothing: the delivery fails as
+never having reached that node, and the channel's next delivery takes its unused position.
 
 The [relay reconciliation and receiver-restart simulations](./interconnect-simulation.md#relay-reconciliation-and-cancellation)
 check this boundary through the production authenticated connection. They lose the reply after an
@@ -1384,12 +1398,19 @@ them.
 
 A committed forced ownership change also retires changing relay routes' preceding channel
 generation before the local graph installer waits for dispatch quiescence. The sender interrupts
-its admission wait and uses the same cancellation operation and five-second reconciliation budget.
-It need not wait for the fenced former owner to resume. An admitted result keeps the receiver's
-record-ACK obligation; an unconfirmed or cancelled delivery fails its held record ACKs for ingestor
-retry, with possible replay duplicates. No transport message or automatic replay contract changes.
-The installer publishes successor routes only after completing the local swap, so another dispatch
-cannot open a fresh channel toward a preceding consumer while that fence is held.
+its admission wait. A delivery to the fenced former owner whose sends never started an exchange,
+typically because each was still waiting for a connection to a node that stopped, left nothing on
+that owner. It ends at once, releasing its channel position and dispatch permits without a
+cancellation request, and its producer delivers the rows again to the unit's owner on the route the
+installer publishes, so they arrive there exactly once. A producer whose own branch ended meanwhile
+fails those rows instead, as it fails its other work still waiting for admission. A delivery that
+may have reached the former owner uses the same cancellation operation and five-second
+reconciliation budget. It need not wait
+for the fenced former owner to resume. An admitted result keeps the receiver's record-ACK
+obligation; an unconfirmed or cancelled delivery fails its held record ACKs for ingestor retry, with
+possible replay duplicates. No transport message or automatic replay contract changes. The installer
+publishes successor routes only after completing the local swap, so another dispatch cannot open a
+fresh channel toward a preceding consumer while that fence is held.
 
 ### Consumers That Leave The Receiver
 
@@ -1964,6 +1985,14 @@ their existing persistence steps before description. No checkpoint body enters a
 replication-class message. Preparation retains its verified checkpoint set until activation, so
 the destination's total held bytes still grow with the number and size of the entity's branches.
 
+The forced-recovery prepare and discard requests use the Replication class. Both carry the
+leader's term and a coordination identity bound to the authenticated peer process. A discard
+also names the exact preparation, including its destination incarnation and target-schedule
+fingerprint. The destination checks the declared term against its observed leadership. An
+accepted discard fences delayed prepares from that round before it removes the named staged
+state. See [Planned Ownership Handoffs And Failover](control-plane.md#planned-ownership-handoffs-and-failover)
+for the publication and rejection rules.
+
 Runtime-state synchronization replies and materialized-snapshot descriptions carry the shared
 typed remote-operation failure envelope. Rejection, absence, temporary unreadiness, and execution
 failure remain distinct across the node boundary, and the requester keeps that classification in
@@ -1986,7 +2015,7 @@ Runtime-state message properties use the production bounded encoder and decoder 
 request's Commands, Replication or Bulk class. The `runtime-state-replication-wire` target checks
 complete request and response values, including every state kind, schema and WASM generation,
 model kind, checkpoint read kind, ordered listing, full-width counters, checkpoint length and
-digest, and each remote-operation refusal and subject. Branch floats are compared by their bits,
+digest, forced-recovery round identity, and each remote-operation refusal and subject. Branch floats are compared by their bits,
 including signed zero and nested collection values. `runtime-checkpoint-listing-owner` additionally
 checks the complete runtime owner listing across its semantic conversion and the replication
 response codec. Its current branch-key domain is nonempty, has distinct canonical field names,

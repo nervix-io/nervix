@@ -20,6 +20,7 @@
 use std::{
     cell::RefCell,
     collections::{BTreeMap, BTreeSet, VecDeque},
+    ffi::OsString,
     fmt,
     fs::{OpenOptions, create_dir_all},
     io::{Read as _, Write},
@@ -28,7 +29,7 @@ use std::{
     os::unix::process::{CommandExt as _, ExitStatusExt as _},
     panic::{AssertUnwindSafe, catch_unwind, resume_unwind},
     path::{Path, PathBuf},
-    process::{Command, Output, Stdio},
+    process::{Command, ExitCode, Output, Stdio, Termination as _},
     str::FromStr,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -52,7 +53,6 @@ use cucumber::{
     given, then, when,
     writer::{self, Stats as _},
 };
-use error_stack::Report;
 use futures_util::{
     StreamExt as _, TryStreamExt,
     future::{join_all, try_join_all},
@@ -99,7 +99,7 @@ use nervix_recovery::Discarded as _;
 use nervix_server::{
     FaultInjection, ModelPublicationRefusalKind, SchedulerMode, WasmStateResetRequestError,
     application::{
-        AppError, InternalTransportMode, NODE_TAGS_OPTION, SettingOverride, ShutdownPhaseOutcome,
+        InternalTransportMode, NODE_TAGS_OPTION, SettingOverride, ShutdownPhaseOutcome,
         run_server_process,
     },
     memory_pressure::MemoryPressureConfig,
@@ -13316,6 +13316,65 @@ async fn when_directed_health_probes_fail(
         .fail_health_responses_between(&probing_node_id, &responding_node_id);
 }
 
+#[given("the first forced recovery publication is paused")]
+fn given_first_forced_recovery_publication_is_paused(world: &mut ScenarioWorld) {
+    let domain = nervix_models::DomainName::try_from(world.domain.as_str())
+        .expect("the scenario domain name is valid");
+    world
+        .fault_injection
+        .pause_first_forced_recovery_publication(domain);
+}
+
+#[then("the first forced recovery publication reaches its pause")]
+async fn then_first_forced_recovery_publication_reaches_its_pause(world: &mut ScenarioWorld) {
+    let domain = nervix_models::DomainName::try_from(world.domain.as_str())
+        .expect("the scenario domain name is valid");
+    nervix_primitives::time::timeout(
+        Duration::from_secs(60),
+        world
+            .fault_injection
+            .wait_for_forced_recovery_publication_pause(&domain),
+    )
+    .await
+    .expect("the leader did not reach the forced recovery publication pause");
+}
+
+#[when("the first forced recovery publication is released")]
+fn when_first_forced_recovery_publication_is_released(world: &mut ScenarioWorld) {
+    let domain = nervix_models::DomainName::try_from(world.domain.as_str())
+        .expect("the scenario domain name is valid");
+    world
+        .fault_injection
+        .release_forced_recovery_publication(&domain);
+}
+
+#[then(expr = "{int} forced recovery preparation round reached publication")]
+fn then_forced_recovery_preparation_rounds(world: &mut ScenarioWorld, expected: usize) {
+    let domain = nervix_models::DomainName::try_from(world.domain.as_str())
+        .expect("the scenario domain name is valid");
+    assert_eq!(
+        world
+            .fault_injection
+            .forced_recovery_preparation_rounds(&domain),
+        expected,
+        "forced recovery preparation rounds for domain '{domain}'"
+    );
+}
+
+#[then("the destination discards the rejected forced recovery preparation")]
+async fn then_destination_discards_rejected_forced_recovery(world: &mut ScenarioWorld) {
+    let domain = nervix_models::DomainName::try_from(world.domain.as_str())
+        .expect("the scenario domain name is valid");
+    nervix_primitives::time::timeout(
+        Duration::from_secs(30),
+        world
+            .fault_injection
+            .wait_for_forced_recovery_discard(&domain),
+    )
+    .await
+    .expect("the destination did not discard the rejected forced recovery preparation");
+}
+
 #[when(expr = "runtime installation on node {string} is paused")]
 async fn when_runtime_installation_is_paused(world: &mut ScenarioWorld, node_id: String) {
     let node_id = expand_placeholders(world, &node_id);
@@ -13981,6 +14040,47 @@ async fn then_junction_parked_a_message(world: &mut ScenarioWorld, junction: Str
     )
     .await
     .expect("the junction parks the message on its materialized state");
+}
+
+fn materialized_snapshot_relay(world: &ScenarioWorld, relay: &str) -> nervix_models::DomainNodeRef {
+    let domain = nervix_models::DomainName::try_from(world.domain.as_str())
+        .assured("the scenario domain is an identifier-shaped name");
+    let relay = expand_placeholders(world, relay);
+    let relay = nervix_models::ModelName::try_from(relay.as_str())
+        .assured("the scenario relay is an identifier-shaped name");
+    nervix_models::DomainNodeRef::node_in(domain, nervix_models::ModelKind::Relay, relay)
+}
+
+#[given(expr = "the next remote snapshot fetch for relay {string} pauses before opening")]
+fn given_materialized_snapshot_opening_pause(world: &mut ScenarioWorld, relay: String) {
+    world
+        .fault_injection
+        .pause_materialized_snapshot_opening(materialized_snapshot_relay(world, &relay));
+}
+
+#[then(expr = "the remote snapshot fetch for relay {string} reaches its opening pause")]
+async fn then_materialized_snapshot_opening_pause_reached(
+    world: &mut ScenarioWorld,
+    relay: String,
+) {
+    let relay_ref = materialized_snapshot_relay(world, &relay);
+    nervix_primitives::time::timeout(
+        Duration::from_secs(30),
+        world
+            .fault_injection
+            .wait_for_materialized_snapshot_opening(&relay_ref),
+    )
+    .await
+    .unwrap_or_else(|_| {
+        panic!("the remote fetch for relay '{relay}' did not reach its opening pause")
+    });
+}
+
+#[when(expr = "the remote snapshot fetch for relay {string} leaves its opening pause")]
+fn when_materialized_snapshot_opening_pause_released(world: &mut ScenarioWorld, relay: String) {
+    world
+        .fault_injection
+        .release_materialized_snapshot_opening(&materialized_snapshot_relay(world, &relay));
 }
 
 #[then(expr = "the last shutdown of node {string} reports its drain-support phase {string}")]
@@ -32254,6 +32354,38 @@ async fn when_http_payload_begins_posting_in_the_background(
     world.background_http_publish = Some(AbortOnDropHandle::new(task));
 }
 
+/// Posts one payload in the background to an acknowledged endpoint, which answers once the graph
+/// acknowledges it. The post is made once: a refusal stays a failure of the background publish.
+#[when(
+    expr = "one http payload begins posting in the background with a completed graph \
+            acknowledgement to node {string} host {string} path {string}"
+)]
+async fn when_one_acknowledged_http_payload_begins_posting_in_the_background(
+    world: &mut ScenarioWorld,
+    node_id: String,
+    host: String,
+    path: String,
+    #[step] step: &Step,
+) {
+    assert!(
+        world.background_http_publish.is_none(),
+        "a background http publish is already active"
+    );
+    let node_id = expand_placeholders(world, &node_id);
+    let host = expand_placeholders(world, &host);
+    let path = expand_placeholders(world, &path);
+    let payload = expand_placeholders(world, docstring(step));
+    let publisher = world.cluster().acknowledged_http_publisher(
+        &node_id,
+        &host,
+        &path,
+        Duration::from_secs(30),
+    );
+    let task =
+        nervix_primitives::task::spawn(async move { publisher.publish_once(&payload).await });
+    world.background_http_publish = Some(AbortOnDropHandle::new(task));
+}
+
 #[then("the background http publish succeeds")]
 async fn then_the_background_http_publish_succeeds(world: &mut ScenarioWorld) {
     let task = world
@@ -38050,6 +38182,9 @@ async fn then_node_eventually_reports_interconnect_status(
     peer_node_id: String,
     expected_status: String,
 ) {
+    let node_id = expand_placeholders(world, &node_id);
+    let peer_node_id = expand_placeholders(world, &peer_node_id);
+    let expected_status = expand_placeholders(world, &expected_status);
     world
         .cluster()
         .wait_for_interconnect_status(&node_id, &peer_node_id, &expected_status)
@@ -38057,10 +38192,38 @@ async fn then_node_eventually_reports_interconnect_status(
         .expect("interconnect status did not converge");
 }
 
-fn main() -> Result<(), Report<AppError>> {
+#[then(expr = "node {string} eventually stops probing {string}")]
+async fn then_node_stops_probing_peer(world: &mut ScenarioWorld, node_id: String, peer: String) {
+    let node_id = expand_placeholders(world, &node_id);
+    let peer = expand_placeholders(world, &peer);
+    let deadline = PhaseDeadline::after(Duration::from_secs(30));
+    loop {
+        nervix_primitives::task::consume_budget().await;
+        let status = world.cluster().status_text(&node_id, deadline).await;
+        if let Ok(status) = &status
+            && status
+                .lines()
+                .any(|line| line == format!("raft.id: {node_id}"))
+            && crate::common::cluster::interconnect_status_from_text(status, &peer).is_none()
+        {
+            return;
+        }
+        assert!(
+            !deadline.has_passed(),
+            "node '{node_id}' kept probing '{peer}': {status:?}"
+        );
+        deadline.pause(Duration::from_millis(100)).await;
+    }
+}
+
+/// Cucumber polls steps on this thread. A debug build can exceed the default 8 MiB process stack
+/// when a step polls a Pulsar publish.
+const SCENARIO_RUNNER_STACK_BYTES: usize = 16 * 1024 * 1024;
+
+fn main() -> ExitCode {
     // A process started under the server's name is the server, and none of the suite below runs.
     let helper_scope = match ProcessProgram::of_this_process() {
-        ProcessProgram::Server => return run_server_process(),
+        ProcessProgram::Server => return run_server_process().report(),
         ProcessProgram::DependencyLifecycleHelper { scope } => Some(scope),
         ProcessProgram::Suite => None,
     };
@@ -38073,6 +38236,30 @@ fn main() -> Result<(), Report<AppError>> {
     // installed once for the whole process before any tracked lock or runtime worker exists.
     #[cfg(feature = "deloxide")]
     start_deadlock_diagnostics();
+
+    if let Some(scope) = helper_scope {
+        run_scenario_process(Some(scope));
+        return ExitCode::SUCCESS;
+    }
+
+    let runner = nervix_primitives::thread::Builder::new()
+        .name("scenario-runner".to_string())
+        .stack_size(SCENARIO_RUNNER_STACK_BYTES)
+        .spawn(|| run_scenario_process(None));
+    let runner = match runner {
+        Ok(runner) => runner,
+        Err(error) => {
+            eprintln!("failed to start the scenario runner thread: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    if let Err(payload) = runner.join() {
+        resume_unwind(payload);
+    }
+    ExitCode::SUCCESS
+}
+
+fn run_scenario_process(helper_scope: Option<OsString>) {
     let parallelism = TestParallelism::detect();
     let runtime = nervix_primitives::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -38104,12 +38291,11 @@ fn main() -> Result<(), Report<AppError>> {
     if let SuiteOutcome::TimedOut(_) = &outcome {
         eprintln!("{dependency_teardown}");
         outcome.end_process();
-        return Ok(());
+        return;
     }
 
     assert!(dependency_teardown.is_clean(), "{dependency_teardown}");
     outcome.end_process();
-    Ok(())
 }
 
 /// The environment variable naming the directory a diagnostic scenario binary records its deadlock

@@ -654,7 +654,7 @@ resubmitting an outcome that might already have produced output.
 
 | Element | Where it runs | Owner |
 | --- | --- | --- |
-| Scenario steps and hooks | One runner task: Cucumber polls every running scenario, and the suite watchdog around them, from the task the binary's main thread blocks on | `tests/scenarios.rs` |
+| Scenario steps and hooks | One dedicated thread with a 16 MiB stack runs Cucumber under the suite watchdog. The main thread waits for it to finish. | `tests/scenarios.rs` |
 | Scenario admission and timing | Feature permits, prioritized run slots, declared scenario weights and lengths, queue reasons, and accumulated attempt times in the runner process | `scenario_schedule.rs` and `scenario_phase.rs` |
 | In-process nodes | One Tokio task per node on the binary's multi-threaded runtime, which has one worker thread per CPU | The cluster fixture, `tests/common/cluster.rs` |
 | Server processes | Child processes of the scenario executable itself, started under the name `nervix-server` | The server-process fixture, `tests/common/server_process.rs`, and the program selection in `tests/common/process_program.rs` |

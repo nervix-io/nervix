@@ -547,3 +547,82 @@ Feature: Partitioned processors and generators
       | 1            | node-1      |
       | 3            | node-3      |
 
+  Scenario: A partitioned dependency read survives replacement of its sealed snapshot
+    Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
+    And the production sticky scheduler is configured
+    And a 3 node nervix cluster is started
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    And the active domain is "{{domain}}"
+    When these Plexus commands are executed on the leader node
+      """
+      CREATE SCHEMA event (tenant STRING, seq I64, amount I64);
+      CREATE WIRE JSON SCHEMA event_wire MODE STRICT (tenant string, seq integer, amount integer);
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
+      CREATE SCHEMA tenant_key (tenant STRING);
+      CREATE BRANCH tenants SCHEMA tenant_key TTL 5m PARTITIONS 2;
+      CREATE RELAY events SCHEMA event BRANCHED BY tenants;
+      CREATE RELAY checks SCHEMA event BRANCHED BY tenants;
+      CREATE RELAY preferences SCHEMA event BRANCHED BY tenants
+        WITH MATERIALIZED STATE LAST BY TIMESTAMP;
+      CREATE RELAY enriched SCHEMA event BRANCHED BY tenants;
+      CREATE VHOST edge snapshot-opening-{{test_id}}.example.com;
+      CREATE HTTP ENDPOINT ingress ON edge PATH '/events';
+      CREATE HTTP ENDPOINT check_ingress ON edge PATH '/checks';
+      CREATE HTTP ENDPOINT state_ingress ON edge PATH '/preferences';
+      CREATE HTTP ENDPOINT INGESTOR state_ingestor FROM state_ingress MODE NO ACK
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec TIMESTAMP NOW
+        TO preferences INHERIT ALL BRANCHED BY tenants SET tenant = message.tenant
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE HTTP ENDPOINT INGESTOR event_ingestor FROM ingress MODE NO ACK
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
+        TO events INHERIT ALL BRANCHED BY tenants SET tenant = message.tenant
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE HTTP ENDPOINT INGESTOR check_ingestor FROM check_ingress MODE NO ACK
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
+        TO checks INHERIT ALL BRANCHED BY tenants SET tenant = message.tenant
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE JUNCTION enrich FROM events BRANCHED BY tenants
+        USING MATERIALIZED STATE preferences REQUIRED WAIT
+        TO enriched INHERIT ALL SET amount = relay_state.preferences.amount
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
+      CREATE JUNCTION check_preference FROM checks BRANCHED BY tenants
+        USING MATERIALIZED STATE preferences REQUIRED WAIT
+        TO enriched INHERIT ALL SET amount = relay_state.preferences.amount
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
+      CREATE SUBSCRIPTION observed TO enriched;
+      START;
+      """
+    And these Plexus commands are executed through the client on the leader node
+      """
+      RELOCATE RELAY preferences ONTO NODE node-1 IGNORE PREFERENCES;
+      RELOCATE JUNCTION enrich ONTO NODE node-2 IGNORE PREFERENCES;
+      RELOCATE JUNCTION check_preference ONTO NODE node-3 IGNORE PREFERENCES;
+      """
+    Given the next remote snapshot fetch for relay "preferences" pauses before opening
+    When http payload is posted to node "node-1" with host "snapshot-opening-{{test_id}}.example.com" path "/events"
+      """
+      {"tenant":"acme","seq":1,"amount":20}
+      """
+    Then the remote snapshot fetch for relay "preferences" reaches its opening pause
+    When http payload is posted to node "node-1" with host "snapshot-opening-{{test_id}}.example.com" path "/preferences"
+      """
+      {"tenant":"acme","seq":1,"amount":200}
+      """
+    # The second reader seals the new generation on the same owner before the first opens its fetch.
+    And http payload is posted to node "node-1" with host "snapshot-opening-{{test_id}}.example.com" path "/checks"
+      """
+      {"tenant":"acme","seq":2,"amount":30}
+      """
+    Then within "30s" the relay subscription receives payloads
+      """
+      key={"tenant":"acme"} payload={"amount":200,"seq":2,"tenant":"acme"}
+      """
+    When the remote snapshot fetch for relay "preferences" leaves its opening pause
+    Then within "30s" the relay subscription receives payloads
+      """
+      key={"tenant":"acme"} payload={"amount":200,"seq":1,"tenant":"acme"}
+      """
+

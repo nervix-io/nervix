@@ -642,7 +642,7 @@ use relay_batch::build_stream_record_batch_preserving_acks;
 #[cfg(any(test, feature = "benchmarks"))]
 use relay_boundary::RelayRetention;
 use relay_boundary::{
-    BranchRelayDispatchGateLease, ConcreteRelayRuntime, ConcreteRelayRuntimeBuild,
+    BranchRelayDispatchGateLease, ConcreteRelayRuntime, ConcreteRelayRuntimeBuild, OwnerDelivery,
     RelayBoundaryBuilder, RelayBoundaryFanout, RelayBoundaryFanoutMap, RelayBoundaryServices,
     RelayBranchPresence, RelayBranchPresences, RelayOutboundSlot, RelayOwnerRoutes, RelayOwnerTask,
     RelayRuntimeFanIn, RemoteRuntimeConsumer, addressable_count,

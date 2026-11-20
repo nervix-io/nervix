@@ -39,6 +39,8 @@ use nervix_interconnect::{
     RemoteOperationSubject, RequestError, StreamHandlerError, StreamingResponse,
 };
 use nervix_models::ClusterNodeName;
+#[cfg(feature = "testing")]
+use nervix_models::DomainNodeRef;
 use nervix_primitives::time::{Instant, timeout_at};
 use thiserror::Error;
 
@@ -398,6 +400,15 @@ impl Runtime {
                 },
             ));
         };
+        #[cfg(feature = "testing")]
+        self.inner
+            .fault_injection
+            .pause_materialized_snapshot_opening_if_armed(DomainNodeRef::node_in(
+                placement.domain.clone(),
+                placement.kind,
+                &placement.identifier,
+            ))
+            .await;
         let timeout = self.inner.data_plane.snapshot_fetch_timeout();
         let opened = dispatcher
             .request_stream_with_timeout(

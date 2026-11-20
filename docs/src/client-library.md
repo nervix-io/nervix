@@ -738,8 +738,9 @@ order. Each branch entry names its opaque fingerprint, absent for the unbranched
 carries its current-lifetime checkpoint, its recorded recovery, or both.
 
 `DESCRIBE LICENSE;` returns the same typed envelope with `StateInspectionEntity::ClusterLicense`
-and summary/quota sections, including when no domain is selected. Match `StateInspectionEntity::DomainNode`
-to access the domain and graph-node reference of a materialized-state observation.
+and its `summary`, `quotas` and `transitions` sections, including when no domain is selected.
+Match `StateInspectionEntity::DomainNode` to access the domain and graph-node reference of a
+materialized-state observation.
 
 `SHOW INFERENCER <name> STATE` uses the same inspection objects. Its `header` section
 identifies each returned branch publication and its persistence/replica progress; `tensor_1`,

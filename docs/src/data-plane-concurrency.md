@@ -1965,10 +1965,28 @@ first-use bindings therefore both reject further deliveries through the precedin
 and immediately publishing a fresh generation would let an existing fan-out acquire a new channel
 for a consumer it selected before the fence. Only relays selected by the typed forced-recovery plan
 and whose routing actually changes are retired. Completed planned handoffs keep their ordinary
-quiescence path. Remote admission uses its existing cancellation/reconciliation budget of five
-seconds per interrupted attempt, rather than retaining a permit until the former owner resumes or
-the entity gate deadline passes. Unconfirmed deliveries fail their record ACKs for ingestor retry;
-already admitted work retains its existing ACK and silence contracts.
+quiescence path. A producer takes its ingress channel only after its dispatch permits, so the
+channel belongs to the route it read the owner from. A delivery to the former owner none of whose
+sends started an exchange holds nothing on that owner: it leaves at once and releases its permits,
+and its producer, holding the rows with their acknowledgements untouched, waits at the closed gate,
+then hands them to the unit's owner on the published route, its own owner buffer when the unit
+moved to its node. A producer whose own branch ended meanwhile fails the rows instead. A route
+change that retires a channel before a delivery sent anything on it does the same while the change
+holds the unit's gate; with no change in progress the delivery fails as before. Each further delivery follows another route change, so a producer never loops on a
+retired route. Remote admission that may have reached the former owner uses its existing
+cancellation/reconciliation budget of five seconds per interrupted attempt, rather than retaining a
+permit until the former owner resumes or the entity gate deadline passes. Unconfirmed deliveries
+fail their record ACKs for ingestor retry; already admitted work retains its existing ACK and
+silence contracts. The owner tests
+`a_batch_forwarded_to_a_departed_owner_follows_the_route_that_replaces_it`,
+`a_batch_waiting_to_store_its_records_follows_the_route_that_replaces_its_departed_owner`,
+`a_batch_held_before_its_grant_follows_the_route_that_replaces_its_departed_owner`,
+`a_produced_batch_forwarded_to_a_departed_owner_follows_the_route_that_replaces_it`,
+`a_producer_that_ends_during_the_failover_fails_its_forwarded_rows` and
+`a_delivery_that_never_reached_its_owner_fails_without_asking_that_owner` drive this through a
+loopback cluster whose former owner nothing routes to, and the three-node `failover_forwarding`
+Cucumber scenario forwards an acknowledged post to a stopped owner while the forwarding node's
+failover installation is held.
 
 The production channel-owner Shuttle check
 `shuttle_forced_routing_fence_cancels_racing_bindings_until_successor_publication` races first-use
