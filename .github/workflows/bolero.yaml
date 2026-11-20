@@ -96,18 +96,20 @@ jobs:
       # which git 2.44 added. GitHub's runner image takes the current git from this PPA too.
       - name: Install the current git
         run: |
-          sudo add-apt-repository --yes ppa:git-core/ppa
+          sudo add-apt-repository --yes --no-update ppa:git-core/ppa
+          sudo apt update --allow-releaseinfo-change
           sudo apt-get install --yes --no-install-recommends git
 
       - name: Install native build tools
         run: |
+          sudo apt update --allow-releaseinfo-change
           wget https://apt.llvm.org/llvm.sh
           chmod +x llvm.sh
           sudo ./llvm.sh 23
 
       - name: Install native server build dependencies
         run: |
-          sudo apt-get update
+          sudo apt-get update --allow-releaseinfo-change
           sudo apt-get install -y cmake libcurl4-openssl-dev protobuf-compiler
 
       - name: Configure cargo
@@ -258,6 +260,7 @@ jobs:
 
       - name: Install native build tools
         run: |
+          sudo apt update --allow-releaseinfo-change
           wget https://apt.llvm.org/llvm.sh
           chmod +x llvm.sh
           sudo ./llvm.sh 23
@@ -266,7 +269,7 @@ jobs:
 
       - name: Install native server build dependencies
         run: |
-          sudo apt-get update
+          sudo apt-get update --allow-releaseinfo-change
           sudo apt-get install -y cmake libcurl4-openssl-dev protobuf-compiler
 
       - name: Configure cargo
