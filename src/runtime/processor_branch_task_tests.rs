@@ -869,42 +869,34 @@ async fn processor_handoff_drains_ready_batches_from_every_input() {
     drop(shutdown_tx);
 }
 
-#[nervix_primitives::test]
-async fn scheduled_processor_handoff_bounds_command_backpressure_and_aborts_the_task() {
-    struct Dropped(Arc<AtomicBool>);
-
-    impl Drop for Dropped {
-        fn drop(&mut self) {
-            self.0.store(true, Ordering::Release);
-        }
-    }
-
-    let (commands, _command_rx) = mpsc::channel(1);
-    let (first_response, _first_receiver) = nervix_primitives::sync::oneshot::channel();
-    commands
-        .send(ProcessorNodeCommand::Handoff {
-            response: first_response,
-        })
-        .await
-        .expect("first command should fill the processor mailbox");
-    let dropped = Arc::new(AtomicBool::new(false));
-    let task_dropped = dropped.clone();
+#[nervix_primitives::test(start_paused = true)]
+async fn scheduled_processor_handoff_waits_for_a_handover_longer_than_any_stop_grace() {
+    // A processor holding many branches stops them one at a time, each under its own grace, so its
+    // handover as a whole may take far longer than one grace. The swap waits for it.
+    let handover =
+        crate::runtime::entity_gate::task_stop_grace(nervix_models::DomainDrainTimeout::DEFAULT)
+            .checked_mul(100)
+            .assured("a hundred default stop graces fit a Duration");
+    let (commands, mut command_rx) = mpsc::channel(1);
     let task = nervix_primitives::task::spawn(async move {
-        let _dropped = Dropped(task_dropped);
-        std::future::pending::<()>().await;
+        let Some(ProcessorNodeCommand::Handoff { response }) = command_rx.recv().await else {
+            panic!("scheduled processor must receive its handoff command")
+        };
+        nervix_primitives::time::sleep(handover).await;
+        response
+            .send(Vec::new())
+            .expect("handoff receiver must remain while the task responds");
     });
     let scheduled = ScheduledNodeTask { commands, task };
+    let started = nervix_primitives::time::Instant::now();
 
-    let error = scheduled
-        .handoff_within(Duration::from_millis(10))
+    let handoffs = scheduled
+        .handoff()
         .await
-        .expect_err("a full command mailbox must bound handoff");
+        .expect("a slow handover must complete");
 
-    assert!(matches!(
-        error.current_context(),
-        ScheduledNodeHandoffError::CommandTimeout
-    ));
-    assert!(dropped.load(Ordering::Acquire));
+    assert!(handoffs.is_empty());
+    assert!(started.elapsed() >= handover);
 }
 
 #[nervix_primitives::test]
@@ -931,9 +923,7 @@ async fn scheduled_processor_handoff_aborts_a_task_that_drops_its_response() {
     let scheduled = ScheduledNodeTask { commands, task };
 
     let error = scheduled
-        .handoff(crate::runtime::entity_gate::task_stop_grace(
-            nervix_models::DomainDrainTimeout::DEFAULT,
-        ))
+        .handoff()
         .await
         .expect_err("a dropped handoff response must fail");
 
@@ -952,36 +942,13 @@ async fn scheduled_processor_handoff_reports_an_unavailable_command_receiver() {
     let scheduled = ScheduledNodeTask { commands, task };
 
     let error = scheduled
-        .handoff_within(Duration::from_millis(10))
+        .handoff()
         .await
         .expect_err("a closed processor mailbox must fail handoff");
 
     assert!(matches!(
         error.current_context(),
         ScheduledNodeHandoffError::CommandUnavailable
-    ));
-}
-
-#[nervix_primitives::test]
-async fn scheduled_processor_handoff_bounds_the_response_wait() {
-    let (commands, mut command_rx) = mpsc::channel(1);
-    let task = nervix_primitives::task::spawn(async move {
-        let Some(ProcessorNodeCommand::Handoff { response }) = command_rx.recv().await else {
-            panic!("scheduled processor must receive its handoff command")
-        };
-        let _response = response;
-        std::future::pending::<()>().await;
-    });
-    let scheduled = ScheduledNodeTask { commands, task };
-
-    let error = scheduled
-        .handoff_within(Duration::from_millis(10))
-        .await
-        .expect_err("a stalled handoff response must time out");
-
-    assert!(matches!(
-        error.current_context(),
-        ScheduledNodeHandoffError::ResponseTimeout
     ));
 }
 
@@ -1000,37 +967,12 @@ async fn scheduled_processor_handoff_reports_a_failed_task_join() {
     let scheduled = ScheduledNodeTask { commands, task };
 
     let error = scheduled
-        .handoff_within(Duration::from_secs(1))
+        .handoff()
         .await
         .expect_err("a failed processor task must fail handoff");
 
     assert!(matches!(
         error.current_context(),
         ScheduledNodeHandoffError::TaskJoin
-    ));
-}
-
-#[nervix_primitives::test]
-async fn scheduled_processor_handoff_bounds_task_shutdown() {
-    let (commands, mut command_rx) = mpsc::channel(1);
-    let task = nervix_primitives::task::spawn(async move {
-        let Some(ProcessorNodeCommand::Handoff { response }) = command_rx.recv().await else {
-            panic!("scheduled processor must receive its handoff command")
-        };
-        response
-            .send(Vec::new())
-            .expect("handoff receiver must remain while the task responds");
-        std::future::pending::<()>().await;
-    });
-    let scheduled = ScheduledNodeTask { commands, task };
-
-    let error = scheduled
-        .handoff_within(Duration::from_millis(10))
-        .await
-        .expect_err("a processor task that does not stop must time out");
-
-    assert!(matches!(
-        error.current_context(),
-        ScheduledNodeHandoffError::TaskStopTimeout
     ));
 }

@@ -1,0 +1,85 @@
+BEGIN;
+
+CREATE SCHEMA chaos_alter_record (
+  event_id STRING,
+  source STRING,
+  branch_name STRING,
+  sequence I64,
+  content STRING
+);
+
+CREATE WIRE JSON SCHEMA chaos_alter_wire MODE STRICT (
+  event_id STRING,
+  source STRING,
+  branch_name STRING,
+  sequence INTEGER,
+  content STRING
+);
+
+CREATE WIRE JSON CODEC chaos_alter_json
+  FROM WIRE SCHEMA chaos_alter_wire
+  TO SCHEMA chaos_alter_record;
+
+CREATE SCHEMA chaos_alter_branch_key (
+  branch_name STRING
+);
+
+CREATE BRANCH chaos_alter_branch SCHEMA chaos_alter_branch_key TTL 1h;
+
+CREATE RELAY chaos_alter_incoming SCHEMA chaos_alter_record BRANCHED BY chaos_alter_branch CAPACITY 64;
+CREATE RELAY chaos_alter_unique SCHEMA chaos_alter_record BRANCHED BY chaos_alter_branch CAPACITY 64;
+
+CREATE KAFKA CLIENT chaos_alter_source
+  CONFIG {
+    'bootstrap.servers' = 'broker:9092'
+  };
+
+CREATE KAFKA CLIENT chaos_alter_destination
+  CONFIG {
+    'bootstrap.servers' = 'broker:9092',
+    'enable.idempotence' = 'true'
+  };
+
+CREATE KAFKA TOPIC INGESTOR chaos_alter_acked
+  FROM chaos_alter_source TOPIC 'chaos_alter_acked_input' OFFSET BY CONSUMER GROUP 'chaos_alter_acked' START AT EARLIEST MODE ACK SEQUENTIAL ACK TIMEOUT 5m RETRY POLICY BACKOFF 200ms MAX 5s ON QUIESCE SUSPEND
+  DECODE USING chaos_alter_json
+  TO chaos_alter_incoming
+    INHERIT ALL
+    BRANCHED BY chaos_alter_branch SET branch_name = message.branch_name
+    FLUSH IMMEDIATE
+    ON MESSAGE ERROR LOG
+  ON GENERAL ERROR LOG;
+
+CREATE KAFKA TOPIC INGESTOR chaos_alter_unacked
+  FROM chaos_alter_source TOPIC 'chaos_alter_unacked_input' OFFSET BY CONSUMER GROUP 'chaos_alter_unacked' START AT EARLIEST MODE NO ACK ON QUIESCE SUSPEND
+  DECODE USING chaos_alter_json
+  TO chaos_alter_incoming
+    INHERIT ALL
+    BRANCHED BY chaos_alter_branch SET branch_name = message.branch_name
+    FLUSH IMMEDIATE
+    ON MESSAGE ERROR LOG
+  ON GENERAL ERROR LOG;
+
+CREATE DEDUPLICATOR chaos_alter_dedup
+  FROM chaos_alter_incoming
+  ATTACHED
+  DEDUPLICATE ON input.event_id
+  MAX TIME 10m
+  BRANCHED BY chaos_alter_branch
+  TO chaos_alter_unique
+    INHERIT ALL
+    FLUSH IMMEDIATE
+    ON MESSAGE ERROR LOG;
+
+CREATE KAFKA TOPIC EMITTER chaos_alter_output
+  FROM chaos_alter_unique
+  ATTACHED
+  TO chaos_alter_destination TOPIC 'chaos_alter_output'
+    MODE ACK PARALLEL MAX 16 ACK TIMEOUT 5m RETRY POLICY BACKOFF 200ms MAX 5s
+    ENCODE USING chaos_alter_json
+  INHERIT ALL
+  FLUSH IMMEDIATE
+  ON MESSAGE ERROR LOG
+  ON GENERAL ERROR LOG;
+
+COMMIT;

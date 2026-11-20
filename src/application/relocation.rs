@@ -281,7 +281,7 @@ impl SessionServiceImpl {
         let mut handoff_activation_error = None;
         if let Some(handoff) = handoff {
             if let Some(error) = &local_activation_error {
-                self.defer_planned_ownership_handoff_release(domain, handoff, error, None);
+                self.hold_planned_ownership_handoff_until_applied(domain, handoff, error, None);
             } else if let Err(error) = self
                 .finish_planned_ownership_handoff(domain, handoff, None)
                 .await

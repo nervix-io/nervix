@@ -1454,7 +1454,6 @@ pub struct ActivationImpact {
 pub enum RebuildReason {
     Configuration,
     Ownership,
-    Recovery,
 }
 
 #[derive(
@@ -1585,8 +1584,8 @@ pub enum QuiescenceOutcome {
     Released,
 }
 
-/// The ordered engagement history for one actual pause scope. A recovery expansion is another
-/// entry with its wider requirement; it never rewrites what was originally planned.
+/// The ordered engagement history for one actual pause scope: each engagement records its own
+/// requirement and outcomes, and never rewrites what was originally planned.
 #[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]

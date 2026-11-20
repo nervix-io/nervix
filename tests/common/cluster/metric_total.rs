@@ -16,6 +16,25 @@ impl Cluster {
         metric_name: &str,
         label_fragments: &[String],
     ) -> io::Result<f64> {
+        self.exposed_observability_metric_sum(node_id, metric_name, label_fragments)
+            .await?
+            .ok_or_else(|| {
+                io::Error::other(format!(
+                    "node '{node_id}' exposed no metric family '{metric_name}'"
+                ))
+            })
+    }
+
+    /// The sum of every matching sample of `metric_name` on `node_id`, or `None` when the node
+    /// exposes no such family. The exposition leaves a family out until it holds a series, so a
+    /// node that never ran an instance the family counts, such as a node without any ingestor,
+    /// exposes none.
+    pub(crate) async fn exposed_observability_metric_sum(
+        &self,
+        node_id: &str,
+        metric_name: &str,
+        label_fragments: &[String],
+    ) -> io::Result<Option<f64>> {
         let response = self.observability_metric_text(node_id).await?;
         let declaration = format!("# TYPE {metric_name} ");
         let counter_declaration = metric_name
@@ -43,12 +62,6 @@ impl Cluster {
                 total += value;
             }
         }
-        if present {
-            Ok(total)
-        } else {
-            Err(io::Error::other(format!(
-                "node '{node_id}' exposed no metric family '{metric_name}'"
-            )))
-        }
+        Ok(present.then_some(total))
     }
 }

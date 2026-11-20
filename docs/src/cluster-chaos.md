@@ -83,7 +83,8 @@ Bolero obligation, and none of those discharges a suite.
 | `scripts/chaos/*-scenario.sh` | Each scenario's faults, observations and verdicts |
 | `node-faults.sh`, `network-faults.sh`, `link-degradation.sh`, `link-ping-helper.sh`, `link-rate-helper.sh` | The fault primitives: process faults through Pumba and Docker, and one netem effect on a container's egress toward chosen addresses; partition plans, rules, effect matrices, preflight and healing; link degradation and its ICMP and transfer probes |
 | `mixed-plan.sh`, `mixed-plan.jq` | Seeded plan generation, plan validation and default coverage |
-| `verify-*.sh` | The external verifiers: ledgers, load pacing, Docker events, and crash, pause, partition, degraded-link, recovery, restart, drain, state, clock, mixed, endpoint, lifetimes, outward TLS and diagnostic evidence |
+| `verify-*.sh` | The external verifiers: ledgers, the strict delivery verdict, load pacing, Docker events, and crash, pause, partition, degraded-link, recovery, restart, drain, state, clock, mixed, endpoint, lifetimes, outward TLS and diagnostic evidence |
+| `burst-load.sh`, `negative-outcomes.sh`, `events-observer.sh`, `observe-events.sh`, `expected-failure.sh` | The shared harness of [correctness reproductions](#correctness-reproductions): the burst load and its accepted-input ledger, the negative-outcome counters, the error-event observers that run inside containers of the image, and the expected failure of a red run |
 | `outward-tls.sh`, `tls-probe.py`, `tls-probe-openssl.cnf` | The three-node leader crash's outward TLS observations, the restricted TLS probe that runs inside the pinned Python image, and the probe's OpenSSL configuration |
 | `continuous-load.sh`, `observe-nodes.sh`, `observe-clock.sh` | The paced producer, the listener observer and the domain-clock observer, each running inside a container |
 | `connector-metrics.sh`, `connector_metrics.py` | The held input boundary and maintained-parser evidence checks for fresh connector counters and progress after an owner crash |
@@ -321,6 +322,7 @@ half of the range. The manifest records the subnet, the dynamic range and the no
 | `postgres` | PostgreSQL | The [lifetimes](#lifetimes) scenario's database, with its data on a tmpfs |
 | `observer` | Alpine | The independent listener observer |
 | `clock-observer` | Nervix | One domain-clock observer per node |
+| `events-observer` | Nervix | One [error-event observer](#error-events) per node |
 
 The shared `admin` and `probe` containers start with the broker and end in the run's labeled
 cleanup. They hold no client sessions between commands. Every CLI and probe process has closed
@@ -429,6 +431,7 @@ take.
 | `--max-backlog N`, `--min-throughput-pct N` | `degraded-links` | 1 to 1,000, default 200; 1 to 100, default 50 |
 | `--max-recovery-backlog N`, `--max-memory-bytes N`, `--max-pending N` | `degraded-links`, `mixed-instability` | 0 to `--max-backlog`, default 20; at least 1 MiB, default 1 GiB; at least 1, default 128 |
 | `--seed N`, `--duration D`, `--policy POLICY`, `--coverage LIST`, `--plan FILE` | `mixed-instability` | See [Mixed Instability](#mixed-instability) |
+| `--expect-failure SYMPTOM[,SYMPTOM...]` | A scenario whose verdict names symptoms | Repeatable. Records a run of an image that still has the defect as its expected failure; see [Expected Failures](#expected-failures) |
 
 The focused checks run parts of the runner on their own:
 
@@ -452,6 +455,7 @@ The focused checks run parts of the runner on their own:
 | `just test-chaos-stateful-verifiers` | The state, clock and window verdicts, and the milestone's checkpoint wait over a typed WASM state page that is confirmed, unconfirmed, left entries unread or was refused |
 | `just test-chaos-lifetimes-verifiers` | The option rules of `lifetimes`, and its [verdicts](#lifetimes) against synthetic ledgers: records enriched with their branch's profile, with an ignored lower or equal timestamp's version, or before a replacement applied; a lost parked record; repeats with and without a fault, before and past the milestone; generated rows of a state never held or going back; malformed and lost windows; a rotation that evicted nothing; an expiring branch that never expired or kept its first profile; a lost late record; and buffered records that were not held or waited for their flush interval |
 | `just test-chaos-endpoint-verifiers` | The option rules of `endpoints`, and its [route and WebSocket verdicts](#endpoints) against synthetic ledgers: accepted records that reach both domains, or a withdrawn domain's route; a lost, repeated, altered or unsent record; a record never accepted or abandoned; a client that stopped early; a bound route that answered 404; a retained connection that was refused with 1013, closed otherwise or not probed; a delivered probe; and a lost, repeated or altered frame |
+| `just test-chaos-correctness-harness` | The [correctness harness](#correctness-reproductions) against stand-ins and synthetic evidence: the rules of `--expect-failure`; a burst's record and accepted ledger, including a producer that delivered part of it; negative-outcome counters that stayed, rose through ended waits, failed trees or unsent records, went back, are missing, or cannot be read; the strict verdict on an exact delivery, on replay duplicates, a lost, changed or unexpected record, rising counters, an error event inside the window, a quiet window an observer did not follow throughout, and sources that share an event ID; and every outcome of an expected failure |
 | `just verify-chaos-clock ARGS` | The clock verifier over retained observer transcripts |
 | `just coverage-chaos-*` | The same controls under kcov, keeping their shell coverage under `target/chaos-*-coverage/` |
 | `just coverage-chaos-baseline IMAGE [NODES] [TIMEOUT] [RUN_ID]` | The complete baseline controller under kcov against a prebuilt image; use a fresh run ID for each collection |
@@ -609,7 +613,8 @@ client, so the gaps between consecutive records are the gaps between the load's 
 Two records closer together than a quarter of the interval fail the run as a controller failure,
 after its ledger and results are written. Every timing such a run reports was measured under a load
 other than the declared one. A longer gap never fails a run: a call that waited on the broker makes
-one record late, a held load is late by its hold, and both are reported.
+one record late, a held load is late by its hold, and both are reported. A [burst
+load](#burst-loads) declares no interval, so it has no pacing verdict.
 
 ## Fault Injection And Its Proof
 
@@ -933,6 +938,7 @@ trap ran exits on its own, 15 minutes after the run's bound.
 | `lifetimes` | 1 or 3; one node only with no fault or a cluster restart | None, or a crash or partition of the state owner, or a cluster restart | 1 s, and `life-load` at 500 ms | 1,000, 2,700 s |
 | `domain-time` | 1 or 3; one node only with no fault or a cluster restart | None, or each voter in turn crashed, paused, isolated or stopped, or a cluster restart | 1 s, and `paced-load` at 250 ms | 1,000, 2,700 s |
 | `mixed-instability` | 3 | A seeded or explicit plan of the families above, alone and combined | 1 s | Twice the planned timeline plus 15 minutes of records, at most 20,000; the duration plus the larger of the duration and 20 minutes, at most 6 hours |
+| `alteration-handover` | 1 or 3 | None; an alteration replaces a deduplicator holding 6,000 branches while a burst is in motion, after `DOMAIN_DRAIN_TIMEOUT` is lowered to 1.5 s | 1 s, and two burst loads per source | 1,000, 1,800 s |
 
 A fixture runs out when the load has produced its last record, so its size bounds how long faults
 can be observed:
@@ -2593,10 +2599,206 @@ So several things can differ between a run and its replay:
 
 Each run's trace records what it actually met.
 
+### Alteration Handover
+
+```bash
+just chaos run alteration-handover --image nervix:debian --nodes 3
+just chaos run alteration-handover --image <image of the base revision> --nodes 3 \
+    --expect-failure domain-rebuilt,negative-acknowledgements
+```
+
+This scenario is the chaos reproduction of [Graceful Lifecycle
+18](https://app.clickup.com/t/86bd1knfh): a change that fails while it is applied never cuts the work
+of a running domain. An alteration replaces a deduplicator through an entity swap, in which the
+replaced deduplicator hands its branches over to its replacement one at a time, while records of two
+sources are in motion, and a [strict verdict](#the-strict-verdict) judges what became of every record.
+The baseline path keeps its own traffic in its own domain, and its ledger stays strict.
+
+**The graph.** `fixtures/alteration-handover.plexus` runs in its own domain, `chaos_alter`. A Kafka
+ingestor that acknowledges, in `MODE ACK SEQUENTIAL`, and one in `MODE NO ACK` each read their own
+topic into one branched relay. A deduplicator keyed on the event ID, branched by the record's branch
+name, feeds a Kafka emitter with an idempotent producer. Its branch has no instance limit, and its
+relays have room to spare.
+
+**The trigger.** Before the graph runs, `ALTER CLUSTER SET DOMAIN_DRAIN_TIMEOUT = 1500ms` makes the
+task stop grace, one fifteenth of the drain timeout, 100 ms. An image whose swap gives the whole
+handover only that grace cannot hand 6,000 branches over in time. Its swap fails, and the node
+rebuilds the domain without a drain: it logs `entity-level schedule apply failed; rebuilding domain`
+and aborts its ingestors' tasks, so the records in motion are cut. The acknowledged source reads one
+payload at a time and is still reading its burst, so the payload it holds ends with a negative
+outcome: a `shutdown` acknowledgement and an unconfirmed stop position. The change's hold suspends
+both sources' intake before the swap, so the source without acknowledgements usually holds nothing
+when its task is aborted; a record it reads during the swap itself is lost and shows as missing.
+The red run therefore expects `domain-rebuilt` and `negative-acknowledgements`. An image whose swap
+waits for every branch cuts nothing.
+
+**The sequence.**
+
+1. One [error-event observer](#error-events) attaches per node, the drain timeout is lowered, the
+   graph is installed and the [negative-outcome counters](#negative-acknowledgements) are read.
+2. Each source's backlog of 3,000 records, each with a branch of its own, is produced as a
+   [burst](#burst-loads) and waits in its topic. `START` follows. Within 300 seconds, the output
+   must hold all 6,000 records and both consumer groups must have committed their backlog through its
+   end: the deduplicator now holds 6,000 branches.
+3. A second burst of 4,000 records per source, alternating between two branches, is produced, the
+   source without acknowledgements last, and `ALTER DEDUPLICATOR chaos_alter_dedup SET DEDUPLICATE
+   ON input.content;` follows at once through the packaged CLI. Every record's content is unique, so
+   neither key drops a record. The output's end offset is read as the alteration is requested; if it
+   already holds every record, nothing was in motion and the run fails as an injection failure. The
+   answer, its exit status and its timing are recorded in `alter-answer.txt`, `alter.exit` and
+   `alter-timing.json`, with the records still in motion at the request.
+4. Within 300 seconds, both sources must have confirmed every position they read and the output must
+   stand still for three observations five seconds apart.
+5. The counters are read again, the observers' transcripts are collected, and every node's log since
+   the scenario began is kept in `node-<host>.log`.
+
+**The verdict.** `verify-alteration-handover.sh` keeps every symptom of the strict verdict over both
+sources and adds two:
+
+| Symptom | When |
+| --- | --- |
+| `alteration-refused` | The CLI did not exit 0 with an answer naming the altered deduplicator |
+| `domain-rebuilt` | A node logged `entity-level schedule apply failed; rebuilding domain`: a rebuild without a drain stood in for the failed swap |
+
+How many processor branch tasks the nodes aborted at their stop grace is recorded beside the verdict
+and judges nothing: an idle branch whose state the alteration purges loses nothing when it is
+aborted, and a branch that held records shows its loss in the strict verdict.
+
+**Evidence.** `alteration-handover/` holds the backlog observation, the alteration's answer and
+timing, the settle observations, both counter snapshots, the observers' transcripts, the node logs,
+`delivery.json` and `verdict.json`. `results/alteration-handover-progress.json` summarizes them, and
+`results/symptoms.json` names the symptoms an expected failure matches. `just
+test-chaos-alteration-handover` runs the scenario's option checks, its fixture generator and its
+verdict without Docker.
+
+## Correctness Reproductions
+
+A correctness fix removes a way for Nervix to lose, repeat, reorder or change data it accepted. Its
+chaos reproduction fails on the image of the base revision with the defect's own symptom and passes
+on the image of the fix. The scenarios above cannot show such a defect on their own: their loads
+send one record per interval, so no buffer holds work when something is taken away; their fault
+ledgers accept identical replay duplicates, which is exactly what a record answered "not processed"
+and sent again looks like; and every source they judge is Kafka, which sends a dropped record again,
+so it never shows as missing. The pieces below give a reproduction what it needs instead. They
+belong to the one harness under `scripts/chaos`: the first reproduction to need a piece adds it,
+and every later one reuses and extends it.
+
+### Burst Loads
+
+`burst-load.sh` produces a backlog: every line of a fixture as one Kafka message, with one kcat
+call, so the payloads wait in the broker together and the ingestor reads them at once. A line is
+one record, or a JSON array of records that the ingestor's codec unfolds. The topic's end offset
+must advance by exactly the fixture's lines, and a producer that failed fails the burst. Each burst
+appends its record to `traffic/<load>-bursts.ndjson`: the payloads and records it held, the end
+offsets before and after it, the producer's exit status and its times. The load's first burst
+declares it in `manifest.json` under `loads` with `shape: "burst"`, beside the paced loads, which
+declare `shape: "paced"`. A burst has no interval, so it has no pacing verdict.
+
+`burst_load_committed GROUP TOPIC` reads the offset a consumer group committed on the topic: a
+source has confirmed everything it read once that reaches the topic's end offset.
+
+A burst source's accepted-input ledger is rebuilt from its topic, never from the producer's report:
+every payload the topic holds through its end offset, kept in `traffic/<load>-payloads.ndjson`, and
+unfolded into one record per line.
+
+### Sources Without Acknowledgements
+
+A reproduction runs a Kafka ingestor in `MODE NO ACK` beside the acknowledged one, each on its own
+topic and consumer group with its own accepted-input ledger. Its consumer group commits the
+positions it reads, so a record it read and then lost is never read again: the loss shows as a
+missing record, where the acknowledged source would hide it by sending the record again.
+
+### The Strict Verdict
+
+`verify-strict-delivery.sh` judges several sources against one output, each by its own exact
+ledger: `verify-ledger.sh` without `--allow-replay-duplicates`, over the output records whose
+`event_id` that source accepted. It admits no duplicate of any kind, replay duplicates included,
+and no missing, changed or unexpected record; an output record no source accepted is unexpected. The
+[negative-outcome counters](#negative-acknowledgements) and the [error-event
+observers](#error-events) join it as inputs. Every violation is a named symptom:
+
+| Symptom | Means |
+| --- | --- |
+| `duplicate-records` | A source's record reached the output more than once; the count is per source |
+| `missing-records` | A source's record never reached the output |
+| `changed-records` | A record reached the output with other content or branch |
+| `unexpected-records` | The output holds a record no source accepted |
+| `negative-acknowledgements` | An ingestor's negative-outcome counter increased |
+| `emitter-failures` | An emitter's undelivered-record counter increased |
+| `error-events` | An observer saw an error event inside its window |
+
+Evidence the verifier cannot judge exits 2 and establishes nothing: sources that share an event ID,
+an empty accepted ledger, a counter that went back or is missing after the run, and a window an
+observer did not follow throughout while no error event was seen.
+
+### Negative Acknowledgements
+
+`negative-outcomes.sh snapshot` reads the public counters of a domain's named ingestors and emitters
+from every node's retained `/metrics` scrape, summing each over the nodes:
+
+- for an ingestor, `nervix_ingestor_ack_outcomes_total` with `outcome` `failed`, `timed_out` or
+  `shutdown`: a tree the graph failed, a payload that made no progress for its `ACK TIMEOUT`, and a
+  wait the ingestor's stop ended; `nervix_ingestor_transport_acknowledgements_total` with
+  `operation="reject"`; and `nervix_ingestor_unconfirmed_stop_positions_total`, the positions it
+  stopped before its transport confirmed them
+- for an emitter, `nervix_emitter_records_failed_total`, `nervix_emitter_unsent_records_total` and
+  `nervix_emitter_records_rejected_total`
+
+An absent series reads as no series and zero: a unit not yet started has no counters, and every
+counter of a started unit exists at zero. `negative-outcomes.sh compare` requires every counter to
+be present after the run and none to have increased. The counters are process-local, so a comparison
+holds only across a window in which no node restarts; a counter that went back shows a restart, and
+the comparison then cannot judge.
+
+### Error Events
+
+A node reports a failure it recovered from as a runtime error event, which reaches every session of
+the cluster as a server notice of kind `runtime`. `events-observer.sh` starts one observer per node:
+a container of the image under test that runs `observe-events.sh`, the packaged CLI's `subscribe`
+mode, which prints the server notices of its session while it follows a subscription. Each observer
+subscribes to the one relay of its own quiet domain, `chaos_observer`, which no record reaches and
+no scenario stops, and stamps every line with the host's clock. The window opens once every observer
+has attached and closes when the transcripts are read. Inside it, every `runtime` notice, and every
+`control plane` notice at `WARN` or `ERROR`, is an error event. A seen event is conclusive. Seeing
+none needs complete observation: every observer attached before the window opened and followed it to
+its end, without its follow ending or its CLI reporting notices it lost. The transcripts stay in the
+scenario's directory as `events-<host>.log`, with the window in `events-window.json`. The observers
+are the Compose service `events-observer` under the profile `events`, which a scenario that uses
+them enables in `run-baseline.sh`.
+
+### Expected Failures
+
+A reproduction's red run records an image that still has the defect. `--expect-failure` lists
+symptoms the scenario's verdict names, and `expected-failure.sh` judges the run once everything else
+about it is known, after the finding of a failed run is written:
+
+| Outcome | When | Exit status, manifest status |
+| --- | --- | --- |
+| `reproduced` | The scenario's verdict failed as a product failure, in the phase in which the scenario judges its findings, naming every expected symptom | 0, `expected-failure` |
+| `not-reproduced` | The run passed, so the image did not show the defect | 1, `failed`, as `unclassified` in the phase `expected failure` |
+| `other-failure` | Any other failure: setup, controller, observation, injection or diagnostic, a product failure in another phase, or one without every expected symptom | The run's own |
+| `interrupted` | A signal ended the run | The run's own |
+
+`manifest.json` records the judgement under `expected_failure`: the outcome, the expected, observed
+and missing symptoms, and the failure the run reached. `results/symptoms.json` keeps every symptom
+of the verdict with its detail, and `results/finding.json` the failure's evidence. The same scenario
+then runs without `--expect-failure` against the image of the fix. A suite never carries an expected
+failure: an entry passes only on a passing run.
+
+A scenario takes `--expect-failure` once it does three things. Its entry in the table
+`scenario_verdict_symptoms` of `run-baseline.sh` lists the symptoms its verdict can name, which the
+option is checked against before anything starts; a scenario without an entry refuses the option as
+a setup error. Its verdict writes
+`results/symptoms.json` as `{scenario, verdict, symptoms: [{name, ...}]}`. And it records each
+symptom as a [recovery finding](#verdicts-findings-and-failure-categories), so a failing verdict
+ends the run as a product failure in the phase `<scenario> product findings`.
+
 ## Verdicts, Findings And Failure Categories
 
-A run passes when it exits 0 and its manifest records `status: passed`. A failed run records its
-category, which separates product defects from problems of the experiment itself:
+A run passes when it exits 0 and its manifest records `status: passed`. A run started with
+`--expect-failure` that reproduced its defect also exits 0, and its manifest records
+`status: expected-failure` instead; see [Expected Failures](#expected-failures). A failed run
+records its category, which separates product defects from problems of the experiment itself:
 
 | Category | Meaning |
 | --- | --- |
@@ -2606,7 +2808,7 @@ category, which separates product defects from problems of the experiment itself
 | `injection` | A fault did not take effect as planned, could not be verified, or would have broken its policy. Examples are a dry run that selected another container, rules that do not match their plan, an ineffective or unhealable network fault, a pause outside its interval, and a role that moved before the fault |
 | `product` | Nervix violated a contract the scenario verifies |
 | `diagnostic` | On a diagnostic image: a deadlock finding, missing, partial, invalid or unbounded evidence, or evidence of another selection; see [Diagnostic Images](#diagnostic-images) |
-| `unclassified` | A failure outside every classified check. An example is a bound reached during graph installation or placement, after startup and before the scenario's own checks begin. It establishes no product failure |
+| `unclassified` | A failure outside every classified check. An example is a bound reached during graph installation or placement, after startup and before the scenario's own checks begin; another is a run expected to fail that passed. It establishes no product failure |
 
 A failed run keeps `results/finding.json` when it is one of these scenarios:
 
@@ -2644,7 +2846,7 @@ Two kinds of violation are handled differently:
 
 | Exit status | Meaning |
 | --- | --- |
-| 0 | Passed |
+| 0 | Passed, or failed as the expected failure `--expect-failure` named |
 | 1 | Failed, with the category above |
 | 2 | Setup error before any product verdict |
 | 124 | A bounded command or wait, or the whole-run bound, ran out before the verdict. Also used when emitter output stayed short of the accepted input past its bound, after the exact ledger was written |
@@ -2732,7 +2934,7 @@ Each run writes bounded evidence under `ARTIFACTS/RUN_ID/`, by default `target/c
 | `fixtures/` | The generated records and every graph and guest the run installed |
 | `public/` | Every packaged-CLI command and its output: domain and graph creation, placements, descriptions, cluster status and metrics |
 | `traffic/` | Accepted input, observed output, every Kafka end-offset read, the output-boundary polls, consumer groups, load timestamps and producer results |
-| `results/` | The verdicts: the scenario's result and progress, the ledger, the output boundary, load pacing, container images, a diagnostic run's evidence verdict, `finding.json`. Also the verifier self-check's output, `verifier-self-test.txt`, and in a run of a suite the record it adopted, `verifier-self-check.json` |
+| `results/` | The verdicts: the scenario's result and progress, the ledger, the output boundary, load pacing, container images, a diagnostic run's evidence verdict, `finding.json`, and the symptoms of a scenario whose verdict names them, `symptoms.json`. Also the verifier self-check's output, `verifier-self-test.txt`, and in a run of a suite the record it adopted, `verifier-self-check.json` |
 | `diagnostics/` | The live event recording and its bounds, container inspection, Compose logs (a fresh-cluster restore adds `fresh-compose-ps.json` and `fresh-compose.log` for its second project), the image-package and startup-status records, preflight and healing records, cleanup output. Also `verifier-self-test/`, the evidence of a [verifier self-check](#the-verifier-self-check) that did not pass or left something behind |
 | `backup/`, `backup-cycles/`, `backup-fault/`, `restore-fresh/`, `restore-fault/`, `restore-volume/`, `restarts/`, `crash/`, `pauses/`, `partitions/`, `degraded/`, `stale/`, `former-owner/`, `restart/`, `stateful/`, `domain-time/`, `mixed/` | Each scenario's own evidence, in catalog order: `restarts/` belongs to rolling restarts and `restart/` to cluster restarts |
 | `deadlock/` | A diagnostic run's per-node evidence files, their inspections and qualifications, in `node-N/` for the run's nodes and `fresh-N/` for a fresh-cluster restore's |
@@ -3251,7 +3453,9 @@ For an image that passes a scenario, the suite guarantees these things about the
 injected and verified, on that worker:
 
 - **Delivery.** Every record the ingestor accepted was delivered with its exact content and branch,
-  and no duplicate appeared beyond the identical replays its fault permits.
+  and no duplicate appeared beyond the identical replays its fault permits. A scenario judged by
+  the [strict verdict](#the-strict-verdict) permits none, and no negative-outcome counter of its
+  units rose and no error event was seen while it ran.
 - **Ownership and consensus.** They recovered within the scenario's bounds, as observed through
   public interfaces.
 - **Control-plane effects.** Every acknowledged effect exists, every refused one does not, and

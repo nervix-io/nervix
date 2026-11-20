@@ -368,13 +368,38 @@ contains only typed runtime instructions:
 
 The schedule classifier retains Model-based change-aspect and quiescence decisions in the
 registry. The runtime receives typed dynamic values, affected node identities, state purges,
-and gate relays. It does not reclassify the new schedule. An entity swap that fails locally
-falls back to a full rebuild of the desired revision; the actual wider engagement is reported as
-a recovery expansion. A failed emitter stop is returned instead: its task is retained with the
-emitter's held records, and rebuilding would discard the stop's exact finish outcome. If a fallback
-rebuild also fails, application fails and the committed revision remains eligible for retry. A plan
-is complete even for a narrow change, so fallback uses the same desired revision rather than
-reconstructing one from live tasks.
+and gate relays. It does not reclassify the new schedule.
+
+An entity swap that fails on a node never rebuilds the domain there. The swap records each part of
+the running execution it stops, replaces or starts, before the operation that can fail after it.
+When a later step fails, it puts the previous execution back, last change first, while the
+entities stay gated:
+
+- a processor unit's previous task starts again from the plan the domain last published, with the
+  branches it handed over; a replacement that already took them hands them back first;
+- an emitter, reingestor or generator unit starts again from the previous revision's plan, after
+  any replacement that started is stopped; a failed emitter stop keeps its task, with the
+  emitter's held records, as it always has;
+- an ingestor starts again the units the swap stopped, after any unit the swap started is stopped;
+- a relay gets back its previous partition count's services and owner tasks, and a rebound or
+  materialized node its previous placement and state tasks;
+- every consumer registration a previous task had is restored, and the routing, state identities
+  and relay capacities the swap staged are discarded, so the domain keeps what it last published.
+
+State that only the previous execution reads, a deduplicator keyspace whose key changed or the
+state of a relay that is no longer materialized, is deleted only once nothing else of the swap can
+fail. Every stored state goes before any state held in memory, so a deletion that fails still finds
+the previous execution's state in memory, and a processor unit whose state is deleted starts its
+replacement only after the deletion.
+
+The swap then fails. The node keeps the previous revision as the one it applied, records the
+failure and its reason in its [application progress](./command-completion.md#application-progress),
+and reconciliation applies the committed revision again on its retry cadence. When a failed attempt
+had already applied the revision to some domains, those domains run their desired schedule and take
+no change on the next attempt. A processor swap waits until the previous task has handed every
+branch over: each branch stops under its own task stop grace, and no limit covers a whole
+handover. A plan is complete even for a narrow change, so a retry uses the same desired revision
+rather than reconstructing one from live tasks.
 
 The swap sequence fences delivery before stopping an owner, prepares new local placement and
 programs, replaces relay owner and remote-consumer edges, and publishes the routing snapshot
@@ -577,9 +602,10 @@ and concurrency limits remain in their owning chapters.
 
 Operators observe the committed schedule, domain lifecycle, applied node state, and typed
 diagnostics through the existing control-plane and session surfaces. Runtime metrics and events
-report node or connector failures without exposing payloads. A recovery expansion reports when
-local entity replacement needed a wider rebuild. The execution plan itself is an internal,
-reconstructible artifact, so it is not an independently persisted or user-editable graph.
+report node or connector failures without exposing payloads. A node that cannot apply a revision
+reports the revision and why in its application progress, and a change that waits for that node
+answers with the node and the reason. The execution plan itself is an internal, reconstructible
+artifact, so it is not an independently persisted or user-editable graph.
 
 ## Task Dependency Binding
 
