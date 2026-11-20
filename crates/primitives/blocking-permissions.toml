@@ -446,6 +446,13 @@ path = "tests/common/kafka_group_member.rs"
 reason = "The external harness must keep polling librdkafka while async scenario steps observe its assignment; it has no node executor."
 
 [[permission]]
+bound = "One thread with a 16 MiB stack per suite process. The suite watchdog bounds the scenario run, teardown has its own budgets, and the main thread joins the runner unless the watchdog exits the process."
+items = ["thread::Builder"]
+owner = "The Cucumber scenario suite runner."
+path = "tests/scenarios.rs"
+reason = "The harness needs to size the stack of the thread polling Cucumber steps independently of the process stack limit. It runs outside any node executor."
+
+[[permission]]
 bound = "Two modeled participants per execution, both joined before the bounded Shuttle execution ends."
 items = ["thread::spawn"]
 owner = "The interconnect relay-owner checks and native contention probe"
