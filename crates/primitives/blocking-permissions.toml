@@ -222,6 +222,13 @@ path = "crates/consensus/src/domain_pause_recovery/tests.rs"
 reason = "Model participants exercise the production applied mutation through the selected scheduler outside a node executor."
 
 [[permission]]
+bound = "Each Shuttle execution starts five finite participants, each applying one stop proposal, and joins all of them before it returns; exploration uses the registered runner bounds."
+items = ["thread::spawn"]
+owner = "Domain stop ending fence checks."
+path = "crates/consensus/src/domain_stop_shuttle_tests.rs"
+reason = "Model participants apply their stop proposals to the production consensus state through the selected scheduler outside a node executor; no product thread is created."
+
+[[permission]]
 bound = "The recorder serially handles one delivery at a time, with at most one watchdog. It waits at most ten seconds; successful potential recording cancels and joins it, and timeout or a terminal finding exits the process."
 items = ["thread::Builder"]
 owner = "The diagnostic run recording-deadline watchdog."

@@ -167,6 +167,7 @@ mod configured_choices;
 mod describe_output;
 mod domain_clock;
 mod domain_lifecycle;
+mod domain_stop;
 mod entity_gate;
 mod entity_labels;
 mod error;
@@ -1075,6 +1076,7 @@ impl Application {
                 traffic: client_traffic::ClientTraffic::new(runtime.metrics().client_traffic()),
                 transaction_bindings: DashMap::with_hasher(RandomState::new()),
                 command_executions: Default::default(),
+                domain_stops: Default::default(),
                 transaction_executions: DashMap::with_hasher(RandomState::new()),
                 transaction_recovery: transaction::TransactionRecovery::new(
                     settings
@@ -1947,6 +1949,9 @@ impl Application {
         service
             .register_backup_state_handlers(&interconnect)
             .change_context(AppError::RegisterInterconnectRequestHandler)?;
+        service
+            .register_domain_stop_handlers(&interconnect)
+            .change_context(AppError::RegisterInterconnectRequestHandler)?;
         interconnect
             .register_handler::<PublishResourceReplica, _, _>(move |context, request| {
                 let service = resource_replica_service.clone();
@@ -2791,6 +2796,7 @@ impl Application {
                 background_tasks.push(nervix_primitives::task::spawn(licensing::run(service.clone(), shutdown.clone())));
                 background_tasks.push(nervix_primitives::task::spawn(licensing::run_notices(service.clone(), shutdown.clone())));
                 background_tasks.push(nervix_primitives::task::spawn(licensing::stop_gate::run(service.clone(), shutdown.clone())));
+                background_tasks.push(nervix_primitives::task::spawn(domain_stop::run(service.clone(), shutdown.clone())));
                 Ok::<(), Report<AppError>>(())
             }) => result,
         };

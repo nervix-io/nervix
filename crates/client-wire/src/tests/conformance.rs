@@ -301,6 +301,17 @@ fn corpus_frames() -> Vec<(&'static str, Bytes)> {
         ("client_close_ingestor.nxcm", client(20)),
         ("client_command.nxcm", client(0)),
         ("client_command_bare.nxcm", client(2)),
+        ("client_command_progress.nxcm", {
+            let mut message = client_messages()[0].clone();
+            message.progress = Some(
+                crate::ProgressInterval::new(std::time::Duration::from_secs(30))
+                    .assured("thirty seconds is above the protocol's shortest interval"),
+            );
+            message
+                .encode(&limits())
+                .assured("every corpus request fits the default limits")
+                .into_bytes()
+        }),
         ("client_commit.nxcm", client(1)),
         ("client_detach_domain_clock.nxcm", client(16)),
         ("client_open_emitter.nxcm", client(21)),
@@ -840,6 +851,15 @@ fn corpus_frames() -> Vec<(&'static str, Bytes)> {
                     message: "`SubscribeRequest.subscription_type` is required".to_string(),
                 }),
             ),
+        ),
+        (
+            "server_request_progress.nxsm",
+            crate::RequestProgress {
+                request_id: request(9),
+            }
+            .encode(&limits())
+            .assured("a progress report fits the default limits")
+            .into_bytes(),
         ),
         ("server_rows.nxsm", rows_frame(&limits()).into_bytes()),
         (
@@ -1631,11 +1651,25 @@ fn render_server(message: &ServerMessage, lines: &mut Vec<String>) {
                 text(&ended.message)
             ));
         }
+        ServerMessage::Progress(progress) => {
+            lines.push(format!("REPLY {} PROGRESS", progress.request_id.get()));
+        }
         other => panic!("the corpus holds no {other:?} message"),
     }
 }
 
 fn render_client(message: &ClientMessage, lines: &mut Vec<String>) {
+    render_client_request(message, lines);
+    if let Some(progress) = message.progress {
+        lines.push(format!(
+            "REQUEST {} PROGRESS_INTERVAL ms={}",
+            message.request_id.get(),
+            progress.get().as_millis()
+        ));
+    }
+}
+
+fn render_client_request(message: &ClientMessage, lines: &mut Vec<String>) {
     let id = message.request_id.get();
     match &message.request {
         ClientRequest::Command(command) => {

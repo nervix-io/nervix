@@ -590,6 +590,36 @@ records as an ordered effect rather than a model mutation, a guest's request for
 its own branch, and `ON REJECTED STATE RESET`. See
 [Coordinated Reset](./wasm-state.md#coordinated-reset).
 
+## Stopping A Domain
+
+A domain's stop is committed state. One consensus decision admits each stop request: it begins the
+stop of a running domain that no other execution holds, or of a paused one only under the mutation
+that pauses it; it joins the stop a stopping domain is already in, needing no lease; and it changes
+nothing for a stopped domain. The `STOP` statement therefore takes no mutation lease of its own, so
+a second `STOP` joins the first rather than waiting for a lease the stop never releases, while a
+`STOP` that meets another execution's lease is refused as before. The committed record of a
+stopping domain holds each request: an operator's under the execution reference it was admitted
+with, the instant it was admitted and its `ENFORCE AFTER` or `CANCEL AFTER` clause, and the
+licensing stop gate's under its expiry. A stopping domain refuses every other mutation lease, so
+`START`, `ALTER`, transactions, `DROP`, `BACKUP` and relocation wait until the stop ends or is called
+off.
+
+One leader task owns each stopping domain, and the next leader resumes it from the committed
+record. It drains in rounds over every live node and every node the schedule assigns the domain's
+work to, as a backup cut does, until no node holds work in motion and a confirming round saw
+nothing move, and then commits the stop's completed ending. It commits an enforced ending once the
+earliest `ENFORCE AFTER` has passed, counted from each request's admission, or once committed
+licensing time reaches the licensing stop's fixed minute after the expiry; and it withdraws each
+request whose `CANCEL AFTER` passed, the last withdrawal calling the stop off. An ending names the
+stop it ends by the revision that began it, so a stop called off and begun again is never ended by
+the owner of the first. Once the domain is stopped, a task of its own collects every node's report
+of what its teardown cut and commits it beside the ending, and each request's `STOP` answers from
+that record. A `STOP` that a leader change interrupts is resumed under its execution reference: its
+request is already held, its stop already ended, or, when the domain has started again since the
+command was admitted, the stop it requested is long over. [Stopping A
+Domain](./domains-and-time.md#stopping-a-domain) describes the statement and its answers, and [A
+Domain's Stop](./shutdown.md#a-domains-stop) the drain and the teardown.
+
 ## Backing Up A Domain
 
 A normal domain backup acquires a replicated mutation lease under its persistent command

@@ -2289,12 +2289,26 @@ impl SessionServiceImpl {
                     }),
                 )
             }
-            PlannedTransactionStepKind::StopDomain => (
-                command_ok(format!("stopped domain '{}'", domain_id.as_str())),
-                Some(TransactionStepEffect::StopDomain {
-                    inputs: Box::new(inputs),
-                }),
-            ),
+            PlannedTransactionStepKind::StopDomain => {
+                let limit = match transaction
+                    .statements
+                    .get(statement_index)
+                    .map(|statement| &statement.statement)
+                {
+                    Some(Statement::StopDomain(stop)) => stop.wait_limit,
+                    _ => None,
+                };
+                (
+                    command_ok(format!("stopped domain '{}'", domain_id.as_str())),
+                    Some(TransactionStepEffect::StopDomain {
+                        inputs: Box::new(inputs),
+                        request: Box::new(nervix_models::OperatorStopRequest {
+                            requested_at: current_timestamp(),
+                            limit,
+                        }),
+                    }),
+                )
+            }
             PlannedTransactionStepKind::ResetWasmState {
                 reset,
                 request,
@@ -2438,6 +2452,19 @@ impl SessionServiceImpl {
                 .is_err()
         {
             return Ok(advanced);
+        }
+        // A STOP step's effect only began, or joined, the domain's stop. The step applies until
+        // that stop ends, as when a later attempt resumes it, so the steps after it run against
+        // the stopped domain they were planned for.
+        if succeeded
+            && application_failure.is_none()
+            && let TransactionState::Committing(progress) = &advanced.state
+            && let Some(applying) = &progress.applying
+            && let Some(TransactionStepEffect::StopDomain { inputs, request }) = &applying.effect
+        {
+            application_failure =
+                Box::pin(self.wait_for_transaction_stop(&advanced, applying, inputs, request))
+                    .await;
         }
         self.record_transaction_application_completion(
             &advanced,

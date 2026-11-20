@@ -309,6 +309,158 @@ fn a_retained_route_keeps_its_selected_signaling_allocation() {
 }
 
 #[test]
+fn a_stopping_domains_routes_are_withdrawn_while_its_bindings_keep_their_intake() {
+    let routes = EndpointIntakeRoutes::default();
+    let stopping = domain(0);
+    let running = domain(1);
+    let shared = key(0, 0);
+    let own = key(1, 0);
+    routes.replace_domain(
+        &stopping,
+        vec![
+            (shared.clone(), endpoint(EndpointType::Http)),
+            (own.clone(), endpoint(EndpointType::Http)),
+        ],
+    );
+    routes.replace_domain(
+        &running,
+        vec![(shared.clone(), endpoint(EndpointType::Http))],
+    );
+    routes.mark_installed();
+    let stopping_binding = routes.bind(identity(&stopping), 1, &[shared.clone(), own]);
+    let running_binding = routes.bind(identity(&running), 2, std::slice::from_ref(&shared));
+    let retained = routes
+        .resolve("host0.example.com", "/path0")
+        .into_route()
+        .assured("the shared route is installed");
+
+    routes.withdraw_stopping_domain(&stopping);
+
+    // A request that arrives now finds only the running domain on the shared route, and no route
+    // where only the stopping domain published one.
+    let current = routes
+        .resolve("host0.example.com", "/path0")
+        .into_route()
+        .assured("the running domain still publishes the shared route");
+    assert_eq!(intakes(&current), vec![2]);
+    assert!(matches!(
+        routes.resolve("host1.example.com", "/path0"),
+        EndpointResolution::Unrouted
+    ));
+    // The stopping domain's binding keeps its intake for a request that already resolved it.
+    assert_eq!(stopping_binding.intake().as_deref(), Some(&1));
+    assert_eq!(intakes(&retained), vec![1, 2]);
+    assert_eq!(running_binding.intake().as_deref(), Some(&2));
+}
+
+#[test]
+fn a_called_off_stop_publishes_its_routes_again_with_each_live_binding_in_its_place() {
+    let routes = EndpointIntakeRoutes::default();
+    let stopping = domain(0);
+    let running = domain(1);
+    let shared = key(0, 0);
+    let keys = std::slice::from_ref(&shared);
+    routes.replace_domain(
+        &stopping,
+        vec![(shared.clone(), endpoint(EndpointType::Http))],
+    );
+    routes.replace_domain(
+        &running,
+        vec![(shared.clone(), endpoint(EndpointType::Http))],
+    );
+    routes.mark_installed();
+    let first = routes.bind(identity(&stopping), 1, keys);
+    let between = routes.bind(identity(&running), 2, keys);
+    let ending = routes.bind(identity(&stopping), 3, keys);
+    routes.withdraw_stopping_domain(&stopping);
+    routes.unbind(&ending, keys);
+    // A source of the stopping domain bound while its routes are withdrawn waits with them.
+    let later = routes.bind(identity(&stopping), 4, keys);
+    let during = routes
+        .resolve("host0.example.com", "/path0")
+        .into_route()
+        .assured("the running domain publishes the shared route");
+    assert_eq!(intakes(&during), vec![2]);
+
+    routes.restore_withdrawn_domain(&stopping);
+
+    let restored = routes
+        .resolve("host0.example.com", "/path0")
+        .into_route()
+        .assured("the called-off stop published the route again");
+    assert_eq!(
+        intakes(&restored),
+        vec![1, 2, 4],
+        "every live binding returns in the order the table created it"
+    );
+    assert_eq!(
+        restored.bindings().len(),
+        3,
+        "a binding that ended while withdrawn is never published again"
+    );
+    assert_eq!(first.intake().as_deref(), Some(&1));
+    assert_eq!(between.intake().as_deref(), Some(&2));
+    assert_eq!(later.intake().as_deref(), Some(&4));
+}
+
+#[test]
+fn the_teardown_of_a_stopped_domain_ends_the_bindings_its_stop_withdrew() {
+    let routes = EndpointIntakeRoutes::default();
+    let owner = domain(0);
+    let keys = [key(0, 0)];
+    routes.replace_domain(
+        &owner,
+        vec![(keys[0].clone(), endpoint(EndpointType::Http))],
+    );
+    routes.mark_installed();
+    let binding = routes.bind(identity(&owner), 1, &keys);
+    routes.withdraw_stopping_domain(&owner);
+
+    routes.withdraw_domain(&owner);
+
+    assert!(binding.intake().is_none());
+    routes.restore_withdrawn_domain(&owner);
+    assert!(matches!(
+        routes.resolve("host0.example.com", "/path0"),
+        EndpointResolution::Unrouted
+    ));
+}
+
+#[test]
+fn a_rebuild_while_stopping_publishes_routes_its_stop_withdraws_again() {
+    let routes = EndpointIntakeRoutes::default();
+    let owner = domain(0);
+    let keys = [key(0, 0)];
+    let definitions = vec![(keys[0].clone(), endpoint(EndpointType::Http))];
+    routes.replace_domain(&owner, definitions.clone());
+    routes.mark_installed();
+    let binding = routes.bind(identity(&owner), 1, &keys);
+    routes.withdraw_stopping_domain(&owner);
+
+    // A rebuild tears the execution down, ending its bindings, and publishes the definitions anew.
+    routes.replace_domain(&owner, definitions);
+    assert!(binding.intake().is_none());
+    let rebuilt = routes
+        .resolve("host0.example.com", "/path0")
+        .into_route()
+        .assured("the rebuild published the route");
+    assert!(rebuilt.bindings().is_empty());
+    routes.withdraw_stopping_domain(&owner);
+    routes.withdraw_stopping_domain(&owner);
+    assert!(matches!(
+        routes.resolve("host0.example.com", "/path0"),
+        EndpointResolution::Unrouted
+    ));
+
+    routes.restore_withdrawn_domain(&owner);
+    let restored = routes
+        .resolve("host0.example.com", "/path0")
+        .into_route()
+        .assured("the called-off stop published the route again");
+    assert!(restored.bindings().is_empty());
+}
+
+#[test]
 fn bolero_endpoint_sequences_preserve_visible_routes_and_intake_lifetimes() {
     bolero::check!()
         .with_iterations(256)
@@ -316,6 +468,10 @@ fn bolero_endpoint_sequences_preserve_visible_routes_and_intake_lifetimes() {
         .for_each(|bytes: &[u8]| {
             let routes = EndpointIntakeRoutes::default();
             let mut configured: BTreeMap<DomainName, ahash::HashMap<HttpRouteKey, EndpointType>> =
+                BTreeMap::new();
+            // The routes each stopping domain published before its stop withdrew them. A domain is
+            // configured or withdrawn, never both.
+            let mut withdrawn: BTreeMap<DomainName, ahash::HashMap<HttpRouteKey, EndpointType>> =
                 BTreeMap::new();
             // Whether a revision installed the table since it was created or last cleared, which
             // decides whether a route no domain publishes is final.
@@ -336,7 +492,7 @@ fn bolero_endpoint_sequences_preserve_visible_routes_and_intake_lifetimes() {
             for (step, byte) in bytes.iter().copied().enumerate() {
                 let owner = domain((byte / 5) % 2);
                 let selected_key = key((byte / 10) % 2, (byte / 20) % 2);
-                match byte % 6 {
+                match byte % 8 {
                     0 => {
                         let kind = if byte & 128 == 0 {
                             EndpointType::Http
@@ -348,6 +504,7 @@ fn bolero_endpoint_sequences_preserve_visible_routes_and_intake_lifetimes() {
                             owner.clone(),
                             ahash::HashMap::from_iter([(selected_key, kind)]),
                         );
+                        withdrawn.remove(&owner);
                         for binding in bindings.values_mut() {
                             if binding.owner == owner {
                                 binding.live = false;
@@ -355,9 +512,15 @@ fn bolero_endpoint_sequences_preserve_visible_routes_and_intake_lifetimes() {
                         }
                     }
                     1 => {
-                        if let Some(domain_routes) = configured.get(&owner)
-                            && domain_routes.contains_key(&selected_key)
-                        {
+                        // A source binds a route its domain publishes, or one its domain's stop
+                        // withdrew, where it waits for the stop to be called off.
+                        let published = configured
+                            .get(&owner)
+                            .is_some_and(|domain_routes| domain_routes.contains_key(&selected_key));
+                        let waiting = withdrawn
+                            .get(&owner)
+                            .is_some_and(|domain_routes| domain_routes.contains_key(&selected_key));
+                        if published || waiting {
                             let handle = routes.bind(
                                 identity(&owner),
                                 step,
@@ -384,6 +547,7 @@ fn bolero_endpoint_sequences_preserve_visible_routes_and_intake_lifetimes() {
                     3 => {
                         routes.withdraw_domain(&owner);
                         configured.remove(&owner);
+                        withdrawn.remove(&owner);
                         for binding in bindings.values_mut() {
                             if binding.owner == owner {
                                 binding.live = false;
@@ -393,9 +557,22 @@ fn bolero_endpoint_sequences_preserve_visible_routes_and_intake_lifetimes() {
                     4 => {
                         routes.clear();
                         configured.clear();
+                        withdrawn.clear();
                         installed = false;
                         for binding in bindings.values_mut() {
                             binding.live = false;
+                        }
+                    }
+                    5 => {
+                        routes.withdraw_stopping_domain(&owner);
+                        if let Some(domain_routes) = configured.remove(&owner) {
+                            withdrawn.insert(owner, domain_routes);
+                        }
+                    }
+                    6 => {
+                        routes.restore_withdrawn_domain(&owner);
+                        if let Some(domain_routes) = withdrawn.remove(&owner) {
+                            configured.insert(owner, domain_routes);
                         }
                     }
                     _ => {
@@ -431,13 +608,23 @@ fn bolero_endpoint_sequences_preserve_visible_routes_and_intake_lifetimes() {
                             .into_route()
                             .assured("the reference contains a configured route");
                         assert_eq!(actual.endpoint_type(), kind);
+                        // A route lists every live source bound to it whose domain's stop has not
+                        // withdrawn it, in the order the sources were bound.
                         let mut expected = Vec::new();
                         for (id, binding) in &bindings {
-                            if binding.live && binding.key == key {
+                            if binding.live
+                                && binding.key == key
+                                && !withdrawn.contains_key(&binding.owner)
+                            {
                                 expected.push(*id);
                             }
                         }
                         assert_eq!(intakes(&actual), expected);
+                        assert_eq!(
+                            actual.bindings().len(),
+                            expected.len(),
+                            "a route never publishes an ended source"
+                        );
                         retained.push(Retained {
                             route: actual,
                             intakes: expected,

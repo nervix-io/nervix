@@ -21,9 +21,12 @@ use nervix_models::{ClusterNodeName, ScheduledUnit};
 
 use crate::cluster;
 
+/// Renders the cluster's report; `stops` are the lines of every stopping domain, which only the
+/// stop's owner can complete with what each stop waits for.
 pub(in crate::application) async fn render_cluster_status(
     cluster: &cluster::ClusterHandle,
     consensus: &Observer,
+    stops: Vec<String>,
 ) -> String {
     let gossip = cluster.gossip_state().await;
     let mut lines = Vec::new();
@@ -39,6 +42,13 @@ pub(in crate::application) async fn render_cluster_status(
     lines.push(String::new());
     lines.push("[domains]".to_string());
     lines.extend(consensus.domain_status_lines().await);
+    lines.push(String::new());
+    lines.push("[stops]".to_string());
+    if stops.is_empty() {
+        lines.push("- none".to_string());
+    } else {
+        lines.extend(stops);
+    }
     lines.push(String::new());
     lines.push("[schedule]".to_string());
     lines.extend(render_cluster_schedule_lines(

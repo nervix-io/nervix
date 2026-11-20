@@ -5508,6 +5508,17 @@ coverage-chaos-endpoint-verifiers:
 test-chaos-lifetimes-verifiers:
     exec bash scripts/chaos/tests/lifetimes-self-test.sh
 
+# Run the controls of the shared correctness harness (the expected-failure option, burst loads,
+# negative-outcome counters, the strict verdict and expected failures) without the other external
+# harness checks.
+test-chaos-correctness-harness:
+    exec bash scripts/chaos/tests/correctness-harness-self-test.sh
+
+# Run the graceful-stop option checks, its fixture generator and its STOP answer verdict without the
+# other external harness checks.
+test-chaos-graceful-stop:
+    exec bash scripts/chaos/tests/graceful-stop-self-test.sh
+
 # Retain shell coverage of the lifetimes verifier controls.
 coverage-chaos-lifetimes-verifiers:
     #!/usr/bin/env bash

@@ -259,6 +259,15 @@ pub enum CommandExecutionEffect {
         source: String,
         statement: Box<Statement>,
     },
+    /// A domain `STOP`, admitted while the domain was at `start_version`. Its execution begins or
+    /// joins the domain's stop and waits for it to end. A stop that ended, and a start that came
+    /// after it, leave the domain at a later version, which tells an execution resumed after a
+    /// leader change that the stop it requested is long over.
+    StopDomain {
+        source: String,
+        stop: nervix_models::StopDomain,
+        start_version: u64,
+    },
     RotateLicenseClusterKey {
         identity: Box<crate::ClusterIdentity>,
         outcome: Option<LicensingCommandOutcome>,
@@ -486,6 +495,14 @@ impl CommandExecution {
         }
     }
 
+    /// When the leader that admitted the command read its clock, while the command applies.
+    pub fn admitted_at(&self) -> Option<Timestamp> {
+        match &self.state {
+            CommandExecutionState::Applying { admitted_at, .. } => Some(*admitted_at),
+            CommandExecutionState::Finished { .. } | CommandExecutionState::Expired => None,
+        }
+    }
+
     pub fn domain(&self) -> Option<&DomainName> {
         match &self.state {
             CommandExecutionState::Applying { domain, .. } => domain.as_ref(),
@@ -578,6 +595,7 @@ impl CommandExecution {
                 | CommandExecutionEffect::AlterCluster { .. }
                 | CommandExecutionEffect::Transaction { .. }
                 | CommandExecutionEffect::Statement { .. }
+                | CommandExecutionEffect::StopDomain { .. }
                 | CommandExecutionEffect::CreateUser { .. }
                 | CommandExecutionEffect::RotateLicenseClusterKey { .. }
                 | CommandExecutionEffect::ReleaseLicense { .. }
@@ -599,6 +617,7 @@ impl CommandExecution {
                 | CommandExecutionEffect::Transaction { .. }
                 | CommandExecutionEffect::TransactionRequest(_)
                 | CommandExecutionEffect::Statement { .. }
+                | CommandExecutionEffect::StopDomain { .. }
                 | CommandExecutionEffect::CreateUser { .. }
                 | CommandExecutionEffect::RotateLicenseClusterKey { .. }
                 | CommandExecutionEffect::ReleaseLicense { .. }
@@ -633,6 +652,7 @@ impl CommandExecution {
                 | CommandExecutionEffect::AlterCluster { .. }
                 | CommandExecutionEffect::Transaction { .. }
                 | CommandExecutionEffect::Statement { .. }
+                | CommandExecutionEffect::StopDomain { .. }
                 | CommandExecutionEffect::CreateUser { .. }
                 | CommandExecutionEffect::RotateLicenseClusterKey { .. }
                 | CommandExecutionEffect::ReleaseLicense { .. }
@@ -661,6 +681,7 @@ impl CommandExecution {
                 | CommandExecutionEffect::Transaction { .. }
                 | CommandExecutionEffect::TransactionRequest(_)
                 | CommandExecutionEffect::Statement { .. }
+                | CommandExecutionEffect::StopDomain { .. }
                 | CommandExecutionEffect::DropNode { .. }
                 | CommandExecutionEffect::RotateLicenseClusterKey { .. }
                 | CommandExecutionEffect::ReleaseLicense { .. }
@@ -761,6 +782,7 @@ impl CommandExecution {
             | CommandExecutionEffect::AlterCluster { .. }
             | CommandExecutionEffect::Transaction { .. }
             | CommandExecutionEffect::Statement { .. }
+            | CommandExecutionEffect::StopDomain { .. }
             | CommandExecutionEffect::DropNode { .. }
             | CommandExecutionEffect::RotateLicenseClusterKey { .. }
             | CommandExecutionEffect::ReleaseLicense { .. }

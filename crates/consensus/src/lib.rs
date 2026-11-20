@@ -123,6 +123,8 @@ pub use cluster_parameters::ClusterParameterPlanningInputs;
 mod connectivity_fault;
 mod domain_mutation;
 mod domain_pause_recovery;
+#[cfg(all(test, feature = "shuttle"))]
+mod domain_stop_shuttle_tests;
 mod durable_batch;
 mod leadership;
 mod lease_refusal;
@@ -564,10 +566,40 @@ pub enum ConsensusCommand {
         authority: Option<ClusterNodeIdentity>,
         mutation: Option<Box<DomainMutationLease>>,
     },
-    StopDomain {
+    /// Stops a domain that has run no work since it last stopped, as the rollback of a failed
+    /// `START` does: nothing is in motion, so nothing drains and nothing is cut.
+    StopDomainBeforeAnyWork {
         domain_id: DomainName,
         mutation: Option<Box<DomainMutationLease>>,
         cause: nervix_models::DomainStopCause,
+    },
+    /// Asks a domain to stop. A running domain no other execution holds begins stopping, a paused
+    /// one only under the mutation that pauses it, and a stopping one takes the request beside the
+    /// requests it holds, whatever holds it. A repeated request, or one for a stopped domain,
+    /// changes nothing.
+    RequestDomainStop {
+        domain_id: DomainName,
+        request: Box<nervix_models::StopRequest>,
+        mutation: Option<Box<DomainMutationLease>>,
+    },
+    /// Withdraws an operator's stop request whose `CANCEL` acted. The last request's withdrawal
+    /// calls the stop off and the domain runs on.
+    WithdrawDomainStopRequest {
+        domain_id: DomainName,
+        reference: nervix_models::CommandExecutionReference,
+    },
+    /// Ends the stop that began at `began_at_revision`, if the domain is still in it. An enforced
+    /// ending names a request the stop still holds.
+    EndDomainStop {
+        domain_id: DomainName,
+        began_at_revision: u64,
+        ending: nervix_models::StopEnding,
+    },
+    /// Records what the teardown of the stop that ended the domain at `start_version` cut.
+    RecordDomainStopReport {
+        domain_id: DomainName,
+        start_version: u64,
+        report: Box<nervix_models::DomainStopReport>,
     },
     PauseDomain {
         domain_id: DomainName,
@@ -924,7 +956,21 @@ impl std::fmt::Display for ConsensusCommand {
             }
             Self::PutDomain { domain, .. } => write!(f, "put-domain:{}", domain.id.as_str()),
             Self::StartDomain { domain_id, .. } => write!(f, "start-domain:{}", domain_id.as_str()),
-            Self::StopDomain { domain_id, .. } => write!(f, "stop-domain:{}", domain_id.as_str()),
+            Self::StopDomainBeforeAnyWork { domain_id, .. } => {
+                write!(f, "stop-domain-before-any-work:{}", domain_id.as_str())
+            }
+            Self::RequestDomainStop { domain_id, .. } => {
+                write!(f, "request-domain-stop:{}", domain_id.as_str())
+            }
+            Self::WithdrawDomainStopRequest { domain_id, .. } => {
+                write!(f, "withdraw-domain-stop-request:{}", domain_id.as_str())
+            }
+            Self::EndDomainStop { domain_id, .. } => {
+                write!(f, "end-domain-stop:{}", domain_id.as_str())
+            }
+            Self::RecordDomainStopReport { domain_id, .. } => {
+                write!(f, "record-domain-stop-report:{}", domain_id.as_str())
+            }
             Self::PauseDomain { domain_id, .. } => write!(f, "pause-domain:{}", domain_id.as_str()),
             Self::ResumeDomain { domain_id, .. } => {
                 write!(f, "resume-domain:{}", domain_id.as_str())
@@ -1780,10 +1826,20 @@ impl StateMachineData {
     }
 
     fn domain_planning_inputs(&self, domain: &DomainName) -> DomainPlanningInputs {
+        // A stop's requests, ending and report decide nothing a transaction plans, and a step after
+        // a `STOP` step cannot know how the stop will end, so the record is no planning input.
+        let state = match self.domains.get(domain) {
+            Some(state) => {
+                let mut planned = state.clone();
+                planned.stop = None;
+                Some(Box::new(planned))
+            }
+            None => None,
+        };
         DomainPlanningInputs {
             parameters: self.parameters,
             domain: domain.clone(),
-            state: self.domains.get(domain).cloned().map(Box::new),
+            state,
             resources: self.domain_resource_planning_inputs(domain),
             schedule: self.schedule.domain(domain).cloned().map(Box::new),
             topology: self.schedule_topology_inputs(),
@@ -1846,7 +1902,7 @@ impl StateMachineData {
             return false;
         };
         domain.status = DomainStatus::Running;
-        domain.stop_cause = None;
+        domain.clear_stop();
         domain.start_version = domain
             .start_version
             .checked_add(1)
@@ -1863,7 +1919,7 @@ impl StateMachineData {
         true
     }
 
-    fn commit_domain_stop(
+    fn commit_domain_stop_before_any_work(
         &mut self,
         domain_id: &DomainName,
         cause: nervix_models::DomainStopCause,
@@ -1871,15 +1927,132 @@ impl StateMachineData {
         let Some(domain) = self.domains.get_mut(domain_id) else {
             return false;
         };
-        domain.record_stop(cause);
-        let paced = domain.config.pace.is_paced();
+        domain.record_stop_before_any_work(cause);
+        self.release_stopped_domain_clock(domain_id);
+        true
+    }
 
+    /// A stopped domain leaves its clock: a paced domain's authority advances to no owner, so a
+    /// later start assigns one afresh.
+    fn release_stopped_domain_clock(&mut self, domain_id: &DomainName) {
+        let paced = self
+            .domains
+            .get(domain_id)
+            .is_some_and(|domain| domain.config.pace.is_paced());
         if paced {
             self.advance_domain_clock_authority(domain_id, None);
         } else {
             self.domain_clock_authorities.remove(domain_id);
         }
-        true
+    }
+
+    /// Applies a stop request at the revision of the entry that carries it. A running domain, and a
+    /// paused one, begins stopping only under the mutation that holds it, if any holds it; a
+    /// stopping domain takes the request whatever holds it. Returns whether the domain changed.
+    fn request_domain_stop(
+        &mut self,
+        domain_id: &DomainName,
+        request: &nervix_models::StopRequest,
+        mutation: Option<&DomainMutationLease>,
+    ) -> error_stack::Result<bool, DomainStopRequestConflict> {
+        let Some(domain) = self.domains.get(domain_id) else {
+            return Err(Report::new(DomainStopRequestConflict::MissingDomain {
+                domain: domain_id.clone(),
+            }));
+        };
+        match domain.status {
+            DomainStatus::Stopped => return Ok(false),
+            DomainStatus::Stopping => {}
+            DomainStatus::Running | DomainStatus::Paused => {
+                validate_domain_mutation(self, domain_id, mutation)
+                    .change_context(DomainStopRequestConflict::Held)?;
+            }
+        }
+        if let nervix_models::StopRequest::Licensing(_) = request
+            && self.licensing_stop().is_none()
+        {
+            return Err(Report::new(DomainStopRequestConflict::LicensingGateOpen {
+                domain: domain_id.clone(),
+            }));
+        }
+        let revision = match &self.last_applied_log_id {
+            Some(log_id) => log_id.index,
+            None => 0,
+        };
+        let domain = self
+            .domains
+            .get_mut(domain_id)
+            .verified("the domain's presence was checked above, in the same applied entry");
+        let admission = domain.request_stop(request.clone(), revision);
+        Ok(matches!(
+            admission,
+            nervix_models::StopRequestAdmission::Began
+                | nervix_models::StopRequestAdmission::Joined
+        ))
+    }
+
+    /// Withdraws an operator's stop request. Returns whether the domain changed.
+    fn withdraw_domain_stop_request(
+        &mut self,
+        domain_id: &DomainName,
+        reference: &nervix_models::CommandExecutionReference,
+    ) -> bool {
+        let Some(domain) = self.domains.get_mut(domain_id) else {
+            return false;
+        };
+        !matches!(
+            domain.withdraw_stop_request(reference),
+            nervix_models::StopWithdrawal::NotHeld
+        )
+    }
+
+    /// Ends the stop that began at `began_at_revision`, if the domain is still in it. Returns
+    /// whether the domain changed.
+    fn end_domain_stop(
+        &mut self,
+        domain_id: &DomainName,
+        began_at_revision: u64,
+        ending: &nervix_models::StopEnding,
+    ) -> error_stack::Result<bool, DomainStopRequestConflict> {
+        let Some(domain) = self.domains.get_mut(domain_id) else {
+            return Ok(false);
+        };
+        let Some(stopping) = domain.stopping() else {
+            return Ok(false);
+        };
+        if stopping.began_at_revision != began_at_revision {
+            return Err(Report::new(DomainStopRequestConflict::AnotherStop {
+                domain: domain_id.clone(),
+            }));
+        }
+        if let nervix_models::StopEnding::Enforced { by } = ending
+            && !stopping.holds(by)
+        {
+            return Err(Report::new(DomainStopRequestConflict::EnforcerWithdrawn {
+                domain: domain_id.clone(),
+                request: by.clone(),
+            }));
+        }
+        domain.end_stop(ending.clone());
+        self.release_stopped_domain_clock(domain_id);
+        Ok(true)
+    }
+
+    /// Records what the teardown of the stop that ended the domain at `start_version` cut.
+    /// Returns whether the domain changed.
+    fn record_domain_stop_report(
+        &mut self,
+        domain_id: &DomainName,
+        start_version: u64,
+        report: &nervix_models::DomainStopReport,
+    ) -> bool {
+        let Some(domain) = self.domains.get_mut(domain_id) else {
+            return false;
+        };
+        if domain.start_version != start_version {
+            return false;
+        }
+        domain.record_stop_report(report.clone())
     }
 
     fn reconcile_domain_clock_authority(
@@ -4238,7 +4411,9 @@ impl Proposer {
         Self::applied_response(response.data)
     }
 
-    pub async fn stop_domain(
+    /// Stops a domain that has run no work since it last stopped, as the rollback of a failed
+    /// `START` does.
+    pub async fn stop_domain_before_any_work(
         &self,
         domain_id: DomainName,
         mutation: Option<&DomainMutationLease>,
@@ -4246,10 +4421,82 @@ impl Proposer {
     ) -> error_stack::Result<(), ConsensusError> {
         let response = self
             .inner
-            .client_write(ConsensusCommand::StopDomain {
+            .client_write(ConsensusCommand::StopDomainBeforeAnyWork {
                 domain_id,
                 mutation: mutation.cloned().map(Box::new),
                 cause,
+            })
+            .await?;
+        Self::applied_response(response.data)
+    }
+
+    /// Asks a domain to stop: begins its stop, or joins the stop it is in. A repeated request, or
+    /// one for a stopped domain, changes nothing; the domain's committed record then tells the
+    /// caller what became of its request.
+    pub async fn request_domain_stop(
+        &self,
+        domain_id: DomainName,
+        request: nervix_models::StopRequest,
+        mutation: Option<&DomainMutationLease>,
+    ) -> error_stack::Result<(), ConsensusError> {
+        let response = self
+            .inner
+            .client_write(ConsensusCommand::RequestDomainStop {
+                domain_id,
+                request: Box::new(request),
+                mutation: mutation.cloned().map(Box::new),
+            })
+            .await?;
+        Self::applied_response(response.data)
+    }
+
+    /// Withdraws an operator's stop request whose `CANCEL` acted.
+    pub async fn withdraw_domain_stop_request(
+        &self,
+        domain_id: DomainName,
+        reference: nervix_models::CommandExecutionReference,
+    ) -> error_stack::Result<(), ConsensusError> {
+        let response = self
+            .inner
+            .client_write(ConsensusCommand::WithdrawDomainStopRequest {
+                domain_id,
+                reference,
+            })
+            .await?;
+        Self::applied_response(response.data)
+    }
+
+    /// Ends the stop that began at `began_at_revision`, if the domain is still in it.
+    pub async fn end_domain_stop(
+        &self,
+        domain_id: DomainName,
+        began_at_revision: u64,
+        ending: nervix_models::StopEnding,
+    ) -> error_stack::Result<(), ConsensusError> {
+        let response = self
+            .inner
+            .client_write(ConsensusCommand::EndDomainStop {
+                domain_id,
+                began_at_revision,
+                ending,
+            })
+            .await?;
+        Self::applied_response(response.data)
+    }
+
+    /// Records what the teardown of the stop that ended the domain at `start_version` cut.
+    pub async fn record_domain_stop_report(
+        &self,
+        domain_id: DomainName,
+        start_version: u64,
+        report: nervix_models::DomainStopReport,
+    ) -> error_stack::Result<(), ConsensusError> {
+        let response = self
+            .inner
+            .client_write(ConsensusCommand::RecordDomainStopReport {
+                domain_id,
+                start_version,
+                report: Box::new(report),
             })
             .await?;
         Self::applied_response(response.data)
@@ -6065,11 +6312,29 @@ fn domain_mutation_recovery_fence(state: &StateMachineData) -> DomainMutationRec
     DomainMutationRecoveryFence::at_revision(revision)
 }
 
+/// Refuses a mutation of a stopping domain: its stop owns it until the stop ends or is called off.
+fn refuse_stopping_domain(
+    state: &StateMachineData,
+    domain: &DomainName,
+) -> error_stack::Result<(), DomainMutationError> {
+    if state
+        .domains
+        .get(domain)
+        .is_some_and(|current| current.status == DomainStatus::Stopping)
+    {
+        return Err(Report::new(DomainMutationError::Stopping {
+            domain: domain.clone(),
+        }));
+    }
+    Ok(())
+}
+
 fn admit_domain_mutation(
     state: &mut StateMachineData,
     domain: &DomainName,
     owner: &DomainMutationOwner,
 ) -> error_stack::Result<DomainMutationLease, DomainMutationError> {
+    refuse_stopping_domain(state, domain)?;
     let admission = DomainMutationAdmission::decide(
         state.domain_mutations.get(domain),
         owner,
@@ -6093,6 +6358,7 @@ fn admit_domain_mutations(
     let recovery_fence = domain_mutation_recovery_fence(state);
     let mut admitted = BTreeMap::new();
     for domain in domains {
+        refuse_stopping_domain(state, domain)?;
         let admission = DomainMutationAdmission::decide(
             state.domain_mutations.get(domain),
             owner,
@@ -6110,6 +6376,27 @@ fn admit_domain_mutations(
         state.domain_mutations.insert(domain.clone(), lease.clone());
     }
     Ok(admitted)
+}
+
+/// Why a stop request, or the end of a stop, cannot act on its domain.
+#[derive(Debug, thiserror::Error)]
+enum DomainStopRequestConflict {
+    #[error("domain '{domain}' does not exist")]
+    MissingDomain { domain: DomainName },
+    /// The mutation that refuses the request is beneath.
+    #[error("the domain is held by another execution")]
+    Held,
+    #[error("the licensing stop gate no longer closes domain '{domain}'")]
+    LicensingGateOpen { domain: DomainName },
+    #[error("domain '{domain}' stopped and began another stop since its drain was observed")]
+    AnotherStop { domain: DomainName },
+    #[error(
+        "stop request '{request}' of domain '{domain}' was withdrawn before it enforced the stop"
+    )]
+    EnforcerWithdrawn {
+        domain: DomainName,
+        request: nervix_models::StopRequestId,
+    },
 }
 
 fn validate_domain_mutation(
@@ -6529,7 +6816,7 @@ fn apply_consensus_command_at(
             }
             changes.domains_changed = state.commit_domain_start(domain_id, start, clock, authority);
         }
-        ConsensusCommand::StopDomain {
+        ConsensusCommand::StopDomainBeforeAnyWork {
             domain_id,
             mutation,
             cause,
@@ -6537,7 +6824,37 @@ fn apply_consensus_command_at(
             if let Err(reason) = validate_domain_mutation(state, domain_id, mutation.as_deref()) {
                 return AppliedConsensusCommand::conflict(reason.to_string());
             }
-            changes.domains_changed = state.commit_domain_stop(domain_id, *cause);
+            changes.domains_changed = state.commit_domain_stop_before_any_work(domain_id, *cause);
+        }
+        ConsensusCommand::RequestDomainStop {
+            domain_id,
+            request,
+            mutation,
+        } => match state.request_domain_stop(domain_id, request, mutation.as_deref()) {
+            Ok(changed) => changes.domains_changed = changed,
+            Err(reason) => return AppliedConsensusCommand::conflict(format!("{reason:#}")),
+        },
+        ConsensusCommand::WithdrawDomainStopRequest {
+            domain_id,
+            reference,
+        } => {
+            changes.domains_changed = state.withdraw_domain_stop_request(domain_id, reference);
+        }
+        ConsensusCommand::EndDomainStop {
+            domain_id,
+            began_at_revision,
+            ending,
+        } => match state.end_domain_stop(domain_id, *began_at_revision, ending) {
+            Ok(changed) => changes.domains_changed = changed,
+            Err(reason) => return AppliedConsensusCommand::conflict(format!("{reason:#}")),
+        },
+        ConsensusCommand::RecordDomainStopReport {
+            domain_id,
+            start_version,
+            report,
+        } => {
+            changes.domains_changed =
+                state.record_domain_stop_report(domain_id, *start_version, report);
         }
         ConsensusCommand::PauseDomain {
             domain_id,
@@ -7354,7 +7671,17 @@ fn apply_consensus_command_at(
                 );
             }
             if let Some(effect) = effect {
-                apply_transaction_step_effect(state, &transaction.domain, effect, &mut changes);
+                let step_reference = transaction
+                    .statements
+                    .get(*expected_next_statement)
+                    .map(|statement| statement.request_reference.clone());
+                apply_transaction_step_effect(
+                    state,
+                    &transaction.domain,
+                    effect,
+                    step_reference.as_ref(),
+                    &mut changes,
+                );
             }
             state.transactions.insert(id.clone(), transaction.clone());
             changes.transactions_changed = true;
@@ -7678,12 +8005,15 @@ fn validate_transaction_step_effect(
                         .is_some_and(|domain| matches!(domain.status, DomainStatus::Stopped))
                     && matches!(statements[0].statement, Statement::StartDomain(_))
             }
-            TransactionStepEffect::StopDomain { inputs } => {
+            TransactionStepEffect::StopDomain { inputs, request } => {
                 statements.len() == 1
-                    && inputs
-                        .state()
-                        .is_some_and(|domain| !matches!(domain.status, DomainStatus::Stopped))
-                    && matches!(statements[0].statement, Statement::StopDomain(_))
+                    && inputs.state().is_some_and(|domain| {
+                        matches!(domain.status, DomainStatus::Running | DomainStatus::Paused)
+                    })
+                    && matches!(
+                        &statements[0].statement,
+                        Statement::StopDomain(stop) if stop.wait_limit == request.limit
+                    )
             }
             TransactionStepEffect::CreateResourceCatalog { identifier, .. } => {
                 statements.len() == 1
@@ -7780,10 +8110,13 @@ fn transaction_schedule_rollback(
     Ok(step_inputs.schedule().cloned())
 }
 
+/// Applies a committed step's effect. `step_reference` is the request reference of the step's
+/// first statement, which names the request a `STOP` step makes.
 fn apply_transaction_step_effect(
     state: &mut StateMachineData,
     domain: &DomainName,
     effect: &TransactionStepEffect,
+    step_reference: Option<&nervix_models::CommandExecutionReference>,
     changes: &mut StateMachineChanges,
 ) {
     match effect {
@@ -7803,9 +8136,27 @@ fn apply_transaction_step_effect(
             changes.domains_changed =
                 state.commit_domain_start(inputs.domain(), start, clock, authority);
         }
-        TransactionStepEffect::StopDomain { inputs } => {
-            changes.domains_changed =
-                state.commit_domain_stop(inputs.domain(), nervix_models::DomainStopCause::Operator);
+        TransactionStepEffect::StopDomain { inputs, request } => {
+            // The step's own statement names the request; the transaction's mutation lease, which
+            // its commit holds, admits the stop.
+            let Some(reference) = step_reference else {
+                return;
+            };
+            let request = nervix_models::StopRequest::Operator {
+                reference: reference.clone(),
+                request: request.as_ref().clone(),
+            };
+            let revision = match &state.last_applied_log_id {
+                Some(log_id) => log_id.index,
+                None => 0,
+            };
+            if let Some(domain) = state.domains.get_mut(inputs.domain()) {
+                changes.domains_changed = matches!(
+                    domain.request_stop(request, revision),
+                    nervix_models::StopRequestAdmission::Began
+                        | nervix_models::StopRequestAdmission::Joined
+                );
+            }
         }
         TransactionStepEffect::CreateResourceCatalog { identifier, .. } => {
             state.resources.ensure_catalog(domain, identifier);
@@ -8612,7 +8963,7 @@ mod tests {
             start_version: 7,
             last_start: DomainStartPoint::Resume,
             clock: None,
-            stop_cause: None,
+            stop: None,
         }
     }
 
@@ -9590,10 +9941,24 @@ mod tests {
 
         apply_consensus_command(
             &mut state,
-            &ConsensusCommand::StopDomain {
+            &ConsensusCommand::RequestDomainStop {
                 domain_id: domain_id.clone(),
+                request: Box::new(test_operator_stop_request("authority-stop")),
                 mutation: None,
-                cause: nervix_models::DomainStopCause::Operator,
+            },
+        );
+        let began_at_revision = state
+            .domains
+            .get(&domain_id)
+            .and_then(|domain| domain.stopping())
+            .map(|stopping| stopping.began_at_revision)
+            .expect("the running domain began its stop");
+        apply_consensus_command(
+            &mut state,
+            &ConsensusCommand::EndDomainStop {
+                domain_id: domain_id.clone(),
+                began_at_revision,
+                ending: nervix_models::StopEnding::Completed,
             },
         );
         let stopped = state
@@ -9653,6 +10018,7 @@ mod tests {
                 clock: Some(mapping),
                 authority: Some(owner),
             },
+            None,
             &mut changes,
         );
         assert!(changes.domains_changed);
@@ -9662,20 +10028,28 @@ mod tests {
             direct.domain_clock_authorities
         );
 
+        let stop = test_operator_stop_request("transactional-stop");
         apply_consensus_command(
             &mut direct,
-            &ConsensusCommand::StopDomain {
+            &ConsensusCommand::RequestDomainStop {
                 domain_id: domain_id.clone(),
+                request: Box::new(stop.clone()),
                 mutation: None,
-                cause: nervix_models::DomainStopCause::Operator,
             },
         );
+        let nervix_models::StopRequest::Operator { reference, request } = stop else {
+            unreachable!("the fixture builds an operator's request");
+        };
         let mut changes = StateMachineChanges::default();
         let inputs = captured_inputs(&transactional, "paced");
         apply_transaction_step_effect(
             &mut transactional,
             &domain_id,
-            &TransactionStepEffect::StopDomain { inputs },
+            &TransactionStepEffect::StopDomain {
+                inputs,
+                request: Box::new(request),
+            },
+            Some(&reference),
             &mut changes,
         );
         assert!(changes.domains_changed);
@@ -9684,6 +10058,18 @@ mod tests {
             transactional.domain_clock_authorities,
             direct.domain_clock_authorities
         );
+    }
+
+    /// An operator's plain stop request under `reference`, made at a fixed instant.
+    fn test_operator_stop_request(reference: &str) -> nervix_models::StopRequest {
+        nervix_models::StopRequest::Operator {
+            reference: nervix_models::CommandExecutionReference::parse(reference)
+                .expect("the fixture reference is a valid literal"),
+            request: nervix_models::OperatorStopRequest {
+                requested_at: nervix_models::Timestamp::from_unix_nanos(1),
+                limit: None,
+            },
+        }
     }
 
     fn resource_version(domain_id: &str, identifier: &str, version: u64) -> ResourceVersion {
@@ -10702,7 +11088,7 @@ mod tests {
                 .assured("the test append reference contains only admitted characters"),
             expected_position: 0,
             source: "STOP".to_string(),
-            statement: Statement::StopDomain(nervix_models::StopDomain),
+            statement: Statement::StopDomain(nervix_models::StopDomain::default()),
         });
         transaction
             .queue(
@@ -10762,7 +11148,7 @@ mod tests {
                 .assured("the test append reference contains only admitted characters"),
             expected_position: 0,
             source: "STOP".to_string(),
-            statement: Statement::StopDomain(nervix_models::StopDomain),
+            statement: Statement::StopDomain(nervix_models::StopDomain::default()),
         });
         assert!(matches!(
             transaction
@@ -11657,7 +12043,7 @@ mod tests {
             Statement::StartDomain(nervix_models::StartDomain {
                 start: DomainStartPoint::Resume,
             }),
-            Statement::StopDomain(nervix_models::StopDomain),
+            Statement::StopDomain(nervix_models::StopDomain::default()),
         ]
         .into_iter()
         .enumerate()

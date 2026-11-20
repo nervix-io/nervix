@@ -290,6 +290,9 @@ pub enum ServerMessage {
     Reply(Reply),
     /// One part of a reply too large for a single frame; see [`crate::TransferAssembly`].
     TransferPart(TransferPart),
+    /// A report that the server still serves a request; see [`crate::RequestProgress`]. It
+    /// completes nothing.
+    Progress(crate::RequestProgress),
     Event(ServerEvent),
 }
 
@@ -311,6 +314,9 @@ impl ServerMessage {
                 if let Some(part) = reply.body_as_transfer_part() {
                     let part = TransferPart::decode(frame, decoder, request_id, part)?;
                     return Ok(Self::TransferPart(part));
+                }
+                if reply.body_as_request_progress().is_some() {
+                    return Ok(Self::Progress(crate::RequestProgress { request_id }));
                 }
                 return Ok(Self::Reply(Reply::decode(
                     frame, decoder, request_id, reply,

@@ -86,6 +86,7 @@ mod relay_partition_fanout;
 mod relay_slicing;
 pub use relay_slicing::RelayCapabilityRefusal;
 mod relocation_commit;
+mod request_progress;
 mod resource_discovery;
 mod resource_publication;
 #[cfg(test)]
@@ -215,6 +216,8 @@ struct FaultInjectionState {
     /// One-shot, node-local refusals of the next subscription a node is asked to open, each removed
     /// when its node delivers it.
     refused_subscription_openings: DashMap<ClusterNodeName, (), RandomState>,
+    /// The nodes whose sessions withhold the progress reports of the requests they serve.
+    withheld_request_progress: DashMap<ClusterNodeName, (), RandomState>,
     /// One-shot, node-local clock attachment refusals, consumed by the next attach or cleared
     /// by the host test's teardown.
     refused_clock_attachments: DashMap<ClusterNodeName, (), RandomState>,
@@ -554,6 +557,7 @@ impl Default for FaultInjection {
                 refused_runtime_installations: DashMap::default(),
                 refused_interest_visibility: DashMap::default(),
                 refused_subscription_openings: DashMap::default(),
+                withheld_request_progress: DashMap::default(),
                 refused_clock_attachments: DashMap::default(),
                 wasm_reset_publication_authority_losses: DashMap::default(),
                 failed_wasm_reset_publications: DashMap::default(),

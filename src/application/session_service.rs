@@ -213,6 +213,9 @@ pub(in crate::application) struct SessionServiceInner {
     /// Retry validity and history capacity every durable command admission applies.
     /// Requests with one durable execution reference join one application owner on this leader.
     pub(in crate::application) command_executions: CommandExecutionOwners,
+    /// What each stop this leader owns waits for, and what each cancelled request was waiting
+    /// for until its `STOP` answers.
+    pub(in crate::application) domain_stops: super::domain_stop::DomainStops,
     /// Calls adopting the same replicated transaction share one executor without serializing
     /// commits in independent domains.
     pub(in crate::application) transaction_executions:

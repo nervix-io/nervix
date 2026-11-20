@@ -407,8 +407,10 @@ resource binding, destination, and prepared bytes. A failed drain leaves the mut
 it does not move pending requests to a new endpoint. `DESCRIBE TRANSACTION` reports the required
 scope and actual engagement under [Transaction Quiescence And Impact Inspection](./transaction-quiescence.md).
 When a destination cannot be repaired in place, an operator can stop the domain, alter the
-stopped emitter, and start the domain again. That path discards volatile prepared attempts and
-relies on the ingestor's replay contract; it can repeat an effect the destination already applied.
+stopped emitter, and start the domain again. The stop lets a request already on the wire run to its
+outcome and does not wait for records held for a retry: it cuts them and its answer lists them. That
+path discards volatile prepared attempts and relies on the ingestor's replay contract; it can repeat
+an effect the destination already applied.
 The [Control Plane](./control-plane.md) chapter owns mutation and drain decisions.
 
 Graceful node shutdown stops intake, force-flushes buffered HTTP work, and waits for eligible

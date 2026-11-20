@@ -627,12 +627,16 @@ While the gate is closed:
   `processing: stopped by licensing: ephemeral activation expired at <instant>`.
 - Admission refuses all new usage with state `stopped`, `CREATE DOMAIN` and the domains a restore
   would create included. The cluster never falls back to the free policy.
-- The leader stops every running domain through the ordinary `STOP`, which preserves its persisted
-  runtime state. `DESCRIBE DOMAIN` then reports
-  `stopped by licensing: ephemeral activation expired at <instant>` until the domain's next
-  `START`. An `ALTER` or a backup that holds a domain paused when the gate closes still
-  completes, and its pause ends in the licensing stop instead of a resume. A domain another
-  operation holds is stopped once that operation releases it.
+- The leader stops every running domain through the ordinary graceful stop, which preserves its
+  persisted runtime state: intake ends at once and the work in motion finishes. The licensing
+  stop's request is forced a fixed 60 seconds after the expiry in committed licensing time
+  (`LICENSING_STOP_ENFORCE_AFTER`, a fixed constant), whatever holds the domain then, and no
+  `CANCEL` withdraws it; an operator's `STOP ENFORCE AFTER` that comes due earlier ends it earlier.
+  `DESCRIBE DOMAIN` then reports `stopped by licensing: ephemeral activation expired at <instant>`
+  with how the stop ended and what it cut until the domain's next `START`. An `ALTER` or a backup
+  that holds a domain paused when the gate closes still completes, and its pause ends in the
+  licensing stop's request instead of a resume. A domain another operation holds begins its
+  licensing stop once that operation releases it, still forced at the same instant.
 - Planning refuses `START`, a transactional `START` and `RESTORE ... RESUME` with
   `licensing stopped processing`. Consensus refuses every other change that would make a domain
   run: resuming a paused domain and writing a domain record that runs. A restore whose gate closed
@@ -1429,6 +1433,12 @@ A Kafka consumer's single control-operation turn is an ordering invariant rather
 operator capacity. Its fixed constant states that a cancelled native mutation cannot be
 overtaken by the next operation. The ingestor control-call budget is the external client's
 `socket.timeout.ms`; [Connector Contract](connector-contract.md) owns that per-system value.
+
+The licensing stop's forced ending, `LICENSING_STOP_ENFORCE_AFTER`, is 60 seconds and a fixed
+constant, never a setting, flag or clause. It is a licensing restriction rather than a tunable: a
+temporary license is not meant to serve real traffic, and the cluster must be stopped one minute
+after its expiry. No test build shortens it. See [Stopping A
+Domain](./domains-and-time.md#stopping-a-domain).
 
 Sentry's 1,000,000-byte event limit is a fixed external ingestion contract. The connector
 vocabulary declares its one constant; [Sentry's event contract](emitters.md#sentry) defines which bytes

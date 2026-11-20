@@ -844,7 +844,10 @@ impl Statement {
                     string_literal(&timestamp.as_datetime().to_rfc3339())
                 ),
             }),
-            Self::StopDomain(_) => Ok("STOP;".to_string()),
+            Self::StopDomain(stop) => Ok(match stop.wait_limit {
+                None => "STOP;".to_string(),
+                Some(limit) => format!("STOP {};", wait_limit_clause(limit)),
+            }),
             Self::AlterSchema(alter) => alter.to_canonical_plexus(),
             Self::AlterWireJsonSchema(alter) => alter_json_wire_schema_to_canonical_plexus(alter),
             Self::AlterWireCborSchema(alter) => alter_cbor_wire_schema_to_canonical_plexus(alter),
@@ -3654,6 +3657,18 @@ fn float_literal(literal: Float64Literal) -> error_stack::Result<String, Canonic
         Ok(rendered)
     } else {
         Ok(format!("{rendered}.0"))
+    }
+}
+
+/// Renders a wait limit as the clause that reads back to it.
+pub(crate) fn wait_limit_clause(limit: crate::WaitLimit) -> String {
+    match limit {
+        crate::WaitLimit::Enforce { after } => {
+            format!("ENFORCE AFTER {}", duration_literal(after.as_nanos()))
+        }
+        crate::WaitLimit::Cancel { after } => {
+            format!("CANCEL AFTER {}", duration_literal(after.as_nanos()))
+        }
     }
 }
 

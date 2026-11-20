@@ -537,7 +537,10 @@ fn transaction_step_effect(
                 authority: resolved.authority,
             }
         }
-        2 => TransactionStepEffect::StopDomain { inputs },
+        2 => TransactionStepEffect::StopDomain {
+            inputs,
+            request: Box::new(arbitrary.operator_stop_request()),
+        },
         3 => TransactionStepEffect::CreateResourceCatalog {
             inputs,
             identifier: arbitrary.rule_name(),
@@ -1125,7 +1128,7 @@ fn create_domain_effect(arbitrary: &mut Arbitrary<'_>) -> CommandExecutionEffect
             start_version: 0,
             last_start: DomainStartPoint::Resume,
             clock: None,
-            stop_cause: None,
+            stop: None,
             ..found
         }
     };
@@ -1145,7 +1148,14 @@ fn command_execution_effect(
     arbitrary: &mut Arbitrary<'_>,
     reference: &CommandExecutionReference,
 ) -> CommandExecutionEffect {
-    match arbitrary.entropy().byte() % 11 {
+    match arbitrary.entropy().byte() % 12 {
+        11 => CommandExecutionEffect::StopDomain {
+            source: arbitrary.string(),
+            stop: nervix_models::StopDomain {
+                wait_limit: arbitrary.wait_limit(),
+            },
+            start_version: arbitrary.entropy().any_u64(),
+        },
         7 => CommandExecutionEffect::AlterCluster {
             changes: arbitrary.cluster_parameter_values().assignments(),
             applied: optional(arbitrary, Arbitrary::cluster_parameter_record).map(Box::new),
@@ -1366,6 +1376,7 @@ fn command_execution_result(
         }
         CommandExecutionEffect::CreateDomain { .. }
         | CommandExecutionEffect::AlterCluster { .. }
+        | CommandExecutionEffect::StopDomain { .. }
         | CommandExecutionEffect::CreateUser { .. }
         | CommandExecutionEffect::RotateLicenseClusterKey { .. }
         | CommandExecutionEffect::ReleaseLicense { .. }
@@ -1611,7 +1622,7 @@ fn restore_step_effect(
             let state = DomainState {
                 status: DomainStatus::Stopped,
                 clock: None,
-                stop_cause: None,
+                stop: None,
                 ..archived
             };
             let resources = arbitrary.records(restored_resource);
@@ -1883,7 +1894,11 @@ enum CommandVariant {
     ReconcileOwnershipHandoffPreparations,
     PutDomain,
     StartDomain,
-    StopDomain,
+    StopDomainBeforeAnyWork,
+    RequestDomainStop,
+    WithdrawDomainStopRequest,
+    EndDomainStop,
+    RecordDomainStopReport,
     PauseDomain,
     ResumeDomain,
     ReconcileDomainClockAuthority,
@@ -1956,7 +1971,11 @@ impl CommandVariant {
             }
             ConsensusCommand::PutDomain { .. } => Self::PutDomain,
             ConsensusCommand::StartDomain { .. } => Self::StartDomain,
-            ConsensusCommand::StopDomain { .. } => Self::StopDomain,
+            ConsensusCommand::StopDomainBeforeAnyWork { .. } => Self::StopDomainBeforeAnyWork,
+            ConsensusCommand::RequestDomainStop { .. } => Self::RequestDomainStop,
+            ConsensusCommand::WithdrawDomainStopRequest { .. } => Self::WithdrawDomainStopRequest,
+            ConsensusCommand::EndDomainStop { .. } => Self::EndDomainStop,
+            ConsensusCommand::RecordDomainStopReport { .. } => Self::RecordDomainStopReport,
             ConsensusCommand::PauseDomain { .. } => Self::PauseDomain,
             ConsensusCommand::ResumeDomain { .. } => Self::ResumeDomain,
             ConsensusCommand::ReconcileDomainClockAuthority { .. } => {
@@ -2176,10 +2195,42 @@ fn command_of(arbitrary: &mut Arbitrary<'_>, variant: CommandVariant) -> Consens
                 mutation: optional_lease(arbitrary),
             }
         }
-        CommandVariant::StopDomain => ConsensusCommand::StopDomain {
+        CommandVariant::StopDomainBeforeAnyWork => ConsensusCommand::StopDomainBeforeAnyWork {
             domain_id: arbitrary.rule_name(),
             mutation: optional_lease(arbitrary),
             cause: arbitrary.stop_cause(),
+        },
+        CommandVariant::RequestDomainStop => ConsensusCommand::RequestDomainStop {
+            domain_id: arbitrary.rule_name(),
+            request: Box::new(if arbitrary.entropy().flag() {
+                nervix_models::StopRequest::Licensing(arbitrary.licensing_stop_reason())
+            } else {
+                nervix_models::StopRequest::Operator {
+                    reference: arbitrary.execution_reference(),
+                    request: arbitrary.operator_stop_request(),
+                }
+            }),
+            mutation: optional_lease(arbitrary),
+        },
+        CommandVariant::WithdrawDomainStopRequest => ConsensusCommand::WithdrawDomainStopRequest {
+            domain_id: arbitrary.rule_name(),
+            reference: arbitrary.execution_reference(),
+        },
+        CommandVariant::EndDomainStop => ConsensusCommand::EndDomainStop {
+            domain_id: arbitrary.rule_name(),
+            began_at_revision: arbitrary.entropy().any_u64(),
+            ending: if arbitrary.entropy().flag() {
+                nervix_models::StopEnding::Completed
+            } else {
+                nervix_models::StopEnding::Enforced {
+                    by: arbitrary.stop_request_id(),
+                }
+            },
+        },
+        CommandVariant::RecordDomainStopReport => ConsensusCommand::RecordDomainStopReport {
+            domain_id: arbitrary.rule_name(),
+            start_version: arbitrary.entropy().any_u64(),
+            report: Box::new(arbitrary.domain_stop_report()),
         },
         CommandVariant::PauseDomain => ConsensusCommand::PauseDomain {
             domain_id: arbitrary.rule_name(),
@@ -2329,7 +2380,7 @@ fn seeded_bytes(seed: u64, length: usize) -> Vec<u8> {
 
 /// Every variant and shape of the transaction, commit plan, report and command execution records
 /// [`state_machine`] promises to reach, as [`RecordWalk`] names them.
-const EXPECTED_RECORDS: [&str; 50] = [
+const EXPECTED_RECORDS: [&str; 51] = [
     "ReplicatedTransaction::session",
     "ReplicatedTransaction::command",
     "ReplicatedTransaction::latest_preview",
@@ -2362,6 +2413,7 @@ const EXPECTED_RECORDS: [&str; 50] = [
     "CommandExecutionEffect::Transaction",
     "CommandExecutionEffect::TransactionRequest",
     "CommandExecutionEffect::Statement",
+    "CommandExecutionEffect::StopDomain",
     "CommandExecutionEffect::CreateUser",
     "CommandExecutionEffect::ActivateLicense",
     "CommandExecutionEffect::RotateLicenseClusterKey",
@@ -2543,6 +2595,9 @@ impl RecordWalk {
             }
             CommandExecutionEffect::Statement { .. } => {
                 self.see("CommandExecutionEffect::Statement");
+            }
+            CommandExecutionEffect::StopDomain { .. } => {
+                self.see("CommandExecutionEffect::StopDomain");
             }
             CommandExecutionEffect::ActivateLicense { .. } => {
                 self.see("CommandExecutionEffect::ActivateLicense");

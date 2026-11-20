@@ -545,7 +545,9 @@ impl Arbitrary<'_> {
                 let start = self.start_point();
                 Statement::StartDomain(StartDomain { start })
             }
-            StatementVariant::StopDomain => Statement::StopDomain(StopDomain),
+            StatementVariant::StopDomain => Statement::StopDomain(StopDomain {
+                wait_limit: self.wait_limit(),
+            }),
             StatementVariant::Create => {
                 let if_not_exists = self.entropy.flag();
                 Statement::Create(CreateStatement::new(Box::new(self.model()), if_not_exists))

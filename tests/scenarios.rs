@@ -14925,6 +14925,26 @@ async fn when_relocation_publication_pause_is_released(world: &mut ScenarioWorld
         .release_relocation_publication_pause(&domain);
 }
 
+/// Silences the progress reports of every request the node's sessions serve, so a client that
+/// bounds its wait hears silence from that node, as it would from a node that stopped answering.
+#[given(expr = "request progress reports from node {string} are withheld")]
+#[when(expr = "request progress reports from node {string} are withheld")]
+async fn given_request_progress_reports_withheld(world: &mut ScenarioWorld, node_id: String) {
+    let node_id = expand_placeholders(world, &node_id);
+    world
+        .fault_injection
+        .withhold_request_progress_on(crate::common::cluster::node_name(&node_id));
+}
+
+#[given(expr = "request progress reports from node {string} are restored")]
+#[when(expr = "request progress reports from node {string} are restored")]
+async fn when_request_progress_reports_restored(world: &mut ScenarioWorld, node_id: String) {
+    let node_id = expand_placeholders(world, &node_id);
+    world
+        .fault_injection
+        .restore_request_progress_on(&crate::common::cluster::node_name(&node_id));
+}
+
 #[given(expr = "command response delivery on node {string} pauses after execution")]
 async fn given_command_response_delivery_pause(world: &mut ScenarioWorld, node_id: String) {
     let node_id = expand_placeholders(world, &node_id);
@@ -18728,6 +18748,48 @@ async fn then_the_background_plexus_execution_succeeds(world: &mut ScenarioWorld
     world.last_command_output = Some(output);
 }
 
+/// The background execution must not finish within `duration`. A STOP that waits for a publish
+/// on the wire keeps its statement waiting for as long as that publish does, so an answer that
+/// arrives during the window is an answer that came too early. The step fails with how the
+/// execution ended when it finished inside the window.
+#[then(expr = "the background Plexus execution is still running after {string}")]
+async fn then_the_background_plexus_execution_is_still_running_after(
+    world: &mut ScenarioWorld,
+    duration: String,
+) {
+    let window = parse_duration_text(&duration).expect("the step's window is a valid duration");
+    let task = world
+        .background_plexus
+        .as_mut()
+        .verified("a preceding step started a background Plexus execution");
+    if let Ok(outcome) = nervix_primitives::time::timeout(window, task).await {
+        panic!(
+            "the background Plexus execution finished within {duration} while it was meant to \
+             keep waiting: {outcome:?}"
+        );
+    }
+}
+
+#[then(expr = "within {string} the background Plexus execution reaches a successful outcome")]
+async fn then_within_the_background_plexus_execution_reaches_a_successful_outcome(
+    world: &mut ScenarioWorld,
+    within: String,
+) {
+    let bound = parse_duration_text(&within).expect("the step's bound is a valid duration");
+    let task = world
+        .background_plexus
+        .take()
+        .verified("a preceding step started a background Plexus execution");
+    let output = nervix_primitives::time::timeout(bound, task)
+        .await
+        .unwrap_or_else(|_| {
+            panic!("the background Plexus execution did not finish within {within}")
+        })
+        .assured("the background Plexus task is owned by this scenario")
+        .unwrap_or_else(|error| panic!("the background Plexus execution failed: {error}"));
+    world.last_command_output = Some(output);
+}
+
 #[then("the background Plexus execution does not report success")]
 async fn then_background_plexus_execution_does_not_report_success(world: &mut ScenarioWorld) {
     let task = world
@@ -19211,6 +19273,43 @@ async fn given_named_client_is_connected_to_node(
     node_id: String,
 ) {
     connect_named_client_to_node(world, name, node_id, Vec::new(), false).await;
+}
+
+/// Connects a named client whose request and retry deadlines are both `timeout`, so a scenario can
+/// show a command that the server keeps answering with progress outlasting them.
+#[given(
+    expr = "client {string} is connected to node {string} with request and retry timeouts of \
+            {string}"
+)]
+async fn given_named_client_is_connected_to_node_with_timeouts(
+    world: &mut ScenarioWorld,
+    name: String,
+    node_id: String,
+    timeout: String,
+) {
+    let timeout = parse_duration_text(&timeout).expect("the step's timeout is a valid duration");
+    let node_id = expand_placeholders(world, &node_id);
+    let grpc_uri = world
+        .cluster()
+        .grpc_uri(&node_id)
+        .expect("failed to resolve client node gRPC URI");
+    let name = expand_placeholders(world, &name);
+    let mut options =
+        client_connect_options(&grpc_uri).expect("failed to build client tls options");
+    options.request_timeout = timeout;
+    options.retry_timeout = timeout;
+    let client = Client::connect_with_options(&grpc_uri, client_domain(&world.domain), options)
+        .await
+        .unwrap_or_else(|error| {
+            panic!("failed to connect client '{name}' to '{grpc_uri}': {error}")
+        });
+    assert!(
+        world
+            .transaction_clients
+            .insert(name.clone(), client)
+            .is_none(),
+        "client '{name}' is already connected"
+    );
 }
 
 #[given(expr = "client {string} is connected to node {string} with cluster seeds")]
@@ -22768,6 +22867,51 @@ async fn then_last_command_output_contains(world: &mut ScenarioWorld, #[step] st
         "expected command output fragment {} in output, got: {output}",
         expected.trim()
     );
+}
+
+/// How often a wait for a node's `DESCRIBE DOMAIN` output asks again.
+const DESCRIBE_DOMAIN_POLL_INTERVAL: Duration = Duration::from_millis(100);
+
+/// Runs `DESCRIBE DOMAIN` on a node until its output holds the docstring as one fragment, as `the
+/// last command output contains` reads it. Some of what a domain reports arrives after its status
+/// does: a stopped domain's stop report is committed only once every node's teardown has ended.
+#[then(expr = "within {string} DESCRIBE DOMAIN on node {string} contains")]
+async fn then_within_duration_describe_domain_contains(
+    world: &mut ScenarioWorld,
+    duration: String,
+    node_id: String,
+    #[step] step: &Step,
+) {
+    let duration = parse_duration_text(&duration).expect("step duration must be a valid duration");
+    let node_id = expand_placeholders(world, &node_id);
+    let expanded = expand_placeholders(world, docstring(step));
+    let expected = expanded.trim();
+    assert!(
+        !expected.is_empty(),
+        "step docstring must state the expected DESCRIBE DOMAIN output"
+    );
+    let deadline = PhaseDeadline::after(duration);
+    loop {
+        nervix_primitives::task::consume_budget().await;
+        match run_plexus_commands_on_node(world, &node_id, "DESCRIBE DOMAIN;").await {
+            Ok(output) => {
+                let found = output.contains(expected);
+                world.last_command_output = Some(output);
+                if found {
+                    return;
+                }
+            }
+            Err(error) => world.last_command_error = Some(error),
+        }
+        assert!(
+            !deadline.has_passed(),
+            "timed out waiting for DESCRIBE DOMAIN on node '{node_id}' to contain {expected:?}. \
+             last output: {:?}, last error: {:?}",
+            world.last_command_output,
+            world.last_command_error
+        );
+        deadline.pause(DESCRIBE_DOMAIN_POLL_INTERVAL).await;
+    }
 }
 
 /// Runs `SHOW CREATE EMITTER` for every emitter the table names and requires its rendering to
@@ -31958,6 +32102,50 @@ async fn when_http_payload_is_posted_and_is_not_routed(
         reported.contains("404"),
         "expected http post to be unrouted, got: {reported}"
     );
+}
+
+/// Posts until the node answers that no domain publishes the route, as it answers once the domain
+/// that published it withdrew it. Each node applies a revision on its own, so the first posts may
+/// still find the route.
+#[then(
+    expr = "within {string} node {string} answers http payload for host {string} path {string} as \
+            not routed"
+)]
+async fn then_node_answers_http_payload_as_not_routed_within(
+    world: &mut ScenarioWorld,
+    duration: String,
+    node_id: String,
+    host: String,
+    path: String,
+    #[step] step: &Step,
+) {
+    let duration = parse_duration_text(&duration).expect("step duration must be a valid duration");
+    let node_id = expand_placeholders(world, &node_id);
+    let host = expand_placeholders(world, &host);
+    let path = expand_placeholders(world, &path);
+    let payload = expand_placeholders(world, docstring(step));
+    let deadline = Instant::now() + duration;
+    loop {
+        nervix_primitives::task::consume_budget().await;
+        let posted = world
+            .cluster()
+            .publish_http(&node_id, &host, &path, &payload)
+            .await;
+        let answered = match posted {
+            Ok(()) => "202 Accepted".to_string(),
+            Err(error) => error.to_string(),
+        };
+        if answered.contains("404") {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "node '{node_id}' still routes http payloads for host '{host}' path '{path}' after \
+             {}; it last answered {answered}",
+            humantime::format_duration(duration)
+        );
+        nervix_primitives::time::sleep(Duration::from_millis(100)).await;
+    }
 }
 
 #[when(

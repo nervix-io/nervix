@@ -38,7 +38,9 @@ TLS connection needs that explicit authority. `REQUIRED` refuses a plaintext URI
 
 `ConnectOptions` is a handle: close it after connecting. The session retains the configuration it
 needs. Seeds let it reach the cluster when the initial address is unavailable. Connection, request,
-retry and backup-wait timeouts are seconds; cancellation deadlines can bound an individual call.
+retry and backup-wait timeouts are seconds; the request and call timeouts count only time without
+the answer or a server progress report, which restarts them. Cancellation deadlines can bound an
+individual call.
 
 ```java
 {{#include ../../tests/client_conformance/java/suite/cluster/ClusterTests.java:seeds}}

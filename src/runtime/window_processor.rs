@@ -182,6 +182,41 @@ pub(super) struct WindowProcessorState {
     pub(super) next_sequence: u64,
     pub(super) incarnation: u64,
     pub(super) accumulators: Vec<WindowAccumulator>,
+    /// How many of `entries` hold acknowledgement shares, counted as rows enter and leave the
+    /// window so a branch's gauge reads it without walking the window.
+    rows_with_pending_acknowledgements: usize,
+}
+
+impl WindowProcessorState {
+    /// The rows the window retains whose message still holds acknowledgement shares, parked
+    /// until further input fills the window: no drain waits for them, and a stop's teardown ends
+    /// them unresolved, so their source hears "not processed" while the rows stay in the
+    /// window's checkpoint.
+    pub(super) fn rows_with_pending_acknowledgements(&self) -> usize {
+        self.rows_with_pending_acknowledgements
+    }
+
+    /// Counts a row entering the window.
+    fn count_entered(&mut self, entry: &WindowEntry) {
+        if entry.message.acks.is_empty() {
+            return;
+        }
+        self.rows_with_pending_acknowledgements = self
+            .rows_with_pending_acknowledgements
+            .checked_add(1)
+            .assured("rows a window retains in memory are fewer than usize::MAX");
+    }
+
+    /// Counts a row leaving the window.
+    fn count_left(&mut self, entry: &WindowEntry) {
+        if entry.message.acks.is_empty() {
+            return;
+        }
+        self.rows_with_pending_acknowledgements = self
+            .rows_with_pending_acknowledgements
+            .checked_sub(1)
+            .verified("a row holding acknowledgement shares was counted as it entered");
+    }
 }
 
 impl RetainedWindowRows for VecDeque<WindowEntry> {
@@ -417,6 +452,7 @@ impl WindowProcessorState {
             next_sequence: 0,
             incarnation,
             accumulators: plan.empty_accumulators(),
+            rows_with_pending_acknowledgements: 0,
         }
     }
 
@@ -539,6 +575,8 @@ impl WindowProcessorState {
                 plan.sketch_layout,
             )?);
         }
+        // A restored row's acknowledgements were answered before the snapshot was published, so
+        // it holds none.
         let state = Self {
             entries,
             next_sequence: snapshot.next_sequence,
@@ -546,6 +584,7 @@ impl WindowProcessorState {
                 "the restore caller checked this snapshot against the branch incarnation",
             ),
             accumulators,
+            rows_with_pending_acknowledgements: 0,
         };
         state.check_admission(plan, None, &[])?;
         Ok(state)
@@ -597,7 +636,7 @@ impl WindowProcessorState {
                 Some(latest) => Some(latest.max(timestamp)),
                 None => Some(timestamp),
             };
-            self.entries.push_back(WindowEntry::retained(
+            let entry = WindowEntry::retained(
                 WindowRow {
                     sequence: self.next_sequence,
                     timestamp,
@@ -605,7 +644,9 @@ impl WindowProcessorState {
                     row: admission.row,
                 },
                 admission.message,
-            ));
+            );
+            self.count_entered(&entry);
+            self.entries.push_back(entry);
             self.next_sequence = self
                 .next_sequence
                 .checked_add(1)
@@ -650,6 +691,7 @@ impl WindowProcessorState {
 
     pub(super) fn clear(&mut self, plan: &WindowAccumulatorPlan) {
         self.entries.clear();
+        self.rows_with_pending_acknowledgements = 0;
         self.accumulators = plan.empty_accumulators();
     }
 
@@ -679,7 +721,11 @@ impl WindowProcessorState {
         for (demand, accumulator) in self.accumulators.iter_mut().enumerate() {
             accumulator.retract_oldest(demand, &self.entries, count, removed_at);
         }
-        self.entries.drain(..count).collect()
+        let removed = self.entries.drain(..count).collect::<Vec<_>>();
+        for entry in &removed {
+            self.count_left(entry);
+        }
+        removed
     }
 }
 

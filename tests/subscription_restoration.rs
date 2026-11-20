@@ -205,6 +205,13 @@ async fn waiting_reader_recovers_before_one_post(
         .get(&client_name)
         .assured("the preceding step connected this named client")
         .clone();
+    // The node still serves the held reopening, so it would keep the reader's wait alive with
+    // progress reports. Withholding them makes the node silent, which is what lets the reader give
+    // the reopening up and open another session.
+    let held_node = crate::common::cluster::node_name(&node_id);
+    world
+        .fault_injection
+        .withhold_request_progress_on(held_node.clone());
     let reading = client.clone();
     let task = AbortOnDropHandle::new(nervix_primitives::task::spawn(async move {
         loop {
@@ -269,6 +276,9 @@ async fn waiting_reader_recovers_before_one_post(
         "the waiting reader restores the subscription and receives the one post within thirty \
          seconds",
     );
+    world
+        .fault_injection
+        .restore_request_progress_on(&held_node);
     let mut lines = recovered
         .display_lines()
         .assured("the received row renders");

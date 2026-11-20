@@ -61,10 +61,12 @@ Feature: Accepted work waits for internal worker room
       | 1            | extension | udf::add_one(input.value) |
       | 3            | extension | udf::add_one(input.value) |
 
+  # The junction's batch in hand waits for a worker that never returns. It is work in motion, which
+  # a graceful stop waits for without a limit, so the stop ends only because its request enforces
+  # it.
   @accepted_worker_stop
-  Scenario Outline: STOP ends accepted input waiting behind an extension worker that never returns
-    Given schema change drain timeout is configured as "2s"
-    And node-1 starts with vm-inline-row-limit = 0
+  Scenario Outline: STOP ENFORCE AFTER ends accepted input waiting behind an extension worker that never returns
+    Given node-1 starts with vm-inline-row-limit = 0
     And node-2 starts with vm-inline-row-limit = 0
     And node-3 starts with vm-inline-row-limit = 0
     And a <cluster_size> node nervix cluster is started
@@ -101,7 +103,7 @@ Feature: Accepted work waits for internal worker room
     And processor "junction" "transform" resumes its paused input
     Then within "30s" these Plexus commands complete on the leader node
       """
-      STOP;
+      STOP ENFORCE AFTER 2s;
       """
     When accepted-work CPU classes are released on every node
 

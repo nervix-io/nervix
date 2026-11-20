@@ -403,6 +403,22 @@ Each receiver lease is a distinct in-memory instance even when an identical requ
 after release. Its deadline task may remove only that exact instance. An earlier deadline can
 therefore neither release nor erase a replacement lease occupying the same logical operation key.
 
+A domain's stop has two management-pool requests from the leader that owns it, each carrying the
+stop owner's coordination identity, which a node answers only while their sender leads.
+`domain_stop_drain` names the domain and one action: release the work in motion the node holds with
+a force-flush generation unless one is running, start the generation that confirms nothing is still
+moving, or only observe. The answer is the node's view of the stopping domain, entity by entity:
+work in motion (an ingestor still admitting, a generator still producing, work a node holds or a
+flush releases, batches a relay delivers, records an emitter's next flush publishes, a publish on
+the wire, a relay admitting during the view) and held work the stop does not wait for (`REQUIRED
+WAIT` messages, records an emitter holds for a retry, rows a reorderer or correlator holds), the
+force-flush obligations of participants that still take work, and the node's count of relay
+admissions, which the owner compares across its confirming round. A node that has not applied the
+stopping record still runs its intake and reports its ingestors as admitting. `domain_stop_report`
+names the domain and the start version the stop ended it at; the answer is what the node's teardown
+cut, entity by entity and by kind, that the teardown has not ended the domain's tasks yet, or that
+the node holds no report for that stop because it restarted or never ran the domain.
+
 A stopping node moves its own scheduled work with one typed commands-pool request to the current
 leader, `stopping_node_drain`. It names no node and carries one of two actions: drain, which cordons
 the sender, carries its remaining drain budget, and moves its scheduled work through planned

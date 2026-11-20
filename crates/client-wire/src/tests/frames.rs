@@ -37,6 +37,7 @@ fn marked_command() -> ClientMessage {
             expected_transaction_position: None,
             expected_preview: None,
         }),
+        progress: None,
     }
 }
 

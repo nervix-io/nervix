@@ -1024,6 +1024,41 @@ waits for those writes and for the last write of each of its deduplicator, windo
 inferencer branches, which a branch ended at its grace left to its snapshot task, before teardown
 moves to the next domain.
 
+### A Domain's Stop
+
+A domain's `STOP` ends the domain's tasks through the same teardown, without stopping the node, and
+drains before it does. Its owner, the leader, commits the domain `stopping`: every node stops the
+domain's intake as a terminating node stops its own, whatever each ingestor's `ON QUIESCE` says,
+while the graph and the domain clock keep running. The owner then drains across the cluster in
+rounds, as a backup cut does: each node that holds work in motion releases it with a force-flush
+generation, and once no node holds any, every node starts the generation that confirms nothing is
+still moving. A node asked for a round before it applied the stop answers with its view and releases
+nothing, starting no generation until it has applied the stop, so the owner asks again. Each of its
+ingestors that still admits holds the drain open in that view, while a node with no intake and
+nothing in motion does not hold it open, even while its installation of the stop waits. A node that
+does not answer a round within the request's deadline holds the domain stopping, as one that holds
+work in motion does, and a request's clause still acts at its time: the owner abandons a round that
+a late node holds when an `ENFORCE AFTER`, a `CANCEL AFTER` or the
+licensing stop's fixed time comes due, acts on it, and drains again from a releasing round. The
+drain has no time limit: the domain drain timeout and the task grace bound neither it nor the
+publish attempts on the wire it waits for. Work that cannot move on, held by a `REQUIRED WAIT`, an
+emitter's retry, a reorderer or correlator until its time or its partner, or a window until further
+input fills it, never holds it open. During a stop, an emitter that a generation finds waiting for
+a retry completes the generation at once, and one whose publish fails during a generation hands the
+records to its retry schedule rather than retrying inline. Only then does the owner commit the
+domain stopped, and each node tears the domain down.
+
+A completed stop's teardown first lets a publish already on the wire run to its outcome, records
+what it is about to cut, and then ends the domain's tasks with the final snapshot writes described
+above. Each node records its cut while the domain's tasks still run, before it installs the stopped
+domain clock that the same committed revision carries, because a branch that loses its clock ends
+on its own and with it the count of what it held. An enforced stop's teardown, once a request's `ENFORCE AFTER` or the licensing stop's fixed
+time has passed, records what it cuts and ends the tasks at once: emitters get no time to finish,
+and each deduplicator, window, inferencer and WASM processor branch keeps the last snapshot it took
+before the stop instead of writing what it published since. Each node keeps what its teardown cut,
+by entity and kind, until the owner collects it into the stop's report. See [Stopping A
+Domain](./domains-and-time.md#stopping-a-domain) for the statement, its clauses and its answers.
+
 Generators and reingestors share their grace. A generator reads its source relay from the node that
 owns it, and both kinds publish to the node that owns their output relay, so while they work they
 wait on other nodes. When every node of a cluster stops at once those peers stop answering, and

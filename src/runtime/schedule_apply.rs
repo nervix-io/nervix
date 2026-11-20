@@ -143,6 +143,7 @@ impl Runtime {
             return Ok(());
         }
 
+        Box::pin(self.capture_stop_teardowns(domains)).await;
         self.sync_committed_domains(revision, domains, domain_clock_authorities);
         // A failed application records nothing, so the same revision is applied again rather than
         // being suppressed as one this node already holds.
@@ -245,6 +246,11 @@ impl Runtime {
             if let nervix_models::DomainStatus::Paused = domain_status {
                 self.engage_domain_ingestor_quiesce(&domain.domain);
             }
+            // A stopping domain's intake ends on every node at once, whatever each ingestor's
+            // `ON QUIESCE` declares; its graph runs on while the work in motion finishes.
+            if let nervix_models::DomainStatus::Stopping = domain_status {
+                self.engage_domain_stop_intake(&domain.domain);
+            }
             let desired_passive_only =
                 matches!(domain_status, nervix_models::DomainStatus::Stopped);
             if !matches!(change.delta, ExecutionDelta::Unchanged)
@@ -295,6 +301,24 @@ impl Runtime {
                 }
             }
 
+            // A stopping domain withdraws its endpoints once its intake holds, so a request that
+            // arrives later finds no route, and withdraws them again after a rebuild published
+            // them. A request admitted before the stop finishes through the intake it borrowed. A
+            // domain that runs again, its stop called off, publishes them again.
+            match domain_status {
+                nervix_models::DomainStatus::Stopping => {
+                    self.inner
+                        .endpoint_intake_routes
+                        .withdraw_stopping_domain(&domain.domain);
+                }
+                nervix_models::DomainStatus::Running | nervix_models::DomainStatus::Paused => {
+                    self.inner
+                        .endpoint_intake_routes
+                        .restore_withdrawn_domain(&domain.domain);
+                }
+                nervix_models::DomainStatus::Stopped => {}
+            }
+
             if let nervix_models::DomainStatus::Running = domain_status {
                 let build = || RuntimeError::build_domain_execution(&domain.domain);
                 self.purge_stale_runtime_state(&domain.domain)
@@ -306,6 +330,7 @@ impl Runtime {
                         .change_context_lazy(build)?;
                 }
                 self.release_domain_ingestor_quiesce(&domain.domain);
+                self.release_domain_stop_intake(&domain.domain);
             }
         }
         self.retain_assigned_wasm_modules(local_node_id, &revision_plan);

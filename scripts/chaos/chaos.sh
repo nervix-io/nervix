@@ -28,6 +28,7 @@ Usage:
   just chaos run binding-endpoints --image IMAGE --binding-image IMAGE [--nodes 1|3] [--fault FAULT]
   just chaos run lifetimes --image IMAGE [--nodes 1|3] [--fault FAULT] [--outage-seconds N]
   just chaos run domain-time --image IMAGE [--nodes 1|3] [--fault FAULT] [--outage-seconds N]
+  just chaos run graceful-stop --image IMAGE [--expect-failure SYMPTOM[,SYMPTOM...]]
   just chaos run mixed-instability --image IMAGE [--seed N] [--duration 30m] [--policy POLICY]
       [--coverage LIST] [--plan FILE] [--max-memory-bytes N] [--max-recovery-backlog N] [--max-pending N]
   just chaos replay RUN_DIRECTORY [--artifacts DIR] [--run-id ID] [--timeout SECONDS]
@@ -48,6 +49,7 @@ Run `just chaos run partition-recovery --help` for partition-recovery options.
 Run `just chaos run degraded-links --help` for degradation profiles and thresholds.
 Run `just chaos run stateful --help` for stateful, endpoints, lifetimes and domain-time faults.
 Run `just chaos run mixed-instability --help` for seeded plans, quorum policies and coverage.
+Run `just chaos run graceful-stop --help` for the symptoms an expected failure can name.
 Run `just chaos suite --help` for the smoke and soak suites that CI runs.
 
 An image whose io.nervix.diagnostic.selection label declares a Deloxide selection runs every node as
@@ -132,6 +134,11 @@ mixed-instability  A seeded, finite plan of restarts, crashes, pauses, partition
                    some combined, against public roles under a quorum policy, with continuous
                    traffic and resource samples (three-node)
                    policies: preserve-quorum (default), temporary-quorum-loss
+graceful-stop  A domain STOP while burst loads from an acknowledged and an unacknowledged Kafka
+               source rest in an ingestor's route buffer, a junction's collector and route buffer
+               and an emitter's buffer, and a slow destination holds a publish on the wire, then a
+               START, judged strictly: every record exactly once, no negative acknowledgement, no
+               error event, and a STOP answer that reports no cut (three-node)
 EOF
 }
 
@@ -180,7 +187,7 @@ case "${command_name}" in
             stale-follower | former-owner-restart | cluster-restart)
                 exec "${script_dir}/run-recovery.sh" --scenario "${scenario}" "$@"
                 ;;
-            stateful | endpoints | binding-endpoints | lifetimes | domain-time | mixed-instability | backup-cycles | backup-fault | restore-fresh-cluster | restore-fault | restore-volume)
+            stateful | endpoints | binding-endpoints | lifetimes | domain-time | mixed-instability | backup-cycles | backup-fault | restore-fresh-cluster | restore-fault | restore-volume | graceful-stop)
                 exec "${script_dir}/run-baseline.sh" --scenario "${scenario}" "$@"
                 ;;
             *)

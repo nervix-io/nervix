@@ -157,6 +157,11 @@ impl ArchiveRecord for DomainRecord {
             DomainStatus::Stopped => StatusWire::Stopped,
             DomainStatus::Running => StatusWire::Running,
             DomainStatus::Paused => StatusWire::Paused,
+            DomainStatus::Stopping => {
+                return Err(Report::new(ArchiveWriteError::StoppingDomain {
+                    domain: self.domain.clone(),
+                }));
+            }
         };
         let start_point = match &self.start_point {
             DomainStartPoint::Resume => StartPointWire::Resume,

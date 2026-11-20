@@ -349,6 +349,7 @@ fn test_session_service(
             traffic,
             transaction_bindings: DashMap::with_hasher(RandomState::new()),
             command_executions: super::command_execution::CommandExecutionOwners::default(),
+            domain_stops: super::domain_stop::DomainStops::default(),
             transaction_executions: DashMap::with_hasher(RandomState::new()),
             transaction_recovery: Default::default(),
             ownership_handoff_operations: nervix_primitives::sync::Mutex::new(()),
@@ -577,7 +578,7 @@ pub(in crate::application) async fn create_test_domain(consensus: &Proposer, raw
         start_version: 0,
         last_start: DomainStartPoint::Resume,
         clock: None,
-        stop_cause: None,
+        stop: None,
     };
 
     for attempt in 0..50 {

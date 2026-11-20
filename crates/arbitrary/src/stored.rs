@@ -13,14 +13,16 @@ use nervix_models::{
     BranchKeyFingerprint, ClusterNodeIdentity, ClusterNodeIncarnation, ClusterNodeName,
     CommandExecutionReference, DomainClockAuthority, DomainClockAuthorityRevision,
     DomainClockState, DomainConfig, DomainName, DomainPace, DomainSchedule, DomainStartPoint,
-    DomainState, DomainStatus, DomainStopCause, LicensingStopReason, Model, ModelName, NodeRef,
-    OwnershipStateComponent, OwnershipStateRecoveryOutcome, OwnershipStateReset,
-    OwnershipStateResetCause, OwnershipTransition, PlacementGroupSchedule,
+    DomainState, DomainStatus, DomainStop, DomainStopCause, DomainStopEnding, DomainStopReport,
+    DomainStopping, LicensingStopReason, Model, ModelName, NodeRef, NodeStopReport,
+    OperatorStopRequest, OwnershipStateComponent, OwnershipStateRecoveryOutcome,
+    OwnershipStateReset, OwnershipStateResetCause, OwnershipTransition, PlacementGroupSchedule,
     RequestedResourceVersion, ResolvedBranching, ResourceId, ResourceNodeState, ResourceNodeStatus,
     ResourceReplicaKey, ResourceUpload, ResourceUploadIdentity, ResourceUploadKey,
     ResourceUploadState, ResourceVersion, RestoreStateAuthority, ScheduledNode, SchemaFingerprint,
-    Timestamp, WasmSavedStateRejection, WasmStateRecoveryAdmission, WasmStateRecoveryOutcome,
-    WasmStateResetPhase, WasmStateResetReason, WasmStateResetScope,
+    StopCut, StopCutKind, StopEnding, StopRequestId, Timestamp, WaitLimit, WasmSavedStateRejection,
+    WasmStateRecoveryAdmission, WasmStateRecoveryOutcome, WasmStateResetPhase,
+    WasmStateResetReason, WasmStateResetScope,
 };
 
 use crate::Arbitrary;
@@ -729,6 +731,21 @@ impl Arbitrary<'_> {
         }
     }
 
+    /// The limit a waiting operation takes: none, or an ending forced through or called off after
+    /// a duration, at once (zero) or after any span a Plexus duration literal reads back.
+    pub fn wait_limit(&mut self) -> Option<WaitLimit> {
+        let after = if self.entropy.flag() {
+            std::time::Duration::ZERO
+        } else {
+            std::time::Duration::from_nanos(self.entropy.any_u64())
+        };
+        match self.entropy.byte() % 3 {
+            0 => None,
+            1 => Some(WaitLimit::Enforce { after }),
+            _ => Some(WaitLimit::Cancel { after }),
+        }
+    }
+
     /// The mapping a running paced generation projects logical time through.
     pub fn domain_clock_state(&mut self) -> DomainClockState {
         let wall_started_at = self.timestamp();
@@ -768,6 +785,7 @@ impl Arbitrary<'_> {
             DomainStatus::Stopped,
             DomainStatus::Running,
             DomainStatus::Paused,
+            DomainStatus::Stopping,
         ]);
         let start_version = self.entropy.any_u64();
         let last_start = self.start_point();
@@ -776,9 +794,11 @@ impl Arbitrary<'_> {
         } else {
             None
         };
-        // Only a committed stop records a cause, and a start clears it.
-        let stop_cause = match status {
-            DomainStatus::Stopped => self.domain_stop_cause(),
+        // A stopping domain holds its requests, a stopped one may keep how its stop ended, and a
+        // start clears either.
+        let stop = match status {
+            DomainStatus::Stopping => Some(DomainStop::Stopping(self.domain_stopping())),
+            DomainStatus::Stopped => self.domain_stop_ending().map(DomainStop::Ended),
             DomainStatus::Running | DomainStatus::Paused => None,
         };
         DomainState {
@@ -788,17 +808,116 @@ impl Arbitrary<'_> {
             start_version,
             last_start,
             clock,
-            stop_cause,
+            stop,
         }
     }
 
-    /// The cause a stopped domain may carry: none for a domain created or restored stopped, or the
-    /// cause of the stop that committed it.
-    pub fn domain_stop_cause(&mut self) -> Option<DomainStopCause> {
+    /// The requests of a stopping domain: up to three operators' and, or alone, the licensing
+    /// stop gate's. A stopping domain always holds at least one.
+    pub fn domain_stopping(&mut self) -> DomainStopping {
+        let mut stopping = DomainStopping {
+            began_at_revision: self.entropy.any_u64(),
+            operators: std::collections::BTreeMap::new(),
+            licensing: None,
+        };
+        for _ in 0..self.entropy.count(3) {
+            let reference = self.execution_reference();
+            let request = self.operator_stop_request();
+            stopping.operators.insert(reference, request);
+        }
+        if stopping.operators.is_empty() || self.entropy.flag() {
+            stopping.licensing = Some(self.licensing_stop_reason());
+        }
+        stopping
+    }
+
+    /// One operator's stop request, made at any instant, with or without its clause.
+    pub fn operator_stop_request(&mut self) -> OperatorStopRequest {
+        OperatorStopRequest {
+            requested_at: self.timestamp(),
+            limit: self.wait_limit(),
+        }
+    }
+
+    /// The identity of any stop request.
+    pub fn stop_request_id(&mut self) -> StopRequestId {
         if self.entropy.flag() {
-            Some(self.stop_cause())
+            StopRequestId::Licensing
+        } else {
+            StopRequestId::Operator(self.execution_reference())
+        }
+    }
+
+    /// How a stopped domain's stop ended, if it keeps one: none for a domain created or restored
+    /// stopped. An ending resolves up to three requests and may still wait for its report.
+    pub fn domain_stop_ending(&mut self) -> Option<DomainStopEnding> {
+        if self.entropy.flag() {
+            return None;
+        }
+        let cause = self.stop_cause();
+        let ending = if self.entropy.flag() {
+            StopEnding::Completed
+        } else {
+            StopEnding::Enforced {
+                by: self.stop_request_id(),
+            }
+        };
+        let mut resolved = Vec::new();
+        for _ in 0..self.entropy.count(3) {
+            resolved.push(self.stop_request_id());
+        }
+        let report = if self.entropy.flag() {
+            Some(self.domain_stop_report())
         } else {
             None
+        };
+        Some(DomainStopEnding {
+            cause,
+            ending,
+            resolved,
+            report,
+        })
+    }
+
+    /// What a stop's teardown cut on up to three nodes: each reported up to three cuts, or did
+    /// not report.
+    pub fn domain_stop_report(&mut self) -> DomainStopReport {
+        let mut report = DomainStopReport::default();
+        for _ in 0..self.entropy.count(3) {
+            let node = self.cluster_node();
+            let node_report = if self.entropy.flag() {
+                let mut cuts = Vec::new();
+                for _ in 0..self.entropy.count(3) {
+                    cuts.push(self.stop_cut());
+                }
+                NodeStopReport::Reported { cuts }
+            } else {
+                NodeStopReport::Unreported
+            };
+            report.nodes.insert(node, node_report);
+        }
+        report
+    }
+
+    /// One entity's cut of any kind, of any size.
+    pub fn stop_cut(&mut self) -> StopCut {
+        let kind = self.entropy.pick([
+            StopCutKind::Enforced,
+            StopCutKind::WindowAcknowledgements,
+            StopCutKind::ReordererRows,
+            StopCutKind::CorrelatorRecords,
+            StopCutKind::RequiredWaitMessages,
+            StopCutKind::EmitterUndelivered,
+            StopCutKind::BranchLimitEntry,
+            StopCutKind::RelayBatches,
+            StopCutKind::NodeBatches,
+            StopCutKind::IngestorPauseBuffer,
+        ]);
+        StopCut {
+            entity_kind: self.model_kind(),
+            entity: self.name(),
+            kind,
+            items: self.entropy.any_u64(),
         }
     }
 

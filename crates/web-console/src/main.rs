@@ -1169,6 +1169,7 @@ impl SessionRequests {
         let message = ClientMessage {
             request_id,
             request: issued.request.client_request(),
+            progress: None,
         };
         self.in_flight.insert(
             request_id,
@@ -1313,6 +1314,9 @@ impl SessionRequests {
                 None => Routed::Untracked,
             },
             ServerMessage::TransferPart(part) => self.assemble(&part),
+            // The console asks for no progress reports, since it never gives up waiting for a
+            // reply, so a report answers no request it tracks.
+            ServerMessage::Progress(_) => Routed::Untracked,
         }
     }
 
@@ -8144,13 +8148,13 @@ impl DomainView {
         )
     }
 
-    /// The statement that starts a stopped domain or stops a running one. A paused domain has
-    /// none.
+    /// The statement that starts a stopped domain or stops a running one. A paused domain, and a
+    /// stopping one whose stop is under way, have none.
     fn state_command(&self) -> Option<&'static str> {
         match self.status {
             DomainStatus::Running => Some("STOP;"),
             DomainStatus::Stopped => Some("START;"),
-            DomainStatus::Paused => None,
+            DomainStatus::Paused | DomainStatus::Stopping => None,
         }
     }
 
@@ -8160,6 +8164,7 @@ impl DomainView {
             DomainStatus::Running => "Stop domain",
             DomainStatus::Stopped => "Start domain",
             DomainStatus::Paused => "Domain lifecycle",
+            DomainStatus::Stopping => "Domain stopping",
         }
     }
 

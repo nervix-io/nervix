@@ -10,15 +10,19 @@
     nervix::layer(data_plane, reason = "owns the data plane boundary declared above")
 )]
 
-use std::collections::BTreeMap;
+use std::{cmp::Ordering as Comparison, collections::BTreeMap};
 
 use ahash::{HashMap, HashMapExt as _};
 use meticulous::OptionExt as _;
 use nervix_connector_websockets::CompiledSignalingProtocol;
 use nervix_primitives::{
     publication::{ArcSwap, ArcSwapOption, Guard},
-    sync::{Arc, CancellationToken, StdArc},
+    sync::{
+        Arc, CancellationToken, StdArc,
+        atomic::{AtomicU64, Ordering},
+    },
 };
+use sorted_vec::SortedVec;
 
 use super::{
     DomainName, DomainNodeRef, EndpointType, HttpRouteKey, RoutedEndpoint,
@@ -36,6 +40,11 @@ struct EndpointBindingLifetime<T> {
         nervix::identity(node, reason = "endpoint intake belongs to this domain node")
     )]
     identity: DomainNodeRef,
+    /// When the route table created this lifetime, relative to every other it created. A route
+    /// keeps its bindings in this order, so a binding published again after its domain's stop was
+    /// called off returns to its place, and the first failure of a request stays the one of the
+    /// earliest binding.
+    sequence: u64,
     intake: ArcSwapOption<T>,
     ending: CancellationToken,
 }
@@ -45,6 +54,28 @@ impl<T> Clone for EndpointBinding<T> {
         Self {
             inner: self.inner.clone(),
         }
+    }
+}
+
+/// Bindings compare by their creation sequence, which the one route table that creates them makes
+/// unique, so equal bindings are the same lifetime.
+impl<T> PartialEq for EndpointBinding<T> {
+    fn eq(&self, other: &Self) -> bool {
+        self.inner.sequence == other.inner.sequence
+    }
+}
+
+impl<T> Eq for EndpointBinding<T> {}
+
+impl<T> PartialOrd for EndpointBinding<T> {
+    fn partial_cmp(&self, other: &Self) -> Option<Comparison> {
+        Some(self.cmp(other))
+    }
+}
+
+impl<T> Ord for EndpointBinding<T> {
+    fn cmp(&self, other: &Self) -> Comparison {
+        self.inner.sequence.cmp(&other.inner.sequence)
     }
 }
 
@@ -63,6 +94,11 @@ impl<T> EndpointBinding<T> {
         self.inner.intake.store(None);
     }
 
+    /// Whether this source lifetime ended, after which no route publishes it again.
+    fn has_ended(&self) -> bool {
+        self.inner.intake.load().is_none()
+    }
+
     /// Resolves when this exact source lifetime ends, including through a retained route.
     pub(super) async fn ended(&self) {
         self.inner.ending.cancelled().await;
@@ -73,7 +109,8 @@ impl<T> EndpointBinding<T> {
 pub(crate) struct EndpointIntakeRoute<T> {
     definitions: BTreeMap<DomainName, RoutedEndpoint>,
     selected: RoutedEndpoint,
-    bindings: Vec<EndpointBinding<T>>,
+    /// In the order the route table created them.
+    bindings: SortedVec<EndpointBinding<T>>,
 }
 
 impl<T> Clone for EndpointIntakeRoute<T> {
@@ -146,6 +183,9 @@ enum RouteTableInstallation {
 
 struct EndpointRouteTable<T> {
     hosts: HashMap<String, HashMap<String, Arc<EndpointIntakeRoute<T>>>>,
+    /// What each stopping domain published before its stop withdrew it, kept until the stop ends,
+    /// which ends it, or is called off, which publishes it again.
+    withdrawn: BTreeMap<DomainName, WithdrawnRoutes<T>>,
     installation: RouteTableInstallation,
 }
 
@@ -153,6 +193,7 @@ impl<T> Default for EndpointRouteTable<T> {
     fn default() -> Self {
         Self {
             hosts: HashMap::new(),
+            withdrawn: BTreeMap::new(),
             installation: RouteTableInstallation::default(),
         }
     }
@@ -162,7 +203,49 @@ impl<T> Clone for EndpointRouteTable<T> {
     fn clone(&self) -> Self {
         Self {
             hosts: self.hosts.clone(),
+            withdrawn: self.withdrawn.clone(),
             installation: self.installation,
+        }
+    }
+}
+
+/// The routes a stopping domain published before its stop withdrew them: each route's definition,
+/// and each binding of the domain's ingestors with the route it was bound to. A withdrawn binding
+/// keeps its intake lifetime, so a request it admitted before the stop finishes through it.
+struct WithdrawnRoutes<T> {
+    definitions: HashMap<HttpRouteKey, RoutedEndpoint>,
+    bindings: Vec<WithdrawnBinding<T>>,
+}
+
+impl<T> Default for WithdrawnRoutes<T> {
+    fn default() -> Self {
+        Self {
+            definitions: HashMap::new(),
+            bindings: Vec::new(),
+        }
+    }
+}
+
+impl<T> Clone for WithdrawnRoutes<T> {
+    fn clone(&self) -> Self {
+        Self {
+            definitions: self.definitions.clone(),
+            bindings: self.bindings.clone(),
+        }
+    }
+}
+
+/// A binding of a withdrawn route, with the route it returns to.
+struct WithdrawnBinding<T> {
+    key: HttpRouteKey,
+    binding: EndpointBinding<T>,
+}
+
+impl<T> Clone for WithdrawnBinding<T> {
+    fn clone(&self) -> Self {
+        Self {
+            key: self.key.clone(),
+            binding: self.binding.clone(),
         }
     }
 }
@@ -172,7 +255,115 @@ impl<T> EndpointRouteTable<T> {
         self.hosts.get(host)?.get(path)
     }
 
+    /// Whether any route publishes a definition of `domain`. The scan visits every route once, as
+    /// the cold writers that derive a replacement table do.
+    fn publishes(&self, domain: &DomainName) -> bool {
+        for paths in self.hosts.values() {
+            for route in paths.values() {
+                if route.definitions.contains_key(domain) {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    /// Publishes `definition` of `domain` on the route of `key`, creating the route where no domain
+    /// publishes it yet.
+    fn insert_definition(
+        &mut self,
+        domain: &DomainName,
+        key: &HttpRouteKey,
+        definition: &RoutedEndpoint,
+    ) {
+        let paths = self.hosts.entry(key.host.clone()).or_default();
+        if let Some(route) = paths.get_mut(&key.path) {
+            let route = Arc::make_mut(route);
+            route.definitions.insert(domain.clone(), definition.clone());
+            route.select_definition();
+        } else {
+            paths.insert(
+                key.path.clone(),
+                Arc::new(EndpointIntakeRoute {
+                    definitions: BTreeMap::from([(domain.clone(), definition.clone())]),
+                    selected: definition.clone(),
+                    bindings: SortedVec::new(),
+                }),
+            );
+        }
+    }
+
+    /// Moves what `domain` publishes out of the routes into its withdrawn routes. Each of its
+    /// bindings keeps its intake lifetime.
+    fn withdraw(&mut self, domain: &DomainName) {
+        let mut withdrawn = self.withdrawn.remove(domain).unwrap_or_default();
+        self.hosts.retain(|host, paths| {
+            paths.retain(|path, route| {
+                let Some(definition) = route.definitions.get(domain) else {
+                    return true;
+                };
+                let key = HttpRouteKey {
+                    host: host.clone(),
+                    path: path.clone(),
+                };
+                withdrawn
+                    .definitions
+                    .insert(key.clone(), definition.clone());
+                let route = Arc::make_mut(route);
+                route.definitions.remove(domain);
+                route.bindings.retain(|binding| {
+                    if &binding.identity().domain != domain {
+                        return true;
+                    }
+                    withdrawn.bindings.push(WithdrawnBinding {
+                        key: key.clone(),
+                        binding: binding.clone(),
+                    });
+                    false
+                });
+                if route.definitions.is_empty() {
+                    return false;
+                }
+                route.select_definition();
+                true
+            });
+            !paths.is_empty()
+        });
+        self.withdrawn.insert(domain.clone(), withdrawn);
+    }
+
+    /// Publishes again what `domain` published before its stop withdrew it, with each binding whose
+    /// intake lifetime goes on, in its place among the route's bindings.
+    fn restore(&mut self, domain: &DomainName) {
+        let Some(withdrawn) = self.withdrawn.remove(domain) else {
+            return;
+        };
+        for (key, definition) in &withdrawn.definitions {
+            self.insert_definition(domain, key, definition);
+        }
+        for withdrawn_binding in withdrawn.bindings {
+            if withdrawn_binding.binding.has_ended() {
+                continue;
+            }
+            let Some(paths) = self.hosts.get_mut(&withdrawn_binding.key.host) else {
+                continue;
+            };
+            let Some(route) = paths.get_mut(&withdrawn_binding.key.path) else {
+                continue;
+            };
+            Arc::make_mut(route)
+                .bindings
+                .insert(withdrawn_binding.binding);
+        }
+    }
+
     fn remove_domain(&mut self, domain: &DomainName) {
+        // A domain whose stop withdrew its routes ends them with every lifetime bound to them.
+        if let Some(withdrawn) = self.withdrawn.remove(domain) {
+            for withdrawn_binding in &withdrawn.bindings {
+                withdrawn_binding.binding.end();
+            }
+        }
         self.hosts.retain(|_, paths| {
             paths.retain(|_, route| {
                 if !route.definitions.contains_key(domain) {
@@ -201,12 +392,16 @@ impl<T> EndpointRouteTable<T> {
 /// Cold lifecycle writers derive a whole replacement; readers perform borrowed map lookups.
 pub(super) struct EndpointIntakeRoutes<T> {
     current: ArcSwap<EndpointRouteTable<T>>,
+    /// The creation sequence of the next binding. It only names an order, so a relaxed increment
+    /// that is unique suffices.
+    next_binding: AtomicU64,
 }
 
 impl<T> Default for EndpointIntakeRoutes<T> {
     fn default() -> Self {
         Self {
             current: ArcSwap::from_pointee(EndpointRouteTable::default()),
+            next_binding: AtomicU64::new(0),
         }
     }
 }
@@ -251,21 +446,7 @@ impl<T> EndpointIntakeRoutes<T> {
             let mut next = current.as_ref().clone();
             next.remove_domain(domain);
             for (key, definition) in &definitions {
-                let paths = next.hosts.entry(key.host.clone()).or_default();
-                if let Some(route) = paths.get_mut(&key.path) {
-                    let route = Arc::make_mut(route);
-                    route.definitions.insert(domain.clone(), definition.clone());
-                    route.select_definition();
-                } else {
-                    paths.insert(
-                        key.path.clone(),
-                        Arc::new(EndpointIntakeRoute {
-                            definitions: BTreeMap::from([(domain.clone(), definition.clone())]),
-                            selected: definition.clone(),
-                            bindings: Vec::new(),
-                        }),
-                    );
-                }
+                next.insert_definition(domain, key, definition);
             }
             next
         });
@@ -279,6 +460,34 @@ impl<T> EndpointIntakeRoutes<T> {
         });
     }
 
+    /// Withdraws every route a stopping `domain` publishes, so a request that arrives later finds
+    /// none. Each binding of the domain's ingestors keeps its intake lifetime: a request admitted
+    /// before the stop finishes through the intake it borrowed, and the stop's teardown or its
+    /// calling off decides what follows.
+    pub(super) fn withdraw_stopping_domain(&self, domain: &DomainName) {
+        if !self.current.load().publishes(domain) {
+            return;
+        }
+        self.current.rcu(|current| {
+            let mut next = current.as_ref().clone();
+            next.withdraw(domain);
+            next
+        });
+    }
+
+    /// Publishes again every route a called-off stop of `domain` withdrew, with the bindings whose
+    /// intake lifetime goes on.
+    pub(super) fn restore_withdrawn_domain(&self, domain: &DomainName) {
+        if !self.current.load().withdrawn.contains_key(domain) {
+            return;
+        }
+        self.current.rcu(|current| {
+            let mut next = current.as_ref().clone();
+            next.restore(domain);
+            next
+        });
+    }
+
     pub(super) fn bind(
         &self,
         identity: DomainNodeRef,
@@ -288,12 +497,26 @@ impl<T> EndpointIntakeRoutes<T> {
         let binding = EndpointBinding {
             inner: Arc::new(EndpointBindingLifetime {
                 identity,
+                sequence: self.next_binding.fetch_add(1, Ordering::Relaxed),
                 intake: ArcSwapOption::from(Some(StdArc::new(intake))),
                 ending: CancellationToken::new(),
             }),
         };
         self.current.rcu(|current| {
             let mut next = current.as_ref().clone();
+            // A binding of a domain whose stop withdrew its routes waits with them, and is published
+            // with them if the stop is called off.
+            if let Some(withdrawn) = next.withdrawn.get_mut(&binding.identity().domain) {
+                for key in keys {
+                    if withdrawn.definitions.contains_key(key) {
+                        withdrawn.bindings.push(WithdrawnBinding {
+                            key: key.clone(),
+                            binding: binding.clone(),
+                        });
+                    }
+                }
+                return next;
+            }
             for key in keys {
                 let Some(paths) = next.hosts.get_mut(&key.host) else {
                     continue;
@@ -302,7 +525,7 @@ impl<T> EndpointIntakeRoutes<T> {
                     continue;
                 };
                 if route.definitions.contains_key(&binding.identity().domain) {
-                    Arc::make_mut(route).bindings.push(binding.clone());
+                    Arc::make_mut(route).bindings.insert(binding.clone());
                 }
             }
             next
@@ -326,6 +549,12 @@ impl<T> EndpointIntakeRoutes<T> {
                     .bindings
                     .retain(|candidate| !Arc::ptr_eq(&candidate.inner, &binding.inner));
             }
+            // A binding its domain's stop withdrew is never published again once it ended.
+            if let Some(withdrawn) = next.withdrawn.get_mut(&binding.identity().domain) {
+                withdrawn
+                    .bindings
+                    .retain(|candidate| !Arc::ptr_eq(&candidate.binding.inner, &binding.inner));
+            }
             next
         });
     }
@@ -337,6 +566,11 @@ impl<T> EndpointIntakeRoutes<T> {
                     for binding in route.bindings() {
                         binding.end();
                     }
+                }
+            }
+            for withdrawn in current.withdrawn.values() {
+                for withdrawn_binding in &withdrawn.bindings {
+                    withdrawn_binding.binding.end();
                 }
             }
             EndpointRouteTable::default()

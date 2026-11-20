@@ -232,6 +232,7 @@ mod deduplicator_archive;
 mod domain_clock;
 mod domain_execution;
 mod domain_rebuild;
+mod domain_stop;
 mod emitter_batch_packing;
 mod emitter_buffer;
 mod emitter_client;

@@ -179,6 +179,7 @@ fn a_submitted_batch_is_read_as_a_window_onto_its_frame() {
             producer: producer(),
             batch: batch.clone(),
         }),
+        progress: None,
     };
     let frame = message
         .encode(&limits())
@@ -208,6 +209,7 @@ fn the_largest_submitted_batch_fits_a_frame_and_one_byte_more_does_not() {
             producer: ProducerId::opened_by(request(u64::MAX)),
             batch: Bytes::from(vec![0x5A; bytes]),
         }),
+        progress: None,
     };
     let frame = submit(largest)
         .encode(&limits)
@@ -230,6 +232,7 @@ fn empty_batches_and_empty_expected_schemas_are_refused_both_ways() {
             producer: producer(),
             batch: Bytes::new(),
         }),
+        progress: None,
     };
     assert!(matches!(
         empty_batch
@@ -251,6 +254,7 @@ fn empty_batches_and_empty_expected_schemas_are_refused_both_ways() {
                 bytes: non_zero(1),
             },
         }),
+        progress: None,
     };
     assert!(matches!(
         empty_schema
@@ -296,6 +300,7 @@ fn client_frame<'fbb>(
             request_id: 11,
             request_type,
             request: Some(request_value),
+            progress_interval_ms: None,
         },
     );
     finish_raw(builder, root, "NXCM")
@@ -397,6 +402,7 @@ fn a_producer_identity_must_not_be_zero() {
         request: ClientRequest::CloseIngestor(CloseIngestorRequest {
             producer: producer(),
         }),
+        progress: None,
     };
     assert_eq!(round_trip_client(&closed), closed);
 }

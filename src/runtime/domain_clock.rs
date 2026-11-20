@@ -81,6 +81,14 @@ pub(crate) enum DomainClockAccessError {
     },
 }
 
+impl DomainClockAccessError {
+    /// Whether the clock's generation stopped, as the stop of its domain ends it: the tasks bound
+    /// to it end with it, which is no failure of theirs.
+    pub(crate) fn is_stopped(&self) -> bool {
+        matches!(self, Self::Stopped { .. })
+    }
+}
+
 #[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DomainClockArithmetic {
     #[error("logical-time projection")]
@@ -368,27 +376,29 @@ impl DomainClockLifecycle {
             nervix_models::DomainStatus::Stopped => DomainClockInstallation::Stopped {
                 generation: state.start_version,
             },
-            nervix_models::DomainStatus::Running | nervix_models::DomainStatus::Paused => {
-                match state.config.pace {
-                    DomainPace::Unpaced => DomainClockInstallation::Installed {
+            // A stopping domain's clock runs on: the work in motion still reads its time until
+            // the stop ends.
+            nervix_models::DomainStatus::Running
+            | nervix_models::DomainStatus::Paused
+            | nervix_models::DomainStatus::Stopping => match state.config.pace {
+                DomainPace::Unpaced => DomainClockInstallation::Installed {
+                    generation: state.start_version,
+                    source: DomainClockSource::Unpaced,
+                },
+                DomainPace::Paced { period, skew } => match (&state.clock, authority.owner()) {
+                    (Some(mapping), Some(_)) => DomainClockInstallation::Installed {
                         generation: state.start_version,
-                        source: DomainClockSource::Unpaced,
-                    },
-                    DomainPace::Paced { period, skew } => match (&state.clock, authority.owner()) {
-                        (Some(mapping), Some(_)) => DomainClockInstallation::Installed {
-                            generation: state.start_version,
-                            source: DomainClockSource::Paced {
-                                mapping: mapping.clone(),
-                                period,
-                                skew,
-                            },
-                        },
-                        (None, _) | (_, None) => DomainClockInstallation::Uninstalled {
-                            generation: state.start_version,
+                        source: DomainClockSource::Paced {
+                            mapping: mapping.clone(),
+                            period,
+                            skew,
                         },
                     },
-                }
-            }
+                    (None, _) | (_, None) => DomainClockInstallation::Uninstalled {
+                        generation: state.start_version,
+                    },
+                },
+            },
         };
         self.replace_with_task_state(installation, Some(DomainTaskState::from(state)));
     }

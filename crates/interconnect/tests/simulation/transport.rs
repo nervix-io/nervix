@@ -68,6 +68,8 @@ mod partition_claims;
 mod process_target;
 #[path = "progress.rs"]
 mod progress;
+#[path = "stop.rs"]
+mod stop;
 
 const CLUSTER: &str = "simulated";
 const PORT: u16 = 7443;

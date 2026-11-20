@@ -266,6 +266,13 @@ archive; see [Restore Streams](#restore-streams).
   a reply of any other kind as a protocol violation under F-8. It MUST NOT adopt the subscription,
   clock attachment, producer, transaction or redirect such a reply carries. A reply whose request
   no longer waits is routed under C-3, whatever its kind.
+- **C-12.** A client that bounds a request's wait SHOULD ask for
+  [progress reports](./client-session-protocol.md#progress-reports) in its `ClientMessage`, with
+  an interval of at least 100 milliseconds that fits several times within its wait. A
+  `RequestProgress` reply completes nothing and MUST NOT be taken as the request's terminal reply or
+  as the protocol violation of C-11: the client restarts its wait for the request at each report.
+  A report for a request no longer waiting, which can arrive after the request's terminal reply,
+  MUST be ignored.
 
 ## Structured Choice Lookups
 
@@ -435,7 +442,10 @@ reset. A genuine reset failure arrives as `RequestFailed` and follows the failur
   name.
 - **D-3.** A client SHOULD remember a bounded set of endpoints it learned from redirects and
   `LeadershipObserved`, and try them, and its configured seeds, when its session is lost.
-- **D-4.** A client MUST bound every call with a deadline of its own. When a deadline passes before
+- **D-4.** A client MUST bound every call with a deadline of its own. A client that asked for
+  progress reports (C-12) MAY start that deadline again at each report, so that only a call that
+  went without its answer and without a report for its whole budget ends; the Rust client does
+  both for every request and call. When a deadline passes before
   a command's outcome is known, the client MUST report the command as uncertain, naming its
   reference, and never as failed or completed. The Rust client keeps the last nonterminal answer's
   typed disposition and message in the report chain when one arrived before the deadline; that

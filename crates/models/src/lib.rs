@@ -276,7 +276,11 @@ pub use domain_clock::{
     DomainClockObservedState, DomainClockPeriod, DomainClockProgress, DomainClockSkew,
     DomainClockState, DomainClockTickObservation, DomainTimeRate, PacedDomainClock,
 };
-pub use domain_stop::DomainStopCause;
+pub use domain_stop::{
+    DomainStop, DomainStopCause, DomainStopEnding, DomainStopReport, DomainStopping,
+    LICENSING_STOP_ENFORCE_AFTER, NodeStopReport, OperatorStopRequest, StopCut, StopCutKind,
+    StopCutReason, StopEnding, StopRequest, StopRequestAdmission, StopRequestId, StopWithdrawal,
+};
 pub use duration_text::{DurationTextError, parse_duration_text};
 pub use emitter::{
     AckMode, AlterEmitter, AlterEmitterError, AlterEmitterOperation, CreateEmitter,
@@ -389,7 +393,7 @@ pub use quiesce::{
     TransactionLifecycle, TransactionModelTransition, TransactionOperation,
     TransactionOperationAdmission, TransactionOperationNumber, TransactionOperationRange,
     TransactionPosition, TransactionPreviewIdentity, TransactionResolvedDomainStart,
-    TransactionStatus, TransactionStatusError,
+    TransactionStatus, TransactionStatusError, WaitLimit,
 };
 pub use rebind_resource::{RebindResource, RebindResourceMembers, RebindResourceSelection};
 pub use remote::{

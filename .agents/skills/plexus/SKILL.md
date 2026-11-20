@@ -876,6 +876,11 @@ literal HTTP polling headers, at model creation and when a later cap is lowered.
   larger batches.
 - Use delivery-mode `MAX <n>` with `ACK PARALLEL` or an endpoint's `ACK`; an ingestor's `NO ACK`
   and an emitter's `NO ACK` have no in-flight ACK window and never accept `MAX`.
+- `STOP` is graceful and has no time limit: it stops intake and waits for the work in motion,
+  cutting and reporting only held work whose kind cannot be saved yet. Add `ENFORCE AFTER <duration>`
+  when a stop must end by a time, or `CANCEL AFTER <duration>` to call the request off; never both.
+  A `STOP` on a stopping domain joins its stop. `Domains And Time` → `Stopping A Domain` has the
+  contract.
 - Do not promise that an emitter's `NO ACK` survives a stop on every emitter. A `STOP`, a replacement
   or a node shutdown sends what a Kafka producer still queues, awaits the receipts of what a Pulsar
   producer accepted and waits for an MQTT QoS 0 client to send what it holds, all within its

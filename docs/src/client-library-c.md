@@ -43,7 +43,9 @@ options unmodified during the connect call and release them once it returns (B-4
 ```
 
 The four timeout selectors bound one connection, one request, the whole retrying call, and waiting
-for a backup archive. Their values are milliseconds, validated from 1 ms through 24 hours. Add
+for a backup archive. Their values are milliseconds, validated from 1 ms through 24 hours. The
+request and call timeouts count only time without the answer or a server progress report, which
+restarts them, so a long-running statement such as a waiting `STOP` is still answered. Add
 further session URLs with `nx_connect_options_add_seed`. The suite supplies its fixture credentials,
 certificate path and server URLs through environment variables.
 

@@ -126,8 +126,8 @@ impl Inbox {
             ServerMessage::Event(ServerEvent::ProducerEnded(ended)) => {
                 filed.producer_frames.push(ProducerFrame::Ended(ended));
             }
-            // Observation events are not this session's subject.
-            ServerMessage::Event(_) => {}
+            // Observation events and progress reports are not this session's subject.
+            ServerMessage::Event(_) | ServerMessage::Progress(_) => {}
         }
         drop(filed);
         self.changed.notify_waiters();
@@ -273,6 +273,7 @@ impl RawProducerSession {
         let message = ClientMessage {
             request_id,
             request,
+            progress: None,
         };
         let frame = message.encode(&self.limits).map_err(io::Error::other)?;
         self.frames

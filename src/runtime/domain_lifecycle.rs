@@ -100,12 +100,27 @@ impl DomainClockLifecycle {
 }
 
 impl DomainClock {
-    pub(in crate::runtime) fn is_paused(&self) -> bool {
+    /// Whether the domain is stopping: its intake holds while the work in motion finishes, and the
+    /// stop's drain waits for no work that cannot move on.
+    pub(in crate::runtime) fn is_stopping(&self) -> bool {
         let publication = self.inner.published.load();
         matches!(
             publication.task_state.as_ref(),
             Some(DomainTaskState {
-                status: nervix_models::DomainStatus::Paused,
+                status: nervix_models::DomainStatus::Stopping,
+                ..
+            })
+        )
+    }
+
+    /// Whether the domain holds its intake: a pause holds it until the domain resumes, and a stop
+    /// until the stop ends or is called off. The work already admitted runs on either way.
+    pub(in crate::runtime) fn holds_intake(&self) -> bool {
+        let publication = self.inner.published.load();
+        matches!(
+            publication.task_state.as_ref(),
+            Some(DomainTaskState {
+                status: nervix_models::DomainStatus::Paused | nervix_models::DomainStatus::Stopping,
                 ..
             })
         )

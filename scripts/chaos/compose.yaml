@@ -448,6 +448,36 @@ services:
     networks:
       - chaos
 
+  # One independent observer per node follows, with the packaged CLI, the server notices that
+  # node's sessions receive, through a subscription to a relay no record reaches; the runner
+  # starts each with its CHAOS_EVENTS_HOST.
+  events-observer:
+    image: ${NERVIX_IMAGE:?NERVIX_IMAGE is required}
+    profiles:
+      - events
+    entrypoint:
+      - /bin/sh
+      - /opt/chaos/observe-events.sh
+    labels:
+      <<: *run-labels
+      io.nervix.chaos.role: observer
+    environment:
+      NERVIX_PASSWORD: ${CHAOS_PASSWORD:?CHAOS_PASSWORD is required}
+      CHAOS_EVENTS_DOMAIN: chaos_observer
+      CHAOS_EVENTS_RELAY: chaos_observer_quiet
+      CHAOS_EVENTS_HOST: nervix-1
+    tmpfs:
+      - /var/lib/nervix
+    volumes:
+      - ${CHAOS_SCRIPT_DIR:?CHAOS_SCRIPT_DIR is required}/observe-events.sh:/opt/chaos/observe-events.sh:ro
+    logging:
+      driver: local
+      options:
+        max-file: "2"
+        max-size: 8m
+    networks:
+      - chaos
+
   observer:
     image: ${CHAOS_PROBE_IMAGE:?CHAOS_PROBE_IMAGE is required}
     profiles:

@@ -709,9 +709,13 @@ change must remain valid with them. A complete `SET TO` body may replace constru
 invocations along with the destination. The complete candidate is
 validated before the transaction commits and has the same effective drain obligation as an
 `ALTER` replacement. A destination that remains unavailable can prevent that drain. The operator
-can repair it, or `STOP` the domain, change the emitter while stopped, and `START` again. Stopping
-discards prepared requests and retry state; attached work depends on its ingestor's redelivery
-contract, and an endpoint that applied a request before losing its response may see a duplicate.
+can repair it, or `STOP` the domain, change the emitter while stopped, and `START` again. A graceful
+`STOP` does not wait for a destination that stays unavailable: records the emitter holds for a retry
+are cut and listed in the stop's answer, while a publish attempt already on the wire runs to its
+outcome, so a destination that accepts a request and never answers needs `STOP ENFORCE AFTER
+<duration>`. Stopping discards prepared requests and retry state; attached work depends on its
+ingestor's redelivery contract, and an endpoint that applied a request before losing its response
+may see a duplicate.
 
 While confirmations or infrastructure retries are pending, the emitter stops consuming from its
 relays and keeps upstream ACK leases alive. `FLUSH` still controls when and how much work enters a

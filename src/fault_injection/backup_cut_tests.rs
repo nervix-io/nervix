@@ -32,7 +32,7 @@ fn revision_domains(name: DomainName, status: DomainStatus) -> BTreeMap<DomainNa
         start_version: 0,
         last_start: DomainStartPoint::Resume,
         clock: None,
-        stop_cause: None,
+        stop: None,
     };
     BTreeMap::from([(name, state)])
 }

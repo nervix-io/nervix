@@ -145,10 +145,19 @@ pub fn next_deadline(policy: &LicensingPolicy) -> Option<Timestamp> {
         _ => [None; 4],
     };
     let grant = policy.grants.values().map(|grant| grant.until).min();
+    // The licensing stop is forced a fixed time after the expiry, in committed licensing time, so
+    // licensing time is committed at that instant for the stop's owner to see it pass.
+    let forced_stop = match binding_expiry {
+        Some(expiry) => expiry
+            .checked_add(nervix_models::LICENSING_STOP_ENFORCE_AFTER)
+            .ok(),
+        None => None,
+    };
     signed
         .into_iter()
         .flatten()
         .chain(binding_expiry)
+        .chain(forced_stop)
         .chain(grant)
         .filter(|at| *at > time)
         .min()

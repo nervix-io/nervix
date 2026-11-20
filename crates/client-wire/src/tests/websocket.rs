@@ -99,6 +99,7 @@ fn non_frame_messages_end_the_connection_with_a_close_code() {
         request: ClientRequest::AttachTransaction(crate::AttachTransactionRequest {
             transaction_id: "t".repeat(2048),
         }),
+        progress: None,
     };
     let payload = client.encode(large.encode(&limits()).assured("a request fits"));
     let error = small_server

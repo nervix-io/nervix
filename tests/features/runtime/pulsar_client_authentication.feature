@@ -322,12 +322,18 @@ Feature: Pulsar clients authenticate to their broker
         ON GENERAL ERROR LOG;
       """
     And the stallable endpoint "pulsar" is paused
-    And these Plexus commands are attempted on node "node-1"
+    # While a node cannot start the ingestor, START keeps its client waiting and the node keeps
+    # trying. START answers once the domain runs on every node, or with the failure of the node that
+    # serves it, so its outcome depends on where the ingestor runs.
+    And these Plexus commands begin executing in the background
       """
       START;
       """
-    And the stallable endpoint "pulsar" is resumed
+    # A second connection means the ingestor's first attempt ended while the broker was away.
+    Then the stallable endpoint "pulsar" eventually accepts 2 connections
+    When the stallable endpoint "pulsar" is resumed
     Then within "120s" Pulsar subscription "returning_{{test_id}}" of topic "returning_{{test_id}}" has 1 consumer
+    And within "120s" the background Plexus execution reaches a terminal outcome
 
     Examples:
       | cluster_size |
