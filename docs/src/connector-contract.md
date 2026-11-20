@@ -2081,11 +2081,15 @@ they cannot stop event-loop polling, consume a QoS 1/2 slot, delay a `PUBACK` or
 keep-alive pings. An oversized QoS 0 publish that cannot enter read-ahead is counted as overflow rather than
 as an oversized outcome; no payload is counted twice.
 
-The host resolves `nervix_ingestor_read_ahead_dropped_payloads_total` once per ingestor and physical
-node and passes its counter handle to the connector. The driver increments it at each overflow,
-including while the host waits for downstream acknowledgement. Prometheus exposes the count with
-`domain`, `ingestor`, `physical_node_id` and `instance` labels; a reconnect does not reset it. It is separate
-from codec rejections, oversized payloads, quiesce drops and transport redeliveries.
+The host resolves its `nervix_ingestor_read_ahead_dropped_payloads_total` child once for each
+ingestor unit on its physical node, registered at zero, and hands the connector an
+`IngestorReadAheadOverflow` report in the unit's plan; the connector names no metrics type. Each
+connection's driver keeps a clone of the report and records every overflow through it at once,
+including while the host waits for downstream acknowledgement: one call to the host's recorder,
+which increments that child without a registry lookup, allocation or wait. Prometheus exposes the
+count with the `domain`, `ingestor`, `physical_node_id`, `instance`, `connector` and `entity`
+labels; a reconnect does not reset it. It is separate from codec rejections, oversized payloads,
+quiesce drops and transport redeliveries.
 
 Every MQTT subscription checks the successful `SUBACK` grant against its declared QoS before
 publishing readiness, including under `NO ACK`. A lower grant is
@@ -3765,6 +3769,13 @@ the recurring path. The host owns counting, wall rates, process-local history an
 The event itself changes no delivery outcome. [Connector-declared events](metrics-and-observability.md#connector-declared-events)
 defines the public families and the Redis zero-subscriber event.
 
+A connector task that polls its transport apart from the host's loop cannot reach `IngestorHost`,
+so a fact only that task sees arrives through a report the host resolves into the plan instead. An
+ingestor connection's read-ahead overflow is the one such fact: the host builds an
+`IngestorReadAheadOverflow` around its counter child for the unit, and the task records each drop
+through its retained clone, with the same rules as an event counter. The host keeps the family, its
+labels and its registration; see [MQTT ingestor connections](#mqtt-ingestor-connections).
+
 The ingestor host resolves its interaction counter children once at startup for its exact execution
 unit. The retained group preserves each instance's counters, including decode rejections, without
 resolving labels or looking up a shared registry while recording a payload outcome.
@@ -4002,11 +4013,11 @@ delivery semantics rather than assuming a generic envelope or exactly-once exter
 The host prepares MQTT's connector plan, rendered client entries and resource mounts once per
 logical ingestor and installed declaration on each node. The connector checks the rendered client
 identities once in that prepared plan. Unit plans share immutable entry arrays and retain their own
-read-ahead counter; an executing unit retains only its selected instance's mount. Input replacement
-compares external sessions once per local logical input and retires only the explicitly ending
-global indices. This keeps preparation
-and retirement proportional to the declared instance count. A declaration change invalidates the
-prepared entry; no mutable driver or ingestor task is shared between units.
+read-ahead overflow report; an executing unit retains only its selected instance's mount. Input
+replacement compares external sessions once per local logical input and retires only the
+explicitly ending global indices. This keeps preparation and retirement proportional to the
+declared instance count. A declaration change invalidates the prepared entry; no mutable driver or
+ingestor task is shared between units.
 
 ## Committed Host Bounds
 

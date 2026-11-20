@@ -182,9 +182,9 @@ Nervix records these raw metric families:
   once for each ingestor its request or upgrade was routed to, on the node that received it; see
   [HTTP ENDPOINT And WEBSOCKETS ENDPOINT](./ingestors.md#http-endpoint-and-websockets-endpoint)
 - `nervix_ingestor_read_ahead_dropped_payloads_total`: QoS 0 publishes an ACK-mode MQTT ingestor
-  dropped because its separate 64-outcome read-ahead quota was full. The driver counts each drop
-  immediately, including during a downstream acknowledgement wait; see
-  [MQTT ingestor connections](./connector-contract.md#mqtt-ingestor-connections)
+  dropped because its separate 64-outcome read-ahead quota was full. The connection reports each
+  drop to the host immediately, including during a downstream acknowledgement wait, and the host
+  counts it; see [MQTT ingestor connections](./connector-contract.md#mqtt-ingestor-connections)
 - `nervix_ingestor_rate_limit_held_total`, `nervix_ingestor_rate_limit_hold_seconds_total`,
   `nervix_ingestor_rate_limit_rejected_total` and
   `nervix_ingestor_rate_limit_program_rejections_total`: what an ingestor unit's `RATE LIMIT`

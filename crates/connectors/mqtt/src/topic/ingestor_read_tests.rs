@@ -29,7 +29,7 @@ use super::{
     PublishReadOutcome,
 };
 use crate::topic::{
-    ingestor::metrics_fixture::IngestorMetricsFixture,
+    ingestor::overflow_fixture::ReadAheadOverflowFixture,
     scripted_broker::{ScriptedBroker, ScriptedConnection},
     test_fixtures::DnsFixture,
 };
@@ -347,7 +347,7 @@ fn acknowledged_plan_at(
         qos,
         acknowledgement_window: Some(window),
         dns,
-        read_ahead_dropped: IngestorMetricsFixture::new().counter(),
+        read_ahead_overflow: ReadAheadOverflowFixture::new().report(),
     })
 }
 

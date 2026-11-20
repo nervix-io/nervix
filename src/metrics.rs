@@ -4116,8 +4116,10 @@ impl RuntimeMetrics {
             ])
     }
 
-    /// Resolve once when composing a connector. The driver retains this handle and counts drops
-    /// without reaching the registry, including while the ingestor host waits on acknowledgement.
+    /// The read-ahead overflow report of an ingestor unit on this physical node, which registers
+    /// its count at zero. Resolve once when composing a connector: the connector's driver retains
+    /// the report and records each drop through this child without reaching the registry,
+    /// including while the ingestor host waits on acknowledgement.
     pub(crate) fn ingestor_read_ahead_dropped_payloads(
         &self,
         domain: &DomainName,
@@ -4125,8 +4127,9 @@ impl RuntimeMetrics {
         unit: Unit,
         physical_node_id: Option<&ClusterNodeName>,
         kind: nervix_models::IngestorEntityKind,
-    ) -> IntCounter {
-        self.series
+    ) -> nervix_connector::IngestorReadAheadOverflow {
+        let dropped = self
+            .series
             .prometheus
             .ingestor_read_ahead_dropped_payloads_total
             .with_label_values(&[
@@ -4136,7 +4139,8 @@ impl RuntimeMetrics {
                 instance_label(unit).as_ref(),
                 kind.connector().as_ref(),
                 kind.entity_keyword(),
-            ])
+            ]);
+        nervix_connector::IngestorReadAheadOverflow::new(move || dropped.inc())
     }
 
     pub(crate) fn register_branch(

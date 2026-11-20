@@ -47,7 +47,8 @@ use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_connector::{
     BrokerIngestorConnector, IngestMessageHeaders, IngestMetadataRow, IngestRowHeaders,
     IngestorBatch, IngestorBatchRequest, IngestorConnector, IngestorError, IngestorMessage,
-    IngestorReadCancellation, IngestorResult, IngestorResume, optional_client_config_value,
+    IngestorReadAheadOverflow, IngestorReadCancellation, IngestorResult, IngestorResume,
+    optional_client_config_value,
 };
 use nervix_dns::DnsResolver;
 use nervix_models::{
@@ -240,8 +241,9 @@ pub struct MqttTopicIngestorSettings {
     pub acknowledgement_window: Option<NonZeroU64>,
     /// The node resolver every instance resolves its broker host through when it connects.
     pub dns: DnsResolver,
-    /// Host-owned, pre-resolved counter for QoS 0 publishes that do not fit ACK-mode read-ahead.
-    pub read_ahead_dropped: prometheus::IntCounter,
+    /// The host's report of QoS 0 publishes that do not fit ACK-mode read-ahead, which it resolved
+    /// once for the executing unit.
+    pub read_ahead_overflow: IngestorReadAheadOverflow,
 }
 
 /// Who acknowledges an ingestor's publishes, and how many of them may wait on their acknowledgements.
@@ -328,7 +330,7 @@ pub struct MqttTopicIngestorPlan {
     acknowledgement: IngestorAcknowledgement,
     client_id_conflict: Option<MqttClientIdError>,
     dns: DnsResolver,
-    read_ahead_dropped: prometheus::IntCounter,
+    read_ahead_overflow: IngestorReadAheadOverflow,
 }
 
 /// One instance's client and the event loop that carries its session, before a driver owns the
@@ -473,10 +475,11 @@ enum GatherPublishOutcome {
 }
 
 impl MqttTopicIngestorPlan {
-    /// Selects the executing unit's counter while retaining the prepared client configurations
-    /// and their identity validation. Cloning a plan shares its immutable instance entries.
-    pub fn with_read_ahead_dropped(mut self, counter: prometheus::IntCounter) -> Self {
-        self.read_ahead_dropped = counter;
+    /// Selects the executing unit's overflow report while retaining the prepared client
+    /// configurations and their identity validation. Cloning a plan shares its immutable instance
+    /// entries.
+    pub fn with_read_ahead_overflow(mut self, overflow: IngestorReadAheadOverflow) -> Self {
+        self.read_ahead_overflow = overflow;
         self
     }
 
@@ -490,7 +493,7 @@ impl MqttTopicIngestorPlan {
             qos,
             acknowledgement_window,
             dns,
-            read_ahead_dropped,
+            read_ahead_overflow,
         } = settings;
         let client_id_conflict = Self::identity_conflict(&instances);
         Self {
@@ -509,7 +512,7 @@ impl MqttTopicIngestorPlan {
             acknowledgement: IngestorAcknowledgement::of(acknowledgement_window),
             client_id_conflict,
             dns,
-            read_ahead_dropped,
+            read_ahead_overflow,
         }
     }
 
@@ -892,7 +895,7 @@ impl MqttTopicIngestor {
             self.plan.acknowledgement,
             keep_alive,
             admission,
-            self.plan.read_ahead_dropped.clone(),
+            self.plan.read_ahead_overflow.clone(),
         )));
     }
 
@@ -1175,7 +1178,7 @@ mod tests {
     use nervix_dns::{DnsLookupError, DnsLookupFailure};
     use nonzero_ext::nonzero;
 
-    use super::{metrics_fixture::IngestorMetricsFixture, *};
+    use super::{overflow_fixture::ReadAheadOverflowFixture, *};
     use crate::topic::test_fixtures::DnsFixture;
 
     fn entry(key: &str, value: &str) -> ClientConfigEntry {
@@ -1238,7 +1241,7 @@ mod tests {
             qos: MqttQos::Qos1,
             acknowledgement_window: Some(nonzero!(1u64)),
             dns,
-            read_ahead_dropped: IngestorMetricsFixture::new().counter(),
+            read_ahead_overflow: ReadAheadOverflowFixture::new().report(),
         }
     }
 
@@ -1412,18 +1415,26 @@ mod tests {
     #[nervix_primitives::test]
     async fn prepared_clients_keep_each_units_read_ahead_count_separate() {
         let fixture = DnsFixture::start().await;
-        let first = MqttTopicIngestorPlan::new(settings(
+        let first_unit = ReadAheadOverflowFixture::new();
+        let second_unit = ReadAheadOverflowFixture::new();
+        let mut prepared = settings(
             "mqtt://127.0.0.1:1883",
             MqttSession::Persistent,
             fixture.dns.clone(),
-        ));
-        let second = first
-            .clone()
-            .with_read_ahead_dropped(IngestorMetricsFixture::new().counter());
-        first.read_ahead_dropped.inc_by(3);
-        second.read_ahead_dropped.inc_by(7);
-        assert_eq!(first.read_ahead_dropped.get(), 3);
-        assert_eq!(second.read_ahead_dropped.get(), 7);
+        );
+        prepared.read_ahead_overflow = first_unit.report();
+        let first = MqttTopicIngestorPlan::new(prepared);
+        let second = first.clone().with_read_ahead_overflow(second_unit.report());
+
+        for _ in 0..3 {
+            first.read_ahead_overflow.record_dropped_payload();
+        }
+        for _ in 0..7 {
+            second.read_ahead_overflow.record_dropped_payload();
+        }
+
+        assert_eq!(first_unit.dropped(), 3);
+        assert_eq!(second_unit.dropped(), 7);
         assert!(Arc::ptr_eq(&first.instances, &second.instances));
     }
 
@@ -1626,7 +1637,7 @@ mod tests {
             qos: MqttQos::Qos1,
             acknowledgement_window: Some(nonzero!(1u64)),
             dns: fixture.dns.clone(),
-            read_ahead_dropped: IngestorMetricsFixture::new().counter(),
+            read_ahead_overflow: ReadAheadOverflowFixture::new().report(),
         });
         assert_eq!(
             plan.subscribe_filter,
@@ -1915,5 +1926,5 @@ mod read_tests;
 mod shuttle_tests;
 
 #[cfg(test)]
-#[path = "ingestor/metrics_fixture.rs"]
-mod metrics_fixture;
+#[path = "ingestor/overflow_fixture.rs"]
+mod overflow_fixture;

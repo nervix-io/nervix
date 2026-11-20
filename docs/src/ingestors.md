@@ -2528,8 +2528,9 @@ delivery attempts and acknowledgements of a connection in memory only, so a publ
 acknowledgement a lost connection never wrote is delivered again once a persistent session
 resumes, at QoS 2 as at QoS 1.
 The per-node Prometheus counter `nervix_ingestor_read_ahead_dropped_payloads_total`, labeled by
-`domain`, `ingestor` and `physical_node_id`, counts each overflow immediately, including during an
-acknowledgement wait. It is separate from the transport-redelivery count in `DESCRIBE INGESTOR`.
+`domain`, `ingestor`, `physical_node_id`, `instance`, `connector` and `entity`, counts each
+overflow immediately, including during an acknowledgement wait. It is separate from the
+transport-redelivery count in `DESCRIBE INGESTOR`.
 An oversized QoS 0 publish dropped at this boundary counts as overflow only. Under `NO ACK` the
 64-outcome read-ahead applies backpressure when full, which also stops its keep-alive until the
 ingestor reads again. See
