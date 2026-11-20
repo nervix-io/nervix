@@ -62,10 +62,14 @@ CREATE KAFKA TOPIC INGESTOR chaos_alter_unacked
 
 CREATE DEDUPLICATOR chaos_alter_dedup
   FROM chaos_alter_incoming
+  ATTACHED
   DEDUPLICATE ON input.event_id
   MAX TIME 10m
   BRANCHED BY chaos_alter_branch
-  TO chaos_alter_unique INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
+  TO chaos_alter_unique
+    INHERIT ALL
+    FLUSH IMMEDIATE
+    ON MESSAGE ERROR LOG;
 
 CREATE KAFKA TOPIC EMITTER chaos_alter_output
   FROM chaos_alter_unique

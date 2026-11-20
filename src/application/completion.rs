@@ -227,11 +227,11 @@ impl ApplicationRevisionPhase {
     /// The runtime failure that keeps `progress` from reaching `revision` in this phase: the
     /// incarnation failed to prepare that revision or a later one, and has not prepared it since.
     /// An authoritative revision fails at no runtime.
-    fn failure<'p>(
+    fn failure(
         self,
-        progress: &'p ApplicationProgress,
+        progress: &ApplicationProgress,
         revision: u64,
-    ) -> Option<&'p RuntimeApplicationFailure> {
+    ) -> Option<&RuntimeApplicationFailure> {
         match self {
             Self::Authoritative => None,
             Self::RuntimePrepared | Self::RuntimeReady => {

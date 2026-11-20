@@ -24,8 +24,8 @@ use error_stack::ResultExt as _;
 
 use super::{
     emitter_supervision::EmitterInput,
+    entity_swap::EntitySwapContext,
     entity_swap_restore::{EmitterInputRegistration, EmitterUnitSwap, EntitySwapJournal},
-    relay_repartition::InstalledRegistrations,
     *,
 };
 use crate::emitter_execution_plan::EmitterInputUnits;
@@ -36,14 +36,17 @@ impl Runtime {
     /// whose local placement changed, so the other instances keep their tasks and connectors.
     pub(super) async fn swap_emitter_entity(
         &self,
-        domain: &DomainName,
+        context: EntitySwapContext<'_, '_>,
         entity: &NodeRef,
-        revision: &Arc<ExecutionRevision>,
-        registrations: &InstalledRegistrations<'_>,
         replace_all: bool,
-        local_node_id: Option<&ClusterNodeName>,
         journal: &mut EntitySwapJournal,
     ) -> error_stack::Result<(), RuntimeError> {
+        let EntitySwapContext {
+            domain,
+            revision,
+            registrations,
+            local_node_id,
+        } = context;
         let build = || RuntimeError::build_domain_execution(domain);
         let emitter_name = EmitterName::from(&entity.identifier);
         let Some(desired_emitter) = revision.emitters.emitter(&emitter_name).cloned() else {

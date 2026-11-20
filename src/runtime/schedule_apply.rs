@@ -21,7 +21,7 @@
 use error_stack::ResultExt as _;
 
 use super::{
-    entity_swap::DeferredSwapWork,
+    entity_swap::{DeferredSwapWork, EntitySwapContext},
     entity_swap_restore::{EntitySwapJournal, EntitySwapStep, IngestorSwap, ReboundNodeSwap},
     ingestor_start::RetiringIngestorInput,
     partition_claims::UnitPartitionTransition,
@@ -1109,22 +1109,20 @@ impl Runtime {
         ))
         .await?;
 
+        let context = EntitySwapContext {
+            domain,
+            revision,
+            registrations: &registrations,
+            local_node_id,
+        };
         let mut deferred = DeferredSwapWork::default();
         for entity in entities {
             nervix_primitives::task::consume_budget().await;
             let replace_all = explicitly_replaced.contains(entity);
             match entity.kind {
                 ModelKind::Relay => {
-                    Box::pin(self.swap_relay_entity(
-                        domain,
-                        entity,
-                        revision,
-                        &registrations,
-                        local_node_id,
-                        journal,
-                        &mut deferred,
-                    ))
-                    .await?;
+                    Box::pin(self.swap_relay_entity(context, entity, journal, &mut deferred))
+                        .await?;
                     materialized_routing_changed = true;
                 }
                 ModelKind::Ingestor => {
@@ -1139,16 +1137,8 @@ impl Runtime {
                     .await?;
                 }
                 ModelKind::Emitter => {
-                    Box::pin(self.swap_emitter_entity(
-                        domain,
-                        entity,
-                        revision,
-                        &registrations,
-                        replace_all,
-                        local_node_id,
-                        journal,
-                    ))
-                    .await?;
+                    Box::pin(self.swap_emitter_entity(context, entity, replace_all, journal))
+                        .await?;
                 }
                 ModelKind::Reingestor => {
                     Box::pin(self.swap_reingestor_entity(
@@ -1174,13 +1164,10 @@ impl Runtime {
                 }
                 _ => {
                     Box::pin(self.swap_processor_entity(
-                        domain,
+                        context,
                         entity,
-                        revision,
-                        &registrations,
                         state_purges,
                         replace_all,
-                        local_node_id,
                         journal,
                         &mut deferred,
                     ))

@@ -35,6 +35,16 @@ use super::{
     *,
 };
 
+/// What every per-kind replacement of one swap reads: the domain, the revision it applies, the
+/// registrations installed before it and this node's identity.
+#[derive(Clone, Copy)]
+pub(super) struct EntitySwapContext<'s, 'r> {
+    pub(super) domain: &'s DomainName,
+    pub(super) revision: &'s Arc<ExecutionRevision>,
+    pub(super) registrations: &'s InstalledRegistrations<'r>,
+    pub(super) local_node_id: Option<&'s ClusterNodeName>,
+}
+
 /// What a swap finishes only once nothing else of it can fail: deleting state that only the
 /// previous execution reads, then starting the processor units whose state that was.
 #[derive(Default)]
@@ -152,14 +162,17 @@ impl Runtime {
     /// placement follow whether `revision` materializes the relay.
     pub(super) async fn swap_relay_entity(
         &self,
-        domain: &DomainName,
+        context: EntitySwapContext<'_, '_>,
         entity: &NodeRef,
-        revision: &Arc<ExecutionRevision>,
-        registrations: &InstalledRegistrations<'_>,
-        local_node_id: Option<&ClusterNodeName>,
         journal: &mut EntitySwapJournal,
         deferred: &mut DeferredSwapWork,
     ) -> error_stack::Result<(), RuntimeError> {
+        let EntitySwapContext {
+            domain,
+            revision,
+            registrations,
+            local_node_id,
+        } = context;
         let build = || RuntimeError::build_domain_execution(domain);
         let activation_plan = &revision.activation;
         let relay = RelayName::from(&entity.identifier);
@@ -593,7 +606,7 @@ impl Runtime {
             .change_context(build())
         };
         let units =
-            self.processor_units_to_swap(domain, entity, &revision, replace_all, local_node_id);
+            self.processor_units_to_swap(domain, entity, revision, replace_all, local_node_id);
         let mut shared_spec: Option<GeneratorTaskSpec> = None;
         let mut units = units.into_iter().peekable();
         while let Some(unit) = units.next() {
@@ -666,16 +679,19 @@ impl Runtime {
     /// this node.
     pub(super) async fn swap_processor_entity(
         &self,
-        domain: &DomainName,
+        context: EntitySwapContext<'_, '_>,
         entity: &NodeRef,
-        revision: &Arc<ExecutionRevision>,
-        registrations: &InstalledRegistrations<'_>,
         state_purges: &BTreeMap<NodeRef, Vec<nervix_models::StatePurge>>,
         replace_all: bool,
-        local_node_id: Option<&ClusterNodeName>,
         journal: &mut EntitySwapJournal,
         deferred: &mut DeferredSwapWork,
     ) -> error_stack::Result<(), RuntimeError> {
+        let EntitySwapContext {
+            domain,
+            revision,
+            registrations,
+            local_node_id,
+        } = context;
         let build = || RuntimeError::build_domain_execution(domain);
         let desired_specs = &revision.processors;
         let missing_desired = || {
@@ -740,7 +756,7 @@ impl Runtime {
         }
 
         let units =
-            self.processor_units_to_swap(domain, entity, &revision, replace_all, local_node_id);
+            self.processor_units_to_swap(domain, entity, revision, replace_all, local_node_id);
         for unit in units {
             nervix_primitives::task::consume_budget().await;
             let owner = NodeUnitRef::new(entity.clone(), unit);
@@ -748,7 +764,7 @@ impl Runtime {
                 Self::scheduled_unit_executes_locally(desired_node, unit, local_node_id);
             let published_plan = if executes_locally {
                 Some(
-                    self.bind_installed_processor_plan(domain, &desired_spec, &revision, unit)
+                    self.bind_installed_processor_plan(domain, &desired_spec, revision, unit)
                         .await?,
                 )
             } else {
@@ -820,15 +836,12 @@ impl Runtime {
                     }
                 }
             }
-            let replacement = match published_plan {
-                Some(published_plan) => Some(ProcessorReplacementPlan {
-                    template: published_plan.template.as_ref().clone(),
-                    spec: desired_spec.clone(),
-                    // A unit holding only keys the previous count placed in it takes no input.
-                    holding: desired_node.is_holding_unit(unit),
-                }),
-                None => None,
-            };
+            let replacement = published_plan.map(|published_plan| ProcessorReplacementPlan {
+                template: published_plan.template.as_ref().clone(),
+                spec: desired_spec.clone(),
+                // A unit holding only keys the previous count placed in it takes no input.
+                holding: desired_node.is_holding_unit(unit),
+            });
             let attach = ProcessorUnitAttach {
                 owner,
                 step,
