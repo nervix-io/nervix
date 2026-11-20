@@ -655,9 +655,9 @@ All state successors advance together after a message the model accepts. A messa
 alone leaves the preceding state intact, and `FILTER WHERE` runs before the model, so a filtered
 row changes no state.
 
-Each admitted batch publishes an immutable tensor generation. Nervix persists the newest
-generation on the runtime state snapshot interval and once more during a graceful stop; replicas
-receive the same generation. A restart continues from the newest surviving snapshot for that
+Each admitted batch that advances the state publishes an immutable tensor generation. Nervix
+persists the newest generation on the runtime state snapshot interval and once more during a
+graceful stop; replicas receive the same generation. A restart continues from the newest surviving snapshot for that
 model binding and branch incarnation. Recovery can skip updates made after that snapshot.
 Inference releases its input acknowledgement shares after dispatch, but another attached consumer
 can still hold the ingestor's position. A redelivered input invokes the model again, including when
@@ -698,6 +698,9 @@ again while preparing INITIAL before publishing the processor plan. A message's 
 includes the carried state, so the state counts against the relay operation limit
 [Execution](#execution) applies to every message. The state is retained once per active branch;
 use the branch's `MAX INSTANCES` to bound the number of live copies.
+
+[Inferencer State And Recovery](inferencer-state.md) describes how the carried state is owned,
+published, persisted, replicated, moved, archived and recovered.
 
 ### Inspect inference configuration and state
 

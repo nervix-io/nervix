@@ -817,8 +817,8 @@ they preserve ordered cursor progress without materializing the entire catalog. 
 receives one fifteenth of the domain drain budget, two seconds at the default. Internal drain,
 freeze and replication rechecks derive from their owning deadline or replication cadence, with a
 one-nanosecond floor. ONNX sessions use one intra-operation and one inter-operation thread because
-the Data executor already owns parallel admission. State admission spins only with parallel Data
-workers; its bounded spin is followed by the selected thread yield.
+the Extension executor already owns the parallel admission of model runs. State admission spins
+only with parallel Data workers; its bounded spin is followed by the selected thread yield.
 
 Framing, packed identity bits, sequential single-slot handoffs, accounting granules and persisted
 segment sizes remain fixed contracts, with their owning code and format chapters declaring why.
