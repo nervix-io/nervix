@@ -941,7 +941,9 @@ relay pool, capped at 32 MiB each; `--execution-relay-scratch-bytes` defaults to
 capped at 16 MiB. All are positive. Validation requires two complete operations to fit relay,
 active read and cache pools independently. `--execution-resident-replication-batches` defaults
 to at most four, retaining command-budget room for an answer. `--execution-bulk-chunk-bytes`
-defaults to one 512th of bulk memory, capped at 64 KiB. Captured-section reads group sixteen
+defaults to one 512th of bulk memory, capped at 64 KiB. The resolved chunk sizes the staged
+snapshot encoder's output buffer. Stored branch captures and native restore conversions include
+that buffer in their bulk admission before encoding. Captured-section reads group sixteen
 bulk quanta, capped at half the immutable bulk pool so a preceding transport buffer and the next
 read can coexist; the default read remains 1 MiB. Existing operation working-set checks
 still apply. Peer receive limits derive from these final limits before transport construction.
@@ -1008,7 +1010,13 @@ so a member that returns with a record an older voter cannot run beside is refus
 that kept running are not. Refusing a voter's run changes no membership. The leader judges a live
 node outside the membership against the accepted voters' records: it admits one that can run beside
 every one of them, refuses one that cannot, naming the first such voter, and leaves one that has
-published no record it can read outside the membership.
+published no record it can read outside the membership. The leader keeps its verdict on a refused
+run outside the membership, without judging that run again, until the run is no longer an admission
+candidate: the run stops once it reads the verdict, yet the failure detector keeps it live in gossip
+for several of its heartbeat intervals, about half a minute for a run that lived a second or two,
+and a member admitted after its run stopped would never run. Once the voter it named stops, is
+dropped or returns with a record the node could run beside, the leader therefore admits the node's
+next run, not the refused one.
 
 The leader publishes its verdicts in its gossip state under the key `admission_verdicts`, with the
 Raft term it leads. A node that finds another node leading withdraws the verdicts it published, and

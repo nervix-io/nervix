@@ -277,6 +277,7 @@ impl IngestorHostServices for RedeliveryHost {
     async fn intake_unacknowledged(
         &mut self,
         _messages: Vec<IngestorIntakeMessage<'_>>,
+        _maintenance: Option<&mut dyn IngestorReadHold>,
     ) -> IngestorIntakeResult<()> {
         panic!("a connection-bound ingestor reads in an acknowledged mode");
     }
@@ -284,6 +285,7 @@ impl IngestorHostServices for RedeliveryHost {
     async fn intake_acknowledged(
         &mut self,
         _messages: Vec<IngestorIntakeMessage<'_>>,
+        _maintenance: Option<&mut dyn IngestorReadHold>,
     ) -> IngestorIntakeResult<IngestorBatchAcknowledgement> {
         if self.lose_during_first_intake {
             self.lose_during_first_intake = false;

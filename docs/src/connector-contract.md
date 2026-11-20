@@ -1960,7 +1960,8 @@ delivers them again, possibly after the held delivery was admitted.
 An ingestor's [`RATE LIMIT`](./ingestors.md#rate-limits) is host policy: the entity declares only
 whether, and in which delivery modes, its transport keeps what the host has not taken, and the host
 owns the allowance of each execution unit, its waits and its rejections. A connector learns of an
-allowance only through the size of the reads it is asked for.
+allowance through the size of the reads it is asked for and the optional `IngestorReadHold`
+session-control hook.
 
 Before every broker read the host asks its services for the read's budget,
 `IngestorHostServices::read_budget`, given the window its delivery mode leaves: one message under
@@ -1975,6 +1976,26 @@ holds before reading, on a deadline of the boundary's timer, servicing its inges
 cadence; a quiesce change or a stop ends the hold, and every turn asks for the budget again.
 `IngestorHostServices::record_rate_limit_hold_started` counts each hold as it starts and
 `record_rate_limit_hold_ended` adds its length once it ended.
+
+The host drives that hook during both waits for the allowance: before a read and when the
+allowance is still refilling for a measured payload the host already holds. The hook services
+transport control without taking records or deciding the outcome of records already held by the
+host. A transport error before a read goes through the broker loop's retry policy. During intake
+the host reports and retries transport maintenance while the held batch continues through its
+allowance and normal settlement.
+
+For a Kafka consumer group, short waits can end before maintenance is due. The connector uses
+librdkafka's configured `max.poll.interval.ms` to start maintenance early enough for control
+execution. On the connector control workers, it pauses the current assignment and polls the
+driver once. The stream wakes again for group events or at its native half-interval cadence.
+It yields after handling a rebalance callback, so the connector can pause newly assigned
+partitions before the next poll. The driver can discard prefetched copies as it pauses
+fetching. Its next read resumes fetching from the first unread position. The ingestor stores
+one identity for each topic partition it may have paused. When an admitted read resumes, it
+releases those pauses after any in-flight control poll finishes and leaves an inherited
+topology's partition pauses in force. Settlement and teardown also wait for an in-flight
+control poll. Domain-offset ingestors use explicit assignments and have no consumer-group
+membership to maintain.
 
 A clause with `OF` is paid once the read returned: the host measures every payload of the read
 once, before decoding, and admits each in order, dispatching what it admitted before it holds a

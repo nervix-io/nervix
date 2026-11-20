@@ -297,7 +297,7 @@ const KAFKA_INGESTOR_BOUNDS: DeclaredBounds = DeclaredBounds {
             bound: WaitBound::Driver("socket.timeout.ms, 60 s per control job"),
         },
         DeclaredWait {
-            wait: "subscribe, assign, pause and unsubscribe",
+            wait: "subscribe, assign, pause, resume fetches and unsubscribe",
             bound: WaitBound::Unbounded,
         },
         DeclaredWait {
@@ -317,8 +317,12 @@ const KAFKA_INGESTOR_BOUNDS: DeclaredBounds = DeclaredBounds {
          after a topology commit admits the partition.",
         "Connector control execution has two workers per node by default. A commit still \
          unanswered after its caller's 30 s deadline retains its worker and the ingestor's one \
-         in-flight commit until the native call ends. Native subscribe, assign, pause and \
+         in-flight commit until the native call ends. Native subscribe, assign, pause, resume and \
          unsubscribe have no cancellable deadline; their caller waits socket.timeout.ms at most.",
+        "During a long read allowance hold, a consumer-group ingestor pauses fetching and \
+         services its group through the same control turn. Each job polls once. The driver can \
+         discard its own prefetched copies; the next admitted read resumes from its unread \
+         position. No record buffer is added.",
         "A consumer whose last handle is gone is destroyed by one connector control job, which \
          waits for a place rather than being refused; no Nervix key changes librdkafka's 5 s \
          LeaveGroup timeout.",

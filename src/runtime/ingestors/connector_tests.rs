@@ -134,6 +134,7 @@ impl IngestorHostServices for FakeHost {
     async fn intake_unacknowledged(
         &mut self,
         messages: Vec<IngestorIntakeMessage<'_>>,
+        _maintenance: Option<&mut dyn IngestorReadHold>,
     ) -> IngestorIntakeResult<()> {
         self.observations
             .lock()
@@ -152,6 +153,7 @@ impl IngestorHostServices for FakeHost {
     async fn intake_acknowledged(
         &mut self,
         messages: Vec<IngestorIntakeMessage<'_>>,
+        _maintenance: Option<&mut dyn IngestorReadHold>,
     ) -> IngestorIntakeResult<IngestorBatchAcknowledgement> {
         self.observations
             .lock()
@@ -977,8 +979,13 @@ async fn individual_settlement_confirms_successes_and_requeues_only_the_failed_d
     ]);
     let mut host = IngestorHost::new(services);
     let mut connector = empty_ingestor(observations.clone());
-    let batch =
-        IndividualBatch::intake(&mut host, three_messages().into(), Duration::from_secs(1)).await;
+    let batch = IndividualBatch::intake(
+        &mut host,
+        three_messages().into(),
+        Duration::from_secs(1),
+        None,
+    )
+    .await;
     let result = batch
         .settle(
             &mut connector,
@@ -1021,8 +1028,13 @@ async fn individual_settlement_retains_each_unsettled_position_once_after_a_tran
     let mut host = IngestorHost::new(services);
     let mut connector = empty_ingestor(observations.clone());
     connector.reject_failures_left = 1;
-    let batch =
-        IndividualBatch::intake(&mut host, three_messages().into(), Duration::from_secs(1)).await;
+    let batch = IndividualBatch::intake(
+        &mut host,
+        three_messages().into(),
+        Duration::from_secs(1),
+        None,
+    )
+    .await;
     let result = batch
         .settle(
             &mut connector,
@@ -1081,6 +1093,7 @@ fn shuttle_individual_settlement_preserves_every_delivery_until_its_own_graph_ou
                 &mut host,
                 three_messages().into(),
                 Duration::from_secs(3_600),
+                None,
             )
             .await;
             let result = batch
@@ -1149,8 +1162,13 @@ async fn individual_settlement_confirms_ready_siblings_while_one_graph_wait_rema
     });
     let mut host = IngestorHost::new(services);
     let mut connector = empty_ingestor(observations.clone());
-    let batch =
-        IndividualBatch::intake(&mut host, three_messages().into(), Duration::from_secs(30)).await;
+    let batch = IndividualBatch::intake(
+        &mut host,
+        three_messages().into(),
+        Duration::from_secs(30),
+        None,
+    )
+    .await;
     let result = batch
         .settle(
             &mut connector,
@@ -1201,8 +1219,13 @@ async fn individual_transport_recovery_keeps_admitted_graph_work() {
     let mut host = IngestorHost::new(services);
     let mut connector = empty_ingestor(observations.clone());
     connector.reject_failures_left = 1;
-    let batch =
-        IndividualBatch::intake(&mut host, three_messages().into(), Duration::from_secs(30)).await;
+    let batch = IndividualBatch::intake(
+        &mut host,
+        three_messages().into(),
+        Duration::from_secs(30),
+        None,
+    )
+    .await;
     let result = batch
         .settle(
             &mut connector,
@@ -1256,8 +1279,13 @@ async fn individual_settlement_leaves_every_delivery_from_a_stopped_intake_on_un
     services.allow_unconfirmed_stop = true;
     let mut host = IngestorHost::new(services);
     let mut connector = empty_ingestor(observations.clone());
-    let batch =
-        IndividualBatch::intake(&mut host, three_messages().into(), Duration::from_secs(1)).await;
+    let batch = IndividualBatch::intake(
+        &mut host,
+        three_messages().into(),
+        Duration::from_secs(1),
+        None,
+    )
+    .await;
     let result = batch
         .settle(
             &mut connector,
@@ -1301,8 +1329,13 @@ async fn individual_settlement_requeues_only_the_delivery_the_host_refused() {
     services.refused_payload = Some(1);
     let mut host = IngestorHost::new(services);
     let mut connector = empty_ingestor(observations.clone());
-    let batch =
-        IndividualBatch::intake(&mut host, three_messages().into(), Duration::from_secs(1)).await;
+    let batch = IndividualBatch::intake(
+        &mut host,
+        three_messages().into(),
+        Duration::from_secs(1),
+        None,
+    )
+    .await;
     let result = batch
         .settle(
             &mut connector,
@@ -1352,9 +1385,13 @@ async fn individual_settlement_counts_every_unconfirmed_position_when_shutdown_e
         let mut host = IngestorHost::new(services);
         let mut connector = empty_ingestor(observations.clone());
         connector.reject_failures_left = usize::from(transport_failed);
-        let batch =
-            IndividualBatch::intake(&mut host, three_messages().into(), Duration::from_secs(1))
-                .await;
+        let batch = IndividualBatch::intake(
+            &mut host,
+            three_messages().into(),
+            Duration::from_secs(1),
+            None,
+        )
+        .await;
         let result = batch
             .settle(
                 &mut connector,

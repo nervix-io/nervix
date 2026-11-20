@@ -19,9 +19,7 @@
 
 use super::*;
 
-/// Caller-owned chunk buffers, placement encoding and a bounded deletion batch fit in this
-/// reservation, independent of checkpoint length and count. Fjall's internal reads, caches,
-/// memtables and snapshot retention have separate allocation ownership.
+/// Layout size of one persisted checkpoint segment.
 #[cfg_attr(
     nervix_lint,
     nervix::constant(
@@ -62,6 +60,11 @@ const DELETION_BATCH_AND_COPIES: u64 = 512 * 1024;
     )
 )]
 const STORAGE_ALLOCATION_OVERHEAD: u64 = 512 * 1024;
+
+/// State-store jobs reserve this allowance for chunk buffers, placement encoding and one
+/// deletion batch, independent of checkpoint length and count. Fjall owns its internal reads,
+/// caches, memtables and snapshot retention. Native checkpoint staging uses the allowance as
+/// a minimum and accounts for the writer's configured output buffer before encoding.
 #[cfg_attr(
     nervix_lint,
     nervix::constant(
