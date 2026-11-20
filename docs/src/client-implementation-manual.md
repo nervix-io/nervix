@@ -1460,6 +1460,21 @@ and an empty value differs from absence. Large results use the existing reply-tr
 and its typed oversize rejection. Native `EntityLabelsInspection` views outlive the outcome;
 host guides demonstrate their ownership and committed/staged accessors.
 
+## Reading Cluster Nodes
+
+Clients MUST preserve the typed `CommandOutcome.node_inspection` independently of the command's
+display message. A successful `SHOW NODES` can contain an empty vector. Keep the node names
+in order, the four membership flags and the optional committed record per node. For a record,
+retain its full-width revision, optional CPU count and byte limit, typed detection values and
+reasons, exact tags, and the per-device and execution-provider order. Read the typed fields from
+the envelope. The command's selected format only governs how it is displayed.
+
+The read can be sent directly to any ready node over a session with no selected domain.
+Clients preserve command diagnostics even on a successful read because a diagnostic can
+identify a node the selector failed to evaluate. Follow the ordinary reply-transfer contract for
+a large result. The native bindings expose an independently retained node inspection with the
+ordered names and a JSON projection of the full verified envelope.
+
 ## Reading Typed Materialized State
 
 Clients MUST retain `CommandOutcome.state` independently of the command message and preserve its

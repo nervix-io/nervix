@@ -553,7 +553,7 @@ fn print_outcome(outcome: &PrintedOutcome<'_>, query_source: &str) {
         emit_terminal_line(line);
     }
     match outcome.disposition {
-        CommandDisposition::Completed { .. } => {}
+        CommandDisposition::Completed { .. } => print_completed_diagnostics(outcome.diagnostics),
         CommandDisposition::OutcomeUnknown(_) => {
             if !outcome.diagnostics.is_empty() {
                 print_diagnostics("remote", query_source, outcome.diagnostics);
@@ -577,6 +577,12 @@ fn print_outcome(outcome: &PrintedOutcome<'_>, query_source: &str) {
 
 fn emit_terminal_line(line: impl Into<String>) {
     println!("{}", line.into());
+}
+
+pub(super) fn print_completed_diagnostics(diagnostics: &[Diagnostic]) {
+    for diagnostic in diagnostics {
+        eprintln!("{}", diagnostic.message);
+    }
 }
 
 fn render_progress_line(line: impl AsRef<str>) {
@@ -931,6 +937,7 @@ mod tests {
             transaction_admission: None,
             inspection: None,
             entity_labels: None,
+            node_inspection: None,
             state: None,
             resource: None,
             subscription: None,

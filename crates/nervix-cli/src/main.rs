@@ -72,7 +72,7 @@ use self::{
     backup::{BackupRequest, CliBackupScope, CliReportFormat},
     interrupt::interrupted,
     restore::{CliExistingUsers, CliRestoreScope, RestoreRequest},
-    statement::{Repetition, StatementRunner, print_diagnostics},
+    statement::{Repetition, StatementRunner, print_completed_diagnostics, print_diagnostics},
     status::RunEnd,
 };
 
@@ -812,6 +812,7 @@ fn is_json_inspection_command(query: &str) -> bool {
         Statement::ShowRelayMaterializedState(show) => show.format == InspectionFormat::Json,
         Statement::ShowProcessorState(show) => show.format == InspectionFormat::Json,
         Statement::ShowWasmProcessorState(show) => show.format == InspectionFormat::Json,
+        Statement::ShowNodes(show) => show.format == InspectionFormat::Json,
         _ => false,
     }
 }
@@ -868,13 +869,14 @@ async fn run_json_inspection_mode(
             message: outcome.message,
         }));
     }
-    if outcome.inspection.is_none() && outcome.state.is_none() {
+    if outcome.inspection.is_none() && outcome.node_inspection.is_none() {
         let message = "the inspection response contained no typed report";
         print_json_inspection_error("REPORT_MISSING", message);
         return Err(StackReport::new(ClientError::InspectionFailed {
             message: message.to_string(),
         }));
     }
+    print_completed_diagnostics(&outcome.diagnostics);
     println!("{}", outcome.message);
     Ok(())
 }

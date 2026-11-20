@@ -338,6 +338,7 @@ pub struct CommandOutcome {
     /// own binding.
     pub inspection: Option<Box<TransactionInspection>>,
     pub entity_labels: Option<Box<nervix_models::EntityLabelsInspection>>,
+    pub node_inspection: Option<Box<nervix_models::NodeInspection>>,
     /// A bounded typed read of runtime state.
     pub state: Option<Box<crate::StateInspection>>,
     /// The versions, entries and bindings read by a description of every version of a resource,
@@ -404,6 +405,11 @@ impl CommandOutcome {
             .as_deref()
             .map(|labels| crate::entity_labels::encode_entity_labels(labels, encoder))
             .transpose()?;
+        let node_inspection = self
+            .node_inspection
+            .as_deref()
+            .map(|inspection| crate::node_inspection::encode(inspection, encoder))
+            .transpose()?;
         let state = self
             .state
             .as_ref()
@@ -435,6 +441,7 @@ impl CommandOutcome {
                 transaction_admission,
                 inspection,
                 entity_labels,
+                node_inspection,
                 state,
                 resource,
                 backup,
@@ -495,6 +502,10 @@ impl CommandOutcome {
             .entity_labels()
             .map(|labels| crate::entity_labels::decode_entity_labels(decoder, labels).map(Box::new))
             .transpose()?;
+        let node_inspection = outcome
+            .node_inspection()
+            .map(|inspection| crate::node_inspection::decode(decoder, inspection).map(Box::new))
+            .transpose()?;
         let state = outcome
             .state()
             .map(|state| {
@@ -524,6 +535,7 @@ impl CommandOutcome {
             transaction_admission,
             inspection,
             entity_labels,
+            node_inspection,
             state,
             resource,
             backup,

@@ -69,6 +69,7 @@ impl CompileNamespace {
             Self::Internal(InternalFieldNamespace::LookupHashMap) => {
                 "internal LOOKUP_HASH_MAP".to_string()
             }
+            Self::Internal(InternalFieldNamespace::NodeTags) => "internal node tags".to_string(),
         }
     }
 
@@ -476,6 +477,41 @@ impl Compiler {
 
     fn header_values_type() -> DataType {
         DataType::List(StdArc::new(Field::new("item", DataType::Utf8, false)))
+    }
+
+    fn node_tag_reference(
+        &self,
+        args: &[SpannedExpr],
+        span: Span,
+    ) -> error_stack::Result<InternalFieldRef, CompileError> {
+        let namespace = InternalFieldNamespace::NodeTags;
+        if !self
+            .readable_namespaces
+            .contains(&CompileNamespace::Internal(namespace))
+        {
+            return Err(Report::new(CompileError {
+                code: CompileErrorCode::UnsupportedFunctionContext,
+                message: "tag() is available only in node selectors".to_string(),
+                span,
+            }));
+        }
+        let [
+            SpannedNode {
+                inner: Expr::Literal(Literal::String(key)),
+                ..
+            },
+        ] = args
+        else {
+            return Err(Report::new(CompileError {
+                code: CompileErrorCode::TypeMismatch,
+                message: "tag() requires a literal STRING key".to_string(),
+                span,
+            }));
+        };
+        Ok(InternalFieldRef {
+            namespace,
+            field: key.clone(),
+        })
     }
 
     fn injected_header_call_type(
@@ -1298,6 +1334,13 @@ impl Compiler {
                 if let FunctionName::ReadHeader | FunctionName::ReadHeaders = function {
                     return self.injected_header_call_type(function, args, expr.span);
                 }
+                if let FunctionName::Tag = function {
+                    let reference = self.node_tag_reference(args, expr.span)?;
+                    return Ok(self
+                        .validate_internal_field_ref(&reference, expr.span)?
+                        .data_type
+                        .clone());
+                }
                 if let FunctionName::WriteHeader = function {
                     return Err(Report::new(CompileError {
                         code: CompileErrorCode::InvalidSideEffectCall,
@@ -1601,7 +1644,7 @@ impl Compiler {
                 {
                     return Ok(false);
                 }
-                if let FunctionName::ReadHeader = function {
+                if let FunctionName::ReadHeader | FunctionName::Tag = function {
                     return Ok(true);
                 }
                 // A URL can lack each of these components, whatever its arguments hold.
@@ -2076,6 +2119,13 @@ impl Compiler {
                 if let FunctionName::LeakSensitive = function {
                     let arg = self.leak_sensitive_arg(args, expr.span)?;
                     return self.compile_expr(arg);
+                }
+                if let FunctionName::Tag = function {
+                    let reference = self.node_tag_reference(args, expr.span)?;
+                    return self.compile_expr(&SpannedNode {
+                        inner: Expr::InternalFieldRef(reference),
+                        span: expr.span,
+                    });
                 }
                 if let FunctionName::ReadHeader | FunctionName::ReadHeaders = function {
                     let output_type = self.injected_header_call_type(function, args, expr.span)?;
@@ -3347,6 +3397,7 @@ fn fold_builtin_call(function: &FunctionName, args: &[FoldedValue]) -> Option<Fo
         | FunctionName::LookupHashMap
         | FunctionName::ReadHeader
         | FunctionName::ReadHeaders
+        | FunctionName::Tag
         | FunctionName::WriteHeader
         | FunctionName::Now
         | FunctionName::UuidV4
@@ -3655,6 +3706,31 @@ pub fn compile_predicate_with_options_for_bindings(
     Ok(CompiledPredicate::new(nervix_primitives::sync::Arc::new(
         compiled,
     )))
+}
+
+/// Compiles a predicate whose only inputs are columns and literals.
+pub fn compile_deterministic_predicate(
+    expression: &SpannedExpr,
+    bindings: impl IntoIterator<Item = CompileBinding>,
+) -> error_stack::Result<crate::DeterministicPredicate, CompileError> {
+    // Use the ordinary compiler first so a bad field, function or result type keeps its own refusal.
+    let predicate = compile_predicate_with_options_for_bindings(
+        expression,
+        bindings,
+        PredicateCompileOptions::default(),
+    )?;
+    if let Some(semantics) = crate::expr_semantics(expression)
+        && semantics.volatility == crate::Volatility::Immutable
+        && semantics.dependency_scope != crate::DependencyScope::ExecutionLocal
+        && !semantics.has_side_effects
+    {
+        return Ok(crate::DeterministicPredicate::new(predicate));
+    }
+    Err(Report::new(CompileError {
+        code: CompileErrorCode::UnsupportedFunctionContext,
+        message: "this predicate must depend only on its input fields and literals".to_string(),
+        span: expression.span,
+    }))
 }
 
 /// One field a program's `SET` list writes, as inferred without compiling the program: the field

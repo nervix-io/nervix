@@ -3727,7 +3727,7 @@ fn apply_attach_outcome(signals: WebConsoleSignals, outcome: AttachOutcome) -> S
             let active = status.lifecycle().is_active();
             adopt_transaction(signals, status);
             if !active {
-                let lines = completed_lines(message);
+                let lines = completed_lines(message, Vec::new(), query);
                 signals
                     .terminal_lines
                     .update(|terminal| terminal.extend(lines));
@@ -4114,7 +4114,7 @@ fn command_outcome_lines(outcome: CommandOutcome, query: &str) -> Vec<TermLine> 
         return lines;
     }
     match disposition {
-        CommandDisposition::Completed { .. } => completed_lines(message),
+        CommandDisposition::Completed { .. } => completed_lines(message, diagnostics, query),
         CommandDisposition::NotLeader(redirect) => not_leader_lines(&redirect, diagnostics, query),
         CommandDisposition::Failed
         | CommandDisposition::TransactionDetached { .. }
@@ -4134,7 +4134,7 @@ fn statement_outcome_lines(statement: StatementOutcome, query: &str) -> Vec<Term
         diagnostics,
     } = statement;
     match disposition {
-        StatementDisposition::Completed { .. } => completed_lines(message),
+        StatementDisposition::Completed { .. } => completed_lines(message, diagnostics, query),
         StatementDisposition::Failed => failed_lines(message, diagnostics, query),
         StatementDisposition::NotLeader(redirect) => {
             not_leader_lines(&redirect, diagnostics, query)
@@ -4142,12 +4142,18 @@ fn statement_outcome_lines(statement: StatementOutcome, query: &str) -> Vec<Term
     }
 }
 
-/// A completed outcome shows its message, when it has one.
-fn completed_lines(message: String) -> Vec<TermLine> {
-    if message.is_empty() {
-        return Vec::new();
+/// A completed outcome shows its message and any diagnostics the server supplied with it.
+fn completed_lines(message: String, diagnostics: Vec<Diagnostic>, query: &str) -> Vec<TermLine> {
+    let mut lines = Vec::new();
+    if !message.is_empty() {
+        lines.push(TermLine::output(message));
     }
-    vec![TermLine::output(message)]
+    lines.extend(
+        diagnostics
+            .into_iter()
+            .map(|diagnostic| diagnostic_line(query, diagnostic)),
+    );
+    lines
 }
 
 /// A failed outcome shows its message as an error, followed by its diagnostics.
@@ -13209,6 +13215,7 @@ mod tests {
     fn completed_outcome(message: &str) -> CommandOutcome {
         CommandOutcome {
             entity_labels: None,
+            node_inspection: None,
             execution_reference: command_execution_reference(),
             origin: OutcomeOrigin::Executed,
             disposition: CommandDisposition::Completed {

@@ -41,6 +41,7 @@ mod enums;
 mod errors;
 mod event;
 mod inspection;
+mod node_inspection;
 mod schema;
 mod session;
 mod values;
@@ -58,6 +59,7 @@ fn nervix_client(module: &Bound<'_, PyModule>) -> PyResult<()> {
     event::register(module)?;
     inspection::register(module)?;
     entity_labels::register(module)?;
+    node_inspection::register(module)?;
     clock::register(module)?;
     endpoint::register(module)?;
     batch::register(module)?;

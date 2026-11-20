@@ -166,6 +166,7 @@ pub fn builtin_descriptor(function: &FunctionName) -> Option<BuiltinDescriptor> 
         | FunctionName::LookupHashMap
         | FunctionName::ReadHeader
         | FunctionName::ReadHeaders
+        | FunctionName::Tag
         | FunctionName::WriteHeader
         | FunctionName::WindowAggregate(_)
         | FunctionName::Udf(_)

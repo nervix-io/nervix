@@ -184,6 +184,7 @@ mod model_validation;
 mod node_detection;
 mod node_identity;
 mod node_initialization;
+mod node_inspection;
 mod node_records;
 mod node_settings;
 mod observability_http;

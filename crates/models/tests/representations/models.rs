@@ -6,8 +6,8 @@
 //! stored Model binds concrete resource versions; a statement carries `LATEST` or a number.
 
 use meticulous::ResultExt as _;
-use nervix_arbitrary::{Arbitrary, Domain};
-use nervix_models::{Model, RequestedResourceVersion, Statement};
+use nervix_arbitrary::{Arbitrary, Domain, StatementVariant};
+use nervix_models::{Expression, Model, RequestedResourceVersion, Statement};
 
 /// Pins every resource version `model` asks for to a number, as planning does before a Model is
 /// stored. `LATEST` pins to zero, which is as much a version number as any other.
@@ -123,6 +123,14 @@ fn bolero_models_and_statements_round_trip_through_their_archives() {
 
             let statement = arbitrary.statement();
             assert_eq!(crate::archive_round_trip!(&statement, Statement), statement);
+
+            let preview = arbitrary.statement_of(StatementVariant::ShowNodes);
+            assert_eq!(crate::archive_round_trip!(&preview, Statement), preview);
+            if let Statement::ShowNodes(preview) = preview
+                && let Some(selector) = preview.selector
+            {
+                assert_eq!(crate::archive_round_trip!(&selector, Expression), selector);
+            }
         });
 }
 

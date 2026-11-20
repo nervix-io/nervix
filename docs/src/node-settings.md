@@ -450,10 +450,12 @@ The edge validates the tags before any I/O, and a refusal ends the process with 
 the tag and the rule it broke, such as `node tag key 'Pool' must start with a lower-case letter or a
 digit and hold only lower-case letters, digits, '.', '_' and '-'`.
 
-Tags belong to the node's identity, addresses and paths, like `--node-id`, rather than to a
-settings class: they describe the node and bound no policy. No statement reads them into a Model
-or writes them. A node changes its tags by restarting with other values, which announces a new
-record, so a tag change follows the rolling-restart procedure of a capability change.
+Tags describe the node alongside its identity, addresses and paths. A node changes its tags by
+restarting with other values and announcing a new record. Tag changes follow the rolling-restart
+procedure of a capability change.
+
+Use [`SHOW NODES`](placement.md#selecting-nodes) to see the committed tag values and preview a
+selector before using those values to choose nodes.
 
 ### In `DESCRIBE CLUSTER`
 
