@@ -358,6 +358,182 @@ Feature: Branches inherit their external producers' partitions
       | 1            | 0        | 1      | 4 INHERITED  | 4                 | 4                | OFFSET BY DOMAIN                                                 | PER PARTITION    | 4                    | 1             |
       | 3            | 1        | 3      | 4 INHERITED  | 4                 | 4                | OFFSET BY DOMAIN                                                 | PER PARTITION    | 4                    | 3             |
 
+  # Growing the topic from 12 to 16 partitions regroups a reader's 12 units into 16, which a
+  # planned handoff moves before the new epoch is committed. Every checkpoint read of that handoff
+  # is made slow here, as on a loaded cluster, and the handoff must still finish within one entity
+  # gate deadline.
+  @inherited_partition_lifecycle @deloxide_stress
+  Scenario Outline: A growing Kafka topology is published within the entity gate deadline when every handoff checkpoint read is slow
+    Given Kafka is running
+    And runtime replication is configured with replica count <replicas> and snapshot interval "100ms"
+    And the production sticky scheduler is configured
+    And entity gate deadline is configured as "10s"
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    And Kafka topic "growing_input_{{test_id}}" exists with 12 partitions
+    And Kafka topic "growing_output_{{test_id}}" exists with 16 partitions
+    And Kafka topic "growing_output_{{test_id}}" is observed
+    When these Plexus commands are executed on the leader node
+      """
+      CREATE SCHEMA event ( tenant STRING, seq I64 );
+      CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( tenant string, seq integer );
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
+      CREATE SCHEMA tenant_key ( tenant STRING );
+      CREATE BRANCH by_tenant SCHEMA tenant_key TTL 5m PARTITIONS INHERITED;
+      CREATE RELAY events SCHEMA event BRANCHED BY by_tenant;
+      CREATE RELAY unique_events SCHEMA event BRANCHED BY by_tenant;
+      CREATE KAFKA CLIENT broker CONFIG { 'bootstrap.servers' = '{{kafka_addr}}' };
+      CREATE KAFKA TOPIC INGESTOR inherited_reader
+        FROM broker TOPIC 'growing_input_{{test_id}}'
+        OFFSET BY DOMAIN INSTANCES PER PARTITION
+        MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 5s
+        ON QUIESCE SUSPEND DECODE USING event_codec
+        TO events INHERIT ALL BRANCHED BY by_tenant SET tenant = message.tenant
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE DEDUPLICATOR distinct_events FROM events
+        DEDUPLICATE ON input.seq MAX TIME 10m BRANCHED BY by_tenant
+        TO unique_events INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
+      CREATE KAFKA TOPIC EMITTER inherited_writer FROM unique_events INSTANCES PER PARTITION
+        TO broker TOPIC 'growing_output_{{test_id}}'
+        MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 5s
+        ENCODE USING event_codec PARTITION FROM BRANCH INHERIT ALL
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      START;
+      """
+    Then within "60s" every instance of ingestor "inherited_reader" reports running and ready on its scheduled owner
+    And within "60s" every instance of emitter "inherited_writer" reports running on its scheduled owner
+    When Kafka message is published to topic "growing_input_{{test_id}}" partition 7
+      """
+      {"tenant":"alpha","seq":1}
+      """
+    Then within "30s" the observed broker receives payloads keeping the order of each key
+      """
+      "tenant":"alpha" | "seq":1
+      """
+    Given every ownership handoff checkpoint read in domain "{{domain}}" takes "25ms"
+    When Kafka topic "growing_input_{{test_id}}" partition count is changed to 16
+    And Kafka message is published to topic "growing_input_{{test_id}}" partition 13
+      """
+      {"tenant":"alpha","seq":2}
+      """
+    Then the current leader node is saved as placeholder "topology_reader"
+    And within "60s" DESCRIBE BRANCH "by_tenant" on node "{{topology_reader}}" contains
+      """
+      partitions: 16
+      external partitions: 16
+      partition epoch: 2
+      previous partitions: 12
+      """
+    And within "60s" every instance of ingestor "inherited_reader" reports running and ready on its scheduled owner
+    And within "30s" the observed broker receives payloads keeping the order of each key
+      """
+      "tenant":"alpha" | "seq":2
+      """
+    And the observed broker does not receive a payload within "500ms"
+
+    Examples:
+      | cluster_size | replicas |
+      | 1            | 0        |
+      | 3            | 1        |
+
+  # While every checkpoint read takes 2 s, a move whose source units hold state needs more than a
+  # minute to capture, so the publication attempt times out inside its entity gate deadline and the
+  # leader reports it to its sessions. A failed attempt discards what it prepared and releases the
+  # readers, which keep delivering. Once the reads are fast again, a later attempt publishes the
+  # growth and every record is delivered once.
+  @inherited_partition_lifecycle @deloxide_stress
+  Scenario Outline: A growing Kafka topology whose handoff times out is published by a later attempt with every record delivered once
+    Given Kafka is running
+    And runtime replication is configured with replica count <replicas> and snapshot interval "100ms"
+    And the production sticky scheduler is configured
+    And entity gate deadline is configured as "10s"
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    And Kafka topic "growing_input_{{test_id}}" exists with 12 partitions
+    And Kafka topic "growing_output_{{test_id}}" exists with 16 partitions
+    And Kafka topic "growing_output_{{test_id}}" is observed
+    When these Plexus commands are executed on the leader node
+      """
+      CREATE SCHEMA event ( tenant STRING, seq I64 );
+      CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( tenant string, seq integer );
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
+      CREATE SCHEMA tenant_key ( tenant STRING );
+      CREATE BRANCH by_tenant SCHEMA tenant_key TTL 5m PARTITIONS INHERITED;
+      CREATE RELAY events SCHEMA event BRANCHED BY by_tenant;
+      CREATE RELAY unique_events SCHEMA event BRANCHED BY by_tenant;
+      CREATE KAFKA CLIENT broker CONFIG { 'bootstrap.servers' = '{{kafka_addr}}' };
+      CREATE KAFKA TOPIC INGESTOR inherited_reader
+        FROM broker TOPIC 'growing_input_{{test_id}}'
+        OFFSET BY DOMAIN INSTANCES PER PARTITION
+        MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 5s
+        ON QUIESCE SUSPEND DECODE USING event_codec
+        TO events INHERIT ALL BRANCHED BY by_tenant SET tenant = message.tenant
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE DEDUPLICATOR distinct_events FROM events
+        DEDUPLICATE ON input.seq MAX TIME 10m BRANCHED BY by_tenant
+        TO unique_events INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
+      CREATE KAFKA TOPIC EMITTER inherited_writer FROM unique_events INSTANCES PER PARTITION
+        TO broker TOPIC 'growing_output_{{test_id}}'
+        MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 5s
+        ENCODE USING event_codec PARTITION FROM BRANCH INHERIT ALL
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      START;
+      """
+    Then within "60s" every instance of ingestor "inherited_reader" reports running and ready on its scheduled owner
+    And within "60s" every instance of emitter "inherited_writer" reports running on its scheduled owner
+    When Kafka message is published to topic "growing_input_{{test_id}}" partition 7
+      """
+      {"tenant":"alpha","seq":1}
+      """
+    Then within "30s" the observed broker receives payloads keeping the order of each key
+      """
+      "tenant":"alpha" | "seq":1
+      """
+    Given every ownership handoff checkpoint read in domain "{{domain}}" takes "2s"
+    When Kafka topic "growing_input_{{test_id}}" partition count is changed to 16
+    Then within "60s" the active session observes a server error containing
+      """
+      timed out capturing ingestor 'inherited_reader'
+      """
+    And the current leader node is saved as placeholder "topology_reader"
+    When Kafka message is published to topic "growing_input_{{test_id}}" partition 7
+      """
+      {"tenant":"alpha","seq":2}
+      """
+    Then within "60s" the observed broker receives payloads keeping the order of each key
+      """
+      "tenant":"alpha" | "seq":2
+      """
+    When every ownership handoff checkpoint read in domain "{{domain}}" takes "0ms"
+    And Kafka message is published to topic "growing_input_{{test_id}}" partition 13
+      """
+      {"tenant":"alpha","seq":3}
+      """
+    Then within "60s" DESCRIBE BRANCH "by_tenant" on node "{{topology_reader}}" contains
+      """
+      partitions: 16
+      external partitions: 16
+      partition epoch: 2
+      previous partitions: 12
+      """
+    And within "60s" every instance of ingestor "inherited_reader" reports running and ready on its scheduled owner
+    And within "30s" the observed broker receives payloads keeping the order of each key
+      """
+      "tenant":"alpha" | "seq":3
+      """
+    And the observed broker does not receive a payload within "500ms"
+
+    Examples:
+      | cluster_size | replicas |
+      | 1            | 0        |
+      | 3            | 1        |
+
   @inherited_partition_lifecycle @deloxide_stress
   Scenario Outline: Regrouping Kafka shards transfers committed next offsets before replacement readers consume
     Given Kafka is running

@@ -749,6 +749,18 @@ activation finish. Preparation retains its original deadline, distinct from the 
 protects activation. Repeated engagement requests use the same coordination identity and scope;
 a bounded reply timeout does not create another flush or restart the lease.
 
+The coordinator prepares the moves of one handoff at the same time, not one after another. It
+captures each moved unit's state and prepares it on its destination and replicas. A reader whose
+unit layout changes, as when an inherited topic grows, makes every new unit a move whose state comes
+from every old unit. The coordinator then captures each old unit once and projects that capture for
+each new unit. A destination reads all of a preparation's sources at the same time. Confirmation of
+the prepared moves proceeds the same way. One preparation deadline bounds all of it, so a handoff
+takes about as long as its slowest chain of requests, not the sum of every move's requests. A
+capture or a confirmation only reads, so the first one that fails ends the handoff at once. A
+preparation persists on its recipients, so every preparation is recorded before any starts, and
+after one fails the coordinator lets the others finish. It then discards every preparation it
+attempted and releases the hold.
+
 Capture reads what each frozen branch publishes, not the last periodic snapshot. The freeze asks
 every branch of a moved processor to publish its live state, so a deduplicator's keys, a window's
 rows and a stateful inferencer's tensors reach the destination with every input the source
