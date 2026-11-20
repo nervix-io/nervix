@@ -494,10 +494,10 @@ impl CommandOutcome {
             }),
             None => None,
         };
-        let inspection = match outcome.inspection() {
-            Some(inspected) => Some(Box::new(decode_inspection(decoder, inspected)?)),
-            None => None,
-        };
+        let inspection = outcome
+            .inspection()
+            .map(|inspected| decode_inspection(decoder, inspected).map(Box::new))
+            .transpose()?;
         let entity_labels = outcome
             .entity_labels()
             .map(|labels| crate::entity_labels::decode_entity_labels(decoder, labels).map(Box::new))
