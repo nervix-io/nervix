@@ -68,12 +68,6 @@ impl SessionServiceImpl {
             }
             .prepare_schedule(current, &mut schedule, attempts)
             .await;
-            #[cfg(feature = "testing")]
-            self.inner
-                .runtime
-                .fault_injection()
-                .observe_forced_recovery_preparation(&domain, attempts.confirmed)
-                .await;
         }
 
         let unpublished_reason = if self.inner.consensus.current_leader_tenure().as_ref()

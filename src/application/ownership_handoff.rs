@@ -388,8 +388,6 @@ pub(super) struct ForcedRecoveryPreparations<'a> {
     round: ForcedOwnershipRecoveryRound,
     attempts: Vec<RemotePrepareForcedOwnershipRecoveryRequest>,
     publication_may_be_applied: bool,
-    #[cfg(feature = "testing")]
-    pub(super) confirmed: bool,
 }
 
 impl<'a> ForcedRecoveryPreparations<'a> {
@@ -402,8 +400,6 @@ impl<'a> ForcedRecoveryPreparations<'a> {
             round,
             attempts: Vec::new(),
             publication_may_be_applied: false,
-            #[cfg(feature = "testing")]
-            confirmed: false,
         }
     }
 
@@ -586,6 +582,8 @@ impl ForcedOwnershipRecoveryCoordinator<'_> {
                 }
             });
         }
+        #[cfg(feature = "testing")]
+        let mut confirmed = false;
         while let Some(preparation) = preparations.next().await {
             nervix_primitives::task::consume_budget().await;
             let moved = preparation.moved;
@@ -597,7 +595,7 @@ impl ForcedOwnershipRecoveryCoordinator<'_> {
                 Ok(prepared) => {
                     #[cfg(feature = "testing")]
                     {
-                        attempts.confirmed = true;
+                        confirmed = true;
                     }
                     node.units
                         .get_mut(&moved.unit)
@@ -640,6 +638,11 @@ impl ForcedOwnershipRecoveryCoordinator<'_> {
                 }
             }
         }
+        #[cfg(feature = "testing")]
+        self.runtime
+            .fault_injection()
+            .observe_forced_recovery_preparation(&current.domain, confirmed)
+            .await;
     }
 
     fn reset_every_move(

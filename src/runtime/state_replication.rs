@@ -2899,6 +2899,9 @@ mod tasks;
 mod wasm_processor_state;
 
 #[cfg(test)]
+mod forced_recovery_store_tests;
+
+#[cfg(test)]
 #[cfg_attr(
     nervix_lint,
     nervix::layer(harness, reason = "test module remains outside product execution")
