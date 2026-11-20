@@ -207,6 +207,7 @@ impl StatementRunner {
         let mut end = RunEnd::of_command(&outcome.disposition);
         if outcome.statements.is_empty() {
             print_outcome(&PrintedOutcome::of_command(outcome), query);
+            print_node_inspection_diagnostics(outcome);
         } else {
             for statement in &outcome.statements {
                 print_outcome(&PrintedOutcome::of_statement(statement), query);
@@ -553,7 +554,7 @@ fn print_outcome(outcome: &PrintedOutcome<'_>, query_source: &str) {
         emit_terminal_line(line);
     }
     match outcome.disposition {
-        CommandDisposition::Completed { .. } => print_completed_diagnostics(outcome.diagnostics),
+        CommandDisposition::Completed { .. } => {}
         CommandDisposition::OutcomeUnknown(_) => {
             if !outcome.diagnostics.is_empty() {
                 print_diagnostics("remote", query_source, outcome.diagnostics);
@@ -579,9 +580,11 @@ fn emit_terminal_line(line: impl Into<String>) {
     println!("{}", line.into());
 }
 
-pub(super) fn print_completed_diagnostics(diagnostics: &[Diagnostic]) {
-    for diagnostic in diagnostics {
-        eprintln!("{}", diagnostic.message);
+pub(super) fn print_node_inspection_diagnostics(outcome: &CommandOutcome) {
+    if outcome.node_inspection.is_some() && outcome.succeeded() {
+        for diagnostic in &outcome.diagnostics {
+            eprintln!("{}", diagnostic.message);
+        }
     }
 }
 

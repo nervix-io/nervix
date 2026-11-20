@@ -72,7 +72,9 @@ use self::{
     backup::{BackupRequest, CliBackupScope, CliReportFormat},
     interrupt::interrupted,
     restore::{CliExistingUsers, CliRestoreScope, RestoreRequest},
-    statement::{Repetition, StatementRunner, print_completed_diagnostics, print_diagnostics},
+    statement::{
+        Repetition, StatementRunner, print_diagnostics, print_node_inspection_diagnostics,
+    },
     status::RunEnd,
 };
 
@@ -876,7 +878,7 @@ async fn run_json_inspection_mode(
             message: message.to_string(),
         }));
     }
-    print_completed_diagnostics(&outcome.diagnostics);
+    print_node_inspection_diagnostics(&outcome);
     println!("{}", outcome.message);
     Ok(())
 }

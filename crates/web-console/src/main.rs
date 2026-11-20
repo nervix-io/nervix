@@ -3727,7 +3727,7 @@ fn apply_attach_outcome(signals: WebConsoleSignals, outcome: AttachOutcome) -> S
             let active = status.lifecycle().is_active();
             adopt_transaction(signals, status);
             if !active {
-                let lines = completed_lines(message, Vec::new(), query);
+                let lines = completed_lines(message);
                 signals
                     .terminal_lines
                     .update(|terminal| terminal.extend(lines));
@@ -4104,6 +4104,7 @@ fn command_outcome_lines(outcome: CommandOutcome, query: &str) -> Vec<TermLine> 
         message,
         diagnostics,
         statements,
+        node_inspection,
         ..
     } = outcome;
     if !statements.is_empty() {
@@ -4114,7 +4115,17 @@ fn command_outcome_lines(outcome: CommandOutcome, query: &str) -> Vec<TermLine> 
         return lines;
     }
     match disposition {
-        CommandDisposition::Completed { .. } => completed_lines(message, diagnostics, query),
+        CommandDisposition::Completed { .. } => {
+            let mut lines = completed_lines(message);
+            if node_inspection.is_some() {
+                lines.extend(
+                    diagnostics
+                        .into_iter()
+                        .map(|diagnostic| diagnostic_line(query, diagnostic)),
+                );
+            }
+            lines
+        }
         CommandDisposition::NotLeader(redirect) => not_leader_lines(&redirect, diagnostics, query),
         CommandDisposition::Failed
         | CommandDisposition::TransactionDetached { .. }
@@ -4134,7 +4145,7 @@ fn statement_outcome_lines(statement: StatementOutcome, query: &str) -> Vec<Term
         diagnostics,
     } = statement;
     match disposition {
-        StatementDisposition::Completed { .. } => completed_lines(message, diagnostics, query),
+        StatementDisposition::Completed { .. } => completed_lines(message),
         StatementDisposition::Failed => failed_lines(message, diagnostics, query),
         StatementDisposition::NotLeader(redirect) => {
             not_leader_lines(&redirect, diagnostics, query)
@@ -4142,18 +4153,12 @@ fn statement_outcome_lines(statement: StatementOutcome, query: &str) -> Vec<Term
     }
 }
 
-/// A completed outcome shows its message and any diagnostics the server supplied with it.
-fn completed_lines(message: String, diagnostics: Vec<Diagnostic>, query: &str) -> Vec<TermLine> {
-    let mut lines = Vec::new();
-    if !message.is_empty() {
-        lines.push(TermLine::output(message));
+/// A completed outcome shows its message, when it has one.
+fn completed_lines(message: String) -> Vec<TermLine> {
+    if message.is_empty() {
+        return Vec::new();
     }
-    lines.extend(
-        diagnostics
-            .into_iter()
-            .map(|diagnostic| diagnostic_line(query, diagnostic)),
-    );
-    lines
+    vec![TermLine::output(message)]
 }
 
 /// A failed outcome shows its message as an error, followed by its diagnostics.
@@ -12093,6 +12098,30 @@ mod tests {
         let lines = command_outcome_lines(completed_outcome(""), "CREATE DOMAIN quiet");
 
         assert!(lines.is_empty());
+    }
+
+    #[test]
+    fn a_node_selector_preview_prints_its_row_diagnostics() {
+        let query = "SHOW NODES WHERE (tag('zone') AS I64) = 1;";
+        let warning = "node selector failed on 'node-1': invalid cast";
+        let mut outcome = completed_outcome("no matching nodes");
+        outcome.node_inspection = Some(Box::new(nervix_models::NodeInspection {
+            nodes: Vec::new(),
+        }));
+        outcome.diagnostics.push(Diagnostic {
+            message: warning.to_string(),
+            span: None,
+        });
+
+        let lines = command_outcome_lines(outcome, query)
+            .into_iter()
+            .map(|line| line.text)
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            lines,
+            ["no matching nodes".to_string(), format!("- {warning}")]
+        );
     }
 
     #[test]
