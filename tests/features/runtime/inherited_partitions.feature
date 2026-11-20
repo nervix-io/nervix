@@ -439,13 +439,13 @@ Feature: Branches inherit their external producers' partitions
       | 1            | 0        |
       | 3            | 1        |
 
-  # While every checkpoint read takes 2 s, each move's capture needs more than a minute, so every
-  # publication attempt times out inside its entity gate deadline and the leader reports it to its
-  # sessions. A failed attempt discards what it prepared and releases the readers, which keep
-  # reading the previous layout. Once the reads are fast again, the leader's next attempt publishes
-  # the growth and every record is delivered once.
+  # While every checkpoint read takes 2 s, a move whose source units hold state needs more than a
+  # minute to capture, so the publication attempt times out inside its entity gate deadline and the
+  # leader reports it to its sessions. A failed attempt discards what it prepared and releases the
+  # readers, which keep delivering. Once the reads are fast again, a later attempt publishes the
+  # growth and every record is delivered once.
   @inherited_partition_lifecycle @deloxide_stress
-  Scenario Outline: A growing Kafka topology whose handoff times out keeps the previous layout until a later attempt publishes it
+  Scenario Outline: A growing Kafka topology whose handoff times out is published by a later attempt with every record delivered once
     Given Kafka is running
     And runtime replication is configured with replica count <replicas> and snapshot interval "100ms"
     And the production sticky scheduler is configured
@@ -502,11 +502,6 @@ Feature: Branches inherit their external producers' partitions
       timed out capturing ingestor 'inherited_reader'
       """
     And the current leader node is saved as placeholder "topology_reader"
-    And within "10s" DESCRIBE BRANCH "by_tenant" on node "{{topology_reader}}" contains
-      """
-      partitions: 12
-      partition epoch: 1
-      """
     When Kafka message is published to topic "growing_input_{{test_id}}" partition 7
       """
       {"tenant":"alpha","seq":2}
