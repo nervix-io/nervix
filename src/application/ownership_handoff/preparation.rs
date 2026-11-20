@@ -12,7 +12,10 @@
 
 #![cfg_attr(
     nervix_lint,
-    nervix::layer(control_plane, reason = "owns the control plane boundary declared above")
+    nervix::layer(
+        control_plane,
+        reason = "owns the control plane boundary declared above"
+    )
 )]
 
 use std::collections::btree_map;
