@@ -15,7 +15,9 @@ use std::num::NonZeroU64;
 use chumsky::prelude::*;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::{
-    CreateStatement, CreateWindowProcessor, WindowBound, WindowStateLimit, parse_duration_text,
+    AckMode, BranchSelection, CreateStatement, CreateWindowProcessor, Expression,
+    MaterializedStateDependency, ProcessorInputs, WindowBound, WindowProcessorName,
+    WindowStateLimit, parse_duration_text,
 };
 
 use crate::{
@@ -205,48 +207,84 @@ fn state_limit<'src>()
         .boxed()
 }
 
+/// What a window processor statement declares before its output routes.
+struct WindowDeclaration {
+    if_not_exists: bool,
+    name: WindowProcessorName,
+    from: ProcessorInputs,
+    mode: Option<AckMode>,
+    filter_where: Option<Expression>,
+    width: WindowBound,
+    step: WindowBound,
+    state_limit: WindowStateLimit,
+    branched_by: BranchSelection,
+    materialized_state: Vec<MaterializedStateDependency>,
+}
+
+/// The clauses of a window processor statement before its output routes: its name and inputs,
+/// acknowledgement, filter, bounds, state limit, branch and materialized state.
+fn declaration<'src>()
+-> impl Parser<'src, &'src [Token], WindowDeclaration, extra::Err<ParseError<'src>>> + Clone {
+    kw(Identifier::Create)
+        .ignore_then(if_not_exists_clause())
+        .then_ignore(kw_phrase2(Identifier::Window, Identifier::Processor))
+        .then(window_processor_name())
+        .then_ignore(kw(Identifier::From))
+        .then(from_relay_clauses())
+        .then(ack_mode().or_not())
+        .then(filter_where_clause().or_not())
+        .boxed()
+        .then(width_and_step())
+        .map(|(head, (width, step))| ((head, width), step))
+        .boxed()
+        .then(state_limit())
+        .then(branch_selection())
+        .then(materialized_state_dependencies())
+        .map(|parsed| {
+            let (parsed, materialized_state) = parsed;
+            let (parsed, branched_by) = parsed;
+            let (parsed, state_limit) = parsed;
+            let ((head, width), step) = parsed;
+            let ((((if_not_exists, name), from), mode), filter_where) = head;
+            WindowDeclaration {
+                if_not_exists,
+                name,
+                from,
+                mode,
+                filter_where,
+                width,
+                step,
+                state_limit,
+                branched_by,
+                materialized_state,
+            }
+        })
+        .boxed()
+}
+
 pub fn create_window_processor_parser<'src>()
 -> impl Parser<'src, &'src [Token], CreateStatement<CreateWindowProcessor>, extra::Err<ParseError<'src>>>
 + Clone {
     crate::labels::finish_creation({
-        kw(Identifier::Create)
-            .ignore_then(if_not_exists_clause())
-            .then_ignore(kw_phrase2(Identifier::Window, Identifier::Processor))
-            .then(window_processor_name())
-            .then_ignore(kw(Identifier::From))
-            .then(from_relay_clauses())
-            .then(ack_mode().or_not())
-            .then(filter_where_clause().or_not())
-            .boxed()
-            .then(width_and_step())
-            .map(|(head, (width, step))| ((head, width), step))
-            .boxed()
-            .then(state_limit())
-            .then(branch_selection())
-            .then(materialized_state_dependencies())
+        declaration()
             .then(explicit_processor_outputs())
-            .try_map(|(parsed, outputs), _span| {
-                let (parsed, materialized_state) = parsed;
-                let (parsed, branched_by) = parsed;
-                let (parsed, state_limit) = parsed;
-                let ((head, width), step) = parsed;
-                let ((((if_not_exists, name), from_input), mode), filter_where) = head;
-                Ok(CreateStatement::new(
+            .map(|(declaration, output_routes)| {
+                CreateStatement::new(
                     CreateWindowProcessor {
                         labels: Default::default(),
-                        name,
-                        from: from_input,
-                        output_routes: outputs,
-                        branched_by,
-                        width,
-                        step,
-                        state_limit,
-                        mode: mode.unwrap_or_default(),
-                        filter_where,
-                        materialized_state,
+                        name: declaration.name,
+                        from: declaration.from,
+                        output_routes,
+                        branched_by: declaration.branched_by,
+                        width: declaration.width,
+                        step: declaration.step,
+                        state_limit: declaration.state_limit,
+                        mode: declaration.mode.unwrap_or_default(),
+                        filter_where: declaration.filter_where,
+                        materialized_state: declaration.materialized_state,
                     },
-                    if_not_exists,
-                ))
+                    declaration.if_not_exists,
+                )
             })
             .boxed()
     })
