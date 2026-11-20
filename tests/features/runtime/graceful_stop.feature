@@ -1081,3 +1081,33 @@ Feature: A domain STOP lets the work already inside the domain finish
       | cluster_size |
       | 1            |
       | 3            |
+
+  @graceful_stop_already_stopped
+  Scenario Outline: A STOP of a domain that is already stopped is refused, while the STOP that stopped it answered on <cluster_size> nodes
+    Given a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these Plexus commands are executed on the leader node
+      """
+      START;
+      STOP;
+      """
+    Then the last command output contains
+      """
+      stopped domain '{{domain}}': every message in motion finished
+      """
+    When these Plexus commands fail with "is already stopped"
+      """
+      STOP;
+      """
+    Then the last command error contains
+      """
+      domain '{{domain}}' is already stopped
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |

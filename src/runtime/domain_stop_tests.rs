@@ -290,3 +290,170 @@ async fn a_node_takes_no_drain_step_before_it_applied_the_stop() {
     );
     assert!(!applied.moving(), "the node still holds nothing in motion");
 }
+
+#[test]
+fn a_teardown_cuts_each_kind_of_work_by_how_its_stop_ended() {
+    use nervix_interconnect::domain_stop::{StopWaitEntry, StopWaitKind};
+    use nervix_models::{ModelKind, ModelName, NodeRef, StopCut, StopCutKind};
+
+    /// One kind of entry a teardown's view can hold, and what the teardown cuts of it when its
+    /// stop completed and when its stop was enforced.
+    struct Case {
+        kind: StopWaitKind,
+        entity: ModelKind,
+        completed: Option<StopCutKind>,
+        enforced: Option<StopCutKind>,
+    }
+    fn case(
+        kind: StopWaitKind,
+        entity: ModelKind,
+        completed: Option<StopCutKind>,
+        enforced: Option<StopCutKind>,
+    ) -> Case {
+        Case {
+            kind,
+            entity,
+            completed,
+            enforced,
+        }
+    }
+    let cases = [
+        // Intake still admitting and generators still producing hold no work of their own.
+        case(
+            StopWaitKind::AdmittingIngestor,
+            ModelKind::Ingestor,
+            None,
+            None,
+        ),
+        case(
+            StopWaitKind::ActiveGenerator,
+            ModelKind::Generator,
+            None,
+            None,
+        ),
+        // Work in motion is cut as what it is when it moved after a completed stop's drain rested,
+        // and as enforced when the stop was forced.
+        case(
+            StopWaitKind::AdmittingRelay,
+            ModelKind::Relay,
+            Some(StopCutKind::RelayBatches),
+            Some(StopCutKind::Enforced),
+        ),
+        case(
+            StopWaitKind::RelayBatches,
+            ModelKind::Relay,
+            Some(StopCutKind::RelayBatches),
+            Some(StopCutKind::Enforced),
+        ),
+        case(
+            StopWaitKind::NodeWork,
+            ModelKind::Junction,
+            Some(StopCutKind::NodeBatches),
+            Some(StopCutKind::Enforced),
+        ),
+        case(
+            StopWaitKind::EmitterBuffer,
+            ModelKind::Emitter,
+            Some(StopCutKind::EmitterUndelivered),
+            Some(StopCutKind::Enforced),
+        ),
+        // A publish still on the wire when the teardown reads it is cut by force either way.
+        case(
+            StopWaitKind::PublishOnTheWire,
+            ModelKind::Emitter,
+            Some(StopCutKind::Enforced),
+            Some(StopCutKind::Enforced),
+        ),
+        // Held work keeps its own kind either way.
+        case(
+            StopWaitKind::RequiredWait,
+            ModelKind::Junction,
+            Some(StopCutKind::RequiredWaitMessages),
+            Some(StopCutKind::RequiredWaitMessages),
+        ),
+        case(
+            StopWaitKind::EmitterRetry,
+            ModelKind::Emitter,
+            Some(StopCutKind::EmitterUndelivered),
+            Some(StopCutKind::EmitterUndelivered),
+        ),
+        case(
+            StopWaitKind::RelayBatchesHeld,
+            ModelKind::Relay,
+            Some(StopCutKind::RelayBatches),
+            Some(StopCutKind::RelayBatches),
+        ),
+        case(
+            StopWaitKind::NodeWorkHeld,
+            ModelKind::Junction,
+            Some(StopCutKind::NodeBatches),
+            Some(StopCutKind::NodeBatches),
+        ),
+        case(
+            StopWaitKind::ProcessorHeld,
+            ModelKind::Reorderer,
+            Some(StopCutKind::ReordererRows),
+            Some(StopCutKind::ReordererRows),
+        ),
+        case(
+            StopWaitKind::ProcessorHeld,
+            ModelKind::Correlator,
+            Some(StopCutKind::CorrelatorRecords),
+            Some(StopCutKind::CorrelatorRecords),
+        ),
+        case(
+            StopWaitKind::ProcessorHeld,
+            ModelKind::WindowProcessor,
+            Some(StopCutKind::WindowAcknowledgements),
+            Some(StopCutKind::WindowAcknowledgements),
+        ),
+        case(
+            StopWaitKind::ProcessorHeld,
+            ModelKind::Junction,
+            Some(StopCutKind::NodeBatches),
+            Some(StopCutKind::NodeBatches),
+        ),
+    ];
+    let completed = StopTeardown {
+        start_version: 1,
+        enforced: false,
+    };
+    let enforced = StopTeardown {
+        start_version: 1,
+        enforced: true,
+    };
+    let entity = named::<ModelName>("held");
+
+    for case in &cases {
+        let entry = StopWaitEntry {
+            entity: Some(NodeRef::new(case.entity, entity.clone())),
+            kind: case.kind,
+            items: 3,
+        };
+        for (teardown, expected) in [(completed, case.completed), (enforced, case.enforced)] {
+            let expected = expected.map(|kind| StopCut {
+                entity_kind: case.entity,
+                entity: entity.clone(),
+                kind,
+                items: 3,
+            });
+            assert_eq!(
+                teardown.cut_of(&entry),
+                expected,
+                "{:?} of a {:?} when the stop was enforced: {}",
+                case.kind,
+                case.entity,
+                teardown.enforced
+            );
+        }
+    }
+
+    // A count of the whole domain names no entity, and no teardown cuts it.
+    let domain_wide = StopWaitEntry {
+        entity: None,
+        kind: StopWaitKind::NodeWork,
+        items: 1,
+    };
+    assert_eq!(completed.cut_of(&domain_wide), None);
+    assert_eq!(enforced.cut_of(&domain_wide), None);
+}
