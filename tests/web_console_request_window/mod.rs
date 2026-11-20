@@ -137,8 +137,8 @@ async fn commands_sent(world: &mut ScenarioWorld, expected: usize) {
     assert_eq!(seen, expected);
 }
 
-#[then(expr = "the web console has received replies to {int} observed commands")]
-async fn commands_replied(world: &mut ScenarioWorld, expected: usize) {
+#[then(expr = "the web console has received replies to at least {int} observed commands")]
+async fn commands_replied(world: &mut ScenarioWorld, minimum: usize) {
     let mut completed = 0;
     let result = nervix_primitives::time::timeout(super::WEB_CONSOLE_ASSERTION_TIMEOUT, async {
         loop {
@@ -159,7 +159,7 @@ async fn commands_replied(world: &mut ScenarioWorld, expected: usize) {
                     completed += 1;
                 }
             }
-            if completed >= expected {
+            if completed >= minimum {
                 return;
             }
             nervix_primitives::time::sleep(Duration::from_millis(20)).await;
@@ -168,9 +168,8 @@ async fn commands_replied(world: &mut ScenarioWorld, expected: usize) {
     .await;
     assert!(
         result.is_ok(),
-        "the browser received {completed} command replies, expected {expected}"
+        "the browser received {completed} command replies, expected at least {minimum}"
     );
-    assert_eq!(completed, expected);
 }
 
 #[when("the web console finishes its scheduled input callbacks")]

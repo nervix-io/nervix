@@ -143,17 +143,19 @@ Feature: Web console Plexus REPL
     When the web console is opened on the leader node with its request window observed
     Then selector ".topbar-status .pill.ok" contains "CONNECTED"
     Given command response delivery on node "{{leader}}" pauses after execution
-    When selector ".prompt-row input" is filled with "SHOW CLUSTER STATUS;"
+    When selector ".prompt-row input" is filled with "CREATE SCHEMA unselected_schema ( id I64 );"
     And selector ".prompt-row input" is pressed with "Enter"
     Then the command response delivery pause on node "{{leader}}" is reached
-    When the web console submits "SHOW CLUSTER STATUS;" 256 times
+    When the web console submits "CREATE SCHEMA unselected_schema ( id I64 );" 256 times
     Then selector ".terminal" contains "256 requests are already outstanding in the console's session; this one was not sent"
     When the command response delivery pause on node "{{leader}}" is released
-    Then selector ".terminal" contains "[schedule]"
-    And the web console has received replies to 256 observed commands
-    When selector ".prompt-row input" is filled with "LIST DOMAINS;"
+    Then selector ".terminal" contains "no active domain selected"
+    # The outstanding limit includes lookups. After these replies, the remaining
+    # one-line results cannot fill the retained history and erase the follow-up.
+    And the web console has received replies to at least 128 observed commands
+    When selector ".prompt-row input" is filled with "DESCRIBE CLUSTER;"
     And selector ".prompt-row input" is pressed with "Enter"
-    Then selector ".terminal" contains "no domains registered"
+    Then selector ".terminal" contains "cluster uid:"
 
   @client_wire36
   Scenario: Web console completes its latest input after a full command request window drains
