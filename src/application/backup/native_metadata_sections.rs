@@ -47,7 +47,7 @@ use crate::{
     application::session_service::SessionServiceImpl,
     runtime::{
         BackupBranchLifecycleEntry, BackupKafkaPartitionOffset, CapturedNativeMetadata,
-        SnapshotStagingError, StagedArtifact,
+        SnapshotStagingError, StagedArtifact, StagedSnapshotWriter,
     },
 };
 
@@ -182,12 +182,11 @@ impl SessionServiceImpl {
             .reserve(MemoryClass::RestoreMetadata, conversion_bytes)
             .await
             .map_err(|error| refusal(domain, error))?;
-        // The bulk memory streaming one section holds: the staged writer's output buffer, one bulk
-        // chunk of this node's executor.
+        // The bulk memory streaming one section holds: the staged writer's output buffer.
         let working = executor
             .reserve(
                 MemoryClass::Bulk,
-                executor.limits().bulk_chunk_bytes.as_u64(),
+                StagedSnapshotWriter::encoding_buffer_bytes(&executor),
             )
             .await
             .map_err(|error| refusal(domain, error))?;

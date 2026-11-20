@@ -31,19 +31,21 @@ use super::{
 };
 use crate::{
     application::session_service::SessionServiceImpl,
-    runtime::{CapturedGuestSave, RESTORE_STATE_CHUNK_BYTES, SnapshotStagingError, StagedArtifact},
+    runtime::{
+        CapturedGuestSave, RESTORE_STATE_CHUNK_BYTES, SnapshotStagingError, StagedArtifact,
+        StagedSnapshotWriter,
+    },
 };
 
 /// The bulk memory streaming one guest save holds: the segmented checkpoint reader's block and the
-/// transfer block, one persisted checkpoint segment each, and the staged writer's output buffer,
-/// one bulk chunk of `executor`.
+/// transfer block, one persisted checkpoint segment each, and the staged writer's output buffer.
 fn guest_writer_bytes(executor: &Executor) -> u64 {
     let segment_bytes: u64 = RESTORE_STATE_CHUNK_BYTES.arch_into();
     let segment_blocks_bytes = segment_bytes
         .checked_mul(2)
         .assured("two 64 KiB persisted checkpoint segments fit u64");
     segment_blocks_bytes
-        .checked_add(executor.limits().bulk_chunk_bytes.as_u64())
+        .checked_add(StagedSnapshotWriter::encoding_buffer_bytes(executor))
         .assured("two 64 KiB segments beside a bulk chunk validated to fit u32 fit u64")
 }
 
@@ -236,33 +238,19 @@ pub(super) fn archived_node<'schedule>(
 
 #[cfg(test)]
 mod tests {
-    use meticulous::ResultExt as _;
-    use nervix_execution::{ExecutionOverrides, ExecutionSettings};
     use ubyte::ByteUnit;
 
     use super::*;
 
-    /// The executor of a node started with `--execution-bulk-chunk-bytes` set to `chunk`.
-    fn executor_with_bulk_chunk(chunk: ByteUnit) -> Executor {
-        let overrides = ExecutionOverrides {
-            bulk_chunk_bytes: Some(chunk),
-            ..ExecutionOverrides::default()
-        };
-        let settings = ExecutionSettings::resolve(overrides, None, None)
-            .assured("a bulk chunk of at most 256 KiB fits the default bulk budget");
-        Executor::new(settings.config())
-            .assured("resolved execution settings satisfy every executor relationship")
-    }
-
     #[test]
-    fn a_guest_save_charges_two_checkpoint_segments_beside_one_bulk_chunk() {
-        let default_chunk = executor_with_bulk_chunk(ByteUnit::Kibibyte(64));
+    fn a_guest_save_charges_two_checkpoint_segments_beside_the_staged_writer_buffer() {
+        let default_chunk = StagedSnapshotWriter::encoding_test_executor(ByteUnit::Kibibyte(64));
         assert_eq!(
             guest_writer_bytes(&default_chunk),
             ByteUnit::Kibibyte(192).as_u64()
         );
 
-        let raised_chunk = executor_with_bulk_chunk(ByteUnit::Kibibyte(256));
+        let raised_chunk = StagedSnapshotWriter::encoding_test_executor(ByteUnit::Kibibyte(256));
         assert_eq!(
             guest_writer_bytes(&raised_chunk),
             ByteUnit::Kibibyte(384).as_u64()
