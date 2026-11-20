@@ -191,6 +191,7 @@ impl Runtime {
         )]
         let mut placements = HashSet::default();
         for checkpoint in checkpoints {
+            nervix_primitives::task::consume_budget().await;
             let placement = RuntimeStatePlacement::from_remote(checkpoint.placement)
                 .change_context(OwnershipHandoffError::IngestorUnitLayout)?;
             if placement.domain != *domain
@@ -208,6 +209,10 @@ impl Runtime {
                 Some(selection) => StateCheckpointRead::IngestorUnits(selection),
                 None => StateCheckpointRead::HandoffCapture,
             };
+            self.inner
+                .fault_injection
+                .delay_ownership_handoff_checkpoint_read_if_armed(domain)
+                .await;
             let (snapshot, charge) = self
                 .fetch_state_checkpoint_charged(source, &placement, &checkpoint.snapshot, read)
                 .await
@@ -267,19 +272,24 @@ impl Runtime {
                         .map_err(|_| refuse(IngestorUnitLayoutError::Bounds))?,
                 )
                 .ok_or_else(|| refuse(IngestorUnitLayoutError::SourceInventory))?;
+                // Every source is read at the same time: each read waits on its own node, and the
+                // merge needs all of them. The reads keep the sources' order, so the merge sees the
+                // same sequence as before.
+                let reads = sources.into_iter().map(|source| async move {
+                    self.read_handoff_unit(
+                        domain,
+                        entity,
+                        source.unit,
+                        &source.node,
+                        source.checkpoints,
+                        Some(selection),
+                    )
+                    .await
+                });
+                let units = futures_util::future::try_join_all(reads).await?;
                 let mut decoded = Vec::new();
                 let mut charges = Vec::new();
-                for source in sources {
-                    let (snapshots, admitted) = self
-                        .read_handoff_unit(
-                            domain,
-                            entity,
-                            source.unit,
-                            &source.node,
-                            source.checkpoints,
-                            Some(selection),
-                        )
-                        .await?;
+                for (snapshots, admitted) in units {
                     decoded.extend(snapshots);
                     charges.extend(admitted);
                 }

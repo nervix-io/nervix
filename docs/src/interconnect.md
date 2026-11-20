@@ -1648,11 +1648,13 @@ domain's capture is one management reply, at most 64 KiB.
 The fetch stream authenticates that process identity before its handler can consume the stage; a
 partitioned or cancelled fetch leaves any unconsumed stage available until expiry.
 An owner streams each branch lifecycle and Kafka offset section from the cut's database snapshot
-into its staged file under a `restore_metadata` conversion charge and a 64 KiB bulk buffer, so the
+into its staged file under a `restore_metadata` conversion charge and the staged writer's output
+buffer of one resolved bulk chunk, charged to `bulk`, so the
 inventory declares a section's exact length and digest without the owner holding the section
 whole. It also checks a WASM save's scheduled generation before opening that save, then streams
 its raw bytes from the same snapshot into a staged section under an independent
-`restore_metadata` charge and three fixed 64 KiB bulk buffers. The stored read supplies the descriptor's
+`restore_metadata` charge and a bulk charge of two 64 KiB buffers beside the staged writer's output
+buffer. The stored read supplies the descriptor's
 revision. An interruption fails the capture before its inventory is published, and the
 coordinator can retry with a new cut. Materialized inventories distinguish archive descriptors,
 scalar identity groups and Arrow column groups. Their bounded sections are staged from a fresh

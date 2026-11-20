@@ -851,6 +851,7 @@ tags = [
   "@execution_class_drain",
   "@kafka_start_generation",
   "@kafka_start_generation_restore",
+  "@kafka_allowance_rebalance",
   "@wasm_reset_authority_recovery",
   "@wasm_reset_publication_failure",
   "@client_wire_pause_leadership",
@@ -4287,6 +4288,8 @@ workloads = [
 [[owner]]
 path = "crates/connectors/kafka/src/topic/ingestor_rejection.rs"
 workloads = [
+  "scenario.kafka-allowance-rebalance",
+  "stress.kafka-allowance-rebalance",
   "scenario.inherited-kafka-readers",
   "stress.inherited-kafka-readers",
   "scenario.inherited-growth",
@@ -7303,6 +7306,26 @@ scenario = "A committed silence policy expires a lost forwarded acknowledgement 
 selections = ["deloxide-stress"]
 
 [[workload]]
+coverage = "A held consumer runs its assignment callback on a connector control worker and acquires the rejection-floor lock. Broker execution, async wakes and the connector's native control turn are outside detector evidence."
+examples = 2
+feature = "tests/features/runtime/ingestor_rate_limit.feature"
+id = "scenario.kafka-allowance-rebalance"
+invariant = "The held group member concedes and regains its partition during a rebalance, then admits the next unread record once when the allowance returns."
+invocation = "scenarios"
+scenario = "A rate-limited Kafka ingestor pauses a partition that leaves and returns during a hold"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: a held consumer runs its assignment callback on a connector control worker and acquires the rejection-floor lock. Broker execution, async wakes and the connector's native control turn are outside detector evidence."
+examples = 2
+feature = "tests/features/runtime/ingestor_rate_limit.feature"
+id = "stress.kafka-allowance-rebalance"
+invariant = "The held group member concedes and regains its partition during a rebalance, then admits the next unread record once when the allowance returns."
+invocation = "stress-scenarios"
+scenario = "A rate-limited Kafka ingestor pauses a partition that leaves and returns during a hold"
+selections = ["deloxide-stress"]
+
+[[workload]]
 coverage = "Production source-instance lifecycle, branch runtime and ACK owners, schedule publication and native checkpoint transfer; restore additionally traverses captured materialized rows and epoch/provenance installation. Broker I/O, async observation and routing publications are outside detector evidence."
 examples = 6
 feature = "tests/features/runtime/inherited_partitions.feature"
@@ -7360,6 +7383,46 @@ id = "stress.inherited-growth"
 invariant = "The committed external layout and its exact-unit readers retain key identity, acknowledged native next offsets and state through lifecycle changes without a tracked deadlock."
 invocation = "stress-scenarios"
 scenario = "A growing Kafka topology preserves keyed state when a producer moves a key to a new shard"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Production planned ownership handoff of a regrouped reader: concurrent per-move capture, preparation and confirmation, concurrent source reads of each preparation, schedule publication and native checkpoint transfer. Broker I/O, async observation and routing publications are outside detector evidence."
+examples = 2
+feature = "tests/features/runtime/inherited_partitions.feature"
+id = "scenario.inherited-growth-slow-handoff-reads"
+invariant = "A growing topology's regrouping handoff finishes within one entity gate deadline while every checkpoint read is slow, and the new epoch's readers deliver once, without a tracked deadlock."
+invocation = "scenarios"
+scenario = "A growing Kafka topology is published within the entity gate deadline when every handoff checkpoint read is slow"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: Production planned ownership handoff of a regrouped reader: concurrent per-move capture, preparation and confirmation, concurrent source reads of each preparation, schedule publication and native checkpoint transfer. Broker I/O, async observation and routing publications are outside detector evidence."
+examples = 2
+feature = "tests/features/runtime/inherited_partitions.feature"
+id = "stress.inherited-growth-slow-handoff-reads"
+invariant = "A growing topology's regrouping handoff finishes within one entity gate deadline while every checkpoint read is slow, and the new epoch's readers deliver once, without a tracked deadlock."
+invocation = "stress-scenarios"
+scenario = "A growing Kafka topology is published within the entity gate deadline when every handoff checkpoint read is slow"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Production planned ownership handoff of a regrouped reader that times out capturing, discards its attempt and releases its gate, then succeeds on a later attempt: concurrent per-move capture, preparation and confirmation, schedule publication and native checkpoint transfer. Broker I/O, async observation and routing publications are outside detector evidence."
+examples = 2
+feature = "tests/features/runtime/inherited_partitions.feature"
+id = "scenario.inherited-growth-handoff-timeout-retry"
+invariant = "A regrouping handoff that times out discards its attempt and releases the readers, a later attempt publishes the growth, and every record is delivered once, without a tracked deadlock."
+invocation = "scenarios"
+scenario = "A growing Kafka topology whose handoff times out is published by a later attempt with every record delivered once"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: Production planned ownership handoff of a regrouped reader that times out capturing, discards its attempt and releases its gate, then succeeds on a later attempt: concurrent per-move capture, preparation and confirmation, schedule publication and native checkpoint transfer. Broker I/O, async observation and routing publications are outside detector evidence."
+examples = 2
+feature = "tests/features/runtime/inherited_partitions.feature"
+id = "stress.inherited-growth-handoff-timeout-retry"
+invariant = "A regrouping handoff that times out discards its attempt and releases the readers, a later attempt publishes the growth, and every record is delivered once, without a tracked deadlock."
+invocation = "stress-scenarios"
+scenario = "A growing Kafka topology whose handoff times out is published by a later attempt with every record delivered once"
 selections = ["deloxide-stress"]
 
 [[workload]]

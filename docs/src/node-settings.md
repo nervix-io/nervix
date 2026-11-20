@@ -941,7 +941,9 @@ relay pool, capped at 32 MiB each; `--execution-relay-scratch-bytes` defaults to
 capped at 16 MiB. All are positive. Validation requires two complete operations to fit relay,
 active read and cache pools independently. `--execution-resident-replication-batches` defaults
 to at most four, retaining command-budget room for an answer. `--execution-bulk-chunk-bytes`
-defaults to one 512th of bulk memory, capped at 64 KiB. Captured-section reads group sixteen
+defaults to one 512th of bulk memory, capped at 64 KiB. The resolved chunk sizes the staged
+snapshot encoder's output buffer. Stored branch captures and native restore conversions include
+that buffer in their bulk admission before encoding. Captured-section reads group sixteen
 bulk quanta, capped at half the immutable bulk pool so a preceding transport buffer and the next
 read can coexist; the default read remains 1 MiB. Existing operation working-set checks
 still apply. Peer receive limits derive from these final limits before transport construction.
@@ -1008,7 +1010,13 @@ so a member that returns with a record an older voter cannot run beside is refus
 that kept running are not. Refusing a voter's run changes no membership. The leader judges a live
 node outside the membership against the accepted voters' records: it admits one that can run beside
 every one of them, refuses one that cannot, naming the first such voter, and leaves one that has
-published no record it can read outside the membership.
+published no record it can read outside the membership. The leader keeps its verdict on a refused
+run outside the membership, without judging that run again, until the run is no longer an admission
+candidate: the run stops once it reads the verdict, yet the failure detector keeps it live in gossip
+for several of its heartbeat intervals, about half a minute for a run that lived a second or two,
+and a member admitted after its run stopped would never run. Once the voter it named stops, is
+dropped or returns with a record the node could run beside, the leader therefore admits the node's
+next run, not the refused one.
 
 The leader publishes its verdicts in its gossip state under the key `admission_verdicts`, with the
 Raft term it leads. A node that finds another node leading withdraws the verdicts it published, and
@@ -1372,10 +1380,19 @@ The compiler accepts this contract on a constant, including an associated consta
 source scanner validates the gate before excluding a constant, including inactive code. The
 reason remains reviewed evidence; neither parser nor compiler proves its prose true.
 
-The one-minute and fifteen-minute metric EMA windows, their decay conversion and the published
-connector-interaction duration buckets are fixed observation contracts. Their declarations carry
-the fixed reasons in the metric owners; they are not node settings. The current resolution is
-documented in [Metrics And Observability](metrics-and-observability.md#connector-interactions).
+The one-minute and fifteen-minute metric EMA windows, their decay conversion, the steps of the
+percentile windows, the unit and precision of the HDR histograms that metric snapshots carry, the
+published histogram buckets and the published connector-interaction duration buckets are fixed
+observation contracts. Their declarations carry the fixed reasons in the metric owners; they are
+not node settings. The current resolution is documented in
+[Metrics And Observability](metrics-and-observability.md#connector-interactions).
+
+The per-session bounds of the [client session protocol](client-session-protocol.md) (requests in
+flight, producers, consumers and batch credit), the chunk bounds both peers of a stream check, the
+process exit statuses and the forced-exit report bound of [Shutdown](shutdown.md#exit-status), and
+the absence markers of packed atomic encodings are fixed the same way, each at its owner. A memory
+charge that mirrors a buffer sized by `--execution-bulk-chunk-bytes` derives from the resolved bulk
+chunk rather than repeating its default.
 
 `just ratchet --show hidden_tunables` lists the temporary count's sites. It counts numeric
 `const` items of types `Duration`, `usize`, `u64`, `u32`, `u16`, `u8`, `i64`, `i32`, `f64`,

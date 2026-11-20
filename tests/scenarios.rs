@@ -14268,7 +14268,7 @@ fn then_node_refused_to_join(world: &mut ScenarioWorld, node_id: String, reason:
 
 /// The refused node has stopped, but its run stays live in the observer's gossip until the failure
 /// detector declares it dead. The membership the observer reports must never name it in that time,
-/// whatever the cluster's licensing policy has become since the refusal.
+/// whatever the cluster's licensing policy or its live voters have become since the refusal.
 #[then(
     expr = "node {string} never admits the refused run of node {string} to its raft membership \
             before that run leaves gossip"
@@ -15405,6 +15405,23 @@ async fn when_ownership_handoff_flush_pause_released(world: &mut ScenarioWorld, 
     world
         .fault_injection
         .release_ownership_handoff_flush_pause(&domain);
+}
+
+/// Every node then waits `delay` before each ownership handoff checkpoint read in the domain, as
+/// nodes slowed by a loaded host do, so a handoff's preparation lasts as long as its longest chain
+/// of reads. A later step may change the delay, and `0ms` makes the reads fast again.
+#[given(expr = "every ownership handoff checkpoint read in domain {string} takes {string}")]
+#[when(expr = "every ownership handoff checkpoint read in domain {string} takes {string}")]
+async fn given_ownership_handoff_checkpoint_reads_take(
+    world: &mut ScenarioWorld,
+    domain: String,
+    delay: String,
+) {
+    let domain = expand_placeholders(world, &domain);
+    let delay = parse_duration_text(&delay).expect("the checkpoint read delay must be a duration");
+    world
+        .fault_injection
+        .delay_ownership_handoff_checkpoint_reads(domain, delay);
 }
 
 #[given(expr = "ownership handoff for domain {string} pauses before activation")]

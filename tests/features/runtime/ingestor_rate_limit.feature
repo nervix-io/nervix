@@ -88,6 +88,123 @@ Feature: Ingestor rate limits
       | 1            | ACK PARALLEL | ACK PARALLEL MAX 8 BATCH TIMEOUT 100ms ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s |
       | 3            | ACK PARALLEL | ACK PARALLEL MAX 8 BATCH TIMEOUT 100ms ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s |
 
+  Scenario Outline: A rate-limited Kafka ingestor keeps its group membership past the poll deadline
+    Given Kafka is running
+    And runtime replication is configured with replica count 0 and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    And Kafka topic "rate_group_{{test_id}}" exists with 1 partitions
+    When these Plexus commands are executed
+      """
+      CREATE SCHEMA event (seq I64);
+      CREATE WIRE JSON SCHEMA event_wire MODE STRICT (seq integer);
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
+      CREATE RELAY events SCHEMA event UNBRANCHED;
+      CREATE KAFKA CLIENT kafka_main CONFIG {
+        'bootstrap.servers' = '{{kafka_addr}}',
+        'session.timeout.ms' = '6000',
+        'max.poll.interval.ms' = '6000',
+        'heartbeat.interval.ms' = '500'
+      };
+      CREATE KAFKA TOPIC INGESTOR limited
+        FROM kafka_main TOPIC 'rate_group_{{test_id}}'
+        OFFSET BY CONSUMER GROUP 'rate_group_{{test_id}}' START AT EARLIEST
+        MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
+        RATE LIMIT <allowance>
+        ON QUIESCE SUSPEND DECODE USING event_codec
+        TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE SUBSCRIPTION observations TO events;
+      START;
+      """
+    Then within "30s" Kafka consumer group "rate_group_{{test_id}}" eventually has 1 consumers
+    When the rate limit start is recorded
+    And these Kafka messages are rapidly published to topic "rate_group_{{test_id}}"
+      """
+      {"seq":1}
+      {"seq":2}
+      """
+    Then Kafka consumer group "rate_group_{{test_id}}" keeps its single stable member for "9s"
+    And within "45s" the relay subscription receives one payload for each fragment set and records their arrivals
+      """
+      "seq":1
+      "seq":2
+      """
+    And arrival 2 came no sooner than "<second_arrival>" after the recorded rate limit start
+    And within "30s" Kafka consumer group "rate_group_{{test_id}}" next offset for topic "rate_group_{{test_id}}" partition 0 is "at least 2"
+    And the relay subscription does not receive a payload within "1s"
+
+    Examples:
+      | cluster_size | allowance                           | second_arrival |
+      | 1            | 1 PER 15s BURST 1                   | 15s            |
+      | 3            | 1 PER 15s BURST 1                   | 15s            |
+      | 1            | 9 OF payload.bytes PER 15s BURST 10 | 13333ms        |
+      | 3            | 9 OF payload.bytes PER 15s BURST 10 | 13333ms        |
+
+  @kafka_allowance_rebalance @deloxide_stress
+  Scenario Outline: A rate-limited Kafka ingestor pauses a partition that leaves and returns during a hold
+    Given Kafka is running
+    And runtime replication is configured with replica count 0 and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    And Kafka topic "rate_rebalance_{{test_id}}" exists with 1 partitions
+    When these Plexus commands are executed
+      """
+      CREATE SCHEMA event (seq I64);
+      CREATE WIRE JSON SCHEMA event_wire MODE STRICT (seq integer);
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
+      CREATE RELAY events SCHEMA event UNBRANCHED;
+      CREATE KAFKA CLIENT kafka_main CONFIG {
+        'bootstrap.servers' = '{{kafka_addr}}',
+        'session.timeout.ms' = '6000',
+        'max.poll.interval.ms' = '6000',
+        'heartbeat.interval.ms' = '500'
+      };
+      CREATE KAFKA TOPIC INGESTOR limited
+        FROM kafka_main TOPIC 'rate_rebalance_{{test_id}}'
+        OFFSET BY CONSUMER GROUP 'rate_rebalance_{{test_id}}' START AT EARLIEST
+        MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
+        RATE LIMIT 1 PER 30s BURST 1
+        ON QUIESCE SUSPEND DECODE USING event_codec
+        TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE SUBSCRIPTION observations TO events;
+      START;
+      """
+    Then within "30s" Kafka consumer group "rate_rebalance_{{test_id}}" eventually has 1 consumers
+    When the rate limit start is recorded
+    And these Kafka messages are rapidly published to topic "rate_rebalance_{{test_id}}"
+      """
+      {"seq":1}
+      {"seq":2}
+      """
+    Then within "5s" Kafka consumer group "rate_rebalance_{{test_id}}" next offset for topic "rate_rebalance_{{test_id}}" partition 0 is "at least 1"
+    When an external member joins Kafka consumer group "rate_rebalance_{{test_id}}" on topic "rate_rebalance_{{test_id}}"
+    Then within "10s" the external member of Kafka consumer group "rate_rebalance_{{test_id}}" holds topic "rate_rebalance_{{test_id}}" partition 0
+    And within "5s" Kafka consumer group "rate_rebalance_{{test_id}}" eventually has 2 consumers
+    When the external member leaves Kafka consumer group "rate_rebalance_{{test_id}}"
+    Then within "5s" Kafka consumer group "rate_rebalance_{{test_id}}" eventually has 1 consumers
+    And Kafka consumer group "rate_rebalance_{{test_id}}" keeps its single stable member for "9s"
+    And within "45s" the relay subscription receives one payload for each fragment set and records their arrivals
+      """
+      "seq":1
+      "seq":2
+      """
+    And arrival 2 came no sooner than "30s" after the recorded rate limit start
+    And within "30s" Kafka consumer group "rate_rebalance_{{test_id}}" next offset for topic "rate_rebalance_{{test_id}}" partition 0 is "at least 2"
+    And the relay subscription does not receive a payload within "1s"
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
   Scenario Outline: Layered per-second and per-minute clauses each hold a Kafka ingestor to their own allowance
     Given Kafka is running
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"

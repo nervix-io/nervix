@@ -10,14 +10,21 @@
     nervix::layer(harness, reason = "tests the production Kafka start boundary")
 )]
 
-use nervix_models::{DomainStartPoint, DomainStatus, DomainTimeRate, Statement};
+use nervix_models::{
+    DomainSchedule, DomainStartPoint, DomainStatus, DomainTimeRate, IngestorEntity, IngestorInput,
+    IngestorInstances, KafkaIngestor, Model, NodeUnitRef, Statement,
+};
 
 use super::*;
+use crate::runtime::state_replication::{
+    OwnershipHandoffActivation, OwnershipHandoffActivationAuthorization,
+};
 
 struct Fixture {
     runtime: Runtime,
     states: Vec<KafkaOffsetStateOriginator>,
     domain: DomainName,
+    schedule: DomainSchedule,
     _directory: tempfile::TempDir,
 }
 
@@ -78,9 +85,9 @@ impl Fixture {
                 .assured("models without resource references need no resolution");
             nodes.push(scheduled_model(model));
         }
-        let schedule = nervix_models::DomainSchedule::new(domain.clone(), nodes, Vec::new());
+        let schedule = DomainSchedule::new(domain.clone(), nodes, Vec::new());
         runtime
-            .rebuild_domain_from_schedule(&node, &domain, Some(schedule), false)
+            .rebuild_domain_from_schedule(&node, &domain, Some(schedule.clone()), false)
             .await
             .assured("the stopped graph installs native ownership without opening consumers");
         lifecycle.status = DomainStatus::Running;
@@ -114,6 +121,7 @@ impl Fixture {
             runtime,
             states,
             domain,
+            schedule,
             _directory: directory,
         }
     }
@@ -131,6 +139,153 @@ impl Fixture {
         );
         ReplicatedKafkaOffsetState::read(&state)
     }
+}
+
+#[nervix_primitives::test]
+async fn regroup_reinstalls_prepared_offsets_on_a_unit_that_keeps_its_owner() {
+    let fixture = Fixture::new(3).await;
+    let runtime = &fixture.runtime;
+    let source = &fixture.states[0];
+    let placement = source.placement().clone();
+    let unit_ref = placement.unit_ref();
+    let dispatcher = runtime
+        .inner
+        .remote_dispatcher
+        .load_full()
+        .assured("the fixture has a loopback dispatcher");
+    let node = dispatcher.local_node_id();
+    let incarnation = dispatcher.local_node_incarnation();
+    let retired = &fixture.states[2];
+    let retired_unit = NodeUnitRef::new(unit_ref.entity.node.clone(), retired.placement().unit);
+    let mut desired = fixture.schedule.clone();
+    let scheduled_source = desired
+        .nodes
+        .get_mut(&unit_ref.entity.node)
+        .assured("the fixture schedules the source");
+    let Model::Ingestor(ingestor) = scheduled_source.config.as_mut() else {
+        panic!("the source is an ingestor");
+    };
+    let IngestorInput::Transport(input) = &mut ingestor.input else {
+        panic!("the source uses a transport");
+    };
+    let IngestorEntity::Kafka(KafkaIngestor::Topic(kafka)) = &mut input.source else {
+        panic!("the source reads a Kafka topic");
+    };
+    kafka.instances = IngestorInstances::Count(nonzero_ext::nonzero!(2u64));
+    let units = scheduled_source
+        .units
+        .keys()
+        .copied()
+        .filter(|unit| *unit != retired_unit.unit)
+        .collect::<Vec<_>>();
+    *scheduled_source = scheduled_source.clone().with_units(&units);
+    let revision = ExecutionRevision::from_schedule(&desired)
+        .assured("the smaller layout has a complete execution plan");
+    // The fixture starts with a passive graph, so give the removed unit its live checkpoint task.
+    let retired_writer = runtime
+        .spawn_kafka_offset_snapshot_task(retired.persistence())
+        .assured("the removed unit has a native offset checkpoint writer");
+    let base = {
+        let mut execution = runtime
+            .inner
+            .executions
+            .get_mut(&fixture.domain)
+            .assured("the fixture installed the previous layout");
+        execution
+            .placement_tasks
+            .entry(retired_unit.clone())
+            .or_default()
+            .checkpoints
+            .push(retired_writer);
+        execution.revision.ownership_handoff_fingerprint
+    };
+
+    // This retained unit still owns partition 0 after the regroup. The prepared checkpoint
+    // carries its committed next offset into the new layout.
+    runtime
+        .commit_domain_kafka_offset(
+            source,
+            KafkaOffsetPosition {
+                topic: "events".to_owned(),
+                partition: 0,
+                offset: 41,
+            },
+        )
+        .await
+        .assured("the old unit can commit through its originator");
+    let snapshot = source
+        .read()
+        .latest_snapshot()
+        .assured("the offset state can be captured");
+    let coordination = nervix_models::CoordinationIdentity::new(node.clone(), 1, 1);
+    let transition = RuntimeStateHandoffTransition {
+        coordination: &coordination,
+        operation_id: "regroup",
+        source: node,
+        destination: node,
+        source_incarnation: incarnation,
+        destination_incarnation: incarnation,
+        entity: &unit_ref.entity,
+        unit: unit_ref.unit,
+        base_schedule_fingerprint: base,
+        target_schedule_fingerprint: revision.ownership_handoff_fingerprint,
+    };
+    let checkpoints = vec![(placement.clone(), snapshot)];
+    runtime
+        .inner
+        .state_store
+        .as_ref()
+        .assured("the fixture uses native storage")
+        .persist_handoff_preparation(&transition, &checkpoints)
+        .assured("the regroup checkpoint is durably prepared");
+    runtime.inner.prepared_runtime_state_handoffs.insert(
+        unit_ref.clone(),
+        PreparedRuntimeStateHandoff {
+            coordination,
+            operation_id: "regroup".to_owned(),
+            source: node.clone(),
+            destination: node.clone(),
+            source_incarnation: incarnation,
+            destination_incarnation: incarnation,
+            unit: unit_ref.unit,
+            base_schedule_fingerprint: base,
+            target_schedule_fingerprint: revision.ownership_handoff_fingerprint,
+            activation_authorization:
+                OwnershipHandoffActivationAuthorization::AuthorizedByPreparation,
+            activation: watch::channel(OwnershipHandoffActivation::Prepared).0,
+            checkpoints,
+        },
+    );
+
+    runtime
+        .rebind_reassigned_nodes(
+            &fixture.domain,
+            &revision,
+            std::slice::from_ref(&unit_ref.entity.node),
+            Some(node),
+            &BTreeSet::new(),
+        )
+        .await
+        .assured("the remaining units can install the regrouped layout");
+    let installed = runtime
+        .inner
+        .replicated_kafka_offset_states
+        .get(&placement)
+        .assured("the regroup reinstalled the retained unit's offsets before restarting it");
+    let originator = ReplicatedKafkaOffsetState::current_originator(installed.value())
+        .assured("the retained unit can commit on its unchanged owner");
+    assert_eq!(originator.read().next_offset("events", 0), Some(41));
+    drop(installed);
+    assert!(
+        !runtime
+            .inner
+            .executions
+            .get(&fixture.domain)
+            .assured("the regroup kept the existing domain execution")
+            .placement_tasks
+            .contains_key(&retired_unit)
+    );
+    runtime.shutdown(Duration::from_secs(5)).await;
 }
 
 #[nervix_primitives::test]

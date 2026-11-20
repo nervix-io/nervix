@@ -159,6 +159,11 @@ and exits immediately with the status a shell reports for that signal, whichever
 started the shutdown. No destructor, exit handler, or remaining phase runs. Whichever comes first,
 the repeated signal or the deadline, decides how the process exits.
 
+Both forced exits write their record before they exit, which normally takes microseconds. When
+standard output has stopped draining, a forced exit waits at most one second for that record and
+then exits with the same status without it, so a stalled log consumer cannot keep the process
+alive.
+
 A diagnostic node that reports an active deadlock ends the same way, immediately, whatever phase it
 is in: its blocked threads hold work it can no longer finish. It describes the cycle on standard
 error, records it as evidence, and exits with `3`, or with `4` when the recording failed, without
@@ -1110,10 +1115,13 @@ publication; the replica's assignment token still fences installation if ownersh
 Consensus stops Raft and then waits for its storage to reach an idle barrier, which proves every
 earlier durable write has returned and released the store, before its dedicated database handle is
 dropped. The registry and runtime database is released separately after the services that hold its
-handles. Terminal teardown does not finish until both database locks have been released. A build
-with the `testing` feature is the exception: its fault injection keeps an observer of each running
-node's consensus state, so an in-process test node's consensus database closes only once the
-scenario harness gives that registration back, after the node has stopped; see
+handles. Terminal teardown does not finish until both database locks have been released, whatever
+asked the node to stop: a termination signal, the caller embedding it, a failed listener, a refused
+initialization, or the cluster refusing its join. A node whose start fails after it opened its
+stores releases both locks the same way before it returns. In a build with the `testing` feature,
+the fault injection also keeps an observer of each running node's consensus state. The node gives
+that observer back itself as soon as its consensus has stopped, so nothing it registered holds the
+consensus database once it has returned, and the same node can start again in the same process; see
 [Integration Test Lifecycle](./integration-test-lifecycle.md#cluster-teardown). See
 [Consensus Storage And Replication](./consensus-storage-and-replication.md) for the write, replay,
 retention, and snapshot contracts behind this barrier.

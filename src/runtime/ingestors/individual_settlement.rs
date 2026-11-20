@@ -52,6 +52,7 @@ where
         host: &mut IngestorHost,
         messages: Vec<M>,
         timeout: Duration,
+        mut maintenance: Option<&mut dyn IngestorReadHold>,
     ) -> Self
     where
         M: IngestorMessage<Position = P>,
@@ -70,7 +71,10 @@ where
                 payload: message.payload(),
                 metadata: message.metadata(),
             };
-            match host.intake_acknowledged(vec![intake]).await {
+            match host
+                .intake_acknowledged(vec![intake], reborrow_maintenance(&mut maintenance))
+                .await
+            {
                 Err(error) if error.current_context().stopped() => {
                     // This delivery and every one after it stay unconfirmed, so their transport
                     // presents them again.

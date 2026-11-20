@@ -367,15 +367,20 @@ Capture then runs as one storage job:
 | State | How it becomes sections |
 | --- | --- |
 | Inferencer tensors | Current inference routes provide immutable published generations. The cut freezes one generation per active lifecycle key, superseding its stored checkpoint. Quiesced and live captures request the scheduled primary's branch checkpoint, publishing its current session and lifecycle without running the model; live capture keeps intake running and retains crash-consistent semantics. Stopped cuts read the selected native checkpoint under bounded admission. Capture projects shapes and streams exact F32 bits into `state.bin`; its descriptor records the same publication revision and incarnation with the staged length/digest. The archive exposes no native snapshot frame. |
-| WASM guest save | The save stays in the cut's snapshot until its scheduled generation has been checked, so a superseded save is never opened. The storage job records a segmented header's bounded size, and staging admission uses that size without a database read on an async worker. Saves are opened one at a time: the inline checkpoint conversion is charged to `restore_metadata`, and the raw bytes stream into a quota-owned staged section under a fixed 192 KiB bulk working charge, so neither another save nor an encoded guest section is held whole during the write. One read supplies the bytes and the descriptor's revision, and the staged writer seals the section's actual length and digest. |
-| Kafka offsets and branch lifecycle | The checkpoint is read once into an aligned allocation charged to `restore_metadata`, its entries convert one at a time, and the record streams through a 64 KiB bulk buffer into a staged file that seals its exact length and digest. Serializer scratch of one resolver per entry is charged beside it. Each section reserves the 64 MiB record limit of node staging while it is written. |
+| WASM guest save | The save stays in the cut's snapshot until its scheduled generation has been checked, so a superseded save is never opened. The storage job records a segmented header's bounded size, and staging admission uses that size without a database read on an async worker. Saves are opened one at a time: the inline checkpoint conversion is charged to `restore_metadata`, and the raw bytes stream into a quota-owned staged section under a bulk working charge of two persisted 64 KiB checkpoint segments beside the staged writer's output buffer, 192 KiB at the default bulk chunk, so neither another save nor an encoded guest section is held whole during the write. One read supplies the bytes and the descriptor's revision, and the staged writer seals the section's actual length and digest. |
+| Kafka offsets and branch lifecycle | The checkpoint is read once into an aligned allocation charged to `restore_metadata`, its entries convert one at a time, and the record streams through the staged writer's output buffer, one resolved bulk chunk charged to `bulk`, into a staged file that seals its exact length and digest. Serializer scratch of one resolver per entry is charged beside it. Each section reserves the 64 MiB record limit of node staging while it is written. |
 | Materialized relay | Shared Arrow row views, typed branch keys, per-row watermarks, revision, ownership fence and branch generation, taken under the relay's assignment barrier with at most 8 MiB of row metadata charged first. Capture reads the entries current at the cut, including updates since the periodic snapshot, and never waits for that interval; a live capture takes the same complete generation under the barrier. An empty relay contributes an explicit empty generation. A stopped relay is read from its stored checkpoint view, one bounded group at a time, retaining the original Arrow bytes. |
 | Deduplicator keyspace and window | Every key with its first-seen time, or every retained row with its aggregate arguments, admission sequence, watermarks and branch incarnation and every linear histogram's pending delayed removals, written as an rkyv descriptor beside bounded Arrow groups. A branch with no live publication on its owner, an inactive window with a sealed publication included, contributes its stored checkpoint. |
 
 A stored keyspace or window selection retains the cut's database view until its scheduled owner and
 schema are checked. The owner opens one selected checkpoint at a time, streams it to quota-owned disk
 in 64 KiB blocks, and admits an immutable mapping of it after unlinking its temporary name; the
-checkpoint's revision comes from the same read as its bytes. Keyspace validation compares borrowed
+checkpoint's revision comes from the same read as its bytes. Before opening a stored branch
+checkpoint, the owner reserves three persisted segments and 8 KiB of framing alongside the
+output buffer sized by the node's resolved bulk chunk. The output share has a 64 KiB minimum.
+Inferencer capture reserves twice the snapshot footprint and two fixed 64 KiB blocks alongside
+the same output share. A stored inferencer's retained charge grows without waiting for a second
+grant. Keyspace validation compares borrowed
 native keys for uniqueness and records their sizes, and only the next archive group is converted into
 owned key parts. A stored window validates its header, sequences, identities and delayed removals,
 indexes its native column sections, decodes one native group at a time to find the canonical archive
@@ -543,17 +548,18 @@ them:
   restored one, every key normalized in an expiry map, which is how a key the archive holds twice is
   found and refused; the keys' parts and values are charged to `restore_metadata` as each group is
   admitted, beside the fixed per-key share the description admitted. The native checkpoint then
-  streams from the resident keyspace into a quota-owned file through a 64 KiB buffered writer under the
-  fixed 2 MiB bulk grant, one entry at a time, in exactly the encoding the runtime writes for the same
-  keys.
+  streams from the resident keyspace into a quota-owned file one entry at a time, in exactly the
+  encoding the runtime writes for the same keys. The bulk grant covers the node's resolved writer
+  buffer with a floor of 2 MiB.
 - **Inferencer tensors.** Planning checks the scheduled unit, schema/model fingerprints, declaration
   shapes, exact length/digest, typed branch fingerprint and lifecycle incarnation. The restored
   branching checks the descriptor's key and names the branch in a refusal. The same conversion
   runs again during installation. One admitted storage job reads only the verified archive slice
   through a cancellable 64 KiB reader and wraps its identical ordered F32 bits in the current native
-  snapshot frame. No ONNX invocation, cast or shape normalization occurs. Twice the model's
-  snapshot footprint plus 128 KiB covers decoded tensors, encoded output and both fixed reader/writer buffers. The result streams through the
-  existing authority-fenced installer to the scheduled owner and replicas.
+  snapshot frame. No ONNX invocation, cast or shape normalization occurs. The job reserves twice
+  the model's snapshot footprint, the fixed 64 KiB reader and the configured writer buffer with a
+  64 KiB minimum output share. The result streams through the existing authority-fenced installer
+  to the scheduled owner and replicas.
 - **Windows.** Each archived group's input rows, then its argument columns, decode under the window's
   input and argument schemas and are sealed into quota-owned pieces as soon as each is admitted, so a
   conversion holds one archived section and its decoded batch at a time and never the whole window.
@@ -565,10 +571,11 @@ them:
   typed sections, and the pieces are concatenated into the checkpoint file through one 64 KiB buffer,
   briefly occupying twice its disk space.
 - **Branch lifecycle and Kafka offsets.** Each converts entry by entry directly into a quota-owned
-  file through a 64 KiB buffered writer, with fixed-capacity serializer scratch holding one resolver
-  per entry and the largest entry's nested resolvers, so neither the converted entries nor the encoded
-  output is collected. Completed native files retain their actual length, digest and rounded disk
-  quota until their last reader exits.
+  file. The bulk grant covers the resolved writer buffer with a floor of 2 MiB, including when
+  branch lifecycles are regrouped to match the restored partition count. The restore metadata
+  charge covers one serializer resolver per entry and the largest entry's nested resolvers.
+  Completed native files retain their actual length, digest and rounded disk quota until their
+  last reader exits.
 - **Guest saves** need no conversion and stream from the staged archive.
 
 The preparation reservation covers overlapping owned archive values, aligned decode buffers, model

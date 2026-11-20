@@ -1405,13 +1405,13 @@ impl MembershipSnapshot {
     }
 
     /// Plans this reconciliation's membership changes. A run outside the membership that
-    /// `quota_refused` holds keeps the refusal it received and stays outside, whatever else would
+    /// `refused` holds keeps the refusal it received and stays outside, whatever else would
     /// admit it now.
     fn automatic_mutations(
         &self,
         gossip: &GossipState,
         admission_fences: &BTreeMap<ClusterNodeName, ClusterNodeIncarnation>,
-        quota_refused: &QuotaRefusedRuns,
+        refused: &RefusedRuns,
     ) -> MembershipPlan {
         let candidates = gossip.latest_admission_candidates();
         let voters = self.voter_ids();
@@ -1425,18 +1425,25 @@ impl MembershipSnapshot {
                 mutations: vec![MembershipMutation::CompleteVoterChange],
                 refusals,
                 verdicts,
+                refused_newcomers: BTreeMap::new(),
             };
         }
         let mut mutations = Vec::new();
         let mut desired_voters = voters.clone();
+        let mut refused_newcomers = BTreeMap::new();
         for node in candidates.into_values() {
             let run = node.identity();
-            if self.node(&node.node_id).is_none()
-                && let Some(refusal) = quota_refused.refusal_of(&run)
-            {
+            let is_member = self.node(&node.node_id).is_some();
+            if !is_member && let Some(refusal) = refused.refusal_of(&run) {
                 // The run stops on this refusal once it reads it, so admitting it now would leave
                 // a member that never runs.
-                verdicts.insert(run, AdmissionVerdict::QuotaRefused { refusal });
+                verdicts.insert(run.clone(), refusal.verdict());
+                if let Some(reason) = refusal.reported_reason() {
+                    refusals.push(AdmissionRefusal {
+                        candidate: run,
+                        reason,
+                    });
+                }
                 continue;
             }
             if !voters.contains(&node.node_id)
@@ -1450,6 +1457,17 @@ impl MembershipSnapshot {
                             mismatch: mismatch.clone(),
                         },
                     );
+                    // A newcomer's run stops on this verdict, so later reconciliations keep it
+                    // while gossip still shows the run, whatever the live voters have become.
+                    if !is_member {
+                        refused_newcomers.insert(
+                            node.identity(),
+                            IncompatibleVoter {
+                                voter: voter.clone(),
+                                mismatch: mismatch.clone(),
+                            },
+                        );
+                    }
                 }
                 refusals.push(AdmissionRefusal {
                     candidate: node.identity(),
@@ -1499,6 +1517,7 @@ impl MembershipSnapshot {
             mutations,
             refusals,
             verdicts,
+            refused_newcomers,
         }
     }
 
@@ -1587,6 +1606,10 @@ struct MembershipPlan {
     mutations: Vec<MembershipMutation>,
     refusals: Vec<AdmissionRefusal>,
     verdicts: BTreeMap<ClusterNodeIdentity, AdmissionVerdict>,
+    /// The runs outside the membership that this reconciliation refused because they cannot run
+    /// beside a live voter, with that voter. Later reconciliations keep refusing each of them
+    /// while gossip shows it.
+    refused_newcomers: BTreeMap<ClusterNodeIdentity, IncompatibleVoter>,
 }
 
 /// A gossip-discovered node the leader leaves outside the membership.
@@ -1683,35 +1706,77 @@ impl ReportedAdmissionRefusals {
     }
 }
 
-/// The runs outside the membership that this node, while it led, refused for the cluster's node
-/// quota, with the refusal each received.
+/// Why the leader refused a run outside the membership.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum RunRefusal {
+    /// Admitting the run would exceed the cluster's node quota.
+    NodeQuota(nervix_licensing_vocabulary::LicensingRefusal),
+    /// The run cannot run beside a live voter whose run the leader accepted.
+    Prerequisites(IncompatibleVoter),
+}
+
+impl RunRefusal {
+    /// The verdict the leader publishes on the refused run.
+    fn verdict(&self) -> AdmissionVerdict {
+        match self {
+            Self::NodeQuota(refusal) => AdmissionVerdict::QuotaRefused { refusal: *refusal },
+            Self::Prerequisites(IncompatibleVoter { voter, mismatch }) => {
+                AdmissionVerdict::Refused {
+                    voter: voter.clone(),
+                    mismatch: mismatch.clone(),
+                }
+            }
+        }
+    }
+
+    /// Why the leader leaves the refused run outside the membership, when it reports that reason
+    /// among a reconciliation's refusals. A node-quota refusal is reported where licensing refuses
+    /// the run instead.
+    fn reported_reason(&self) -> Option<AdmissionRefusalReason> {
+        match self {
+            Self::NodeQuota(_) => None,
+            Self::Prerequisites(IncompatibleVoter { voter, mismatch }) => {
+                Some(AdmissionRefusalReason::Incompatible {
+                    voter: voter.clone(),
+                    mismatch: mismatch.clone(),
+                })
+            }
+        }
+    }
+}
+
+/// The runs outside the membership that this node, while it led, refused, with the refusal each
+/// received: for the cluster's node quota, or because the run cannot run beside a live voter.
 ///
 /// A refused run stops once it reads its verdict, yet the failure detector keeps it live in gossip
 /// for several of its heartbeat intervals, so later reconciliations still see it as a candidate.
-/// The leader keeps refusing such a run whatever the licensing policy has become, because
-/// admitting a run that has stopped would leave a member that never runs. A run is forgotten once
-/// it is no longer the current run of an admission candidate; the node's next run is judged again.
+/// The leader keeps refusing such a run with the verdict it gave, whatever the licensing policy or
+/// the live voters have become since, because admitting a run that has stopped would leave a
+/// member that never runs. A run is forgotten once it is no longer the current run of an admission
+/// candidate; the node's next run is judged again.
 #[derive(Debug, Default)]
-struct QuotaRefusedRuns(
-    BTreeMap<ClusterNodeIdentity, nervix_licensing_vocabulary::LicensingRefusal>,
-);
+struct RefusedRuns(BTreeMap<ClusterNodeIdentity, RunRefusal>);
 
-impl QuotaRefusedRuns {
+impl RefusedRuns {
     /// The refusal this node gave `run`, if it refused it.
-    fn refusal_of(
-        &self,
-        run: &ClusterNodeIdentity,
-    ) -> Option<nervix_licensing_vocabulary::LicensingRefusal> {
-        self.0.get(run).copied()
+    fn refusal_of(&self, run: &ClusterNodeIdentity) -> Option<&RunRefusal> {
+        self.0.get(run)
     }
 
-    /// Records that this node refused `run` for the node quota.
-    fn record(
-        &mut self,
-        run: ClusterNodeIdentity,
-        refusal: nervix_licensing_vocabulary::LicensingRefusal,
-    ) {
+    /// Records that this node refused `run`.
+    fn record(&mut self, run: ClusterNodeIdentity, refusal: RunRefusal) {
         self.0.insert(run, refusal);
+    }
+
+    /// Records that this node refused each run of `refused_newcomers` because it cannot run
+    /// beside the voter named with it.
+    fn record_refused_newcomers(
+        &mut self,
+        refused_newcomers: BTreeMap<ClusterNodeIdentity, IncompatibleVoter>,
+    ) {
+        for (run, incompatible) in refused_newcomers {
+            self.record(run, RunRefusal::Prerequisites(incompatible));
+        }
     }
 
     /// Forgets every refused run that is no longer the current run of one of `candidates`: its
@@ -1737,7 +1802,7 @@ impl QuotaRefusedRuns {
 #[derive(Debug, Default)]
 struct MembershipJudgments {
     reported: ReportedAdmissionRefusals,
-    quota_refused: QuotaRefusedRuns,
+    refused: RefusedRuns,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -2639,7 +2704,7 @@ struct ConsensusState {
     raft_retention: RaftRetentionPolicy,
     operations: RaftOperationSettings,
     /// Serializes membership changes, and holds the admission refusals the leader has reported
-    /// and the newcomer runs it refused for the node quota.
+    /// and the newcomer runs it refused, for the node quota or for their prerequisites.
     membership_mutation: AsyncMutex<MembershipJudgments>,
     /// The verdicts on live runs this node holds while it leads, replaced by every membership
     /// reconciliation and withdrawn once a reconciliation finds another node leading.
@@ -5042,7 +5107,7 @@ impl Administrator {
         let mut judgments = self.inner.membership_mutation.lock().await;
         let gossip = gossip.await;
         let candidates = gossip.latest_admission_candidates();
-        judgments.quota_refused.retain_candidates(&candidates);
+        judgments.refused.retain_candidates(&candidates);
         // One observation gives both the leadership and the term the verdicts are published under.
         let metrics = self.inner.raft.metrics().borrow_watched().clone();
         if metrics.current_leader.as_ref() != Some(&self.inner.local_node_id) {
@@ -5062,8 +5127,12 @@ impl Administrator {
                 mutations,
                 refusals,
                 mut verdicts,
-            } = current.automatic_mutations(&gossip, &admission_fences, &judgments.quota_refused);
+                refused_newcomers,
+            } = current.automatic_mutations(&gossip, &admission_fences, &judgments.refused);
             judgments.reported.report(&refusals);
+            judgments
+                .refused
+                .record_refused_newcomers(refused_newcomers);
             self.inner
                 .admission_verdicts
                 .send_replace(Some(AdmissionVerdicts::new(
@@ -5125,9 +5194,10 @@ impl Administrator {
                                 .identity();
                             // Later reconciliations keep this verdict for the run until it leaves
                             // gossip, whatever the licensing policy has become.
-                            judgments
-                                .quota_refused
-                                .record(run.clone(), *refusal.current_context());
+                            judgments.refused.record(
+                                run.clone(),
+                                RunRefusal::NodeQuota(*refusal.current_context()),
+                            );
                             // Publish only the fixed membership verdict; the report stays at its reporting boundary.
                             verdicts.insert(
                                 run,
@@ -8265,15 +8335,15 @@ mod tests {
         CommandExecutionDisposition, CommandExecutionEffect, CommandExecutionRequestConflict,
         CommandExecutionResult, CommandExecutionState, ConsensusCommand, ConsensusConflict,
         ConsensusResponse, FjallLogReader, FjallStore, GossipNode, GossipState,
-        IncomingSnapshotTransfer, LeaderTenure, MembershipMutation, MembershipSnapshot,
-        ProtocolOriginError, QuotaRefusedRuns, ResourceRecords, SnapshotChunkPart, SnapshotMeta,
-        SnapshotTransferError, SnapshotTransferIds, StateMachineChanges, StateMachineData,
-        StoredMembership, TransactionApplicationOutcome, TransactionCommandResult,
-        TransactionCommitAdmissionFailure, TransactionMutationError, TransactionOutcome,
-        TransactionStatement, TransactionStatementRequest, TransactionStepEffect,
-        TransactionStepResult, TypeConfig, UserCredentials, apply_consensus_command,
-        apply_consensus_command_at, apply_transaction_step_effect, io_error, storage_decode,
-        validate_protocol_origin,
+        IncomingSnapshotTransfer, IncompatibleVoter, LeaderTenure, MembershipMutation,
+        MembershipSnapshot, ProtocolOriginError, RefusedRuns, ResourceRecords, RunRefusal,
+        SnapshotChunkPart, SnapshotMeta, SnapshotTransferError, SnapshotTransferIds,
+        StateMachineChanges, StateMachineData, StoredMembership, TransactionApplicationOutcome,
+        TransactionCommandResult, TransactionCommitAdmissionFailure, TransactionMutationError,
+        TransactionOutcome, TransactionStatement, TransactionStatementRequest,
+        TransactionStepEffect, TransactionStepResult, TypeConfig, UserCredentials,
+        apply_consensus_command, apply_consensus_command_at, apply_transaction_step_effect,
+        io_error, storage_decode, validate_protocol_origin,
     };
     use crate::{
         ClusterNodeName, ConsensusError, LeadershipObservation, LogIdOf, ReplicatedTransaction,
@@ -8743,7 +8813,7 @@ mod tests {
 
         assert_eq!(
             membership
-                .automatic_mutations(&gossip, &admission_fences, &QuotaRefusedRuns::default())
+                .automatic_mutations(&gossip, &admission_fences, &RefusedRuns::default())
                 .mutations,
             vec![
                 MembershipMutation::AddLearner {
@@ -8773,7 +8843,7 @@ mod tests {
 
         assert!(
             membership
-                .automatic_mutations(&gossip, &admission_fences, &QuotaRefusedRuns::default())
+                .automatic_mutations(&gossip, &admission_fences, &RefusedRuns::default())
                 .mutations
                 .is_empty()
         );
@@ -8796,7 +8866,7 @@ mod tests {
 
         assert_eq!(
             membership
-                .automatic_mutations(&gossip, &admission_fences, &QuotaRefusedRuns::default())
+                .automatic_mutations(&gossip, &admission_fences, &RefusedRuns::default())
                 .mutations,
             vec![
                 MembershipMutation::AddLearner {
@@ -8835,7 +8905,7 @@ mod tests {
 
         assert_eq!(
             membership
-                .automatic_mutations(&gossip, &admission_fences, &QuotaRefusedRuns::default())
+                .automatic_mutations(&gossip, &admission_fences, &RefusedRuns::default())
                 .mutations,
             vec![
                 MembershipMutation::UpdateAddress {
@@ -8877,7 +8947,7 @@ mod tests {
 
         assert_eq!(
             membership
-                .automatic_mutations(&gossip, &admission_fences, &QuotaRefusedRuns::default())
+                .automatic_mutations(&gossip, &admission_fences, &RefusedRuns::default())
                 .mutations,
             vec![MembershipMutation::UpdateAddress {
                 node_id: restarted.clone(),
@@ -8896,7 +8966,7 @@ mod tests {
         membership = uniform_membership_snapshot(membership.voter_ids(), updated_addresses);
         assert!(
             membership
-                .automatic_mutations(&gossip, &admission_fences, &QuotaRefusedRuns::default())
+                .automatic_mutations(&gossip, &admission_fences, &RefusedRuns::default())
                 .mutations
                 .is_empty()
         );
@@ -8922,7 +8992,7 @@ mod tests {
 
         assert!(
             membership
-                .automatic_mutations(&gossip, &admission_fences, &QuotaRefusedRuns::default())
+                .automatic_mutations(&gossip, &admission_fences, &RefusedRuns::default())
                 .mutations
                 .is_empty()
         );
@@ -8935,7 +9005,7 @@ mod tests {
             .incarnation = ClusterNodeIncarnation::new(3);
         assert_eq!(
             membership
-                .automatic_mutations(&restarted, &admission_fences, &QuotaRefusedRuns::default())
+                .automatic_mutations(&restarted, &admission_fences, &RefusedRuns::default())
                 .mutations,
             vec![
                 MembershipMutation::AddLearner {
@@ -8992,7 +9062,7 @@ mod tests {
         );
 
         let plan =
-            membership.automatic_mutations(&gossip, &BTreeMap::new(), &QuotaRefusedRuns::default());
+            membership.automatic_mutations(&gossip, &BTreeMap::new(), &RefusedRuns::default());
 
         assert!(plan.mutations.is_empty());
         assert_eq!(
@@ -9030,7 +9100,7 @@ mod tests {
         );
 
         let plan =
-            membership.automatic_mutations(&gossip, &BTreeMap::new(), &QuotaRefusedRuns::default());
+            membership.automatic_mutations(&gossip, &BTreeMap::new(), &RefusedRuns::default());
 
         let mismatch = PrerequisiteMismatch::Timing {
             prerequisite: TimingPrerequisite::RaftHeartbeatInterval,
@@ -9088,7 +9158,7 @@ mod tests {
         );
 
         let plan =
-            membership.automatic_mutations(&gossip, &BTreeMap::new(), &QuotaRefusedRuns::default());
+            membership.automatic_mutations(&gossip, &BTreeMap::new(), &RefusedRuns::default());
 
         assert!(plan.refusals.is_empty());
         assert_eq!(
@@ -9188,7 +9258,7 @@ mod tests {
         };
         assert_eq!(
             joint
-                .automatic_mutations(&gossip, &BTreeMap::new(), &QuotaRefusedRuns::default())
+                .automatic_mutations(&gossip, &BTreeMap::new(), &RefusedRuns::default())
                 .mutations,
             vec![MembershipMutation::CompleteVoterChange]
         );
@@ -9202,7 +9272,7 @@ mod tests {
         let uniform = voters(&target);
         assert_eq!(
             uniform
-                .automatic_mutations(&gossip, &BTreeMap::new(), &QuotaRefusedRuns::default())
+                .automatic_mutations(&gossip, &BTreeMap::new(), &RefusedRuns::default())
                 .mutations,
             vec![
                 MembershipMutation::AddLearner {
@@ -9234,14 +9304,14 @@ mod tests {
         let fences = BTreeMap::from([(removed, ClusterNodeIncarnation::new(3))]);
         assert_eq!(
             joint
-                .automatic_mutations(&gossip, &fences, &QuotaRefusedRuns::default())
+                .automatic_mutations(&gossip, &fences, &RefusedRuns::default())
                 .mutations,
             vec![MembershipMutation::CompleteVoterChange]
         );
         assert_eq!(joint.joint_target(), Some(&voters(&target).voter_ids()));
         assert!(
             voters(&target)
-                .automatic_mutations(&gossip, &fences, &QuotaRefusedRuns::default())
+                .automatic_mutations(&gossip, &fences, &RefusedRuns::default())
                 .mutations
                 .is_empty()
         );
@@ -9530,7 +9600,7 @@ mod tests {
         let plan = voters(&["node-1", "node-2"]).automatic_mutations(
             &gossip,
             &BTreeMap::new(),
-            &QuotaRefusedRuns::default(),
+            &RefusedRuns::default(),
         );
 
         let mismatch = heartbeat_mismatch(Duration::from_millis(250), Duration::from_secs(1));
@@ -9576,7 +9646,7 @@ mod tests {
         let plan = voters(&["node-1", "node-2", "node-3"]).automatic_mutations(
             &gossip,
             &BTreeMap::new(),
-            &QuotaRefusedRuns::default(),
+            &RefusedRuns::default(),
         );
 
         assert_eq!(
@@ -9615,7 +9685,7 @@ mod tests {
         let plan = voters(&["node-1", "node-2"]).automatic_mutations(
             &gossip,
             &BTreeMap::new(),
-            &QuotaRefusedRuns::default(),
+            &RefusedRuns::default(),
         );
 
         let mismatch = heartbeat_mismatch(Duration::from_millis(100), Duration::from_millis(250));
@@ -9654,7 +9724,7 @@ mod tests {
         let plan = voters(&["node-1", "node-2"]).automatic_mutations(
             &gossip,
             &BTreeMap::new(),
-            &QuotaRefusedRuns::default(),
+            &RefusedRuns::default(),
         );
 
         assert_eq!(
@@ -9694,10 +9764,10 @@ mod tests {
     }
 
     /// The refusals a leader remembers after refusing `runs` for the node quota.
-    fn quota_refused(runs: &[ClusterNodeIdentity]) -> QuotaRefusedRuns {
-        let mut refused = QuotaRefusedRuns::default();
+    fn quota_refused(runs: &[ClusterNodeIdentity]) -> RefusedRuns {
+        let mut refused = RefusedRuns::default();
         for run in runs {
-            refused.record(run.clone(), lapsed_node_refusal());
+            refused.record(run.clone(), RunRefusal::NodeQuota(lapsed_node_refusal()));
         }
         refused
     }
@@ -9799,7 +9869,7 @@ mod tests {
             &quota_refused(&[node_identity("node-2", 2)]),
         );
         let unremembered =
-            membership.automatic_mutations(&gossip, &BTreeMap::new(), &QuotaRefusedRuns::default());
+            membership.automatic_mutations(&gossip, &BTreeMap::new(), &RefusedRuns::default());
 
         assert_eq!(remembered, unremembered);
         assert_eq!(
@@ -9840,11 +9910,312 @@ mod tests {
 
         assert_eq!(
             refused.refusal_of(&node_identity("node-2", 2)),
-            Some(lapsed_node_refusal())
+            Some(&RunRefusal::NodeQuota(lapsed_node_refusal()))
         );
         assert_eq!(refused.refusal_of(&node_identity("node-3", 3)), None);
         assert_eq!(refused.refusal_of(&node_identity("node-3", 5)), None);
         assert_eq!(refused.refusal_of(&node_identity("node-4", 4)), None);
+    }
+
+    /// node-4's 400ms heartbeat is the one a newcomer at 166ms cannot run beside, seen from node-4.
+    fn refused_beside_node_4() -> IncompatibleVoter {
+        IncompatibleVoter {
+            voter: ClusterNodeName::parse("node-4").assured("the test node name is valid"),
+            mismatch: heartbeat_mismatch(Duration::from_millis(400), Duration::from_millis(166)),
+        }
+    }
+
+    /// The refusals a leader remembers after refusing `runs` because node-4 cannot run beside them.
+    fn prerequisites_refused(runs: &[ClusterNodeIdentity]) -> RefusedRuns {
+        let mut refused = RefusedRuns::default();
+        for run in runs {
+            refused.record(
+                run.clone(),
+                RunRefusal::Prerequisites(refused_beside_node_4()),
+            );
+        }
+        refused
+    }
+
+    #[test]
+    fn only_a_newcomer_refused_for_its_prerequisites_is_kept_for_later_reconciliations() {
+        // node-2's returning run cannot run beside the older voter node-1. The newcomer node-3 and
+        // the learner node-5 cannot run beside node-4, and the newcomer node-6 has published no
+        // record. Only node-3 is outside the membership and refused, so only its refusal is kept.
+        let first = ClusterNodeName::parse("node-1").assured("the test node name is valid");
+        let second = ClusterNodeName::parse("node-2").assured("the test node name is valid");
+        let fourth = ClusterNodeName::parse("node-4").assured("the test node name is valid");
+        let learner = ClusterNodeName::parse("node-5").assured("the test node name is valid");
+        let mut unpublished = undiscovered_node("node-6", 8);
+        unpublished.prerequisites = None;
+        let gossip = GossipState {
+            live_nodes: vec![
+                live_voter("node-1", 1, Duration::from_millis(300)),
+                live_voter("node-2", 7, Duration::from_secs(1)),
+                live_voter("node-3", 6, Duration::from_millis(166)),
+                live_voter("node-4", 2, Duration::from_millis(400)),
+                live_voter("node-5", 5, Duration::from_millis(166)),
+                unpublished,
+            ],
+            dead_node_ids: BTreeSet::new(),
+            dead_node_identities: BTreeSet::new(),
+        };
+        let membership = uniform_membership_snapshot(
+            BTreeSet::from([first.clone(), second.clone(), fourth.clone()]),
+            BTreeMap::from([
+                (first, "node-1.test:7443".to_string()),
+                (second, "node-2.test:7443".to_string()),
+                (fourth, "node-4.test:7443".to_string()),
+                (learner, "node-5.test:7443".to_string()),
+            ]),
+        );
+
+        let plan =
+            membership.automatic_mutations(&gossip, &BTreeMap::new(), &RefusedRuns::default());
+
+        assert!(plan.mutations.is_empty());
+        assert_eq!(
+            plan.refused_newcomers,
+            BTreeMap::from([(node_identity("node-3", 6), refused_beside_node_4())])
+        );
+        let mut refused_runs = BTreeSet::new();
+        for refusal in &plan.refusals {
+            refused_runs.insert(refusal.candidate.clone());
+        }
+        assert_eq!(
+            refused_runs,
+            BTreeSet::from([
+                node_identity("node-2", 7),
+                node_identity("node-3", 6),
+                node_identity("node-5", 5),
+                node_identity("node-6", 8),
+            ])
+        );
+    }
+
+    #[test]
+    fn a_refused_newcomer_stays_refused_after_the_voter_that_refused_it_is_dropped() {
+        // node-4 refused node-3's run and has since been dropped: the voters left would admit the
+        // run, so only the remembered refusal keeps it out.
+        let first = ClusterNodeName::parse("node-1").assured("the test node name is valid");
+        let second = ClusterNodeName::parse("node-2").assured("the test node name is valid");
+        let joining = ClusterNodeName::parse("node-3").assured("the test node name is valid");
+        let gossip = GossipState {
+            live_nodes: vec![
+                live_voter("node-1", 1, Duration::from_millis(300)),
+                live_voter("node-2", 2, Duration::from_millis(300)),
+                live_voter("node-3", 6, Duration::from_millis(166)),
+            ],
+            dead_node_ids: BTreeSet::new(),
+            dead_node_identities: BTreeSet::new(),
+        };
+        let membership = voters(&["node-1", "node-2"]);
+
+        let remembered = membership.automatic_mutations(
+            &gossip,
+            &BTreeMap::new(),
+            &prerequisites_refused(&[node_identity("node-3", 6)]),
+        );
+        let unremembered =
+            membership.automatic_mutations(&gossip, &BTreeMap::new(), &RefusedRuns::default());
+
+        let IncompatibleVoter { voter, mismatch } = refused_beside_node_4();
+        assert!(remembered.mutations.is_empty());
+        assert!(remembered.refused_newcomers.is_empty());
+        assert_eq!(
+            remembered.refusals,
+            vec![AdmissionRefusal {
+                candidate: node_identity("node-3", 6),
+                reason: AdmissionRefusalReason::Incompatible {
+                    voter: voter.clone(),
+                    mismatch: mismatch.clone(),
+                },
+            }]
+        );
+        assert_eq!(
+            remembered.verdicts,
+            BTreeMap::from([
+                (node_identity("node-1", 1), AdmissionVerdict::Accepted),
+                (node_identity("node-2", 2), AdmissionVerdict::Accepted),
+                (
+                    node_identity("node-3", 6),
+                    AdmissionVerdict::Refused { voter, mismatch },
+                ),
+            ])
+        );
+        assert_eq!(
+            unremembered.mutations,
+            vec![
+                MembershipMutation::AddLearner {
+                    node_id: joining.clone(),
+                    endpoint: node_endpoint("node-3.test:7443"),
+                },
+                MembershipMutation::ChangeVoters {
+                    voters: BTreeSet::from([first, second, joining]),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn a_refused_newcomer_stays_refused_after_the_voter_that_refused_it_returns_compatible() {
+        // node-4 refused node-3's run, then returned as a run at 300ms that node-3 could run
+        // beside: the voter's new record does not reopen the refused run.
+        let gossip = GossipState {
+            live_nodes: vec![
+                live_voter("node-1", 1, Duration::from_millis(300)),
+                live_voter("node-2", 2, Duration::from_millis(300)),
+                live_voter("node-3", 6, Duration::from_millis(166)),
+                live_voter("node-4", 9, Duration::from_millis(300)),
+            ],
+            dead_node_ids: BTreeSet::new(),
+            dead_node_identities: BTreeSet::new(),
+        };
+
+        let plan = voters(&["node-1", "node-2", "node-4"]).automatic_mutations(
+            &gossip,
+            &BTreeMap::new(),
+            &prerequisites_refused(&[node_identity("node-3", 6)]),
+        );
+
+        let IncompatibleVoter { voter, mismatch } = refused_beside_node_4();
+        assert!(plan.mutations.is_empty());
+        assert_eq!(
+            plan.verdicts.get(&node_identity("node-3", 6)),
+            Some(&AdmissionVerdict::Refused { voter, mismatch })
+        );
+        assert_eq!(
+            plan.verdicts.get(&node_identity("node-4", 9)),
+            Some(&AdmissionVerdict::Accepted)
+        );
+    }
+
+    #[test]
+    fn the_next_run_of_a_node_refused_for_its_prerequisites_is_judged_again() {
+        let first = ClusterNodeName::parse("node-1").assured("the test node name is valid");
+        let second = ClusterNodeName::parse("node-2").assured("the test node name is valid");
+        let joining = ClusterNodeName::parse("node-3").assured("the test node name is valid");
+        let gossip = GossipState {
+            live_nodes: vec![
+                live_voter("node-1", 1, Duration::from_millis(300)),
+                live_voter("node-2", 2, Duration::from_millis(300)),
+                live_voter("node-3", 10, Duration::from_millis(166)),
+            ],
+            dead_node_ids: BTreeSet::new(),
+            dead_node_identities: BTreeSet::new(),
+        };
+
+        let plan = voters(&["node-1", "node-2"]).automatic_mutations(
+            &gossip,
+            &BTreeMap::new(),
+            &prerequisites_refused(&[node_identity("node-3", 6)]),
+        );
+
+        assert!(plan.refusals.is_empty());
+        assert_eq!(
+            plan.mutations,
+            vec![
+                MembershipMutation::AddLearner {
+                    node_id: joining.clone(),
+                    endpoint: node_endpoint("node-3.test:7443"),
+                },
+                MembershipMutation::ChangeVoters {
+                    voters: BTreeSet::from([first, second, joining]),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn a_remembered_prerequisite_refusal_never_holds_back_a_member() {
+        // node-3 is already a learner of the membership: the refusal of its run judged no member,
+        // so it changes nothing about the member's catch-up and promotion.
+        let first = ClusterNodeName::parse("node-1").assured("the test node name is valid");
+        let learner = ClusterNodeName::parse("node-3").assured("the test node name is valid");
+        let gossip = GossipState {
+            live_nodes: vec![
+                live_voter("node-1", 1, Duration::from_millis(300)),
+                live_voter("node-3", 6, Duration::from_millis(166)),
+            ],
+            dead_node_ids: BTreeSet::new(),
+            dead_node_identities: BTreeSet::new(),
+        };
+        let membership = uniform_membership_snapshot(
+            BTreeSet::from([first.clone()]),
+            BTreeMap::from([
+                (first.clone(), "node-1.test:7443".to_string()),
+                (learner.clone(), "node-3.test:7443".to_string()),
+            ]),
+        );
+
+        let remembered = membership.automatic_mutations(
+            &gossip,
+            &BTreeMap::new(),
+            &prerequisites_refused(&[node_identity("node-3", 6)]),
+        );
+        let unremembered =
+            membership.automatic_mutations(&gossip, &BTreeMap::new(), &RefusedRuns::default());
+
+        assert_eq!(remembered, unremembered);
+        assert_eq!(
+            remembered.mutations,
+            vec![
+                MembershipMutation::AddLearner {
+                    node_id: learner.clone(),
+                    endpoint: node_endpoint("node-3.test:7443"),
+                },
+                MembershipMutation::ChangeVoters {
+                    voters: BTreeSet::from([first, learner]),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn a_newcomer_refused_in_one_reconciliation_stays_refused_in_the_next() {
+        // The first pass sees node-4 refuse node-3's run, as the leader records it. By the next
+        // pass node-4 has been dropped, and only what the first pass recorded keeps the run out.
+        let mut refused = RefusedRuns::default();
+        let with_node_4 = GossipState {
+            live_nodes: vec![
+                live_voter("node-1", 1, Duration::from_millis(300)),
+                live_voter("node-2", 2, Duration::from_millis(300)),
+                live_voter("node-3", 6, Duration::from_millis(166)),
+                live_voter("node-4", 3, Duration::from_millis(400)),
+            ],
+            dead_node_ids: BTreeSet::new(),
+            dead_node_identities: BTreeSet::new(),
+        };
+        let first_pass = voters(&["node-1", "node-2", "node-4"]).automatic_mutations(
+            &with_node_4,
+            &BTreeMap::new(),
+            &refused,
+        );
+        refused.record_refused_newcomers(first_pass.refused_newcomers);
+
+        let without_node_4 = GossipState {
+            live_nodes: vec![
+                live_voter("node-1", 1, Duration::from_millis(300)),
+                live_voter("node-2", 2, Duration::from_millis(300)),
+                live_voter("node-3", 6, Duration::from_millis(166)),
+            ],
+            dead_node_ids: BTreeSet::new(),
+            dead_node_identities: BTreeSet::new(),
+        };
+        refused.retain_candidates(&without_node_4.latest_admission_candidates());
+        let next_pass = voters(&["node-1", "node-2"]).automatic_mutations(
+            &without_node_4,
+            &BTreeMap::new(),
+            &refused,
+        );
+
+        let IncompatibleVoter { voter, mismatch } = refused_beside_node_4();
+        assert!(first_pass.mutations.is_empty());
+        assert!(next_pass.mutations.is_empty());
+        assert_eq!(
+            next_pass.verdicts.get(&node_identity("node-3", 6)),
+            Some(&AdmissionVerdict::Refused { voter, mismatch })
+        );
     }
 
     #[test]

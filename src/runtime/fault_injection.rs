@@ -78,6 +78,12 @@ impl ConfiguredFaultInjection {
     ) {
     }
 
+    pub(in crate::runtime) async fn delay_ownership_handoff_checkpoint_read_if_armed(
+        &self,
+        _domain: &DomainName,
+    ) {
+    }
+
     pub(in crate::runtime) fn emitter_should_fail(&self, _emitter: &EmitterName) -> bool {
         false
     }

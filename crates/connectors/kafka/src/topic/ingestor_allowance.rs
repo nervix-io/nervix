@@ -1,0 +1,293 @@
+//! Kafka consumer-group control during an ingestor's read allowance hold.
+//!
+//! Layer: engines and infrastructure.
+//! - **Owns.** The native fetch pauses taken during an allowance hold and polling the same
+//!   consumer's group events while its partitions are paused.
+//! - **Depends on.** The connector contract, Kafka control execution, the primitive boundary,
+//!   and rust-rdkafka's stream and partition assignment APIs.
+//! - **Must not know.** How the host calculates its allowance, graph acknowledgements, relays,
+//!   or schedules.
+
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        engine,
+        reason = "services one retained Kafka consumer during a read hold"
+    )
+)]
+
+use std::{
+    collections::BTreeSet,
+    convert::Infallible,
+    future::{Future, pending},
+    task::{Context, Poll, Wake, Waker},
+    time::Duration,
+};
+
+use async_trait::async_trait;
+use error_stack::{Report, ResultExt as _};
+use meticulous::{OptionExt as _, ResultExt as _};
+use nervix_connector::{IngestorError, IngestorReadHold};
+use nervix_primitives::{
+    sync::{Notify, StdArc},
+    time::{Instant, sleep_until},
+};
+use rdkafka::{
+    config::ClientConfig, consumer::Consumer as _, error::RDKafkaErrorCode,
+    topic_partition_list::TopicPartitionList,
+};
+
+use super::{KAFKA, KafkaTopicIngestor, KafkaTopicIngestorError, KafkaTopicIngestorOffsetMode};
+
+/// A normal stream read can end up to half a native poll interval after the last driver poll.
+/// Service starts a quarter interval after that read ends, leaving the last quarter for
+/// executor admission and native control.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "reserves time for a held poll inside the driver's own interval"
+    )
+)]
+const POLL_MARGIN_DIVISOR: u32 = 4;
+
+pub(super) struct KafkaAllowanceHold {
+    service_delay: Duration,
+    next_service: Option<Instant>,
+    /// Each topic partition the current hold may have paused, including revoked partitions
+    /// whose native pause can survive a rebalance.
+    paused: Option<BTreeSet<i32>>,
+    /// An admitted poll can outlive the host dropping its future at the end of a hold.
+    poll_in_flight: bool,
+}
+
+impl KafkaAllowanceHold {
+    pub(super) fn new(config: &ClientConfig) -> Result<Self, Report<KafkaTopicIngestorError>> {
+        let native = config
+            .create_native_config()
+            .change_context(KafkaTopicIngestorError::Initialize)?;
+        let interval = native
+            .get("max.poll.interval.ms")
+            .change_context(KafkaTopicIngestorError::Initialize)?;
+        let milliseconds = interval.parse::<u64>().assured(
+            "librdkafka validates max.poll.interval.ms as an integer and renders decimal digits",
+        );
+        Ok(Self {
+            service_delay: Duration::from_millis(milliseconds) / POLL_MARGIN_DIVISOR,
+            next_service: None,
+            paused: None,
+            poll_in_flight: false,
+        })
+    }
+
+    pub(super) fn subscribed(&mut self) {
+        self.next_service = None;
+    }
+
+    pub(super) fn polled(&mut self) {
+        self.next_service = Some(Instant::now().checked_add(self.service_delay).assured(
+            "a fraction of librdkafka's maximum one-day poll interval fits the monotonic clock",
+        ));
+    }
+
+    pub(super) fn is_paused(&self) -> bool {
+        self.paused.is_some()
+    }
+}
+
+/// The driver's queue callback and half-interval wakeups ask for the next control poll. A wake
+/// during the executor job stays pending until the owner can receive it.
+#[derive(Default)]
+struct GroupPollWake(Notify);
+
+impl Wake for GroupPollWake {
+    fn wake(self: StdArc<Self>) {
+        self.wake_by_ref();
+    }
+
+    fn wake_by_ref(self: &StdArc<Self>) {
+        self.0.notify_one();
+    }
+}
+
+#[async_trait]
+impl IngestorReadHold for KafkaTopicIngestor {
+    async fn maintain(&mut self, until: Instant) -> Report<IngestorError> {
+        match self.service_held_group(until).await {
+            Err(error) => error.change_context(IngestorError::Read { connector: KAFKA }),
+            Ok(never) => match never {},
+        }
+    }
+}
+
+impl KafkaTopicIngestor {
+    async fn service_held_group(
+        &mut self,
+        until: Instant,
+    ) -> Result<Infallible, Report<KafkaTopicIngestorError>> {
+        let hold = self
+            .allowance_hold
+            .as_mut()
+            .verified("only a consumer with allowance maintenance offers the hook");
+        if let Some(next_service) = hold.next_service {
+            if next_service >= until {
+                return pending().await;
+            }
+            sleep_until(next_service).await;
+        }
+        if Instant::now() >= until {
+            return pending().await;
+        }
+        hold.paused.get_or_insert_with(BTreeSet::new);
+
+        let topic = self.topic.clone();
+        let mut assignment = self
+            .control
+            .run(&self.consumer, {
+                let topic = topic.clone();
+                move |consumer, _budget| {
+                    consumer.assignment().change_context_lazy(|| {
+                        KafkaTopicIngestorError::ReadAssignment {
+                            topic: topic.as_str().to_owned(),
+                        }
+                    })
+                }
+            })
+            .await?;
+        let wake = StdArc::new(GroupPollWake::default());
+        let waker = Waker::from(StdArc::clone(&wake));
+        let reader = self.consumer.clone();
+        let mut read = Box::pin(async move {
+            reader.recv().await.err().assured(
+                "the assignment is paused before each poll, and the pinned stream yields as soon \
+                 as it handles a rebalance",
+            )
+        });
+
+        loop {
+            nervix_primitives::task::consume_budget().await;
+            if Instant::now() >= until {
+                return pending().await;
+            }
+            hold.paused
+                .as_mut()
+                .verified("the hold recorded its native pause before admitting work")
+                .extend(
+                    assignment
+                        .elements()
+                        .iter()
+                        .map(|partition| partition.partition()),
+                );
+            // The blocking work owns exactly one poll. A native pause retires prefetched copies
+            // and rewinds fetching to the next unread offset. A rebalance callback can add a
+            // partition during this poll, but the stream yields before its next attempt. Refresh
+            // the assignment in the same control job, ready to pause it before that next poll.
+            let poll_waker = waker.clone();
+            let poll_topic = topic.clone();
+            hold.poll_in_flight = true;
+            (read, assignment) = self
+                .control
+                .run(&self.consumer, move |consumer, budget| {
+                    if assignment.count() > 0 {
+                        consumer.pause(&assignment).change_context_lazy(|| {
+                            KafkaTopicIngestorError::PauseForAllowance {
+                                topic: poll_topic.as_str().to_owned(),
+                            }
+                        })?;
+                        for partition in assignment.elements() {
+                            partition.error().change_context_lazy(|| {
+                                KafkaTopicIngestorError::PauseForAllowance {
+                                    topic: poll_topic.as_str().to_owned(),
+                                }
+                            })?;
+                        }
+                    }
+                    budget.remaining()?;
+                    let mut context = Context::from_waker(&poll_waker);
+                    match read.as_mut().poll(&mut context) {
+                        Poll::Pending => {
+                            budget.remaining()?;
+                            let assignment = consumer.assignment().change_context_lazy(|| {
+                                KafkaTopicIngestorError::ReadAssignment {
+                                    topic: poll_topic.as_str().to_owned(),
+                                }
+                            })?;
+                            Ok((read, assignment))
+                        }
+                        Poll::Ready(error) => Err(Self::receive_failure(&poll_topic, error)),
+                    }
+                })
+                .await?;
+            hold.poll_in_flight = false;
+            hold.polled();
+            wake.0.notified().await;
+        }
+    }
+
+    /// A settlement or lifecycle operation can follow a measured hold without another read.
+    /// Complete any callback already admitted by the hold before touching the consumer.
+    pub(super) async fn finish_allowance_poll(
+        &mut self,
+    ) -> Result<(), Report<KafkaTopicIngestorError>> {
+        if let Some(hold) = &mut self.allowance_hold
+            && hold.poll_in_flight
+        {
+            self.control.wait_for_turn().await?;
+            hold.poll_in_flight = false;
+        }
+        Ok(())
+    }
+
+    /// Release only this hold's pauses and wait for its admitted control poll before reading.
+    pub(super) async fn resume_after_allowance(
+        &mut self,
+    ) -> Result<(), Report<KafkaTopicIngestorError>> {
+        let hold = self
+            .allowance_hold
+            .as_mut()
+            .verified("a held consumer has allowance maintenance");
+        let paused = hold
+            .paused
+            .as_ref()
+            .verified("the caller found a possible native pause");
+        let topology = match &self.offset_mode {
+            KafkaTopicIngestorOffsetMode::ConsumerGroup {
+                committed_partitions: Some(read),
+                ..
+            } => read.paused_for_topology.as_ref(),
+            _ => None,
+        };
+        let topic = self.topic.as_str().to_owned();
+        let mut partitions = TopicPartitionList::new();
+        for &partition in paused {
+            if !topology.is_some_and(|holds| holds.contains(&partition)) {
+                partitions.add_partition(&topic, partition);
+            }
+        }
+        self.control
+            .run(&self.consumer, move |consumer, _budget| {
+                if partitions.count() == 0 {
+                    return Ok(());
+                }
+                consumer.resume(&partitions).change_context_lazy(|| {
+                    KafkaTopicIngestorError::ResumeAfterAllowance {
+                        topic: topic.clone(),
+                    }
+                })?;
+                for partition in partitions.elements() {
+                    if let Err(error) = partition.error()
+                        && error.rdkafka_error_code() != Some(RDKafkaErrorCode::UnknownPartition)
+                    {
+                        return Err(Report::new(error).change_context(
+                            KafkaTopicIngestorError::ResumeAfterAllowance { topic },
+                        ));
+                    }
+                }
+                Ok(())
+            })
+            .await?;
+        hold.poll_in_flight = false;
+        hold.paused = None;
+        Ok(())
+    }
+}

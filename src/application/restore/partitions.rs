@@ -31,10 +31,10 @@ use nervix_models::{
 use nervix_primitives::sync::Arc;
 use thiserror::Error;
 
-use super::steps::remote_branch_key;
+use super::{prepare::VerifiedArchive, steps::remote_branch_key};
 use crate::runtime::{
-    BackupBranchLifecycleEntry, BranchKey, RESTORE_STATE_WORKING_BYTES, Runtime,
-    SnapshotStagingError, StagedArtifact, write_restored_branch_lifecycle,
+    BackupBranchLifecycleEntry, BranchKey, Runtime, SnapshotStagingError, StagedArtifact,
+    write_restored_branch_lifecycle,
 };
 
 /// Why archived per-key state could not be placed under the restored partition count.
@@ -279,9 +279,7 @@ impl RegroupedLifecycle {
         let staging = || RestoredPartitionError::Staging {
             entity: entity.clone(),
         };
-        let charge = runtime
-            .executor()
-            .reserve(MemoryClass::Bulk, RESTORE_STATE_WORKING_BYTES)
+        let charge = VerifiedArchive::reserve_native_checkpoint_encoding(runtime.executor())
             .await
             .change_context(RestoredPartitionError::Admission)?;
         let writer = runtime
