@@ -13983,6 +13983,47 @@ async fn then_junction_parked_a_message(world: &mut ScenarioWorld, junction: Str
     .expect("the junction parks the message on its materialized state");
 }
 
+fn materialized_snapshot_relay(world: &ScenarioWorld, relay: &str) -> nervix_models::DomainNodeRef {
+    let domain = nervix_models::DomainName::try_from(world.domain.as_str())
+        .assured("the scenario domain is an identifier-shaped name");
+    let relay = expand_placeholders(world, relay);
+    let relay = nervix_models::ModelName::try_from(relay.as_str())
+        .assured("the scenario relay is an identifier-shaped name");
+    nervix_models::DomainNodeRef::node_in(domain, nervix_models::ModelKind::Relay, relay)
+}
+
+#[given(expr = "the next remote snapshot fetch for relay {string} pauses before opening")]
+fn given_materialized_snapshot_opening_pause(world: &mut ScenarioWorld, relay: String) {
+    world
+        .fault_injection
+        .pause_materialized_snapshot_opening(materialized_snapshot_relay(world, &relay));
+}
+
+#[then(expr = "the remote snapshot fetch for relay {string} reaches its opening pause")]
+async fn then_materialized_snapshot_opening_pause_reached(
+    world: &mut ScenarioWorld,
+    relay: String,
+) {
+    let relay_ref = materialized_snapshot_relay(world, &relay);
+    nervix_primitives::time::timeout(
+        Duration::from_secs(30),
+        world
+            .fault_injection
+            .wait_for_materialized_snapshot_opening(&relay_ref),
+    )
+    .await
+    .unwrap_or_else(|_| {
+        panic!("the remote fetch for relay '{relay}' did not reach its opening pause")
+    });
+}
+
+#[when(expr = "the remote snapshot fetch for relay {string} leaves its opening pause")]
+fn when_materialized_snapshot_opening_pause_released(world: &mut ScenarioWorld, relay: String) {
+    world
+        .fault_injection
+        .release_materialized_snapshot_opening(&materialized_snapshot_relay(world, &relay));
+}
+
 #[then(expr = "the last shutdown of node {string} reports its drain-support phase {string}")]
 async fn then_last_shutdown_reports_drain_support_phase(
     world: &mut ScenarioWorld,
