@@ -5,7 +5,7 @@ Feature: Declared public listener bounds
   Scenario Outline: Ordinary fragmented HTTP input within its bounds is admitted on <cluster_size> nodes
     Given node-1 starts with execution-intake-memory-bytes = 4MiB
     And node-1 starts with http-body-bytes = 1MiB
-    # Bound read backings so fragmentation stays within the declared intake pool.
+    # Small read buffers keep the up-front read scratch, four read buffers, small beside the pool.
     And node-1 starts with listener-buffer-bytes = 8KiB
     And a <cluster_size> node nervix cluster is started
     And the leader node is configured with these Plexus commands
@@ -30,6 +30,35 @@ Feature: Declared public listener bounds
       | cluster_size |
       | 1            |
       | 3            |
+
+  Scenario Outline: HTTP input arriving in small network pieces within its bounds is admitted on <cluster_size> nodes with <framing> framing
+    Given node-1 starts with execution-intake-memory-bytes = 4MiB
+    And node-1 starts with http-body-bytes = 1MiB
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA event (value STRING);
+      CREATE WIRE JSON SCHEMA event_wire MODE STRICT (value string);
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
+      CREATE RELAY events SCHEMA event UNBRANCHED;
+      CREATE VHOST edge bounded-{{test_id}}.example.com;
+      CREATE HTTP ENDPOINT intake ON edge PATH '/ingest';
+      CREATE HTTP ENDPOINT INGESTOR intake_ingestor FROM intake MODE NO ACK
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
+        TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      START;
+      """
+    Then within "30s" node "node-1" eventually reports describe ingestor "intake_ingestor" as "ready: true"
+    And node "node-1" admits an HTTP body arriving in 512 byte pieces with <framing> framing for host "bounded-{{test_id}}.example.com"
+
+    Examples:
+      | cluster_size | framing |
+      | 1            | chunked |
+      | 3            | chunked |
+      | 1            | length  |
+      | 3            | length  |
 
   Scenario Outline: A half-open gRPC session is reaped by transport keepalive on <cluster_size> nodes
     Given node-1 starts with grpc-keepalive-interval = 500ms
