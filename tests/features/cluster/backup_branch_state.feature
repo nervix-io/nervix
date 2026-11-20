@@ -57,6 +57,56 @@ Feature: Deduplicator and window state in backup archives
       START;
       """
 
+  Scenario Outline: A stopped branch backup admits its configured staging buffer on <cluster_size> nodes
+    Given runtime replication is configured with replica count 0 and snapshot interval "10m"
+    And the production sticky scheduler is configured
+    And node-1 starts with execution-bulk-chunk-bytes = 4MiB
+    And node-2 starts with execution-bulk-chunk-bytes = 4MiB
+    And node-3 starts with execution-bulk-chunk-bytes = 4MiB
+    And a <cluster_size> node nervix cluster is started
+    And the active domain is "{{domain}}"
+    When these Plexus commands are executed on the leader node
+      """
+      {{branch_state_models}}
+      CREATE SUBSCRIPTION source_payments TO unique_payments;
+      """
+    And http payload is posted to host "backup-branch-state-{{test_id}}.example.com" path "/payments"
+      """
+      {"tenant":"alpha","transaction_id":"txn-1","amount":10}
+      """
+    And http payload is posted to host "backup-branch-state-{{test_id}}.example.com" path "/payments"
+      """
+      {"tenant":"beta","transaction_id":"txn-2","amount":20}
+      """
+    Then within "30s" the relay subscription receives exactly one payload for each fragment set
+      """
+      key={"tenant":"alpha"} | "transaction_id":"txn-1" | "amount":10
+      key={"tenant":"beta"} | "transaction_id":"txn-2" | "amount":20
+      """
+    When these Plexus commands are executed on the leader node
+      """
+      STOP;
+      """
+    Then the current leader node is saved as placeholder "leader"
+    # Leave 4 MiB plus 128 KiB, enough for the writer alone but short of the writer and the
+    # checkpoint's three 64 KiB segments and framing.
+    When bulk memory on every node keeps only "4325376" bytes free
+    And the CLI backs up "domain {{domain}} --timeout 30s" from node "{{leader}}" into "refused.nvxb" reporting JSON
+    Then the CLI backup failed with JSON error code "BACKUP_REFUSED"
+    And the CLI backup failure mentions "reading the state of 'unique_payment_filter' could not be admitted"
+    And backup archive "refused.nvxb" does not exist
+    And within "30s" every node reserves only the bulk memory the scenario holds
+    When bulk memory on every node is released
+    And the CLI backs up "domain {{domain}} --timeout 60s" from node "{{leader}}" into "accepted.nvxb" reporting JSON
+    Then the CLI backup succeeded with a JSON report naming domain "{{domain}}"
+    When the CLI describes backup archive "accepted.nvxb" as json
+    Then the described backup has exactly 2 "deduplicator" state sections
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
   @restore_installation @deloxide_stress_restore @long_running
   Scenario Outline: Deduplicator keys and half-filled windows captured at a quiesced cut continue per branch after RESUME
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "10m"

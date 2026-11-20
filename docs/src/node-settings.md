@@ -941,7 +941,9 @@ relay pool, capped at 32 MiB each; `--execution-relay-scratch-bytes` defaults to
 capped at 16 MiB. All are positive. Validation requires two complete operations to fit relay,
 active read and cache pools independently. `--execution-resident-replication-batches` defaults
 to at most four, retaining command-budget room for an answer. `--execution-bulk-chunk-bytes`
-defaults to one 512th of bulk memory, capped at 64 KiB. Captured-section reads group sixteen
+defaults to one 512th of bulk memory, capped at 64 KiB. The resolved chunk sizes the staged
+snapshot encoder's output buffer. Stored branch captures and native restore conversions include
+that buffer in their bulk admission before encoding. Captured-section reads group sixteen
 bulk quanta, capped at half the immutable bulk pool so a preceding transport buffer and the next
 read can coexist; the default read remains 1 MiB. Existing operation working-set checks
 still apply. Peer receive limits derive from these final limits before transport construction.
