@@ -89,13 +89,18 @@ are positive and must fit their native protocol/admission representation. Deadli
 and representable by the monotonic clock. Kernel keepalive durations are whole seconds from 1
 through 32,767; the probe count is from 1 through 127, matching the native socket-option ranges.
 The HTTP/1 header default preserves the transport's 16 KiB trailer ceiling. Request heads also
-fit the configured read-buffer capacity.
+fit the configured read-buffer capacity. The shared HTTP/1 parser refuses a request head with more
+than 100 headers, including a WebSocket upgrade request.
 The startup preflight requires the intake pool to hold two body limits plus the declared initial
 read scratch and collection metadata. An explicit inconsistent pair refuses startup before stores
 or listeners open.
 
-Read and write progress both renew idle time. A WebSocket upgrade retains the accepted socket's
-lease and deadline. Connection tasks are reaped while the listener runs; shutdown retains its
+Read and write byte progress both renew idle time. A WebSocket upgrade retains the accepted
+socket's lease and deadline, so a silent peer waiting for its next frame eventually loses its
+connection. The frame size setting caps each frame's payload. The message size setting caps the
+assembled message across its frames. See the [endpoint manual](ingestors.md#websockets-endpoint)
+for what a client observes on expiry or overflow.
+Connection tasks are reaped while the listener runs; shutdown retains its
 existing admission, grace and terminal-cut order. HTTP listeners keep one bounded refusal
 slot alongside accepts, in addition to admitted connections. At capacity, cleartext HTTP returns 503 with reason
 `listener_connection_capacity` through the same bounded HTTP parser. Receiving its request and

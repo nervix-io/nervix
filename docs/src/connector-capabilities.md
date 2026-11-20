@@ -64,7 +64,7 @@ Client CONFIG keys below come from the same declaration used by validation, comp
 
 | Capability | Declaration | Mirror and transport reason |
 | --- | --- | --- |
-| Entity | HTTP ENDPOINT | Compare `HTTP REQUEST`: options, modes, headers, reference, ingest metadata, ingest payload facts. An endpoint is the server side: every live node serves it, its requests carry no remote transport position, and their headers and method, path, query, peer socket address, IP without its port and host metadata describe what a client sent. The HTTP REQUEST emitter instead sends requests to an external endpoint through an HTTP CLIENT. |
+| Entity | HTTP ENDPOINT | Compare `HTTP REQUEST`: options, modes, headers, reference, ingest metadata, ingest payload facts. An endpoint is the server side: every live node serves it, its requests carry no remote transport position, and their headers and method, path, query, peer socket address, IP without its port and host metadata describe what a client sent. The HTTP REQUEST emitter instead sends requests to an external endpoint through an HTTP CLIENT. See [Listener Bounds](node-settings.md#listener-bounds) for the shared HTTP transport and admission limits. |
 | Reference | Http endpoint |  |
 | Locator and validation rule | Not offered: The endpoint declaration owns the host and path this cluster serves; this body has no separate external-name locator. |  |
 | Modes (complete bodies after MODE) | NO ACK<br>ACK MAX 8 ACK TIMEOUT 5s |  |
@@ -80,9 +80,9 @@ Client CONFIG keys below come from the same declaration used by validation, comp
 | Every live node | yes |  |
 | Position class | none |  |
 | Acknowledgement confirmation | none |  |
-| Buffers | a request body: set by node setting `--http-body-bytes`; when exceeded, refuses the request as too large; the same request sent again is refused again<br>the request input of every HTTP endpoint connection on the node together, read buffers included: set by node setting `--execution-intake-memory-bytes`; when full, immediately refuses the request for its sender to retry<br>unresolved requests under MODE ACK, per node and ingestor: set by MODE ACK MAX; when full, immediately refuses the request for its sender to retry |  |
+| Buffers | a request head: set by node setting `--listener-header-bytes`; when exceeded, refuses the request as too large; the same request sent again is refused again<br>a request body: set by node setting `--http-body-bytes`; when exceeded, refuses the request as too large; the same request sent again is refused again<br>the request input of every HTTP endpoint connection on the node together, read buffers included: set by node setting `--execution-intake-memory-bytes`; when full, immediately refuses the request for its sender to retry<br>unresolved requests under MODE ACK, per node and ingestor: set by MODE ACK MAX; when full, immediately refuses the request for its sender to retry |  |
 | Network waits | a client's request head: node setting `--listener-header-timeout`; at the bound, closes the connection without an answer<br>a client's request body: node setting `--http-body-timeout`; at the bound, refuses the request as timed out<br>graph acknowledgement under MODE ACK: `ACK TIMEOUT, or the exact intake lifetime ending` |  |
-| Driver limits | Request heads above 100 headers are refused. |  |
+| Driver limits | None declared. |  |
 | Stalled-peer checks | None: no client deadline key bounds a wait. |  |
 
 ### KAFKA TOPIC ingest
@@ -364,7 +364,7 @@ Client CONFIG keys below come from the same declaration used by validation, comp
 
 | Capability | Declaration | Mirror and transport reason |
 | --- | --- | --- |
-| Entity | WEBSOCKETS ENDPOINT | No emit entity is declared. An outbound connection or server endpoint receives frames. The declared emitter set has no WebSocket frame publisher; handshake signaling remains distinct from a frame payload. Endpoint metadata carries the peer socket address and its IP without the port separately. |
+| Entity | WEBSOCKETS ENDPOINT | No emit entity is declared. An outbound connection or server endpoint receives frames. The declared emitter set has no WebSocket frame publisher; handshake signaling remains distinct from a frame payload. Endpoint metadata carries the peer socket address and its IP without the port separately. See [Listener Bounds](node-settings.md#listener-bounds) for the shared HTTP upgrade and connection limits. |
 | Reference | Websockets endpoint |  |
 | Locator and validation rule | Not offered: The configured client or endpoint owns the address and path; this body has no separate external-name locator. |  |
 | Modes (complete bodies after MODE) | NO ACK<br>ACK MAX 8 ACK TIMEOUT 5s |  |
@@ -380,9 +380,9 @@ Client CONFIG keys below come from the same declaration used by validation, comp
 | Every live node | yes |  |
 | Position class | none |  |
 | Acknowledgement confirmation | none |  |
-| Buffers | unresolved data frames under MODE ACK, per node and ingestor: set by MODE ACK MAX; when full, immediately refuses the request for its sender to retry |  |
-| Network waits | graph acknowledgement under MODE ACK: `ACK TIMEOUT, or the exact intake lifetime ending`<br>the signaling handshake: `the signaling protocol's TIMEOUT`<br>reading the next frame: unbounded |  |
-| Driver limits | A message above 64 MiB or a frame above 16 MiB ends the session. |  |
+| Buffers | the upgrade request head: set by node setting `--listener-header-bytes`; when exceeded, refuses the request as too large; the same request sent again is refused again<br>an incoming frame payload, per session: set by node setting `--websocket-frame-bytes`; when exceeded, closes only that peer's session<br>an incoming message assembled from frames, per session: set by node setting `--websocket-message-bytes`; when exceeded, closes only that peer's session<br>unresolved data frames under MODE ACK, per node and ingestor: set by MODE ACK MAX; when full, immediately refuses the request for its sender to retry |  |
+| Network waits | the upgrade request head: node setting `--listener-header-timeout`; at the bound, closes the connection without an answer<br>the signaling handshake: `the signaling protocol's TIMEOUT`<br>reading the next frame: node setting `--listener-idle-timeout`; at the bound, closes that session after no read or write byte progress<br>graph acknowledgement under MODE ACK: `ACK TIMEOUT, or the exact intake lifetime ending` |  |
+| Driver limits | None declared. |  |
 | Stalled-peer checks | None: no client deadline key bounds a wait. |  |
 
 ### SYSLOG LISTENER ingest

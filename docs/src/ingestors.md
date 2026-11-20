@@ -3318,10 +3318,11 @@ its [transport contract](connector-contract.md#http-client-transport):
 
 ### `HTTP ENDPOINT` And `WEBSOCKETS ENDPOINT`
 
-The node's [Listener Bounds](node-settings.md#listener-bounds) apply before endpoint dispatch:
-connection, header, TLS, idle and HTTP body limits, accounted body admission, explicit WebSocket
-frame/message bounds, and the 413/408/431/503 input outcomes. These are local Nervix capacities;
-the endpoint's delivery, quiesce and acknowledgement contract still owns graph admission.
+Both endpoints use the node's [Listener Bounds](node-settings.md#listener-bounds) for connection
+admission, HTTP parsing, and TLS. The tables below give each endpoint's input bounds. If a
+WebSocket frame or assembled message is too large, or the socket runs out of idle time while
+waiting for input, Nervix ends that session without sending a WebSocket Close frame. Other
+sessions keep running.
 
 #### HTTP ENDPOINT
 
@@ -3355,9 +3356,9 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Every live node | yes |
 | Position class | none |
 | Acknowledgement confirmation | none |
-| Buffers | a request body: set by node setting `--http-body-bytes`; when exceeded, refuses the request as too large; the same request sent again is refused again<br>the request input of every HTTP endpoint connection on the node together, read buffers included: set by node setting `--execution-intake-memory-bytes`; when full, immediately refuses the request for its sender to retry<br>unresolved requests under MODE ACK, per node and ingestor: set by MODE ACK MAX; when full, immediately refuses the request for its sender to retry |
+| Buffers | a request head: set by node setting `--listener-header-bytes`; when exceeded, refuses the request as too large; the same request sent again is refused again<br>a request body: set by node setting `--http-body-bytes`; when exceeded, refuses the request as too large; the same request sent again is refused again<br>the request input of every HTTP endpoint connection on the node together, read buffers included: set by node setting `--execution-intake-memory-bytes`; when full, immediately refuses the request for its sender to retry<br>unresolved requests under MODE ACK, per node and ingestor: set by MODE ACK MAX; when full, immediately refuses the request for its sender to retry |
 | Network waits | a client's request head: node setting `--listener-header-timeout`; at the bound, closes the connection without an answer<br>a client's request body: node setting `--http-body-timeout`; at the bound, refuses the request as timed out<br>graph acknowledgement under MODE ACK: `ACK TIMEOUT, or the exact intake lifetime ending` |
-| Driver limits | Request heads above 100 headers are refused. |
+| Driver limits | None declared. |
 | Stalled-peer checks | None: no client deadline key bounds a wait. |
 
 See the [HTTP ENDPOINT capability and mirror reference](connector-capabilities.md#http-endpoint-ingest).
@@ -3395,9 +3396,9 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Every live node | yes |
 | Position class | none |
 | Acknowledgement confirmation | none |
-| Buffers | unresolved data frames under MODE ACK, per node and ingestor: set by MODE ACK MAX; when full, immediately refuses the request for its sender to retry |
-| Network waits | graph acknowledgement under MODE ACK: `ACK TIMEOUT, or the exact intake lifetime ending`<br>the signaling handshake: `the signaling protocol's TIMEOUT`<br>reading the next frame: unbounded |
-| Driver limits | A message above 64 MiB or a frame above 16 MiB ends the session. |
+| Buffers | the upgrade request head: set by node setting `--listener-header-bytes`; when exceeded, refuses the request as too large; the same request sent again is refused again<br>an incoming frame payload, per session: set by node setting `--websocket-frame-bytes`; when exceeded, closes only that peer's session<br>an incoming message assembled from frames, per session: set by node setting `--websocket-message-bytes`; when exceeded, closes only that peer's session<br>unresolved data frames under MODE ACK, per node and ingestor: set by MODE ACK MAX; when full, immediately refuses the request for its sender to retry |
+| Network waits | the upgrade request head: node setting `--listener-header-timeout`; at the bound, closes the connection without an answer<br>the signaling handshake: `the signaling protocol's TIMEOUT`<br>reading the next frame: node setting `--listener-idle-timeout`; at the bound, closes that session after no read or write byte progress<br>graph acknowledgement under MODE ACK: `ACK TIMEOUT, or the exact intake lifetime ending` |
+| Driver limits | None declared. |
 | Stalled-peer checks | None: no client deadline key bounds a wait. |
 
 See the [WEBSOCKETS ENDPOINT capability and mirror reference](connector-capabilities.md#websockets-endpoint-ingest).

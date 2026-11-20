@@ -15,7 +15,7 @@ properties = "This entity declares no typed PROPERTIES block; any encoded record
 
 [entity."HTTP ENDPOINT"]
 ingest_locator = "The endpoint declaration owns the host and path this cluster serves; this body has no separate external-name locator."
-mirror = "An endpoint is the server side: every live node serves it, its requests carry no remote transport position, and their headers and method, path, query, peer socket address, IP without its port and host metadata describe what a client sent. The HTTP REQUEST emitter instead sends requests to an external endpoint through an HTTP CLIENT."
+mirror = "An endpoint is the server side: every live node serves it, its requests carry no remote transport position, and their headers and method, path, query, peer socket address, IP without its port and host metadata describe what a client sent. The HTTP REQUEST emitter instead sends requests to an external endpoint through an HTTP CLIENT. See [Listener Bounds](node-settings.md#listener-bounds) for the shared HTTP transport and admission limits."
 
 [entity."KAFKA TOPIC"]
 mirror = "Consumption tracks replayable log offsets and consumer groups; ACK consumption waits for commit confirmation, while publication uses a producer queue or delivery report. Both directions use the same quoted, case-preserving Kafka topic names and a client with bootstrap.servers. Nervix-owned client keys are refused; other driver properties are checked offline under one accepted name each. Consumers disable topic auto-creation, while producers retain the driver default, so provision input and output topics explicitly."
@@ -70,7 +70,7 @@ mirror = "An outbound connection or server endpoint receives frames. The declare
 
 [entity."WEBSOCKETS ENDPOINT"]
 ingest_locator = "The configured client or endpoint owns the address and path; this body has no separate external-name locator."
-mirror = "An outbound connection or server endpoint receives frames. The declared emitter set has no WebSocket frame publisher; handshake signaling remains distinct from a frame payload. Endpoint metadata carries the peer socket address and its IP without the port separately."
+mirror = "An outbound connection or server endpoint receives frames. The declared emitter set has no WebSocket frame publisher; handshake signaling remains distinct from a frame payload. Endpoint metadata carries the peer socket address and its IP without the port separately. See [Listener Bounds](node-settings.md#listener-bounds) for the shared HTTP upgrade and connection limits."
 
 [entity."SYSLOG LISTENER"]
 ingest_headers = "A listener admits UDP datagrams or framed TCP/TLS input and exposes its peer socket address, IP without its port, transport and optional verified TLS client subject; a collector writes encoded syslog records. Syslog fields belong to the wire schema rather than a transport header map."

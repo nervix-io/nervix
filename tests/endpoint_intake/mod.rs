@@ -6,6 +6,7 @@
 //! - **Depends on.** The cluster's public HTTP listener and Plexus scenario steps.
 //! - **Must not know.** Runtime route tables or source binding internals.
 
+mod bounds;
 pub(crate) mod requests;
 
 use std::time::Duration;

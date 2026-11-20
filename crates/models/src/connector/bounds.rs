@@ -168,6 +168,9 @@ pub enum BufferOverflow {
     /// An incoming message or frame above the bound fails the ingestor read and ends its
     /// connection. The host reconnects on its declared retry policy.
     FailRead,
+    /// An oversized frame or message ends only the session that sent it. The listener keeps
+    /// serving its other peers.
+    CloseSession,
 }
 
 /// One network wait a connector performs.
