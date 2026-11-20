@@ -1031,10 +1031,13 @@ domain's intake as a terminating node stops its own, whatever each ingestor's `O
 while the graph and the domain clock keep running. The owner then drains across the cluster in
 rounds, as a backup cut does: each node that holds work in motion releases it with a force-flush
 generation, and once no node holds any, every node starts the generation that confirms nothing is
-still moving. A node asked for a round before it applied the stop reports that its intake still
-admits and releases nothing, so the owner asks again once it has. A node that does not answer a
-round within the request's deadline holds the domain stopping, as one that holds work in motion does, and a request's clause still acts at its time: the
-owner abandons a round that a late node holds when an `ENFORCE AFTER`, a `CANCEL AFTER` or the
+still moving. A node asked for a round before it applied the stop answers with its view and releases
+nothing, starting no generation until it has applied the stop, so the owner asks again. Each of its
+ingestors that still admits holds the drain open in that view, while a node with no intake and
+nothing in motion does not hold it open, even while its installation of the stop waits. A node that
+does not answer a round within the request's deadline holds the domain stopping, as one that holds
+work in motion does, and a request's clause still acts at its time: the owner abandons a round that
+a late node holds when an `ENFORCE AFTER`, a `CANCEL AFTER` or the
 licensing stop's fixed time comes due, acts on it, and drains again from a releasing round. The
 drain has no time limit: the domain drain timeout and the task grace bound neither it nor the
 publish attempts on the wire it waits for. Work that cannot move on, held by a `REQUIRED WAIT`, an

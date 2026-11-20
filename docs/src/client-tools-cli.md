@@ -84,11 +84,12 @@ name with underscores. The typed native client definitions supply both help and 
 | `--upload-frame-capacity` | 8 | queued outbound resource-upload frames |
 | `--restore-frame-capacity` | 8 | queued outbound restore frames |
 
-The server reports every request the CLI sends while it still serves it, four times per the
-shorter of the request and call timeouts and at least every 100 milliseconds, and each report
-starts both timeouts again. A statement the server keeps working on, such as a `STOP` that waits for
-the domain's work in motion, therefore runs as long as it needs; the timeouts end only a wait in
-which neither the answer nor a report arrived.
+The server reports every request the CLI sends while it still serves it, four times per the shorter
+of the request and call timeouts and at least every 100 milliseconds, and each report starts both
+timeouts again. A statement the server keeps working on, such as a `STOP` that waits for the
+domain's work in motion or a `START` that waits for another node to start the domain's ingestors,
+therefore runs as long as it needs; the timeouts end only a wait in which neither the answer nor a
+report arrived.
 
 Durations accept one millisecond through 24 hours. The backoff base cannot exceed its ceiling.
 Capacities must be positive, fit the native channel bound and produce addressable aggregate byte

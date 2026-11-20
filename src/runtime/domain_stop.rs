@@ -189,17 +189,12 @@ impl Runtime {
         domain: &DomainName,
         action: StopDrainAction,
     ) -> StopDrainStatus {
-        // The owner can ask before this node applied the stop. Its intake still admits then, which
-        // its view reports, and it releases nothing: an emitter that still sees the domain running
-        // would take the flush for an ordinary drain's and retry an unavailable destination inline.
+        // The owner can ask before this node applied the stop. The node answers with its view, in
+        // which each of its ingestors that still admits keeps the drain going, and releases
+        // nothing: an emitter that still sees the domain running would take the flush for an
+        // ordinary drain's and retry an unavailable destination inline.
         if !self.applied_stop(domain) {
-            let mut status = self.observe_stopping_domain(domain);
-            status.entries.push(StopWaitEntry {
-                entity: None,
-                kind: StopWaitKind::AdmittingIngestor,
-                items: 1,
-            });
-            return status;
+            return self.observe_stopping_domain(domain);
         }
         match action {
             StopDrainAction::FlushMovingWork => {

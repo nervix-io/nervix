@@ -22747,6 +22747,51 @@ async fn then_last_command_output_contains(world: &mut ScenarioWorld, #[step] st
     );
 }
 
+/// How often a wait for a node's `DESCRIBE DOMAIN` output asks again.
+const DESCRIBE_DOMAIN_POLL_INTERVAL: Duration = Duration::from_millis(100);
+
+/// Runs `DESCRIBE DOMAIN` on a node until its output holds the docstring as one fragment, as `the
+/// last command output contains` reads it. Some of what a domain reports arrives after its status
+/// does: a stopped domain's stop report is committed only once every node's teardown has ended.
+#[then(expr = "within {string} DESCRIBE DOMAIN on node {string} contains")]
+async fn then_within_duration_describe_domain_contains(
+    world: &mut ScenarioWorld,
+    duration: String,
+    node_id: String,
+    #[step] step: &Step,
+) {
+    let duration = parse_duration_text(&duration).expect("step duration must be a valid duration");
+    let node_id = expand_placeholders(world, &node_id);
+    let expanded = expand_placeholders(world, docstring(step));
+    let expected = expanded.trim();
+    assert!(
+        !expected.is_empty(),
+        "step docstring must state the expected DESCRIBE DOMAIN output"
+    );
+    let deadline = PhaseDeadline::after(duration);
+    loop {
+        nervix_primitives::task::consume_budget().await;
+        match run_plexus_commands_on_node(world, &node_id, "DESCRIBE DOMAIN;").await {
+            Ok(output) => {
+                let found = output.contains(expected);
+                world.last_command_output = Some(output);
+                if found {
+                    return;
+                }
+            }
+            Err(error) => world.last_command_error = Some(error),
+        }
+        assert!(
+            !deadline.has_passed(),
+            "timed out waiting for DESCRIBE DOMAIN on node '{node_id}' to contain {expected:?}. \
+             last output: {:?}, last error: {:?}",
+            world.last_command_output,
+            world.last_command_error
+        );
+        deadline.pause(DESCRIBE_DOMAIN_POLL_INTERVAL).await;
+    }
+}
+
 /// Runs `SHOW CREATE EMITTER` for every emitter the table names and requires its rendering to
 /// contain the clause beside it. The first row names the columns.
 #[then("SHOW CREATE EMITTER on the leader node renders these clauses")]

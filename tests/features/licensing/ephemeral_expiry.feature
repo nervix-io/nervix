@@ -365,11 +365,8 @@ Feature: Ephemeral activation expiry and the licensing stop gate
     Then the background CLI backup finishes
     And the CLI backup succeeded with a JSON report naming domain "{{domain}}"
     And within "30s" node "<observer>" eventually reports status containing "{{domain}} status=Stopped"
-    When these Plexus commands are executed on node "<observer>"
-      """
-      DESCRIBE DOMAIN;
-      """
-    Then the last command output contains
+    # The stop's report follows its status: it is committed once every node's teardown has ended.
+    And within "30s" DESCRIBE DOMAIN on node "<observer>" contains
       """
       stopped by licensing: ephemeral activation expired at {{expired_at}}
       stop: every message in motion finished; discarded with the ingestor session: node-1: ingestor 'buffered': payloads an ingestor's pause buffer retained (2)

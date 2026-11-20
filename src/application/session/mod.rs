@@ -534,8 +534,6 @@ impl SessionShared {
         Ok(admission)
     }
 
-    /// Takes the requests whose progress report is due at `now`, schedules each one's next report
-    /// an interval later, and says when the earliest report still to come falls due.
     /// The reports due now, unless a testing fault silences this node's progress reports: a
     /// client waiting on the node then hears silence, as it would from a node that stopped
     /// answering.
@@ -557,6 +555,8 @@ impl SessionShared {
         due
     }
 
+    /// Takes the requests whose progress report is due at `now`, schedules each one's next report
+    /// an interval later, and says when the earliest report still to come falls due.
     fn take_due_progress(&self, now: Instant) -> DueProgress {
         let mut in_flight = self.in_flight.lock();
         let mut requests = Vec::new();

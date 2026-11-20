@@ -11,8 +11,10 @@
 //! in motion, each such node releases it with a force-flush generation. Once no node holds any,
 //! every node starts the generation that confirms nothing is still moving, and the drain rests
 //! only when every node's participants that still take work completed it, no node holds work in
-//! motion, and no relay of any node admitted a batch between the confirming view and the last. Held
-//! work never holds the drain open: the stop does not wait for it, and its teardown cuts it.
+//! motion, and no relay of any node admitted a batch between the confirming view and the last. A
+//! node that has not applied the stop yet starts no generation and answers with its view alone, in
+//! which each of its ingestors that still admits holds the drain open. Held work never holds the
+//! drain open: the stop does not wait for it, and its teardown cuts it.
 
 use std::{collections::BTreeMap, time::Duration};
 

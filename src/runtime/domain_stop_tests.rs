@@ -225,26 +225,35 @@ async fn a_node_reports_what_its_stop_cut_only_once_its_teardown_ended() {
 
 #[nervix_primitives::test]
 async fn a_node_takes_no_drain_step_before_it_applied_the_stop() {
-    use nervix_interconnect::domain_stop::{StopDrainAction, StopWaitEntry, StopWaitKind};
+    use nervix_interconnect::domain_stop::StopDrainAction;
 
     let runtime = Runtime::default();
     let domain = domain(DOMAIN);
     apply(&runtime, 1, state(DomainStatus::Running, None)).await;
-    let not_applied = StopWaitEntry {
-        entity: None,
-        kind: StopWaitKind::AdmittingIngestor,
-        items: 1,
-    };
-
-    // The stop's owner can ask before this node applied the stop. Its intake still admits then, so
-    // it reports that and releases nothing: an emitter that still sees the domain running would
-    // take the flush for an ordinary drain's and wait out an unavailable destination.
-    let early = runtime.stop_drain_status(&domain, StopDrainAction::Confirm);
-    assert!(
-        early.moving(),
-        "a node that has not applied the stop is not at rest"
+    let emitter = nervix_models::NodeRef::new(
+        nervix_models::ModelKind::Emitter,
+        named::<nervix_models::EmitterName>("forwarded"),
     );
-    assert!(early.entries.contains(&not_applied));
+    let counters = runtime.node_quiesce_counters(&domain, emitter);
+    let mut flush = runtime.force_flush_participant(&domain, counters);
+
+    // The stop's owner can ask before this node applied the stop. The node answers with its view
+    // and releases nothing: an emitter that still sees the domain running would take the flush for
+    // an ordinary drain's and wait out an unavailable destination.
+    let early = runtime.stop_drain_status(&domain, StopDrainAction::Confirm);
+    let early_generation = flush
+        .pending_completion()
+        .assured("the domain's flush coordinator stays open while the domain runs");
+    assert!(
+        early_generation.is_none(),
+        "a node that has not applied the stop starts no force-flush generation"
+    );
+    // Its view is all it reports, so a node with no intake and nothing in motion does not hold the
+    // drain open while its installation of the stop still waits.
+    assert!(
+        !early.moving(),
+        "a node with no intake and no work is at rest before it applied the stop"
+    );
 
     let stopping = DomainStopping {
         began_at_revision: 2,
@@ -263,6 +272,21 @@ async fn a_node_takes_no_drain_step_before_it_applied_the_stop() {
         state(DomainStatus::Stopping, Some(DomainStop::Stopping(stopping))),
     )
     .await;
-    let applied = runtime.stop_drain_status(&domain, StopDrainAction::Observe);
-    assert!(!applied.entries.contains(&not_applied));
+    // Whatever applying the stop asked of the participant is done before the owner's round.
+    let applying = flush
+        .pending_completion()
+        .assured("the domain's flush coordinator stays open while the domain stops");
+    if let Some(completion) = applying {
+        completion.complete();
+    }
+
+    let applied = runtime.stop_drain_status(&domain, StopDrainAction::Confirm);
+    let confirming = flush
+        .pending_completion()
+        .assured("the domain's flush coordinator stays open while the domain stops");
+    assert!(
+        confirming.is_some(),
+        "once it applied the stop, the node starts the confirming generation its owner asks for"
+    );
+    assert!(!applied.moving(), "the node still holds nothing in motion");
 }

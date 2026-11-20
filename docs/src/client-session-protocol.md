@@ -1245,7 +1245,8 @@ keeps reconnecting through an outage longer than `retry_timeout`. Every request 
 [progress reports](#progress-reports) four times per the shorter of its request wait and its call's
 budget, never more often than every 100 milliseconds. The request and call deadlines are silence
 deadlines: each report starts both again, so a command the server keeps serving, such as a `STOP`
-that waits for the work in motion, is answered however long it takes, and a deadline passes only
+that waits for the work in motion or a `START` that waits for another node to start the domain's
+ingestors, is answered however long it takes, and a deadline passes only
 once neither the answer nor a report arrived within it. A request that goes silent for
 `request_timeout` causes the client to end every request still waiting on that session, and the
 next request opens a new one. The deadline bounds silence only: a request the server still serves
