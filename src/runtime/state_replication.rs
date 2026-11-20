@@ -710,15 +710,12 @@ impl Runtime {
         request: nervix_interconnect::PrepareForcedOwnershipRecoveryRequest,
         deadline: Instant,
     ) -> OwnershipHandoffResult<nervix_interconnect::ForcedOwnershipRecoveryPreparation> {
-        let operation_id = request.operation_id.clone();
         let source = &request.source;
         let destination = &request.destination;
-        let destination_incarnation = request.destination_incarnation;
         let domain = &request.domain;
         let entity = &request.entity;
         let unit = request.unit;
         let base_schedule_fingerprint = request.base_schedule_fingerprint;
-        let target_schedule_fingerprint = request.target_schedule_fingerprint;
         let scheduled = self
             .forced_recovery_node_until(domain, entity, base_schedule_fingerprint, deadline)
             .await?;
@@ -876,30 +873,8 @@ impl Runtime {
                 })
         });
         let entity_ref = entity.in_domain(domain);
-        let transition = ForcedRuntimeStateRecoveryTransition {
-            operation_id: &operation_id,
-            source,
-            destination,
-            destination_incarnation,
-            entity: &entity_ref,
-            unit,
-            target_schedule_fingerprint,
-        };
-        if let Some(store) = self.inner.state_store.as_ref() {
-            store
-                .persist_forced_recovery_preparation(&transition, &checkpoints)
-                .change_context(OwnershipHandoffError::Persistence)?;
-        }
-        let recovery = transition.identity();
-        self.inner.prepared_forced_runtime_state_recoveries.insert(
-            DomainNodeUnitRef::new(entity_ref, unit),
-            PreparedForcedRuntimeStateRecovery {
-                recovery,
-                destination_incarnation,
-                target_schedule_fingerprint,
-                checkpoints,
-            },
-        );
+        let transition = ForcedRuntimeStateRecoveryTransition::from_request(&request, &entity_ref);
+        self.stage_forced_recovery_preparation(&request.round, &transition, checkpoints)?;
         let resets = resets
             .into_iter()
             .map(|(component, cause)| OwnershipStateReset { component, cause })
@@ -2922,6 +2897,9 @@ pub(in crate::runtime) mod routing;
 mod schedule_installation;
 mod tasks;
 mod wasm_processor_state;
+
+#[cfg(test)]
+mod forced_recovery_store_tests;
 
 #[cfg(test)]
 #[cfg_attr(

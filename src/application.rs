@@ -42,6 +42,7 @@ use std::{
 use admitted_connection::AdmittingListener;
 use ahash::{HashMap, HashMapExt, HashSet, RandomState};
 use authentication::user_credentials;
+use automatic_schedule::AutomaticSchedulePublication;
 use background_task::{
     await_background_task_shutdown, join_public_listeners, request_shutdown_on_completion,
     request_shutdown_on_return,
@@ -88,7 +89,7 @@ use nervix_interconnect::{
     DescribeMetricsRequest as RemoteDescribeMetricsRequest,
     DescribeMetricsResponse as RemoteDescribeMetricsResponse,
     DescribeRelayRequest as RemoteDescribeRelayRequest,
-    DescribeRelayResponse as RemoteDescribeRelayResponse,
+    DescribeRelayResponse as RemoteDescribeRelayResponse, DiscardForcedOwnershipRecoveryRequest,
     DiscardOwnershipHandoffStateRequest as RemoteDiscardOwnershipHandoffStateRequest,
     DomainClockProgressRequest as RemoteDomainClockProgressRequest,
     DomainDrainStatusRequest as RemoteDomainDrainStatusRequest,
@@ -117,7 +118,6 @@ use nervix_primitives::{
     time::sleep,
 };
 use observability_http::serve_observability_http;
-use ownership_handoff::ForcedOwnershipRecoveryCoordinator;
 use partition_topology::run_partition_topology_watchers;
 use public_listener::{PublicListener, PublicListenerKind};
 use scheduling::StartupVoterObservations;
@@ -146,6 +146,7 @@ use crate::{
 
 mod admitted_connection;
 mod authentication;
+mod automatic_schedule;
 mod background_task;
 mod backup;
 mod cli;
@@ -941,8 +942,6 @@ impl Application {
         let consensus_for_reconcile = consensus.proposer();
         let registry_for_reconcile = registry.clone();
         let runtime_for_reconcile = runtime.clone();
-        let interconnect_for_reconcile = interconnect.clone();
-        let local_node_for_reconcile = node_id.clone();
         let reconcile_shutdown = shutdown.clone();
         let cluster_for_membership_reconcile = cluster.clone();
         let administrator_for_membership_reconcile = consensus.administrator();
@@ -1312,6 +1311,7 @@ impl Application {
                 }
             }));
         }
+        let service_for_reconcile = service.clone();
         background_tasks.push(nervix_primitives::task::spawn(async move {
             if reconcile_shutdown.run_until_cancelled(sleep(startup_delay)).await.is_none() { return; }
             #[cfg(feature = "testing")]
@@ -1478,6 +1478,12 @@ impl Application {
                             live_node_incarnations
                                 .insert(node.node_id.clone(), node.incarnation);
                         }
+                        let publication = AutomaticSchedulePublication {
+                            committed: &automatic_schedule_input,
+                            availability: &scheduling_availability,
+                            health_revision: health_scheduling_revision,
+                            live_node_incarnations: &live_node_incarnations,
+                        };
                         let topology = automatic_schedule_input.topology();
                         // A leader that has just started cannot yet tell a voter that is still
                         // starting from one that failed, and treating it as failed would move its
@@ -1572,51 +1578,12 @@ impl Application {
                                     );
                                 }
                             }
-                            ForcedOwnershipRecoveryCoordinator {
-                                recovery_budget: automatic_schedule_input.runtime_state().parameters.verified("scheduling starts after committed policy initialization").values.forced_recovery_budget(),
-                                runtime: &runtime_for_reconcile,
-                                interconnect: &interconnect_for_reconcile,
-                                local_node_id: &local_node_for_reconcile,
-                                node_incarnations: &live_node_incarnations,
-                            }
-                            .prepare_schedule(domain_schedule, &mut failover_schedule)
-                            .await;
                             automatic_decision_selected = true;
-                            if !cluster_for_reconcile.peer_health_scheduling_revision_is_current(
-                                health_scheduling_revision,
-                            )
-                            {
-                                break;
-                            }
-                            let current_availability =
-                                cluster_for_reconcile.availability_state().await;
-                            if !schedule_planning::DomainSchedulePlanningSnapshot::same_eligibility(
-                                &scheduling_availability,
-                                &current_availability,
-                                automatic_schedule_input.topology().voters(),
-                                automatic_schedule_input.topology().cordoned(),
-                            ) {
-                                break;
-                            }
-                            match consensus_for_reconcile
-                                .apply_automatic_domain_schedule(
-                                    automatic_schedule_input.fence(),
-                                    automatic_schedule_input
-                                        .planning_inputs(&domain_schedule.domain)
-                                        .cloned()
-                                        .verified(
-                                            "the automatic runtime snapshot and planning inputs \
-                                             contain the same domains",
-                                        ),
-                                    Some(failover_schedule),
+                            automatic_decision_published = service_for_reconcile
+                                .publish_automatic_schedule(
+                                    &publication, Some(domain_schedule), failover_schedule, "owner failover",
                                 )
-                                .await
-                            {
-                                Ok(()) => automatic_decision_published = true,
-                                Err(error) => {
-                                    warn!(error = %format_args!("{error:#}"), "failed to republish domain schedule after node failover");
-                                }
-                            }
+                                .await;
                             break;
                         }
                         if !automatic_decision_selected {
@@ -1691,52 +1658,11 @@ impl Application {
                                 if current_domain == Some(&schedule) {
                                     continue;
                                 }
-                                if let Some(current_domain) = current_domain {
-                                    ForcedOwnershipRecoveryCoordinator {
-                                recovery_budget: automatic_schedule_input.runtime_state().parameters.verified("scheduling starts after committed policy initialization").values.forced_recovery_budget(),
-                                        runtime: &runtime_for_reconcile,
-                                        interconnect: &interconnect_for_reconcile,
-                                        local_node_id: &local_node_for_reconcile,
-                                        node_incarnations: &live_node_incarnations,
-                                    }
-                                    .prepare_schedule(current_domain, &mut schedule)
-                                    .await;
-                                }
-                                if !cluster_for_reconcile.peer_health_scheduling_revision_is_current(
-                                    health_scheduling_revision,
-                                )
-                                {
-                                    break;
-                                }
-                                let current_availability =
-                                    cluster_for_reconcile.availability_state().await;
-                                if !schedule_planning::DomainSchedulePlanningSnapshot::same_eligibility(
-                                    &scheduling_availability,
-                                    &current_availability,
-                                    automatic_schedule_input.topology().voters(),
-                                    automatic_schedule_input.topology().cordoned(),
-                                ) {
-                                    break;
-                                }
-                                match consensus_for_reconcile
-                                    .apply_automatic_domain_schedule(
-                                        automatic_schedule_input.fence(),
-                                        automatic_schedule_input
-                                            .planning_inputs(&domain)
-                                            .cloned()
-                                            .verified(
-                                                "the automatic runtime snapshot and planning \
-                                                 inputs contain the same domains",
-                                            ),
-                                        Some(schedule),
+                                automatic_decision_published = service_for_reconcile
+                                    .publish_automatic_schedule(
+                                        &publication, current_domain, schedule, "membership or schedulability change",
                                     )
-                                    .await
-                                {
-                                    Ok(()) => automatic_decision_published = true,
-                                    Err(error) => {
-                                        warn!(error = %format_args!("{error:#}"), "failed to republish domain schedule after membership or schedulability change");
-                                    }
-                                }
+                                    .await;
                                 break;
                             }
                         }
@@ -1809,7 +1735,7 @@ impl Application {
                     });
                 }
                 let health_targets = cluster_for_health
-                    .replace_peer_health_endpoints(health_endpoints)
+                    .replace_peer_health_endpoints(health_endpoints, &live_node_ids)
                     .into_iter()
                     .map(|target| (target.node_id().clone(), target))
                     .collect::<BTreeMap<_, _>>();
@@ -2442,6 +2368,17 @@ impl Application {
                     }
                 },
             )
+            .change_context(AppError::RegisterInterconnectRequestHandler)?;
+
+        let discard_forced_recovery_service = service.clone();
+        interconnect
+            .register_handler::<DiscardForcedOwnershipRecoveryRequest, _, _>(move |_context, request| {
+                let service = discard_forced_recovery_service.clone();
+                async move {
+                    service.discard_local_forced_ownership_recovery(request.preparation).await
+                        .map_err(|error| OwnershipHandoffError::remote_rejection(&error))
+                }
+            })
             .change_context(AppError::RegisterInterconnectRequestHandler)?;
 
         let confirm_handoff_service = service.clone();

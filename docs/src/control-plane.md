@@ -393,9 +393,11 @@ unavailable.
 Automatic scheduling runs independently of the health-probe sweep, resource downloads, and Raft
 learner catch-up. It does not wait for any of them to finish. Slow health responses, learner
 admission, and bulk progress can therefore overlap scheduling and unrelated administrative work.
-Scheduling uses only observations that are current when it computes and publishes a candidate; a
-changed topology or effective-health revision causes the candidate to be recomputed. A newer
-observation with the same effective health does not invalidate an otherwise current candidate.
+Scheduling checks the live and placement-eligible voter incarnations again after preparing a
+candidate. It also checks the peer-health generation, which catches a peer briefly changing
+availability during preparation. Retiring an already unavailable peer's probe target updates the
+health diagnostics. When gossip also has the peer absent and the other targets are unchanged, that
+retirement leaves the scheduling generation unchanged and the first preparation can be published.
 
 The leader's effective availability view also defines the required process incarnations for
 authoritative visibility, runtime preparation and readiness, and HTTPS listener installation.
@@ -903,6 +905,14 @@ reapplying its retained schedule after a destination restart or a later domain r
 newer checkpoints the destination has published. A state reset occurs only when the accepted recovery
 decision either stages the recreated checkpoint inventory or reports a reset outcome for every state
 component owned by the entity.
+
+When current eligibility or leader tenure invalidates an automatic candidate, the coordinator
+logs why and asks each destination to discard its exact preparation. An explicit rejection by the
+commit fence also triggers discard. If publication returns an uncertain result, such as a leadership
+change while the proposal was pending, staging stays available for the schedule that may have
+committed. A destination records the rejected round before discarding its unit's staged state, so a
+delayed prepare cannot recreate it. A repeated discard matches the same transition, destination
+incarnation and schedule fingerprint, preserving newer preparations and activated state.
 
 A forced recovery of a WASM processor also starts a new guest-state generation for every branch, in
 the schedule publication that names the new owner, and that schedule is the one the recovery
