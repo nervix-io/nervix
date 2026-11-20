@@ -14263,6 +14263,27 @@ fn then_node_refused_to_join(world: &mut ScenarioWorld, node_id: String, reason:
     world.assert_node_attempt_refused(&node_id, &reason);
 }
 
+/// The refused node has stopped, but its run stays live in the observer's gossip until the failure
+/// detector declares it dead. The membership the observer reports must never name it in that time,
+/// whatever the cluster's licensing policy has become since the refusal.
+#[then(
+    expr = "node {string} never admits the refused run of node {string} to its raft membership \
+            before that run leaves gossip"
+)]
+async fn then_refused_run_stays_outside_membership(
+    world: &mut ScenarioWorld,
+    observer_id: String,
+    refused_id: String,
+) {
+    let observer_id = expand_placeholders(world, &observer_id);
+    let refused_id = expand_placeholders(world, &refused_id);
+    world
+        .cluster()
+        .wait_for_refused_run_to_leave_gossip_outside_membership(&observer_id, &refused_id)
+        .await
+        .expect("the refused run stayed outside the membership until it left gossip");
+}
+
 /// The refusal names the trust roots of both nodes as each reads its own trust bundle.
 #[then(
     expr = "node {string} refused to join because its trust root differs from the trust root of \

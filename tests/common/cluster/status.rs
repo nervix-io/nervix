@@ -18,6 +18,8 @@ pub(super) struct ClusterStatus {
     pub(super) membership_joint: Option<bool>,
     pub(super) membership_committed: Option<bool>,
     pub(super) interconnect: BTreeMap<String, String>,
+    /// The other nodes this node's gossip calls live, once the status lists them.
+    pub(super) live_gossip_nodes: Option<BTreeSet<String>>,
 }
 
 impl ClusterStatus {
@@ -30,10 +32,30 @@ impl ClusterStatus {
         let mut membership_joint = None;
         let mut membership_committed = None;
         let mut interconnect = BTreeMap::new();
+        let mut live_gossip_nodes = BTreeSet::new();
+        let mut lists_live_gossip = false;
         let mut in_membership = false;
         let mut in_interconnect = false;
+        let mut in_live_gossip = false;
 
         for line in raw.lines() {
+            if line == "live_nodes:" {
+                in_live_gossip = true;
+                lists_live_gossip = true;
+                continue;
+            }
+            if in_live_gossip {
+                if let Some(node_id) = line.strip_prefix("- node_id: ") {
+                    live_gossip_nodes.insert(node_id.trim().to_string());
+                    continue;
+                }
+                // A listed node's other advertisements are indented beneath its name.
+                if line.starts_with("  ") {
+                    continue;
+                }
+                in_live_gossip = false;
+            }
+
             if let Some(value) = line.strip_prefix("raft.current_leader: ") {
                 let trimmed = value.trim();
                 if trimmed != "(none)" {
@@ -102,6 +124,7 @@ impl ClusterStatus {
             membership_joint,
             membership_committed,
             interconnect,
+            live_gossip_nodes: lists_live_gossip.then_some(live_gossip_nodes),
         }
     }
 }
@@ -131,6 +154,15 @@ impl ClusterStatus {
         }
         match self.membership.get(node_id) {
             Some(role) => role == "voter",
+            None => false,
+        }
+    }
+
+    /// Whether this node's gossip, as the status lists it, no longer calls `node_id` live. A
+    /// status that lists no live gossip proves nothing, so it never reads as a departure.
+    pub(super) fn has_left_live_gossip(&self, node_id: &str) -> bool {
+        match &self.live_gossip_nodes {
+            Some(live) => !live.contains(node_id),
             None => false,
         }
     }
@@ -188,5 +220,38 @@ mod membership_status_tests {
         );
         assert_eq!(status.has_ready_voters(&expected), ready);
         assert_eq!(status.is_ready_voter("node-3"), ready);
+    }
+
+    #[test]
+    fn live_gossip_lists_only_the_other_live_nodes() {
+        let raw = "[chitchat]\ncluster_id: cucumber\nseed_nodes: (none)\nself:\n- node_id: \
+                   node-1\n  gossip_addr: 127.0.0.1:41001\n  terminating: false\nlive_nodes:\n- \
+                   node_id: node-2\n  gossip_addr: 127.0.0.1:41002\n  terminating: true\n- \
+                   node_id: node-3\n  gossip_addr: 127.0.0.1:41003\n\n[raft]\nraft.membership:\n- \
+                   node-1 [voter] 127.0.0.1:41001\n- node-2 [learner] 127.0.0.1:41002"
+            .to_string();
+        let status = ClusterStatus::parse(raw);
+
+        assert_eq!(
+            status.live_gossip_nodes,
+            Some(BTreeSet::from(["node-2".to_string(), "node-3".to_string()]))
+        );
+        assert!(!status.has_left_live_gossip("node-2"));
+        assert!(status.has_left_live_gossip("node-4"));
+        assert_eq!(
+            status.membership.get("node-2").map(String::as_str),
+            Some("learner")
+        );
+    }
+
+    #[test]
+    fn a_status_without_live_gossip_proves_no_departure() {
+        let empty = ClusterStatus::parse("live_nodes:\n\n[raft]".to_string());
+        assert_eq!(empty.live_gossip_nodes, Some(BTreeSet::new()));
+        assert!(empty.has_left_live_gossip("node-2"));
+
+        let unlisted = ClusterStatus::parse("[raft]\nraft.state: Leader".to_string());
+        assert_eq!(unlisted.live_gossip_nodes, None);
+        assert!(!unlisted.has_left_live_gossip("node-2"));
     }
 }

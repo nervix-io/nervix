@@ -590,7 +590,9 @@ crossings independently of its refresh attempt. The derived refresh state is `li
 `licensed due`, or `licensed overdue`; a bounded `valid_until` crossing becomes `lapsed freeze`.
 An outage moves no signed deadline, and restart resets none. Freeze keeps existing work running
 and refuses new domain and member usage. Existing domain lifecycle commands and backups remain
-available. A later verified decision can clear the lapse.
+available. A later verified decision can clear the lapse. A newcomer refused during the freeze
+stops, and the leader keeps refusing that run after the lapse clears, for as long as gossip still
+shows it; the node joins under the cleared policy when it starts again.
 
 The licensed leader holds one authenticated outbound event stream. Each connection obtains a
 fresh challenge and single-use signed stream ticket; credentials stay out of the URL. The initial

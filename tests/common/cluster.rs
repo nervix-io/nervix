@@ -215,6 +215,13 @@ const _: () = assert!(
     "scenario cleanup must end well before the watchdog of a node a scenario stops itself"
 );
 const POLL_INTERVAL: Duration = Duration::from_millis(200);
+/// How long a scenario waits for a stopped node's run to leave another node's live gossip. The
+/// failure detector declares a run dead once eight of its smoothed heartbeat intervals pass in
+/// silence. That interval never exceeds the twenty-gossip-interval cap on a sample, ten seconds at
+/// the default half-second gossip interval, so a stopped run leaves within about eighty seconds
+/// even on a loaded host; a run that lived a second or two leaves after about half a minute. The
+/// budget doubles the bound.
+const REFUSED_RUN_GOSSIP_DEPARTURE_BUDGET: Duration = Duration::from_secs(160);
 const SQS_REGION: &str = "us-east-1";
 const TEST_LOG_DIR: &str = "tests/logs";
 const TEST_LOG_FILE: &str = "tests/logs/scenarios.log";
@@ -2489,6 +2496,60 @@ impl Cluster {
             .collect::<BTreeSet<_>>();
         self.wait_until(node_id, |status| status.has_ready_voters(&expected))
             .await
+    }
+
+    /// Watches the status `observer_id` reports until its gossip no longer calls `refused_id`
+    /// live, and fails as soon as its Raft membership names `refused_id`, as a learner or a voter.
+    ///
+    /// A refused node stops at once, but the failure detector keeps its run live for several of
+    /// its observed heartbeat intervals, about half a minute for a run that lived a second or two.
+    /// The watch therefore spans every membership reconciliation the leader runs while it can still
+    /// see that run, and it ends on the run's departure rather than after a quiet period.
+    pub(crate) async fn wait_for_refused_run_to_leave_gossip_outside_membership(
+        &self,
+        observer_id: &str,
+        refused_id: &str,
+    ) -> io::Result<()> {
+        let handle = self
+            .nodes
+            .get(observer_id)
+            .unwrap_or_else(|| panic!("unknown node '{observer_id}'"));
+        let deadline = PhaseDeadline::after(REFUSED_RUN_GOSSIP_DEPARTURE_BUDGET);
+        let watched = deadline
+            .poll_until(
+                POLL_INTERVAL,
+                |phase| handle.cluster_status(phase),
+                |status| {
+                    status.membership.contains_key(refused_id)
+                        || status.has_left_live_gossip(refused_id)
+                },
+            )
+            .await;
+        let status = match watched {
+            Ok(status) => status,
+            Err(expired) => {
+                let mut message = format!(
+                    "node '{observer_id}' still saw the refused run of node '{refused_id}' in its \
+                     live gossip after {:?}",
+                    deadline.elapsed()
+                );
+                if let Some(status) = expired.last_output {
+                    message.push_str(&format!("\nlast status:\n{}", status.raw));
+                }
+                if let Some(failure) = expired.last_failure {
+                    message.push_str(&format!("\nlast error: {failure:#}"));
+                }
+                return Err(io::Error::other(message));
+            }
+        };
+        if let Some(role) = status.membership.get(refused_id) {
+            return Err(io::Error::other(format!(
+                "node '{observer_id}' admitted the refused run of node '{refused_id}' to its raft \
+                 membership as a {role} before that run left its gossip\nstatus:\n{}",
+                status.raw
+            )));
+        }
+        Ok(())
     }
 
     pub(crate) async fn wait_for_kafka_consumer_group_members(

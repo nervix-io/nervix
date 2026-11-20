@@ -105,6 +105,44 @@ Feature: Licensing refresh and committed deadline crossings
       | 1            | node-2       | node-1               |
       | 3            | node-4       | node-1,node-2,node-3 |
 
+  Scenario Outline: A newcomer refused while the license lapsed stays outside the membership after licensed policy returns on <cluster_size> nodes
+    Given an HTTPS licensing test service has bounded offline allowance
+    And a <cluster_size> node nervix cluster is started
+    When these Plexus commands are executed on the leader node
+      """
+      ACTIVATE LICENSE PERSISTENT WITH KEY 'NVXK-TESTABCD-fixture-secret';
+      """
+    And the licensing service becomes unreachable
+    And the cluster licensing clock passes the "valid_until" deadline
+    Then node "node-1" eventually describes this license without a selected domain
+      """
+      policy: lapsed freeze
+      """
+    And the current leader node is saved as placeholder "licensing_leader"
+    When node "<joining_node>" attempts to join
+    Then node "<joining_node>" refused to join because "lapsed"
+    When the licensing service becomes reachable
+    And the licensing service clock catches up with the cluster
+    And these Plexus commands are executed through the client on node "{{licensing_leader}}"
+      """
+      REFRESH LICENSE;
+      """
+    Then node "node-1" eventually describes this license without a selected domain
+      """
+      policy: licensed fresh
+      """
+    And node "{{licensing_leader}}" never admits the refused run of node "<joining_node>" to its raft membership before that run leaves gossip
+    When these Plexus commands are executed through the client on node "{{licensing_leader}}"
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    Then node "{{licensing_leader}}" eventually reports raft voters "<voters>"
+
+    Examples:
+      | cluster_size | joining_node | voters               |
+      | 1            | node-2       | node-1               |
+      | 3            | node-4       | node-1,node-2,node-3 |
+
   Scenario Outline: A service refusal is reported without renewing the decision on <cluster_size> nodes
     Given an HTTPS licensing test service is available
     And a <cluster_size> node nervix cluster is started
