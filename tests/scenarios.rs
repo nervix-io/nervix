@@ -14266,7 +14266,7 @@ fn then_node_refused_to_join(world: &mut ScenarioWorld, node_id: String, reason:
 
 /// The refused node has stopped, but its run stays live in the observer's gossip until the failure
 /// detector declares it dead. The membership the observer reports must never name it in that time,
-/// whatever the cluster's licensing policy has become since the refusal.
+/// whatever the cluster's licensing policy or its live voters have become since the refusal.
 #[then(
     expr = "node {string} never admits the refused run of node {string} to its raft membership \
             before that run leaves gossip"
