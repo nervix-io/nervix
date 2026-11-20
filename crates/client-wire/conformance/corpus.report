@@ -212,6 +212,17 @@ DIAGNOSTIC span=4294967295..4294967295 message=str:616e20656d707479207370616e206
 DIAGNOSTIC span=none message=str:
 STATE scope=cluster_license kind=LICENSE
 STATE_REFUSED NotReady
+FRAME server_command_nodes.nxsm
+REPLY 31 COMMAND completed reference=0192d4e4-7b36-7c3e-9f00-5b2d8c3a1e44 origin=Recovered message=str:636f6d6d6974746564207472616e73616374696f6e3b2071756965736365206c6576656c3a20454e544954595f5041555345
+DIAGNOSTIC span=7..12 message=str:756e657870656374656420746f6b656e202752454c415927
+DIAGNOSTIC span=4294967295..4294967295 message=str:616e20656d707479207370616e206d61726b73206120706f736974696f6e
+DIAGNOSTIC span=none message=str:
+NODE name=node-1 live=true voter=true cordoned=false terminating=false
+NODE_RECORD revision=18446744073709551615 cpu_count=24 memory_limit=none architecture=str:7838365f3634
+NODE_TAG key=str:6f776e6572 value=str:4461746120ce943d4f7073
+NODE_TAG key=str:7a6f6e65 value=str:6575
+NODE name=node-2 live=true voter=false cordoned=true terminating=true
+NODE_RECORD none
 FRAME server_command_redirect.nxsm
 REPLY 2 COMMAND not_leader reference=0192d4e4-7b36-7c3e-9f00-5b2d8c3a1e44 origin=Recovered message=str:636f6d6d6974746564207472616e73616374696f6e3b2071756965736365206c6576656c3a20454e544954595f5041555345
 DIAGNOSTIC span=7..12 message=str:756e657870656374656420746f6b656e202752454c415927

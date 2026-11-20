@@ -62,6 +62,8 @@ mod branch_partitions;
 mod node_endpoint;
 mod node_operations;
 mod node_record;
+mod node_selector;
+pub use node_selector::{NODE_SCOPE, NODE_TAG_FUNCTION, NodeSelectorField};
 mod node_ref;
 mod partition_epoch;
 mod partition_topology;
@@ -339,9 +341,9 @@ pub use node_endpoint::{
 pub use node_record::{
     CommittedNodeRecord, CudaProviderRegistration, Detected, ExecutionProviders, GpuDevice,
     GpuDevices, GpuInventory, MAX_NODE_TAGS, MAX_PROPERTY_LIST_ITEMS, MAX_PROPERTY_TEXT_BYTES,
-    MAX_TAG_KEY_BYTES, MAX_TAG_VALUE_BYTES, NodeProperties, NodeRecord, NodeTag, NodeTagError,
-    NodeTags, OnnxRuntime, OnnxRuntimeDetection, PropertyText, PropertyValueError, TagKey,
-    TagValue, UndetectedReason,
+    MAX_TAG_KEY_BYTES, MAX_TAG_VALUE_BYTES, NodeInspection, NodeInspectionRecord,
+    NodeInspectionRow, NodeProperties, NodeRecord, NodeTag, NodeTagError, NodeTags, OnnxRuntime,
+    OnnxRuntimeDetection, PropertyText, PropertyValueError, TagKey, TagValue, UndetectedReason,
 };
 pub use node_ref::{DomainNodeRef, NodeRef};
 pub use partition_epoch::{BranchPartitionEpoch, PartitionEpochNumber, PartitionTransition};
@@ -466,8 +468,8 @@ pub use statement::{
     MaterializedRelayState, MessageErrorPolicy, Model, ModelKind, PartitionSeed, RelayBranching,
     Relocation, RelocationMember, RelocationPreferenceOverride, RelocationPreferenceStrategy,
     RelocationSelection, RelocationUnitSelection, ResolvedBranching, ResolvedCodecWireFormat,
-    RetryPolicy, ShowClusterStatus, ShowCreate, ShowEmitters, ShowIngestors, ShowPlacements,
-    ShowProcessorState, ShowRelayMaterializedState, ShowTransactions, ShowUdfs,
+    RetryPolicy, ShowClusterStatus, ShowCreate, ShowEmitters, ShowIngestors, ShowNodes,
+    ShowPlacements, ShowProcessorState, ShowRelayMaterializedState, ShowTransactions, ShowUdfs,
     SignalingProtobufConfig, SignalingProtocolOnConnect, SignalingStep, SignalingWaitStep,
     SignalingWireFormat, StartDomain, StateInspectedProcessor, StateInspectionPageRequest,
     Statement, StopDomain, SubscriptionBinding, SubscriptionDeliveryBehavior, SubscriptionLiteral,

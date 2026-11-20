@@ -138,11 +138,35 @@ const JEMALLOC_SUBSYSTEM: &str = "jemalloc";
 const DOMAIN_TARGET_KIND: &str = "DOMAIN";
 const DOMAIN_INPUT_OUTPUT_TARGET: &str = "input_output";
 const DOMAIN_PROCESSED_TARGET: &str = "processed";
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the exported messages-per-batch histogram publishes these bucket boundaries as \
+                  its series schema"
+    )
+)]
 const MESSAGE_BATCH_BUCKETS: &[f64] = &[
     1.0, 2.0, 5.0, 10.0, 50.0, 100.0, 500.0, 1000.0, 1024.0, 2048.0, 4096.0, 8192.0, 16_384.0,
     32_768.0, 65_536.0,
 ];
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the exported delivery-latency histogram publishes these bucket boundaries as \
+                  its series schema"
+    )
+)]
 const LATENCY_BUCKETS: &[f64] = &[0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 5.0, 30.0];
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the exported relay-buffer histogram publishes these bucket boundaries as its \
+                  series schema"
+    )
+)]
 const RELAY_BUFFER_LEN_BUCKETS: &[f64] = &[
     1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0, 256.0, 512.0, 1024.0, 2048.0,
 ];
@@ -182,9 +206,41 @@ const CLIENT_INGESTOR_PROMETHEUS_LABELS: &[&str] = &["domain", "ingestor"];
 const CLIENT_EMITTER_PROMETHEUS_LABELS: &[&str] = &["domain", "emitter"];
 const CLIENT_INGESTOR_SUBMISSION_PROMETHEUS_LABELS: &[&str] =
     &["domain", "ingestor", "outcome", "cause"];
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the packed atomic domain timestamp reserves i64::MIN, the earliest Unix \
+                  nanosecond count, to encode absence"
+    )
+)]
 const NO_DOMAIN_TIMESTAMP: i64 = i64::MIN;
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the packed atomic histogram capacity reserves u64::MAX, which no declared \
+                  capacity reaches, to encode absence"
+    )
+)]
 const NO_HISTOGRAM_CAPACITY: u64 = u64::MAX;
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the packed atomic elapsed time reserves u64::MAX nanoseconds, over 584 years, \
+                  to encode absence"
+    )
+)]
 const NO_WALL_ELAPSED_NANOS: u64 = u64::MAX;
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the packed atomic rate reserves NaN's bits, which no average of finite rates \
+                  produces, to encode absence"
+    )
+)]
 const NO_EMA_VALUE_BITS: u64 = f64::NAN.to_bits();
 #[cfg_attr(
     nervix_lint,
@@ -210,17 +266,70 @@ const FIFTEEN_MINUTES: Duration = Duration::from_secs(15 * 60);
     )
 )]
 const RATE_DECAY_TAU_FRACTION: f64 = 20.0;
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the metrics chapter fixes ten-second steps for the one-minute percentile window"
+    )
+)]
 const WALL_HISTOGRAM_1M_STEP: Duration = Duration::from_secs(10);
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the metrics chapter fixes one-minute steps for the fifteen-minute percentile \
+                  window"
+    )
+)]
 const WALL_HISTOGRAM_15M_STEP: Duration = Duration::from_secs(60);
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the metrics chapter fixes ten-second steps for the one-minute percentile window"
+    )
+)]
 const DOMAIN_HISTOGRAM_1M_STEP: Duration = Duration::from_secs(10);
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the metrics chapter fixes one-minute steps for the fifteen-minute percentile \
+                  window"
+    )
+)]
 const DOMAIN_HISTOGRAM_15M_STEP: Duration = Duration::from_secs(60);
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "snapshotted and replicated HDR histograms hold samples in thousandths of their \
+                  unit"
+    )
+)]
 const HISTOGRAM_VALUE_SCALE: f64 = 1_000.0;
 #[cfg_attr(
     nervix_lint,
     nervix::constant(fixed, reason = "one SI second contains one billion nanoseconds")
 )]
 const NANOS_PER_SECOND: f64 = 1_000_000_000.0;
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "DESCRIBE renders a histogram estimate of one or more to one decimal place"
+    )
+)]
 const HISTOGRAM_DISPLAY_DECIMAL_SCALE: f64 = 10.0;
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "snapshotted and replicated HDR histograms record and restore at two significant \
+                  figures"
+    )
+)]
 const HDR_HISTOGRAM_SIGFIG: u8 = 2;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]

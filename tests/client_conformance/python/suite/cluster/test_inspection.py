@@ -10,6 +10,19 @@ import nervix_client as nx
 from support import Cluster, Row, build, completed, deadline, execute, input_fields
 
 
+def test_node_preview_retains_committed_facts(session: nx.Session) -> None:
+    # ANCHOR: node_inspection
+    outcome = execute(session, "SHOW NODES WHERE node.name = 'node-1';")
+    nodes = outcome.node_inspection
+    del outcome
+    assert isinstance(nodes, nx.NodeInspection)
+    assert nodes.names == ["node-1"]
+    row, = json.loads(nodes.json)["nodes"]
+    assert row["name"] == "node-1" and row["record"]["properties"]["architecture"]
+    # ANCHOR_END: node_inspection
+    assert execute(session, "DESCRIBE LICENSE;").node_inspection is None
+
+
 def test_inspection_metadata_and_verified_frames_survive_their_parents(
     cluster: Cluster, session: nx.Session, unique: str
 ) -> None:

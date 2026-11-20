@@ -1784,6 +1784,45 @@ table ClusterLicenseInspectionEntity {}
 union StateInspectionEntity { DomainNodeInspectionEntity, ClusterLicenseInspectionEntity }
 table StateInspection { entity: StateInspectionEntity (required); result: StateInspectionResult (required); }
 
+enum NodeUndetectedReason : ubyte { NotReported, LibraryUnavailable, DriverUnavailable, QueryFailed, DeadlineExpired, DetectionFailed, ExceedsRecordBound }
+enum NodeCudaRegistration : ubyte { Registered, NotInLibrary, RegistrationFailed }
+table NodeUndetected { reason: NodeUndetectedReason = null; }
+table NodeDetectedText { value: string (required); }
+table NodeDetectedBytes { bytes: ulong = null; }
+table NodeDetectedProviders { values: [string] (required); }
+union NodeTextDetection { NodeDetectedText, NodeUndetected }
+union NodeBytesDetection { NodeDetectedBytes, NodeUndetected }
+union NodeProvidersDetection { NodeDetectedProviders, NodeUndetected }
+table NodeGpuDevice { model: NodeTextDetection (required); memory: NodeBytesDetection (required); }
+table NodeGpuDevices { devices: [NodeGpuDevice] (required); driver: NodeTextDetection (required); }
+table NodeNoGpuDevice {}
+union NodeGpuInventory { NodeGpuDevices, NodeNoGpuDevice, NodeUndetected }
+table NodeOnnxRuntime { version: NodeTextDetection (required); providers: NodeProvidersDetection (required); cuda: NodeCudaRegistration = null; }
+union NodeOnnxDetection { NodeOnnxRuntime, NodeUndetected }
+table NodeDetectedProperties {
+  architecture: string (required);
+  cpu_model: NodeTextDetection (required);
+  gpus: NodeGpuInventory (required);
+  onnx: NodeOnnxDetection (required);
+}
+table NodeTagEntry { key: string (required); value: string (required); }
+table NodeInspectionRecord {
+  revision: ulong = null;
+  cpu_count: ulong = null;
+  memory_limit: ulong = null;
+  properties: NodeDetectedProperties (required);
+  tags: [NodeTagEntry] (required);
+}
+table NodeInspectionRow {
+  name: string (required);
+  live: bool = null;
+  voter: bool = null;
+  cordoned: bool = null;
+  terminating: bool = null;
+  record: NodeInspectionRecord;
+}
+table NodeInspection { nodes: [NodeInspectionRow] (required); }
+
 // An exact metadata read under its captured committed acceptance policy.
 table LabelEntry { key: string (required); value: string (required); }
 table EntityLabelLimits { count: ulong; key_bytes: ulong; value_bytes: ulong; bytes: ulong; }
@@ -1824,6 +1863,8 @@ table CommandOutcome {
   /// Typed bounded state inspection, independent of the requested presentation format.
   state: StateInspection;
   entity_labels: EntityLabelsInspection;
+  /// Committed node facts and observed membership flags, regardless of the requested format.
+  node_inspection: NodeInspection;
 }
 
 table TransactionAttached {

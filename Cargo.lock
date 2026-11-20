@@ -8564,6 +8564,7 @@ dependencies = [
  "md5",
  "meticulous",
  "nervix-approx-into",
+ "nervix-arbitrary",
  "nervix-crypto",
  "nervix-execution",
  "nervix-models",

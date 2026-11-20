@@ -120,6 +120,7 @@ pub use cluster_identity::{
     ClusterSigner, PendingClusterKey,
 };
 pub use cluster_parameters::ClusterParameterPlanningInputs;
+pub use node_records::CommittedNodeObservations;
 mod connectivity_fault;
 mod domain_mutation;
 mod domain_pause_recovery;

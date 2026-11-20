@@ -1106,6 +1106,18 @@ The reference owns each family's contract. These notes describe its implementati
 
 ## Context, Determinism, And Extension Boundaries
 
+### Node Selectors
+
+The node selector uses the shared semantic compiler with the vocabulary's fixed `node` schema.
+The frontend exposes that scope and `tag` in selector expressions. It resolves each literal tag
+key to a nullable string column filled from the committed node records. Pure, immutable builtins
+and ordinary constant folding apply. The selector's scalar result must be Boolean.
+
+A selector evaluates one typed batch whose rows keep the decisions layer's order of node names.
+Only a successful true result includes a node. The VM preserves error indices from the original
+batch so the caller can identify the node whose predicate failed. See
+[Selecting nodes](placement.md#selecting-nodes).
+
 ### Domain Time
 
 The one timestamp an execution sees is `ExecutionContext::now`. The host takes it from the
