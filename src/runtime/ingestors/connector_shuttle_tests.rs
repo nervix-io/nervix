@@ -24,7 +24,7 @@ use nervix_model_harness::shuttle::{check_pct, check_random};
 // changes in the same scheduling step as the dispatch it counts.
 use nervix_primitives::unmodeled::sync::atomic::{AtomicUsize, Ordering};
 use nervix_primitives::{
-    sync::{StdArc, mpsc, oneshot, watch},
+    sync::{Notify, StdArc, mpsc, oneshot, watch},
     time::{clear_triggers, trigger_timeouts},
 };
 
@@ -90,6 +90,7 @@ impl IngestorHostServices for ChannelHost {
     async fn intake_unacknowledged(
         &mut self,
         messages: Vec<IngestorIntakeMessage<'_>>,
+        _maintenance: Option<&mut dyn IngestorReadHold>,
     ) -> IngestorIntakeResult<()> {
         for message in messages {
             nervix_primitives::task::consume_budget().await;
@@ -124,6 +125,7 @@ impl IngestorHostServices for ChannelHost {
     async fn intake_acknowledged(
         &mut self,
         _messages: Vec<IngestorIntakeMessage<'_>>,
+        _maintenance: Option<&mut dyn IngestorReadHold>,
     ) -> IngestorIntakeResult<IngestorBatchAcknowledgement> {
         panic!("a channel ingestor reads without acknowledgements");
     }
@@ -142,10 +144,13 @@ impl IngestorHostServices for ChannelHost {
         let Ok(message) = messages.try_recv() else {
             return Ok(false);
         };
-        self.intake_unacknowledged(vec![IngestorIntakeMessage {
-            payload: &message.payload,
-            metadata: message.metadata(),
-        }])
+        self.intake_unacknowledged(
+            vec![IngestorIntakeMessage {
+                payload: &message.payload,
+                metadata: message.metadata(),
+            }],
+            None,
+        )
         .await?;
         Ok(true)
     }
@@ -230,7 +235,7 @@ impl PacedIngestorHostServices for ChannelHost {
         if messages.is_empty() {
             return Ok(false);
         }
-        self.intake_unacknowledged(messages).await?;
+        self.intake_unacknowledged(messages, None).await?;
         Ok(true)
     }
 
@@ -537,10 +542,10 @@ struct AllowanceDeadline;
 /// A broker ingestor whose transport holds a message from the start, read for a host whose
 /// allowance is spent, and a quiesce change or a stop that meets the loop's hold at any point.
 ///
-/// The loop takes nothing from its transport while the allowance is spent. A quiesce change brings
-/// the loop back for a new turn, which asks its budget again and holds again; once the allowance
-/// returns and the hold's deadline passes, the loop reads the waiting message. A stop ends the hold
-/// and the loop without a read, and without waiting for the deadline.
+/// The loop only services its transport while the allowance is spent. A quiesce change cancels
+/// the service and brings the loop back for a new turn. Once the allowance returns, the service
+/// ends before the loop reads the waiting message. A stop ends the service and closes the
+/// transport without waiting for the allowance's deadline.
 fn spent_allowance_hold(meets: HoldMeets) {
     // Timeout triggers are thread-local rather than per execution, so every execution starts
     // without the trigger an earlier one registered.
@@ -555,6 +560,7 @@ fn spent_allowance_hold(meets: HoldMeets) {
         let events = ReadLog::new();
         let signals = Arc::new(IngestorSignals::new());
         let control = Arc::new(HostControl::new());
+        let maintenance_started = Arc::new(Notify::new());
         // Far beyond any check: only the check's clock ends a hold at its deadline.
         let allowance = Arc::new(ScriptedAllowance::spent(Duration::from_secs(3600)));
         let (shutdown, shutdown_rx) = watch::channel(false);
@@ -562,12 +568,15 @@ fn spent_allowance_hold(meets: HoldMeets) {
             let signals = signals.clone();
             let control = control.clone();
             let allowance = allowance.clone();
+            let maintenance_started = maintenance_started.clone();
             async move {
                 allowance.held_back.notified().await;
+                maintenance_started.notified().await;
                 if let HoldMeets::QuiesceChange = meets {
                     control.change_quiesce();
                     // The new turn asks its budget again and holds again.
                     allowance.held_back.notified().await;
+                    maintenance_started.notified().await;
                     allowance.return_room();
                     trigger_timeouts(|labels| labels.get::<AllowanceDeadline>().is_some());
                     signals.took.notified().await;
@@ -578,7 +587,8 @@ fn spent_allowance_hold(meets: HoldMeets) {
             }
         });
         run_ingestor_instance_with_retry(
-            GatheringIngestor::new(receiver, events.clone(), signals.clone()),
+            GatheringIngestor::new(receiver, events.clone(), signals.clone())
+                .with_hold_maintenance(maintenance_started),
             IngestorHost::new(
                 RecordingHost::new(events.clone(), control.clone()).with_allowance(allowance),
             ),
@@ -599,6 +609,18 @@ fn spent_allowance_hold(meets: HoldMeets) {
             .iter()
             .filter(|event| matches!(event, ReadEvent::HoldEnded))
             .count();
+        let transport_activity: Vec<_> = events
+            .iter()
+            .filter(|event| {
+                matches!(
+                    event,
+                    ReadEvent::MaintenanceStarted
+                        | ReadEvent::MaintenanceEnded
+                        | ReadEvent::Took(_)
+                        | ReadEvent::Closed
+                )
+            })
+            .collect();
         match meets {
             HoldMeets::QuiesceChange => {
                 let first_read = first_read.assured("the loop reads once the allowance returns");
@@ -617,6 +639,17 @@ fn spent_allowance_hold(meets: HoldMeets) {
                     "the returned allowance holds nothing back: {events:?}"
                 );
                 assert_eq!(holds, 2, "each hold ended once: {events:?}");
+                assert_eq!(
+                    transport_activity,
+                    [
+                        &ReadEvent::MaintenanceStarted,
+                        &ReadEvent::MaintenanceEnded,
+                        &ReadEvent::MaintenanceStarted,
+                        &ReadEvent::MaintenanceEnded,
+                        &ReadEvent::Took(1),
+                        &ReadEvent::Closed,
+                    ]
+                );
                 assert!(
                     events.contains(&ReadEvent::TookIn(vec![1])),
                     "the waiting message reached the host: {events:?}"
@@ -625,6 +658,14 @@ fn spent_allowance_hold(meets: HoldMeets) {
             HoldMeets::Stop => {
                 assert_eq!(first_read, None, "a stopped loop read nothing: {events:?}");
                 assert_eq!(holds, 1, "the stop ended the one hold: {events:?}");
+                assert_eq!(
+                    transport_activity,
+                    [
+                        &ReadEvent::MaintenanceStarted,
+                        &ReadEvent::MaintenanceEnded,
+                        &ReadEvent::Closed,
+                    ]
+                );
             }
         }
     });
@@ -791,6 +832,7 @@ impl IngestorHostServices for GraphHost {
     async fn intake_unacknowledged(
         &mut self,
         _messages: Vec<IngestorIntakeMessage<'_>>,
+        _maintenance: Option<&mut dyn IngestorReadHold>,
     ) -> IngestorIntakeResult<()> {
         panic!("the check's ingestor reads in an acknowledged mode");
     }
@@ -798,6 +840,7 @@ impl IngestorHostServices for GraphHost {
     async fn intake_acknowledged(
         &mut self,
         messages: Vec<IngestorIntakeMessage<'_>>,
+        _maintenance: Option<&mut dyn IngestorReadHold>,
     ) -> IngestorIntakeResult<IngestorBatchAcknowledgement> {
         let mut roots = Vec::with_capacity(messages.len());
         let mut completions = Vec::with_capacity(messages.len());
@@ -1022,6 +1065,7 @@ impl IngestorHostServices for RefusingGraphHost {
     async fn intake_unacknowledged(
         &mut self,
         _messages: Vec<IngestorIntakeMessage<'_>>,
+        _maintenance: Option<&mut dyn IngestorReadHold>,
     ) -> IngestorIntakeResult<()> {
         panic!("the check's ingestor reads in an acknowledged mode");
     }
@@ -1029,6 +1073,7 @@ impl IngestorHostServices for RefusingGraphHost {
     async fn intake_acknowledged(
         &mut self,
         messages: Vec<IngestorIntakeMessage<'_>>,
+        _maintenance: Option<&mut dyn IngestorReadHold>,
     ) -> IngestorIntakeResult<IngestorBatchAcknowledgement> {
         self.unresolved.store(messages.len(), Ordering::SeqCst);
         let mut roots = BatchRoots::new(&self.trackers, messages.len());

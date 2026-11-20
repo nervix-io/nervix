@@ -100,7 +100,7 @@ async fn an_acknowledged_batch_consumes_a_payload_its_codec_refuses_and_delivers
 
     let decoded = br#"{"user_id":7}"#;
     let mut acknowledgement = host
-        .intake_acknowledged(vec![message(REFUSED), message(decoded)])
+        .intake_acknowledged(vec![message(REFUSED), message(decoded)], None)
         .await
         .expect("a payload its codec refuses does not fail its batch");
 
@@ -128,7 +128,7 @@ async fn an_acknowledged_batch_its_codec_refuses_whole_is_acknowledged() {
     let mut host = fixture.host(quiesce, shutdown, WAITING_INTAKE).await;
 
     let mut acknowledgement = host
-        .intake_acknowledged(vec![message(REFUSED), message(REFUSED)])
+        .intake_acknowledged(vec![message(REFUSED), message(REFUSED)], None)
         .await
         .expect("payloads their codec refuses do not fail their batch");
 
@@ -163,7 +163,7 @@ async fn an_unacknowledged_batch_drops_a_payload_its_codec_refuses_and_delivers_
     let mut host = fixture.host(quiesce, shutdown, WAITING_INTAKE).await;
 
     let decoded = br#"{"user_id":8}"#;
-    host.intake_unacknowledged(vec![message(decoded), message(REFUSED)])
+    host.intake_unacknowledged(vec![message(decoded), message(REFUSED)], None)
         .await
         .expect("a payload its codec refuses does not fail its batch");
 
@@ -190,7 +190,7 @@ async fn an_unacknowledged_batch_its_codec_refuses_whole_dispatches_nothing() {
     let quiesce = fixture.quiesce();
     let mut host = fixture.host(quiesce, shutdown, WAITING_INTAKE).await;
 
-    host.intake_unacknowledged(vec![message(REFUSED)])
+    host.intake_unacknowledged(vec![message(REFUSED)], None)
         .await
         .expect("a payload its codec refuses does not fail its batch");
 
@@ -306,7 +306,7 @@ async fn a_retained_payload_its_codec_refuses_leaves_the_buffer_as_a_decode_reje
         .await;
 
     quiesce.engage(IngestorQuiesceCause::EntityHold);
-    host.intake_unacknowledged(vec![message(REFUSED)])
+    host.intake_unacknowledged(vec![message(REFUSED)], None)
         .await
         .expect("a quiesced intake retains the payload");
     assert_eq!(quiesce.counters().buffered_records, 1);

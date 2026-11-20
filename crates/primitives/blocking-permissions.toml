@@ -124,11 +124,11 @@ path = "crates/benchmark/src/kafka.rs"
 reason = "The driver is a harness, not a node; librdkafka's metadata fetch parks its calling thread until the broker answers."
 
 [[permission]]
-bound = "One database open per check, and one committed-offset request with a one-second timeout per poll of a bounded wait."
+bound = "One database open per check, and one Kafka committed-offset or group information request per poll of a bounded observation, with a one- or five-second request timeout respectively."
 items = ["task::spawn_blocking"]
 owner = "The scenario harness's cluster fixture."
 path = "tests/common/cluster.rs"
-reason = "The harness is not a node; it checks that a stopped node released its databases and reads Kafka's committed offsets, both blocking calls outside any node's executor."
+reason = "The harness is not a node; it checks that a stopped node released its databases and reads Kafka's offsets and group information, blocking calls outside any node's executor."
 
 [[permission]]
 bound = "One probe run, which ends when the probe's session with the cluster ends."

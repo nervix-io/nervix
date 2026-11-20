@@ -27,7 +27,9 @@ use super::{
     KafkaDomainOffsetResult, KafkaDomainOffsetServices, KafkaGroupCommit, KafkaOffsetPosition,
     KafkaTopicIngestor, KafkaTopicIngestorError, KafkaTopicIngestorOffsetMode,
     KafkaTopicIngestorPlan, TopicPartitionInspector,
-    commit_tests::{cluster, plan as group_plan, publish, read_positions, subscribed_ingestor},
+    commit_tests::{
+        READ_DEADLINE, cluster, plan as group_plan, publish, read_positions, subscribed_ingestor,
+    },
 };
 
 struct UnreachedOffsets;
@@ -161,6 +163,38 @@ async fn cancelling_a_commit_keeps_its_request_in_flight() {
 }
 
 #[nervix_primitives::test]
+async fn a_control_turn_outlives_the_future_that_admitted_it() {
+    let broker = cluster();
+    let ingestor = domain_ingestor(&broker, Executor::default()).await;
+    let (started, has_started) = oneshot::channel();
+    let (release, released) = oneshot::channel();
+    {
+        let operation = ingestor.control.run(&ingestor.consumer, move |_, _| {
+            started
+                .send(())
+                .assured("the test observes worker admission");
+            released
+                .blocking_recv()
+                .assured("the test releases the admitted operation after dropping its future");
+            Ok(())
+        });
+        nervix_primitives::select! {
+            result = operation => panic!("the admitted job is still held: {result:?}"),
+            result = has_started => result.assured("the admitted worker holds the control turn"),
+        }
+    }
+
+    let mut next_turn = std::pin::pin!(ingestor.control.wait_for_turn());
+    let status = poll_fn(|context| Poll::Ready(next_turn.as_mut().poll(context))).await;
+    assert!(status.is_pending(), "the admitted job still owns the turn");
+    release.send(()).assured("the admitted job awaits release");
+    nervix_primitives::time::timeout(READ_DEADLINE, next_turn)
+        .await
+        .assured("the next turn opens when the admitted job ends")
+        .assured("the control turn became free within its deadline");
+}
+
+#[nervix_primitives::test]
 async fn a_domain_resume_yields_while_the_broker_holds_its_metadata() {
     let broker = cluster();
     broker
@@ -184,6 +218,7 @@ async fn domain_ingestor(
     executor: Executor,
 ) -> KafkaTopicIngestor {
     let plan = KafkaTopicIngestorPlan {
+        maintain_rate_limit_holds: false,
         settings: crate::KafkaTopicIngestorSettings::default(),
         executor,
         config: vec![

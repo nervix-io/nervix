@@ -98,8 +98,8 @@ pub use ingestor::{
     IngestorBatchAcknowledgementServices, IngestorBatchRequest, IngestorCapabilities,
     IngestorConnector, IngestorError, IngestorHost, IngestorHostServices, IngestorIntakeError,
     IngestorIntakeMessage, IngestorIntakeResult, IngestorMessage, IngestorPlan, IngestorPoll,
-    IngestorPollMessage, IngestorReadBudget, IngestorReadCancellation, IngestorReadOutcome,
-    IngestorResult, IngestorResume, IngestorResumeOutcome, IngestorSettlement,
+    IngestorPollMessage, IngestorReadBudget, IngestorReadCancellation, IngestorReadHold,
+    IngestorReadOutcome, IngestorResult, IngestorResume, IngestorResumeOutcome, IngestorSettlement,
     IngestorSettlementOperation, IngestorSettlementOutcome, IngestorSuspendCause,
     PacedIngestorConnector,
 };
