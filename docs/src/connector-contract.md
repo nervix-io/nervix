@@ -1591,15 +1591,18 @@ domain offsets all read those same plans; none of them reads the ingestor's Mode
 ingestor binds its codec, node filter, routes and branched entrypoints against the installed domain
 surfaces and parses its declared acknowledgement before any connector instance opens, so a start
 that fails leaves nothing running.
-Instance-capable entities declare `Count(NonZeroU64)` or `PerPartition` in the vocabulary. The
-registry resolves that declaration into exact `Instance(i)` unit placements and per-unit start
+Instance-capable entities declare `Count(NonZeroU64)` or `PerTransportPartition` in the vocabulary.
+The registry resolves that declaration into exact `Instance(i)` unit placements and per-unit start
 plans; `Single` entities retain their single unit. Each host opens only its plan's global index.
 Connector configuration still carries the total count where the transport needs it. A handoff
 changes one unit's primary and state originator without restarting its siblings.
 
-The vocabulary declares `Single | Instances | PerPartition` once per entity. Grammar, validation,
-console drafts, inspection and capability exports consume that declaration. Per-partition ingestors
-bind instance `p` to each constructing destination's partition `p`; Kafka requires domain offsets.
+The vocabulary declares `Single | Instances | PerTransportPartition` once per entity, and only an
+entity whose transport keeps partitions that Nervix observes, KAFKA TOPIC and PULSAR TOPIC, declares
+`PerTransportPartition`. Grammar, validation, console drafts, inspection and capability exports
+consume that declaration. Transport-partition ingestors bind instance `p` to each constructing
+destination's partition `p` and are dealt transport partition `k` by `k mod n`; Kafka requires
+domain offsets.
 Before placement materializes fixed instances, the registry refuses a count whose execution-unit
 entry layout is unaddressable on the target. The connector receives only its validated unit plan.
 All constructing routes agree on key fields and partition count. A count change freezes the
@@ -2262,9 +2265,13 @@ it in the subscription. The plan carries it, and the connector passes it to ever
 builds: the data consumers, the non-durable existence probe and the removal consumer. Subscription
 identity ignores it, like ownership and the start position, so `SET TYPE` and a `SET FROM` that
 changes only the type retain the subscription. The registry refuses `FAILOVER` and `EXCLUSIVE` with
-a count other than one or with `INSTANCES PER PARTITION` at `CREATE` and on every alteration,
-because those types require one fixed consumer. `SHARED` and `KEY_SHARED` accept both fixed counts
-and partition-following instances; every unit opens its own consumer with its stable global index.
+a fixed count other than one at `CREATE` and on every alteration, because those types require one
+consumer per topic. `INSTANCES PER TRANSPORT PARTITION` is accepted with every type: the plan deals
+the observed partition topics among the units, and every unit opens its own consumer, with its
+stable global index, on the partition topics dealt to it, so each partition topic has one consumer
+of the ingestor. Until the leader has observed the topic, the units' plans are suspended and open
+no consumer. `SHARED` and `KEY_SHARED` also accept fixed counts, whose units each consume the whole
+topic.
 
 A Pulsar ingestor's client gives the driver one attempt at an operation. The driver would otherwise
 repeat a subscribe the broker answers with `ConsumerBusy` or `ServiceNotReady` without limit, which

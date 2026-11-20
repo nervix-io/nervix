@@ -425,7 +425,7 @@ impl IngestorDeclaration for KafkaTopicIngestor {
     const CAPABILITIES: IngestorEntityCapabilities = IngestorEntityCapabilities {
         external_partitions: crate::IngestorExternalPartitions::Enumerated(PARTITION_METADATA),
         events: crate::DeclaredEvents::NONE,
-        instancing: crate::IngestorInstancingCapability::PerPartition,
+        instancing: crate::IngestorInstancingCapability::PerTransportPartition,
         // A Kafka record carries its headers as a list, in the order written, repeats included.
         headers: Some(HeaderModel::exact(HeaderLayout::OrderedRepeats)),
         metadata: KAFKA_TOPIC_METADATA,
@@ -471,7 +471,7 @@ impl IngestorDeclaration for KafkaTopicIngestor {
                     },
                 ]),
             },
-            OptionDeclaration::INSTANCES,
+            OptionDeclaration::TRANSPORT_PARTITION_INSTANCES,
         ],
         bounds: KAFKA_INGESTOR_BOUNDS,
     };

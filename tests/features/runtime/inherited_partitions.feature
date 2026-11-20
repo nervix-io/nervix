@@ -64,7 +64,7 @@ Feature: Branches inherit their external producers' partitions
         CONFIG { 'bootstrap.servers' = '{{kafka_addr}}' };
       CREATE KAFKA TOPIC INGESTOR inherited_reader
         FROM broker TOPIC 'inherited_input_{{test_id}}'
-        OFFSET BY DOMAIN INSTANCES PER PARTITION
+        OFFSET BY DOMAIN INSTANCES PER TRANSPORT PARTITION
         MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 5s
         ON QUIESCE SUSPEND DECODE USING event_codec
         TO events INHERIT ALL BRANCHED BY by_tenant SET tenant = message.tenant
@@ -198,7 +198,7 @@ Feature: Branches inherit their external producers' partitions
       CREATE PULSAR TOPIC INGESTOR inherited_reader
         FROM broker TOPIC 'inherited_pulsar_{{test_id}}'
         SUBSCRIPTION 'inherited_{{test_id}}' OWNED BY INGESTOR START AT EARLIEST
-        TYPE <subscription_type> INSTANCES PER PARTITION
+        TYPE <subscription_type> INSTANCES PER TRANSPORT PARTITION
         MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 5s
         ON QUIESCE SUSPEND DECODE USING event_codec
         TO events INHERIT ALL SET native_partition = metadata.partition BRANCHED BY by_tenant SET tenant = message.tenant
@@ -350,13 +350,13 @@ Feature: Branches inherit their external producers' partitions
     And within "30s" DESCRIBE INGESTOR "inherited_reader" metric "messages_total" "sent" relay "events" totals 6
 
     Examples:
-      | cluster_size | replicas | owners | partitioning | partitions_before | partitions_after | offset_mode                                                      | reader_instances | readers_after_growth | reader_owners |
-      | 1            | 0        | 1      | INHERITED    | 12                | 16               | OFFSET BY DOMAIN                                                 | PER PARTITION    | 16                   | 1             |
-      | 3            | 1        | 3      | INHERITED    | 12                | 16               | OFFSET BY DOMAIN                                                 | PER PARTITION    | 16                   | 3             |
-      | 1            | 0        | 1      | INHERITED    | 12                | 16               | OFFSET BY CONSUMER GROUP 'growing_{{test_id}}' START AT EARLIEST | 1                | 1                    | 1             |
-      | 3            | 1        | 3      | INHERITED    | 12                | 16               | OFFSET BY CONSUMER GROUP 'growing_{{test_id}}' START AT EARLIEST | 1                | 1                    | 1             |
-      | 1            | 0        | 1      | 4 INHERITED  | 4                 | 4                | OFFSET BY DOMAIN                                                 | PER PARTITION    | 4                    | 1             |
-      | 3            | 1        | 3      | 4 INHERITED  | 4                 | 4                | OFFSET BY DOMAIN                                                 | PER PARTITION    | 4                    | 3             |
+      | cluster_size | replicas | owners | partitioning | partitions_before | partitions_after | offset_mode                                                      | reader_instances        | readers_after_growth | reader_owners |
+      | 1            | 0        | 1      | INHERITED    | 12                | 16               | OFFSET BY DOMAIN                                                 | PER TRANSPORT PARTITION | 16                   | 1             |
+      | 3            | 1        | 3      | INHERITED    | 12                | 16               | OFFSET BY DOMAIN                                                 | PER TRANSPORT PARTITION | 16                   | 3             |
+      | 1            | 0        | 1      | INHERITED    | 12                | 16               | OFFSET BY CONSUMER GROUP 'growing_{{test_id}}' START AT EARLIEST | 1                       | 1                    | 1             |
+      | 3            | 1        | 3      | INHERITED    | 12                | 16               | OFFSET BY CONSUMER GROUP 'growing_{{test_id}}' START AT EARLIEST | 1                       | 1                    | 1             |
+      | 1            | 0        | 1      | 4 INHERITED  | 4                 | 4                | OFFSET BY DOMAIN                                                 | PER TRANSPORT PARTITION | 4                    | 1             |
+      | 3            | 1        | 3      | 4 INHERITED  | 4                 | 4                | OFFSET BY DOMAIN                                                 | PER TRANSPORT PARTITION | 4                    | 3             |
 
   # Growing the topic from 12 to 16 partitions regroups a reader's 12 units into 16, which a
   # planned handoff moves before the new epoch is committed. Every checkpoint read of that handoff
@@ -388,7 +388,7 @@ Feature: Branches inherit their external producers' partitions
       CREATE KAFKA CLIENT broker CONFIG { 'bootstrap.servers' = '{{kafka_addr}}' };
       CREATE KAFKA TOPIC INGESTOR inherited_reader
         FROM broker TOPIC 'growing_input_{{test_id}}'
-        OFFSET BY DOMAIN INSTANCES PER PARTITION
+        OFFSET BY DOMAIN INSTANCES PER TRANSPORT PARTITION
         MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 5s
         ON QUIESCE SUSPEND DECODE USING event_codec
         TO events INHERIT ALL BRANCHED BY by_tenant SET tenant = message.tenant
@@ -470,7 +470,7 @@ Feature: Branches inherit their external producers' partitions
       CREATE KAFKA CLIENT broker CONFIG { 'bootstrap.servers' = '{{kafka_addr}}' };
       CREATE KAFKA TOPIC INGESTOR inherited_reader
         FROM broker TOPIC 'growing_input_{{test_id}}'
-        OFFSET BY DOMAIN INSTANCES PER PARTITION
+        OFFSET BY DOMAIN INSTANCES PER TRANSPORT PARTITION
         MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 5s
         ON QUIESCE SUSPEND DECODE USING event_codec
         TO events INHERIT ALL BRANCHED BY by_tenant SET tenant = message.tenant
@@ -558,7 +558,7 @@ Feature: Branches inherit their external producers' partitions
       CREATE KAFKA CLIENT broker CONFIG { 'bootstrap.servers' = '{{kafka_addr}}' };
       CREATE KAFKA TOPIC INGESTOR inherited_reader
         FROM broker TOPIC 'regroup_input_{{test_id}}'
-        OFFSET BY DOMAIN INSTANCES PER PARTITION
+        OFFSET BY DOMAIN INSTANCES PER TRANSPORT PARTITION
         MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 5s
         ON QUIESCE SUSPEND DECODE USING event_codec
         TO events INHERIT ALL BRANCHED BY by_tenant SET tenant = message.tenant

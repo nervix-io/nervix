@@ -36,9 +36,11 @@ The largest native partition coordinate must also fit the connectors' signed 32-
 
 ## Producers And Key Identity
 
-Only Kafka topic and Pulsar topic ingestors can construct keys for a parametrization with
-inherited partitions. Their immutable transport positions supply the external partition. Branch
-assignments construct the key fields.
+Only Kafka topic and Pulsar topic ingestors can construct keys for a parametrization with inherited
+partitions. Their immutable transport positions supply the external partition. Branch assignments
+construct the key fields. NATS, RabbitMQ, SQS, MQTT and Redis have no transport partitions: a layout
+an operator splits into several queues, subjects, topics or channels is a convention Nervix cannot
+observe, so those transports cannot feed an inherited branch.
 
 Branch-preserving processor routes carry inherited keys through their own parametrization.
 A key's canonical field text and fingerprint remain field-based across external partitions.
@@ -51,16 +53,16 @@ committed layout and state until coherent observations are available.
 
 ## Reader Placement
 
-With Kafka `OFFSET BY DOMAIN INSTANCES PER PARTITION`, instance `p` reads the external partitions
-of branch group `p`. Its native offset originator belongs to that instance. The reader, branch
-partition and an emitter using `INSTANCES PER PARTITION` can therefore execute together without an
-interconnect relay hop. Grouping changes retain each external partition's acknowledged next offset.
+With Kafka `OFFSET BY DOMAIN INSTANCES PER TRANSPORT PARTITION`, instance `p` reads the external
+partitions of branch group `p`. Its native offset originator belongs to that instance. The reader,
+branch partition and an emitter using `INSTANCES PER PARTITION` can therefore execute together
+without an interconnect relay hop. Grouping changes retain each external partition's acknowledged
+next offset.
 
-With Pulsar `TYPE EXCLUSIVE` or `TYPE FAILOVER`, `INSTANCES PER PARTITION` requires inherited
-partitions. Each instance consumes its group's explicit partition topics. Empty groups remain
-idle and become active when a later committed topology assigns them a topic. `metadata.partition`
-exposes the native partition index; an unpartitioned topic's native value is `-1`, which inheritance
-maps to external coordinate zero.
+With Pulsar `INSTANCES PER TRANSPORT PARTITION`, of any subscription type, each instance consumes
+its group's explicit partition topics. Empty groups remain idle and become active when a later
+committed topology assigns them a topic. `metadata.partition` exposes the native partition index; an
+unpartitioned topic's native value is `-1`, which inheritance maps to external coordinate zero.
 
 Kafka consumer groups and Pulsar `TYPE SHARED` with `INSTANCES n` keep their broker-managed reader
 assignment. Records still inherit their native partition and travel to its branch owner when the
@@ -85,13 +87,13 @@ new schedule. Kafka observation follows the leader's `control-plane-kafka-partit
 Pulsar observation and topology observer reconciliation use `partition-topology-poll-interval`.
 
 The transfer is a planned ownership handoff of the reader's units. When a reader with `INSTANCES PER
-PARTITION` grows from twelve units to sixteen, each of the sixteen new units receives its share of
-the committed offsets of all twelve old units. Nervix captures each old unit once and prepares the
-new units at the same time, and each preparation reads its old units at the same time. The transfer
-therefore takes about as long as its slowest chain of requests, not the sum of every unit's
-requests. The whole transfer must finish within the entity gate deadline (`ENTITY_GATE_DEADLINE`).
-If it does not, the publication fails, the readers continue on the previous layout, and the leader
-publishes the topology again at its next observation.
+TRANSPORT PARTITION` grows from twelve units to sixteen, each of the sixteen new units receives its
+share of the committed offsets of all twelve old units. Nervix captures each old unit once and
+prepares the new units at the same time, and each preparation reads its old units at the same time.
+The transfer therefore takes about as long as its slowest chain of requests, not the sum of every
+unit's requests. The whole transfer must finish within the entity gate deadline
+(`ENTITY_GATE_DEADLINE`). If it does not, the publication fails, the readers continue on the
+previous layout, and the leader publishes the topology again at its next observation.
 
 Growing a topic from twelve to sixteen partitions advances the branch epoch. An automatic branch
 then has sixteen partitions. A four-group branch keeps four groups, and the new external partitions

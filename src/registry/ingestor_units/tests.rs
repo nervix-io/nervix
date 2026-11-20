@@ -168,7 +168,7 @@ fn independent_instances_spread_primaries_and_keep_their_own_replicas() {
 
 #[test]
 fn per_partition_groups_bind_only_the_corresponding_instance_and_relay_unit() {
-    let graph = graph(IngestorInstances::PerPartition, true);
+    let graph = graph(IngestorInstances::PerTransportPartition, true);
     let groups = UnitPlacementGroups::decide(&graph, &graph.placement.effective());
     assert_eq!(groups.groups.len(), 4);
     for index in 0..4 {

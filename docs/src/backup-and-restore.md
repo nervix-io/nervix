@@ -1108,8 +1108,8 @@ steps it recorded stay applied. A restore whose archive no client sent to a new 
 retry validity of its execution reference ended reports `restore stopped after the steps it
 recorded`. No message includes password hashes or resource bytes.
 
-Ingestor offset and branch-lifecycle records retain their global `Instance(i)` placement. A
-quiesced cut observes and checkpoints each locally owned ingestor unit; restore preserves those
-identities and lets the current scheduler choose their owners. Canonical Models retain fixed
-counts or `INSTANCES PER PARTITION`. The current major fences this ownership contract before any
+Ingestor offset and branch-lifecycle records retain their global `Instance(i)` placement. A quiesced
+cut observes and checkpoints each locally owned ingestor unit; restore preserves those identities
+and lets the current scheduler choose their owners. Canonical Models retain fixed counts or
+`INSTANCES PER TRANSPORT PARTITION`. The current major fences this ownership contract before any
 configuration or state is installed.

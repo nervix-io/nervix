@@ -52,14 +52,20 @@ use crate::{
     IngestorMetadataDeclaration, Model, ModelKind, ModelName, RetryPolicy,
 };
 
-/// How an entity may instantiate its intake. Partition-following entities also accept a fixed
-/// count; a single ingestor has no `INSTANCES` clause.
+/// How an entity may instantiate its intake; a single ingestor has no `INSTANCES` clause.
+///
+/// Only an entity whose transport keeps partitions, which Nervix observes, can follow them. A
+/// transport without partitions offers its readers nothing of their own to read, so they compete
+/// for the same source and the entity declares a fixed count only.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, AsRefStr)]
 #[strum(serialize_all = "snake_case")]
 pub enum IngestorInstancingCapability {
     Single,
+    /// A fixed count of instances, which compete for the same source.
     Instances,
-    PerPartition,
+    /// A fixed count, or `INSTANCES PER TRANSPORT PARTITION`: one instance per partition of the
+    /// constructed branch, with the transport's partitions dealt among them.
+    PerTransportPartition,
 }
 
 impl IngestorInstancingCapability {
@@ -67,19 +73,23 @@ impl IngestorInstancingCapability {
         matches!(
             (self, instances),
             (
-                Self::Instances | Self::PerPartition,
+                Self::Instances | Self::PerTransportPartition,
                 IngestorInstances::Count(_)
-            ) | (Self::PerPartition, IngestorInstances::PerPartition)
+            ) | (
+                Self::PerTransportPartition,
+                IngestorInstances::PerTransportPartition
+            )
         )
     }
 }
 
 /// The intake units an instance-capable ingestor declares. Fixed counts retain their full-width
-/// positive count; a partition declaration takes the constructed branch's cardinality.
+/// positive count; the transport-partition form takes the constructed branch's partition count
+/// and deals the transport's partitions among its instances.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum IngestorInstances {
     Count(NonZeroU64),
-    PerPartition,
+    PerTransportPartition,
 }
 
 impl IngestorInstances {
@@ -88,15 +98,15 @@ impl IngestorInstances {
     pub const fn choice(self) -> &'static str {
         match self {
             Self::Count(_) => "<count>",
-            Self::PerPartition => "PER PARTITION",
+            Self::PerTransportPartition => "PER TRANSPORT PARTITION",
         }
     }
 
-    /// Zero encodes the partition-following form; every positive value encodes its exact count.
+    /// Zero encodes the transport-partition form; every positive value encodes its exact count.
     fn archive_count(self) -> u64 {
         match self {
             Self::Count(count) => count.get(),
-            Self::PerPartition => 0,
+            Self::PerTransportPartition => 0,
         }
     }
 }
@@ -123,9 +133,9 @@ impl<D: Fallible + ?Sized> RkyvDeserialize<IngestorInstances, D> for ArchivedU64
     fn deserialize(&self, _deserializer: &mut D) -> Result<IngestorInstances, D::Error> {
         let count = self.to_native();
         Ok(match count {
-            0 => IngestorInstances::PerPartition,
+            0 => IngestorInstances::PerTransportPartition,
             _ => IngestorInstances::Count(
-                NonZeroU64::new(count).verified("the partition-following zero case returned above"),
+                NonZeroU64::new(count).verified("the transport-partition zero case returned above"),
             ),
         })
     }
@@ -135,7 +145,7 @@ impl Display for IngestorInstances {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Count(count) => count.fmt(f),
-            Self::PerPartition => f.write_str("PER PARTITION"),
+            Self::PerTransportPartition => f.write_str("PER TRANSPORT PARTITION"),
         }
     }
 }
