@@ -155,10 +155,8 @@ async fn regroup_reinstalls_prepared_offsets_on_a_unit_that_keeps_its_owner() {
         .assured("the fixture has a loopback dispatcher");
     let node = dispatcher.local_node_id();
     let incarnation = dispatcher.local_node_incarnation();
-    let retired_unit = NodeUnitRef::new(
-        unit_ref.entity.node.clone(),
-        fixture.states[2].placement().unit,
-    );
+    let retired = &fixture.states[2];
+    let retired_unit = NodeUnitRef::new(unit_ref.entity.node.clone(), retired.placement().unit);
     let mut desired = fixture.schedule.clone();
     let scheduled_source = desired
         .nodes
@@ -183,13 +181,22 @@ async fn regroup_reinstalls_prepared_offsets_on_a_unit_that_keeps_its_owner() {
     *scheduled_source = scheduled_source.clone().with_units(&units);
     let revision = ExecutionRevision::from_schedule(&desired)
         .assured("the smaller layout has a complete execution plan");
+    // The fixture starts with a passive graph, so give the removed unit its live checkpoint task.
+    let retired_writer = runtime
+        .spawn_kafka_offset_snapshot_task(retired.persistence())
+        .assured("the removed unit has a native offset checkpoint writer");
     let base = {
-        let execution = runtime
+        let mut execution = runtime
             .inner
             .executions
-            .get(&fixture.domain)
+            .get_mut(&fixture.domain)
             .assured("the fixture installed the previous layout");
-        assert!(execution.placement_tasks.contains_key(&retired_unit));
+        execution
+            .placement_tasks
+            .entry(retired_unit.clone())
+            .or_default()
+            .checkpoints
+            .push(retired_writer);
         execution.revision.ownership_handoff_fingerprint
     };
 
