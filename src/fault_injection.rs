@@ -79,6 +79,7 @@ mod materialized_fetch_hold;
 mod materialized_reads;
 mod model_publication;
 mod orphaned_domain_pause;
+mod ownership_handoff_reads;
 mod pause;
 mod processor_flush;
 mod relay_memory;
@@ -359,6 +360,8 @@ struct FaultInjectionState {
     /// The owner waits this long before it fans out each buffered batch of a domain's relays, so
     /// the rows its sources admitted reach their consumers slowly, as on a loaded node.
     owner_relay_fanout_delays: DashMap<String, Duration, RandomState>,
+    /// Every ownership handoff checkpoint read in a domain first waits this long.
+    ownership_handoff_checkpoint_read_delays: DashMap<String, Duration, RandomState>,
     /// A local schedule swap pauses after removing one attached emitter from its relay.
     emitter_swap_after_detach_pauses:
         DashMap<(DomainName, EmitterName), Arc<TestPause>, RandomState>,
@@ -609,6 +612,7 @@ impl Default for FaultInjection {
                 owner_relay_fanout_pauses: DashMap::default(),
                 owner_relay_partition_fanout_pauses: DashMap::default(),
                 owner_relay_fanout_delays: DashMap::default(),
+                ownership_handoff_checkpoint_read_delays: DashMap::default(),
                 emitter_swap_after_detach_pauses: DashMap::default(),
                 ingestor_dispatch_pauses: DashMap::default(),
                 ownership_handoff_preparation_pauses: DashMap::default(),
