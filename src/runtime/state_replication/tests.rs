@@ -816,6 +816,56 @@ async fn forced_recovery_completion_survives_runtime_restart_and_schedule_rebuil
 }
 
 #[nervix_primitives::test]
+async fn forced_recovery_reopens_a_stateless_relay_after_destination_restart() {
+    let fixture = EmptyRelayHandoffFixture::new("recover-stateless-relay");
+    let mut schedule = fixture.target_schedule.clone();
+    schedule
+        .nodes
+        .get_mut(&fixture.entity)
+        .expect("the target schedule includes the moved relay")
+        .single_unit_mut()
+        .ownership_transition
+        .as_mut()
+        .expect("the relay has a committed owner change")
+        .state_recovery = OwnershipStateRecoveryOutcome::Unverified;
+    let fingerprint = ExecutionRevision::ownership_fingerprint(&schedule)
+        .expect("the committed schedule has a recovery fingerprint");
+
+    let dir = tempdir().expect("temporary runtime state directory should open");
+    let prepared_incarnation = {
+        let database = Database::builder(dir.path()).open().expect("open state");
+        let runtime = Runtime::with_persistence(Some(database), Duration::from_secs(3_600))
+            .expect("runtime should open persisted state");
+        let incarnation = attach_loopback_cluster(&runtime, &fixture.destination).await;
+        let entity = fixture.entity.in_domain(&fixture.domain);
+        let recovery = ForcedRuntimeStateRecoveryTransition {
+            operation_id: &fixture.operation_id,
+            source: &fixture.source,
+            destination: &fixture.destination,
+            destination_incarnation: incarnation,
+            entity: &entity,
+            unit: nervix_models::Unit::SINGLE,
+            target_schedule_fingerprint: fingerprint,
+        };
+        runtime
+            .inner
+            .state_store
+            .as_ref()
+            .expect("runtime should own a state store")
+            .persist_forced_recovery_preparation(&recovery, &[])
+            .expect("the relay's empty preparation should persist");
+        incarnation
+    };
+
+    let database = Database::builder(dir.path()).open().expect("reopen state");
+    let runtime = Runtime::with_persistence(Some(database), Duration::from_secs(3_600))
+        .expect("restarted runtime should open persisted state");
+    let restarted_incarnation = attach_loopback_cluster(&runtime, &fixture.destination).await;
+    assert_ne!(prepared_incarnation, restarted_incarnation);
+    fixture.rebuild_destination(&runtime, schedule).await;
+}
+
+#[nervix_primitives::test]
 async fn forced_recovery_recreates_state_only_for_a_complete_reset_decision() {
     let dir = tempdir().expect("temporary runtime state directory should open");
     let db = Database::builder(dir.path())

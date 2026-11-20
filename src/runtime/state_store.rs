@@ -1221,12 +1221,13 @@ pub(in crate::runtime) struct ForcedRuntimeStateRecoveryIdentity {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::runtime) enum ForcedRuntimeStateRecoveryAuthorization {
     PreparedCheckpoints,
-    RecreateState,
+    /// The node owns zero checkpoint components or the schedule authorizes recreating them all.
+    AllowEmptyInventory,
 }
 
 impl ForcedRuntimeStateRecoveryAuthorization {
-    pub(in crate::runtime) fn recreates_without_preparation(self) -> bool {
-        self == Self::RecreateState
+    pub(in crate::runtime) fn allows_empty_inventory(self) -> bool {
+        self == Self::AllowEmptyInventory
     }
 }
 
@@ -1885,7 +1886,7 @@ impl RuntimeStateStore {
                 let prepared = Self::decode_forced_recovery_preparation(prepared.as_ref())?;
                 if prepared.accepts(transition) {
                     prepared.checkpoints
-                } else if authorization.recreates_without_preparation() {
+                } else if authorization.allows_empty_inventory() {
                     Vec::new()
                 } else {
                     return Err(Report::new(
@@ -1893,7 +1894,7 @@ impl RuntimeStateStore {
                     ));
                 }
             }
-            None if authorization.recreates_without_preparation() => Vec::new(),
+            None if authorization.allows_empty_inventory() => Vec::new(),
             None => {
                 return Err(Report::new(
                     RuntimePersistenceError::MissingForcedRecoveryPreparation,
