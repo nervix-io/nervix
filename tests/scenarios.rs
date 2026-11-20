@@ -238,6 +238,7 @@ mod generated_http_payloads;
 mod http_transport;
 mod iceberg_delivery;
 mod inferencer_describe;
+mod inferencer_state_benchmark;
 mod ingestion_time;
 mod ingestor_instances;
 mod ingestor_payload;

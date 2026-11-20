@@ -3902,6 +3902,10 @@ bench-admitted-work-executable executable *args:
 bench-inferencer *args: build-web-console download-onnxruntime generate-test-onnx
     ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)" cargo bench --package nervix-server --bench inferencer --features benchmarks -- {{ args }}
 
+# Compare one running-sum ONNX model with and without STATE on one and three loopback nodes.
+bench-inferencer-state-cluster: build-deps
+    ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)" cargo test --package nervix-scenarios --test scenarios -- --input {{ quote(justfile_directory() / "benches/inferencer-state.feature") }} --concurrency 1 --retry 0 --suite-budget 15m
+
 # Measure retained full emitter flushes; every iteration checks the delivered-row count.
 bench-emitter-flush *args: build-web-console
     cargo bench --package nervix-server --bench emitter_flush --features benchmarks -- {{ quote(args) }}
