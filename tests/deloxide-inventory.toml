@@ -851,6 +851,7 @@ tags = [
   "@execution_class_drain",
   "@kafka_start_generation",
   "@kafka_start_generation_restore",
+  "@kafka_allowance_rebalance",
   "@wasm_reset_authority_recovery",
   "@wasm_reset_publication_failure",
   "@client_wire_pause_leadership",
@@ -4283,6 +4284,8 @@ workloads = [
 [[owner]]
 path = "crates/connectors/kafka/src/topic/ingestor_rejection.rs"
 workloads = [
+  "scenario.kafka-allowance-rebalance",
+  "stress.kafka-allowance-rebalance",
   "scenario.inherited-kafka-readers",
   "stress.inherited-kafka-readers",
   "scenario.inherited-growth",
@@ -7267,6 +7270,26 @@ id = "stress.runtime-settings-lost-ack"
 invariant = "A lost terminal ACK expires under the captured short policy and sequential Kafka ingestion resumes within the measured bound."
 invocation = "stress-scenarios"
 scenario = "A committed silence policy expires a lost forwarded acknowledgement sooner"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "A held consumer runs its assignment callback on a connector control worker and acquires the rejection-floor lock. Broker execution, async wakes and the connector's native control turn are outside detector evidence."
+examples = 2
+feature = "tests/features/runtime/ingestor_rate_limit.feature"
+id = "scenario.kafka-allowance-rebalance"
+invariant = "The held group member concedes and regains its partition during a rebalance, then admits the next unread record once when the allowance returns."
+invocation = "scenarios"
+scenario = "A rate-limited Kafka ingestor pauses a partition that leaves and returns during a hold"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: a held consumer runs its assignment callback on a connector control worker and acquires the rejection-floor lock. Broker execution, async wakes and the connector's native control turn are outside detector evidence."
+examples = 2
+feature = "tests/features/runtime/ingestor_rate_limit.feature"
+id = "stress.kafka-allowance-rebalance"
+invariant = "The held group member concedes and regains its partition during a rebalance, then admits the next unread record once when the allowance returns."
+invocation = "stress-scenarios"
+scenario = "A rate-limited Kafka ingestor pauses a partition that leaves and returns during a hold"
 selections = ["deloxide-stress"]
 
 [[workload]]

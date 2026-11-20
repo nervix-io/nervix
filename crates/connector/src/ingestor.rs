@@ -335,6 +335,22 @@ pub enum IngestorSettlement {
     Individual,
 }
 
+/// Services a transport session while the host's read allowance is spent.
+#[async_trait]
+#[cfg_attr(
+    nervix_lint,
+    nervix::context(
+        recurring,
+        reason = "the host drives the transport while its read allowance is spent"
+    )
+)]
+pub trait IngestorReadHold: Send {
+    /// Drives only session control, without taking a record. The host stops polling this future
+    /// when the allowance returns, a lifecycle change interrupts the wait, or the driver reports
+    /// a failure. Dropping the future must leave an explicit stop, suspend or next read usable.
+    async fn maintain(&mut self, until: Instant) -> Report<IngestorError>;
+}
+
 /// Broker operations the host drives between ingestor lifecycle transitions.
 #[async_trait]
 #[cfg_attr(
@@ -351,6 +367,12 @@ pub trait BrokerIngestorConnector: IngestorConnector {
 
     /// Whether one graph outcome settles a batch or only its own position.
     const SETTLEMENT: IngestorSettlement = IngestorSettlement::Batch;
+
+    /// Session control the host may need to drive during an allowance hold. A transport that
+    /// stays usable without it has no work during the hold.
+    fn hold_maintenance(&mut self) -> Option<&mut dyn IngestorReadHold> {
+        None
+    }
 
     /// Reads the next batch, up to `request.max_messages`.
     ///
@@ -590,6 +612,7 @@ pub trait IngestorHostServices: crate::ConnectorEventProvider + Send + 'static {
     async fn intake_unacknowledged(
         &mut self,
         messages: Vec<IngestorIntakeMessage<'_>>,
+        maintenance: Option<&mut dyn IngestorReadHold>,
     ) -> IngestorIntakeResult<()>;
 
     /// Takes in a batch whose positions the ingestor settles once every message has been
@@ -597,6 +620,7 @@ pub trait IngestorHostServices: crate::ConnectorEventProvider + Send + 'static {
     async fn intake_acknowledged(
         &mut self,
         messages: Vec<IngestorIntakeMessage<'_>>,
+        maintenance: Option<&mut dyn IngestorReadHold>,
     ) -> IngestorIntakeResult<IngestorBatchAcknowledgement>;
 
     async fn flush(&mut self) -> IngestorIntakeResult<()>;
@@ -688,15 +712,21 @@ impl IngestorHost {
     pub async fn intake_unacknowledged(
         &mut self,
         messages: Vec<IngestorIntakeMessage<'_>>,
+        maintenance: Option<&mut dyn IngestorReadHold>,
     ) -> IngestorIntakeResult<()> {
-        self.services.intake_unacknowledged(messages).await
+        self.services
+            .intake_unacknowledged(messages, maintenance)
+            .await
     }
 
     pub async fn intake_acknowledged(
         &mut self,
         messages: Vec<IngestorIntakeMessage<'_>>,
+        maintenance: Option<&mut dyn IngestorReadHold>,
     ) -> IngestorIntakeResult<IngestorBatchAcknowledgement> {
-        self.services.intake_acknowledged(messages).await
+        self.services
+            .intake_acknowledged(messages, maintenance)
+            .await
     }
 
     pub async fn flush(&mut self) -> IngestorIntakeResult<()> {

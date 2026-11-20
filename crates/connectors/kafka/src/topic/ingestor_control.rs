@@ -21,7 +21,7 @@ use nervix_execution::{Cancellation, ExecutionError, Executor, MemoryClass, Stor
 use nervix_primitives::{
     sync::{Semaphore, StdArc},
     task::JoinHandle,
-    time::{Instant, timeout_at},
+    time::{Instant, timeout, timeout_at},
 };
 use rdkafka::{config::ClientConfig, error::KafkaResult};
 
@@ -126,6 +126,18 @@ impl KafkaControl {
             .await
             .map_err(|_| Report::new(KafkaTopicIngestorError::ControlTimeout { timeout: bound }))?
             .change_context(KafkaTopicIngestorError::ControlExecution)?
+    }
+
+    /// Wait for an admitted control operation that could outlive its caller, without admitting
+    /// another worker job. The ingestor has exclusive access when it uses this fence.
+    pub(super) async fn wait_for_turn(&self) -> Result<(), Report<KafkaTopicIngestorError>> {
+        let _turn = timeout(self.timeout, self.turn.acquire())
+            .await
+            .map_err(|_| KafkaTopicIngestorError::ControlTimeout {
+                timeout: self.timeout,
+            })?
+            .assured("the control owner never closes its semaphore");
+        Ok(())
     }
 
     /// The supervisor owns admission and the answer until the synchronous commit actually ends.

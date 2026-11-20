@@ -651,6 +651,7 @@ async fn domain_ingestor(
     let stored = Arc::new(Mutex::new(Vec::new()));
     let resets = Arc::new(Mutex::new(Vec::new()));
     let plan = KafkaTopicIngestorPlan {
+        maintain_rate_limit_holds: false,
         settings: crate::KafkaTopicIngestorSettings::default(),
         executor: nervix_execution::Executor::default(),
         config: vec![entry("bootstrap.servers", &cluster.bootstrap_servers())],

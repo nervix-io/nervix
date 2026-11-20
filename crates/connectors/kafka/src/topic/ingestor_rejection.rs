@@ -136,9 +136,9 @@ impl RejectionFloors {
 /// Logging, errors and statistics keep rust-rdkafka's default handling. A rebalance assigns and
 /// revokes partitions as rust-rdkafka's default handling does, after it started every assigned
 /// partition that has a floor at that floor. librdkafka runs the rebalance while the ingestor
-/// polls for its next batch, and the ingestor never polls while it rejects or acknowledges a
-/// batch, so the lock is never contended; it orders the floors only against a rebalance a future
-/// version of the driver might serve on another thread.
+/// polls for its next batch or services an allowance hold. An admitted allowance poll finishes
+/// before the ingestor settles a batch or changes lifecycle state, so the floor is never
+/// contended by these operations.
 #[cfg_attr(
     nervix_lint,
     nervix::context(
