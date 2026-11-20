@@ -64,7 +64,8 @@ const FLEXIBLE: &[(IngestQuiesceKind, bool)] = &[
 ];
 const ENDPOINT: &[(IngestQuiesceKind, bool)] = &[
     (IngestQuiesceKind::Reject, false),
-    (IngestQuiesceKind::EndpointBuffer, false),
+    (IngestQuiesceKind::EndpointBufferImmediate, false),
+    (IngestQuiesceKind::EndpointBufferAfterResume, false),
 ];
 
 fn source_surface(kind: IngestorEntityKind) -> IngestorSurface {

@@ -596,6 +596,8 @@ mod tests {
                                         mode: EndpointIngestMode::NoAck,
                                         quiesce: nervix_models::IngestQuiesceMode::EndpointBuffer {
                                             max_size: "1MiB".to_string(),
+                                            response:
+                                                nervix_models::EndpointPauseResponse::Immediate,
                                         },
                                     },
                                 )),

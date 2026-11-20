@@ -31,7 +31,7 @@ Feature: Branched branch expiration
         PATH '/ingest';
         CREATE HTTP ENDPOINT INGESTOR http_notifications
         FROM http_notifications_endpoint MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING notification_codec
         TIMESTAMP NOW
         TO notifications
         INHERIT ALL
@@ -129,7 +129,7 @@ Feature: Branched branch expiration
 
       CREATE HTTP ENDPOINT INGESTOR http_notifications
         FROM http_notifications_endpoint MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING notification_codec
         TIMESTAMP NOW
         TO notifications
         INHERIT ALL
@@ -212,7 +212,7 @@ Feature: Branched branch expiration
 
       CREATE HTTP ENDPOINT INGESTOR left_ingestor
         FROM left_endpoint MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING notification_codec
         TO left_events
         INHERIT ALL
         BRANCHED BY by_correlated_users
@@ -223,7 +223,7 @@ Feature: Branched branch expiration
 
       CREATE HTTP ENDPOINT INGESTOR right_ingestor
         FROM right_endpoint MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING notification_codec
         TO right_events
         INHERIT ALL
         BRANCHED BY by_correlated_users
@@ -340,7 +340,7 @@ Feature: Branched branch expiration
 
       CREATE HTTP ENDPOINT INGESTOR http_notifications
         FROM http_notifications_endpoint MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING notification_codec
         TO notifications
         INHERIT ALL
         BRANCHED BY by_suppressed_users
@@ -434,7 +434,7 @@ Feature: Branched branch expiration
 
       CREATE HTTP ENDPOINT INGESTOR http_notifications
         FROM http_notifications_endpoint MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING notification_codec
         TO notifications
         INHERIT ALL
         BRANCHED BY by_limited_users

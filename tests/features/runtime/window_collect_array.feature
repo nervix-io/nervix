@@ -18,7 +18,7 @@ Feature: Fixed arrays of retained window values
       CREATE VHOST edge collect-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT ingress ON edge PATH '/readings';
       CREATE HTTP ENDPOINT INGESTOR reading_ingestor FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING reading_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING reading_codec
         TO readings INHERIT ALL BRANCHED BY by_tenant SET tenant = message.tenant
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE WINDOW PROCESSOR history_window FROM readings
@@ -70,7 +70,7 @@ Feature: Fixed arrays of retained window values
       CREATE VHOST edge collect-order-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT ingress ON edge PATH '/readings';
       CREATE HTTP ENDPOINT INGESTOR reading_ingestor FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING reading_codec TIMESTAMP AT occurred_at
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING reading_codec TIMESTAMP AT occurred_at
         TO readings INHERIT ALL BRANCHED BY by_tenant SET tenant = message.tenant
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE WINDOW PROCESSOR history_window FROM readings
@@ -167,7 +167,7 @@ Feature: Fixed arrays of retained window values
         CREATE HTTP ENDPOINT ingress ON edge PATH '/metrics';
         CREATE HTTP ENDPOINT INGESTOR metric_ingestor
         FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING metric_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING metric_codec
         TO metrics
         INHERIT ALL
         BRANCHED BY by_metric_ingestor
@@ -257,7 +257,7 @@ Feature: Fixed arrays of retained window values
       CREATE VHOST edge collect-sample-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT ingress ON edge PATH '/readings';
       CREATE HTTP ENDPOINT INGESTOR reading_ingestor FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING reading_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING reading_codec
         TO readings INHERIT ALL BRANCHED BY by_tenant SET tenant = message.tenant
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE GENERATOR sampler USING MATERIALIZED STATE readings EACH 100ms
@@ -325,7 +325,7 @@ Feature: Fixed arrays of retained window values
       CREATE HTTP ENDPOINT ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR window_ingestor
         FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING window_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING window_codec
         TO window_inputs INHERIT ALL BRANCHED BY by_tenant
         SET tenant = message.tenant
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;

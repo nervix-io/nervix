@@ -342,6 +342,8 @@ during a resumable hold — a model alteration, a domain pause, or memory-pressu
 the ingestor will run again. Shutdown and ownership handoff are not resumable, so polling and
 endpoint admission simply stop, and no `SUSPEND`, `BUFFER`, `DROP`, or `REJECT` policy is applied on
 behalf of the stop. An endpoint refuses new requests outright, without offering a retry delay.
+During a pause an endpoint can keep a request waiting for resume. A stop ends the wait and
+discards the body if it is still in the pause buffer.
 
 Endpoint ingestor close and terminal table clearing end each exact intake lifetime before withdrawing
 its binding. HTTP requests and WebSocket sessions that retained a route then see absent intake on

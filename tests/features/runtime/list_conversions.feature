@@ -50,7 +50,7 @@ Feature: List conversions
       CREATE HTTP ENDPOINT list_ingress ON edge PATH '/lists';
       CREATE HTTP ENDPOINT INGESTOR list_ingestor
         FROM list_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING raw_list_batch_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING raw_list_batch_codec
         TO raw_lists
           INHERIT ALL
           UNBRANCHED
@@ -166,7 +166,7 @@ Feature: List conversions
       CREATE HTTP ENDPOINT routed_ingress ON edge PATH '/routed-lists';
       CREATE HTTP ENDPOINT INGESTOR routed_list_ingestor
         FROM routed_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING routed_list_batch_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING routed_list_batch_codec
         TO routed_lists
           INHERIT ALL
           UNBRANCHED
@@ -241,7 +241,7 @@ Feature: List conversions
       CREATE HTTP ENDPOINT ingress ON edge PATH '/grids';
       CREATE HTTP ENDPOINT INGESTOR integer_grid_ingestor
         FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING integer_grid_batch_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING integer_grid_batch_codec
         TO integer_grids
           INHERIT ALL
           UNBRANCHED

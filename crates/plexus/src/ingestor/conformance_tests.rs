@@ -351,7 +351,7 @@ fn every_declared_delivery_and_quiesce_mode_parses_into_its_kind() {
                 }
                 .choosing(delivery.requires)
                 .choosing(quiesce.requires);
-                if !delivery.kind.allows_quiesce(quiesce.kind) {
+                if !quiesce.allows_delivery(delivery.kind) {
                     generated.assert_refused("a quiesce mode this delivery cannot honor");
                     continue;
                 }

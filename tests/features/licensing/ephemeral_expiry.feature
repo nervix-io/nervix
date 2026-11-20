@@ -334,7 +334,7 @@ Feature: Ephemeral activation expiry and the licensing stop gate
       CREATE HTTP ENDPOINT events_endpoint ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR buffered
         FROM events_endpoint MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING event_codec
         TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       START;

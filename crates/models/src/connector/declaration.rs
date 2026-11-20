@@ -28,8 +28,8 @@ mod events;
 pub use events::{ConnectorEvent, DeclaredEvents};
 
 use crate::{
-    ConnectorKind, DeadlineKey, DeclaredBounds, EmitterPublishingModeKind, IngestDeliveryKind,
-    ParseAsType,
+    ConnectorKind, DeadlineKey, DeclaredBounds, EmitterPublishingModeKind, EndpointPauseResponse,
+    IngestDeliveryKind, ParseAsType,
 };
 
 /// What completion and documentation say about the external names of one kind, which a
@@ -493,6 +493,8 @@ pub enum RuntimeCapability {
     Event(ConnectorEvent),
     /// An ingestor delivering in one declared mode.
     Delivery(IngestDeliveryKind),
+    /// A request endpoint buffering data with its declared reply timing.
+    EndpointPause(EndpointPauseResponse),
     /// An emitter publishing in one declared mode.
     Publishing(EmitterPublishingModeKind),
     /// A statement writing an option that takes a value.
@@ -562,6 +564,7 @@ impl Display for RuntimeCapability {
         match self {
             Self::Event(event) => write!(f, "EVENT {event}"),
             Self::Delivery(kind) => write!(f, "MODE {}", kind.phrase()),
+            Self::EndpointPause(response) => write!(f, "ON QUIESCE BUFFER {}", response.phrase()),
             Self::Publishing(kind) => write!(f, "MODE {}", kind.label()),
             Self::Option { keywords } => f.write_str(keywords),
             Self::OptionChoice { keywords, choice } => write!(f, "{keywords} {choice}"),

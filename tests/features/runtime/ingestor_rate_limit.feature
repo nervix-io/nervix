@@ -674,17 +674,17 @@ Feature: Ingestor rate limits
       """
 
     Examples:
-      | entity                | body                                                                       | quiesce               | refusal                                                                                                  |
-      | NATS SUBJECT          | nats_main SUBJECT 'orders.*' QUEUE GROUP 'readers' INSTANCES 1 MODE NO ACK | DROP                  | NATS SUBJECT ingestors in MODE NO ACK cannot hold their source back, so they take no RATE LIMIT          |
-      | REDIS PUBSUB          | redis_main CHANNEL 'orders' MODE NO ACK                                    | DROP                  | REDIS PUBSUB ingestors in MODE NO ACK cannot hold their source back, so they take no RATE LIMIT          |
-      | WEBSOCKETS CONNECTION | ws_main MODE NO ACK                                                        | DROP                  | WEBSOCKETS CONNECTION ingestors in MODE NO ACK cannot hold their source back, so they take no RATE LIMIT |
-      | HTTP ENDPOINT         | http_ingress MODE NO ACK                                                   | BUFFER MAX SIZE 1MiB  | HTTP ENDPOINT ingestors in MODE NO ACK cannot hold their source back, so they take no RATE LIMIT         |
-      | HTTP ENDPOINT         | http_ingress MODE ACK MAX 8 ACK TIMEOUT 5s                                 | REJECT RETRY AFTER 5s | HTTP ENDPOINT ingestors in MODE ACK cannot hold their source back, so they take no RATE LIMIT            |
-      | WEBSOCKETS ENDPOINT   | ws_ingress MODE NO ACK                                                     | REJECT RETRY AFTER 5s | WEBSOCKETS ENDPOINT ingestors in MODE NO ACK cannot hold their source back, so they take no RATE LIMIT   |
-      | RABBITMQ QUEUE        | rabbit_main QUEUE 'orders' MODE NO ACK                                     | SUSPEND               | RABBITMQ QUEUE ingestors in MODE NO ACK cannot hold their source back, so they take no RATE LIMIT        |
-      | MQTT TOPIC            | mqtt_main TOPIC 'devices/+/orders' SESSION PERSISTENT QOS 1 MODE NO ACK    | DROP                  | MQTT TOPIC ingestors in MODE NO ACK cannot hold their source back, so they take no RATE LIMIT            |
-      | HTTP REQUEST          | http_main METHOD 'GET' EVERY 1s MODE NO ACK                                | SUSPEND               | HTTP REQUEST ingestors read on their EVERY cadence, so they take no RATE LIMIT                           |
-      | PROMETHEUS QUERY      | prom_main QUERY 'up' EVERY 15s MODE NO ACK                                 | SUSPEND               | PROMETHEUS QUERY ingestors read on their EVERY cadence, so they take no RATE LIMIT                       |
+      | entity                | body                                                                       | quiesce                                | refusal                                                                                                  |
+      | NATS SUBJECT          | nats_main SUBJECT 'orders.*' QUEUE GROUP 'readers' INSTANCES 1 MODE NO ACK | DROP                                   | NATS SUBJECT ingestors in MODE NO ACK cannot hold their source back, so they take no RATE LIMIT          |
+      | REDIS PUBSUB          | redis_main CHANNEL 'orders' MODE NO ACK                                    | DROP                                   | REDIS PUBSUB ingestors in MODE NO ACK cannot hold their source back, so they take no RATE LIMIT          |
+      | WEBSOCKETS CONNECTION | ws_main MODE NO ACK                                                        | DROP                                   | WEBSOCKETS CONNECTION ingestors in MODE NO ACK cannot hold their source back, so they take no RATE LIMIT |
+      | HTTP ENDPOINT         | http_ingress MODE NO ACK                                                   | BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE | HTTP ENDPOINT ingestors in MODE NO ACK cannot hold their source back, so they take no RATE LIMIT         |
+      | HTTP ENDPOINT         | http_ingress MODE ACK MAX 8 ACK TIMEOUT 5s                                 | REJECT RETRY AFTER 5s                  | HTTP ENDPOINT ingestors in MODE ACK cannot hold their source back, so they take no RATE LIMIT            |
+      | WEBSOCKETS ENDPOINT   | ws_ingress MODE NO ACK                                                     | REJECT RETRY AFTER 5s                  | WEBSOCKETS ENDPOINT ingestors in MODE NO ACK cannot hold their source back, so they take no RATE LIMIT   |
+      | RABBITMQ QUEUE        | rabbit_main QUEUE 'orders' MODE NO ACK                                     | SUSPEND                                | RABBITMQ QUEUE ingestors in MODE NO ACK cannot hold their source back, so they take no RATE LIMIT        |
+      | MQTT TOPIC            | mqtt_main TOPIC 'devices/+/orders' SESSION PERSISTENT QOS 1 MODE NO ACK    | DROP                                   | MQTT TOPIC ingestors in MODE NO ACK cannot hold their source back, so they take no RATE LIMIT            |
+      | HTTP REQUEST          | http_main METHOD 'GET' EVERY 1s MODE NO ACK                                | SUSPEND                                | HTTP REQUEST ingestors read on their EVERY cadence, so they take no RATE LIMIT                           |
+      | PROMETHEUS QUERY      | prom_main QUERY 'up' EVERY 15s MODE NO ACK                                 | SUSPEND                                | PROMETHEUS QUERY ingestors read on their EVERY cadence, so they take no RATE LIMIT                       |
 
   Scenario: An alteration that leaves a RATE LIMIT under a mode that cannot hold its source back is refused
     Given a 1 node nervix cluster is started

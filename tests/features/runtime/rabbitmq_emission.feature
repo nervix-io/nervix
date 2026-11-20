@@ -176,7 +176,7 @@ Feature: RabbitMQ emission
       CREATE HTTP ENDPOINT returned_ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR returned_ingestor
         FROM returned_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING returned_event_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING returned_event_codec
         TIMESTAMP NOW
         TO returned_events
           INHERIT ALL

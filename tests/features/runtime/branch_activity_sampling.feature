@@ -55,7 +55,7 @@ Feature: Branch activity sampling
 
       CREATE HTTP ENDPOINT INGESTOR left_ingestor
         FROM left_endpoint MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING notification_codec
         TIMESTAMP NOW
         TO left_events
         INHERIT ALL
@@ -67,7 +67,7 @@ Feature: Branch activity sampling
 
       CREATE HTTP ENDPOINT INGESTOR right_ingestor
         FROM right_endpoint MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING notification_codec
         TIMESTAMP NOW
         TO right_events
         INHERIT ALL

@@ -15,7 +15,6 @@
 
 use std::{convert::Infallible, net::SocketAddr, time::Duration};
 
-use futures_util::SinkExt;
 use http_body_util::{Either, Empty, Full};
 use hyper::{
     Method, Request as HyperRequest, Response as HyperResponse, StatusCode,
@@ -33,14 +32,15 @@ use nervix_connector::{
     IngestMessageHeaders, IngestMetadataRow, IngestRowHeaders, RetainedIngestHeaders,
 };
 use nervix_connector_websockets::{
-    SignalingDataEmitter, WebsocketDataFrame, WebsocketSignalingSession,
+    SignalingDataEmitter, WebsocketDataFrame, WebsocketSessionSocket, WebsocketSignalingError,
+    WebsocketSignalingSession,
 };
 use nervix_models::EndpointType;
 use nervix_primitives::{
     sync::{Arc, CancellationToken},
     task::JoinSet,
+    time::Instant,
 };
-use nervix_recovery::NoReceiver;
 use tokio_rustls::TlsAcceptor;
 use tokio_tungstenite::{
     WebSocketStream,
@@ -57,8 +57,9 @@ use super::{
     service_tasks::ServiceTasks, tls::HttpsListenerCertificates,
 };
 use crate::runtime::{
-    EndpointDispatchOutcome, EndpointRequestOutcome, EndpointResolution,
-    HttpEndpointRequestMetadata, ResolvedEndpointRoute, Runtime, WebsocketsEndpointFrameMetadata,
+    EndpointDispatchOutcome, EndpointFramePause, EndpointPayload, EndpointRequestOutcome,
+    EndpointResolution, HttpEndpointRequestMetadata, ResolvedEndpointRoute, Runtime,
+    WebsocketsEndpointFrameMetadata,
 };
 
 type EndpointResponseBody = Either<Empty<Bytes>, Full<Bytes>>;
@@ -115,7 +116,7 @@ fn endpoint_dispatch_response(
     };
     let mut response = response_with_bytes(status, reply.body(), "application/json");
     if status == StatusCode::SERVICE_UNAVAILABLE {
-        let rejection = endpoint_rejection_response(Some(reply.retry_after));
+        let rejection = endpoint_rejection_response(reply.retry_after);
         if let Some(value) = rejection.headers().get(RETRY_AFTER) {
             response.headers_mut().insert(RETRY_AFTER, value.clone());
         }
@@ -187,7 +188,9 @@ impl EndpointWebsocketConnection {
         &self,
         runtime: &Runtime,
         frame: &WebsocketDataFrame,
+        received_at: Instant,
         shutdown: &CancellationToken,
+        pause: Option<&EndpointFramePause>,
     ) -> EndpointDispatchOutcome {
         let metadata = WebsocketsEndpointFrameMetadata {
             payload_bytes: frame.payload().len(),
@@ -201,7 +204,16 @@ impl EndpointWebsocketConnection {
             position: None,
         };
         self.route
-            .dispatch(runtime, frame.payload(), row, shutdown)
+            .dispatch_received(
+                runtime,
+                EndpointPayload {
+                    bytes: frame.payload(),
+                    metadata: row,
+                    received_at,
+                },
+                shutdown,
+                pause,
+            )
             .await
     }
 
@@ -245,19 +257,24 @@ impl EndpointWebsocketConnection {
             ..Default::default()
         };
         let mut websocket = WebSocketStream::from_raw_socket(io, Role::Server, Some(config)).await;
+        let mut websocket = WebsocketSessionSocket::new(&mut websocket);
 
         let connector = EndpointSignalingDataEmitter {
             runtime: &runtime,
             connection: &self,
             shutdown: &shutdown,
+            watch_pause: self.route.holds_frames_in_a_pause(),
         };
         if let Some(protocol) = self.route.signaling_protocol() {
             let session = WebsocketSignalingSession::new(protocol.clone());
             let session_result = nervix_primitives::select! {
                 _ = shutdown.cancelled() => return,
-                result = session.run(&mut websocket, &connector) => result,
+                result = session.run_on_socket(&mut websocket, &connector) => result,
             };
             if let Err(error) = session_result {
+                if let WebsocketSignalingError::Ended = error.current_context() {
+                    return;
+                }
                 warn!(
                     error = %format_args!("{error:#}"),
                     host,
@@ -272,7 +289,7 @@ impl EndpointWebsocketConnection {
             nervix_primitives::task::consume_budget().await;
             let message = nervix_primitives::select! {
                 _ = shutdown.cancelled() => break,
-                message = futures_util::StreamExt::next(&mut websocket) => message,
+                message = websocket.next() => message,
             };
             let Some(message) = message else {
                 break;
@@ -298,20 +315,21 @@ impl EndpointWebsocketConnection {
                     break;
                 }
             };
-            let outcome = self.dispatch(&runtime, &frame, &shutdown).await;
-            if let Some(reply) = connector.reply(outcome) {
-                if websocket.send(reply).await.is_err() {
+            match connector
+                .respond(frame, &mut websocket, EndpointFramePhase::Established)
+                .await
+            {
+                Ok(true) => {}
+                Ok(false) => break,
+                Err(error) => {
+                    warn!(
+                        error = %format_args!("{error:#}"),
+                        host,
+                        path = self.path.as_str(),
+                        "websocket data response failed"
+                    );
                     break;
                 }
-            } else if !outcome.is_accepted() {
-                websocket
-                    .send(Message::Close(Some(CloseFrame {
-                        code: CloseCode::Again,
-                        reason: "Try Again Later".into(),
-                    })))
-                    .await
-                    .means_peer_left("websocket ingest client");
-                break;
             }
         }
     }
@@ -322,25 +340,149 @@ struct EndpointSignalingDataEmitter<'a> {
     runtime: &'a Runtime,
     connection: &'a EndpointWebsocketConnection,
     shutdown: &'a CancellationToken,
+    watch_pause: bool,
 }
 
 impl SignalingDataEmitter for EndpointSignalingDataEmitter<'_> {
     async fn accept(&self, frame: WebsocketDataFrame) {
         self.connection
-            .dispatch(self.runtime, &frame, self.shutdown)
+            .dispatch(self.runtime, &frame, Instant::now(), self.shutdown, None)
             .await;
     }
 
-    async fn accept_and_reply(&self, frame: WebsocketDataFrame) -> Option<Message> {
-        let outcome = self
-            .connection
-            .dispatch(self.runtime, &frame, self.shutdown)
-            .await;
-        self.reply(outcome)
+    async fn deliver_data<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send>(
+        &self,
+        frame: WebsocketDataFrame,
+        websocket: &mut WebsocketSessionSocket<'_, S>,
+    ) -> error_stack::Result<(), WebsocketSignalingError> {
+        if self
+            .respond(frame, websocket, EndpointFramePhase::Signaling)
+            .await?
+        {
+            return Ok(());
+        }
+        Err(error_stack::Report::new(WebsocketSignalingError::Ended))
     }
 }
 
+enum EndpointFrameOutcome {
+    Dispatched(EndpointDispatchOutcome),
+    ConnectionEnded,
+    FrameAlreadyWaiting,
+}
+
+enum EndpointFramePhase {
+    Signaling,
+    Established,
+}
+
 impl EndpointSignalingDataEmitter<'_> {
+    async fn respond<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(
+        &self,
+        frame: WebsocketDataFrame,
+        websocket: &mut WebsocketSessionSocket<'_, S>,
+        phase: EndpointFramePhase,
+    ) -> error_stack::Result<bool, WebsocketSignalingError> {
+        let received_at = websocket
+            .take_deferred_arrival()
+            .unwrap_or_else(Instant::now);
+        let outcome = if self.watch_pause {
+            self.dispatch_until_reply_or_close(&frame, received_at, websocket)
+                .await?
+        } else {
+            let outcome = self
+                .connection
+                .dispatch(self.runtime, &frame, received_at, self.shutdown, None)
+                .await;
+            EndpointFrameOutcome::Dispatched(outcome)
+        };
+        let reply = match outcome {
+            EndpointFrameOutcome::ConnectionEnded => return Ok(false),
+            EndpointFrameOutcome::FrameAlreadyWaiting => Some(Self::retry_close()),
+            EndpointFrameOutcome::Dispatched(outcome) if outcome.pause_buffer_full() => {
+                Some(Self::retry_close())
+            }
+            EndpointFrameOutcome::Dispatched(outcome) => self.reply(outcome).or_else(|| {
+                (matches!(phase, EndpointFramePhase::Established) && !outcome.is_accepted())
+                    .then(Self::retry_close)
+            }),
+        };
+        let Some(reply) = reply else {
+            return Ok(true);
+        };
+        let closing = matches!(reply, Message::Close(_));
+        websocket.send(reply).await?;
+        Ok(!closing)
+    }
+
+    /// Reads for peer closure only after a frame is buffered. If another data frame wins the
+    /// race while the first is still held, dropping dispatch removes that first frame before the
+    /// socket closes. A frame read after graph admission stays in serial order.
+    async fn dispatch_until_reply_or_close<
+        S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+    >(
+        &self,
+        frame: &WebsocketDataFrame,
+        received_at: Instant,
+        websocket: &mut WebsocketSessionSocket<'_, S>,
+    ) -> error_stack::Result<EndpointFrameOutcome, WebsocketSignalingError> {
+        let pause = EndpointFramePause::default();
+        let dispatch = self.connection.dispatch(
+            self.runtime,
+            frame,
+            received_at,
+            self.shutdown,
+            Some(&pause),
+        );
+        let mut dispatch = std::pin::pin!(dispatch);
+        nervix_primitives::select! {
+            biased;
+            outcome = &mut dispatch => return Ok(EndpointFrameOutcome::Dispatched(outcome)),
+            () = pause.wait_until_buffered() => {}
+        }
+        loop {
+            nervix_primitives::task::consume_budget().await;
+            let message = nervix_primitives::select! {
+                biased;
+                outcome = &mut dispatch => return Ok(EndpointFrameOutcome::Dispatched(outcome)),
+                message = websocket.next() => message,
+            };
+            match message {
+                None | Some(Ok(Message::Close(_))) => {
+                    return Ok(EndpointFrameOutcome::ConnectionEnded);
+                }
+                Some(Ok(message @ (Message::Text(_) | Message::Binary(_)))) => {
+                    if pause.abandon_waiting() {
+                        return Ok(EndpointFrameOutcome::FrameAlreadyWaiting);
+                    }
+                    websocket.put_back(message, Instant::now());
+                    return Ok(EndpointFrameOutcome::Dispatched(dispatch.await));
+                }
+                Some(Ok(Message::Ping(payload))) => {
+                    let sent = nervix_primitives::select! {
+                        biased;
+                        outcome = &mut dispatch => return Ok(EndpointFrameOutcome::Dispatched(outcome)),
+                        sent = websocket.send(Message::Pong(payload)) => sent,
+                    };
+                    sent?;
+                }
+                Some(Ok(Message::Pong(_) | Message::Frame(_))) => {}
+                Some(Err(error)) => {
+                    return Err(error_stack::Report::new(WebsocketSignalingError::Receive(
+                        Box::new(error),
+                    )));
+                }
+            }
+        }
+    }
+
+    fn retry_close() -> Message {
+        Message::Close(Some(CloseFrame {
+            code: CloseCode::Again,
+            reason: "Try Again Later".into(),
+        }))
+    }
+
     fn reply(&self, outcome: EndpointDispatchOutcome) -> Option<Message> {
         let reply = outcome.acknowledgement()?;
         let Some(protocol) = self.connection.route.signaling_protocol() else {
@@ -518,6 +660,7 @@ async fn dispatch_http_request(
                 return Ok(response.map(Either::Right));
             }
         };
+        let received_at = Instant::now();
         if shutdown.is_cancelled() {
             return Ok(endpoint_rejection_response(None).map(Either::Left));
         }
@@ -538,7 +681,16 @@ async fn dispatch_http_request(
             position: None,
         };
         let outcome = route
-            .dispatch(&runtime, body.as_ref(), row, &shutdown)
+            .dispatch_received(
+                &runtime,
+                EndpointPayload {
+                    bytes: body.as_ref(),
+                    metadata: row,
+                    received_at,
+                },
+                &shutdown,
+                None,
+            )
             .await;
         return Ok(endpoint_dispatch_response(outcome));
     }

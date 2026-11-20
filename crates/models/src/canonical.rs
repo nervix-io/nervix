@@ -3306,8 +3306,8 @@ pub fn ingest_quiesce_to_plexus(quiesce: &crate::IngestQuiesceMode) -> String {
         crate::IngestQuiesceMode::Reject { retry_after } => {
             format!("REJECT RETRY AFTER {retry_after}")
         }
-        crate::IngestQuiesceMode::EndpointBuffer { max_size } => {
-            format!("BUFFER MAX SIZE {max_size}")
+        crate::IngestQuiesceMode::EndpointBuffer { max_size, response } => {
+            format!("BUFFER MAX SIZE {max_size} {}", response.phrase())
         }
     }
 }
@@ -5615,11 +5615,12 @@ mod tests {
                         mode: EndpointIngestMode::NoAck,
                         quiesce: crate::IngestQuiesceMode::EndpointBuffer {
                             max_size: "1MiB".to_string(),
+                            response: crate::EndpointPauseResponse::Immediate,
                         },
                     }),
                 ),
                 "CREATE WEBSOCKETS ENDPOINT INGESTOR ws_endpoint_ingestor\n  FROM orders_socket \
-                 MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB",
+                 MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE",
             ),
             (
                 orders_ingestor(

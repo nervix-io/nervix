@@ -12,12 +12,42 @@
 # line writes it.
 #
 # A change that declares a new capability registers the scenario that observes it in the same
-# change; one that renames or moves a registered scenario updates its entry. Quiesce modes, header
-# access and `RATE LIMIT` are not capabilities here: the host owns how a source is quiesced and how
+# change; one that renames or moves a registered scenario updates its entry. Endpoint pause
+# response choices have public request outcomes and are covered here. Streaming quiesce, header
+# access and `RATE LIMIT` stay with their hosts: the host owns how a source is quiesced and how
 # it is held back for an allowance, which a connector sees only as the size of the reads it is asked
 # for, the registry checks a program's header access against the declaration, and the generated
 # conformance tests hold the grammar to all three. `tests/features/runtime/ingestor_rate_limit.feature`
 # observes the host's admission, holds and read budget through the public interface.
+
+[[capability]]
+capability = "ON QUIESCE BUFFER RESPOND IMMEDIATE"
+entity = "HTTP ENDPOINT INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/endpoint_quiesce_response.feature", scenario = "An unacknowledged HTTP endpoint <timing> keeps its buffered body and refuses overflow" },
+]
+
+[[capability]]
+capability = "ON QUIESCE BUFFER RESPOND AFTER RESUME"
+entity = "HTTP ENDPOINT INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/endpoint_quiesce_response.feature", scenario = "An acknowledged HTTP endpoint holds requests through an alteration in arrival order" },
+  { feature = "tests/features/runtime/endpoint_quiesce_response.feature", scenario = "An unacknowledged HTTP endpoint <timing> keeps its buffered body and refuses overflow" },
+]
+
+[[capability]]
+capability = "ON QUIESCE BUFFER RESPOND IMMEDIATE"
+entity = "WEBSOCKETS ENDPOINT INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/endpoint_quiesce_response.feature", scenario = "An unacknowledged WebSocket keeps the buffered frame when a later frame overflows" },
+]
+
+[[capability]]
+capability = "ON QUIESCE BUFFER RESPOND AFTER RESUME"
+entity = "WEBSOCKETS ENDPOINT INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/endpoint_quiesce_response.feature", scenario = "A second WebSocket frame closes only its connection while the first is held" },
+]
 
 [[capability]]
 capability = "EVENT published_without_subscribers"

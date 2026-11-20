@@ -925,9 +925,12 @@ literal HTTP polling headers, at model creation and when a later cap is lowered.
   or relocation only while the domain `START` generation and endpoint contract still match; it
   never resends a batch merely because its outcome is missing.
 - End every transport ingestor body with an explicit declared `ON QUIESCE` body
-  immediately before `DECODE USING`. Include positive `MAX SIZE` and, outside `HTTP ENDPOINT` and
-  `WEBSOCKETS ENDPOINT`, an explicit `ON OVERFLOW DROP OLDEST|DROP NEWEST` for `BUFFER`; include
-  `RETRY AFTER` for endpoint `REJECT`. Write every `MQTT TOPIC` ingestor's `SESSION CLEAN` or
+  immediately before `DECODE USING`. Write a positive `MAX SIZE` with `BUFFER`. An `HTTP ENDPOINT`
+  in `MODE NO ACK` can use `RESPOND IMMEDIATE` or `RESPOND AFTER RESUME`. A
+  `WEBSOCKETS ENDPOINT` in `MODE NO ACK` uses `RESPOND IMMEDIATE`. A buffered endpoint in `MODE ACK`
+  uses `RESPOND AFTER RESUME`. Either endpoint can use `REJECT RETRY AFTER <duration>` in
+  either mode. Connected sources write `ON OVERFLOW DROP OLDEST|DROP NEWEST` after the buffer size.
+  Use the same bodies in `SET QUIESCE`. Write every `MQTT TOPIC` ingestor's `SESSION CLEAN` or
   `SESSION PERSISTENT` and its `QOS 0`, `QOS 1` or `QOS 2` before `MODE`, and use its `ACK` modes
   and `SUSPEND` only with `SESSION PERSISTENT` at `QOS 1` or `QOS 2`. Write every `MQTT TOPIC`
   emitter's `QOS 0`, `QOS 1` or `QOS 2` before `MODE`, with `NO ACK` only at `QOS 0` and `ACK` only

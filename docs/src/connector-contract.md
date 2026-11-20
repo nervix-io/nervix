@@ -1827,11 +1827,16 @@ The host runs four ingestor loop families, with a listener using the broker loop
 The broker, paced and request-scoped loops each drain what their instance's quiesce buffer
 retained once the ingestor resumes, oldest first. A retained payload stays in its buffer, counted
 with its bytes, until its messages enter their ingest group, and the buffer hands out nothing
-behind it until then. Its sender was already answered and its ingestor has moved past it, so the
-host admits its `ON INGESTION` unfolding to wait for a place on the node's extension workers rather
-than to be refused, ahead of work that asks afterwards. A shutdown or a new quiesce ends the wait
-and returns the payload to the front of its buffer, so a drain delays neither. A payload its codec
-refuses leaves the buffer as a decode rejection.
+behind it until then. The host waits for a place on the node's extension workers to unfold
+retained work. A shutdown or a new quiesce interrupts unfolding and returns the payload to the
+front. A payload its codec refuses leaves the buffer as a decode rejection.
+
+HTTP and WebSocket endpoint declarations list their pause-buffer response timings per delivery
+mode. `RESPOND IMMEDIATE` completes admission while retaining the body. `RESPOND AFTER RESUME`
+owns a reply until the retained body enters the graph or the wait ends. An acknowledged request
+occupies a slot of its existing response window while it waits. A client departure, its physical
+`ACK TIMEOUT`, or an intake stop can remove a waiting body before it enters the graph. On resume
+the buffer delivers its oldest request first and keeps later live intake behind it.
 
 At the start of a graceful stop, the host closes intake on the stopping node before the control
 plane moves scheduled ingestors or emitters. The shutdown quiesce suspends broker polling and listener

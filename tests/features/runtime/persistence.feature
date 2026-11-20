@@ -26,7 +26,7 @@ Feature: Runtime persistence
         PATH '/ingest';
         CREATE HTTP ENDPOINT INGESTOR http_notifications
         FROM http_notifications_endpoint MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING notification_codec
         TO notifications
         INHERIT ALL
         BRANCHED BY by_http_notifications
@@ -90,7 +90,7 @@ Feature: Runtime persistence
       CREATE HTTP ENDPOINT reading_ingress ON edge PATH '/readings';
       CREATE HTTP ENDPOINT INGESTOR reading_ingestor
         FROM reading_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING reading_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING reading_codec
         TO readings
         INHERIT ALL
         BRANCHED BY by_restart_tenant
@@ -162,7 +162,7 @@ Feature: Runtime persistence
       CREATE HTTP ENDPOINT reading_ingress ON edge PATH '/readings';
       CREATE HTTP ENDPOINT INGESTOR reading_ingestor
         FROM reading_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING reading_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING reading_codec
         TO readings
         INHERIT ALL
         BRANCHED BY by_flushed_tenant

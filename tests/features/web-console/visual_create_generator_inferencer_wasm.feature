@@ -22,7 +22,7 @@ Feature: Web console visual generator, inferencer and WASM processor creation
       CREATE VHOST visual_generator_host generator-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT visual_generator_endpoint ON visual_generator_host PATH '/state';
       CREATE HTTP ENDPOINT INGESTOR visual_generator_ingestor FROM visual_generator_endpoint MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING visual_generator_codec TIMESTAMP NOW
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING visual_generator_codec TIMESTAMP NOW
         TO visual_generator_state INHERIT ALL BRANCHED BY visual_generator_tenant SET tenant = message.tenant
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
@@ -132,7 +132,7 @@ Feature: Web console visual generator, inferencer and WASM processor creation
       CREATE VHOST visual_infer_host infer-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT visual_infer_endpoint ON visual_infer_host PATH '/features';
       CREATE HTTP ENDPOINT INGESTOR visual_infer_ingestor FROM visual_infer_endpoint MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING visual_infer_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING visual_infer_codec
         TO visual_infer_features INHERIT ALL BRANCHED BY visual_infer_tenant SET tenant = message.tenant
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
@@ -254,7 +254,7 @@ Feature: Web console visual generator, inferencer and WASM processor creation
       CREATE VHOST visual_wasm_host wasm-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT visual_wasm_endpoint ON visual_wasm_host PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR visual_wasm_ingestor FROM visual_wasm_endpoint MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING visual_wasm_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING visual_wasm_codec
         TO visual_wasm_events INHERIT ALL BRANCHED BY visual_wasm_tenant SET tenant = message.tenant
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;

@@ -56,7 +56,7 @@ Feature: Narrow schedule activation on ownership change
 
       CREATE HTTP ENDPOINT INGESTOR ingestor_txns
         FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING transaction_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING transaction_codec
         TO inbound
         INHERIT ALL
         BRANCHED BY by_tenant
@@ -236,7 +236,7 @@ Feature: Narrow schedule activation on ownership change
 
       CREATE HTTP ENDPOINT INGESTOR ingestor_txns
         FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING transaction_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING transaction_codec
         TO inbound
         INHERIT ALL
         BRANCHED BY by_gauge_tenant
@@ -382,7 +382,7 @@ Feature: Narrow schedule activation on ownership change
 
       CREATE HTTP ENDPOINT INGESTOR state_ingestor
         FROM state_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING notification_codec
         TO tenant_state
         INHERIT ALL
         BRANCHED BY by_wait_tenant
@@ -393,7 +393,7 @@ Feature: Narrow schedule activation on ownership change
 
       CREATE HTTP ENDPOINT INGESTOR event_ingestor
         FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING notification_codec
         TO incoming
         INHERIT ALL
         BRANCHED BY by_wait_tenant
@@ -556,7 +556,7 @@ Feature: Narrow schedule activation on ownership change
 
       CREATE HTTP ENDPOINT INGESTOR metric_ingestor
         FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING metric_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING metric_codec
         TO metrics
         INHERIT ALL
         BRANCHED BY by_window_tenant
@@ -694,7 +694,7 @@ Feature: Narrow schedule activation on ownership change
 
       CREATE HTTP ENDPOINT INGESTOR ingestor_txns
         FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING transaction_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING transaction_codec
         TO inbound
         INHERIT ALL
         BRANCHED BY by_group_tenant
@@ -891,7 +891,7 @@ Feature: Narrow schedule activation on ownership change
 
       CREATE HTTP ENDPOINT INGESTOR state_ingestor
         FROM state_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING notification_codec
         TO tenant_state
         INHERIT ALL
         BRANCHED BY by_move_tenant
@@ -902,7 +902,7 @@ Feature: Narrow schedule activation on ownership change
 
       CREATE HTTP ENDPOINT INGESTOR event_ingestor
         FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING notification_codec
         TO incoming
         INHERIT ALL
         BRANCHED BY by_move_tenant

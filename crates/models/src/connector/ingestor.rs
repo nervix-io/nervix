@@ -157,6 +157,34 @@ pub enum IngestQuiesceOverflow {
     DropNewest,
 }
 
+/// When an endpoint answers for a request that fits in its pause buffer.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    Serialize,
+    Deserialize,
+    Archive,
+    RkyvSerialize,
+    RkyvDeserialize,
+)]
+pub enum EndpointPauseResponse {
+    Immediate,
+    AfterResume,
+}
+
+impl EndpointPauseResponse {
+    pub const fn phrase(self) -> &'static str {
+        match self {
+            Self::Immediate => "RESPOND IMMEDIATE",
+            Self::AfterResume => "RESPOND AFTER RESUME",
+        }
+    }
+}
+
 #[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
@@ -172,6 +200,7 @@ pub enum IngestQuiesceMode {
     },
     EndpointBuffer {
         max_size: String,
+        response: EndpointPauseResponse,
     },
 }
 
@@ -187,7 +216,14 @@ impl IngestQuiesceMode {
             Self::Buffer { .. } => IngestQuiesceKind::Buffer,
             Self::Drop => IngestQuiesceKind::Drop,
             Self::Reject { .. } => IngestQuiesceKind::Reject,
-            Self::EndpointBuffer { .. } => IngestQuiesceKind::EndpointBuffer,
+            Self::EndpointBuffer {
+                response: EndpointPauseResponse::Immediate,
+                ..
+            } => IngestQuiesceKind::EndpointBufferImmediate,
+            Self::EndpointBuffer {
+                response: EndpointPauseResponse::AfterResume,
+                ..
+            } => IngestQuiesceKind::EndpointBufferAfterResume,
         }
     }
 }
@@ -202,22 +238,25 @@ pub enum IngestQuiesceKind {
     Buffer,
     Drop,
     Reject,
-    EndpointBuffer,
+    EndpointBufferImmediate,
+    EndpointBufferAfterResume,
 }
 
 impl IngestQuiesceKind {
     /// The control value of the declared quiesce keyword in a visual editor.
     pub fn form_key(self) -> String {
-        self.keyword().to_ascii_lowercase()
+        self.keyword().to_ascii_lowercase().replace(' ', "-")
     }
 
     /// The keyword that opens the mode after `ON QUIESCE`.
     pub const fn keyword(self) -> &'static str {
         match self {
             Self::Suspend => "SUSPEND",
-            Self::Buffer | Self::EndpointBuffer => "BUFFER",
+            Self::Buffer => "BUFFER",
             Self::Drop => "DROP",
             Self::Reject => "REJECT",
+            Self::EndpointBufferImmediate => "BUFFER RESPOND IMMEDIATE",
+            Self::EndpointBufferAfterResume => "BUFFER RESPOND AFTER RESUME",
         }
     }
 
@@ -229,7 +268,17 @@ impl IngestQuiesceKind {
             Self::Buffer => "BUFFER MAX SIZE 64MiB ON OVERFLOW DROP OLDEST",
             Self::Drop => "DROP",
             Self::Reject => "REJECT RETRY AFTER 5s",
-            Self::EndpointBuffer => "BUFFER MAX SIZE 64MiB",
+            Self::EndpointBufferImmediate => "BUFFER MAX SIZE 64MiB RESPOND IMMEDIATE",
+            Self::EndpointBufferAfterResume => "BUFFER MAX SIZE 64MiB RESPOND AFTER RESUME",
+        }
+    }
+
+    /// The response choice written by an endpoint buffer.
+    pub const fn endpoint_response(self) -> Option<EndpointPauseResponse> {
+        match self {
+            Self::EndpointBufferImmediate => Some(EndpointPauseResponse::Immediate),
+            Self::EndpointBufferAfterResume => Some(EndpointPauseResponse::AfterResume),
+            Self::Suspend | Self::Buffer | Self::Drop | Self::Reject => None,
         }
     }
 }
@@ -242,6 +291,8 @@ pub struct DeclaredQuiesce {
     /// The choices of the entity's options a statement must make for its ingestor to honor this
     /// mode, such as the persistent session at QoS 1 an MQTT broker keeps messages for.
     pub requires: &'static [ChoiceRequirement],
+    /// The delivery mode this clause requires, where an entity restricts the pairing.
+    delivery: Option<IngestDeliveryKind>,
 }
 
 impl DeclaredQuiesce {
@@ -249,14 +300,28 @@ impl DeclaredQuiesce {
     pub const BUFFER: Self = Self::honoring(IngestQuiesceKind::Buffer);
     pub const DROP: Self = Self::honoring(IngestQuiesceKind::Drop);
     pub const REJECT: Self = Self::honoring(IngestQuiesceKind::Reject);
-    pub const ENDPOINT_BUFFER: Self = Self::honoring(IngestQuiesceKind::EndpointBuffer);
+    pub const ENDPOINT_BUFFER_IMMEDIATE: Self = Self {
+        delivery: Some(IngestDeliveryKind::NoAck),
+        ..Self::honoring(IngestQuiesceKind::EndpointBufferImmediate)
+    };
+    pub const ENDPOINT_BUFFER_AFTER_RESUME: Self =
+        Self::honoring(IngestQuiesceKind::EndpointBufferAfterResume);
+    pub const ACKNOWLEDGED_ENDPOINT_BUFFER_AFTER_RESUME: Self = Self {
+        delivery: Some(IngestDeliveryKind::AckRequest),
+        ..Self::ENDPOINT_BUFFER_AFTER_RESUME
+    };
 
     /// A quiesce mode every statement of the entity can name.
     const fn honoring(kind: IngestQuiesceKind) -> Self {
         Self {
             kind,
             requires: &[],
+            delivery: None,
         }
+    }
+
+    pub fn allows_delivery(self, kind: IngestDeliveryKind) -> bool {
+        self.delivery.is_none_or(|required| required == kind)
     }
 
     /// This mode, honored only where a statement makes the `requires` choices.
@@ -297,15 +362,6 @@ impl IngestDeliveryKind {
             Self::AckRequest => "ACK",
             Self::AckSequential => "ACK SEQUENTIAL",
             Self::AckParallel => "ACK PARALLEL",
-        }
-    }
-
-    /// A sender must retry an acknowledged request itself; quiesce cannot retain it after the
-    /// endpoint has answered it.
-    pub const fn allows_quiesce(self, quiesce: IngestQuiesceKind) -> bool {
-        match self {
-            Self::AckRequest => matches!(quiesce, IngestQuiesceKind::Reject),
-            Self::NoAck | Self::AckSequential | Self::AckParallel => true,
         }
     }
 }
@@ -611,7 +667,7 @@ impl IngestorEntityCapabilities {
 
     /// The declaration of the quiesce mode `kind`, where the entity's transport can honor it.
     ///
-    /// An entity declares at most one entry per kind, of the five kinds there are.
+    /// An entity declares at most one entry per kind.
     pub fn declared_quiesce(&self, kind: IngestQuiesceKind) -> Option<&'static DeclaredQuiesce> {
         self.quiesce.iter().find(|quiesce| quiesce.kind == kind)
     }
@@ -636,6 +692,11 @@ impl IngestorEntityCapabilities {
         }
         for delivery in self.delivery {
             capabilities.push(RuntimeCapability::Delivery(delivery.kind));
+        }
+        for quiesce in self.quiesce {
+            if let Some(response) = quiesce.kind.endpoint_response() {
+                capabilities.push(RuntimeCapability::EndpointPause(response));
+            }
         }
         capabilities.extend(RuntimeCapability::of_options(self.options));
         for field in self.metadata.fields() {
@@ -675,13 +736,11 @@ impl IngestorEntityCapabilities {
         kind: IngestQuiesceKind,
         body: &dyn IngestorEntityBody,
     ) -> bool {
-        if !body.acknowledgement().kind().allows_quiesce(kind) {
-            return false;
-        }
         let Some(declared) = self.declared_quiesce(kind) else {
             return false;
         };
-        ChoiceRequirement::all_met(declared.requires, &|option| body.chosen(option))
+        declared.allows_delivery(body.acknowledgement().kind())
+            && ChoiceRequirement::all_met(declared.requires, &|option| body.chosen(option))
     }
 
     /// The requirement of the delivery mode `delivery` that a statement of the pair `entity`

@@ -26,7 +26,7 @@ Feature: Delivery latency metrics
       CREATE VHOST edge delivery-latency-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT ingress ON edge PATH '/readings';
       CREATE HTTP ENDPOINT INGESTOR ingestor FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING reading_batch_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING reading_batch_codec
         TIMESTAMP AT occurred_at
         TO raw_readings INHERIT ALL BRANCHED BY tenants SET tenant = message.tenant
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;

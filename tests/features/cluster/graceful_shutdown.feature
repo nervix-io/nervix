@@ -349,7 +349,7 @@ Feature: Graceful shutdown
       CREATE HTTP ENDPOINT ingress ON edge PATH '/follower-drain';
       CREATE HTTP ENDPOINT INGESTOR ingestor_txns
         FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING transaction_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING transaction_codec
         TO inbound INHERIT ALL BRANCHED BY by_tenant
         SET tenant = message.tenant
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
@@ -489,7 +489,7 @@ Feature: Graceful shutdown
       CREATE HTTP ENDPOINT shutdown_ack_ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR shutdown_ack_ingestor
         FROM shutdown_ack_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING shutdown_ack_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING shutdown_ack_codec
         TO shutdown_ack_input INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE JUNCTION shutdown_ack_route FROM shutdown_ack_input UNBRANCHED
@@ -560,7 +560,7 @@ Feature: Graceful shutdown
       CREATE HTTP ENDPOINT held_ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR held_ingestor
         FROM held_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING held_event_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING held_event_codec
         TIMESTAMP NOW
         TO held_ingested
           INHERIT ALL
@@ -623,7 +623,7 @@ Feature: Graceful shutdown
       CREATE HTTP ENDPOINT held_ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR held_ingestor
         FROM held_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING held_event_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING held_event_codec
         TIMESTAMP NOW
         TO held_events
           INHERIT ALL
@@ -966,7 +966,7 @@ Feature: Graceful shutdown
       CREATE HTTP ENDPOINT eligible_ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR eligible_ingestor
         FROM eligible_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING eligible_event_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING eligible_event_codec
         TO eligible_ingested
           INHERIT ALL
           UNBRANCHED
@@ -1302,7 +1302,7 @@ Feature: Graceful shutdown
       CREATE HTTP ENDPOINT tenant_amount_ingress ON edge PATH '/amounts';
       CREATE HTTP ENDPOINT INGESTOR tenant_amount_ingestor
         FROM tenant_amount_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING tenant_amount_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING tenant_amount_codec
         TO tenant_amounts
           INHERIT ALL
           BRANCHED BY by_generated_tenant
@@ -1390,7 +1390,7 @@ Feature: Graceful shutdown
       CREATE HTTP ENDPOINT wait_state_ingress ON edge PATH '/state';
       CREATE HTTP ENDPOINT INGESTOR wait_state_ingestor
         FROM wait_state_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING wait_event_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING wait_event_codec
         TO wait_state
           INHERIT ALL
           UNBRANCHED
@@ -1549,7 +1549,7 @@ Feature: Graceful shutdown
 
       CREATE HTTP ENDPOINT INGESTOR ingestor_txns
         FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING transaction_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING transaction_codec
         TO inbound
         INHERIT ALL
         BRANCHED BY by_source_txns

@@ -54,10 +54,11 @@ use nervix_dataflow_graph::{
     DataflowStatistics,
 };
 use nervix_models::{
-    CommandExecutionReference, CreateSubscription, DomainName, DomainPace, DomainStatus, ModelKind,
-    ModelName, RelayName, ResourceDescription, ResourceEntryContent, ResourceManifestEntry,
-    ResourceUsage, ResourceVersionDescription, ResourceVersionEntries, Statement, SubscriptionName,
-    Timestamp, TransactionLifecycle, TransactionStatus, expression_to_plexus,
+    CommandExecutionReference, CreateSubscription, DomainName, DomainPace, DomainStatus,
+    IngestorEntityKind, IngestorName, ModelKind, ModelName, RelayName, ResourceDescription,
+    ResourceEntryContent, ResourceManifestEntry, ResourceUsage, ResourceVersionDescription,
+    ResourceVersionEntries, Statement, SubscriptionName, Timestamp, TransactionLifecycle,
+    TransactionStatus, expression_to_plexus,
 };
 use nervix_plexus::client_statement::{
     ClientStatement, parse_client_statement, parse_client_statements, parse_use_domain,
@@ -92,7 +93,8 @@ use clock_display::{ClockDisplay, ClockPanel, ClockSelection, ClockSelectionChan
 use command_retry::{CommandRetries, CommandRetryWait};
 use create_dialog::{
     ChoiceControl, ChoiceRequestContext, CommandDispatch, CreateCommandContext, CreateDialog,
-    CreateDispatch, CreateKind, CreateMenu, CreateSignals, CreateSubmission, SubscriptionDispatch,
+    CreateDispatch, CreateKind, CreateMenu, CreateSignals, CreateSubmission,
+    EndpointPauseSettingsResponse, SubscriptionDispatch,
 };
 use node_panel::{ClusterEventLog, NodePanel};
 use request_handoff::{RequestReceiver, RequestSender, request_handoff};
@@ -646,6 +648,8 @@ enum CommandPurpose {
     Repl,
     /// A popup form reads the terminal outcome and its own submission state.
     Create(CreateCommandContext),
+    /// The pause form seeds its controls from the selected endpoint ingestor's SHOW CREATE.
+    EndpointPauseSettings { revision: u64 },
     /// The resource dialog reads the versions of `resource` from its typed `DESCRIBE RESOURCE`
     /// description.
     ResourceDescription { resource: String },
@@ -2157,6 +2161,10 @@ fn App() -> impl IntoView {
         input.set(String::new());
     };
     let create_request_tx = web_console_session.request_tx;
+    let open_endpoint_pause =
+        Callback::new(move |(domain, ingestor): (DomainName, IngestorName)| {
+            request_endpoint_pause(create, create_request_tx, domain, ingestor);
+        });
     let submit_create = move |submission: CreateSubmission, attempt: u64, draft_revision: u64| {
         let CreateSubmission {
             kind,
@@ -2227,6 +2235,7 @@ fn App() -> impl IntoView {
                             domain=active_graph
                             run_command=run_command
                             create=create
+                            open_endpoint_pause=open_endpoint_pause
                         />
                         <ReplPanel
                             domain=active_domain_name
@@ -2394,6 +2403,36 @@ fn submit_create_command(
             refusal.current_context().to_string(),
         );
     }
+}
+
+fn request_endpoint_pause(
+    create: CreateSignals,
+    request_tx: RwSignal<Option<RequestSender>>,
+    domain: DomainName,
+    ingestor: IngestorName,
+) {
+    let query = format!("SHOW CREATE INGESTOR {ingestor};");
+    let Some(revision) = create.open_endpoint_pause(domain.clone(), ingestor) else {
+        return;
+    };
+    let queued = ConsoleRequest::Command {
+        request: CommandRequest {
+            query,
+            domain: Some(domain),
+            execution_reference: command_execution_reference(),
+            expected_transaction_position: None,
+            expected_preview: None,
+        },
+        purpose: CommandPurpose::EndpointPauseSettings { revision },
+    };
+    let error = match request_tx.get_untracked() {
+        Some(sender) => match sender.send(queued) {
+            Ok(()) => return,
+            Err(refusal) => refusal.current_context().to_string(),
+        },
+        None => SESSION_UNAVAILABLE.to_string(),
+    };
+    create.endpoint_pause_loaded(revision, EndpointPauseSettingsResponse::Refused(error));
 }
 
 #[component]
@@ -3537,6 +3576,15 @@ fn apply_command_outcome(
                 queued_transaction_position,
             );
         }
+        CommandPurpose::EndpointPauseSettings { revision } => {
+            let settings = match outcome.disposition {
+                CommandDisposition::Completed { .. } => {
+                    EndpointPauseSettingsResponse::Configuration(outcome.message)
+                }
+                _ => EndpointPauseSettingsResponse::Refused(outcome.message),
+            };
+            signals.create.endpoint_pause_loaded(revision, settings);
+        }
         CommandPurpose::ResourceDescription { resource } => {
             let detail = ResourceDetailView::from_description(outcome);
             signals.resource_details.update(|details| {
@@ -3939,6 +3987,14 @@ fn fail_request(signals: WebConsoleSignals, request: ConsoleRequest, reason: Str
             signals.resource_details.update(|details| {
                 details.insert(resource, detail);
             });
+        }
+        ConsoleRequest::Command {
+            purpose: CommandPurpose::EndpointPauseSettings { revision },
+            ..
+        } => {
+            signals
+                .create
+                .endpoint_pause_loaded(revision, EndpointPauseSettingsResponse::Refused(reason));
         }
         ConsoleRequest::Command {
             purpose: CommandPurpose::Backup(command),
@@ -5671,6 +5727,7 @@ fn GraphPanel(
     domain: impl Fn() -> Option<GraphView> + Copy + Send + Sync + 'static,
     run_command: impl Fn(Option<String>) + Copy + Send + Sync + 'static,
     create: CreateSignals,
+    open_endpoint_pause: Callback<(DomainName, IngestorName)>,
 ) -> impl IntoView {
     let selected_action_target = RwSignal::new(None::<GraphActionTarget>);
     let selected_branch_group = RwSignal::new(None::<String>);
@@ -6368,7 +6425,9 @@ fn GraphPanel(
                                     on:mouseleave=move |_| graph_hover.set(None)
                                     on:click=move |_| {
                                         if !graph_moved.get() {
-                                            selected_action_target.set(Some(GraphActionTarget::node(&click_node)));
+                                            selected_action_target.set(Some(GraphActionTarget::node(
+                                                &click_node, active_domain.get_untracked(),
+                                            )));
                                         }
                                     }
                                 >
@@ -6433,6 +6492,22 @@ fn GraphPanel(
                             >
                                 "SHOW CREATE"
                             </button>
+                            <Show when=move || selected_action_target.get().is_some_and(|target| target.endpoint_pause_ingestor.is_some()) fallback=|| ()>
+                                <button
+                                    type="button"
+                                    data-action="change-pause-settings"
+                                    on:click=move |_| {
+                                        if let Some(target) = selected_action_target.get_untracked()
+                                            && let Some(ingestor) = target.endpoint_pause_ingestor
+                                        {
+                                            selected_action_target.set(None);
+                                            open_endpoint_pause.run(ingestor);
+                                        }
+                                    }
+                                >
+                                    "Change pause settings"
+                                </button>
+                            </Show>
                             <Show when=move || selected_action_target.get().and_then(|target| target.relay).is_some() fallback=|| ()>
                                 <button
                                     type="button"
@@ -7478,13 +7553,14 @@ struct GraphActionTarget {
     relay: Option<RelayName>,
     /// The runtime node a PLACE action starts a placement corridor from.
     placement_member: Option<ModelName>,
+    endpoint_pause_ingestor: Option<(DomainName, IngestorName)>,
 }
 
 impl GraphActionTarget {
     /// A node's actions. PLACE is offered for a drawn ingestor, processor or emitter, the runtime
     /// nodes a placement rule names; a client is configuration, not a runtime node. An ingestor
     /// that runs on every cluster node is refused by the rule's validation, which the form shows.
-    fn node(node: &GraphViewNode) -> Self {
+    fn node(node: &GraphViewNode, domain: Option<DomainName>) -> Self {
         let kind = node.command_kind();
         let name = node.label.clone();
         let placement_member = match node.kind {
@@ -7493,6 +7569,15 @@ impl GraphActionTarget {
                 ModelName::parse(&name).ok()
             }
         };
+        let endpoint_pause_ingestor = if let DataflowNodeRole::Ingestor { transport } = &node.role
+            && IngestorEntityKind::modeled().any(|kind| {
+                kind.phrase() == transport.as_str()
+                    && kind.capabilities().reference.endpoint_type().is_some()
+            }) {
+            domain.zip(IngestorName::parse(&name).ok())
+        } else {
+            None
+        };
         Self {
             kind,
             name: name.clone(),
@@ -7500,6 +7585,7 @@ impl GraphActionTarget {
             show_create_command: format!("SHOW CREATE {kind} {name};"),
             relay: None,
             placement_member,
+            endpoint_pause_ingestor,
         }
     }
 
@@ -7514,6 +7600,7 @@ impl GraphActionTarget {
             show_create_command: format!("SHOW CREATE RELAY {name};"),
             relay: RelayName::parse(&name).ok(),
             placement_member: ModelName::parse(&name).ok(),
+            endpoint_pause_ingestor: None,
         }
     }
 }
@@ -12376,7 +12463,7 @@ mod tests {
             &[],
         );
         assert_eq!(
-            GraphActionTarget::node(&junction).placement_member,
+            GraphActionTarget::node(&junction, None).placement_member,
             Some(ModelName::parse("normalize").assured("valid name"))
         );
         let ingestor = view_node(
@@ -12388,7 +12475,7 @@ mod tests {
             &[],
         );
         assert_eq!(
-            GraphActionTarget::node(&ingestor).placement_member,
+            GraphActionTarget::node(&ingestor, None).placement_member,
             Some(ModelName::parse("intake").assured("valid name"))
         );
         let client = view_node(
@@ -12399,7 +12486,7 @@ mod tests {
             None,
             &[],
         );
-        assert_eq!(GraphActionTarget::node(&client).placement_member, None);
+        assert_eq!(GraphActionTarget::node(&client, None).placement_member, None);
         let relay = view_relay("relay:orders", None, &[]);
         assert_eq!(
             GraphActionTarget::relay(&relay).placement_member,

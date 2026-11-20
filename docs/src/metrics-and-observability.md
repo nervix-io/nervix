@@ -1012,11 +1012,18 @@ route, under the outcome that ingestor reached:
 | `outcome` | The ingestor |
 | --- | --- |
 | `accepted` | took it in: in `MODE NO ACK` it dispatched it into its graph or its endpoint `BUFFER` retained it (HTTP 202); in `MODE ACK` its acknowledgement root completed (HTTP 200, `completed`). |
-| `busy` | had no free slot in its `MODE ACK MAX` response window (HTTP 503, `not_admitted` with `busy`). |
+| `busy` | had no free slot in its `MODE ACK MAX` response window or could not fit an acknowledged request in the pause buffer (HTTP 503, `not_admitted` with `busy`). |
 | `refused` | refused it: its quiesce refused new intake, such as `ON QUIESCE REJECT` while it is quiesced or a full endpoint `BUFFER` (HTTP 503), or in `MODE ACK` one of its routes refused the decoded input (HTTP 400). |
-| `not_admitted` | could not have it unfolded because the node's extension workers had no room, which `nervix_ingestor_unfolding_refused_total` counts too (HTTP 503). |
+| `not_admitted` | could not unfold it when the node's extension workers had no room, or removed a waiting body when its deadline or intake ended (HTTP 503). |
 | `decode_rejected` | consumed it as a decode rejection because its codec refused the payload, which `nervix_ingestor_decode_rejections_total` counts too (HTTP 202 in `MODE NO ACK`, 400 in `MODE ACK`). |
 | `processing_failed` | admitted it without completing it: its `MODE NO ACK` dispatch into the graph failed (HTTP 202), or its `MODE ACK` acknowledgement root failed, its `ACK TIMEOUT` expired or its intake stopped while the response was held (HTTP 503). |
+
+The pause buffer reports `nervix_ingestor_endpoint_pause_waiting_requests` and
+`nervix_ingestor_endpoint_pause_waiting_bytes` for bodies whose senders are still waiting for
+admission. The existing quiesce buffer gauges also include bodies already answered with
+`RESPOND IMMEDIATE`. The `nervix_ingestor_endpoint_pause_refusals_total` counter records refusals
+with `buffer_full`, `deadline`, or `intake_ended` as the cause. Each node reports its own endpoint
+units.
 
 A route refuses a request before reading its body, or a WebSocket upgrade, only when none of its
 ingestors can take it, and counts that refusal once for each of them there. Otherwise every

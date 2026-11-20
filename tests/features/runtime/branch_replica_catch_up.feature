@@ -115,7 +115,7 @@ Feature: Replica catch-up of branch-keyed state
       CREATE HTTP ENDPOINT ingress ON edge PATH '/dedup';
       CREATE HTTP ENDPOINT INGESTOR ingestor_txns
         FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING transaction_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING transaction_codec
         TO inbound INHERIT ALL BRANCHED BY by_tenant
         SET tenant = message.tenant
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;

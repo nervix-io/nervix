@@ -306,6 +306,11 @@ kind: `DESCRIBE INGESTOR`, `SHOW CREATE EMITTER` and `DROP CLIENT`. An ingestor 
 holds its source back may write repeatable `RATE LIMIT <count> [OF <measure>] PER <duration> BURST
 <count>` clauses between its `MODE` and `ON QUIESCE`; see [Rate Limits](./ingestors.md#rate-limits).
 
+An endpoint ingestor's pause buffer writes when to respond after its size, using
+`RESPOND IMMEDIATE` or `RESPOND AFTER RESUME` where its delivery mode supports that choice.
+The same form follows `SET QUIESCE` in an alteration. See
+[Quiesce Modes](./ingestors.md#quiesce-modes).
+
 `CREATE DOMAIN <name>` is the short spelling for `CREATE UNPACED DOMAIN <name>`.
 
 Every inferencer runs its model once for each admitted batch, before any route, one message at a
@@ -656,7 +661,7 @@ CREATE BRANCH by_tenant
 
 CREATE HTTP ENDPOINT INGESTOR notifications_in
   FROM ingress MODE NO ACK
-  ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
+  ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING notification_codec
   FILTER WHERE input.active
   TO notifications
     INHERIT ALL EXCEPT raw

@@ -20,9 +20,9 @@ use std::num::NonZeroU64;
 use chumsky::{Boxed, prelude::*};
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::{
-    DeclaredQuiesce, IngestAcknowledgement, IngestDeliveryKind, IngestQuiesceKind,
-    IngestQuiesceMode, IngestQuiesceOverflow, IngestStartPosition, IngestorEntityModel,
-    IngestorInstances, RateLimit, RateLimits, RateQuantity, RetryPolicy,
+    DeclaredQuiesce, EndpointPauseResponse, IngestAcknowledgement, IngestDeliveryKind,
+    IngestQuiesceKind, IngestQuiesceMode, IngestQuiesceOverflow, IngestStartPosition,
+    IngestorEntityModel, IngestorInstances, RateLimit, RateLimits, RateQuantity, RetryPolicy,
 };
 use strum::IntoEnumIterator as _;
 
@@ -30,7 +30,8 @@ use crate::{
     lexer::{Identifier, Token, Word},
     parser_support::{
         ParseError, ack_timeout, byte_size_lit, duration_lit, embedded_expression, kw, kw_phrase2,
-        nonzero_u64_value, parallel_ack_window, retry_policy, sequential_ack_window, unknown_word,
+        kw_phrase3, nonzero_u64_value, parallel_ack_window, retry_policy, sequential_ack_window,
+        unknown_word,
     },
 };
 
@@ -188,12 +189,22 @@ pub(super) fn quiesce_buffer_parser<'src>()
         .map(|(max_size, overflow)| IngestQuiesceMode::Buffer { max_size, overflow })
 }
 
-fn endpoint_quiesce_buffer_parser<'src>()
--> impl Parser<'src, &'src [Token], IngestQuiesceMode, extra::Err<ParseError<'src>>> + Clone {
+fn endpoint_quiesce_buffer_parser<'src>(
+    response: EndpointPauseResponse,
+) -> impl Parser<'src, &'src [Token], IngestQuiesceMode, extra::Err<ParseError<'src>>> + Clone {
+    let response_phrase = match response {
+        EndpointPauseResponse::Immediate => {
+            kw_phrase2(Identifier::Respond, Identifier::Immediate).boxed()
+        }
+        EndpointPauseResponse::AfterResume => {
+            kw_phrase3(Identifier::Respond, Identifier::After, Identifier::Resume).boxed()
+        }
+    };
     kw(Identifier::Buffer)
         .ignore_then(kw_phrase2(Identifier::Max, Identifier::Size))
         .ignore_then(positive_quiesce_buffer_size())
-        .map(|max_size| IngestQuiesceMode::EndpointBuffer { max_size })
+        .then_ignore(response_phrase)
+        .map(move |max_size| IngestQuiesceMode::EndpointBuffer { max_size, response })
 }
 
 pub(super) fn quiesce_suspend_parser<'src>()
@@ -247,33 +258,35 @@ pub(super) fn polling_quiesce_clause<'src>()
     quiesce_clause(choice((quiesce_suspend_parser(), quiesce_buffer_parser())))
 }
 
-pub(super) fn endpoint_quiesce_clause<'src>()
--> impl Parser<'src, &'src [Token], IngestQuiesceMode, extra::Err<ParseError<'src>>> + Clone {
-    quiesce_clause(choice((
-        quiesce_reject_parser(),
-        endpoint_quiesce_buffer_parser(),
-    )))
-}
-
-pub(super) fn endpoint_ack_quiesce_clause<'src>()
--> impl Parser<'src, &'src [Token], IngestQuiesceMode, extra::Err<ParseError<'src>>> + Clone {
-    quiesce_clause(quiesce_reject_parser())
+pub(super) fn endpoint_quiesce_clause<'src>(
+    declared: &'static [DeclaredQuiesce],
+    delivery: IngestDeliveryKind,
+) -> impl Parser<'src, &'src [Token], IngestQuiesceMode, extra::Err<ParseError<'src>>> + Clone {
+    let declared = declared
+        .iter()
+        .filter(|clause| clause.allows_delivery(delivery));
+    quiesce_clause(declared_quiesce_body(declared))
 }
 
 /// The quiesce body `SET QUIESCE` writes for an entity that declares `declared`: each mode the
 /// entity declares and no other. Whether the rest of the body keeps a mode's requirements is
 /// checked on the complete ingestor, once every operation applied.
 pub(super) fn declared_quiesce_body<'src>(
-    declared: &'static [DeclaredQuiesce],
+    declared: impl IntoIterator<Item = &'static DeclaredQuiesce>,
 ) -> Boxed<'src, 'src, &'src [Token], IngestQuiesceMode, extra::Err<ParseError<'src>>> {
-    let mut bodies = Vec::with_capacity(declared.len());
+    let mut bodies = Vec::new();
     for quiesce in declared {
         let body = match quiesce.kind {
             IngestQuiesceKind::Suspend => quiesce_suspend_parser().boxed(),
             IngestQuiesceKind::Buffer => quiesce_buffer_parser().boxed(),
             IngestQuiesceKind::Drop => quiesce_drop_parser().boxed(),
             IngestQuiesceKind::Reject => quiesce_reject_parser().boxed(),
-            IngestQuiesceKind::EndpointBuffer => endpoint_quiesce_buffer_parser().boxed(),
+            IngestQuiesceKind::EndpointBufferImmediate => {
+                endpoint_quiesce_buffer_parser(EndpointPauseResponse::Immediate).boxed()
+            }
+            IngestQuiesceKind::EndpointBufferAfterResume => {
+                endpoint_quiesce_buffer_parser(EndpointPauseResponse::AfterResume).boxed()
+            }
         };
         bodies.push(body);
     }

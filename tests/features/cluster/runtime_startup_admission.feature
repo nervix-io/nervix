@@ -40,7 +40,7 @@ Feature: Runtime startup admission
 
       CREATE HTTP ENDPOINT INGESTOR admission_ingestor
         FROM admission_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING admission_event_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING admission_event_codec
         TO admission_input
         INHERIT ALL
         UNBRANCHED

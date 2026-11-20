@@ -24,7 +24,7 @@ Feature: List shape functions
       CREATE VHOST edge list-inference-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT ingress ON edge PATH '/samples';
       CREATE HTTP ENDPOINT INGESTOR ingest FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING samples_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING samples_codec
         TO samples INHERIT ALL BRANCHED BY by_tenant SET tenant = message.tenant
           FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
@@ -98,7 +98,7 @@ Feature: List shape functions
       CREATE HTTP ENDPOINT ingress ON edge PATH '/shapes';
       CREATE HTTP ENDPOINT INGESTOR ingest
         FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING source_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING source_codec
         TO sources INHERIT ALL UNBRANCHED
           FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;

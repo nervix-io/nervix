@@ -144,8 +144,9 @@ Every ingestor body declares its delivery mode with `MODE`, polled and listener 
   is the longest wait for a partial batch. A `CLIENT PRODUCER` ingestor writes `ACK PARALLEL MAX
   <n> ACK TIMEOUT ...` without `BATCH TIMEOUT`.
 - `ACK MAX <n> ACK TIMEOUT <duration>` is the endpoint response mode. It holds at most `n`
-  outstanding payloads per ingestor on each node and requires `ON QUIESCE REJECT RETRY AFTER
-  <duration>`. The sender owns retry.
+  outstanding payloads per ingestor on each node. During a pause it can refuse requests with
+  `REJECT RETRY AFTER <duration>` or hold them with `BUFFER MAX SIZE <bytes> RESPOND AFTER RESUME`.
+  The sender owns retry.
 
 For `ACK SEQUENTIAL` and `ACK PARALLEL`, `ACK TIMEOUT` bounds how long a payload may make no
 acknowledgement progress, not how long its processing takes. Work under way on its records reports
@@ -160,9 +161,11 @@ reports that as a timeout, not as a failed acknowledgement: its error event name
 failing branch gave. See [Ingestor Acknowledgement And
 Lifecycle](metrics-and-observability.md#ingestor-acknowledgement-and-lifecycle).
 
-Endpoint `ACK TIMEOUT` instead bounds the complete response wait on the physical clock; progress
-does not restart it. Expiry reports `processing_failed` with cause `ack_timeout` without undoing
-admitted effects. See [endpoint ingestion](#http-endpoint-and-websockets-endpoint).
+Endpoint `ACK TIMEOUT` bounds the complete response wait on the physical clock, including any time
+in a pause buffer. Progress never restarts it. An expired payload still in the pause buffer is
+removed and answered `not_admitted` with cause `suspended`. Once a payload enters the graph,
+expiry reports `processing_failed` with cause `ack_timeout` and admitted effects may complete.
+See [endpoint ingestion](#http-endpoint-and-websockets-endpoint).
 
 Each entity accepts only the modes it can honor, and completion offers only those:
 
@@ -402,9 +405,9 @@ is refused once every operation of the statement has applied, by the registry ch
 `CREATE` result also passes. An `MQTT TOPIC` ingestor that moves from `NO ACK` to an acknowledged
 mode therefore writes the session, the quality of service and the mode in one statement:
 `SET SESSION PERSISTENT, SET QOS 1, SET MODE ACK SEQUENTIAL …`. A declared quiesce mode the
-stored delivery mode cannot honor is refused the same way: `SET QUIESCE BUFFER MAX SIZE 1MiB` on
-an `HTTP ENDPOINT` ingestor in `MODE ACK MAX 8 ACK TIMEOUT 5s` fails with `HTTP ENDPOINT ingestors
-do not support ON QUIESCE BUFFER`.
+stored delivery mode cannot honor is refused the same way. For an acknowledged endpoint, setting
+`SET QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE` is refused because the endpoint owes each
+request its actual outcome.
 
 `SET DECODE USING` exists under every head except `CLIENT PRODUCER`, which decodes nothing.
 `ADD ROUTE` appends a route, while `REPLACE ROUTE` preserves the matched route's position.
@@ -444,11 +447,17 @@ The shared mode vocabulary is:
 - `REJECT RETRY AFTER <duration>` is available only to `HTTP ENDPOINT` and `WEBSOCKETS ENDPOINT`.
   HTTP requests and new WebSocket upgrades receive 503; HTTP includes `Retry-After`, rounded up to
   whole seconds. Established WebSockets close with code 1013 (Try Again Later).
-- Endpoint buffering, for `HTTP ENDPOINT` and `WEBSOCKETS ENDPOINT`, is `BUFFER MAX SIZE <bytes>`
-  without `ON OVERFLOW`, available only with `MODE NO ACK`. HTTP requests that fit receive 202 and
-  are held; WebSocket data frames that fit are held without a per-frame acknowledgement. A full
-  buffer, or a body that cannot fit, is rejected with HTTP 503 or a WebSocket 1013 close; an accepted
-  body is never discarded by buffer policy. `MODE ACK` requires `REJECT RETRY AFTER <duration>`.
+- `BUFFER MAX SIZE <bytes> RESPOND IMMEDIATE` retains what fits and sends HTTP 202 as soon as the
+  body is buffered. An unacknowledged WebSocket buffers each frame that fits and sends no
+  per-frame reply.
+- `BUFFER MAX SIZE <bytes> RESPOND AFTER RESUME` holds the client's reply while the body waits.
+  An unacknowledged HTTP request receives 202 once its payload proceeds. An acknowledged HTTP
+  request or WebSocket frame gets the outcome of its graph acknowledgement. A disconnected
+  client’s waiting body is removed before it can reach the graph.
+- Both endpoint buffer forms refuse overflow, with HTTP 503 or WebSocket close code 1013. Each
+  serving ingestor keeps its buffered bodies in arrival order ahead of new live input. A stop
+  discards the pause buffer with its session and refuses the requests still waiting to enter the
+  graph.
 
 A read already in progress when an ingestor quiesces ends without losing what it took from
 the transport: under `SUSPEND` those payloads still dispatch before the ingestor suspends, and under
@@ -464,7 +473,8 @@ An ingestor accepts only the modes it can honor, and completion of its body offe
 | `NATS SUBJECT`, `REDIS PUBSUB`, `WEBSOCKETS CONNECTION` | `BUFFER ... ON OVERFLOW ...`, `DROP` |
 | `ZEROMQ PULL`, `SYSLOG LISTENER`, `NATS STREAM` | `SUSPEND`, `BUFFER ... ON OVERFLOW ...`, `DROP` |
 | `HTTP REQUEST`, `PROMETHEUS QUERY` | `SUSPEND`, `BUFFER ... ON OVERFLOW ...` |
-| `HTTP ENDPOINT`, `WEBSOCKETS ENDPOINT` | `REJECT RETRY AFTER ...`; `BUFFER MAX SIZE ...` only with `MODE NO ACK` |
+| `HTTP ENDPOINT` | `REJECT RETRY AFTER ...` and `BUFFER MAX SIZE ... RESPOND AFTER RESUME` in either mode, plus `BUFFER MAX SIZE ... RESPOND IMMEDIATE` in `MODE NO ACK` |
+| `WEBSOCKETS ENDPOINT` | `REJECT RETRY AFTER ...` in either mode, `BUFFER MAX SIZE ... RESPOND IMMEDIATE` in `MODE NO ACK`, and `BUFFER MAX SIZE ... RESPOND AFTER RESUME` in `MODE ACK` |
 | `CLIENT PRODUCER` | `SUSPEND` |
 
 For `SYSLOG LISTENER`, suspension retains frames already held by the listener, while UDP arrivals
@@ -660,7 +670,7 @@ CREATE BRANCH by_tenant
 
 CREATE IF NOT EXISTS HTTP ENDPOINT INGESTOR notifications_in
   FROM ingress MODE NO ACK
-  ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
+  ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING notification_codec
   FILTER WHERE input.active
   TO notifications
     INHERIT ALL EXCEPT raw
@@ -3356,15 +3366,15 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Connector events | None declared. |
 | Instancing | single |
 | External partitions | No enumerable external partition set. |
-| Quiesce (complete bodies after ON QUIESCE) | REJECT RETRY AFTER 5s<br>BUFFER MAX SIZE 64MiB |
+| Quiesce (complete bodies after ON QUIESCE) | REJECT RETRY AFTER 5s<br>BUFFER MAX SIZE 64MiB RESPOND IMMEDIATE<br>BUFFER MAX SIZE 64MiB RESPOND AFTER RESUME |
 | RATE LIMIT | Refused in every mode: the entity cannot hold its source back. |
 | Metadata | metadata.method: STRING OPTIONAL<br>metadata.path: STRING OPTIONAL<br>metadata.query: STRING OPTIONAL<br>metadata.remote_addr: STRING OPTIONAL<br>metadata.host: STRING OPTIONAL<br>metadata.remote_ip: STRING OPTIONAL |
 | Payload facts | payload.bytes: U64 |
 | Every live node | yes |
 | Position class | none |
 | Acknowledgement confirmation | none |
-| Buffers | a request head: set by node setting `--listener-header-bytes`; when exceeded, refuses the request as too large; the same request sent again is refused again<br>a request body: set by node setting `--http-body-bytes`; when exceeded, refuses the request as too large; the same request sent again is refused again<br>the request input of every HTTP endpoint connection on the node together, read buffers included: set by node setting `--execution-intake-memory-bytes`; when full, immediately refuses the request for its sender to retry<br>unresolved requests under MODE ACK, per node and ingestor: set by MODE ACK MAX; when full, immediately refuses the request for its sender to retry |
-| Network waits | a client's request head: node setting `--listener-header-timeout`; at the bound, closes the connection without an answer<br>a client's request body: node setting `--http-body-timeout`; at the bound, refuses the request as timed out<br>graph acknowledgement under MODE ACK: `ACK TIMEOUT, or the exact intake lifetime ending` |
+| Buffers | a request head: set by node setting `--listener-header-bytes`; when exceeded, refuses the request as too large; the same request sent again is refused again<br>a request body: set by node setting `--http-body-bytes`; when exceeded, refuses the request as too large; the same request sent again is refused again<br>the request input of every HTTP endpoint connection on the node together, read buffers included: set by node setting `--execution-intake-memory-bytes`; when full, immediately refuses the request for its sender to retry<br>unresolved requests under MODE ACK, per node and ingestor: set by MODE ACK MAX; when full, immediately refuses the request for its sender to retry<br>request bodies and their metadata retained during a pause, per node and ingestor: set by ON QUIESCE BUFFER MAX SIZE; when full, immediately refuses the request for its sender to retry |
+| Network waits | a client's request head: node setting `--listener-header-timeout`; at the bound, closes the connection without an answer<br>a client's request body: node setting `--http-body-timeout`; at the bound, refuses the request as timed out<br>graph acknowledgement under MODE ACK: `ACK TIMEOUT from complete body arrival, client disconnect, or intake ending`<br>HTTP MODE NO ACK response under RESPOND AFTER RESUME: `resume, client disconnect, or intake ending` |
 | Driver limits | None declared. |
 | Stalled-peer checks | None: no client deadline key bounds a wait. |
 
@@ -3396,15 +3406,15 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Connector events | None declared. |
 | Instancing | single |
 | External partitions | No enumerable external partition set. |
-| Quiesce (complete bodies after ON QUIESCE) | REJECT RETRY AFTER 5s<br>BUFFER MAX SIZE 64MiB |
+| Quiesce (complete bodies after ON QUIESCE) | REJECT RETRY AFTER 5s<br>BUFFER MAX SIZE 64MiB RESPOND IMMEDIATE<br>BUFFER MAX SIZE 64MiB RESPOND AFTER RESUME |
 | RATE LIMIT | Refused in every mode: the entity cannot hold its source back. |
 | Metadata | metadata.frame_type: STRING OPTIONAL<br>metadata.remote_addr: STRING OPTIONAL<br>metadata.path: STRING OPTIONAL<br>metadata.remote_ip: STRING OPTIONAL |
 | Payload facts | payload.bytes: U64 |
 | Every live node | yes |
 | Position class | none |
 | Acknowledgement confirmation | none |
-| Buffers | the upgrade request head: set by node setting `--listener-header-bytes`; when exceeded, refuses the request as too large; the same request sent again is refused again<br>an incoming frame payload, per session: set by node setting `--websocket-frame-bytes`; when exceeded, closes only that peer's session<br>an incoming message assembled from frames, per session: set by node setting `--websocket-message-bytes`; when exceeded, closes only that peer's session<br>unresolved data frames under MODE ACK, per node and ingestor: set by MODE ACK MAX; when full, immediately refuses the request for its sender to retry |
-| Network waits | the upgrade request head: node setting `--listener-header-timeout`; at the bound, closes the connection without an answer<br>the signaling handshake: `the signaling protocol's TIMEOUT`<br>reading the next frame: node setting `--listener-idle-timeout`; at the bound, closes that session after no read or write byte progress<br>graph acknowledgement under MODE ACK: `ACK TIMEOUT, or the exact intake lifetime ending` |
+| Buffers | the upgrade request head: set by node setting `--listener-header-bytes`; when exceeded, refuses the request as too large; the same request sent again is refused again<br>an incoming frame payload, per session: set by node setting `--websocket-frame-bytes`; when exceeded, closes only that peer's session<br>an incoming message assembled from frames, per session: set by node setting `--websocket-message-bytes`; when exceeded, closes only that peer's session<br>unresolved data frames under MODE ACK, per node and ingestor: set by MODE ACK MAX; when full, immediately refuses the request for its sender to retry<br>data frames and their metadata retained during a pause, per node and ingestor: set by ON QUIESCE BUFFER MAX SIZE; when exceeded, closes only that peer's session<br>a data frame waiting for admission under RESPOND AFTER RESUME: at most 1 frame per connection; when exceeded, closes only that peer's session<br>a message read as the previous frame enters the graph: at most 1 message per connection; when full, holds back what fills it |
+| Network waits | the upgrade request head: node setting `--listener-header-timeout`; at the bound, closes the connection without an answer<br>the signaling handshake: `the signaling protocol's TIMEOUT`<br>reading the next frame: node setting `--listener-idle-timeout`; at the bound, closes that session after no read or write byte progress<br>graph acknowledgement under MODE ACK: `ACK TIMEOUT from complete frame arrival, client disconnect, or intake ending` |
 | Driver limits | None declared. |
 | Stalled-peer checks | None: no client deadline key bounds a wait. |
 
@@ -3432,10 +3442,9 @@ the other kind is refused when the statement is applied, with a message such as
 the same body.
 
 Both endpoint entities accept `MODE NO ACK` or `MODE ACK MAX <n> ACK TIMEOUT <duration>`.
-The ACK window is explicit: `MAX` is 1–65,535 outstanding payloads per ingestor on each node.
-An acknowledged endpoint requires `ON QUIESCE REJECT RETRY AFTER <duration>`. The sender owns
-retry; there is no endpoint `RETRY POLICY`, `ACK PARALLEL`, or `BATCH` clause. `BUFFER MAX SIZE`
-is available with `MODE NO ACK`. Transport headers are available through `read_header` and
+The ACK window is explicit: `MAX` is 1–65,535 outstanding requests per ingestor on each node,
+including buffered requests that still owe a reply. The sender owns retries. Transport headers
+are available through `read_header` and
 `read_headers`, and each entity declares the typed metadata of a request or a frame. Both ingestors
 execute on every cluster node and are excluded from placement members and placement completion.
 
@@ -3500,23 +3509,23 @@ CREATE HTTP ENDPOINT INGESTOR acknowledged
 | --- | --- | --- | --- |
 | 200 | `completed` | `none` | The payload's graph acknowledgement root completed under the declared error policies. |
 | 400 | `processing_failed` | `rejected` | The codec or local route construction refused the input. |
-| 503 | `not_admitted` | `busy` | The response window or execution capacity is full. |
-| 503 | `not_admitted` | `suspended` | Intake is quiesced before admission. |
+| 503 | `not_admitted` | `busy` | The response window, pause buffer or execution capacity is full. |
+| 503 | `not_admitted` | `suspended` | Intake is quiesced, or the deadline or intake ended while the payload was still waiting to enter the graph. |
 | 503 | `processing_failed` | `rejected` | Downstream negatively acknowledged admitted work. |
-| 503 | `processing_failed` | `ack_timeout` | The absolute response deadline expired. |
-| 503 | `outcome_unknown` | `interrupted` | The exact intake stopped or ended while the response was held. |
+| 503 | `processing_failed` | `ack_timeout` | The absolute response deadline expired after admission. |
+| 503 | `outcome_unknown` | `interrupted` | Intake ended while admitted work still owed a response. |
 
 Every ACK response has a JSON object containing exactly `outcome` and `cause`, using the existing
 [client submission outcome vocabulary](client-io-architecture.md). For example, a local refusal
 is `{"outcome":"processing_failed","cause":"rejected"}`. Downstream rejection uses that same
 object with status 503. The response contains no payload or diagnostic details. Runtime events
 retain the ingestor's ordinary diagnostics.
-A 503 uses the declared retry delay, rounded up to whole seconds. A retry can duplicate output
-that already completed; timeout or interruption does not roll back admitted work.
+A 503 carries `Retry-After` when the quiesce mode declares a retry delay, rounded up to whole
+seconds. A retry can duplicate output that already completed.
 
-The physical ACK timeout starts when a complete payload obtains its window slot. It is positive
-and fits the supported physical deadline range. Downstream keepalive does not restart it. The
-window uses immediate admission: it never queues a request for a response slot. A window already
+The physical ACK timeout starts when the complete payload arrives, including during a pause. It
+is positive and fits the supported physical deadline range. A buffered ACK request claims a
+response slot immediately and holds it until its reply ends. A window already
 full at the HTTP head refuses before reading the body; dispatch checks capacity again after the
 body completes, so competing requests cannot overrun the window. HTTP request-head and body reads,
 input memory and WebSocket message and frame sizes follow the node's separately declared
@@ -3525,8 +3534,9 @@ input memory and WebSocket message and frame sizes follow the node's separately 
 In `MODE NO ACK`, admission still answers HTTP 202 without waiting for downstream acknowledgement.
 A codec refusal becomes a decode rejection consumed by `ON GENERAL ERROR`; it also answers 202.
 WebSocket data frames receive no per-frame graph-completion reply in this mode; signaling replies
-still follow their protocol. With `BUFFER`, HTTP bodies that fit receive 202 and drain after resume.
-A full buffer rejects new intake without discarding bodies already accepted. If extension workers
+still follow their protocol. Under `RESPOND AFTER RESUME`, an unacknowledged HTTP request waits
+until resume, it disconnects, or the intake ends. A request still waiting when the domain stops
+receives HTTP 503 and its body is discarded. If extension workers
 cannot unfold a fresh payload,
 HTTP answers 503 and a WebSocket closes with 1013; buffered payloads instead retain their place
 until workers can take them. See [When The Codec Refuses A Payload](#when-the-codec-refuses-a-payload).
@@ -3536,6 +3546,11 @@ WebSocket upgrades with 503. A stopped or absent intake refuses new requests too
 by unacknowledged ingestors accepts when at least one accepts; it includes `Retry-After` only when
 all refusals supply a delay. When an acknowledged binding participates, success waits for its root;
 a failure after any binding admitted the input is not reported as `not_admitted`.
+
+Each acknowledged WebSocket connection can hold one frame during a pause, including during
+`ACCEPT DATA`. If it sends another data frame while its first is still buffered, Nervix closes that
+connection with 1013 and removes the waiting frame. Requests on other connections retain their
+place. A frame that resumes before the next frame arrives keeps its normal ordered reply.
 
 Each node counts every request and WebSocket data frame it receives once for each ingestor bound to
 the route, in `nervix_ingestor_endpoint_requests_total` under the outcome that ingestor reached:

@@ -2396,6 +2396,7 @@ fn an_endpoint_ingestor_rejects_an_endpoint_of_the_other_type() {
                                     mode: nervix_models::EndpointIngestMode::NoAck,
                                     quiesce: nervix_models::IngestQuiesceMode::EndpointBuffer {
                                         max_size: "1MiB".to_string(),
+                                        response: nervix_models::EndpointPauseResponse::Immediate,
                                     },
                                 },
                             )),

@@ -695,9 +695,9 @@ impl RuntimeIngestorHost {
     /// Every request that arrives on those routes is admitted through this host's quiesce control
     /// and dispatched as its own ingest group through the same outputs, codec and branch senders
     /// the host holds, on the request path rather than in the ingestor loop.
-    pub(super) fn request_intake(&self, request: EndpointRequestPolicy) -> EndpointIngestBinding {
+    pub(super) fn request_intake(&self, plan: &EndpointRequestPlan) -> EndpointIngestBinding {
         EndpointIngestBinding {
-            request,
+            request: self.quiesce.endpoint_request_policy(plan),
             handles: self.handles.clone(),
             quiesce: self.quiesce.clone(),
             domain: self.domain.clone(),
@@ -957,7 +957,7 @@ impl RuntimeIngestorHost {
                 IngestorQuiesceIntake::Dispatch(_) => admitted.push(message),
                 IngestorQuiesceIntake::Buffered
                 | IngestorQuiesceIntake::Dropped
-                | IngestorQuiesceIntake::Rejected { .. } => {}
+                | IngestorQuiesceIntake::Rejected => {}
             }
         }
         if admitted.is_empty() {
@@ -1190,7 +1190,7 @@ impl RuntimeIngestorHost {
             }
             IngestorQuiesceIntake::Buffered
             | IngestorQuiesceIntake::Dropped
-            | IngestorQuiesceIntake::Rejected { .. } => Ok(false),
+            | IngestorQuiesceIntake::Rejected => Ok(false),
         }
     }
 
@@ -1243,7 +1243,7 @@ impl RuntimeIngestorHost {
                         }
                         IngestorQuiesceIntake::Buffered
                         | IngestorQuiesceIntake::Dropped
-                        | IngestorQuiesceIntake::Rejected { .. } => return Ok(false),
+                        | IngestorQuiesceIntake::Rejected => return Ok(false),
                     }
                 }
             };
@@ -1663,8 +1663,8 @@ impl RuntimeIngestorHost {
     /// Delivers the oldest payload this instance's quiesce buffer retained, and answers whether it
     /// delivered one.
     ///
-    /// Nothing can present a retained payload again: an endpoint already answered it and an ingestor
-    /// already moved past it. Its unfolding therefore waits for a place on the node's extension
+    /// Its sender gave the buffer ownership of a retained payload. Its unfolding waits for a place
+    /// on the node's extension
     /// workers rather than being refused, and the payload stays retained, counted with its bytes,
     /// until its messages are accepted into the ingest group. A shutdown or a new quiesce ends
     /// that wait and leaves the payload at the front of the buffer, so it is delivered first when
@@ -1690,10 +1690,12 @@ impl RuntimeIngestorHost {
         );
         let decoded = retained.run_until_interrupted(&self.shutdown, decode).await;
         let Some(decoded) = decoded else {
-            // The group keeps none of the payload's messages, and dropping the delivery puts the
-            // payload back at the front of the buffer.
+            // Dropping returns the payload to the front or removes an abandoned request. In the
+            // latter case the host can continue draining under the same pause decision.
             self.collector.discard_undispatched_payloads();
-            return Ok(false);
+            return Ok(retained
+                .reply()
+                .is_some_and(endpoint_pause::EndpointPauseReply::abandoned));
         };
         let payloads = match decoded {
             Ok(payloads) => payloads,
@@ -1709,15 +1711,50 @@ impl RuntimeIngestorHost {
                 return Ok(false);
             }
         };
+        if retained.is_endpoint() {
+            if self.quiesce.is_quiesced() {
+                self.collector.discard_undispatched_payloads();
+                return Ok(false);
+            }
+            if retained.reply().is_some_and(|reply| !reply.admit()) {
+                self.collector.discard_undispatched_payloads();
+                if let Some(reply) = retained.refuse_endpoint() {
+                    reply.answer(endpoint_pause::EndpointPauseOutcome::Finished(
+                        EndpointRequestOutcome::NotAdmitted(
+                            endpoint_acknowledgement::EndpointAdmissionRefusal::PauseExpired,
+                        ),
+                    ));
+                }
+                return Ok(true);
+            }
+            let mut delivery = retained.into_endpoint(&self.quiesce);
+            if let Some(reply) = delivery.reply.take() {
+                self.deliver_waiting_endpoint(&delivery.payload, payloads, reply)
+                    .await?;
+            } else {
+                self.dispatch_retained_payload(&delivery.payload, payloads)
+                    .await?;
+            }
+            return Ok(true);
+        }
         // What its codec refused is consumed, and the payload's other messages are in the group, so
         // it leaves the buffer before the group accepts them.
         let payload = retained.finish();
+        self.dispatch_retained_payload(&payload, payloads).await?;
+        Ok(true)
+    }
+
+    async fn dispatch_retained_payload(
+        &mut self,
+        payload: &BufferedIngestPayload,
+        payloads: SplitPayloads<usize>,
+    ) -> IngestorIntakeResult<()> {
         let payloads = payloads.map(|index| payload.metadata_row(index));
         let metadata = self
             .consume_refused_payloads(payloads, payload.observed_at())
             .await;
         if metadata.is_empty() {
-            return Ok(true);
+            return Ok(());
         }
         self.runtime
             .accept_raw_ingest_payload(RawIngestAcceptance {
@@ -1744,7 +1781,81 @@ impl RuntimeIngestorHost {
         {
             self.flush().await?;
         }
-        Ok(true)
+        Ok(())
+    }
+
+    /// Admits one retained endpoint body in order and hands its reply to the waiting request.
+    /// The request waits for the root after the replay task has moved on to the next body.
+    async fn deliver_waiting_endpoint(
+        &mut self,
+        payload: &BufferedIngestPayload,
+        decoded: SplitPayloads<usize>,
+        reply: endpoint_pause::EndpointPauseReply,
+    ) -> IngestorIntakeResult<()> {
+        use endpoint_acknowledgement::EndpointInputRefusal;
+        use endpoint_pause::EndpointPauseOutcome;
+
+        let decoded = decoded.map(|index| payload.metadata_row(index));
+        let metadata = self
+            .consume_refused_payloads(decoded, payload.observed_at())
+            .await;
+        if metadata.is_empty() {
+            reply.answer(EndpointPauseOutcome::Finished(
+                EndpointRequestOutcome::Refused(EndpointInputRefusal::Codec),
+            ));
+            return Ok(());
+        }
+        let response_root = if reply.acknowledged() {
+            Some(self.handles.tracked_root())
+        } else {
+            None
+        };
+        let routed_ack = match &response_root {
+            Some((root, _)) if self.branched_senders.is_empty() => root.clone(),
+            Some((root, _)) => root.attached(),
+            None => AckSet::empty(),
+        };
+        let dispatch = self
+            .runtime
+            .dispatch_ingested_records(IngestGroupDispatch {
+                handles: &self.handles,
+                collector: &mut self.collector,
+                domain: &self.domain,
+                ingestor: &self.ingestor,
+                timestamp_source: self.timestamp_source.as_ref(),
+                output_routes: &self.output_routes,
+                filter_where: self.filter_where.as_ref(),
+                metadata: &metadata,
+                ingested_at: payload.observed_at(),
+                acks: vec![routed_ack],
+            })
+            .await
+            .change_context(IngestorIntakeError::Dispatch);
+        let flush = self.flush().await;
+        let completion = response_root.map(|(root, completion)| {
+            root.ack_success();
+            completion
+        });
+        if let Err(error) = dispatch.and(flush) {
+            reply.answer(EndpointPauseOutcome::Finished(
+                EndpointRequestOutcome::ProcessingFailed(
+                    nervix_models::ClientProcessingFailure::Rejected,
+                ),
+            ));
+            return Err(error);
+        }
+        let outcome = match completion {
+            Some(_) if self.collector.input_refused() => EndpointPauseOutcome::Finished(
+                EndpointRequestOutcome::Refused(EndpointInputRefusal::Route),
+            ),
+            Some(completion) => EndpointPauseOutcome::Acknowledging {
+                completion,
+                intake_ending: self.shutdown.clone(),
+            },
+            None => EndpointPauseOutcome::Finished(EndpointRequestOutcome::Completed),
+        };
+        reply.answer(outcome);
+        Ok(())
     }
 }
 
