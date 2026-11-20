@@ -2702,11 +2702,13 @@ policies are applicable. Domain pace is a separate domain-creation choice.
 ## Entity Label Inspection
 
 `CommandOutcome.entity_labels` carries one `EntityLabelsInspection`, independently of the display
-message and selected `TEXT` or `JSON` presentation. It contains the existing domain/node identity,
-the complete exact string map, captured committed policy revision and four acceptance limits.
-Its required view union is committed, with a required applied revision (zero included), or staged,
-with the complete existing transaction preview identity. Neither variant supplies the other's
-identity by default.
+message and selected `TEXT` or `JSON` presentation. The required owner union carries a Model's
+domain and node reference, a domain's name, a logical resource's domain and name, or a cluster
+user's name. It also carries the complete exact string map, captured committed policy revision
+and four acceptance limits. Its required view union is committed, with an applied revision (zero
+included), or staged, with the complete transaction preview identity. A staged view is defined
+for Models and resources. The logical `DESCRIBE DOMAIN` and `DESCRIBE RESOURCE` outcomes
+also use this envelope.
 
 The receiver validates every key, duplicate-key absence, complete-set limits and ordinary outer
 string/vector/transfer bounds. Missing required policy or view fields, undeclared discriminants

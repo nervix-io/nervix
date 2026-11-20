@@ -600,7 +600,7 @@ C and C++ endpoint accessors, credit and ownership are described in the
 
 `SHOW LABELS ON <entity> FORMAT TEXT|JSON` also returns
 `CommandOutcome::entity_labels`. The retained `EntityLabelsInspection` exposes the existing typed
-`DomainNodeRef`, exact ordered label map, captured policy revision and four limits, and an explicit
+`EntityLabelOwner`, exact ordered label map, captured policy revision and four limits, and an explicit
 `EntityLabelView`. A committed view carries its applied revision, including zero; a staged view
 carries the existing transaction preview identity and accepted position. Both rendered formats
 project the same typed result. Clone it to retain the snapshot after the outcome is dropped;

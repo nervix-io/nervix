@@ -620,6 +620,7 @@ mod tests {
 
     fn domain(status: DomainStatus) -> DomainState {
         DomainState {
+            labels: crate::EntityLabels::default(),
             id: DomainName::parse("orders").expect("the test domain name is valid"),
             config: DomainConfig {
                 pace: DomainPace::Unpaced,

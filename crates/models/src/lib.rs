@@ -405,8 +405,8 @@ pub use remote_branch_key::{
 };
 pub use reset_wasm_state::ResetWasmState;
 pub use resource::{
-    RequestedResourceVersion, ResourceDescription, ResourceEntryContent, ResourceId,
-    ResourceManifestEntry, ResourceNodeState, ResourceNodeStatus, ResourceReplicaKey,
+    RequestedResourceVersion, ResourceCatalogKey, ResourceDescription, ResourceEntryContent,
+    ResourceId, ResourceManifestEntry, ResourceNodeState, ResourceNodeStatus, ResourceReplicaKey,
     ResourceUpload, ResourceUploadIdentity, ResourceUploadIdentityError, ResourceUploadKey,
     ResourceUploadState, ResourceUploads, ResourceUploadsError, ResourceUsage, ResourceVersion,
     ResourceVersionCounter, ResourceVersionDescription, ResourceVersionEntries, ResourceVersionKey,

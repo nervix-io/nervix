@@ -514,6 +514,11 @@ table CreateResourceOperation {
   resource: string (required);
 }
 
+table EditResourceLabelsOperation {
+  domain: string (required);
+  resource: string (required);
+}
+
 /// `VERSION <n>`: exactly this version.
 table ResourceVersionNumber {
   version: ulong;
@@ -548,7 +553,8 @@ union TransactionOperation {
   StopDomainOperation = 6,
   CreateResourceOperation = 7,
   RebindResourceOperation = 8,
-  ResetWasmStateOperation = 9
+  ResetWasmStateOperation = 9,
+  EditResourceLabelsOperation = 10
 }
 
 enum ModelChangeAspect : ubyte {
@@ -726,7 +732,8 @@ table ConfigurationImpact {
 }
 
 enum ResourceCatalogAction : ubyte {
-  Create
+  Create,
+  EditLabels
 }
 
 table ResourceCatalogImpact {
@@ -1791,7 +1798,12 @@ table EntityLabelPolicy { revision: ulong; limits: EntityLabelLimits (required);
 table CommittedEntityLabels { revision: ulong; }
 table StagedEntityLabels { preview: TransactionPreviewIdentity (required); }
 union EntityLabelView { CommittedEntityLabels, StagedEntityLabels }
-table EntityLabelsInspection { domain: string (required); entity: NodeRef (required); labels: [LabelEntry] (required); policy: EntityLabelPolicy (required); view: EntityLabelView (required); }
+table ModelLabelOwner { domain: string (required); model: NodeRef (required); }
+table DomainLabelOwner { name: string (required); }
+table ResourceLabelOwner { domain: string (required); name: string (required); }
+table UserLabelOwner { name: string (required); }
+union EntityLabelOwner { ModelLabelOwner, DomainLabelOwner, ResourceLabelOwner, UserLabelOwner }
+table EntityLabelsInspection { owner: EntityLabelOwner (required); labels: [LabelEntry] (required); policy: EntityLabelPolicy (required); view: EntityLabelView (required); }
 
 table CommandOutcome {
   /// The execution_reference of the request.

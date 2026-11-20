@@ -4341,6 +4341,10 @@ workloads = [
 [[owner]]
 path = "crates/consensus/src/restore.rs"
 workloads = [
+  "scenario.entity-label-publication-6",
+  "scenario.entity-label-publication-7",
+  "stress.entity-label-publication-6",
+  "stress.entity-label-publication-7",
   "scenario.password-credentials",
   "stress.password-credentials",
   "scenario.restore-generation",
@@ -4363,6 +4367,14 @@ workloads = [
 [[owner]]
 path = "crates/consensus/src/storage.rs"
 workloads = [
+  "scenario.entity-label-publication-4",
+  "scenario.entity-label-publication-5",
+  "scenario.entity-label-publication-6",
+  "scenario.entity-label-publication-7",
+  "stress.entity-label-publication-4",
+  "stress.entity-label-publication-5",
+  "stress.entity-label-publication-6",
+  "stress.entity-label-publication-7",
   "scenario.inherited-kafka-readers",
   "stress.inherited-kafka-readers",
   "scenario.inherited-pulsar-readers",
@@ -7480,15 +7492,67 @@ scenario = "Restart and archive restore retain the captured label revision"
 selections = ["deloxide", "deloxide-order"]
 
 
+[[workload]]
+coverage = "The production label reader acquires the tracked applied-state publication lock. The selected commands also publish or reopen consensus state."
+examples = 2
+feature = "tests/features/runtime/entity_labels.feature"
+id = "scenario.entity-label-publication-4"
+invariant = "Resource operations publish in statement order, keep staged labels private, and discard reverted edits."
+invocation = "entity-label-publication"
+scenario = "Resource label edits publish with their transaction and disappear on revert"
+selections = ["deloxide", "deloxide-order"]
+
+
+[[workload]]
+coverage = "The production label reader acquires the tracked applied-state publication lock. The selected commands also publish or reopen consensus state."
+examples = 2
+feature = "tests/features/runtime/entity_labels.feature"
+id = "scenario.entity-label-publication-5"
+invariant = "Restart restores the exact named-owner maps and their typing from consensus storage."
+invocation = "entity-label-publication"
+scenario = "Domain, resource and user labels survive edits and a cluster restart"
+selections = ["deloxide", "deloxide-order"]
+
+
+[[workload]]
+coverage = "The production label reader acquires the tracked applied-state publication lock. The backup and restore reach existing tracked consensus and restore owners."
+examples = 2
+feature = "tests/features/runtime/entity_labels.feature"
+id = "scenario.entity-label-publication-6"
+invariant = "A domain restore under a new name keeps its labels and the labels of the resource catalog it restores."
+invocation = "entity-label-publication"
+scenario = "A domain backup retains domain and catalog labels within its original scope"
+selections = ["deloxide", "deloxide-order"]
+
+
+[[workload]]
+coverage = "The production label reader acquires the tracked applied-state publication lock. The backup and restore reach existing tracked consensus and restore owners."
+examples = 2
+feature = "tests/features/runtime/entity_labels.feature"
+id = "scenario.entity-label-publication-7"
+invariant = "Cluster restore publishes user labels with their credentials as one record."
+invocation = "entity-label-publication"
+scenario = "A cluster backup restores user labels with the same sign-in"
+selections = ["deloxide", "deloxide-order"]
+
+
 [[owner]]
 path = "crates/consensus/src/entity_labels.rs"
 workloads = [
   "scenario.entity-label-publication-1",
   "scenario.entity-label-publication-2",
   "scenario.entity-label-publication-3",
+  "scenario.entity-label-publication-4",
+  "scenario.entity-label-publication-5",
+  "scenario.entity-label-publication-6",
+  "scenario.entity-label-publication-7",
   "stress.entity-label-publication-1",
   "stress.entity-label-publication-2",
   "stress.entity-label-publication-3",
+  "stress.entity-label-publication-4",
+  "stress.entity-label-publication-5",
+  "stress.entity-label-publication-6",
+  "stress.entity-label-publication-7",
 ]
 
 
@@ -7522,6 +7586,50 @@ id = "stress.entity-label-publication-3"
 invariant = "Exact labels, typed revision/policy coherence and retained execution/state survive the selected transaction or lifecycle operation without a tracked-lock cycle."
 invocation = "stress-entity-label-publication"
 scenario = "Restart and archive restore retain the captured label revision"
+selections = ["deloxide-stress", "deloxide-stress-restore"]
+
+
+[[workload]]
+coverage = "Under scheduling stress: The production label reader acquires the tracked applied-state publication lock. The selected commands also publish or reopen consensus state."
+examples = 2
+feature = "tests/features/runtime/entity_labels.feature"
+id = "stress.entity-label-publication-4"
+invariant = "Resource operations publish in statement order, keep staged labels private, and discard reverted edits."
+invocation = "stress-entity-label-publication"
+scenario = "Resource label edits publish with their transaction and disappear on revert"
+selections = ["deloxide-stress", "deloxide-stress-restore"]
+
+
+[[workload]]
+coverage = "Under scheduling stress: The production label reader acquires the tracked applied-state publication lock. The selected commands also publish or reopen consensus state."
+examples = 2
+feature = "tests/features/runtime/entity_labels.feature"
+id = "stress.entity-label-publication-5"
+invariant = "Restart restores the exact named-owner maps and their typing from consensus storage."
+invocation = "stress-entity-label-publication"
+scenario = "Domain, resource and user labels survive edits and a cluster restart"
+selections = ["deloxide-stress", "deloxide-stress-restore"]
+
+
+[[workload]]
+coverage = "Under scheduling stress: The production label reader acquires the tracked applied-state publication lock. The backup and restore reach existing tracked consensus and restore owners."
+examples = 2
+feature = "tests/features/runtime/entity_labels.feature"
+id = "stress.entity-label-publication-6"
+invariant = "A domain restore under a new name keeps its labels and the labels of the resource catalog it restores."
+invocation = "stress-entity-label-publication"
+scenario = "A domain backup retains domain and catalog labels within its original scope"
+selections = ["deloxide-stress", "deloxide-stress-restore"]
+
+
+[[workload]]
+coverage = "Under scheduling stress: The production label reader acquires the tracked applied-state publication lock. The backup and restore reach existing tracked consensus and restore owners."
+examples = 2
+feature = "tests/features/runtime/entity_labels.feature"
+id = "stress.entity-label-publication-7"
+invariant = "Cluster restore publishes user labels with their credentials as one record."
+invocation = "stress-entity-label-publication"
+scenario = "A cluster backup restores user labels with the same sign-in"
 selections = ["deloxide-stress", "deloxide-stress-restore"]
 
 

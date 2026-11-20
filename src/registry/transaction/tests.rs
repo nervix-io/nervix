@@ -43,7 +43,7 @@ pub(super) fn snapshot(
         parameters: nervix_models::ClusterParameterValues::default(),
         domain: domain_state(status),
         models: models.into_iter().collect(),
-        resources: BTreeSet::new(),
+        resources: BTreeMap::new(),
         resource_uploads: ResourceUploads::default(),
         schedule: None,
         basis: ImpactPlanningBasis::new([7; 32]),
@@ -75,7 +75,7 @@ pub(super) fn scheduled_snapshot(
         parameters: nervix_models::ClusterParameterValues::default(),
         domain: domain_state(status),
         models,
-        resources: BTreeSet::new(),
+        resources: BTreeMap::new(),
         resource_uploads: ResourceUploads::default(),
         schedule: Some(schedule),
         basis: ImpactPlanningBasis::new([7; 32]),
@@ -434,6 +434,7 @@ fn an_incomplete_model_run_cannot_be_repaired_after_a_resource_boundary() {
         )),
         Statement::CreateResource(CreateStatement::new(
             CreateResource {
+                labels: nervix_models::EntityLabels::default(),
                 identifier: ResourceName::parse("weights")
                     .assured("the resource fixture is an identifier-shaped literal"),
             },

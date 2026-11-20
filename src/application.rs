@@ -41,7 +41,7 @@ use std::{
 
 use admitted_connection::AdmittingListener;
 use ahash::{HashMap, HashMapExt, HashSet, RandomState};
-use authentication::user_credentials;
+use authentication::prepare_user_record;
 use automatic_schedule::AutomaticSchedulePublication;
 use background_task::{
     await_background_task_shutdown, join_public_listeners, request_shutdown_on_completion,
@@ -1388,10 +1388,11 @@ impl Application {
                                     .is_none() =>
                             {
                                 if let Some(password) = init_default_user_password.clone() {
-                                    match user_credentials(
+                                    match prepare_user_record(
                                         runtime_for_reconcile.executor(),
                                         default_user_id.clone(),
                                         password,
+                                        nervix_models::EntityLabels::default(),
                                         nervix_models::PasswordCost::try_from(consensus_for_reconcile.cluster_parameters().assured("reconciliation starts after cluster policy initialization").values.password_iterations()).assured("committed policy validates the password cost"),
                                     )
                                     .await

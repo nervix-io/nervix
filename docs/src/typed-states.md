@@ -830,9 +830,10 @@ record. Registry publication, recovered committed configuration and wire inspect
 against that captured policy and their outer representation bounds. Compiled defaults never
 replace a missing policy or normalize invalid stored metadata.
 
-An `EntityLabelsInspection` carries the existing `DomainNodeRef`, complete map and captured
-policy. Its view is explicitly committed, with its applied revision, or staged, with a
-`TransactionPreviewIdentity`. The discriminant determines which identity is present; an absent
+An `EntityLabelsInspection` carries a typed `EntityLabelOwner`, complete map and captured
+policy. The owner is a Model's `DomainNodeRef`, a domain name, a domain-scoped
+`ResourceCatalogKey` or a cluster-wide user name. Its view is explicitly committed, with its
+applied revision, or staged, with a `TransactionPreviewIdentity`. The discriminant determines which identity is present; an absent
 committed revision is never inferred to be zero or to describe a staged candidate. Labels remain
 control-plane state and are excluded from execution identities. [Entity Labels](entity-labels.md)
 owns their product semantics.

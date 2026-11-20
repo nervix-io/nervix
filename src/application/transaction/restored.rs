@@ -20,12 +20,12 @@
     )
 )]
 
-use std::collections::BTreeSet;
+use std::collections::BTreeMap;
 
 use error_stack::Report;
 use nervix_models::{
-    CanonicalImpactSet, DomainState, ImpactNodeCoverage, ModelIndex, OwnershipMoveImpact,
-    ResourceName, ResourceUploads, Statement,
+    CanonicalImpactSet, DomainState, EntityLabels, ImpactNodeCoverage, ModelIndex,
+    OwnershipMoveImpact, ResourceName, ResourceUploads, Statement,
 };
 
 use super::{TransactionPlanningBasisSource, transaction_planning_basis};
@@ -44,7 +44,7 @@ pub(in crate::application) struct RestoredDomainInputs<'a> {
     /// The domain as the restore creates it: stopped, with its archived configuration.
     pub(in crate::application) state: &'a DomainState,
     /// Every resource the domain declares.
-    pub(in crate::application) resources: &'a BTreeSet<ResourceName>,
+    pub(in crate::application) resources: &'a BTreeMap<ResourceName, EntityLabels>,
     /// Exactly the versions the restore imports, each completed.
     pub(in crate::application) completed: ResourceUploads,
     pub(in crate::application) partitions: Option<&'a nervix_models::PartitionTopologySnapshot>,

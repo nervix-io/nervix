@@ -84,11 +84,17 @@ pub(super) fn plan_sections(
 ) -> Result<Vec<PlannedSection>, Report<BackupError>> {
     let mut sections = Vec::new();
     if scope.with_users() {
+        let parameters = capture
+            .parameters
+            .as_ref()
+            .ok_or_else(|| Report::new(BackupError::ClusterParametersUnseeded))?;
         let users = UsersRecord {
+            label_policy: nervix_models::EntityLabelPolicy::from(parameters),
             users: capture
                 .users
                 .values()
                 .map(|credentials| UserRecord {
+                    labels: credentials.labels.clone(),
                     name: credentials.name.clone(),
                     password_credential: credentials.password_credential.clone(),
                 })
@@ -116,9 +122,10 @@ fn plan_domain(
     sections: &mut Vec<PlannedSection>,
 ) -> Result<(), Report<BackupError>> {
     let domain = &state.id;
-    let declared = declared_resources(&capture.resources, domain)?;
+    let declared = declared_resources(capture, domain)?;
     let record = DomainRecord {
         domain: domain.clone(),
+        labels: state.labels.clone(),
         pace: state.config.pace,
         status: state.status.clone(),
         start_version: state.start_version,
@@ -217,12 +224,12 @@ fn plan_domain(
 
 /// Every resource `domain` declares, in name order, with the version its next upload receives.
 fn declared_resources(
-    catalog: &ResourceVersionStatus,
+    capture: &ConfigurationCapture,
     domain: &DomainName,
 ) -> Result<Vec<DeclaredResource>, Report<BackupError>> {
     // The counters are sorted by domain and then resource, so one domain's run is located by
     // binary search.
-    let counters = &catalog.next_version_by_resource;
+    let counters = &capture.resources.next_version_by_resource;
     let start = counters.partition_point(|counter| counter.domain < *domain);
     let end = counters.partition_point(|counter| counter.domain <= *domain);
     let run = end
@@ -236,9 +243,17 @@ fn declared_resources(
                 resource: counter.identifier.clone(),
             }));
         };
+        let key = nervix_models::ResourceCatalogKey::new(domain, &counter.identifier);
+        let labels = capture.resource_labels.get(&key).ok_or_else(|| {
+            Report::new(BackupError::InvalidCatalog {
+                domain: domain.clone(),
+                resource: counter.identifier.clone(),
+            })
+        })?;
         declared.push(DeclaredResource {
             resource: counter.identifier.clone(),
             next_version,
+            labels: labels.clone(),
         });
     }
     Ok(declared)
@@ -465,7 +480,7 @@ fn record_kind<R: ArchiveRecord>(_record: &R) -> nervix_backup::RecordKind {
 mod tests {
     use std::collections::BTreeMap;
 
-    use nervix_consensus::{AppliedLogPosition, UserCredentials};
+    use nervix_consensus::{AppliedLogPosition, UserRecord as ConsensusUserRecord};
     use nervix_models::{
         ClusterNodeName, ClusterSchedule, DomainConfig, DomainPace, DomainStartPoint,
         ResourceUpload, ResourceUploadIdentity, ResourceUploadKey, ResourceUploads,
@@ -489,6 +504,7 @@ mod tests {
 
     fn state(name: &str, status: DomainStatus) -> DomainState {
         DomainState {
+            labels: nervix_models::EntityLabels::default(),
             id: domain(name),
             config: DomainConfig {
                 pace: DomainPace::Unpaced,
@@ -568,13 +584,21 @@ mod tests {
             schedule: ClusterSchedule::from_iter([schedule]),
             users: BTreeMap::from([(
                 user("alice"),
-                UserCredentials {
+                ConsensusUserRecord {
+                    labels: nervix_models::EntityLabels::default(),
                     name: user("alice"),
                     password_credential: nervix_models::PasswordCredential::from_parts(
                         210000, [33; 16], [33; 64],
                     )
                     .assured("the fixed credential has a bounded iteration count"),
                 },
+            )]),
+            resource_labels: BTreeMap::from([(
+                nervix_models::ResourceCatalogKey {
+                    domain: prod.clone(),
+                    identifier: resource("model"),
+                },
+                nervix_models::EntityLabels::default(),
             )]),
             resources: ResourceVersionStatus {
                 next_version_by_resource: SortedVec::from_unsorted(vec![ResourceVersionCounter {

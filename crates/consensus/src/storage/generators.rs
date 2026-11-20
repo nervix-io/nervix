@@ -48,7 +48,7 @@ use crate::{
     TransactionCommitProgress, TransactionDiagnostic, TransactionOutcome, TransactionQueueLimits,
     TransactionReportArchive, TransactionScheduleEligibility, TransactionState,
     TransactionStatement, TransactionStatementRequest, TransactionStepEffect,
-    TransactionStepResult, UserCredentials, command_execution::CommandExecutionRecords,
+    TransactionStepResult, UserRecord, command_execution::CommandExecutionRecords,
     domain_mutation::DomainMutationLease, restore::DomainRestoreInstallation,
     transaction::AcceptedTransactionStatement, transaction_plan::TransactionCommitPlanRecords,
     transaction_report::TransactionReportRecords,
@@ -162,10 +162,11 @@ fn leader_tenure(arbitrary: &mut Arbitrary<'_>) -> LeaderTenure {
 }
 
 /// A user and the password hash it signs in with.
-fn user_credentials(arbitrary: &mut Arbitrary<'_>) -> UserCredentials {
+fn user_credentials(arbitrary: &mut Arbitrary<'_>) -> UserRecord {
     let name = arbitrary.rule_name::<UserName>();
     let password_credential = arbitrary.password_credential();
-    UserCredentials {
+    UserRecord {
+        labels: arbitrary.entity_labels(),
         name,
         password_credential,
     }
@@ -194,13 +195,33 @@ fn restore_installation(arbitrary: &mut Arbitrary<'_>) -> DomainRestoreInstallat
 
 /// The resource catalog: declared sequences, published versions, replica records and uploads,
 /// each keyed by the identity its value carries, with every upload assigned a version of its own.
-fn resource_records(arbitrary: &mut Arbitrary<'_>) -> ResourceRecords {
+fn valid_labels(
+    arbitrary: &mut Arbitrary<'_>,
+    limits: &nervix_models::EntityLabelLimits,
+) -> nervix_models::EntityLabels {
+    let labels = arbitrary.entity_labels();
+    if labels.validate(limits).is_ok() {
+        labels
+    } else {
+        nervix_models::EntityLabels::default()
+    }
+}
+
+fn resource_records(
+    arbitrary: &mut Arbitrary<'_>,
+    limits: &nervix_models::EntityLabelLimits,
+) -> ResourceRecords {
     let mut resources = ResourceRecords::default();
     for _ in 0..arbitrary.entropy().count(RECORDS) {
         let domain = arbitrary.rule_name::<DomainName>();
         let identifier = arbitrary.rule_name::<ResourceName>();
         let next_version = arbitrary.positive_u64();
-        resources.restore_catalog(&domain, &identifier, next_version);
+        resources.restore_catalog(
+            &domain,
+            &identifier,
+            next_version,
+            valid_labels(arbitrary, limits),
+        );
     }
     for _ in 0..arbitrary.entropy().count(RECORDS) {
         let id = ResourceId::new(
@@ -297,7 +318,12 @@ fn planning_inputs_with(
     domain: DomainName,
     state: Option<DomainState>,
 ) -> DomainPlanningInputs {
-    let resources = arbitrary.records(Arbitrary::rule_name::<ResourceName>);
+    let resources = arbitrary.records(|arbitrary| {
+        (
+            arbitrary.rule_name::<ResourceName>(),
+            arbitrary.entity_labels(),
+        )
+    });
     let completed_versions = arbitrary.records(|arbitrary| {
         let identifier = arbitrary.rule_name();
         let version = arbitrary.entropy().any_u64();
@@ -310,7 +336,7 @@ fn planning_inputs_with(
         domain,
         state: state.map(Box::new),
         resources: DomainResourcePlanningInputs {
-            resources: resources.into_iter().collect(),
+            catalog: resources.into_iter().collect(),
             completed_versions: completed_versions.into_iter().collect(),
         },
         schedule,
@@ -523,7 +549,7 @@ fn transaction_step_effect(
     domain: &DomainName,
 ) -> TransactionStepEffect {
     let inputs = Box::new(domain_planning_inputs(arbitrary, domain.clone()));
-    match arbitrary.entropy().byte() % 5 {
+    match arbitrary.entropy().byte() % 6 {
         0 => TransactionStepEffect::ReplaceDomainSchedule {
             inputs,
             schedule: optional_schedule(arbitrary, domain),
@@ -544,6 +570,12 @@ fn transaction_step_effect(
         3 => TransactionStepEffect::CreateResourceCatalog {
             inputs,
             identifier: arbitrary.rule_name(),
+            labels: arbitrary.entity_labels(),
+        },
+        4 => TransactionStepEffect::EditResourceLabels {
+            inputs,
+            identifier: arbitrary.rule_name(),
+            labels: arbitrary.entity_labels(),
         },
         _ => TransactionStepEffect::ResetWasmState {
             inputs,
@@ -939,6 +971,7 @@ fn leave_room_for_starts(decision: &mut TransactionCommitPlan) -> u64 {
             TransactionCommitStepKind::Models { .. }
             | TransactionCommitStepKind::StopDomain
             | TransactionCommitStepKind::CreateResource { .. }
+            | TransactionCommitStepKind::EditResourceLabels { .. }
             | TransactionCommitStepKind::ResetWasmState { .. } => {}
         }
     }
@@ -1124,6 +1157,7 @@ fn create_domain_effect(arbitrary: &mut Arbitrary<'_>) -> CommandExecutionEffect
         found
     } else {
         DomainState {
+            labels: nervix_models::EntityLabels::default(),
             status: DomainStatus::Stopped,
             start_version: 0,
             last_start: DomainStartPoint::Resume,
@@ -1148,7 +1182,8 @@ fn command_execution_effect(
     arbitrary: &mut Arbitrary<'_>,
     reference: &CommandExecutionReference,
 ) -> CommandExecutionEffect {
-    match arbitrary.entropy().byte() % 12 {
+    match arbitrary.entropy().byte() % 13 {
+        12 => administrative_label_effect(arbitrary),
         11 => CommandExecutionEffect::StopDomain {
             source: arbitrary.string(),
             stop: nervix_models::StopDomain {
@@ -1180,6 +1215,7 @@ fn command_execution_effect(
             }
         }
         4 => CommandExecutionEffect::CreateUser {
+            labels: arbitrary.entity_labels(),
             if_not_exists: arbitrary.entropy().flag(),
             name: arbitrary.rule_name(),
             password_credential: arbitrary.password_credential(),
@@ -1376,6 +1412,7 @@ fn command_execution_result(
         }
         CommandExecutionEffect::CreateDomain { .. }
         | CommandExecutionEffect::AlterCluster { .. }
+        | CommandExecutionEffect::EditAdministrativeLabels { .. }
         | CommandExecutionEffect::StopDomain { .. }
         | CommandExecutionEffect::CreateUser { .. }
         | CommandExecutionEffect::RotateLicenseClusterKey { .. }
@@ -1453,15 +1490,15 @@ pub(super) fn state_machine(arbitrary: &mut Arbitrary<'_>) -> StateMachineData {
         .cluster_identity
         .as_ref()
         .map(|identity| Arc::new(crate::LicensingRecord::free(identity.public().created_at)));
+    let limits = nervix_models::EntityLabelLimits::from(
+        &state
+            .parameters
+            .assured("the generator committed its policy")
+            .values,
+    );
     for _ in 0..arbitrary.entropy().count(RECORDS) {
         let domain = arbitrary.rule_name::<DomainName>();
         let mut schedule = arbitrary.domain_schedule_of(domain.clone());
-        let limits = nervix_models::EntityLabelLimits::from(
-            &state
-                .parameters
-                .assured("the generator committed its policy")
-                .values,
-        );
         for node in schedule.nodes.values_mut() {
             if node.config.labels().validate(&limits).is_err() {
                 *node.config.labels_mut() = nervix_models::EntityLabels::default();
@@ -1471,7 +1508,8 @@ pub(super) fn state_machine(arbitrary: &mut Arbitrary<'_>) -> StateMachineData {
     }
     for _ in 0..arbitrary.entropy().count(RECORDS) {
         let domain = arbitrary.rule_name::<DomainName>();
-        let domain_state = arbitrary.domain_state_of(domain.clone());
+        let mut domain_state = arbitrary.domain_state_of(domain.clone());
+        domain_state.labels = valid_labels(arbitrary, &limits);
         state.domains.insert(domain, domain_state);
     }
     for _ in 0..arbitrary.entropy().count(RECORDS) {
@@ -1480,7 +1518,10 @@ pub(super) fn state_machine(arbitrary: &mut Arbitrary<'_>) -> StateMachineData {
         state.domain_clock_authorities.insert(domain, authority);
     }
     for _ in 0..arbitrary.entropy().count(RECORDS) {
-        let user = user_credentials(arbitrary);
+        let mut user = user_credentials(arbitrary);
+        if user.labels.validate(&limits).is_err() {
+            user.labels = nervix_models::EntityLabels::default();
+        }
         state.raise_password_work(user.password_credential.cost());
         state.users.insert(user.name.clone(), user);
     }
@@ -1493,7 +1534,7 @@ pub(super) fn state_machine(arbitrary: &mut Arbitrary<'_>) -> StateMachineData {
     )
     .assured("generated policy has a bounded cost");
     state.raise_password_work(cost);
-    state.resources = resource_records(arbitrary);
+    state.resources = resource_records(arbitrary, &limits);
     for _ in 0..arbitrary.entropy().count(RECORDS) {
         let committed = committed_node_record(arbitrary);
         state
@@ -1595,6 +1636,7 @@ fn restored_resource(arbitrary: &mut Arbitrary<'_>) -> RestoredResource {
     RestoredResource {
         resource,
         next_version,
+        labels: arbitrary.entity_labels(),
     }
 }
 
@@ -1620,6 +1662,7 @@ fn restore_step_effect(
         RestoreStep::CreateDomain(domain) => {
             let archived = arbitrary.domain_state_of(domain.clone());
             let state = DomainState {
+                labels: arbitrary.entity_labels(),
                 status: DomainStatus::Stopped,
                 clock: None,
                 stop: None,
@@ -1904,6 +1947,7 @@ enum CommandVariant {
     ReconcileDomainClockAuthority,
     CreateUser,
     CreateResourceCatalog,
+    EditAdministrativeLabels,
     BeginResourceUpload,
     PublishResourceUpload,
     PutResourceReplica,
@@ -1983,6 +2027,7 @@ impl CommandVariant {
             }
             ConsensusCommand::CreateUser { .. } => Self::CreateUser,
             ConsensusCommand::CreateResourceCatalog { .. } => Self::CreateResourceCatalog,
+            ConsensusCommand::EditAdministrativeLabels { .. } => Self::EditAdministrativeLabels,
             ConsensusCommand::BeginResourceUpload { .. } => Self::BeginResourceUpload,
             ConsensusCommand::PublishResourceUpload { .. } => Self::PublishResourceUpload,
             ConsensusCommand::PutResourceReplica { .. } => Self::PutResourceReplica,
@@ -2262,6 +2307,10 @@ fn command_of(arbitrary: &mut Arbitrary<'_>, variant: CommandVariant) -> Consens
         CommandVariant::CreateResourceCatalog => ConsensusCommand::CreateResourceCatalog {
             domain: arbitrary.rule_name(),
             identifier: arbitrary.rule_name(),
+            labels: arbitrary.entity_labels(),
+        },
+        CommandVariant::EditAdministrativeLabels => ConsensusCommand::EditAdministrativeLabels {
+            reference: arbitrary.execution_reference(),
         },
         CommandVariant::BeginResourceUpload => ConsensusCommand::BeginResourceUpload {
             key: Box::new(upload_key(arbitrary)),
@@ -2380,7 +2429,7 @@ fn seeded_bytes(seed: u64, length: usize) -> Vec<u8> {
 
 /// Every variant and shape of the transaction, commit plan, report and command execution records
 /// [`state_machine`] promises to reach, as [`RecordWalk`] names them.
-const EXPECTED_RECORDS: [&str; 51] = [
+const EXPECTED_RECORDS: [&str; 52] = [
     "ReplicatedTransaction::session",
     "ReplicatedTransaction::command",
     "ReplicatedTransaction::latest_preview",
@@ -2409,6 +2458,7 @@ const EXPECTED_RECORDS: [&str; 51] = [
     "CommandExecutionState::Finished",
     "CommandExecutionState::Expired",
     "CommandExecutionEffect::AlterCluster",
+    "CommandExecutionEffect::EditAdministrativeLabels",
     "CommandExecutionEffect::CreateDomain",
     "CommandExecutionEffect::Transaction",
     "CommandExecutionEffect::TransactionRequest",
@@ -2581,6 +2631,9 @@ impl RecordWalk {
 
     fn effect(&mut self, effect: &CommandExecutionEffect) {
         match effect {
+            CommandExecutionEffect::EditAdministrativeLabels { .. } => {
+                self.see("CommandExecutionEffect::EditAdministrativeLabels");
+            }
             CommandExecutionEffect::AlterCluster { .. } => {
                 self.see("CommandExecutionEffect::AlterCluster")
             }
@@ -2697,6 +2750,28 @@ fn every_record_variant_is_generated_across_seeds() {
         unexpected.is_empty(),
         "generated but not expected: {unexpected:?}"
     );
+}
+
+fn administrative_label_effect(arbitrary: &mut Arbitrary<'_>) -> CommandExecutionEffect {
+    use nervix_models::{AdministrativeLabelTarget, EntityLabelMutation};
+
+    let target = if arbitrary.entropy().flag() {
+        AdministrativeLabelTarget::Domain(arbitrary.rule_name())
+    } else {
+        AdministrativeLabelTarget::User(arbitrary.rule_name())
+    };
+    let outcome = match arbitrary.entropy().byte() % 3 {
+        0 => None,
+        1 => Some(Ok(())),
+        _ => Some(Err(crate::EntityLabelWriteError::UnknownEntity {
+            target: target.clone(),
+        })),
+    };
+    CommandExecutionEffect::EditAdministrativeLabels {
+        target,
+        mutation: EntityLabelMutation::Set(arbitrary.entity_labels()),
+        outcome,
+    }
 }
 
 fn licensing_command_outcome(arbitrary: &mut Arbitrary<'_>) -> crate::LicensingCommandOutcome {

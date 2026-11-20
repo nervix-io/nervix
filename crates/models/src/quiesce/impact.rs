@@ -1052,6 +1052,10 @@ pub enum TransactionOperation {
         domain: DomainName,
         resource: ResourceName,
     },
+    EditResourceLabels {
+        domain: DomainName,
+        resource: ResourceName,
+    },
     RebindResource {
         domain: DomainName,
         resource: ResourceName,
@@ -1073,6 +1077,7 @@ impl TransactionOperation {
             | Self::StartDomain { domain }
             | Self::StopDomain { domain }
             | Self::CreateResource { domain, .. }
+            | Self::EditResourceLabels { domain, .. }
             | Self::RebindResource { domain, .. } => domain,
             Self::ResetWasmState { domain, .. } => domain,
         }
@@ -1279,6 +1284,7 @@ pub struct ConfigurationImpact {
 #[strum(serialize_all = "SCREAMING_SNAKE_CASE")]
 pub enum ResourceCatalogAction {
     Create,
+    EditLabels,
 }
 
 #[derive(

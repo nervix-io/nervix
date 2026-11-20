@@ -46,14 +46,17 @@ impl EntityLabelsInspection {
     pub fn value(&self) -> &nervix_models::EntityLabelsInspection {
         &self.captured.value
     }
-    pub fn domain(&self) -> &str {
-        self.value().entity().domain.as_str()
+    pub fn domain(&self) -> Option<&str> {
+        self.value()
+            .entity()
+            .domain()
+            .map(nervix_models::DomainName::as_str)
     }
     pub fn entity_kind(&self) -> &str {
-        self.value().entity().node.kind.keyword_phrase()
+        self.value().entity().keyword_phrase()
     }
     pub fn entity_name(&self) -> &str {
-        self.value().entity().node.identifier.as_str()
+        self.value().entity().name()
     }
     pub fn labels(&self) -> &nervix_models::EntityLabels {
         self.value().labels()

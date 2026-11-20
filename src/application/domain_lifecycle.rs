@@ -859,6 +859,7 @@ impl SessionServiceImpl {
         let state = DomainState {
             id: create.id.clone(),
             config: create.config,
+            labels: create.labels,
             status: DomainStatus::Stopped,
             start_version: 0,
             last_start: DomainStartPoint::Resume,
@@ -1213,6 +1214,7 @@ mod tests {
         let result = service
             .create_domain(CreateStatement::new(
                 CreateDomain {
+                    labels: nervix_models::EntityLabels::default(),
                     id: domain.clone(),
                     config: DomainConfig {
                         pace: DomainPace::Unpaced,
@@ -1248,6 +1250,7 @@ mod tests {
         let first = service
             .create_domain(CreateStatement::new(
                 CreateDomain {
+                    labels: nervix_models::EntityLabels::default(),
                     id: DomainName::parse("prod").expect("valid domain"),
                     config: DomainConfig {
                         pace: DomainPace::Unpaced,
@@ -1262,6 +1265,7 @@ mod tests {
         let duplicate = service
             .create_domain(CreateStatement::new(
                 CreateDomain {
+                    labels: nervix_models::EntityLabels::default(),
                     id: DomainName::parse("prod").expect("valid domain"),
                     config: DomainConfig {
                         pace: DomainPace::Unpaced,
@@ -1285,6 +1289,7 @@ mod tests {
             path,
         } = build_test_service(false).await;
         let state = DomainState {
+            labels: nervix_models::EntityLabels::default(),
             id: DomainName::parse("resumed")
                 .assured("the test domain is an identifier-shaped literal"),
             config: DomainConfig {

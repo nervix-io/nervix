@@ -1,16 +1,16 @@
 # Entity Labels
 
-Labels describe persisted domain entities in Nervix. They are a map of string keys to string
-values, managed through Plexus and committed with the entity. They do not grant permissions,
-select placement, inherit from another entity, or become metric dimensions.
+Labels describe named entities in Nervix. They are a map of string keys to string values, managed
+through Plexus and committed with the entity. Each owner keeps its own labels. Labels have no
+effect on permissions, authentication, placement, or metric dimensions.
 
-Every domain Model supports labels, including schemas, all wire-schema kinds, clients,
-ingestors, emitters, processors, relays, configured branches, virtual hosts, endpoints, codecs,
-signaling protocols, generators, lookups, UDFs and placement definitions. Entities that bind
-resources retain those bindings when labels change.
-Domains, logical resources and users are outside this surface. Runtime branches, partitions,
-execution instances, resource versions, sessions and subscriptions are not separately labelable.
-Physical node tags retain their separate [node settings](node-settings.md) contract.
+Domains, logical resources, cluster users and every domain Model support labels. Models include
+schemas, all wire-schema kinds, clients, ingestors, emitters, processors, relays, configured
+branches, virtual hosts, endpoints, codecs, signaling protocols, generators, lookups, UDFs and
+placement definitions. Models and resource versions do not inherit labels from their domain or
+resource. Runtime branches, partitions, execution instances, resource versions, sessions and
+subscriptions have no label maps. Physical node tags follow the
+[node settings](node-settings.md) contract.
 
 ## Keys, Values And Limits
 
@@ -42,6 +42,9 @@ The optional trailing `LABELS` clause creates the initial set:
 ```plexus
 CREATE SCHEMA readings ( value F32 )
   LABELS { 'owner' = 'Operations', 'team/path' = 'Platform / East' };
+CREATE UNPACED DOMAIN orders LABELS { 'owner' = 'Operations' };
+CREATE RESOURCE orders_schema LABELS { 'status' = 'draft' };
+CREATE USER orders_reader WITH PASSWORD 'example-password' LABELS { 'purpose' = 'Audit' };
 ```
 
 Omission creates an empty set. `CREATE IF NOT EXISTS` leaves an existing entity and its labels
@@ -60,21 +63,29 @@ Inspect the result in a separate request:
 
 ```plexus
 SHOW LABELS ON SCHEMA readings FORMAT JSON;
+SHOW LABELS ON DOMAIN orders;
+SET LABELS ON RESOURCE orders_schema { 'status' = 'approved' };
+DROP LABELS ON USER orders_reader { 'purpose' };
 ```
 
 Targets use the entity's established addressing phrase. For example, a connector is addressed
 as `INGESTOR intake` or `EMITTER archive`; a wire schema retains its kind as
 `WIRE JSON SCHEMA payload`, `WIRE CBOR SCHEMA payload` or `WIRE AVRO SCHEMA payload`.
-The selected domain remains part of the target's typed identity.
+Models and resources resolve in the selected domain. `DOMAIN <name>` identifies a domain
+directly, and `USER <name>` identifies a cluster account. Named domain and user targets work
+without a selected domain.
 
 ## Transactions And Inspection
 
-Label edits participate in the domain's `BEGIN`, `COMMIT` and `REVERT` lifecycle. An inspection
-inside a transaction reads its coherent staged candidate, including earlier label edits. Other
-sessions observe committed labels. Conflicting edits are subject to the same candidate and
-commit fences as configuration changes. Reversion publishes nothing.
+Model and resource label edits can run alone or in the selected domain's `BEGIN`, `COMMIT`
+and `REVERT` lifecycle. A transaction applies resource edits in statement order, including edits
+to a resource created earlier in that transaction. The attached session reads its staged labels.
+Other sessions observe committed labels until the commit applies the edit. Conflicting edits
+follow the same candidate and commit checks as configuration changes. Reversion discards queued
+changes. Domain and user label edits are administrative commands and are refused inside a
+transaction. Their reads show committed labels even in a session with an attached transaction.
 
-`SHOW LABELS` returns one bounded typed result containing the domain entity identity, complete
+`SHOW LABELS` returns one bounded typed result containing the resolved owner identity, complete
 label map and a committed revision or an explicitly staged transaction view. `FORMAT TEXT` is
 the default; `FORMAT JSON` is a projection of that same result. Clients receive the typed result
 and do not reconstruct it from display text. Keys render in lexicographic order.
@@ -84,8 +95,10 @@ queue without appending an operation or changing the transaction's position.
 The result also carries the committed policy revision and the four limits captured with the read.
 A client validates the received complete set against that policy and its transport's outer bounds.
 
-`DESCRIBE` and canonical `SHOW CREATE` expose the same metadata where those commands exist.
-Canonical creation text preserves every key and exact value and can recreate the complete set.
+`DESCRIBE DOMAIN` and `DESCRIBE RESOURCE <name>` include labels in the text and typed result.
+Individual resource version descriptions omit labels. Model `DESCRIBE` and canonical
+`SHOW CREATE` expose the same metadata where those commands exist. Canonical creation text
+preserves every key and exact value.
 
 ## Execution And Durability
 
@@ -98,9 +111,16 @@ configuration edits retain attachments and state whenever their actual execution
 even after metadata was edited.
 
 Labels persist with the entity through registry snapshots, consensus replay, restart and archive
-restore. `WITHOUT STATE` omits runtime state and retains labels. Dropping an entity removes its
-metadata; recreation starts with only its explicitly supplied labels. A supported rename retains
-labels and introduces no new rename operation.
+restore. Resource uploads and rebinds leave the logical resource's map intact. Editing a user's
+labels leaves the account's credential intact. A domain archive includes its domain, Model and
+resource catalog labels. A cluster archive also includes user labels. `WITHOUT STATE` and
+`WITHOUT RESOURCES` retain the labels in their original archive scope. The latter omits resource
+version bytes, so normal restore requirements for completed versions still apply.
+
+Where a drop command exists, dropping an entity removes its metadata and recreation starts with
+the explicitly supplied labels. A supported rename, including `RESTORE DOMAIN ... AS`, retains
+labels. Domain, logical resource and user creation and inspection do not add drop or rename
+commands for those owners.
 
 [Transaction Quiescence](transaction-quiescence.md) owns commit effects and pause classification.
 [Execution Plans](execution-plans.md) owns the separation between configuration and running work.

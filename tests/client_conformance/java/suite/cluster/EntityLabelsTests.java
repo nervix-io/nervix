@@ -58,6 +58,26 @@ public final class EntityLabelsTests {
                 assertEquals(" Δ ", labels.labels().get("owner"));
             }
             // ANCHOR_END: entity_labels
+
+            completed(session, "CREATE USER " + name + " WITH PASSWORD 'probe-password' LABELS { 'owner' = ' Δ ' };");
+            try (var cancel = deadline();
+                    var outcome = session.command("SHOW LABELS ON USER " + name + " FORMAT JSON;", cancel);
+                    var user = outcome.entityLabels()) {
+                assertNull(user.domain());
+                assertEquals("USER", user.entityKind());
+                assertEquals(name, user.entityName());
+                assertEquals(Map.of("owner", " Δ "), user.labels());
+            }
+
+            completed(session, "CREATE RESOURCE " + name + " LABELS { 'empty' = '' };");
+            try (var cancel = deadline();
+                    var outcome = session.command("DESCRIBE RESOURCE " + name + ";", cancel);
+                    var resource = outcome.entityLabels()) {
+                assertEquals(cluster.domain, resource.domain());
+                assertEquals("RESOURCE", resource.entityKind());
+                assertEquals(name, resource.entityName());
+                assertEquals(Map.of("empty", ""), resource.labels());
+            }
         }
     }
 }

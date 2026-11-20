@@ -19,9 +19,10 @@ use error_stack::{Report, ResultExt as _};
 use imbl::{OrdMap, ordmap::DiffItem};
 use meticulous::ResultExt as _;
 use nervix_models::{
-    ClusterSchedule, DomainName, DomainSchedule, ResourceId, ResourceName, ResourceNodeState,
-    ResourceNodeStatus, ResourceReplicaKey, ResourceUpload, ResourceUploadKey, ResourceUploadState,
-    ResourceUploads, ResourceVersion, ResourceVersionCounter, ResourceVersionStatus,
+    ClusterSchedule, DomainName, DomainSchedule, EntityLabels, ResourceCatalogKey, ResourceId,
+    ResourceName, ResourceNodeState, ResourceNodeStatus, ResourceReplicaKey, ResourceUpload,
+    ResourceUploadKey, ResourceUploadState, ResourceUploads, ResourceVersion,
+    ResourceVersionCounter, ResourceVersionStatus,
 };
 use nervix_primitives::sync::Arc;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
@@ -155,6 +156,7 @@ macro_rules! stored_under_any_key {
 stored_under_any_key!(
     u64,
     (),
+    ResourceCatalogEntry,
     nervix_models::ClusterNodeIncarnation,
     nervix_models::DomainClockAuthority,
     crate::DomainMutationLease,
@@ -185,7 +187,7 @@ impl StoredUnder<DomainName> for nervix_models::DomainState {
     }
 }
 
-impl StoredUnder<nervix_models::UserName> for crate::UserCredentials {
+impl StoredUnder<nervix_models::UserName> for crate::UserRecord {
     fn is_stored_under(&self, name: &nervix_models::UserName) -> bool {
         self.name == *name
     }
@@ -302,24 +304,25 @@ impl From<&ScheduleRecords> for ClusterSchedule {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-pub(crate) struct ResourceCatalogKey {
-    domain: DomainName,
-    identifier: ResourceName,
-}
-
-impl ResourceCatalogKey {
-    fn new(domain: &DomainName, identifier: &ResourceName) -> Self {
-        Self {
-            domain: domain.clone(),
-            identifier: identifier.clone(),
-        }
-    }
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    rkyv::Archive,
+    rkyv::Serialize,
+    rkyv::Deserialize,
+)]
+pub(crate) struct ResourceCatalogEntry {
+    next_version: NonZeroU64,
+    pub(crate) labels: EntityLabels,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct ResourceRecords {
-    pub(crate) counters: Records<ResourceCatalogKey, u64>,
+    pub(crate) catalog: Records<ResourceCatalogKey, ResourceCatalogEntry>,
     pub(crate) versions: Records<ResourceId, ResourceVersion>,
     pub(crate) replicas: Records<ResourceReplicaKey, ResourceNodeStatus>,
     pub(crate) uploads: Records<ResourceUploadKey, ResourceUpload>,
@@ -401,7 +404,7 @@ impl ResourceRecords {
 
     /// How many keyed records the catalog stores.
     pub(crate) fn stored_records(&self) -> Option<usize> {
-        self.counters
+        self.catalog
             .len()
             .checked_add(self.versions.len())?
             .checked_add(self.replicas.len())?
@@ -409,7 +412,7 @@ impl ResourceRecords {
     }
 
     pub(crate) fn declares(&self, domain: &DomainName, identifier: &ResourceName) -> bool {
-        self.counters
+        self.catalog
             .contains_key(&ResourceCatalogKey::new(domain, identifier))
     }
 
@@ -421,10 +424,14 @@ impl ResourceRecords {
         domain: &DomainName,
         identifier: &ResourceName,
         next_version: NonZeroU64,
+        labels: EntityLabels,
     ) {
-        self.counters.insert(
+        self.catalog.insert(
             ResourceCatalogKey::new(domain, identifier),
-            next_version.get(),
+            ResourceCatalogEntry {
+                next_version,
+                labels,
+            },
         );
     }
 
@@ -469,12 +476,13 @@ impl ResourceRecords {
             return Ok(());
         }
         let catalog_key = ResourceCatalogKey::new(&key.domain, &key.identifier);
-        let Some(next_version) = self.counters.get(&catalog_key).copied() else {
+        let Some(entry) = self.catalog.get(&catalog_key) else {
             return Err(Report::new(ResourceMutationError::MissingCatalog {
                 domain: key.domain.clone(),
                 identifier: key.identifier.clone(),
             }));
         };
+        let next_version = entry.next_version.get();
         if version == 0 || version >= next_version {
             return Err(Report::new(ResourceMutationError::OutsideSequence {
                 domain: key.domain.clone(),
@@ -505,10 +513,15 @@ impl ResourceRecords {
         Ok(())
     }
 
-    pub(crate) fn ensure_catalog(&mut self, domain: &DomainName, identifier: &ResourceName) {
+    pub(crate) fn ensure_catalog(
+        &mut self,
+        domain: &DomainName,
+        identifier: &ResourceName,
+        labels: &EntityLabels,
+    ) {
         let key = ResourceCatalogKey::new(domain, identifier);
-        if !self.counters.contains_key(&key) {
-            self.counters.insert(key, 1);
+        if !self.catalog.contains_key(&key) {
+            self.restore_catalog(domain, identifier, NonZeroU64::MIN, labels.clone());
         }
     }
 
@@ -529,19 +542,20 @@ impl ResourceRecords {
             }));
         }
         let catalog_key = ResourceCatalogKey::new(&key.domain, &key.identifier);
-        let Some(version) = self.counters.get(&catalog_key).copied() else {
+        let Some(entry) = self.catalog.get_mut(&catalog_key) else {
             return Err(Report::new(ResourceMutationError::MissingCatalog {
                 domain: key.domain.clone(),
                 identifier: key.identifier.clone(),
             }));
         };
-        let next = version.checked_add(1).ok_or_else(|| {
+        let version = entry.next_version.get();
+        let next = entry.next_version.checked_add(1).ok_or_else(|| {
             Report::new(ResourceMutationError::VersionSequenceExhausted {
                 domain: key.domain.clone(),
                 identifier: key.identifier.clone(),
             })
         })?;
-        self.counters.insert(catalog_key, next);
+        entry.next_version = next;
         self.uploads.insert(
             key.clone(),
             ResourceUpload {
@@ -679,12 +693,12 @@ impl From<&ResourceRecords> for ResourceVersionStatus {
     fn from(resources: &ResourceRecords) -> Self {
         Self {
             next_version_by_resource: resources
-                .counters
+                .catalog
                 .iter()
-                .map(|(key, next_version)| ResourceVersionCounter {
+                .map(|(key, entry)| ResourceVersionCounter {
                     domain: key.domain.clone(),
                     identifier: key.identifier.clone(),
-                    next_version: *next_version,
+                    next_version: entry.next_version.get(),
                 })
                 .collect(),
             versions: resources.versions.values().cloned().collect(),

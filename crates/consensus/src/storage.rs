@@ -95,12 +95,10 @@ const KEY_INSTALLING: &[u8] = b"installing";
 const KEY_VOTE: &[u8] = b"vote";
 const KEY_COMMITTED: &[u8] = b"committed";
 const KEY_LAST_PURGED: &[u8] = b"last_purged";
-const KEYSPACE_LOGS: &str = "raft_runtime_entity_labels_inherited_topology_ratelimit_stopping_logs";
-const KEYSPACE_META: &str = "raft_runtime_entity_labels_inherited_topology_ratelimit_stopping_meta";
-const KEYSPACE_STATE_MACHINE: &str =
-    "raft_runtime_entity_labels_inherited_topology_ratelimit_stopping_state";
-const KEYSPACE_SNAPSHOT: &str =
-    "raft_runtime_entity_labels_inherited_topology_ratelimit_stopping_snapshots";
+const KEYSPACE_LOGS: &str = "raft_runtime_label_owners_logs";
+const KEYSPACE_META: &str = "raft_runtime_label_owners_meta";
+const KEYSPACE_STATE_MACHINE: &str = "raft_runtime_label_owners_state";
+const KEYSPACE_SNAPSHOT: &str = "raft_runtime_label_owners_snapshots";
 const KEY_CLUSTER_IDENTITY: &[u8] = b"K";
 const KEY_LICENSING: &[u8] = b"L";
 /// Working memory reserved for ordinary metadata and log storage relative to its operation unit.
@@ -403,7 +401,7 @@ impl StateMachineData {
             domain_clock_authorities: Records::load(b'a', sm)?,
             users: Records::load(b'u', sm)?,
             resources: ResourceRecords {
-                counters: Records::load(b'c', sm)?,
+                catalog: Records::load(b'c', sm)?,
                 versions: Records::load(b'v', sm)?,
                 replicas: Records::load(b'r', sm)?,
                 uploads: Records::load(b'o', sm)?,
@@ -458,20 +456,19 @@ impl StateMachineData {
 
     /// Checks every recovered label map under the recovered record's committed policy.
     fn check_recovered_entity_labels(&self) -> io::Result<()> {
-        if self.schedule.domains.len() != 0 {
-            let parameters = self
-                .parameters
-                .as_ref()
-                .ok_or_else(|| io::Error::other(StorageFailure::InvalidState))?;
-            let limits = nervix_models::EntityLabelLimits::from(&parameters.values);
-            for schedule in self.schedule.domains.values() {
-                for node in schedule.nodes.values() {
-                    node.config
-                        .labels()
-                        .validate(&limits)
-                        .map_err(crate::durable_batch::storage_report_io)?;
-                }
+        let Some(parameters) = self.parameters.as_ref() else {
+            if self.schedule.domains.len() != 0
+                || self.entity_label_sets().any(|labels| !labels.is_empty())
+            {
+                return Err(io::Error::other(StorageFailure::InvalidState));
             }
+            return Ok(());
+        };
+        let limits = nervix_models::EntityLabelLimits::from(&parameters.values);
+        for labels in self.entity_label_sets() {
+            labels
+                .validate(&limits)
+                .map_err(crate::durable_batch::storage_report_io)?;
         }
         Ok(())
     }
@@ -586,8 +583,8 @@ impl StateMachineData {
         self.users
             .write_changes(&preceding.users, b'u', batch, sm)?;
         self.resources
-            .counters
-            .write_changes(&preceding.resources.counters, b'c', batch, sm)?;
+            .catalog
+            .write_changes(&preceding.resources.catalog, b'c', batch, sm)?;
         self.resources
             .versions
             .write_changes(&preceding.resources.versions, b'v', batch, sm)?;

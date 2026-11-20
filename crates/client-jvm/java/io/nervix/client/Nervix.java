@@ -661,6 +661,7 @@ public final class Nervix {
     /** Exact metadata and its captured policy, retained independently of the originating outcome. */
     public static final class EntityLabelsInspection extends Handle {
         private EntityLabelsInspection(long pointer) { super(pointer); }
+        /** The associated domain, or null for cluster-wide user labels. */
         public String domain() { return read(Native::entityLabelsDomain); }
         public String entityKind() { return read(Native::entityLabelsEntityKind); }
         public String entityName() { return read(Native::entityLabelsEntityName); }

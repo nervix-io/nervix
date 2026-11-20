@@ -18,6 +18,11 @@
 use nervix_models::Statement;
 
 pub(in crate::application) fn requires_request_domain(statement: &Statement) -> bool {
+    match statement {
+        Statement::MutateEntityLabels(edit) => return edit.entity.requires_selected_domain(),
+        Statement::ShowLabels(show) => return show.entity.requires_selected_domain(),
+        _ => {}
+    }
     !matches!(
         statement,
         Statement::AlterCluster(_)
@@ -43,6 +48,11 @@ pub(in crate::application) fn requires_request_domain(statement: &Statement) -> 
 }
 
 pub(in crate::application) fn requires_existing_domain(statement: &Statement) -> bool {
+    match statement {
+        Statement::MutateEntityLabels(edit) => return edit.entity.requires_selected_domain(),
+        Statement::ShowLabels(show) => return show.entity.requires_selected_domain(),
+        _ => {}
+    }
     !matches!(
         statement,
         Statement::AlterCluster(_)
@@ -111,7 +121,8 @@ pub(in crate::application) fn is_persistent_statement(statement: &Statement) -> 
     statement.is_model_mutation()
         || matches!(
             statement,
-            Statement::AlterCluster(_)
+            Statement::MutateEntityLabels(_)
+                | Statement::AlterCluster(_)
                 | Statement::ActivateLicense(_)
                 | Statement::ReleaseLicense(_)
                 | Statement::RotateLicenseClusterKey(_)
@@ -145,7 +156,8 @@ mod tests {
     use meticulous::ResultExt as _;
     use nervix_models::{
         AlterCluster, ClientName, ClusterParameterChange, ClusterParameterUpdates, DescribeClient,
-        DescribeCluster, InspectionFormat, ModelKind, ModelName, NodeRef, ShowLabels,
+        DescribeCluster, EntityLabelTarget, InspectionFormat, ModelKind, ModelName, NodeRef,
+        ShowLabels,
     };
 
     use super::*;
@@ -153,10 +165,10 @@ mod tests {
     #[test]
     fn entity_label_inspection_is_a_domain_read() {
         let statement = Statement::ShowLabels(ShowLabels {
-            entity: NodeRef::new(
+            entity: EntityLabelTarget::Model(NodeRef::new(
                 ModelKind::Schema,
                 ModelName::parse("events").assured("events is a valid model name"),
-            ),
+            )),
             format: InspectionFormat::Text,
         });
         assert!(requires_request_domain(&statement));

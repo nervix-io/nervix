@@ -704,6 +704,7 @@ mod tests {
         runtime.sync_domains(&BTreeMap::from([(
             domain.clone(),
             DomainState {
+                labels: nervix_models::EntityLabels::default(),
                 id: domain.clone(),
                 config: DomainConfig {
                     pace: DomainPace::Unpaced,
@@ -864,6 +865,7 @@ mod tests {
         runtime.sync_domains(&BTreeMap::from([(
             domain.clone(),
             DomainState {
+                labels: nervix_models::EntityLabels::default(),
                 id: domain.clone(),
                 config: DomainConfig {
                     pace: DomainPace::Unpaced,

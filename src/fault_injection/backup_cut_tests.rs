@@ -24,6 +24,7 @@ fn domain() -> DomainName {
 /// The committed domains of a runtime revision in which `name` has `status`.
 fn revision_domains(name: DomainName, status: DomainStatus) -> BTreeMap<DomainName, DomainState> {
     let state = DomainState {
+        labels: nervix_models::EntityLabels::default(),
         id: name.clone(),
         config: DomainConfig {
             pace: DomainPace::Unpaced,

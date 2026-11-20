@@ -35,7 +35,7 @@ use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::{StateMachineChanges, StateMachineData, UserCredentials, validate_domain_mutation};
+use crate::{StateMachineChanges, StateMachineData, UserRecord, validate_domain_mutation};
 
 /// A restored domain remains unstartable until the complete state set is published everywhere.
 /// The pending state survives a terminal failure and release of the command's mutation lease.
@@ -255,7 +255,7 @@ pub enum RestoreStepEffect {
     /// Imports the archived users under the restore's policy, with their password hashes as the
     /// archive holds them.
     Users {
-        users: Vec<UserCredentials>,
+        users: Vec<UserRecord>,
         policy: ExistingUserPolicy,
     },
     /// Creates the domain and declares each of its resources.
@@ -283,11 +283,16 @@ pub enum RestoreStepEffect {
 pub struct RestoredResource {
     pub resource: ResourceName,
     pub next_version: NonZeroU64,
+    pub labels: nervix_models::EntityLabels,
 }
 
 /// Why the replicated state refused a restore step or an imported resource version.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub(crate) enum RestoreStepConflict {
+    #[error("labels for {owner} are invalid under the receiving cluster's limits")]
+    LabelLimits {
+        owner: nervix_models::EntityLabelOwner,
+    },
     #[error("licensing refused creation of restored domain '{domain}'")]
     Licensing { domain: DomainName },
     #[error("command execution '{reference}' is not an applying restore")]
@@ -515,17 +520,27 @@ fn applying_restore<'state>(
 /// leaves every user as it was.
 fn import_users(
     state: &mut StateMachineData,
-    users: &[UserCredentials],
+    users: &[UserRecord],
     policy: ExistingUserPolicy,
 ) -> Result<RestoredUsers, Report<RestoreStepConflict>> {
-    if policy == ExistingUserPolicy::Fail {
-        for user in users {
-            if state.users.contains_key(&user.name) {
+    for user in users {
+        if state.users.contains_key(&user.name) {
+            if policy == ExistingUserPolicy::Fail {
                 return Err(Report::new(RestoreStepConflict::UserExists {
                     user: user.name.clone(),
                 }));
             }
+            if policy == ExistingUserPolicy::Skip {
+                continue;
+            }
         }
+        state.validate_label_set(&user.labels).map_err(|issue| {
+            Report::new(issue).change_context(RestoreStepConflict::LabelLimits {
+                owner: nervix_models::EntityLabelOwner::User {
+                    name: user.name.clone(),
+                },
+            })
+        })?;
     }
     let mut restored = RestoredUsers::default();
     for user in users {
@@ -592,6 +607,15 @@ fn create_domain(
             domain: domain.clone(),
         })
     })?;
+    state
+        .validate_label_set(&domain_state.labels)
+        .map_err(|issue| {
+            Report::new(issue).change_context(RestoreStepConflict::LabelLimits {
+                owner: nervix_models::EntityLabelOwner::Domain {
+                    name: domain.clone(),
+                },
+            })
+        })?;
     for declared in resources {
         if state.resources.declares(domain, &declared.resource) {
             return Err(Report::new(RestoreStepConflict::CatalogExists {
@@ -599,6 +623,15 @@ fn create_domain(
                 resource: declared.resource.clone(),
             }));
         }
+        state
+            .validate_label_set(&declared.labels)
+            .map_err(|issue| {
+                Report::new(issue).change_context(RestoreStepConflict::LabelLimits {
+                    owner: nervix_models::EntityLabelOwner::Resource(
+                        nervix_models::ResourceCatalogKey::new(domain, &declared.resource),
+                    ),
+                })
+            })?;
     }
     state.domains.insert(domain.clone(), domain_state.clone());
     state.domain_restore_installations.insert(
@@ -609,9 +642,12 @@ fn create_domain(
     );
     changes.domains_changed = true;
     for declared in resources {
-        state
-            .resources
-            .restore_catalog(domain, &declared.resource, declared.next_version);
+        state.resources.restore_catalog(
+            domain,
+            &declared.resource,
+            declared.next_version,
+            declared.labels.clone(),
+        );
         changes.resources_changed = true;
     }
     Ok(())
@@ -651,8 +687,9 @@ mod tests {
             .assured("the test command reference is a UUIDv7 value")
     }
 
-    fn credentials(name: &str, seed: u8) -> UserCredentials {
-        UserCredentials {
+    fn credentials(name: &str, seed: u8) -> UserRecord {
+        UserRecord {
+            labels: nervix_models::EntityLabels::default(),
             name: user(name),
             password_credential: nervix_models::PasswordCredential::from_parts(
                 210000, [seed; 16], [seed; 64],
@@ -739,6 +776,7 @@ mod tests {
 
     fn stopped(name: &str) -> DomainState {
         DomainState {
+            labels: nervix_models::EntityLabels::default(),
             id: domain(name),
             config: DomainConfig {
                 pace: DomainPace::Unpaced,
@@ -756,6 +794,7 @@ mod tests {
             domain_quota: nervix_licensing_vocabulary::Quota::Unlimited,
             state: Box::new(stopped(name)),
             resources: vec![RestoredResource {
+                labels: nervix_models::EntityLabels::default(),
                 resource: resource("model"),
                 next_version: NonZeroU64::new(next_version).assured("a positive test version"),
             }],

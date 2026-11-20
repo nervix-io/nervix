@@ -15,10 +15,11 @@ use chumsky::prelude::*;
 use meticulous::OptionExt as _;
 use nervix_models::{
     CreateDomain, CreateStatement, DomainClockSkew, DomainConfig, DomainPace, DomainStartPoint,
-    DomainTimeRate, StartDomain, StopDomain, Timestamp,
+    DomainTimeRate, EntityLabels, StartDomain, StopDomain, Timestamp,
 };
 
 use crate::{
+    labels::finish_creation,
     lexer::{Identifier, Token},
     parser_support::{
         LexedInput, ParseError, ParseFromSourceError, completion_context, completion_tokens,
@@ -68,6 +69,7 @@ pub fn create_domain_parser<'src>()
                 config: DomainConfig {
                     pace: DomainPace::Unpaced,
                 },
+                labels: EntityLabels::default(),
             });
     let paced = kw_phrase2(Identifier::Paced, Identifier::Domain)
         .ignore_then(domain_name())
@@ -81,6 +83,7 @@ pub fn create_domain_parser<'src>()
             config: DomainConfig {
                 pace: DomainPace::Paced { period, skew },
             },
+            labels: EntityLabels::default(),
         });
     let unpaced = kw_phrase2(Identifier::Unpaced, Identifier::Domain)
         .ignore_then(domain_name())
@@ -89,13 +92,15 @@ pub fn create_domain_parser<'src>()
             config: DomainConfig {
                 pace: DomainPace::Unpaced,
             },
+            labels: EntityLabels::default(),
         });
 
-    kw(Identifier::Create)
-        .ignore_then(if_not_exists_clause())
-        .then(choice((paced, unpaced, default_unpaced)))
-        .then_ignore(tok(Token::Semicolon).or_not())
-        .map(|(if_not_exists, create)| CreateStatement::new(create, if_not_exists))
+    finish_creation(
+        kw(Identifier::Create)
+            .ignore_then(if_not_exists_clause())
+            .then(choice((paced, unpaced, default_unpaced)))
+            .map(|(if_not_exists, create)| CreateStatement::new(create, if_not_exists)),
+    )
 }
 
 pub fn start_domain_parser<'src>()

@@ -1448,9 +1448,10 @@ password remains refused. Clients never receive a stored credential, salt or dig
 ## Reading Entity Labels
 
 Clients MUST preserve `CommandOutcome.entity_labels` independently of the rendered command
-message. The result's existing domain/node identity, complete exact string map and captured policy
-revision/limits form one read. The required view distinguishes a committed applied revision from
-a staged `TransactionPreviewIdentity`. Clients MUST preserve that distinction, including a
+message. The result's typed owner, complete exact string map and captured policy revision and
+limits form one read. The owner union carries a Model's domain and node reference, a domain
+name, a logical resource's domain and name, or a cluster user name. The required view distinguishes a committed applied revision from
+a staged `TransactionPreviewIdentity` for a Model or resource. Clients MUST preserve that distinction, including a
 present-zero committed revision or accepted-operation position, and MUST NOT parse display text
 or substitute defaults for missing fields.
 

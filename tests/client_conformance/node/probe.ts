@@ -1678,11 +1678,35 @@ function stateInspectionLines(state: wire.StateInspection): string[] {
   return lines;
 }
 
+function entityLabelOwner(value: wire.EntityLabelsInspection): { domain: string, kind: string, name: string } {
+  switch (value.ownerType()) {
+    case wire.EntityLabelOwner.ModelLabelOwner: {
+      const owner = member(value.owner(new wire.ModelLabelOwner()) as wire.ModelLabelOwner | null);
+      const model = member(owner.model());
+      return { domain: member(owner.domain()), kind: wire.ModelKind[member(model.kind())].toLowerCase(), name: member(model.name()) };
+    }
+    case wire.EntityLabelOwner.DomainLabelOwner: {
+      const owner = member(value.owner(new wire.DomainLabelOwner()) as wire.DomainLabelOwner | null);
+      const name = member(owner.name());
+      return { domain: name, kind: 'domain', name };
+    }
+    case wire.EntityLabelOwner.ResourceLabelOwner: {
+      const owner = member(value.owner(new wire.ResourceLabelOwner()) as wire.ResourceLabelOwner | null);
+      return { domain: member(owner.domain()), kind: 'resource', name: member(owner.name()) };
+    }
+    case wire.EntityLabelOwner.UserLabelOwner: {
+      const owner = member(value.owner(new wire.UserLabelOwner()) as wire.UserLabelOwner | null);
+      return { domain: 'none', kind: 'user', name: member(owner.name()) };
+    }
+    default: throw new Error('labels have an undeclared owner');
+  }
+}
+
 function entityLabelLines(value: wire.EntityLabelsInspection): string[] {
-  const entity = member(value.entity());
+  const { domain, kind, name } = entityLabelOwner(value);
   const policy = member(value.policy());
   const limits = member(policy.limits());
-  const lines = [`ENTITY_LABELS domain=${value.domain()} kind=${wire.ModelKind[member(entity.kind())].toLowerCase()} name=${entity.name()} policy=${policy.revision()} limits=${limits.count()}/${limits.keyBytes()}/${limits.valueBytes()}/${limits.bytes()}`];
+  const lines = [`ENTITY_LABELS domain=${domain} kind=${kind} name=${name} policy=${policy.revision()} limits=${limits.count()}/${limits.keyBytes()}/${limits.valueBytes()}/${limits.bytes()}`];
   switch (value.viewType()) {
     case wire.EntityLabelView.CommittedEntityLabels: {
       const view = member(value.view(new wire.CommittedEntityLabels()) as wire.CommittedEntityLabels | null);
@@ -1690,6 +1714,7 @@ function entityLabelLines(value: wire.EntityLabelsInspection): string[] {
       break;
     }
     case wire.EntityLabelView.StagedEntityLabels: {
+      if (kind === 'domain' || kind === 'user') throw new Error('administrative labels have no staged view');
       const view = member(value.view(new wire.StagedEntityLabels()) as wire.StagedEntityLabels | null);
       const preview = member(view.preview());
       const basis = member(member(preview.planningBasis()).bytesArray());

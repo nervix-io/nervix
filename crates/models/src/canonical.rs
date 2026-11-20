@@ -762,7 +762,10 @@ impl Statement {
                         format!("UNPACED DOMAIN {}", create.body.id.as_str())
                     }
                 };
-                Ok(format!("CREATE {modifier}{pacing};"))
+                Ok(entity_labels::append_labels(
+                    format!("CREATE {modifier}{pacing};"),
+                    &create.labels,
+                ))
             }
             Self::CreateUser(create) => {
                 let modifier = if create.if_not_exists {
@@ -770,11 +773,12 @@ impl Statement {
                 } else {
                     ""
                 };
-                Ok(format!(
+                let creation = format!(
                     "CREATE {modifier}USER {} WITH PASSWORD {};",
                     create.body.name.as_str(),
                     string_literal(&create.body.password)
-                ))
+                );
+                Ok(entity_labels::append_labels(creation, &create.labels))
             }
             Self::CreateResource(create) => {
                 let modifier = if create.if_not_exists {
@@ -782,10 +786,8 @@ impl Statement {
                 } else {
                     ""
                 };
-                Ok(format!(
-                    "CREATE {modifier}RESOURCE {};",
-                    create.body.identifier.as_str()
-                ))
+                let creation = format!("CREATE {modifier}RESOURCE {};", create.identifier);
+                Ok(entity_labels::append_labels(creation, &create.labels))
             }
             Self::RebindResource(rebind) => {
                 let latest = match rebind.version {
