@@ -725,26 +725,27 @@ impl SessionServiceImpl {
     ) -> Result<(), Report<CompletionError>> {
         let deadline = self.completion_deadline()?;
 
-        wait_for_application_revision(
+        let applied = wait_for_application_revision(
             self.barrier_node(),
             revision,
             ApplicationRevisionPhase::Authoritative,
             ApplicationRevisionParticipants::EveryLiveNode,
             deadline,
         )
-        .await
-        .map_err(|incomplete| {
-            let pending_nodes = match incomplete {
-                ApplicationRevisionIncomplete::Timeout { pending_nodes } => pending_nodes,
-                // An authoritative revision fails at no runtime, so its barrier names a node only
-                // as one that has not applied it.
-                ApplicationRevisionIncomplete::Failed { node, .. } => vec![node],
-            };
-            Report::new(CompletionError::Visibility {
-                revision,
-                pending_nodes,
-            })
-        })
+        .await;
+        let Err(incomplete) = applied else {
+            return Ok(());
+        };
+        let pending_nodes = match incomplete {
+            ApplicationRevisionIncomplete::Timeout { pending_nodes } => pending_nodes,
+            // An authoritative revision fails at no runtime, so its barrier names a node only as
+            // one that has not applied it.
+            ApplicationRevisionIncomplete::Failed { node, .. } => vec![node],
+        };
+        Err(Report::new(CompletionError::Visibility {
+            revision,
+            pending_nodes,
+        }))
     }
 
     /// Waits until the HTTPS listener of every live process incarnation installed the TLS VHOSTs

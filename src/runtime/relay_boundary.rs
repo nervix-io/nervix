@@ -2015,6 +2015,14 @@ impl RelayBoundaryServices {
     /// A receiver for a runtime consumer of `unit` that this relay already counts, such as the
     /// input of a task a failed swap starts again while its registration stayed in place. It
     /// reads from the same audience a counted registration does and changes no count.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "a failed swap's restore takes a restarted task's input once, before the \
+                      task runs"
+        )
+    )]
     pub(super) fn registered_unit_runtime_fan_in(
         &self,
         mode: AckMode,
