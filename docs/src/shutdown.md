@@ -726,10 +726,11 @@ ingestor redelivers the record to the new owner rather than committing it; see
 Forced recovery is the path that publishes a schedule when the source cannot participate. It stages
 the destination's checkpoint inventory under the destination's process incarnation and the complete
 target-schedule fingerprint, and applying staged checkpoints accepts only that exact preparation. A
-missing or mismatched preparation does not imply a reset: without an exhaustive reset outcome in the
-schedule, activation fails and leaves every saved checkpoint unchanged. State is recreated only when
-the accepted decision either stages a recreated inventory or reports a reset for every state
-component the entity owns.
+relay that only forwards records owns zero durable checkpoints. The destination can install its
+committed move with an empty inventory after restarting. A stateful move with missing or mismatched
+preparation fails and leaves every saved checkpoint unchanged unless the schedule authorizes a
+reset of every component. State is recreated only when the accepted decision either stages a
+recreated inventory or reports a reset for every state component the entity owns.
 
 The destination first waits for the execution schedule it validates to finish installing, within
 the existing five-second preparation deadline. Lifecycle state can be published before the graph,
