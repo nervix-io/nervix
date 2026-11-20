@@ -690,6 +690,14 @@ test-cluster-identity *args: build-deps build-plexus-format build-test-cli build
     # Absolute globs keep Cucumber's file walk within the feature directory.
     cargo test --package nervix-scenarios --test scenarios -- --input "$(pwd)/tests/features/runtime/cluster_identity*.feature" {{ quote(args) }}
 
+# Node prerequisite scenarios: join refusals and the leader's judgment of every run, including the
+# refusals it keeps while a stopped run stays in gossip, on native nodes and the session client.
+test-node-prerequisites *args: build-deps build-plexus-format build-test-cli build-deadlock-report
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    cargo test --package nervix-scenarios --test scenarios -- --input "$(pwd)/tests/features/cluster/node_prerequisites.feature" {{ quote(args) }}
+
 # Verify infrastructure capacities and derived liveness through native nodes and public clients.
 test-infrastructure-settings *args: build-deps build-plexus-format build-test-cli build-deadlock-report
     #!/usr/bin/env bash
