@@ -1780,13 +1780,13 @@ impl Runtime {
                         })
                         .collect()
                 }
-                Some(_) if authorization.recreates_without_preparation() => Vec::new(),
+                Some(_) if authorization.allows_empty_inventory() => Vec::new(),
                 Some(_) => {
                     return Err(Report::new(
                         RuntimePersistenceError::ForcedRecoveryPreparationMismatch,
                     ));
                 }
-                None if authorization.recreates_without_preparation() => Vec::new(),
+                None if authorization.allows_empty_inventory() => Vec::new(),
                 None => {
                     return Err(Report::new(
                         RuntimePersistenceError::MissingForcedRecoveryPreparation,

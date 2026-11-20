@@ -4145,7 +4145,7 @@ the committed grant deadline later.
 ## Public Listener Input Refusals
 
 The [Listener Bounds](node-settings.md#listener-bounds) table owns HTTP input status/reason pairs.
-Body size and completion deadline produce 413 and 408; memory and assembly admission produce 503;
+Body size and completion deadline produce 413 and 408; memory and body-move admission produce 503;
 malformed body framing produces 400. Their typed causes remain attached until the HTTP reporting
 boundary. Hyper enforces header capacity with 431 and closes incomplete headers at their deadline.
 An input-memory refusal passes its complete admission report through the foreign I/O error; the
@@ -4163,7 +4163,7 @@ TLS/gRPC refusal ends that connection. None of these paths claims graph admissio
 rejection, and retryable memory/worker refusal is never classified as a codec failure.
 
 The HTTP input completion budget distinguishes phases: expiry while receiving bytes returns 408;
-expiry while the server waits for or performs accounted body assembly returns 503. Assembly
+expiry while the server waits for or performs a body move on a data worker returns 503. The move
 retains its reservation until the worker actually exits after cancellation.
 
 ## Licensing Notification Failures

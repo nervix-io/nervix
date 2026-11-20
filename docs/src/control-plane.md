@@ -928,9 +928,11 @@ task discards that history.
 
 Forced recovery stages the destination's checkpoint inventory under the destination process
 incarnation and the complete target-schedule fingerprint. Applying staged checkpoints accepts only
-that exact preparation. A missing or mismatched preparation does not imply a reset; without an
-exhaustive reset outcome in the schedule, activation fails and leaves every saved checkpoint
-unchanged. After activation, the durable completion belongs to the ownership transition itself, so
+that exact preparation. A relay that only forwards records owns zero durable checkpoints. Its
+committed move can install with an empty inventory if a restart leaves its preparation absent or
+bound to the earlier process. A stateful move with missing or mismatched preparation fails and
+leaves every saved checkpoint unchanged unless the schedule authorizes a reset of every component.
+After activation, the durable completion belongs to the ownership transition itself, so
 reapplying its retained schedule after a destination restart or a later domain rebuild preserves any
 newer checkpoints the destination has published. A state reset occurs only when the accepted recovery
 decision either stages the recreated checkpoint inventory or reports a reset outcome for every state

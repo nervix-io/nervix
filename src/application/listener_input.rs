@@ -11,11 +11,10 @@
 )]
 
 use std::{
-    collections::VecDeque,
     io,
-    mem::size_of,
     pin::Pin,
     task::{Context, Poll},
+    time::Duration,
 };
 
 use bytes::Bytes;
@@ -23,7 +22,7 @@ use error_stack::{Report, ResultExt as _};
 use http_body_util::BodyExt as _;
 use hyper::body::{Body as _, Incoming};
 use meticulous::{OptionExt as _, ResultExt as _};
-use nervix_execution::{CpuClass, Executor, MemoryClass, Reservation};
+use nervix_execution::{Cancellation, CpuClass, Executor, MemoryClass, Reservation};
 use nervix_primitives::{
     sync::{Arc, CancellationToken, blocking::Mutex},
     time::{Instant, timeout},
@@ -40,14 +39,65 @@ struct ReadAllocation {
     end: usize,
 }
 impl ReadAllocation {
+    fn len(self) -> usize {
+        self.end
+            .checked_sub(self.start)
+            .assured("a read window is built from its start and capacity")
+    }
     fn contains(self, other: Self) -> bool {
         self.start <= other.start && other.end <= self.end
+    }
+    fn overlaps(self, other: Self) -> bool {
+        self.start < other.end && other.start < self.end
+    }
+    /// The window spanning both, which has no gap when they overlap.
+    fn union(self, other: Self) -> Self {
+        Self {
+            start: self.start.min(other.start),
+            end: self.end.max(other.end),
+        }
     }
 }
 struct Ledger {
     current: Option<ReadAllocation>,
     active: Option<ActiveInput>,
     disposition: InputDisposition,
+}
+/// A read window the ledger has not seen whole, and how many of its bytes no earlier charge covers.
+struct WindowGrowth {
+    window: ReadAllocation,
+    uncharged: usize,
+}
+impl Ledger {
+    /// What observing `range` adds, or nothing when the current window already contains it.
+    ///
+    /// Once no frame holds Hyper's read allocation, Hyper reuses it, rewinding to its start or
+    /// extending it in place. A window that overlaps the current one is therefore that same
+    /// allocation, or memory released under a charge already made, so only its bytes outside the
+    /// current window are new.
+    fn grow_window(&self, range: ReadAllocation) -> Option<WindowGrowth> {
+        let Some(current) = self.current else {
+            return Some(WindowGrowth {
+                window: range,
+                uncharged: range.len(),
+            });
+        };
+        if current.contains(range) {
+            return None;
+        }
+        if current.overlaps(range) {
+            let window = current.union(range);
+            let uncharged = window
+                .len()
+                .checked_sub(current.len())
+                .assured("a union spans each window it joins");
+            return Some(WindowGrowth { window, uncharged });
+        }
+        Some(WindowGrowth {
+            window: range,
+            uncharged: range.len(),
+        })
+    }
 }
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum InputDisposition {
@@ -125,24 +175,21 @@ impl InputAccounting {
             accounting: self.clone(),
         })
     }
-    fn observe(&self, range: ReadAllocation, capacity: usize) -> Result<(), Report<InputRefusal>> {
+    fn observe(&self, range: ReadAllocation) -> Result<(), Report<InputRefusal>> {
         let mut ledger = self.ledger.lock();
-        if ledger
-            .current
-            .is_some_and(|current| current.contains(range))
-        {
+        let Some(growth) = ledger.grow_window(range) else {
             return Ok(());
-        }
+        };
         if let Some(active) = ledger.active.as_mut() {
             // Hyper asks for body I/O only when its read buffer is empty. Chunk framing is
             // consumed incrementally, and trailers have their own bounded decoder buffer.
             // The initial scratch covers the backing shared with the request head; each new
             // body backing needs its exposed capacity, without another request-head allowance.
-            let capacity =
-                u64::try_from(capacity).map_err(|_| Report::new(InputRefusal::MemoryCapacity))?;
+            let uncharged = u64::try_from(growth.uncharged)
+                .map_err(|_| Report::new(InputRefusal::MemoryCapacity))?;
             let target = active
                 .required
-                .checked_add(capacity)
+                .checked_add(uncharged)
                 .ok_or_else(|| Report::new(InputRefusal::MemoryCapacity))?;
             active
                 .reservation
@@ -150,26 +197,7 @@ impl InputAccounting {
                 .change_context(InputRefusal::MemoryCapacity)?;
             active.required = target;
         }
-        ledger.current = Some(range);
-        Ok(())
-    }
-    fn charge_frame(&self) -> Result<(), Report<InputRefusal>> {
-        let mut ledger = self.ledger.lock();
-        let active = ledger
-            .active
-            .as_mut()
-            .assured("receive_input retains its InputGuard throughout the frame loop");
-        let metadata =
-            u64::try_from(2 * size_of::<Bytes>()).assured("byte-buffer metadata fits a byte count");
-        let total = active
-            .required
-            .checked_add(metadata)
-            .ok_or_else(|| Report::new(InputRefusal::MemoryCapacity))?;
-        active
-            .reservation
-            .grow_to(total)
-            .change_context(InputRefusal::MemoryCapacity)?;
-        active.required = total;
+        ledger.current = Some(growth.window);
         Ok(())
     }
     fn refuse_read(&self, error: Report<InputRefusal>) -> io::Error {
@@ -204,7 +232,7 @@ impl InputGuard {
             .lock()
             .active
             .take()
-            .assured("receive_input takes its charge once after its frame loop")
+            .assured("collect takes the input charge once, after its frame loop")
             .reservation
     }
 }
@@ -229,10 +257,248 @@ impl AccountedBody {
     }
 }
 
-struct ReceivedBody {
-    frames: VecDeque<Bytes>,
-    total: u64,
+/// The time one body has to arrive. Waiting for its frames and growing its buffer share it.
+struct InputDeadline {
+    started: Instant,
+    budget: Duration,
+}
+impl InputDeadline {
+    fn start(budget: Duration) -> Self {
+        Self {
+            started: Instant::now(),
+            budget,
+        }
+    }
+    /// What is left of the budget, or nothing once it has passed.
+    fn remaining(&self) -> Duration {
+        self.budget
+            .checked_sub(self.started.elapsed())
+            .unwrap_or_default()
+    }
+}
+
+/// How one request's body buffer is sized and grown, resolved from its listener settings.
+#[derive(Clone, Copy)]
+struct BodyGrowth {
+    /// The body limit, which the buffer never outgrows.
+    limit: usize,
+    /// The most bytes the connection copies at once: one read buffer, as much as it reads from
+    /// the transport at once. Growing a body that already holds more runs on a data worker.
+    inline_copy: usize,
+    /// The bytes a data worker copies between cancellation checks.
+    copy_unit: usize,
+}
+impl BodyGrowth {
+    fn new(settings: ListenerSettings) -> Self {
+        Self {
+            limit: usize::try_from(settings.http_body_bytes().as_u64())
+                .assured("the body-limit setting checks native byte representation"),
+            inline_copy: usize::try_from(settings.buffer_bytes().as_u64())
+                .assured("the read-buffer setting checks native byte representation"),
+            copy_unit: usize::try_from(settings.http_body_copy_bytes().as_u64())
+                .assured("the copy-unit setting checks native byte representation"),
+        }
+    }
+    /// The capacity a buffer of `capacity` bytes grows to so it holds `needed`. Doubling keeps the
+    /// number of moves logarithmic in the body's size; the limit caps it, and the caller has
+    /// already refused a body above the limit, so the result always holds `needed`.
+    fn grown(self, capacity: usize, needed: usize) -> usize {
+        let doubled = capacity.checked_mul(2).unwrap_or(self.limit);
+        doubled.max(needed).min(self.limit)
+    }
+}
+
+/// A body copied out of the frames it arrived in, charged for its whole allocation.
+struct BodyBuffer {
+    bytes: Vec<u8>,
     reservation: Reservation,
+}
+impl BodyBuffer {
+    /// Copy the first two data frames into a buffer sized to the declared length, or to twice
+    /// what they hold when the request declared none. Each frame is at most one read buffer.
+    fn start(
+        first: &Bytes,
+        second: &Bytes,
+        declared: Option<u64>,
+        growth: BodyGrowth,
+        executor: &Executor,
+    ) -> Result<Self, Report<InputRefusal>> {
+        let needed = first
+            .len()
+            .checked_add(second.len())
+            .ok_or_else(|| Report::new(InputRefusal::BodyCapacity))?;
+        let capacity = match declared {
+            Some(declared) => usize::try_from(declared)
+                .map_err(|_| Report::new(InputRefusal::BodyCapacity))?
+                .max(needed),
+            None => growth.grown(needed, needed),
+        };
+        let charge = u64::try_from(capacity).assured("a native capacity fits a byte count");
+        let reservation = executor
+            .try_reserve(MemoryClass::Intake, charge)
+            .change_context(InputRefusal::MemoryCapacity)?;
+        let mut bytes = Vec::with_capacity(capacity);
+        bytes.extend_from_slice(first);
+        bytes.extend_from_slice(second);
+        Ok(Self { bytes, reservation })
+    }
+
+    /// Copy one more data frame into the buffer, after growing it when the frame does not fit.
+    async fn append(
+        self,
+        frame: &Bytes,
+        growth: BodyGrowth,
+        executor: &Executor,
+        deadline: &InputDeadline,
+    ) -> Result<Self, Report<InputRefusal>> {
+        let needed = self
+            .bytes
+            .len()
+            .checked_add(frame.len())
+            .ok_or_else(|| Report::new(InputRefusal::BodyCapacity))?;
+        let mut buffer = if needed > self.bytes.capacity() {
+            self.grow(needed, growth, executor, deadline).await?
+        } else {
+            self
+        };
+        buffer.bytes.extend_from_slice(frame);
+        Ok(buffer)
+    }
+
+    /// Move the body into an allocation that holds `needed`. Both allocations exist while the
+    /// bytes move, so both stay charged until the old one is released. A body of at most one
+    /// read buffer moves on the connection; a larger one moves on a data worker, whose charge
+    /// follows it until the worker exits.
+    async fn grow(
+        self,
+        needed: usize,
+        growth: BodyGrowth,
+        executor: &Executor,
+        deadline: &InputDeadline,
+    ) -> Result<Self, Report<InputRefusal>> {
+        let Self {
+            bytes,
+            mut reservation,
+        } = self;
+        let capacity = growth.grown(bytes.capacity(), needed);
+        let held = u64::try_from(bytes.capacity()).assured("a native capacity fits a byte count");
+        let grown = u64::try_from(capacity).assured("a native capacity fits a byte count");
+        let overlap = held
+            .checked_add(grown)
+            .ok_or_else(|| Report::new(InputRefusal::MemoryCapacity))?;
+        reservation
+            .grow_to(overlap)
+            .change_context(InputRefusal::MemoryCapacity)?;
+        if bytes.len() <= growth.inline_copy {
+            let mut moved = Vec::with_capacity(capacity);
+            moved.extend_from_slice(&bytes);
+            drop(bytes);
+            return Self::release_moved(moved, reservation);
+        }
+        let copy_unit = growth.copy_unit;
+        let worker = executor.run_cpu(
+            CpuClass::Data,
+            reservation,
+            move |reservation, cancellation| {
+                Self::move_on_worker(bytes, capacity, copy_unit, reservation, cancellation)
+            },
+        );
+        timeout(deadline.remaining(), worker)
+            .await
+            .map_err(Report::new)
+            .change_context(InputRefusal::WorkerCapacity)?
+            .change_context(InputRefusal::WorkerCapacity)?
+    }
+
+    /// Copy the body into a new allocation in `copy_unit` steps, checking for cancellation before
+    /// each, then release the old allocation and its charge.
+    fn move_on_worker(
+        bytes: Vec<u8>,
+        capacity: usize,
+        copy_unit: usize,
+        reservation: Reservation,
+        cancellation: &Cancellation,
+    ) -> Result<Self, Report<InputRefusal>> {
+        let mut moved = Vec::with_capacity(capacity);
+        for chunk in bytes.chunks(copy_unit) {
+            cancellation
+                .check()
+                .map_err(Report::new)
+                .change_context(InputRefusal::WorkerCapacity)?;
+            moved.extend_from_slice(chunk);
+        }
+        drop(bytes);
+        Self::release_moved(moved, reservation)
+    }
+
+    /// Keep the charge for the moved body's allocation alone, now that the old one is gone.
+    fn release_moved(
+        bytes: Vec<u8>,
+        reservation: Reservation,
+    ) -> Result<Self, Report<InputRefusal>> {
+        let capacity =
+            u64::try_from(bytes.capacity()).assured("a native capacity fits a byte count");
+        let (reservation, released) = reservation
+            .split(capacity)
+            .change_context(InputRefusal::MemoryCapacity)?;
+        drop(released);
+        Ok(Self { bytes, reservation })
+    }
+}
+
+/// The body as far as it has arrived. A single data frame stays the shared buffer it arrived in.
+/// From the second one on, every frame is copied into one owned buffer and released at once, so
+/// the connection keeps reusing its read buffer rather than pinning one per read, and the charge
+/// follows the body's size however the network split it.
+enum ArrivedBody {
+    Empty,
+    Shared(Bytes),
+    Copied(BodyBuffer),
+}
+impl ArrivedBody {
+    async fn receive(
+        self,
+        frame: Bytes,
+        declared: Option<u64>,
+        growth: BodyGrowth,
+        executor: &Executor,
+        deadline: &InputDeadline,
+    ) -> Result<Self, Report<InputRefusal>> {
+        match self {
+            Self::Empty => Ok(Self::Shared(frame)),
+            Self::Shared(first) => {
+                let buffer = BodyBuffer::start(&first, &frame, declared, growth, executor)?;
+                Ok(Self::Copied(buffer))
+            }
+            Self::Copied(buffer) => {
+                let buffer = buffer.append(&frame, growth, executor, deadline).await?;
+                Ok(Self::Copied(buffer))
+            }
+        }
+    }
+
+    /// The collected body and the charge it keeps until dispatch ends. A shared frame keeps the
+    /// whole input charge, which covers the read buffer it still pins. A copied body keeps the
+    /// charge for its own allocation, and the read buffers' charge is returned.
+    fn into_body(self, guard: InputGuard) -> AccountedBody {
+        match self {
+            Self::Empty => AccountedBody {
+                bytes: Bytes::new(),
+                _reservation: guard.take(),
+            },
+            Self::Shared(bytes) => AccountedBody {
+                bytes,
+                _reservation: guard.take(),
+            },
+            Self::Copied(buffer) => {
+                drop(guard);
+                AccountedBody {
+                    bytes: Bytes::from(buffer.bytes),
+                    _reservation: buffer.reservation,
+                }
+            }
+        }
+    }
 }
 
 pub(super) async fn collect(
@@ -240,31 +506,28 @@ pub(super) async fn collect(
     executor: &Executor,
     accounting: &InputAccounting,
 ) -> Result<AccountedBody, Report<InputRefusal>> {
-    let started = Instant::now();
-    let budget = accounting.settings.http_body_timeout();
-    let received = timeout(budget, receive_input(body, executor, accounting))
-        .await
-        .map_err(Report::new)
-        .change_context(InputRefusal::BodyTimeout)??;
-    let remaining = budget.checked_sub(started.elapsed()).unwrap_or_default();
-    let copy_unit = usize::try_from(accounting.settings.http_body_copy_bytes().as_u64())
-        .assured("the copy-unit setting checks native byte representation");
-    finish_input(received, executor, copy_unit, remaining).await
-}
-async fn receive_input(
-    body: &mut Incoming,
-    executor: &Executor,
-    accounting: &InputAccounting,
-) -> Result<ReceivedBody, Report<InputRefusal>> {
-    let cap = accounting.settings.http_body_bytes().as_u64();
-    if body.size_hint().lower() > cap {
+    let settings = accounting.settings;
+    let cap = settings.http_body_bytes().as_u64();
+    let hint = body.size_hint();
+    if hint.lower() > cap {
         return Err(Report::new(InputRefusal::BodyCapacity));
     }
+    // Read before the first frame: the hint shrinks as the body is consumed.
+    let declared = hint.exact();
+    let deadline = InputDeadline::start(settings.http_body_timeout());
+    let growth = BodyGrowth::new(settings);
     let guard = accounting.begin(executor)?;
-    let mut frames = VecDeque::new();
+    let mut arrived = ArrivedBody::Empty;
     let mut total = 0_u64;
-    while let Some(frame) = body.frame().await {
+    loop {
         nervix_primitives::task::consume_budget().await;
+        let next = timeout(deadline.remaining(), body.frame())
+            .await
+            .map_err(Report::new)
+            .change_context(InputRefusal::BodyTimeout)?;
+        let Some(frame) = next else {
+            break;
+        };
         let frame = frame.map_err(|error| accounting.read_error(error))?;
         let Ok(bytes) = frame.into_data() else {
             continue;
@@ -274,86 +537,17 @@ async fn receive_input(
         }
         let length =
             u64::try_from(bytes.len()).assured("a native slice length is at most u64::MAX");
-        let next_total = total
+        total = total
             .checked_add(length)
             .ok_or_else(|| Report::new(InputRefusal::BodyCapacity))?;
-        if next_total > cap {
+        if total > cap {
             return Err(Report::new(InputRefusal::BodyCapacity));
         }
-        total = next_total;
-        accounting.charge_frame()?;
-        frames.push_back(bytes);
+        arrived = arrived
+            .receive(bytes, declared, growth, executor, &deadline)
+            .await?;
     }
-    Ok(ReceivedBody {
-        frames,
-        total,
-        reservation: guard.take(),
-    })
-}
-async fn finish_input(
-    received: ReceivedBody,
-    executor: &Executor,
-    copy_unit: usize,
-    remaining: std::time::Duration,
-) -> Result<AccountedBody, Report<InputRefusal>> {
-    timeout(remaining, assemble_input(received, executor, copy_unit))
-        .await
-        .map_err(Report::new)
-        .change_context(InputRefusal::WorkerCapacity)?
-}
-async fn assemble_input(
-    received: ReceivedBody,
-    executor: &Executor,
-    copy_unit: usize,
-) -> Result<AccountedBody, Report<InputRefusal>> {
-    let ReceivedBody {
-        mut frames,
-        total,
-        mut reservation,
-    } = received;
-    if frames.len() <= 1 {
-        return Ok(AccountedBody {
-            bytes: frames.pop_front().unwrap_or_default(),
-            _reservation: reservation,
-        });
-    }
-    let charge = reservation
-        .bytes()
-        .checked_add(total)
-        .ok_or_else(|| Report::new(InputRefusal::MemoryCapacity))?;
-    reservation
-        .grow_to(charge)
-        .change_context(InputRefusal::MemoryCapacity)?;
-    executor
-        .run_cpu(
-            CpuClass::Data,
-            reservation,
-            move |reservation, cancellation| {
-                let mut bytes = Vec::with_capacity(
-                    usize::try_from(total)
-                        .assured("receive_input caps total at the validated native body limit"),
-                );
-                for frame in frames {
-                    for chunk in frame.chunks(copy_unit) {
-                        cancellation
-                            .check()
-                            .map_err(Report::new)
-                            .change_context(InputRefusal::WorkerCapacity)?;
-                        bytes.extend_from_slice(chunk);
-                    }
-                }
-                let (retained, scratch) = reservation
-                    .split(total)
-                    .change_context(InputRefusal::MemoryCapacity)?;
-                drop(scratch);
-                Ok(AccountedBody {
-                    bytes: Bytes::from(bytes),
-                    _reservation: retained,
-                })
-            },
-        )
-        .await
-        .change_context(InputRefusal::WorkerCapacity)?
+    Ok(arrived.into_body(guard))
 }
 
 /// Hyper passes a buffer's spare window to this owner. Admission occurs before reading into a
@@ -384,10 +578,7 @@ impl<IO: AsyncRead + Unpin> AsyncRead for AccountedIo<IO> {
                 .accounting
                 .refuse_read(Report::new(InputRefusal::MemoryCapacity))));
         };
-        if let Err(error) = this
-            .accounting
-            .observe(ReadAllocation { start, end }, buf.capacity())
-        {
+        if let Err(error) = this.accounting.observe(ReadAllocation { start, end }) {
             return Poll::Ready(Err(this.accounting.refuse_read(error)));
         }
         Pin::new(&mut this.io).poll_read(cx, buf)
@@ -490,110 +681,205 @@ mod tests {
     }
 
     #[test]
-    fn retained_read_allocations_and_metadata_are_released_on_input_cancellation() {
+    fn read_allocations_are_charged_once_and_released_on_input_cancellation() {
         let executor = Executor::new(ExecutionConfig::default()).assured("valid executor");
         let accounting = InputAccounting::new(ListenerSettings::default());
         let guard = accounting.begin(&executor).assured("input admission");
-        let first = executor.memory(MemoryClass::Intake).reserved_bytes;
-        assert!(first > 0);
+        let scratch = executor.memory(MemoryClass::Intake).reserved_bytes;
+        assert!(scratch > 0);
+        let charged_beyond_scratch = || {
+            executor
+                .memory(MemoryClass::Intake)
+                .reserved_bytes
+                .checked_sub(scratch)
+                .assured("observations only add to the scratch")
+        };
+        let window = |start: usize, end: usize| ReadAllocation { start, end };
         accounting
-            .observe(
-                ReadAllocation {
-                    start: 4096,
-                    end: 12288,
-                },
-                8192,
-            )
-            .assured("first backing");
-        let allocated = executor.memory(MemoryClass::Intake).reserved_bytes;
-        assert!(allocated > first);
+            .observe(window(4096, 12288))
+            .assured("a fresh allocation's spare window");
+        assert_eq!(charged_beyond_scratch(), 8192);
         accounting
-            .observe(
-                ReadAllocation {
-                    start: 8192,
-                    end: 12288,
-                },
-                4096,
-            )
-            .assured("same backing");
+            .observe(window(8192, 12288))
+            .assured("the rest of the same window after a read");
+        assert_eq!(charged_beyond_scratch(), 8192);
+        accounting
+            .observe(window(0, 12288))
+            .assured("the same allocation rewound to its start");
         assert_eq!(
-            executor.memory(MemoryClass::Intake).reserved_bytes,
-            allocated
+            charged_beyond_scratch(),
+            12288,
+            "a rewound allocation is charged only for its bytes outside the charged window"
         );
-        for _ in 0..128 {
-            accounting.charge_frame().assured("retained frame metadata");
-        }
-        assert!(executor.memory(MemoryClass::Intake).reserved_bytes > allocated);
+        accounting
+            .observe(window(0, 16384))
+            .assured("the same allocation extended in place");
+        assert_eq!(charged_beyond_scratch(), 16384);
+        accounting
+            .observe(window(65536, 73728))
+            .assured("another allocation");
+        assert_eq!(charged_beyond_scratch(), 24576);
         drop(guard);
         assert_eq!(executor.memory(MemoryClass::Intake).reserved_bytes, 0);
         assert_eq!(executor.memory(MemoryClass::Relay).reserved_bytes, 0);
     }
 
-    #[nervix_primitives::test]
-    async fn an_assembly_deadline_reports_server_capacity_and_releases_the_queued_body() {
-        use std::time::Duration;
+    #[test]
+    fn a_body_buffer_doubles_up_to_its_limit() {
+        let growth = BodyGrowth {
+            limit: 100,
+            inline_copy: 8,
+            copy_unit: 4,
+        };
+        assert_eq!(growth.grown(10, 11), 20);
+        assert_eq!(
+            growth.grown(10, 25),
+            25,
+            "a frame larger than the doubling is held"
+        );
+        assert_eq!(growth.grown(60, 61), 100, "growth stops at the body limit");
+        assert_eq!(growth.grown(usize::MAX, 100), 100);
+    }
 
-        use nervix_primitives::{
-            sync::{blocking::mpsc, oneshot},
-            task::{self, AbortOnDropHandle},
-        };
+    /// Keeps the executor's only data worker busy until released, so a test can tell work that
+    /// needs a data worker from work that does not.
+    struct OccupiedWorker {
+        release: nervix_primitives::sync::blocking::mpsc::Sender<()>,
+        holder: nervix_primitives::task::AbortOnDropHandle<()>,
+    }
+    impl OccupiedWorker {
+        async fn start(executor: &Executor) -> Self {
+            use nervix_primitives::{
+                sync::{blocking::mpsc, oneshot},
+                task::{self, AbortOnDropHandle},
+            };
+            let (release, held) = mpsc::channel::<()>();
+            let (ready, started) = oneshot::channel();
+            let worker = executor.clone();
+            let holder = AbortOnDropHandle::new(task::spawn(async move {
+                let reservation = worker
+                    .try_reserve(MemoryClass::Intake, 0)
+                    .assured("empty worker charge");
+                worker
+                    .run_cpu(
+                        CpuClass::Data,
+                        reservation,
+                        move |_reservation, _cancellation| {
+                            ready.send(()).means_peer_left(
+                                "the listener-owner test withdrew its readiness waiter",
+                            );
+                            // The test keeps its sole data worker occupied until the sender
+                            // drops, including during unwinding; no product callback parks this
+                            // way.
+                            held.recv().discarded(
+                                "dropping the test's sender releases its occupied worker, \
+                                 including on unwinding",
+                            );
+                        },
+                    )
+                    .await
+                    .assured("the occupied worker finishes when released");
+            }));
+            started.await.assured("the data worker is occupied");
+            Self { release, holder }
+        }
+        async fn release(self) {
+            drop(self.release);
+            self.holder.await.assured("the holder task joins");
+        }
+    }
+
+    async fn intake_returns_to_zero(executor: &Executor) {
+        timeout(std::time::Duration::from_secs(30), async {
+            while executor.memory(MemoryClass::Intake).reserved_bytes != 0 {
+                nervix_primitives::task::yield_now().await;
+            }
+        })
+        .await
+        .assured("every body charge returns once its owner, or the worker holding it, ends");
+    }
+
+    #[nervix_primitives::test]
+    async fn a_body_within_one_read_buffer_grows_without_a_data_worker() {
         let executor = crate::runtime::single_worker_executor();
-        let (release, held) = mpsc::channel::<()>();
-        let (ready, started) = oneshot::channel();
-        let worker = executor.clone();
-        let holder = AbortOnDropHandle::new(task::spawn(async move {
-            let reservation = worker
-                .try_reserve(MemoryClass::Intake, 0)
-                .assured("empty worker charge");
-            worker
-                .run_cpu(
-                    CpuClass::Data,
-                    reservation,
-                    move |_reservation, _cancellation| {
-                        ready.send(()).means_peer_left(
-                            "the listener-owner test withdrew its readiness waiter",
-                        );
-                        // The test keeps its sole data worker occupied until the sender drops,
-                        // including during unwinding; no product callback parks this way.
-                        held.recv().discarded(
-                            "dropping the test's sender releases its occupied worker, including \
-                             on unwinding",
-                        );
-                    },
-                )
-                .await
-                .assured("the occupied worker finishes when released");
-        }));
-        started.await.assured("the data worker is occupied");
-        let received = ReceivedBody {
-            frames: [Bytes::from_static(b"left"), Bytes::from_static(b"right")].into(),
-            total: 9,
-            reservation: executor
-                .try_reserve(MemoryClass::Intake, 4096)
-                .assured("body charge"),
+        let occupied = OccupiedWorker::start(&executor).await;
+        let growth = BodyGrowth {
+            limit: 64,
+            inline_copy: 16,
+            copy_unit: 1,
         };
-        let result = finish_input(received, &executor, 1, Duration::from_millis(1)).await;
+        let buffer = BodyBuffer::start(
+            &Bytes::from_static(b"left"),
+            &Bytes::from_static(b"right"),
+            None,
+            growth,
+            &executor,
+        )
+        .assured("the first two frames are charged");
+        assert_eq!(buffer.bytes.capacity(), 18);
+        // A worker would miss this deadline; the move of nine bytes needs none.
+        let deadline = InputDeadline::start(std::time::Duration::from_millis(1));
+        let buffer = buffer
+            .append(
+                &Bytes::from_static(b"0123456789"),
+                growth,
+                &executor,
+                &deadline,
+            )
+            .await
+            .assured("a body of at most one read buffer moves on the connection");
+        assert_eq!(buffer.bytes, b"leftright0123456789");
+        assert_eq!(buffer.bytes.capacity(), 36);
+        assert_eq!(
+            executor.memory(MemoryClass::Intake).reserved_bytes,
+            36,
+            "only the moved allocation stays charged"
+        );
+        drop(buffer);
+        occupied.release().await;
+        assert_eq!(executor.memory(MemoryClass::Intake).reserved_bytes, 0);
+    }
+
+    #[nervix_primitives::test]
+    async fn a_growth_deadline_on_a_data_worker_reports_server_capacity_and_releases_the_body() {
+        let executor = crate::runtime::single_worker_executor();
+        let occupied = OccupiedWorker::start(&executor).await;
+        let growth = BodyGrowth {
+            limit: 64,
+            inline_copy: 4,
+            copy_unit: 1,
+        };
+        let buffer = BodyBuffer::start(
+            &Bytes::from_static(b"left"),
+            &Bytes::from_static(b"right"),
+            None,
+            growth,
+            &executor,
+        )
+        .assured("the first two frames are charged");
+        let deadline = InputDeadline::start(std::time::Duration::from_millis(1));
+        let result = buffer
+            .append(
+                &Bytes::from_static(b"0123456789"),
+                growth,
+                &executor,
+                &deadline,
+            )
+            .await;
         let Err(error) = result else {
-            panic!("an occupied worker cannot assemble the queued body");
+            panic!("an occupied worker cannot move a body larger than one read buffer");
         };
         assert_eq!(*error.current_context(), InputRefusal::WorkerCapacity);
         assert!(
             error.contains::<nervix_primitives::time::error::Elapsed>(),
-            "the queued assembly must expire, rather than be refused at queue admission"
+            "the queued growth must expire, rather than be refused at queue admission"
         );
         assert_eq!(
             error.current_context().status(),
             hyper::StatusCode::SERVICE_UNAVAILABLE
         );
-        drop(release);
-        holder.await.assured("the holder task joins");
-        timeout(Duration::from_secs(30), async {
-            while executor.memory(MemoryClass::Intake).reserved_bytes != 0 {
-                task::yield_now().await;
-            }
-        })
-        .await
-        .assured("cancellation releases the queued body after the worker returns");
+        occupied.release().await;
+        intake_returns_to_zero(&executor).await;
     }
 
     #[test]
@@ -631,6 +917,13 @@ mod tests {
     }
 }
 
+#[cfg(all(
+    test,
+    not(any(feature = "shuttle", feature = "loom", feature = "deloxide"))
+))]
+#[path = "listener_input_replay_tests.rs"]
+mod replay_tests;
+
 #[cfg(all(test, feature = "shuttle"))]
 mod shuttle_checks {
     use super::*;
@@ -646,13 +939,10 @@ mod shuttle_checks {
                 let reader = accounting.clone();
                 let observation = nervix_primitives::thread::spawn(move || {
                     reader
-                        .observe(
-                            ReadAllocation {
-                                start: 4096,
-                                end: 12288,
-                            },
-                            8192,
-                        )
+                        .observe(ReadAllocation {
+                            start: 4096,
+                            end: 12288,
+                        })
                         .assured("bounded observation");
                 });
                 drop(guard);
