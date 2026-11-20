@@ -24,6 +24,31 @@ use super::{
 };
 mod notifications;
 
+#[given(
+    expr = "node {string} refuses its next license activation because it cannot confirm its lease"
+)]
+async fn arm_activation_lease_refusal(world: &mut ScenarioWorld, node: String) {
+    let node = expand_placeholders(world, &node);
+    let node = super::common::cluster::node_name(&node);
+    world
+        .fault_injection
+        .refuse_next_license_activation_as_lapsed_lease(&node)
+        .await;
+}
+
+#[then(expr = "node {string} refused a license activation because it could not confirm its lease")]
+async fn observe_activation_lease_refusal(world: &mut ScenarioWorld, node: String) {
+    let node = expand_placeholders(world, &node);
+    let node = super::common::cluster::node_name(&node);
+    assert!(
+        world
+            .fault_injection
+            .license_activation_refused_as_lapsed_lease(&node)
+            .await,
+        "node '{node}' did not attempt the activation at the armed proposal boundary"
+    );
+}
+
 #[given(expr = "the free licensing quota {string} is limited to {int}")]
 fn limit_quota(world: &mut ScenarioWorld, condition: String, limit: u64) {
     let name = match condition.as_str() {

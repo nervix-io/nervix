@@ -2,8 +2,8 @@
 //!
 //! Layer: test harness, outside the product layer order.
 //!
-//! - **Owns.** Membership interruption, follower answer delays, append controls and observations
-//!   from running nodes' consensus probes.
+//! - **Owns.** Membership interruption, follower answer delays, append controls, proposal refusals
+//!   and observations from running nodes' consensus probes.
 //! - **Depends on.** The harness's shared probe registry and vocabulary node identities.
 //! - **Must not know.** Plexus, graph placement, runtime state or Raft retry policy.
 
@@ -15,6 +15,27 @@ use nervix_models::ClusterNodeName;
 use super::FaultInjection;
 
 impl FaultInjection {
+    /// Arm the future leader's first activation proposal, before transferring leadership to it.
+    pub async fn refuse_next_license_activation_as_lapsed_lease(&self, node: &ClusterNodeName) {
+        let probe = {
+            let state = self.inner.consensus_probes.entry(node.clone()).or_default();
+            state.test_probe.clone()
+        };
+        probe.refuse_next_license_activation_as_lapsed_lease().await;
+    }
+
+    pub async fn license_activation_refused_as_lapsed_lease(&self, node: &ClusterNodeName) -> bool {
+        let probe = {
+            let state = self
+                .inner
+                .consensus_probes
+                .get(node)
+                .verified("the harness registered this node before observing consensus");
+            state.test_probe.clone()
+        };
+        probe.license_activation_refused_as_lapsed_lease().await
+    }
+
     /// Interrupt a promotion on whichever current node leads, after its joint entry applies.
     pub async fn interrupt_voter_promotion(&self, joining: ClusterNodeName) {
         for probe in self.consensus_test_probes() {
