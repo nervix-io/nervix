@@ -130,8 +130,8 @@ async fn records_still_without_room_at_their_bound_are_refused_with_the_budget_c
     assert_eq!(owners.executor.snapshot().relay_memory.reserved_bytes, 0);
 }
 
-/// A delivery whose channel ends while its records wait for room stores nothing and leaves nothing
-/// charged.
+/// A delivery whose channel ends while its records wait for room stores nothing, leaves nothing
+/// charged and gets back, undecided, the shares it handed over.
 #[nervix_primitives::test(start_paused = true)]
 async fn a_storage_wait_ends_without_a_charge_when_its_delivery_is_cancelled() {
     let owners = RemoteDispatchRegistry::with_capacity(1);
@@ -141,7 +141,7 @@ async fn a_storage_wait_ends_without_a_charge_when_its_delivery_is_cancelled() {
         .try_reserve(MemoryClass::Relay, capacity)
         .assured("the fixture reserves exactly its relay budget");
     let (cancel, cancelled) = oneshot::channel::<()>();
-    let (acks, _completion) = AckSet::root();
+    let (acks, completion) = AckSet::root();
     let storage = owners.store_acks(
         receiver(),
         vec![acks],
@@ -157,13 +157,27 @@ async fn a_storage_wait_ends_without_a_charge_when_its_delivery_is_cancelled() {
 
     assert!(storage.as_mut().now_or_never().is_none());
     drop(cancel);
-    let Some(Ok(RecordStorage::Cancelled)) = storage.as_mut().now_or_never() else {
+    let Some(Ok(RecordStorage::Cancelled { acks: unstored })) = storage.as_mut().now_or_never()
+    else {
         panic!("a cancelled delivery ends its storage wait at once");
     };
     assert_eq!(owners.next_delivery.load(Ordering::Relaxed), 0);
     drop(occupied);
     assert_eq!(owners.executor.snapshot().relay_memory.reserved_bytes, 0);
     assert_eq!(owners.executor.snapshot().relay_memory.refused, 0);
+    assert_eq!(
+        unstored.len(),
+        1,
+        "the storage hands back the share it was given"
+    );
+    for acks in unstored {
+        acks.no_ack("the delivery decides the share it handed over");
+    }
+    assert_eq!(
+        completion.wait().await,
+        AckOutcome::NoAck("the delivery decides the share it handed over".to_string()),
+        "the cancelled storage left the share undecided"
+    );
 }
 
 /// A delivery whose rows carry no acknowledgement has no records to store, so it neither waits

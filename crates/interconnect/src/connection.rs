@@ -115,6 +115,7 @@ pub use duplex::{
     ChargedItem, DuplexCodec, DuplexItems, DuplexReceiver, DuplexResponses, DuplexSendProgress,
     DuplexSender, EncodedMessage,
 };
+pub use relay::RelaySendProgress;
 use relay_owner::{RelayGrantPosition, RelayOwnersPublication, RelayPeerOwner};
 pub use stream::IncomingByteStream;
 pub(crate) use stream::OutboundByteStreamRequest;
@@ -1930,7 +1931,9 @@ impl TransportState {
         envelope: Envelope,
     ) -> Result<(), Report<TransportError>> {
         if let Envelope::RelayPayload(payload) = envelope {
-            return self.send_relay(node_id, payload).await;
+            return self
+                .send_relay(node_id, payload, &RelaySendProgress::default())
+                .await;
         }
         let mut completed_admission = None;
         let result = async {

@@ -515,8 +515,10 @@ DESCRIBE LICENSE;
 domain and outside domain transactions. Nervix uses the credential for the creation request;
 its durable execution retains the verified signed response and the public eight-character key
 identifier. Neither the credential nor the command's source enters that effect or its semantic
-request digest. Reusing the execution reference resumes its recorded outcome. If the service
-already processed creation, Nervix adopts the matching activation through an authenticated refresh.
+request digest. If leadership moves or the leader cannot confirm its authority after the cluster
+records the command, clients can recover under the same execution reference. Nervix resumes
+applying the saved decision or returns the recorded outcome. If the service already processed
+creation, Nervix adopts the matching activation through an authenticated refresh.
 `REFRESH LICENSE` runs immediately on the leader, outside domain transactions, and completes when
 the newer signed decision commits or the service or cluster returns a typed refusal.
 

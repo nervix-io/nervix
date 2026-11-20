@@ -54,8 +54,9 @@ impl Runtime {
                     .processors
                     .get(&processor.identifier)
                     .ok_or_else(|| Report::new(ProcessorStatePageError::Unavailable))?;
-                let RelayProcessorOperationTemplate::StatefulInferencer { state: plan, .. } =
-                    &template.operation
+                let RelayProcessorOperationTemplate::Inferencer {
+                    state: Some(plan), ..
+                } = &template.operation
                 else {
                     return Err(Report::new(ProcessorStatePageError::Unrestored));
                 };

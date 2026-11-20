@@ -892,8 +892,9 @@ is full, each network wait with what ends it, and the limits its driver imposes 
 changes. The [Connector Capabilities](connector-capabilities.md) reference and each entity's manual
 render these bounds from the declaration, so a reader sees the same facts a reviewer checks.
 
-A buffer is bounded by a capacity Nervix fixes, a statement clause or client key sets, or a driver
-default declares. When it is full, a protocol with flow control is held back: the connector stops
+A buffer is bounded by a capacity Nervix fixes, a statement clause or client key sets, a node setting
+an operator chooses when the node starts, or a driver default declares. When it is full, a protocol
+with flow control is held back: the connector stops
 reading, and the transport's own window or prefetch keeps the peer from sending more, or a publish
 waits for the buffer to drain. A protocol without flow control drops what does not fit and counts
 it. A buffer that drops without counting, or whose overflow fails the publish for the host to retry,
@@ -922,12 +923,26 @@ nor makes the host reconnect. UDP admission separately drops and counts a datagr
 intake queue holds at most the node's `syslog-intake-queue-capacity` frames and applies backpressure;
 that queue does not limit the connection count or total connection-local retention.
 
+A connector that refuses a request it cannot hold declares which refusal it gives. A full queue or
+pool refuses the request for its sender to retry. A request above its size limit is refused as too
+large, and that refusal is final: the same request sent again is refused again. An `HTTP ENDPOINT`
+request passes the node's [Listener Bounds](node-settings.md#listener-bounds) before the endpoint
+dispatches it, so the endpoint's declaration names node settings. `http-body-bytes` refuses a larger
+request body as too large. The `execution-intake-memory-bytes` pool, which every HTTP endpoint
+connection on the node shares, refuses request input it cannot back, for its sender to retry.
+`listener-header-timeout` closes a connection whose request head is unfinished, without an answer,
+and `http-body-timeout` refuses a request whose body does not arrive in time.
+
 A wait ends at a client deadline key, a statement clause such as `ACK TIMEOUT`, a protocol interval
-another client key sets, such as MQTT's `keep_alive_ms`, a fixed bound Nervix sets, or the driver's
-own default. A protocol interval is not a deadline key: it keeps its protocol's meaning, and the
-entity declares how its wait follows from the key and what applies where the client leaves the key
-out. A wait that only the host's stop ends is declared unbounded. The deadline keys mean the same
-thing for every connector:
+another client key sets, such as MQTT's `keep_alive_ms`, a node setting such as a listener's
+`listener-header-timeout`, a fixed bound Nervix sets, or the driver's own default. A protocol
+interval is not a deadline key: it keeps its protocol's meaning, and the entity declares how its
+wait follows from the key and what applies where the client leaves the key out. A node setting is
+not one either: it belongs to the node, an operator chooses it when the node starts, no statement or
+client changes it, and the entity declares what ending the wait does. Every node setting a
+declaration names, whether it bounds a buffer or a wait, is one the node declares, by the name its
+definition gives it, which the server's settings tests check. A wait that only the host's stop ends
+is declared unbounded. The deadline keys mean the same thing for every connector:
 
 | Key | What it bounds |
 | --- | --- |
@@ -970,8 +985,12 @@ A change that adds or alters a connector's buffers or network waits checks that:
 
 - every buffer between the transport and the host is declared with its capacity and overflow, and
   only a buffer already declared unbounded stays so;
-- every network wait is bounded by a declared deadline key, protocol interval key, clause, fixed
-  bound or driver default, and only a wait already declared unbounded stays so;
+- every network wait is bounded by a declared deadline key, protocol interval key, clause, node
+  setting, fixed bound or driver default, and only a wait already declared unbounded stays so;
+- every refusal it declares says whether its sender may retry the request or the request is too
+  large to be accepted at all;
+- every node setting its declaration names is a setting the node declares, by its definition's
+  name;
 - every deadline key it reads keeps the meaning above and is read through `ConfiguredDeadline`;
 - no driver call parks an asynchronous worker;
 - every deadline key its declaration names has its stalled-peer scenario in the inventory.

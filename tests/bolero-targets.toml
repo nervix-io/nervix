@@ -1378,10 +1378,10 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/interconnect/src/__fuzz__/runtime_state__replication_properties__bolero_runtime_state_replication_messages_round_trip/corpus"
-domain_version = 19
+domain_version = 20
 features = []
 id = "runtime-state-replication-wire"
-invariant = "Every current runtime-state request and reply retains its complete placement, state/schema/generation, model kind, ordered branch fields and nested float bits, counters, captured recovery budget, checkpoint length/digest, listing and refusal variant through its production pool-class codec, releasing all charges."
+invariant = "Every current runtime-state request and reply retains its complete placement, state/schema/generation, model kind, ordered branch fields and nested float bits, counters, captured recovery budget and round identity, checkpoint length/digest, listing and refusal variant through its production pool-class codec, releasing all charges."
 manifest = "Cargo.toml"
 max_input_bytes = 2048
 package = "nervix-interconnect"
@@ -1393,7 +1393,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/interconnect/src/__fuzz__/runtime_state__replication_properties__bolero_damaged_runtime_state_replication_messages_fail_typed/corpus"
-domain_version = 19
+domain_version = 20
 features = []
 id = "runtime-state-replication-malformed"
 invariant = "Bounded damaged current runtime-state requests and responses either decode or fail with a typed decode outcome; empty frames and zero-byte encoding limits refuse every message kind, and no command or bulk charge survives."
@@ -1722,17 +1722,17 @@ test_target = "lib"
 
 [[target]]
 case_timeout_seconds = 10
-corpus = "src/runtime/inferencer/stateful/__fuzz__/runtime__inferencer__stateful__tests__bolero_stateful_tensor_columns_preserve_shape_and_float_bits/corpus"
-domain_version = 1
+corpus = "src/runtime/inferencer/columns/__fuzz__/runtime__inferencer__columns__tests__bolero_tensor_columns_preserve_shape_and_float_bits/corpus"
+domain_version = 2
 features = []
 id = "inferencer-tensor-columns"
-invariant = "Dense F32 tensor columns preserve the complete Arrow schema, fixed and dynamic shape, row and element order and every float bit through production public-output encoding and input extraction."
+invariant = "Dense F32 tensor columns of one to three messages preserve the complete Arrow schema, each message's fixed and dynamic shape, message and element order and every float bit through production public-output encoding and message input extraction."
 manifest = "Cargo.toml"
 max_input_bytes = 2048
 package = "nervix-server"
 random_iterations = 256
-source = "src/runtime/inferencer/stateful/tests.rs"
-test = "runtime::inferencer::stateful::tests::bolero_stateful_tensor_columns_preserve_shape_and_float_bits"
+source = "src/runtime/inferencer/columns/tests.rs"
+test = "runtime::inferencer::columns::tests::bolero_tensor_columns_preserve_shape_and_float_bits"
 test_target = "lib"
 
 [[target]]

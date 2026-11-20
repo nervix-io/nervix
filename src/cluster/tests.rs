@@ -170,6 +170,7 @@ fn established_health_target_survives_gossip_loss_until_continuous_failure() {
     let target = health
         .replace_endpoints(
             [health_endpoint("node-2", 7, endpoint)],
+            &BTreeSet::new(),
             started_at,
             timeout,
         )
@@ -227,6 +228,26 @@ fn established_health_target_survives_gossip_loss_until_continuous_failure() {
             .effective_snapshot(almost_unavailable, timeout)
             .retains_known_node(&changed_endpoint)
     );
+
+    let unavailable = health.effective_snapshot(unavailable_at, timeout);
+    let mut still_live = health.clone();
+    still_live.replace_endpoints(
+        [],
+        &BTreeSet::from([node_id.clone()]),
+        unavailable_at,
+        timeout,
+    );
+    assert!(still_live.scheduling_revision() > unavailable.scheduling_revision());
+    health.replace_endpoints([], &BTreeSet::new(), unavailable_at, timeout);
+    let retired = health.effective_snapshot(unavailable_at, timeout);
+    let mut after_retirement = gossip_miss();
+    retired.retain_known_nodes(&mut after_retirement, &known_nodes);
+    assert_eq!(after_retirement, failed);
+    assert!(retired.revision() > unavailable.revision());
+    assert_eq!(
+        retired.scheduling_revision(),
+        unavailable.scheduling_revision()
+    );
 }
 
 #[test]
@@ -247,6 +268,7 @@ fn a_gossip_lapse_is_bridged_only_while_health_was_observed_within_the_interval(
     let target = health
         .replace_endpoints(
             [health_endpoint("node-2", 7, endpoint)],
+            &BTreeSet::new(),
             healthy_at,
             timeout,
         )
@@ -555,6 +577,7 @@ fn peer_health_ignores_results_superseded_by_an_endpoint_change() {
     let superseded_target = state
         .replace_endpoints(
             vec![health_endpoint("node-2", 7, "node-2.example:7001")],
+            &BTreeSet::new(),
             started_at,
             timeout,
         )
@@ -564,6 +587,7 @@ fn peer_health_ignores_results_superseded_by_an_endpoint_change() {
     let current_target = state
         .replace_endpoints(
             vec![health_endpoint("node-2", 8, "node-2.example:7002")],
+            &BTreeSet::new(),
             started_at,
             timeout,
         )
@@ -620,6 +644,7 @@ fn repeated_equivalent_observations_do_not_invalidate_scheduling() {
     let target = state
         .replace_endpoints(
             [health_endpoint("node-2", 7, "node-2.example:7001")],
+            &BTreeSet::new(),
             started_at,
             freshness,
         )
@@ -670,6 +695,7 @@ fn only_fresh_continuous_failures_become_unavailable() {
     let target = state
         .replace_endpoints(
             vec![health_endpoint("node-2", 7, "node-2.example:7001")],
+            &BTreeSet::new(),
             started_at,
             timeout,
         )
@@ -724,6 +750,7 @@ fn capacity_results_break_a_failure_run_without_marking_the_peer_dead() {
     let target = state
         .replace_endpoints(
             vec![health_endpoint("node-2", 7, "node-2.example:7001")],
+            &BTreeSet::new(),
             started_at,
             timeout,
         )
@@ -811,6 +838,7 @@ async fn cluster_state_watcher_observes_a_health_target_change_before_wait_prepa
     peer_health_state.send_modify(|snapshot| {
         snapshot.replace_endpoints(
             [health_endpoint("node-2", 7, "node-2.example:7001")],
+            &BTreeSet::new(),
             Instant::now(),
             observation_freshness,
         );
@@ -845,6 +873,7 @@ async fn cluster_state_watcher_observes_a_health_target_change_after_wait_prepar
     peer_health_state.send_modify(|snapshot| {
         snapshot.replace_endpoints(
             [health_endpoint("node-2", 7, "node-2.example:7001")],
+            &BTreeSet::new(),
             Instant::now(),
             observation_freshness,
         );

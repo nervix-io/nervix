@@ -21,7 +21,9 @@ pub mod test_support;
 
 use error_stack::{Report, ResultExt as _};
 use meticulous::ResultExt as _;
-use nervix_consensus::{ActivationBinding, CommandExecutionEffect, ReceivedLicenseDecision};
+use nervix_consensus::{
+    ActivationBinding, CommandExecutionEffect, ConsensusError, ReceivedLicenseDecision,
+};
 use nervix_execution::{CpuClass, MemoryClass};
 use nervix_licensing_protocol::{
     problems::ProblemKind,
@@ -358,6 +360,12 @@ impl SessionServiceImpl {
                 super::model_mutation::command_ok("License activated".to_owned())
             }
             Err(error) => {
+                if let ConsensusError::LeadershipLost { observed } = error.current_context() {
+                    // The admitted command still owns the verified decision. Its recovery can
+                    // apply that decision once the leader has authority to write.
+                    tracing::debug!(error = %format_args!("{error:#}"), "deferring license activation after leadership refusal");
+                    return self.not_leader_response("", observed.clone()).await;
+                }
                 let error = error.change_context(LicensingOperationError::Consensus);
                 self.report_license_rejection(
                     operation,

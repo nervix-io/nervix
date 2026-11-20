@@ -70,17 +70,16 @@ use nervix_models::{
     CorrelationTimeoutAction, CorrelatorMatchPolicy, DomainClockAuthority, DomainConfig,
     DomainName, DomainNodeRef, DomainNodeUnitRef, DomainState, EmitterName, EndpointName,
     EndpointType, EntityGateTargets, ErrorPolicies, FieldName, FieldPath, FlushPolicy,
-    GeneralErrorPolicy, GeneratorName, InferencerExecutionMode, InferencerTensorDeclaration,
-    IngestQuiesceMode, IngestQuiesceOverflow, IngestTimestampSource, IngestorName,
-    Literal as ModelLiteral, LookupName, MaterializedStatePolicy, MessageErrorCode,
-    MessageErrorOperation, MessageErrorPolicy, ModelKind, ModelName, NodeRef, NodeUnitRef,
-    OwnershipStateComponent, OwnershipStateRecoveryOutcome, OwnershipStateReset,
-    OwnershipStateResetCause, ParseAsType, PartitionSeed, RelayName, RemoteAckOutcome,
-    RemoteAckRegistration, RemoteAckResolution, RemoteRuntimeField, ResolvedBranchPartitions,
-    ResolvedBranching, ResourceId, ResourceName, RetryPolicy, RouteConstruction, SchemaFingerprint,
-    SignalingProtocolName, SignalingWireFormat, StructuredMessageError, SubscriptionName,
-    Timestamp, Unit, WasmCheckpointInspection, WasmRejectedStatePolicy, WasmSavedStateRejection,
-    WasmStateGeneration, WasmStateResetScope,
+    GeneralErrorPolicy, GeneratorName, InferencerTensorDeclaration, IngestQuiesceMode,
+    IngestQuiesceOverflow, IngestTimestampSource, IngestorName, Literal as ModelLiteral,
+    LookupName, MaterializedStatePolicy, MessageErrorCode, MessageErrorOperation,
+    MessageErrorPolicy, ModelKind, ModelName, NodeRef, NodeUnitRef, OwnershipStateComponent,
+    OwnershipStateRecoveryOutcome, OwnershipStateReset, OwnershipStateResetCause, ParseAsType,
+    PartitionSeed, RelayName, RemoteAckOutcome, RemoteAckRegistration, RemoteAckResolution,
+    RemoteRuntimeField, ResolvedBranchPartitions, ResolvedBranching, ResourceId, ResourceName,
+    RetryPolicy, RouteConstruction, SchemaFingerprint, SignalingProtocolName, SignalingWireFormat,
+    StructuredMessageError, SubscriptionName, Timestamp, Unit, WasmCheckpointInspection,
+    WasmRejectedStatePolicy, WasmSavedStateRejection, WasmStateGeneration, WasmStateResetScope,
 };
 #[cfg(test)]
 #[cfg_attr(
@@ -266,10 +265,13 @@ mod forced_recovery_decision;
 mod generator;
 mod http_request_fields;
 mod inferencer;
+mod inferencer_admission;
 pub(crate) use inferencer::probe_onnx_runtime;
 mod inferencer_archive;
+#[cfg(any(test, feature = "benchmarks"))]
+#[doc(hidden)]
+pub mod inferencer_benchmark;
 mod inferencer_observation;
-mod inferencer_output;
 mod inferencer_state;
 mod inferencer_state_inspection;
 pub(crate) use inferencer_archive::CapturedInferencer;
@@ -354,7 +356,6 @@ mod resources;
 #[cfg(feature = "testing")]
 #[doc(hidden)]
 pub mod revision_index_inspection;
-mod stateful_inferencer;
 pub(crate) use resources::RuntimeResourceError;
 mod connector_host_settings;
 mod runtime_lifecycle;
@@ -525,7 +526,6 @@ use http_request_fields::{
     AcceptedHttpRequests, AdmittedHttpRequests, CompiledHttpRequestFields, HttpRequestEvaluation,
     HttpRequestFields, HttpRequestInput, HttpRequestSchemas, SourceRecords,
 };
-use inferencer_output::flush_branch_inferencer_output;
 use inferencer_state::ReplicatedInferencerState;
 use ingest_group::{
     BatchPayload, BoundIngestor, BoundIngestorInput, BranchedEntrypointInput, ClientBatchDispatch,
@@ -622,26 +622,26 @@ use processor_template::{
 use processors::{
     BranchInstanceTemplate, CompiledCorrelatorOutputProgram, CompiledCorrelatorWhereProgram,
     CompiledInferencerInputProgram, CompiledReordererProgram, CompiledWindowAggregateProgram,
-    CorrelatorBranchState, CorrelatorPendingMessage, FilterMapPlan, InferencerFlushContext,
-    InferencerOutputBuffer, IngestorRouteTemplate, JunctionFlushContext, PlannedGeneralError,
-    PlannedGeneralFailure, PlannedGeneralResult, PlannedMessageError, PlannedSidecar,
-    ProcessorCompileError, ProcessorLiveStateError, ProcessorMaterializedError,
-    ProcessorPlanRevision, ProcessorUnitRevision, ProgramName, PublishedProcessorPlan,
-    RelayProcessorNode, RelayProcessorOperationNode, RelayProcessorOperationTemplate,
-    RelayProcessorOutputNode, RelayProcessorOutputTemplate, RelayProcessorOutputsNode,
-    RelayProcessorOutputsTemplate, RelayProcessorRelayTemplate, RelayProcessorTemplate,
-    ReorderKeyPart, ReordererOutputBuffer, ReordererRowOrder, WasmAckContext, WasmAckMap,
-    WasmCompiledBranchProcessor, WasmFlushContext, WindowBounds, WindowFlushContext,
+    CorrelatorBranchState, CorrelatorPendingMessage, FilterMapPlan, IngestorRouteTemplate,
+    JunctionFlushContext, PlannedGeneralError, PlannedGeneralFailure, PlannedGeneralResult,
+    PlannedMessageError, PlannedSidecar, ProcessorCompileError, ProcessorLiveStateError,
+    ProcessorMaterializedError, ProcessorPlanRevision, ProcessorUnitRevision, ProgramName,
+    PublishedProcessorPlan, RelayProcessorNode, RelayProcessorOperationNode,
+    RelayProcessorOperationTemplate, RelayProcessorOutputNode, RelayProcessorOutputTemplate,
+    RelayProcessorOutputsNode, RelayProcessorOutputsTemplate, RelayProcessorRelayTemplate,
+    RelayProcessorTemplate, ReorderKeyPart, ReordererOutputBuffer, ReordererRowOrder,
+    WasmAckContext, WasmAckMap, WasmCompiledBranchProcessor, WasmFlushContext, WindowBounds,
+    WindowFlushContext,
 };
 pub(in crate::runtime) use reconnect_backoff::{AcknowledgementKeepalive, RuntimeReconnectBackoff};
 use record_metadata::RecordMetadataColumns;
 use reingestor::{PlannedReingestorInput, ReingestorInputConsumer, ReingestorRuntimes};
 pub(in crate::runtime) use relay_batch::RelayDispatchResult;
 use relay_batch::build_stream_record_batch_preserving_acks;
-#[cfg(test)]
+#[cfg(any(test, feature = "benchmarks"))]
 use relay_boundary::RelayRetention;
 use relay_boundary::{
-    BranchRelayDispatchGateLease, ConcreteRelayRuntime, ConcreteRelayRuntimeBuild,
+    BranchRelayDispatchGateLease, ConcreteRelayRuntime, ConcreteRelayRuntimeBuild, OwnerDelivery,
     RelayBoundaryBuilder, RelayBoundaryFanout, RelayBoundaryFanoutMap, RelayBoundaryServices,
     RelayBranchPresence, RelayBranchPresences, RelayOutboundSlot, RelayOwnerRoutes, RelayOwnerTask,
     RelayRuntimeFanIn, RemoteRuntimeConsumer, addressable_count,

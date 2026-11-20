@@ -757,6 +757,23 @@ test-inferencer-describe *args: build-deps
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
     cargo test --package nervix-scenarios --test scenarios -- --input {{ quote(justfile_directory() / "tests/features/runtime/inferencer_describe*.feature") }} {{ quote(args) }}
 
+# Run every inferencer through admission-time inference: one model run per input batch for every
+# route, a refused row failing alone, a route failure's original input, and BATCH models over the
+# batch COLLECT FOR releases.
+test-inferencer-admission *args: build-deps build-plexus-format build-test-cli build-deadlock-report
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    cargo test --package nervix-scenarios --test scenarios -- --input {{ quote(justfile_directory() / "tests/features/runtime/inferencer_admission*.feature") }} {{ quote(args) }}
+
+# Run the inferencer owner tests: the session and its model runs, tensor columns, carried state and
+# its publication, and admission through one concrete branch.
+test-inferencer-owners filter="runtime::inferencer" *args: build-deps
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    cargo test --package nervix-server --features testing --lib {{ quote(filter) }} -- {{ quote(args) }}
+
 # Verify inference resource replacement without traversing unrelated features or build artifacts.
 test-inferencer-rebinding *args: build-deps
     #!/usr/bin/env bash
@@ -3836,11 +3853,12 @@ bench *args: build-web-console
     cargo bench --package nervix-server --bench subscription_row_encoding --features benchmarks -- {{ args }}
     cargo bench --package nervix-server --bench wasm_checkpoint --features benchmarks -- {{ args }}
     cargo bench --package nervix-server --bench state_replication --features benchmarks -- {{ args }}
+    ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)" cargo bench --package nervix-server --bench inferencer --features benchmarks -- {{ args }}
     cargo bench --package nervix-columnar-json --bench json_encode -- {{ args }}
     cargo bench --package nervix-vm --bench vm -- {{ args }}
 
 # Exercise every benchmark body once without spending CI's smoke-test budget on release codegen.
-bench-smoke: build-web-console wasm-processor-guests download-onnxruntime check-emitter-flush-graph bench-smoke-bodies
+bench-smoke: build-web-console wasm-processor-guests download-onnxruntime generate-test-onnx check-emitter-flush-graph bench-smoke-bodies
 
 # The benchmark bodies `bench-smoke` exercises, without the console build that precedes them there.
 # `coverage-native-extras` builds the console outside its instrumentation and then runs these in it.
@@ -3857,6 +3875,7 @@ bench-smoke-bodies:
     cargo bench --profile dev --package nervix-server --bench state_replication --features benchmarks -- --test
     cargo bench --profile dev --package nervix-server --bench window_sketches --features benchmarks -- --test
     cargo bench --profile dev --package nervix-server --bench window_collection --features benchmarks -- --test
+    ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)" cargo bench --profile dev --package nervix-server --bench inferencer --features benchmarks -- --test
     cargo bench --profile dev --package nervix-columnar-json --bench json_encode -- --test
     cargo bench --profile dev --package nervix-simd-kernels --bench constant_division -- --test
     cargo bench --profile dev --package nervix-simd-kernels --bench byte_classes -- --test
@@ -3876,6 +3895,12 @@ bench-admitted-work *args: build-web-console
 # Measure an exact preserved build when comparing admitted work before and after a source change.
 bench-admitted-work-executable executable *args:
     {{ quote(executable) }} {{ quote(args) }}
+
+# Measure one inferencer branch admitting a batch, from INPUTS through the model to its route's
+# dispatch: one message at a time, batched, and with STATE. Extra arguments are forwarded to
+# Criterion.
+bench-inferencer *args: build-web-console download-onnxruntime generate-test-onnx
+    ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)" cargo bench --package nervix-server --bench inferencer --features benchmarks -- {{ args }}
 
 # Measure retained full emitter flushes; every iteration checks the delivered-row count.
 bench-emitter-flush *args: build-web-console
@@ -5094,7 +5119,6 @@ coverage-go-ci-tool:
 # this builds the Rust gate and installs its pinned complexity analyzer.
 test-docs: typed-ratchet-source-build install-cargo-crap build-client-suite-java-checker
     NERVIX_CLIENT_SUITE_JAVA_CHECKER={{ quote(cargo_target_dir + "/client-suites/java") }} NERVIX_CLIENT_CONFORMANCE_DIR={{ quote(cargo_target_dir + "/client-conformance") }} uv run --locked python -m unittest discover -s scripts/tests -p "test_*.py"
-    node --test cloudflare/docs-worker/src/index.test.js
 
 # Screenshots are recaptured from the current console and the nervix-cli and nervix-server
 # reference chapters are rendered from the current binaries, so a published book can never describe
@@ -5197,18 +5221,9 @@ publish-dir source target zone_id alias="snapshot" bucket="nervix-docs":
 purge-cache zone_id:
     python3 scripts/purge_cloudflare_cache.py --zone-id {{ zone_id }}
 
-worker-deploy zone_id="":
-    #!/usr/bin/env bash
-    set -euo pipefail
-    npx --yes wrangler deploy --config cloudflare/docs-worker/wrangler.jsonc
-    if [[ -n "{{ zone_id }}" ]]; then
-        python3 scripts/purge_cloudflare_cache.py --zone-id {{ zone_id }}
-    fi
-
 publish-book target zone_id alias="snapshot" bucket="nervix-docs":
     just book-pdf {{ target }} docs/book/nervix.pdf
     just publish-dir docs/book {{ target }} {{ zone_id }} {{ alias }} {{ bucket }}
-    just worker-deploy {{ zone_id }}
 
 deps:
     just generate-dev-tls
