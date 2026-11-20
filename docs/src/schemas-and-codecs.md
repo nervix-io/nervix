@@ -39,6 +39,10 @@ nested Arrow `FixedSizeList` level, so `ARRAY<F32, 2, 3>` maps to
 type is recursive, so fixed and variable axes can be mixed, for example
 `VEC<ARRAY<F32, 6>>` and `ARRAY<VEC<STRING>, 4>`.
 
+List elements are required at every depth. `OPTIONAL` applies to the whole list field.
+A sequence in one list stays together within its record when a batch is split. A window can
+produce that field from its retained rows. [Window Aggregates](filter-map-functions.md#window-aggregates).
+
 `ARRAY` and `VEC` are distinct and are never implicitly converted. An expression converts a list's
 container or element type only explicitly, with `AS` or `TRY_CAST` to the full target list type;
 see [Lists](filter-map-functions.md#lists). Every fixed

@@ -497,7 +497,8 @@ keeps the chapter current in the same change. Where areas meet, each chapter kee
   registration, type or sensitivity checking, constant folding or expression sharing, compiled
   programs and their prepared artifacts, the runtime bridge and execution context, scalar operands,
   selected-row execution of conditional arms, row and batch errors, kernel selection and SIMD use,
-  function-family implementations, injected functions, window aggregate and sketch structures.
+  function-family implementations, list conversions and kernels, injected functions, window
+  aggregation and sketches, and retained sequence representation, bounds and recovery.
   [Expression Functions](docs/src/filter-map-functions.md) owns every public function contract.
 - [SIMD Kernels](docs/src/simd-kernels.md): kernel ownership, dispatch or build targets, arithmetic
   or bitmap contracts, byte scanning, typed run execution, scalar/level qualification, SIMD
@@ -579,6 +580,13 @@ keeps the chapter current in the same change. Where areas meet, each chapter kee
 - All schemaful operations are exact-type operations. Implicit casts, parsing, stringification,
   numeric widening or narrowing, datetime/string interchange and wire/internal coercions are
   forbidden.
+- Scalar operators and scalar functions use their declared scalar operands. Computation on
+  `ARRAY` and `VEC` elements uses named list functions, with distinct names for list/list and
+  list/scalar arithmetic. New list functions start with `list_` and have names distinct from
+  window aggregates.
+- List element types and containers change through `AS` or `TRY_CAST` with the full target list
+  type. These casts preserve nesting depth. Use `list_reshape` to give a fixed array a new shape
+  and `list_flatten` to remove one list level. Expressions share one declared-type grammar.
 - Nullability is part of the type contract: required uninitialized fields are errors, and optional
   uninitialized fields finalize as typed nulls.
 - Sensitivity may be promoted but never downgraded implicitly. External emission of a sensitive
@@ -621,6 +629,8 @@ keeps the chapter current in the same change. Where areas meet, each chapter kee
 - Window output is set-only. Live `input` values are available only inside aggregate arguments,
   although aggregate calls may participate in larger scalar expressions; aggregates never nest
   inside aggregates.
+- An aggregate argument that becomes a list element must be required. Every list element is
+  non-null.
 - Correlators use explicit `left` and `right` scopes and never expose an ambiguous default input.
 - Relay names are graph references, never top-level field qualifiers; materialized state is the
   explicit exception, through the `relay_state.<relay>.<field>` namespace.
@@ -717,6 +727,9 @@ No justification makes an inversion acceptable: not that it is temporary, smalle
 - Arrow columnar batches are the only data-plane payload representation, end to end: ingest
   decoding, relay carriage, VM input and output, stateful processor state, error handling, emission,
   sessions and interconnect. A batch with one row is still a batch.
+- A retained sequence travels as one `ARRAY` or `VEC` field in one record, built by a window
+  processor from the rows its branch retains. A generator samples materialized state one record
+  at a time without accumulating a window of its own.
 - No row-oriented payload representation is introduced, reintroduced or extended: no
   `HashMap`-of-fields records, per-row boxed value maps or dual row-plus-column carriers kept in
   sync. A single message is addressed through a row view over an Arc'd Arrow batch (a batch
@@ -1236,6 +1249,9 @@ miss-heavy keys; a lower count or a shorter function is not a speedup.
 - Parser-only work requires positive and negative parse tests and completion-context tests that
   guard against grammar-branch leakage, kept near the grammar they protect; composed language
   phrases require completion coverage.
+- A new window aggregate includes its structure in `DESCRIBE WINDOW PROCESSOR`, its evaluated
+  argument columns in `SHOW WINDOW PROCESSOR STATE`, and snapshot and archive coverage. A new
+  builtin includes a qualification-ledger row, a registered Bolero property and a benchmark.
 - Compile-time rejection is checked with Rustdoc `compile_fail` doctests beside the owning API,
   paired with compiling examples of the current imports and supported signatures, never with
   `trybuild` or its dependencies, harnesses, fixtures or snapshots. They run in the normal test
