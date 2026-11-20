@@ -233,3 +233,39 @@ pub(super) fn archived_node<'schedule>(
     }
     Some(node)
 }
+
+#[cfg(test)]
+mod tests {
+    use meticulous::ResultExt as _;
+    use nervix_execution::{ExecutionOverrides, ExecutionSettings};
+    use ubyte::ByteUnit;
+
+    use super::*;
+
+    /// The executor of a node started with `--execution-bulk-chunk-bytes` set to `chunk`.
+    fn executor_with_bulk_chunk(chunk: ByteUnit) -> Executor {
+        let overrides = ExecutionOverrides {
+            bulk_chunk_bytes: Some(chunk),
+            ..ExecutionOverrides::default()
+        };
+        let settings = ExecutionSettings::resolve(overrides, None, None)
+            .assured("a bulk chunk of at most 256 KiB fits the default bulk budget");
+        Executor::new(settings.config())
+            .assured("resolved execution settings satisfy every executor relationship")
+    }
+
+    #[test]
+    fn a_guest_save_charges_two_checkpoint_segments_beside_one_bulk_chunk() {
+        let default_chunk = executor_with_bulk_chunk(ByteUnit::Kibibyte(64));
+        assert_eq!(
+            guest_writer_bytes(&default_chunk),
+            ByteUnit::Kibibyte(192).as_u64()
+        );
+
+        let raised_chunk = executor_with_bulk_chunk(ByteUnit::Kibibyte(256));
+        assert_eq!(
+            guest_writer_bytes(&raised_chunk),
+            ByteUnit::Kibibyte(384).as_u64()
+        );
+    }
+}
