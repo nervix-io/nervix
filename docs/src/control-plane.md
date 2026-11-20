@@ -906,13 +906,13 @@ newer checkpoints the destination has published. A state reset occurs only when 
 decision either stages the recreated checkpoint inventory or reports a reset outcome for every state
 component owned by the entity.
 
-When current eligibility invalidates an automatic candidate, the leader logs why and asks each
-destination to discard its exact preparation. An explicit rejection by the commit fence also
-triggers discard. A transport failure that leaves the commit outcome unknown preserves staging for
-the schedule that may have committed. A destination records the rejected round before discarding
-its unit's staged state, so a delayed prepare cannot recreate it. A repeated discard matches the
-same transition, destination incarnation and schedule fingerprint, preserving newer preparations
-and activated state.
+When current eligibility or leader tenure invalidates an automatic candidate, the coordinator
+logs why and asks each destination to discard its exact preparation. An explicit rejection by the
+commit fence also triggers discard. If publication returns an uncertain result, such as a leadership
+change while the proposal was pending, staging stays available for the schedule that may have
+committed. A destination records the rejected round before discarding its unit's staged state, so a
+delayed prepare cannot recreate it. A repeated discard matches the same transition, destination
+incarnation and schedule fingerprint, preserving newer preparations and activated state.
 
 A forced recovery of a WASM processor also starts a new guest-state generation for every branch, in
 the schedule publication that names the new owner, and that schedule is the one the recovery

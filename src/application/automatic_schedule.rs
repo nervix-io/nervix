@@ -76,7 +76,11 @@ impl SessionServiceImpl {
                 .await;
         }
 
-        let unpublished_reason = if !self
+        let unpublished_reason = if self.inner.consensus.current_leader_tenure().as_ref()
+            != Some(fence.leader_tenure())
+        {
+            Some("the automatic decision's leader tenure changed")
+        } else if !self
             .inner
             .cluster
             .peer_health_scheduling_revision_is_current(inputs.health_revision)
@@ -115,10 +119,10 @@ impl SessionServiceImpl {
         {
             Ok(()) => true,
             Err(error) => {
-                if matches!(
-                    error.current_context(),
-                    ConsensusError::Conflict(_) | ConsensusError::LeadershipLost { .. }
-                ) && let Some(attempts) = preparations.as_mut()
+                // A leader-change response can refer to an entry already covered by a snapshot.
+                // An applied conflict proves that this proposal left the schedule unchanged.
+                if matches!(error.current_context(), ConsensusError::Conflict(_))
+                    && let Some(attempts) = preparations.as_mut()
                 {
                     attempts.reject_publication();
                 }
