@@ -1,9 +1,8 @@
-//! A materialized snapshot fetch held on its first received chunk until its node's restore
-//! maintenance has asked for bulk memory, for the public bulk contention scenarios.
+//! Pauses at the opening and first chunk of a materialized snapshot fetch.
 //!
 //! Layer: test harness, outside the product layer order.
-//! - **Owns.** The nodes armed to hold their next materialized snapshot fetch, the one fetch each
-//!   hold claims, and its held, released and resumed observations.
+//! - **Owns.** The one-shot barriers that hold a fetch before opening a described snapshot or
+//!   after receiving its first chunk, and their observations and releases.
 //! - **Depends on.** Vocabulary identities and the shared pause barriers.
 //! - **Must not know.** Snapshot formats, staging, bulk budgets, restore staging or how
 //!   maintenance is admitted.
@@ -16,12 +15,35 @@
     )
 )]
 
-use nervix_models::ClusterNodeName;
+use nervix_models::{ClusterNodeName, DomainNodeRef};
 use nervix_primitives::sync::{Arc, atomic::Ordering};
 
-use super::{FaultInjection, pause::TestPause};
+use super::{CommandPausePoint, FaultInjection, pause::TestPause};
 
 impl FaultInjection {
+    /// Pause the next remote fetch of this relay after it has described its snapshot.
+    pub fn pause_materialized_snapshot_opening(&self, relay: DomainNodeRef) {
+        self.arm_command_pause(CommandPausePoint::MaterializedSnapshotOpening(relay));
+    }
+
+    pub async fn wait_for_materialized_snapshot_opening(&self, relay: &DomainNodeRef) {
+        self.wait_for_command_pause(&CommandPausePoint::MaterializedSnapshotOpening(
+            relay.clone(),
+        ))
+        .await;
+    }
+
+    pub fn release_materialized_snapshot_opening(&self, relay: &DomainNodeRef) {
+        self.release_command_pause(&CommandPausePoint::MaterializedSnapshotOpening(
+            relay.clone(),
+        ));
+    }
+
+    pub(crate) async fn pause_materialized_snapshot_opening_if_armed(&self, relay: DomainNodeRef) {
+        self.pause_command_if_armed(CommandPausePoint::MaterializedSnapshotOpening(relay))
+            .await;
+    }
+
     /// Holds the next materialized snapshot fetch `node_id` makes once its first received chunk is
     /// charged to the node's bulk memory, until the node's restore checkpoint maintenance next asks
     /// bulk memory for its working set. Fetches after the held one are not held.
