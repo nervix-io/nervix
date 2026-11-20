@@ -11,7 +11,7 @@ runs:
       shell: bash
       run: |
         if ! command -v sysbench >/dev/null || [[ ! -x /usr/bin/fio ]]; then
-          sudo apt-get update
+          sudo apt-get update --allow-releaseinfo-change
           sudo apt-get install --yes --no-install-recommends sysbench fio
         fi
     - name: Measure runner resources
