@@ -596,3 +596,59 @@ Feature: Ephemeral activation expiry and the licensing stop gate
       policy: stopped
       processing: stopped by licensing: ephemeral activation expired at {{expired_at}}
       """
+
+  # A member the closed gate refuses on its return stops once its server is ready, and nothing of
+  # that run holds the node's stores after it has stopped. The same node therefore starts again in
+  # this process, and the cluster judges the new run: it refuses it while the gate stays closed and
+  # admits it after a new activation. Dropping a member needs the other two to keep a quorum, so
+  # this case runs on three nodes only. The dropped member's own storage still lists it as a voter,
+  # so the leader's voters, not the node's own report, show that the cluster admitted it.
+  Scenario: A member refused on its return starts again in the same process and the cluster judges it again
+    Given an HTTPS licensing test service allows one ephemeral activation
+    And a 3 node nervix cluster is started
+    When these Plexus commands are executed on the leader node
+      """
+      ACTIVATE LICENSE EPHEMERAL WITH KEY 'NVXK-TESTABCD-fixture-secret';
+      """
+    Then the committed license decision is saved as placeholder "first_activation"
+    And the ephemeral expiry of license placeholder "first_activation" is saved as placeholder "expired_at"
+    When both licensing clocks pass the "ephemeral" deadline
+    Then node "node-1" eventually describes this license without a selected domain
+      """
+      policy: stopped
+      processing: stopped by licensing: ephemeral activation expired at {{expired_at}}
+      """
+    And the current leader node is saved as placeholder "licensing_leader"
+    And a node other than placeholder "licensing_leader" is saved as placeholder "returning_node"
+    When node "{{returning_node}}" is stopped
+    Then node "{{licensing_leader}}" eventually reports status containing "raft member '{{returning_node}}' is marked unavailable"
+    When these Plexus commands are executed through the client on node "{{licensing_leader}}"
+      """
+      DROP NODE {{returning_node}};
+      """
+    And node "{{returning_node}}" attempts to rejoin
+    Then node "{{returning_node}}" refused to join because "licensing quota 'cluster.nodes' refused usage: limit 2, current 2, requested 1 (stopped)"
+    When node "{{returning_node}}" attempts to rejoin
+    Then node "{{returning_node}}" refused to join because "licensing quota 'cluster.nodes' refused usage: limit 2, current 2, requested 1 (stopped)"
+    When these Plexus commands are executed through the client on node "{{licensing_leader}}"
+      """
+      REFRESH LICENSE;
+      """
+    Then node "{{licensing_leader}}" eventually describes this license without a selected domain
+      """
+      status: expired
+      policy: stopped
+      """
+    And the licensing service marks placeholder "first_activation" expired and frees its slot
+    When these Plexus commands are executed through the client on node "{{licensing_leader}}"
+      """
+      ACTIVATE LICENSE EPHEMERAL WITH KEY 'NVXK-TESTABCD-fixture-secret';
+      """
+    Then node "{{licensing_leader}}" eventually describes this license without a selected domain
+      """
+      policy: licensed fresh
+      processing: running
+      """
+    When node "{{returning_node}}" attempts to join
+    Then node "{{returning_node}}" joined the cluster
+    And node "{{licensing_leader}}" eventually reports raft voters "node-1,node-2,node-3"

@@ -55,6 +55,9 @@ pub(in crate::application) struct ApplicationStartup {
     pub(in crate::application) runtime: Runtime,
     pub(in crate::application) consensus: Option<Consensus>,
     pub(in crate::application) interconnect: Option<Transport>,
+    /// Where a test build registers the consensus this startup opens, until that consensus stops.
+    /// A normal build's is an empty marker.
+    pub(in crate::application) fault_injection: ConfiguredFaultInjection,
 }
 
 impl ApplicationStartup {
@@ -112,10 +115,11 @@ impl ApplicationStartup {
         }
     }
 
+    /// Opens this node's consensus. A test build also registers an observer of it with the fault
+    /// injection, which [`Self::stop_consensus`] gives back.
     pub(in crate::application) async fn open_consensus(
         &self,
         settings: ConsensusSettings,
-        _fault_injection: &ConfiguredFaultInjection,
     ) -> Result<Consensus, Report<AppError>> {
         #[cfg(feature = "testing")]
         let node_id = settings.node_id.clone();
@@ -123,7 +127,7 @@ impl ApplicationStartup {
         let consensus = Consensus::open_with_test_probe(
             &self.consensus_path,
             settings,
-            _fault_injection.consensus_test_probe(&node_id),
+            self.fault_injection.consensus_test_probe(&node_id),
         )
         .await
         .change_context(AppError::StartConsensus)?;
@@ -132,8 +136,22 @@ impl ApplicationStartup {
             .await
             .change_context(AppError::StartConsensus)?;
         #[cfg(feature = "testing")]
-        _fault_injection.register_consensus(node_id, &consensus);
+        self.fault_injection.register_consensus(node_id, &consensus);
         Ok(consensus)
+    }
+
+    /// Stops this node's `consensus`: Raft, then its storage's last writes. A test build then
+    /// gives back the observer its fault injection has kept of that consensus since
+    /// [`Self::open_consensus`]. The node's own handles are then the last holders of the
+    /// consensus database, so it closes when they are dropped with the node's other stores,
+    /// however the node stopped, and the same node can start again in the same process.
+    pub(in crate::application) async fn stop_consensus(
+        consensus: &Consensus,
+        _fault_injection: &ConfiguredFaultInjection,
+    ) {
+        consensus.shutdown().await;
+        #[cfg(feature = "testing")]
+        _fault_injection.unregister_consensus(consensus.observer().local_node_id());
     }
 
     pub(in crate::application) async fn terminate(self) {
@@ -141,7 +159,7 @@ impl ApplicationStartup {
             .shutdown(self.runtime.domain_drain_timeout())
             .await;
         if let Some(consensus) = &self.consensus {
-            consensus.shutdown().await;
+            Self::stop_consensus(consensus, &self.fault_injection).await;
         }
         if let Some(interconnect) = &self.interconnect {
             interconnect.shutdown().await;
@@ -202,7 +220,7 @@ impl TryFrom<Args> for Application {
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
+    use std::{path::PathBuf, time::Duration};
 
     use fjall::Database;
     use nervix_consensus::RaftTimings;
@@ -214,7 +232,11 @@ mod tests {
         STORAGE_JOB_RESERVATION_BYTES,
     };
     use crate::{
-        application::test_fixtures::{test_addr, test_tls_files},
+        ConfiguredFaultInjection,
+        application::{
+            shutdown::ShutdownRequestOutcome,
+            test_fixtures::{TestTlsFiles, test_addr, test_tls_files},
+        },
         cluster::{MembershipSettings, MembershipValues},
     };
 
@@ -406,46 +428,129 @@ mod tests {
         assert!(failure.contains::<fjall::Error>());
     }
 
+    /// One node whose listeners all take ephemeral ports, with its storage in a temporary
+    /// directory and the TLS files it reads, both kept until the test drops it.
+    struct EphemeralNode {
+        root: tempfile::TempDir,
+        tls_files: TestTlsFiles,
+        node_id: ClusterNodeName,
+        cluster_id: String,
+    }
+
+    impl EphemeralNode {
+        fn new(cluster_id: &str) -> Self {
+            let node_id = ClusterNodeName::parse("node-1").expect("valid name");
+            Self {
+                root: tempfile::tempdir().expect("temporary root should be created"),
+                tls_files: test_tls_files(cluster_id, &node_id),
+                node_id,
+                cluster_id: cluster_id.to_string(),
+            }
+        }
+
+        fn db_path(&self) -> PathBuf {
+            self.root.path().join("db")
+        }
+
+        /// The node, dialling `bootstrap_host` first. It shares `fault_injection` with the test as
+        /// an in-process scenario node shares the harness's, so whatever the node registers there
+        /// outlives its run unless the node gives it back.
+        fn application(
+            &self,
+            bootstrap_host: Option<String>,
+            fault_injection: ConfiguredFaultInjection,
+        ) -> Application {
+            let listen_addr = test_addr(0);
+            let identity = NodeIdentity::builder()
+                .addr(listen_addr)
+                .http_listen_addr(listen_addr)
+                .https_listen_addr(listen_addr)
+                .observability_listen_addr(listen_addr)
+                .web_console_listen_addr(listen_addr)
+                .cluster_id(self.cluster_id.clone())
+                .node_id(self.node_id.clone())
+                .grpc_advertise_addr(listen_addr.into())
+                .interconnect_listen_addr(listen_addr)
+                .interconnect_advertise_addr(listen_addr.into())
+                .interconnect_tls_ca(self.tls_files.ca.clone())
+                .interconnect_tls_cert(self.tls_files.certificate.clone())
+                .interconnect_tls_key(self.tls_files.private_key.clone())
+                .allow_bootstrap(true)
+                .cluster_bootstrap_host(bootstrap_host)
+                .db_path(self.db_path())
+                .build();
+            let settings = NodeSettings {
+                raft: RaftTimings::resolve(Some(Duration::from_millis(50)))
+                    .expect("the test's Raft heartbeat is valid"),
+                membership: MembershipSettings::resolve(MembershipValues {
+                    node_unavailability_timeout: Some(Duration::from_secs(1)),
+                    ..MembershipValues::default()
+                })
+                .expect("the test's membership settings are valid"),
+                ..NodeSettings::default()
+            };
+            Application::builder()
+                .identity(identity)
+                .settings(settings)
+                .fault_injection(fault_injection)
+                .graceful_shutdown_drain(false)
+                .build()
+        }
+
+        /// Opens the node database and the consensus database, which fails while anything still
+        /// holds either lock, and checks that each holds only its own keyspaces.
+        async fn assert_released_both_databases(&self, ending: &str) {
+            let db_path = self.db_path();
+            let executor = Executor::default();
+            let reservation = executor
+                .try_reserve(MemoryClass::Management, STORAGE_JOB_RESERVATION_BYTES)
+                .expect("the test's own executor has management room");
+            let inspected = executor
+                .run_storage(StorageClass::Filesystem, reservation, move |_, _| {
+                    let consensus_path = ApplicationStartup::consensus_database_path(&db_path);
+                    let db = Database::builder(db_path).open()?;
+                    let consensus_db = Database::builder(consensus_path).open()?;
+                    let node_keyspaces = db.list_keyspace_names();
+                    let consensus_keyspaces = consensus_db.list_keyspace_names();
+                    drop(consensus_db);
+                    drop(db);
+                    Ok::<_, fjall::Error>((node_keyspaces, consensus_keyspaces))
+                })
+                .await
+                .expect("the database inspection job should run");
+            let (node_keyspaces, consensus_keyspaces) = match inspected {
+                Ok(keyspaces) => keyspaces,
+                Err(error) => panic!("{ending} must release both database locks: {error}"),
+            };
+            assert!(
+                node_keyspaces
+                    .iter()
+                    .all(|name| !name.starts_with(CONSENSUS_KEYSPACE_PREFIX)),
+                "the node database must not contain consensus keyspaces"
+            );
+            assert_eq!(consensus_keyspaces.len(), 4);
+            assert!(
+                consensus_keyspaces
+                    .iter()
+                    .all(|name| name.starts_with(CONSENSUS_KEYSPACE_PREFIX)),
+                "the consensus database must contain only consensus keyspaces"
+            );
+        }
+    }
+
+    /// The node opens both databases and its consensus, registers that consensus with its fault
+    /// injection, and then fails to start its cluster membership. The fault injection outlives the
+    /// run, and the node's databases are released all the same.
     #[nervix_primitives::test]
     async fn startup_failure_releases_the_split_databases_before_returning() {
-        let root = tempfile::tempdir().expect("temporary root should be created");
-        let db_path = root.path().join("db");
-        let listen_addr = test_addr(0);
-        let node_id = ClusterNodeName::parse("node-1").expect("valid name");
-        let tls_files = test_tls_files("startup-failure-test", &node_id);
-        let identity = NodeIdentity::builder()
-            .addr(listen_addr)
-            .http_listen_addr(listen_addr)
-            .https_listen_addr(listen_addr)
-            .observability_listen_addr(listen_addr)
-            .web_console_listen_addr(listen_addr)
-            .cluster_id("startup-failure-test".to_string())
-            .node_id(node_id)
-            .grpc_advertise_addr(listen_addr.into())
-            .interconnect_listen_addr(listen_addr)
-            .interconnect_advertise_addr(listen_addr.into())
-            .interconnect_tls_ca(tls_files.ca.clone())
-            .interconnect_tls_cert(tls_files.certificate.clone())
-            .interconnect_tls_key(tls_files.private_key.clone())
-            .allow_bootstrap(true)
-            .cluster_bootstrap_host(Some("invalid host name:1".to_string()))
-            .db_path(db_path.clone())
-            .build();
-        let settings = NodeSettings {
-            raft: RaftTimings::resolve(Some(Duration::from_millis(50)))
-                .expect("the test's Raft heartbeat is valid"),
-            membership: MembershipSettings::resolve(MembershipValues {
-                node_unavailability_timeout: Some(Duration::from_secs(1)),
-                ..MembershipValues::default()
-            })
-            .expect("the test's membership settings are valid"),
-            ..NodeSettings::default()
-        };
-        let application = Application::builder()
-            .identity(identity)
-            .settings(settings)
-            .graceful_shutdown_drain(false)
-            .build();
+        let node = EphemeralNode::new("startup-failure-test");
+        // Held until the test ends, past the database check, as the harness holds its fault
+        // injection past every run.
+        let fault_injection = ConfiguredFaultInjection::default();
+        let application = node.application(
+            Some("invalid host name:1".to_string()),
+            fault_injection.clone(),
+        );
 
         let error = application
             .run()
@@ -456,37 +561,33 @@ mod tests {
             "unexpected startup error: {error:?}"
         );
 
-        let executor = Executor::default();
-        let reservation = executor
-            .try_reserve(MemoryClass::Management, STORAGE_JOB_RESERVATION_BYTES)
-            .expect("the test's own executor has management room");
-        let (node_keyspaces, consensus_keyspaces) = executor
-            .run_storage(StorageClass::Filesystem, reservation, move |_, _| {
-                let consensus_path = ApplicationStartup::consensus_database_path(&db_path);
-                let db = Database::builder(db_path).open()?;
-                let consensus_db = Database::builder(consensus_path).open()?;
-                let node_keyspaces = db.list_keyspace_names();
-                let consensus_keyspaces = consensus_db.list_keyspace_names();
-                drop(consensus_db);
-                drop(db);
-                Ok::<_, fjall::Error>((node_keyspaces, consensus_keyspaces))
-            })
+        node.assert_released_both_databases("application startup failure")
+            .await;
+    }
+
+    /// A node asked to stop before it runs still opens both databases and its consensus and
+    /// registers that consensus with its fault injection, and then takes its terminal teardown at
+    /// once. Its run returns with both databases released while the fault injection outlives it,
+    /// so the same node can start again in the same process.
+    #[nervix_primitives::test]
+    async fn a_stopped_node_releases_the_split_databases_before_returning() {
+        let node = EphemeralNode::new("stopped-node-test");
+        // Held until the test ends, past the database check, as the harness holds its fault
+        // injection past every run.
+        let fault_injection = ConfiguredFaultInjection::default();
+        let application = node.application(None, fault_injection.clone());
+        let requested = application.shutdown.request_stop();
+        assert!(
+            matches!(requested, ShutdownRequestOutcome::Accepted(_)),
+            "a node that has not run yet has no earlier stop request: {requested:?}"
+        );
+
+        application
+            .run()
             .await
-            .expect("the database inspection job should run")
-            .expect("application startup failure must release both database locks");
-        assert!(
-            node_keyspaces
-                .iter()
-                .all(|name| !name.starts_with(CONSENSUS_KEYSPACE_PREFIX)),
-            "the node database must not contain consensus keyspaces"
-        );
-        assert_eq!(consensus_keyspaces.len(), 4);
-        assert!(
-            consensus_keyspaces
-                .iter()
-                .all(|name| name.starts_with(CONSENSUS_KEYSPACE_PREFIX)),
-            "the consensus database must contain only consensus keyspaces"
-        );
+            .expect("a node asked to stop before it runs stops cleanly");
+
+        node.assert_released_both_databases("a stopped node").await;
     }
 
     #[nervix_primitives::test]
