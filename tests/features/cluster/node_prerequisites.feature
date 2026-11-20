@@ -5,7 +5,8 @@ Feature: Node prerequisites
   promise it keeps, and its timings. A joining node and every member it handshakes with compare
   these before anything else. A node that cannot run beside a member is refused with the
   prerequisite and both values, and only that node stops. The leader judges a joining node against
-  every live voter, so the member it happens to reach first does not decide its fate. A node whose
+  every live voter, so the member it happens to reach first does not decide its fate, and it keeps
+  refusing a newcomer's run for as long as gossip still shows that stopped run. A node whose
   timings stay within the compatibility bound joins, and the cluster reports how its timings drift
   from the leader's.
 
@@ -82,6 +83,29 @@ Feature: Node prerequisites
     Then node "node-3" refused to join because "node 'node-4' cannot run beside this node: raft-heartbeat-interval is 400ms on this node and 166ms on the peer, not within a factor of 2"
     And node "node-1" eventually reports raft voters "node-1,node-2,node-3,node-4"
     And node "node-1" eventually observes a stable leader
+
+  # Topology-specific: a stopped voter can be dropped only while the voters still running hold a
+  # quorum, which three voters give and two do not. node-3 keeps the default 166ms heartbeat, which
+  # can run beside the 300ms voters but not beside node-4's 400ms, so node-4 alone refuses it. The
+  # refused run stops at once but stays in gossip for about half a minute, and once node-4 has left
+  # no live voter would refuse that run any more.
+  Scenario: A newcomer refused because of one voter stays outside the membership after that voter is stopped and dropped
+    Given node-1 starts with raft-heartbeat-interval = 300ms
+    And node-2 starts with raft-heartbeat-interval = 300ms
+    And a 2 node nervix cluster is started
+    And node-4 starts with raft-heartbeat-interval = 400ms
+    And node "node-4" has joined the cluster
+    When node "node-3" attempts to join through node "node-1"
+    Then node "node-3" refused to join because "node 'node-4' cannot run beside this node: raft-heartbeat-interval is 166ms on this node and 400ms on the peer, not within a factor of 2"
+    And the leader of the running nodes is saved as placeholder "leader"
+    When node "node-4" is stopped
+    Then node "{{leader}}" eventually reports status containing "raft member 'node-4' is marked unavailable"
+    When these Plexus commands are executed through the client on node "{{leader}}"
+      """
+      DROP NODE node-4;
+      """
+    Then node "{{leader}}" never admits the refused run of node "node-3" to its raft membership before that run leaves gossip
+    And node "{{leader}}" eventually reports raft voters "node-1,node-2"
 
   Scenario Outline: A node whose heartbeat is within the bound joins and its drift is described on a cluster of <cluster_size>
     Given a <cluster_size> node nervix cluster is started

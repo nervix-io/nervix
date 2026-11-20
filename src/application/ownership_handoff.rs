@@ -138,9 +138,15 @@ struct ClusterOwnershipHandoffPreparations {
     operation_id: String,
     domain: DomainName,
     target_schedule_fingerprint: [u8; 32],
-    attempts: BTreeMap<NodeUnitRef, PlannedOwnershipMove>,
+    attempts: BTreeMap<NodeUnitRef, AttemptedOwnershipHandoffMove>,
     publication_may_be_in_flight: bool,
     cleanup_owner: Option<SessionServiceImpl>,
+}
+
+#[derive(Clone)]
+struct AttemptedOwnershipHandoffMove {
+    moved: PlannedOwnershipMove,
+    input_checkpoint_count: usize,
 }
 
 struct PendingOwnershipHandoffPreparationCleanup {
@@ -148,7 +154,7 @@ struct PendingOwnershipHandoffPreparationCleanup {
     operation_id: String,
     domain: DomainName,
     target_schedule_fingerprint: [u8; 32],
-    attempts: BTreeMap<NodeUnitRef, PlannedOwnershipMove>,
+    attempts: BTreeMap<NodeUnitRef, AttemptedOwnershipHandoffMove>,
     publication_may_be_in_flight: bool,
 }
 
@@ -373,10 +379,13 @@ impl ClusterOwnershipHandoffPreparations {
 
     /// Records the destination before its prepare RPC can persist anything. A missing response is
     /// therefore cleanup work, just like a successful response.
-    fn record_attempt(&mut self, moved: &PlannedOwnershipMove) {
+    fn record_attempt(&mut self, moved: &PlannedOwnershipMove, input_checkpoint_count: usize) {
         self.attempts.insert(
             NodeUnitRef::new(moved.entity.clone(), moved.unit),
-            moved.clone(),
+            AttemptedOwnershipHandoffMove {
+                moved: moved.clone(),
+                input_checkpoint_count,
+            },
         );
     }
 
@@ -1934,8 +1943,9 @@ impl SessionServiceImpl {
     ) {
         preparations.require_discard();
         let attempts = preparations.attempts.values().cloned().collect::<Vec<_>>();
-        for moved in attempts {
+        for attempt in attempts {
             nervix_primitives::task::consume_budget().await;
+            let moved = attempt.moved;
             match self
                 .discard_ownership_handoff_preparation_on_node(
                     &preparations.coordination,
@@ -2013,8 +2023,9 @@ impl SessionServiceImpl {
             let schedule = self.inner.consensus.current_schedule().await;
             if let Some(domain_schedule) = schedule.domain(&cleanup.domain) {
                 let attempts = cleanup.attempts.values().cloned().collect::<Vec<_>>();
-                for moved in attempts {
+                for attempt in attempts {
                     nervix_primitives::task::consume_budget().await;
+                    let moved = attempt.moved;
                     let committed = moved.belongs_to_committed_transition(
                         domain_schedule,
                         &cleanup.operation_id,
@@ -2047,8 +2058,9 @@ impl SessionServiceImpl {
         while !cleanup.attempts.is_empty() {
             nervix_primitives::task::consume_budget().await;
             let attempts = cleanup.attempts.values().cloned().collect::<Vec<_>>();
-            for moved in attempts {
+            for attempt in attempts {
                 nervix_primitives::task::consume_budget().await;
+                let moved = attempt.moved;
                 let result = nervix_primitives::select! {
                     _ = self.inner.drain_support_shutdown.cancelled() => return,
                     result = self.discard_ownership_handoff_preparation_on_node(
@@ -2618,27 +2630,22 @@ impl SessionServiceImpl {
             return Err(error);
         }
         let hold_duration = handoff.started_at.elapsed();
-        for moved in &handoff.moves {
+        for attempt in handoff.preparations.attempts.values() {
+            let moved = &attempt.moved;
             info!(
                 domain = domain.as_str(),
                 kind = moved.entity.kind.as_ref(),
                 name = moved.entity.identifier.as_str(),
+                unit = ?moved.unit,
                 former_owner = %moved.former_owner,
                 destination = %moved.destination,
+                coordination = %handoff.preparations.coordination,
                 hold_duration_millis = hold_duration.as_millis(),
                 promoted_replica = moved.promoted_replica,
+                input_checkpoint_count = attempt.input_checkpoint_count,
+                state_transferred = attempt.input_checkpoint_count != 0,
                 "planned ownership handoff completed"
             );
-            if !moved.promoted_replica {
-                warn!(
-                    domain = domain.as_str(),
-                    kind = moved.entity.kind.as_ref(),
-                    name = moved.entity.identifier.as_str(),
-                    former_owner = %moved.former_owner,
-                    destination = %moved.destination,
-                    "planned ownership handoff moved a runtime node without replicated state"
-                );
-            }
         }
         self.discard_attempted_ownership_handoff_preparations(&mut handoff.preparations)
             .await;
