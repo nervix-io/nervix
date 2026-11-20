@@ -61,15 +61,15 @@ Each public listener enforces its own connection ceiling, independently of place
 | --- | --- | --- |
 | `--listener-max-connections` | 1,024 | Each public TCP listener, including upgraded WebSockets and TLS handshakes |
 | `--listener-header-bytes` | 16 KiB | HTTP/1 request head and chunked trailers |
-| `--listener-buffer-bytes` | 408 KiB | HTTP/1 read buffer; minimum 8 KiB |
+| `--listener-buffer-bytes` | 408 KiB | HTTP/1 read buffer, and the largest body copy made on the connection; minimum 8 KiB |
 | `--listener-header-timeout` | 30 s | Complete HTTP/1 request head |
 | `--listener-tls-timeout` | 10 s | HTTPS, console TLS and gRPC TLS handshake |
 | `--listener-idle-timeout` | 60 s | Accepted public I/O without read or write byte progress |
 | `--listener-accept-retry-delay` | 100 ms | Public and interconnect accepts after a node-local failure |
 | `--listener-http-keepalive` | true | HTTP/1 connection reuse |
 | `--http-body-bytes` | 32 MiB | Complete HTTP endpoint payload, including chunked input |
-| `--http-body-copy-bytes` | 64 KiB | Body assembly bytes between cancellation checks |
-| `--http-body-timeout` | 30 s | Complete HTTP input, including bounded assembly |
+| `--http-body-copy-bytes` | 64 KiB | Body bytes a data worker moves between cancellation checks |
+| `--http-body-timeout` | 30 s | Complete HTTP input, including moving its body to a larger buffer |
 | `--http-refusal-drain-timeout` | 5 s | Transport drain after a completed HTTP input refusal |
 | `--websocket-message-bytes` | 64 MiB | Ingest endpoint WebSocket message |
 | `--websocket-frame-bytes` | 16 MiB | Ingest endpoint WebSocket frame |
@@ -105,13 +105,20 @@ that slot is occupied, further excess connections close without a protocol excha
 available admission capacity remains usable. A TLS or gRPC connection is closed before protocol
 admission.
 
-HTTP endpoint bodies use the independent `intake` executor memory class. It accounts retained
-transport backing buffers and collection metadata conservatively, as well as the copy overlap when
-several frames are concatenated. Input contention refuses immediately with 503; it never holds
-relay decode capacity while waiting for relay work. A single data frame keeps its existing shared
-byte buffer. Multi-frame assembly runs through the data CPU class with cancellation checks between
-bounded copies, and the reservation follows the worker and final body until dispatch ends.
-Size is a payload limit; highly fragmented bodies may exhaust the memory ceiling before that size.
+HTTP endpoint bodies use the independent `intake` executor memory class. It accounts the
+transport read buffers a request holds conservatively, and its body buffer exactly, including both
+allocations while a body moves to a larger buffer. Input contention refuses immediately with 503;
+it never holds relay decode capacity while waiting for relay work.
+
+A body that arrives in a single data frame keeps the shared byte buffer it was read into, with no
+copy. From the second data frame on, the endpoint copies each frame into one body buffer as it
+arrives and releases the frame at once, so the connection keeps reusing its read buffer instead of
+holding one per read: the charge follows the body's size, however the network splits it. The body
+buffer is sized to a declared `Content-Length`; without one it doubles as frames arrive, up to
+`--http-body-bytes`. A copy of at most one read buffer runs on the connection itself. Moving a body
+that already holds more runs through the data CPU class, with a cancellation check every
+`--http-body-copy-bytes`, and its reservation follows the worker until it exits. The final body
+keeps the charge for its own allocation until dispatch ends.
 
 The endpoint's public input outcomes are:
 
@@ -121,11 +128,11 @@ The endpoint's public input outcomes are:
 | 408 | `http_body_timeout` | The complete body did not arrive by its deadline |
 | 431 | HTTP header capacity | Hyper refuses an oversized request head and closes the connection |
 | 503 | `http_input_memory_capacity` | The intake pool cannot back retained input |
-| 503 | `http_input_worker_capacity` | Accounted body assembly cannot be admitted, expires or finishes cancelled |
+| 503 | `http_input_worker_capacity` | Moving a body larger than one read buffer cannot be admitted on a data worker, expires or finishes cancelled |
 | 400 | `http_body_invalid` | Malformed or interrupted HTTP body framing, including oversized chunked trailers |
 
 The HTTP input completion budget distinguishes phases: expiry while receiving bytes returns 408;
-expiry while the server waits for or performs accounted body assembly returns 503. Assembly
+expiry while the server waits for or performs a body move on a data worker returns 503. The move
 retains its reservation until the worker actually exits after cancellation.
 
 Input refusals admit no payload to the graph. Hyper completes the response and closes its write

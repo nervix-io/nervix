@@ -623,6 +623,132 @@ async fn admitted_fragmented_body(world: &mut ScenarioWorld, node: String, host:
         .assured("successful input returns its entire reservation");
 }
 
+/// How the small-pieces fixture declares its body.
+enum PiecedFraming {
+    Chunked,
+    Length,
+}
+impl PiecedFraming {
+    fn parse(framing: &str) -> Self {
+        match framing {
+            "chunked" => Self::Chunked,
+            "length" => Self::Length,
+            other => panic!("unknown body framing {other:?}; expected chunked or length"),
+        }
+    }
+    fn header(&self, payload_len: usize) -> String {
+        match self {
+            Self::Chunked => "Transfer-Encoding: chunked".to_string(),
+            Self::Length => format!("Content-Length: {payload_len}"),
+        }
+    }
+    /// One piece as it goes on the wire.
+    fn piece(&self, data: &[u8]) -> Vec<u8> {
+        match self {
+            Self::Chunked => {
+                let mut chunk = format!("{:x}\r\n", data.len()).into_bytes();
+                chunk.extend_from_slice(data);
+                chunk.extend_from_slice(b"\r\n");
+                chunk
+            }
+            Self::Length => data.to_vec(),
+        }
+    }
+    fn end(&self) -> &'static [u8] {
+        match self {
+            Self::Chunked => b"0\r\n\r\n",
+            Self::Length => b"",
+        }
+    }
+}
+
+#[then(
+    expr = "node {string} admits an HTTP body arriving in {int} byte pieces with {word} framing \
+            for host {string}"
+)]
+async fn admitted_small_pieces(
+    world: &mut ScenarioWorld,
+    node: String,
+    piece: usize,
+    framing: String,
+    host: String,
+) {
+    // Below the scenario's 1 MiB body limit and well inside its 4 MiB pool, and still refused when
+    // every read pins a whole read buffer.
+    const VALUE_BYTES: usize = 500 * 1024;
+    // Long enough that the node reads each piece on its own on an idle host.
+    const PACE: Duration = Duration::from_millis(1);
+    let framing = PiecedFraming::parse(&framing);
+    let host = expand_placeholders(world, &host);
+    let payload = serde_json::to_vec(&serde_json::json!({ "value": "x".repeat(VALUE_BYTES) }))
+        .assured("the bounded JSON fixture encodes");
+    let mut stream = TcpStream::connect(address(world, &node, "http"))
+        .await
+        .assured("the HTTP listener accepts the small-pieces fixture");
+    stream
+        .set_nodelay(true)
+        .assured("the fixture sends every piece as soon as it is written");
+    let head = format!(
+        "POST /ingest HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n{}\r\n\r\n",
+        framing.header(payload.len()),
+    );
+    let mut wire = vec![head.into_bytes()];
+    for data in payload.chunks(piece) {
+        wire.push(framing.piece(data));
+    }
+    wire.push(framing.end().to_vec());
+    for bytes in wire {
+        if bytes.is_empty() {
+            continue;
+        }
+        let sent = timeout(WAIT, stream.write_all(&bytes))
+            .await
+            .assured("each bounded piece is accepted by the transport");
+        if let Err(error) = sent {
+            // A refused body is answered and its transport drained, then closed; the response
+            // read below reports the refusal.
+            assert!(
+                matches!(
+                    error.kind(),
+                    io::ErrorKind::ConnectionReset | io::ErrorKind::BrokenPipe
+                ),
+                "sending a small piece: {error}"
+            );
+            break;
+        }
+        nervix_primitives::time::sleep(PACE).await;
+    }
+    let mut response = Vec::new();
+    let read = timeout(WAIT, stream.read_to_end(&mut response))
+        .await
+        .assured("the node answers the body and closes the connection");
+    if let Err(error) = read {
+        assert!(
+            matches!(
+                error.kind(),
+                io::ErrorKind::ConnectionReset | io::ErrorKind::ConnectionAborted
+            ),
+            "reading the outcome: {error}"
+        );
+    }
+    let response = String::from_utf8_lossy(&response);
+    assert!(
+        response.starts_with("HTTP/1.1 202 "),
+        "a body within the declared bounds is admitted however the network splits it: {response}"
+    );
+    world
+        .cluster()
+        .wait_for_observability_metric_value(
+            &node,
+            "nervix_execution_memory_reserved_bytes",
+            &["class=\"intake\"".to_string()],
+            0,
+            Some(WAIT),
+        )
+        .await
+        .assured("the admitted body returns its entire reservation");
+}
+
 #[then(expr = "node {string} refuses an oversized chunked trailer for host {string}")]
 async fn oversized_trailer(world: &mut ScenarioWorld, node: String, host: String) {
     let host = expand_placeholders(world, &host);
