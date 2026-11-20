@@ -105,9 +105,11 @@ For carried inference tensors, read [Runtime Nodes → Inspect Carried Inference
 before selecting branches, paging STATE entries, interpreting checkpoint progress or deciding
 whether tensor values are visible. Use the shared typed inspection surface in native clients.
 
-For arithmetic on sequences, read [Expression Functions → List Arithmetic](../../../docs/src/filter-map-functions.md#list-arithmetic)
-before choosing a two-list or scalar-broadcast function. Check its exact numeric type, fixed-shape,
-null and message-error rules; scalar operators do not select list arithmetic.
+For sequence preparation, follow the
+[Generators walkthrough](../../../docs/src/quickstart-generators.md#shape-a-sequence-for-a-matrix).
+Choose a named list function with the right operands, including the two-list or scalar form
+of arithmetic. Check shape, type, nulls and errors in
+[Expression Functions](../../../docs/src/filter-map-functions.md#array-and-vector-functions).
 
 For interactive authoring, the [CLI](https://docs.nervix.io/client-tools-cli.html) and
 [web console](https://docs.nervix.io/client-tools-web-console.html) use the same server completion
@@ -590,9 +592,9 @@ literal HTTP polling headers, at model creation and when a later cap is lowered.
     `BRANCHED BY ... SET`, which have no error route;
   - `IN` sets hold non-null constants of the operand's exact type, and string positions count from
     1 while `nth`, `slice`, and JSON path indexes count from 0;
-  - a list changes its element type or container only through `AS` or `TRY_CAST` to the full list
-    type, nested as deep as the operand (`input.readings AS ARRAY<F32, 64>`); a `VEC` that does not
-    hold the `ARRAY`'s length fails its message, and a list never converts to a scalar or `STRING`;
+  - write the full target list type in `AS` or `TRY_CAST` and check its nesting depth against the
+    operand. Use [Lists](../../../docs/src/filter-map-functions.md#lists) for accepted conversions
+    and failure handling;
   - before shaping an inferencer input or reading a nested list, read `Expression Functions` →
     `Array And Vector Functions` and `Processors` → `Inferencer`; check the fixed shape and literal
     dimensions rather than treating a change of axes as an element-type conversion;
@@ -609,9 +611,10 @@ literal HTTP polling headers, at model creation and when a later cap is lowered.
   list functions an aggregate's argument may call. Compute window output from aggregates
   and constants, and prefer the dedicated aggregates (`AVG`, `COUNT_IF`, `ARG_MIN`, `ARG_MAX`, the
   `*_POP` and `*_SAMP` statistics, `CORR`) over hand-built formulas. Before using `COLLECT_VEC` or
-  `COLLECT_ARRAY`, check the reference's required-argument, retention and count-width rules;
-  follow the Generators quickstart for sampled sequences and visible cadence gaps. Use the
-  documented list functions to consume the result. For `APPROX_COUNT_DISTINCT`,
+  `COLLECT_ARRAY`, check that the collected argument is required. Use `COLLECT_ARRAY` only with
+  a message-count-only `WIDTH`. Check retention and the exact result type against the
+  [collection contract](../../../docs/src/filter-map-functions.md#window-aggregates).
+  For `APPROX_COUNT_DISTINCT`,
   `APPROX_QUANTILE`, and `APPROX_TOP_K`, read `Approximate Sketches`: the window needs
   `MAX STATE SIZE` after duration `WIDTH` and `STEP`, a branched window a branch with
   `MAX INSTANCES <n> EVICT LRU`, and the precision or capacity sets both accuracy and memory.

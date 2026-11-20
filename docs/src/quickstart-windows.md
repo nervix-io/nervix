@@ -48,23 +48,12 @@ CREATE WINDOW PROCESSOR customer_order_window
 COMMIT;
 ```
 
-- The aggregate functions are `COUNT`, `COUNT_IF`, `SUM`, `AVG`, `MIN`, `MAX`, `FIRST`, `LAST`, `COLLECT_VEC`, `COLLECT_ARRAY`,
-  `ARG_MIN`, `ARG_MAX`, `BOOL_AND`, `BOOL_OR`, `VAR_POP`, `VAR_SAMP`, `STDDEV_POP`, `STDDEV_SAMP`,
-  `COVAR_POP`, `COVAR_SAMP`, `CORR`, and `PERCENTILE_LINEAR_HISTOGRAM`, and the approximate
-  `APPROX_COUNT_DISTINCT`, `APPROX_QUANTILE`, and `APPROX_TOP_K`. Aggregate calls also participate
-  in larger scalar expressions. See
-  [Window Aggregates](filter-map-functions.md#window-aggregates) for their types, null handling,
-  numerical behavior, and the bounded state the approximate ones need.
-- A null argument contributes nothing to an aggregate. An aggregate that can be null, such as
-  `VAR_SAMP` or any aggregate over an `OPTIONAL` field, needs an `OPTIONAL` output field or a
-  `COALESCE`.
-- `COLLECT_VEC` returns the retained amounts as one list in `FIRST`-to-`LAST` order. It requires a
-  required argument and either a message `WIDTH` or `MAX STATE SIZE`. Choose a null default with
-  `coalesce` before collecting an optional field.
-- For a fixed-length consumer, choose `WIDTH n MESSAGES` without a duration and assign
-  `COLLECT_ARRAY(input.amount)` to an `ARRAY<I64, n>` field. See
-  [collecting generator samples](quickstart-generators.md#collect-samples-for-a-fixed-tensor)
-  for a complete fixed-tensor pipeline and its sample timestamps.
+- Each aggregate reads the branch's retained rows. A result that can be null, such as a
+  variance over a one-row sample, needs an `OPTIONAL` output field or a value chosen with
+  `coalesce`. [Window Aggregates](filter-map-functions.md#window-aggregates).
+- `COLLECT_VEC` puts the retained amounts in one list field. If a model needs a fixed length,
+  use a count-only window and `COLLECT_ARRAY`.
+  [Collect samples for a fixed tensor](quickstart-generators.md#collect-samples-for-a-fixed-tensor).
 - `input.<field>` is valid **only** inside aggregate arguments; a bare `customer = input.customer`
   is rejected. Aggregates cannot be nested.
 - `WIDTH` equal to `STEP` makes the windows tumbling (no overlap); a smaller `STEP` slides them.

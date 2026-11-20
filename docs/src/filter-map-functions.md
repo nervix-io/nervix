@@ -2076,9 +2076,10 @@ independently of the assigned field: a field of another length is an exact-type 
 or combined bound is refused when the processor is applied; use `COLLECT_VEC` for those windows.
 With `WIDTH 64 MESSAGES`, collecting `[input.cpu, input.mem]` yields `ARRAY<F32, 64, 2>` when both
 inputs are required `F32` values. Collecting a vector adds a fixed outer level and retains the
-vector inside it. The width and every necessarily present nested fixed dimension must fit Arrow's
-signed 32-bit field lengths. Actual output bytes still pass the node's decoded and encoded relay
-limits; a byte or admission refusal follows the existing window emission-failure policy.
+vector inside it. For each consecutive fixed level, the product of the widths through that level
+must fit Arrow's signed 32-bit field lengths. Both aggregates check actual collection sizes at
+emission. A size or admission refusal follows the window emission-failure policy.
+[Sequence bounds and emission](vm-functions.md#retained-sequences).
 
 The [approximate sketches](#approximate-sketches) describe the last three table entries.
 
@@ -2227,6 +2228,8 @@ local execution admission and caches follow the node's
 | `DATETIME` | `1677-09-21T00:12:43.145224192Z` through `2262-04-11T23:47:16.854775807Z`, in nanoseconds | Datetime functions and conversions, with `overflow` |
 | Datetime format | 256 bytes per value, counting every directive at its longest | Rejected when the statement is applied |
 | `date_bin` width | 9,223,372,036,854,775,807 nanoseconds, about 292 years | Rejected when the statement is applied |
+| Fixed list width | 1 through 2,147,483,647 elements per fixed level | Declared list types and the fixed widths computed by list expressions and `COLLECT_ARRAY` |
+| Collected list offsets | At most 2,147,483,647 retained rows, cumulative bytes per text level or children per variable-list level | `COLLECT_VEC` and `COLLECT_ARRAY` at emission |
 | Window sketches | Precision 4–16; capacity 32–4096; `k` at most the capacity | Rejected when the processor is applied |
 | Window sketch state | `MAX STATE SIZE` per branch, and at most `MAX INSTANCES` branches | Rows refused at admission; see [Approximate Sketches](#approximate-sketches) |
 
