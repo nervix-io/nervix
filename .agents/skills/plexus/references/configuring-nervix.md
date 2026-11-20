@@ -61,6 +61,7 @@ Keep detailed grammar in those chapters when reviewing a configuration.
 | Session subscriptions and domain clock attachment | `Sessions` |
 | Configuration backups, their archives, bounded waits and exact-reference recovery, `DESCRIBE BACKUP`, and `RESTORE` | `Backup And Restore`; cut timeout phases and their elapsed measurements: `Backup And Restore Architecture` → `Observability` |
 | Metrics and runtime inspection | `Metrics And Observability` |
+| Transport attempts, endpoint outcomes, acknowledgements and retries in `/metrics` and `DESCRIBE` | [Connector Interaction Metrics](../../../../docs/src/metrics-and-observability.md#connector-interaction-metrics) |
 | Domain entity labels, bounded metadata, staged inspection and execution continuity | `Entity Labels` |
 | Emitter record outcomes, retries, acquisition, pool waits, finish outcomes and current failure | `Metrics And Observability` → `Emitter outcomes and lifecycle` |
 | Persistent-command history size, retry-fence age and admission refusal metrics | `Metrics And Observability` → `Command Execution History` |
@@ -668,9 +669,9 @@ current connection, retry and deadline limits.
   `write_header` invocation.
 - A Redis PUBSUB emitter counts successful publications with zero receivers as
   `published_without_subscribers`; they still satisfy its server-acceptance delivery boundary.
-  Read `Metrics And Observability` → `Connector-declared events` for cumulative totals and
-  inspection-sampled wall rates, and the generated connector capability reference for each
-  entity's declared events.
+  Read [Connector-declared events](../../../../docs/src/metrics-and-observability.md#connector-declared-events)
+  for cumulative totals and inspection-sampled wall rates, and the generated connector capability
+  reference for each entity's declared events.
 - Every custom WASM guest is built for the current ABI, accepts
   `nervix_process_batch(ptr, size)`, validates that exact range against its reusable buffer, and
   declares positive `MAX FUEL` then `MAX MEMORY` limits immediately after `FILE`. Its

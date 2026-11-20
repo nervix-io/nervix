@@ -5,11 +5,9 @@ Nervix exposes runtime graph metrics in two forms:
 - raw Prometheus metrics at the observability server's `/metrics` endpoint
 - owner-routed summarized metrics in `DESCRIBE` command output
 
-The two surfaces use the same semantic labels where they overlap, but they use separate storage.
-Prometheus receives raw counters and histogram buckets through a Prometheus registry for external
-aggregation. `DESCRIBE` reads Nervix runtime state and includes derived values such as rates and
-recent percentiles. Relay descriptions are routed to the scheduled relay owner; nonowners do not
-maintain relay metrics.
+The two surfaces use the same semantic labels where they overlap. The Prometheus registry exports
+raw values for external aggregation. `DESCRIBE` reads retained runtime observations, including
+derived rates and recent percentiles. The scheduled relay owner maintains and reports relay metrics.
 
 [Errors And Diagnostics](./errors-and-diagnostics.md) defines the error information that may be
 reported and its sensitivity and log-level rules. This chapter defines metric surfaces and labels.
@@ -20,7 +18,7 @@ The observability listener exposes:
 
 - `/livez`: process liveness
 - `/readyz`: readiness once a leader is known
-- `/metrics`: Prometheus text output for graph, command history, interconnection, and allocator metrics
+- `/metrics`: Prometheus text output for graph, connector, command history, interconnection and allocator metrics
 
 Use the node's observability address, not the data-plane HTTP listener:
 
@@ -94,7 +92,8 @@ metrics:
 
 ## Raw Metrics
 
-Nervix records these raw metric families:
+The [Connector Interaction Metrics](#connector-interaction-metrics) section lists the raw
+families for ingestors and emitters. Nervix also records these raw metric families:
 
 - `nervix_messages_total`: total messages received or sent
 - `nervix_batches_total`: total batches received or sent
@@ -104,10 +103,6 @@ Nervix records these raw metric families:
   `8192`, `16384`, `32768`, and `65536`, followed by `+Inf`. The rolling HDR histograms used by
   `DESCRIBE` track batch sizes through 65,536 messages.
 - `nervix_delivery_latency_seconds`: histogram of delivery latency between graph nodes
-- `nervix_emitter_publish_attempts_total`: completed host publish and commit attempts, split by
-  `operation` and `outcome`; see [Connector Interactions](#connector-interactions)
-- `nervix_emitter_publish_duration_seconds`: elapsed wall seconds per host publish or commit
-  attempt, split by `operation`
 - `nervix_relay_buffer_len`: histogram of runtime relay buffer occupancy in queued batches
 - `nervix_branch_instances`: current concrete branch keys with at least one runtime instance on the
   physical node
@@ -125,70 +120,6 @@ Nervix records these raw metric families:
   tensor generation
 - `nervix_inferencer_reset_branches_total`: branches initialized from their declared `INITIAL`,
   including their first start
-- `nervix_ingestor_quiesce_buffered_records`: raw payloads currently retained in an ingestor's
-  per-instance quiesce buffers, including a payload that is draining until its messages enter
-  their ingest group
-- `nervix_ingestor_quiesce_buffered_bytes`: raw payload bytes currently retained in those buffers
-- `nervix_ingestor_quiesce_dropped_total`: payloads deliberately discarded by `DROP`, buffer
-  overflow, memory-pressure zero-capacity behavior, or an interrupting termination
-- `nervix_ingestor_quiesce_rejected_total`: endpoint requests or connections refused while an
-  ingestor cannot accept them, counted once per request for each ingestor whose quiesce refused it
-- `nervix_ingestor_endpoint_requests_total`: requests and WebSocket data frames an `HTTP ENDPOINT`
-  or `WEBSOCKETS ENDPOINT` ingestor answered, counted once per request for each ingestor its route
-  was bound to, with bounded `outcome` values `accepted`, `busy`, `refused`, `not_admitted`,
-  `decode_rejected` and `processing_failed`; see
-  [Ingestor Source Interactions](#ingestor-source-interactions)
-- `nervix_ingestor_reads_total`: completed broker reads and scheduled polls, with bounded
-  `outcome` values `delivered`, `empty`, `failed` and `interrupted`
-- `nervix_ingestor_read_payloads_total` and `nervix_ingestor_read_bytes_total`: raw payloads and
-  their bytes handed over by broker reads or paced polls, before decoding, filtering and timestamp
-  admission. Transport redelivery counts again; replay of an internal quiesce buffer does not.
-- `nervix_ingestor_poll_duration_seconds`: elapsed wall seconds around paced polls, including
-  failed or interrupted polls. Broker reads have no duration observation because their wait is idle
-  time, rather than the cost of a scheduled operation.
-- `nervix_ingestor_ack_outcomes_total`: acknowledgement waits an ingestor settled, by `outcome`:
-  `acknowledged`, `failed` for a tree the graph failed, `timed_out` for an `ACK TIMEOUT` that
-  expired, and `shutdown` for a wait its stop ended; see
-  [Ingestor Acknowledgement And Lifecycle](#ingestor-acknowledgement-and-lifecycle)
-- `nervix_ingestor_transport_acknowledgements_total`: acknowledgements and rejections of read
-  positions the ingestor's transport answered, by `operation` (`acknowledge` or `reject`) and
-  `outcome` (`succeeded` or `failed`)
-- `nervix_ingestor_transport_acknowledgement_duration_seconds`: elapsed wall seconds of each of
-  those transport operations, by `operation`, such as a Kafka commit or an SQS deletion
-- `nervix_ingestor_resumes_total`: completed resumes of an ingestor's connector, by `outcome`:
-  `ready`, `waiting` for an external assignment, or `failed`
-- `nervix_ingestor_suspends_total`: suspensions of an ingestor's connector, by `cause`: `quiesce`,
-  `read_failure` or `rejection`
-- `nervix_ingestor_unconfirmed_stop_positions_total`: positions an ingestor read but stopped before
-  its transport confirmed them, which its transport presents again
-- `nervix_ingestor_transient_failure`: `1` while the ingestor's current task has a published
-  transient failure, `0` otherwise and once the task ends
-- `nervix_ingestor_unfolding_refused_total`: raw payloads refused because extension-worker
-  admission had no place, including acknowledged intake and endpoint requests. A retained payload
-  waiting for a place is not a refusal. See [When The Extension Workers Are Full](./ingestors.md#when-the-extension-workers-are-full).
-- `nervix_ingestor_transport_redeliveries_total`: pending acknowledgements and rejections an
-  ingestor discarded after its RabbitMQ, SQS or MQTT ingestor reconnected. The broker redelivers what
-  the lost connection did not acknowledge, so each counted position is ingested again
-- `nervix_ingestor_decode_rejections_total`: payloads an ingestor consumed because its codec
-  refused them, each reported as a decode rejection under its `ON GENERAL ERROR` policy; see
-  [When The Codec Refuses A Payload](./ingestors.md#when-the-codec-refuses-a-payload)
-- `nervix_ingestor_oversized_payloads_total`: payloads an ingestor dropped because they
-  exceed their client's message size bound, such as a Syslog UDP datagram larger than
-  `max_message_size`; see [Oversized payloads](./connector-contract.md#oversized-payloads)
-- `nervix_ingestor_header_values_dropped_total`: invalid UTF-8 transport header values an
-  ingestor discarded while retaining their message and all valid header values: the response
-  headers of an `HTTP REQUEST` poll, or the request headers an `HTTP ENDPOINT` request or a
-  `WEBSOCKETS ENDPOINT` upgrade carried, such as a value in Latin-1. An endpoint counts such a value
-  once for each ingestor its request or upgrade was routed to, on the node that received it; see
-  [HTTP ENDPOINT And WEBSOCKETS ENDPOINT](./ingestors.md#http-endpoint-and-websockets-endpoint)
-- `nervix_ingestor_read_ahead_dropped_payloads_total`: QoS 0 publishes an ACK-mode MQTT ingestor
-  dropped because its separate 64-outcome read-ahead quota was full. The driver counts each drop
-  immediately, including during a downstream acknowledgement wait; see
-  [MQTT ingestor connections](./connector-contract.md#mqtt-ingestor-connections)
-- `nervix_ingestor_rate_limit_held_total`, `nervix_ingestor_rate_limit_hold_seconds_total`,
-  `nervix_ingestor_rate_limit_rejected_total` and
-  `nervix_ingestor_rate_limit_program_rejections_total`: what an ingestor unit's `RATE LIMIT`
-  allowance held back and rejected; see [Ingestor Rate Limits](#ingestor-rate-limits)
 - `nervix_session_subscriptions`: open session subscriptions the node delivers from a relay. The
   node advertises interest in the relay to the cluster exactly while this is above zero, and the
   series stays at `0` once the relay's last subscription on the node closes
@@ -220,47 +151,22 @@ Nervix records these raw metric families:
 - `nervix_jemalloc_resident_bytes`: resident data-page bytes mapped by the allocator
 - `nervix_jemalloc_retained_bytes`: retained virtual-memory mapping bytes
 
-Histograms follow Prometheus conventions and include `_bucket`, `_sum`, and `_count` series. Current bucket boundaries are:
+Histograms follow Prometheus conventions and include `_bucket`, `_sum`, and `_count` series.
+Delivery latency and relay buffer occupancy use these bucket boundaries:
 
-- messages per batch: `1`, `2`, `5`, `10`, `50`, `100`, `500`, `1000`, `+Inf`
 - delivery latency seconds: `0.001`, `0.005`, `0.01`, `0.05`, `0.1`, `0.5`, `1`, `5`, `30`, `+Inf`
 - relay buffer length: `1`, `2`, `4`, `8`, `16`, `32`, `64`, `128`, `256`, `512`, `1024`, `2048`, `+Inf`
 
 Prometheus receives raw values only. The `/metrics` endpoint is encoded by the Prometheus client registry, not by Nervix internal summary state. Prometheus should compute external queries, alerts, and dashboards with normal PromQL aggregation.
-
-The ingestor families `nervix_ingestor_unfolding_refused_total`,
-`nervix_ingestor_transport_redeliveries_total`, `nervix_ingestor_decode_rejections_total`,
-`nervix_ingestor_oversized_payloads_total`, `nervix_ingestor_header_values_dropped_total`
-and `nervix_ingestor_read_ahead_dropped_payloads_total`
-use `domain`, `ingestor`, `physical_node_id`, `instance`, `connector` and `entity` labels.
-The same label set applies to the four quiesce families, the read/poll families, the endpoint
-request family and the acknowledgement and lifecycle families. Reads, endpoint requests,
-acknowledgement outcomes and resumes add `outcome`, suspensions add `cause`, transport
-acknowledgements add `operation` and `outcome`, and their duration adds `operation`. Connector and
-entity values come from the vocabulary, such as `KAFKA` and `TOPIC`. Buffer families and the
-transient-failure family are gauges; dropped, rejected, refused, redelivered, decode-rejection,
-oversized, invalid-header, endpoint request, acknowledgement, resume, suspension and
-unconfirmed-stop families are monotonic counters. They are process-local: quiesce buffers do not
-migrate during termination or failover.
-
-Quiesce, refusal, redelivery, decode-rejection, oversized and invalid-header children are registered when the
-ingestor starts, and `DESCRIBE INGESTOR` registers the redelivery, decode-rejection and oversized
-children at zero on the node that runs the ingestor. An `HTTP ENDPOINT` or `WEBSOCKETS ENDPOINT`
-ingestor registers its six endpoint request children at zero when it starts on a node; no other
-ingestor has them.
-The MQTT read-ahead counter is registered at zero when that ingestor starts. It is exported through
-Prometheus and remains on that physical node across connection restarts; `DESCRIBE INGESTOR` does
-not project this counter. The invalid-header counter is exported through Prometheus only;
-`DESCRIBE INGESTOR` does not project it.
-Client-ingestor outcome children are registered when its endpoint starts, and subscription loss
-counters when delivery starts. These bounded series may therefore appear at zero before their
-first observation. Their labels and counting contracts are unchanged.
 
 The two session-subscription families use `domain` and `relay` labels and describe the node that
 exports them: the subscriptions its sessions hold and the rows those sessions lost. A client is told
 of its own losses directly, as described in [Sessions](sessions.md). The rest of a node's session
 traffic, and the authentication attempts its client listeners judge, are described under
 [Client Traffic](#client-traffic).
+
+Client-ingestor outcome children are registered when their endpoint starts, and subscription
+loss counters when delivery starts. These series can appear at zero before their first observation.
 
 ## Client Traffic
 
@@ -604,17 +510,58 @@ family of their own: their transfers appear in the interconnection series and th
 the `bulk` and `restore_metadata` memory classes. [Backup And
 Restore](backup-and-restore.md#restore-checkpoint-storage-quota-and-metrics) defines each series.
 
-## Connector Interactions
+<a id="connector-interactions"></a>
+
+## Connector Interaction Metrics
+
+An interaction measures work at the host's connector boundary. For example, one emitter publish
+attempt may make several driver calls and settle many records. It contributes one attempt outcome.
+Graph `messages_total sent` measures the records delivered at the entity's declared delivery
+boundary. Graph edges keep the `relay` label in `/metrics` and render it as `relay=<name>` in the
+`incoming_edges` and `outgoing_edges` sections of `DESCRIBE`.
+
+Every interaction family carries six identity labels:
+
+| Label | Meaning |
+| --- | --- |
+| `domain` | Domain that owns the ingestor or emitter. |
+| `ingestor` or `emitter` | Logical entity name for that side of the connector. |
+| `physical_node_id` | Node that recorded the observation. |
+| `instance` | Global ingestor or emitter instance index, or `-` for a `Single` unit. |
+| `connector` | Vocabulary connector name, such as `KAFKA`. |
+| `entity` | Entity name from its declaration, such as `TOPIC`. |
+
+Family-specific labels in the tables below use closed sets. A partitioned graph still reports
+these observations per connector instance. The partition labels on graph metrics describe those
+graph units. Branch keys, external locators, payloads and error text stay out of metric labels.
+
+The host resolves the bounded metric children for each running unit at startup. The applicable
+children appear at zero before their first observation. Counters are process-local and the same
+series can accumulate across task or connection restarts. Retiring an ingestor unit withdraws its
+read, acknowledgement, request and intake series for that assignment. Declared event histories
+and emitter counters are retained for the lifetime of the process. A new node or process starts
+its own series at zero. Gauges describe current work or current failure, and task teardown clears
+that task's contribution. Durable branch-aggregated graph metrics have their own [checkpoint
+contract](#ingestor-unit-metrics-and-recovery).
+
+`DESCRIBE INGESTOR` puts connector observations under `source:`. `DESCRIBE EMITTER` puts them
+under `destination:`. The scheduled owners supply both sections, with the receiving node answering
+for its own instance of an endpoint ingestor. Where projected with a selector, a line starts with
+the full family name and its Prometheus labels. Counts use `total=<n>` and gauges use `value=<n>`.
+Publish attempts, reads, endpoint requests and declared events also include the lifetime wall rate
+and the one- and fifteen-minute wall EMA rates. Their domain-rate fields are `-` because these
+observations have no domain timestamp. Duration histograms print `count` and `sum_seconds`.
+The emitter preparation summaries and the ingestor's scalar lines are described below.
+
+Publish, commit, poll and transport-settlement durations share finite buckets of `0.001`, `0.005`,
+`0.01`, `0.05`, `0.1`, `0.5`, `1`, `5` and `30` seconds, followed by `+Inf`.
 
 ### Connector-declared events
 
 An entity's generated [capability reference](connector-capabilities.md) names its closed set of
-connector events. The host registers one counter at zero for each declared event when its task
-starts. Emitters export `nervix_emitter_connector_events_total` with `domain`, `emitter`,
-`physical_node_id`, `connector`, `entity` and `event`; ingestors export
-`nervix_ingestor_connector_events_total` with `ingestor` instead of `emitter` and their existing
-`instance` label. An entity with no declared events creates no event children. Event labels never
-contain payloads, external names or driver error text.
+connector events. At task start the host registers one zero-valued counter per declared event
+under `nervix_emitter_connector_events_total` or `nervix_ingestor_connector_events_total`. Both
+families carry the six identity labels and the declared `event` value.
 
 The connector resolves a typed counter from its host during construction and retains it while
 recording. Event counters appear with their wall rates under `destination:` or `source:` in
@@ -635,14 +582,9 @@ prove subscriber processing. An unanswered or failed publish does not count this
 
 ### Publish attempts
 
-Emitter destination observations describe the host's interaction with a connector, separately
-from delivered graph traffic. Both interaction families carry `domain`, `emitter`,
-`physical_node_id`, `instance`, `connector` and `entity`. `instance` is the index of an emitter
-[instance](emitters.md#emitter-instances), or `-` for an emitter that runs one instance, so every
-instance of one emitter on one node keeps its own children. Connector names use the vocabulary's
-display form, such as `REDIS`; entities use their declared name, such as `PUBSUB`. `operation` is
-`publish` or `commit`. Each starting emitter registers every operation/outcome child and histogram at zero,
-even if that connector has no separate commit operation.
+Both publish families add `operation="publish"` or `operation="commit"`. Each starting emitter
+registers every operation and outcome counter and both histograms at zero. The commit children for
+an entity without a separate commit stay at zero.
 
 `nervix_emitter_publish_attempts_total` records one outcome per nonempty host publish attempt or
 due staged commit, including each retry. It never counts one attempt per record. Its bounded
@@ -656,26 +598,14 @@ due staged commit, including each retry. It never counts one attempt per record.
 - `violation`: a terminal preparation or connector-contract failure, including an unknown or
   repeated record answer
 
-This observation does not change retry, acknowledgement or error policy. In particular, delivered
-records still increase the existing `messages_total sent` only once. A connector can make several
-external calls inside one host attempt; these families do not count those calls separately.
+For a completed attempt that settled record rejections, use `nervix_emitter_records_rejected_total`
+to see how many records reached each rejection code.
 
 `nervix_emitter_publish_duration_seconds` observes elapsed wall time once per started attempt,
-including failed and cancelled attempts. Its finite bucket boundaries are `0.001`, `0.005`,
-`0.01`, `0.05`, `0.1`, `0.5`, `1`, `5` and `30` seconds, followed by `+Inf`. Empty flushes and
-commits that are not due record neither a counter nor a duration.
+including failed and cancelled attempts. An empty flush or a commit that is still waiting for its
+cadence leaves both families at their prior values.
 
-Interaction observations are process-local and are retained for that process's lifetime. A
-restarted task with the same labels continues its totals; another connector entity or physical
-node has separate children. A new process starts at zero. These observations are neither
-replicated nor restored from snapshots, and removing a task does not withdraw its history.
-
-`DESCRIBE EMITTER` renders a `destination:` section after status and before the graph-edge
-`metrics:` section. The existing owner route also supplies this section when another node receives
-the command. Each attempt counter line includes its full family and label selector, `total`, the wall
-average rate and the one-minute and fifteen-minute wall EMA rates. Domain rates are `-`, because
-an attempt has no domain timestamp. Each duration line includes its full selector, `count` and
-`sum_seconds`. For example:
+These two lines show two successful publish attempts on the node running `notifications_out`.
 
 ```text
 destination:
@@ -706,10 +636,8 @@ The two wait counters preserve fractional seconds.
 | `nervix_emitter_unsent_records_total` | None | Exact record counts reported by `EmitterFinishError::Unsent`, summed across finishes. |
 | `nervix_emitter_transient_failure` | None | `1` while the current task has a published host or connector failure, otherwise `0`. Ending the task resets the observation to `0`; an ending predecessor cannot clear its replacement. |
 
-These counters describe host attempts and source membership. A connector can perform several
-external calls during one attempt. Retrying a record with an uncertain result can duplicate its
-external delivery; an already resolved source row contributes no further retry count. The
-existing sent-traffic counter continues to count each delivered source row once.
+These counters describe host attempts and source membership. Retrying an unresolved record can
+duplicate its external delivery. Once its outcome is resolved, its retry count stops increasing.
 A forced flush or live drain inherits an already pending retry's classification on its first
 attempt, without scheduling another delay.
 
@@ -724,9 +652,9 @@ unavailability from historical failures and recovery attempts.
 The [Emitter Batching](./emitter-batching.md#inspection-and-tuning) architecture chapter connects
 these observations to packing boundaries, retry ownership and scoped performance measurements.
 
-Payload observations use the same six identity labels as destination attempts. They have no
-branch-key, record, request or error-text label. Every child exists at zero when its emitter starts.
-`DESCRIBE EMITTER` includes the same totals in its owner-routed `destination:` section.
+Payload observations use the six identity labels. The `destination:` section groups their totals
+in `payloads:`, `payload_splits:`, `messages_per_payload:` and `work:` lines with the selector for
+the emitting unit.
 
 | Family | Unit and meaning |
 | --- | --- |
@@ -735,7 +663,7 @@ branch-key, record, request or error-text label. Every child exists at zero when
 | `nervix_emitter_payload_encoded_bytes_total` | Exact encoded bytes at the payload's documented measurement boundary. |
 | `nervix_emitter_payload_size_bound_bytes_total` | The corresponding exact size bounds; these equal measured encoded bytes because Nervix measures rather than estimates. |
 | `nervix_emitter_prepared_bytes_total` | Prepared content bytes, including connector preparation such as a Sentry envelope, counted once per preparation. |
-| `nervix_emitter_messages_per_payload` | Histogram of source records per prepared payload. |
+| `nervix_emitter_messages_per_payload` | Histogram of source records per prepared payload. It uses the published messages-per-batch buckets above. |
 | `nervix_emitter_payload_splits_total` | Candidate halvings caused by an encoded-size limit, excluding count and metadata boundaries. |
 | `nervix_emitter_work_messages` | Current source rows by `state="buffered"`, `prepared`, `in_flight` or `staged`. |
 | `nervix_emitter_prepared_payloads` | Logical payloads whose bytes and membership the host retains for an answer. |
@@ -778,13 +706,168 @@ active write; a native row write can have in-flight rows without host-retained p
 withdraws its gauge contribution, including cancellation and terminal teardown, while counters keep
 their process-local history across task restarts.
 
+### Ingestor Source Interactions
+
+| Family | Kind and additional labels | Meaning |
+| --- | --- | --- |
+| `nervix_ingestor_reads_total` | Counter, `outcome="delivered\|empty\|failed\|interrupted"` | Completed broker reads and scheduled polls by outcome. |
+| `nervix_ingestor_read_payloads_total` | Counter | Raw payloads returned by reads and polls before decoding and admission. |
+| `nervix_ingestor_read_bytes_total` | Counter | Bytes of those raw payloads. |
+| `nervix_ingestor_poll_duration_seconds` | Histogram | Elapsed wall seconds of scheduled polls, including failed and interrupted polls. |
+| `nervix_ingestor_endpoint_requests_total` | Counter, `outcome` as listed below | Requests and data frames answered by each bound endpoint ingestor. |
+| `nervix_ingestor_endpoint_pause_waiting_requests` | Gauge | Requests whose senders are waiting for the body to enter the graph. |
+| `nervix_ingestor_endpoint_pause_waiting_bytes` | Gauge | Bytes in those waiting request bodies. |
+| `nervix_ingestor_endpoint_pause_refusals_total` | Counter, `cause="buffer_full\|deadline\|intake_ended"` | Requests refused by the pause buffer, grouped by the reason they could not proceed. |
+
+A returned nonempty message batch is `delivered`; a successful answer carrying no payload, including
+an oversized-only answer, a resume request or end of input, is `empty`. A read returning an error is
+`failed`. A broker's interrupted answer is `interrupted` even when it returns a gathered prefix;
+that prefix still contributes its raw payloads and bytes and follows the existing intake path.
+A paced poll cancelled by a quiesce change or stop is `interrupted`. Partial per-record poll
+failures retain their existing error reporting; the poll's payload presence determines its
+successful read outcome. A driver error that prevents a poll is `failed`.
+
+Raw payload and byte totals measure the batches a broker read or paced poll returned, before
+decoding, filtering, timestamp admission or waiting for unfolding capacity. Replaying a retained
+buffer does not increment them; a transport redelivery is a new read and does. Request-scoped
+endpoints and client producers perform no transport read or scheduled poll, so their read counters
+stay zero. Their intake and refusal counters keep their own meaning. Only paced polls contribute
+duration samples: a broker read waits for arrivals, so its elapsed time is not measured.
+
+An `HTTP ENDPOINT` or `WEBSOCKETS ENDPOINT` unit follows its read/poll lines with one
+`nervix_ingestor_endpoint_requests_total` line for each outcome, with its total and wall rates.
+These ingestors execute on every live node, so `DESCRIBE INGESTOR` reports the counts of the node
+that answers it, as it does their quiesce counters, and each node's `/metrics` reports its own.
+Every request, and every WebSocket data frame, is counted once for each ingestor bound to its
+route, under the outcome that ingestor reached:
+
+| `outcome` | The ingestor |
+| --- | --- |
+| `accepted` | took it in: in `MODE NO ACK` it dispatched it into its graph or its endpoint `BUFFER` retained it (HTTP 202); in `MODE ACK` its acknowledgement root completed (HTTP 200, `completed`). |
+| `busy` | had no free slot in its `MODE ACK MAX` response window or could not fit an acknowledged request in the pause buffer (HTTP 503, `not_admitted` with `busy`). |
+| `refused` | refused new intake under quiesce, overflowed or ended a waiting `MODE NO ACK` request (HTTP 503), or in `MODE ACK` one of its routes refused the decoded input (HTTP 400). |
+| `not_admitted` | had no extension-worker capacity to unfold the request or removed a waiting acknowledged body when its deadline or intake ended (HTTP 503). Extension-worker refusals also count in `nervix_ingestor_unfolding_refused_total`. |
+| `decode_rejected` | consumed it as a decode rejection because its codec refused the payload, which `nervix_ingestor_decode_rejections_total` counts too (HTTP 202 in `MODE NO ACK`, 400 in `MODE ACK`). |
+| `processing_failed` | admitted it without completing it: its `MODE NO ACK` dispatch into the graph failed (HTTP 202), or its `MODE ACK` acknowledgement root failed, its `ACK TIMEOUT` expired or its intake stopped while the response was held (HTTP 503). |
+
+The pause metrics appear under `source:` in `DESCRIBE INGESTOR` and in the node's `/metrics`.
+The waiting gauges count requests still waiting for admission. The quiesce buffer gauges also
+count bodies already answered with `RESPOND IMMEDIATE`. Each `cause` has its own refusal counter.
+
+A route refuses a request before reading its body, or a WebSocket upgrade, only when none of its
+ingestors can take it, and counts that refusal once for each of them there. Otherwise every
+ingestor counts the request when it is dispatched to it, so an ingestor whose quiesce refuses the
+requests of a route it shares with an available ingestor counts each of them once, in this family
+and in `nervix_ingestor_quiesce_rejected_total` alike. A request the listener answers before it
+consults any ingestor, such as one for an unknown route, with a method other than `POST`, whose body
+could not be read or that arrives while the node shuts down, is counted by none.
+
+The read line below counts three completed Kafka reads that returned data, on instance 0. Inspect
+the raw payload count and graph traffic separately to see how much each read returned and how much
+input entered the graph.
+
+```text
+source:
+  nervix_ingestor_reads_total{domain="prod",ingestor="notifications_in",physical_node_id="node-1",instance="0",connector="KAFKA",entity="TOPIC",outcome="delivered"} total=3 wall_rate_per_sec=0.5 domain_rate_per_sec=- wall_rate_ema_1m_per_sec=0.4 wall_rate_ema_15m_per_sec=0.1 domain_rate_ema_1m_per_sec=- domain_rate_ema_15m_per_sec=-
+```
+
+### Ingestor intake and payload handling
+
+`source:` begins with seven scalar `family: value` lines. An ingestor with a rate limit prints its
+four counters next, followed by the selector-based observations for the running unit. The last
+decode rejection is also available separately as a diagnostic.
+
+| Family | Kind | Meaning |
+| --- | --- | --- |
+| `nervix_ingestor_quiesce_buffered_records` | Gauge | Raw payloads held in the unit's quiesce buffers, including a draining payload until its messages enter their ingest group. |
+| `nervix_ingestor_quiesce_buffered_bytes` | Gauge | Raw payload bytes held in those buffers. |
+| `nervix_ingestor_quiesce_dropped_total` | Counter | Payloads discarded by `DROP`, buffer overflow, memory-pressure zero capacity or an interrupting termination. |
+| `nervix_ingestor_quiesce_rejected_total` | Counter | Endpoint requests or connections quiesce refused, once per request for each refusing ingestor. |
+| `nervix_ingestor_transport_redeliveries_total` | Counter | Pending settlement positions discarded after a RabbitMQ, SQS or MQTT ingestor reconnects because its broker will redeliver the unconfirmed positions. |
+| `nervix_ingestor_decode_rejections_total` | Counter | Payloads consumed after the codec refused them, each reported under `ON GENERAL ERROR`. |
+| `nervix_ingestor_oversized_payloads_total` | Counter | Payloads dropped because they exceeded the entity's message-size bound, such as a Syslog UDP datagram above `max_message_size`. |
+
+These three additional counters are available in `/metrics`:
+
+| Family | Meaning |
+| --- | --- |
+| `nervix_ingestor_unfolding_refused_total` | Payloads refused because the extension workers had no room to unfold them. Waiting for a place leaves the count unchanged. [When The Extension Workers Are Full](ingestors.md#when-the-extension-workers-are-full) explains the admission paths. |
+| `nervix_ingestor_header_values_dropped_total` | Invalid UTF-8 header values skipped while retaining their valid siblings and the payload. Applies to `HTTP REQUEST` responses, `HTTP ENDPOINT` requests and `WEBSOCKETS ENDPOINT` upgrades. Requests and upgrades count once per invalid value for each bound ingestor. |
+| `nervix_ingestor_read_ahead_dropped_payloads_total` | QoS 0 publishes that exceed the separate read-ahead quota of an ACK-mode MQTT ingestor, counted immediately, including during a downstream acknowledgement wait. [MQTT ingestor connections](connector-contract.md#mqtt-ingestor-connections) owns the bound. |
+
+### Ingestor Acknowledgement And Lifecycle
+
+These host observations carry the same six identity labels as the read families. Every bounded
+child exists at zero when the unit is registered. Counters retain their process-local history
+across task restarts of the same unit; the failure gauge describes the current task. `DESCRIBE
+INGESTOR` lists every family in `source:` after the read lines, and an endpoint's request lines,
+with its full selector and `total`, `count` and `sum_seconds` for the duration histogram, or
+`value` for the gauge.
+
+| Family | Additional labels | Meaning |
+| --- | --- | --- |
+| `nervix_ingestor_ack_outcomes_total` | `outcome="acknowledged\|failed\|timed_out\|shutdown"` | One per acknowledgement wait the ingestor settled: a batch under batch settlement, or each delivery a RabbitMQ `ACK PARALLEL` ingestor settles individually. `failed` is a tree the graph failed, such as an emitter that refused a record; `timed_out` is a tree that reported no progress for the ingestor's `ACK TIMEOUT`; `shutdown` is a wait that the ingestor's stop ended. |
+| `nervix_ingestor_transport_acknowledgements_total` | `operation="acknowledge\|reject"`, `outcome="succeeded\|failed"` | Every acknowledgement or rejection of read positions the ingestor's transport completed, including a rejection the host retries after resuming. |
+| `nervix_ingestor_transport_acknowledgement_duration_seconds` | `operation="acknowledge\|reject"` | Elapsed wall seconds of each of those transport operations, such as a Kafka consumer-group commit or an SQS deletion, failed operations included. |
+| `nervix_ingestor_resumes_total` | `outcome="ready\|waiting\|failed"` | Every resume of the ingestor's connector that completed: ready to read, waiting for an external assignment, or failed. A resume a stop or a quiesce change ended before it completed is not counted. |
+| `nervix_ingestor_suspends_total` | `cause="quiesce\|read_failure\|rejection"` | Every suspension of a ready connector: by a quiesce that suspends intake, by a read that failed and left the connector needing a resume, or because a rejection failed and the transport must be reopened before the same positions are read again. A connector asking for a resume without a failed read, such as after a Kafka domain-offset reassignment, counts only its resume. |
+| `nervix_ingestor_unconfirmed_stop_positions_total` | None | Positions the ingestor read whose acknowledgement trees had not all resolved when it stopped. Their transport presents them again by its own redelivery contract. |
+| `nervix_ingestor_transient_failure` | None | `1` while the current task has a published transient failure, which `DESCRIBE INGESTOR` shows as its transient error, otherwise `0`. Ending the task resets the observation to `0`; an ending predecessor cannot clear its replacement. |
+
+Broker ingestors record every family. Paced ingestors acknowledge nothing on a transport, so they
+record resumes, suspensions and the transient failure. An endpoint answers its sender and a client
+producer its batch's outcome instead, so their acknowledgement, transport, lifecycle and stop
+counters stay at zero. Endpoints count their requests in `nervix_ingestor_endpoint_requests_total`,
+and client producers keep the outcomes of [Client Ingestors](#client-ingestors).
+
+A tree that has already resolved keeps its outcome when the ingestor observes a stop at the same
+poll. A domain's graceful `STOP` ends intake and lets the work in motion finish before any node
+tears the domain down, so a tree in motion resolves as it would have without the stop. What the
+stop cuts, held work and work an `ENFORCE` ends, ends as each node's teardown reaches it,
+independently on each node: a remote emitter can drop its held tree before the ingestor stops,
+producing a `failed` wait and a transport rejection instead of a `shutdown` wait and an unconfirmed
+stop position. Only a tree still unresolved when the stop ends its wait contributes to the
+unconfirmed-stop counter.
+
+An ACK timeout is not a failed tree. The tree that went silent is not resolved by the timeout: the
+ingestor rejects the batch, its transport presents the positions again, and the earlier delivery
+may still complete. The ingestor's error event names the expired `ACK TIMEOUT` as a timeout, and a
+failed tree's event keeps the reason its failing branch gave. Transport durations start when the
+ingestor asks its transport to acknowledge or reject and end when the transport answered, as far as
+its [acknowledgement confirmation](./connector-contract.md#confirmed-acknowledgements) reaches, so
+they exclude the graph wait. A broker ingestor's transient failure clears once its transport
+confirms an acknowledgement again; a paced ingestor's clears once a poll or resume succeeds.
+Recording touches retained atomic children, with no label resolution or registry access, and
+changes no delivery, retry or error policy.
+
+### Ingestor Rate Limits
+
+An execution unit whose ingestor writes [`RATE LIMIT`](./ingestors.md#rate-limits) resolves four
+families with the six identity labels of the read families when it starts, so each series exists at
+zero before the first hold or rejection, and withdraws them with the unit's other series. A unit
+whose ingestor writes no `RATE LIMIT` has none of them.
+
+| Family | Type | Meaning |
+| --- | --- | --- |
+| `nervix_ingestor_rate_limit_held_total` | Counter | Every time the unit held its source back because its allowance had no room: before a read, or for a payload already read whose measured cost did not fit yet. A hold counts as it starts, so a long one is visible while it lasts. |
+| `nervix_ingestor_rate_limit_hold_seconds_total` | Counter | The seconds those holds lasted on the node's physical clock, added as each ends, a hold that a quiesce change or a stop ended included. |
+| `nervix_ingestor_rate_limit_rejected_total` | Counter | Payloads consumed because they cost more than a clause's `BURST`, each reported with operation `rate_limit` under the ingestor's `ON GENERAL ERROR` policy. |
+| `nervix_ingestor_rate_limit_program_rejections_total` | Counter | Payloads consumed because a clause's measure failed on them, reported the same way. |
+
+`DESCRIBE INGESTOR` writes each of the unit's clauses as a `rate limit:` line after its `mode:`
+line and, in its `source:` section, the four values under their family names, the hold seconds
+to the millisecond. Like the other ingestor families they are process-local: an allowance starts
+full in a unit's next task or on another node, and its counters start where that node's series
+stand.
+
 ## DESCRIBE Metrics
 
 `DESCRIBE` commands include metric summaries for the described target when metrics exist. For a
 scheduled target, the request is answered from its owner. An ingestor that runs on every live node,
 such as an `HTTP ENDPOINT` ingestor, has no single owner, so the node that receives
-`DESCRIBE INGESTOR` answers for its own instance. Node traffic is grouped under
-`incoming_edges` and `outgoing_edges`; relay descriptions keep owner-buffer utilization under
+`DESCRIBE INGESTOR` answers for its own instance. The `source:` and `destination:` sections report
+[connector interactions](#connector-interaction-metrics). Node traffic is grouped under
+`incoming_edges` and `outgoing_edges`. Relay descriptions keep owner-buffer utilization under
 `relay_buffers` rather than mixing relay traffic into the relay node:
 
 ```plexus
@@ -964,144 +1047,17 @@ planned handoff or failover.
 ## Ingestor Unit Metrics And Recovery
 
 `DESCRIBE INGESTOR` queries each unit's current owner and reports its global index, owner, running
-state and readiness. Its edge metric lines render `instance=<i>`. Ingestor-specific quiesce,
-redelivery, decode-rejection, oversize, header-drop, read-ahead-drop, unfolding-refusal and
-endpoint-request metrics use `domain`, `ingestor`, `physical_node_id`, `instance`, `connector` and
-`entity`; a `Single` ingestor uses `instance="-"`.
+state and readiness. Its edge metric lines render `instance=<i>`. Its connector families use the
+identity labels in [Connector Interaction Metrics](#connector-interaction-metrics).
 
 A `BranchAggregated` checkpoint belongs to an exact execution unit. Capture includes that unit's
 series with each series' physical-node attribution intact. Installation replaces only that unit's
 namespace, preserving a colocated sibling's live counters. After a move, later checkpoints retain
 both the predecessor's and the new owner's contributions. A final snapshot selects its bytes
-before a departing owner withdraws the unit's live series. Raw Prometheus recorders belong to
-their local assignment lifetime and are not restored from checkpoints; durable summarized
-metrics use the checkpoint store.
+before a departing owner withdraws the unit's live series. The checkpoint restores the durable
+summaries. The new assignment registers its raw intake and graph series in its own process.
 Inspection discovers the current units through a key-only checkpoint listing, including before a
 stopped ingestor is restarted, and never substitutes one sibling's measurements for another's.
-
-## Ingestor Source Interactions
-
-`DESCRIBE INGESTOR` groups its existing seven quiesce, redelivery, decode-rejection and oversized
-lines under `source:`, followed by read/poll interaction lines. Each unit reports its own counters
-through its execution owner; remote inspection carries the same ordered lines. Counter lines
-include totals and wall rates in the connector-interaction format; domain rates are `-`. The poll
-histogram reports `count` and `sum_seconds`, using the same duration buckets as emitter interactions.
-
-A returned nonempty message batch is `delivered`; a successful answer carrying no payload, including
-an oversized-only answer, a resume request or end of input, is `empty`. A read returning an error is
-`failed`. A broker's interrupted answer is `interrupted` even when it returns a gathered prefix;
-that prefix still contributes its raw payloads and bytes and follows the existing intake path.
-A paced poll cancelled by a quiesce change or stop is `interrupted`. Partial per-record poll
-failures retain their existing error reporting; the poll's payload presence determines its
-successful read outcome. A driver error that prevents a poll is `failed`.
-
-Raw payload and byte totals measure the batches a broker read or paced poll returned, before
-decoding, filtering, timestamp admission or waiting for unfolding capacity. Replaying a retained
-buffer does not increment them; a transport redelivery is a new read and does. Request-scoped
-endpoints and client producers perform no transport read or scheduled poll, so their read counters
-stay zero. Their intake and refusal counters keep their own meaning. Only paced polls contribute
-duration samples: a broker read waits for arrivals, so its elapsed time is not measured.
-
-An `HTTP ENDPOINT` or `WEBSOCKETS ENDPOINT` unit follows its read/poll lines with one
-`nervix_ingestor_endpoint_requests_total` line for each outcome, with its total and wall rates.
-These ingestors execute on every live node, so `DESCRIBE INGESTOR` reports the counts of the node
-that answers it, as it does their quiesce counters, and each node's `/metrics` reports its own.
-Every request, and every WebSocket data frame, is counted once for each ingestor bound to its
-route, under the outcome that ingestor reached:
-
-| `outcome` | The ingestor |
-| --- | --- |
-| `accepted` | took it in: in `MODE NO ACK` it dispatched it into its graph or its endpoint `BUFFER` retained it (HTTP 202); in `MODE ACK` its acknowledgement root completed (HTTP 200, `completed`). |
-| `busy` | had no free slot in its `MODE ACK MAX` response window or could not fit an acknowledged request in the pause buffer (HTTP 503, `not_admitted` with `busy`). |
-| `refused` | refused it: its quiesce refused new intake, such as `ON QUIESCE REJECT` while it is quiesced or a full endpoint `BUFFER` (HTTP 503), or in `MODE ACK` one of its routes refused the decoded input (HTTP 400). |
-| `not_admitted` | could not unfold it when the node's extension workers had no room, or removed a waiting body when its deadline or intake ended (HTTP 503). |
-| `decode_rejected` | consumed it as a decode rejection because its codec refused the payload, which `nervix_ingestor_decode_rejections_total` counts too (HTTP 202 in `MODE NO ACK`, 400 in `MODE ACK`). |
-| `processing_failed` | admitted it without completing it: its `MODE NO ACK` dispatch into the graph failed (HTTP 202), or its `MODE ACK` acknowledgement root failed, its `ACK TIMEOUT` expired or its intake stopped while the response was held (HTTP 503). |
-
-The pause buffer reports `nervix_ingestor_endpoint_pause_waiting_requests` and
-`nervix_ingestor_endpoint_pause_waiting_bytes` for bodies whose senders are still waiting for
-admission. The existing quiesce buffer gauges also include bodies already answered with
-`RESPOND IMMEDIATE`. The `nervix_ingestor_endpoint_pause_refusals_total` counter records refusals
-with `buffer_full`, `deadline`, or `intake_ended` as the cause. Each node reports its own endpoint
-units.
-
-A route refuses a request before reading its body, or a WebSocket upgrade, only when none of its
-ingestors can take it, and counts that refusal once for each of them there. Otherwise every
-ingestor counts the request when it is dispatched to it, so an ingestor whose quiesce refuses the
-requests of a route it shares with an available ingestor counts each of them once, in this family
-and in `nervix_ingestor_quiesce_rejected_total` alike. A request the listener answers before it
-consults any ingestor, such as one for an unknown route, with a method other than `POST`, whose body
-could not be read or that arrives while the node shuts down, is counted by none.
-
-All bounded children start at zero. Read recording touches retained atomic children, with no label
-resolution or registry access. Counters are process-local observations, not durable delivery
-positions; a completed read does not imply that decoding, filtering or graph execution accepted its
-payload. Retirement withdraws only the exact unit's series and leaves siblings intact.
-
-### Ingestor Acknowledgement And Lifecycle
-
-These host observations carry the same six identity labels as the read families. Every bounded
-child exists at zero when the unit is registered. Counters retain their process-local history
-across task restarts of the same unit; the failure gauge describes the current task. `DESCRIBE
-INGESTOR` lists every family in `source:` after the read lines, and an endpoint's request lines,
-with its full selector and `total`, `count` and `sum_seconds` for the duration histogram, or
-`value` for the gauge.
-
-| Family | Additional labels | Meaning |
-| --- | --- | --- |
-| `nervix_ingestor_ack_outcomes_total` | `outcome="acknowledged\|failed\|timed_out\|shutdown"` | One per acknowledgement wait the ingestor settled: a batch under batch settlement, or each delivery a RabbitMQ `ACK PARALLEL` ingestor settles individually. `failed` is a tree the graph failed, such as an emitter that refused a record; `timed_out` is a tree that reported no progress for the ingestor's `ACK TIMEOUT`; `shutdown` is a wait that the ingestor's stop ended. |
-| `nervix_ingestor_transport_acknowledgements_total` | `operation="acknowledge\|reject"`, `outcome="succeeded\|failed"` | Every acknowledgement or rejection of read positions the ingestor's transport completed, including a rejection the host retries after resuming. |
-| `nervix_ingestor_transport_acknowledgement_duration_seconds` | `operation="acknowledge\|reject"` | Elapsed wall seconds of each of those transport operations, such as a Kafka consumer-group commit or an SQS deletion, failed operations included. It uses the connector duration buckets of [Connector Interactions](#connector-interactions). |
-| `nervix_ingestor_resumes_total` | `outcome="ready\|waiting\|failed"` | Every resume of the ingestor's connector that completed: ready to read, waiting for an external assignment, or failed. A resume a stop or a quiesce change ended before it completed is not counted. |
-| `nervix_ingestor_suspends_total` | `cause="quiesce\|read_failure\|rejection"` | Every suspension of a ready connector: by a quiesce that suspends intake, by a read that failed and left the connector needing a resume, or because a rejection failed and the transport must be reopened before the same positions are read again. A connector asking for a resume without a failed read, such as after a Kafka domain-offset reassignment, counts only its resume. |
-| `nervix_ingestor_unconfirmed_stop_positions_total` | None | Positions the ingestor read whose acknowledgement trees had not all resolved when it stopped. Their transport presents them again by its own redelivery contract. |
-| `nervix_ingestor_transient_failure` | None | `1` while the current task has a published transient failure, which `DESCRIBE INGESTOR` shows as its transient error, otherwise `0`. Ending the task resets the observation to `0`; an ending predecessor cannot clear its replacement. |
-
-Broker ingestors record every family. Paced ingestors acknowledge nothing on a transport, so they
-record resumes, suspensions and the transient failure. An endpoint answers its sender and a client
-producer its batch's outcome instead, so their acknowledgement, transport, lifecycle and stop
-counters stay at zero. Endpoints count their requests in `nervix_ingestor_endpoint_requests_total`,
-and client producers keep the outcomes of [Client Ingestors](#client-ingestors).
-
-A tree that has already resolved keeps its outcome when the ingestor observes a stop at the same
-poll. A domain's graceful `STOP` ends intake and lets the work in motion finish before any node
-tears the domain down, so a tree in motion resolves as it would have without the stop. What the
-stop cuts, held work and work an `ENFORCE` ends, ends as each node's teardown reaches it,
-independently on each node: a remote emitter can drop its held tree before the ingestor stops,
-producing a `failed` wait and a transport rejection instead of a `shutdown` wait and an unconfirmed
-stop position. Only a tree still unresolved when the stop ends its wait contributes to the
-unconfirmed-stop counter.
-
-An ACK timeout is not a failed tree. The tree that went silent is not resolved by the timeout: the
-ingestor rejects the batch, its transport presents the positions again, and the earlier delivery
-may still complete. The ingestor's error event names the expired `ACK TIMEOUT` as a timeout, and a
-failed tree's event keeps the reason its failing branch gave. Transport durations start when the
-ingestor asks its transport to acknowledge or reject and end when the transport answered, as far as
-its [acknowledgement confirmation](./connector-contract.md#confirmed-acknowledgements) reaches, so
-they exclude the graph wait. A broker ingestor's transient failure clears once its transport
-confirms an acknowledgement again; a paced ingestor's clears once a poll or resume succeeds.
-Recording touches retained atomic children, with no label resolution or registry access, and
-changes no delivery, retry or error policy.
-
-### Ingestor Rate Limits
-
-An execution unit whose ingestor writes [`RATE LIMIT`](./ingestors.md#rate-limits) resolves four
-families with the six identity labels of the read families when it starts, so each series exists at
-zero before the first hold or rejection, and withdraws them with the unit's other series. A unit
-whose ingestor writes no `RATE LIMIT` has none of them.
-
-| Family | Type | Meaning |
-| --- | --- | --- |
-| `nervix_ingestor_rate_limit_held_total` | Counter | Every time the unit held its source back because its allowance had no room: before a read, or for a payload already read whose measured cost did not fit yet. A hold counts as it starts, so a long one is visible while it lasts. |
-| `nervix_ingestor_rate_limit_hold_seconds_total` | Counter | The seconds those holds lasted on the node's physical clock, added as each ends, a hold that a quiesce change or a stop ended included. |
-| `nervix_ingestor_rate_limit_rejected_total` | Counter | Payloads consumed because they cost more than a clause's `BURST`, each reported with operation `rate_limit` under the ingestor's `ON GENERAL ERROR` policy. |
-| `nervix_ingestor_rate_limit_program_rejections_total` | Counter | Payloads consumed because a clause's measure failed on them, reported the same way. |
-
-`DESCRIBE INGESTOR` writes each of the unit's clauses as a `rate limit:` line after its `mode:`
-line and, in its `source:` section, the four values under their family names, the hold seconds
-to the millisecond. Like the other ingestor families they are process-local: an allowance starts
-full in a unit's next task or on another node, and its counters start where that node's series
-stand.
 
 ## Listener Capacity Observations
 

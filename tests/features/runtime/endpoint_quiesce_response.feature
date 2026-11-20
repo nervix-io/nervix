@@ -49,6 +49,8 @@ Feature: Endpoint responses during quiesce
       domain="{{domain}}"
       ingestor="incoming"
       """
+    And within "5s" node "<intake_node>" eventually reports describe ingestor "incoming" as 'nervix_ingestor_endpoint_pause_waiting_requests{domain="{{domain}}",ingestor="incoming",physical_node_id="<intake_node>",instance="-",connector="HTTP",entity="ENDPOINT"} value=2'
+    And within "5s" node "<intake_node>" eventually reports describe ingestor "incoming" as 'nervix_ingestor_endpoint_pause_waiting_bytes{domain="{{domain}}",ingestor="incoming",physical_node_id="<intake_node>",instance="-",connector="HTTP",entity="ENDPOINT"} value=28'
     When endpoint request "overflow" is posted on node "<intake_node>" host "paused-{{test_id}}.example.com" path "/events"
       """
       {"value":43}
@@ -61,6 +63,7 @@ Feature: Endpoint responses during quiesce
       ingestor="incoming"
       cause="buffer_full"
       """
+    And within "5s" node "<intake_node>" eventually reports describe ingestor "incoming" as 'nervix_ingestor_endpoint_pause_refusals_total{domain="{{domain}}",ingestor="incoming",physical_node_id="<intake_node>",instance="-",connector="HTTP",entity="ENDPOINT",cause="buffer_full"} total=1 '
     When the endpoint response boundary is recorded
     And the entity gate pause for domain "{{domain}}" is released
     Then the background Plexus execution succeeds
