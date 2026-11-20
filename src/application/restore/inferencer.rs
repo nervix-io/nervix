@@ -13,16 +13,18 @@
 
 use std::io::{BufReader, Read, Seek, SeekFrom};
 
+use arch_into::ArchInto as _;
 use error_stack::{Report, ResultExt as _};
+use meticulous::OptionExt as _;
 use nervix_backup::{BranchLifecycleRecord, DescribedSection, InferencerStateDescriptor};
-use nervix_execution::MemoryClass;
+use nervix_execution::{Executor, MemoryClass, Reservation};
 use nervix_models::{DomainSchedule, ModelKind, NodeRef};
 
 use super::{prepare::VerifiedArchive, steps::remote_branch_key};
 use crate::{
     inferencer_state_snapshot::{BranchSnapshot, Snapshot, TensorSnapshot},
     registry::InferencerArchivePlan,
-    runtime::{BranchKey, Runtime, SnapshotStagingError, StagedArtifact},
+    runtime::{BranchKey, Runtime, SnapshotStagingError, StagedArtifact, StagedSnapshotWriter},
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -120,17 +122,7 @@ pub(super) async fn prepare_inferencer_checkpoint(
     }
     let offset = values.offset;
     let length = values.length;
-    let tensors_working = maximum
-        .checked_mul(2)
-        .ok_or_else(|| Report::new(InferencerRestoreError::Admission))?;
-    let working = tensors_working
-        .checked_add(2 * 64 * 1024)
-        .ok_or_else(|| Report::new(InferencerRestoreError::Admission))?;
-    let charge = runtime
-        .executor()
-        .reserve(MemoryClass::Bulk, working)
-        .await
-        .change_context(InferencerRestoreError::Admission)?;
+    let charge = VerifiedArchive::reserve_inferencer_encoding(runtime.executor(), maximum).await?;
     let writer = runtime
         .try_stage_artifact(maximum)
         .await
@@ -197,6 +189,29 @@ pub(super) async fn prepare_inferencer_checkpoint(
 )]
 const TENSOR_READ_BLOCK_BYTES: usize = 64 * 1024;
 
+impl VerifiedArchive {
+    async fn reserve_inferencer_encoding(
+        executor: &Executor,
+        snapshot_bytes: u64,
+    ) -> error_stack::Result<Reservation, InferencerRestoreError> {
+        let tensors_working = snapshot_bytes
+            .checked_mul(2)
+            .ok_or_else(|| Report::new(InferencerRestoreError::Admission))?;
+        let read_bytes: u64 = TENSOR_READ_BLOCK_BYTES.arch_into();
+        let output_bytes = StagedSnapshotWriter::encoding_buffer_bytes(executor).max(read_bytes);
+        let buffers = read_bytes
+            .checked_add(output_bytes)
+            .verified("the fixed reader and the validated u32 bulk chunk fit in u64");
+        let working = tensors_working
+            .checked_add(buffers)
+            .ok_or_else(|| Report::new(InferencerRestoreError::Admission))?;
+        executor
+            .reserve(MemoryClass::Bulk, working)
+            .await
+            .change_context(InferencerRestoreError::Admission)
+    }
+}
+
 /// Buffer fills check cancellation between fixed-size storage reads, including during a large tensor.
 struct TensorSectionReader<'a> {
     input: std::io::Take<std::fs::File>,
@@ -207,5 +222,32 @@ impl Read for TensorSectionReader<'_> {
     fn read(&mut self, output: &mut [u8]) -> std::io::Result<usize> {
         self.cancellation.check().map_err(std::io::Error::other)?;
         self.input.read(output)
+    }
+}
+
+#[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
+mod tests {
+    use meticulous::ResultExt as _;
+    use ubyte::ByteUnit;
+
+    use super::*;
+
+    #[rstest::rstest]
+    #[case::large_chunk(ByteUnit::Mebibyte(4), 4 * 1024 * 1024 + 66 * 1024)]
+    #[case::small_chunk(ByteUnit::Kibibyte(32), 130 * 1024)]
+    #[nervix_primitives::test]
+    async fn inferencer_restore_charges_staging_buffer_beside_the_reader(
+        #[case] chunk: ByteUnit,
+        #[case] expected: u64,
+    ) {
+        let executor = StagedSnapshotWriter::encoding_test_executor(chunk);
+        let charge = VerifiedArchive::reserve_inferencer_encoding(&executor, 1024)
+            .await
+            .assured("the test bulk budget fits the tensor restore");
+        StagedSnapshotWriter::assert_staging_encoding_charge(&executor, charge, expected).await;
     }
 }

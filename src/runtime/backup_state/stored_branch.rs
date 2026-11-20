@@ -19,25 +19,26 @@
 
 use std::io::Read as _;
 
+use arch_into::ArchInto as _;
 use error_stack::{Report, ResultExt as _};
-use nervix_execution::MemoryClass;
+use meticulous::OptionExt as _;
+use nervix_execution::{AdmissionError, Executor, MemoryClass, Reservation};
 
 use super::{BackupStateCaptureError, ListedCheckpoint, Runtime};
 use crate::runtime::{
-    SnapshotStagingError, snapshot_staging::MappedArtifact, window_archive::CapturedWindowState,
+    SnapshotStagingError, StagedSnapshotWriter, snapshot_staging::MappedArtifact,
+    window_archive::CapturedWindowState,
 };
 
 const CHUNK_BYTES: usize = super::super::RESTORE_STATE_CHUNK_BYTES;
-// A retained stored chunk, its Fjall read, the transfer block and the writer's buffer, plus
-// bounded hashing and filesystem metadata. Inline value copies have their own metadata charge.
 #[cfg_attr(
     nervix_lint,
     nervix::constant(
         fixed,
-        reason = "branch backup admission covers four stored segments and their framing"
+        reason = "branch backup holds bounded hashing and filesystem metadata beside its buffers"
     )
 )]
-const STAGING_BYTES: u64 = 4 * 64 * 1024 + 8 * 1024;
+const STAGING_FRAMING_BYTES: u64 = 8 * 1024;
 
 pub(crate) struct StoredBranchCheckpoint {
     checkpoint: ListedCheckpoint,
@@ -50,6 +51,23 @@ pub(in crate::runtime) struct OpenedBranchCheckpoint {
 }
 
 impl StoredBranchCheckpoint {
+    /// A retained segment, its Fjall read, the transfer block and the staged output buffer
+    /// overlap. Inline value copies have their own metadata charge.
+    fn reserve_staging(executor: &Executor) -> error_stack::Result<Reservation, AdmissionError> {
+        let segment_bytes: u64 = CHUNK_BYTES.arch_into();
+        let read_bytes = segment_bytes
+            .checked_mul(3)
+            .verified("three persisted segments fit in u64");
+        let working = read_bytes
+            .checked_add(STAGING_FRAMING_BYTES)
+            .verified("the persisted segments and framing fit in u64");
+        let output_bytes = StagedSnapshotWriter::encoding_buffer_bytes(executor).max(segment_bytes);
+        let working = working
+            .checked_add(output_bytes)
+            .verified("the resolved output buffer fits in the validated u32 chunk bound");
+        executor.try_reserve(MemoryClass::Bulk, working)
+    }
+
     pub(super) fn new(
         checkpoint: ListedCheckpoint,
     ) -> error_stack::Result<Self, BackupStateCaptureError> {
@@ -120,12 +138,11 @@ impl StoredBranchCheckpoint {
             .change_context_lazy(|| BackupStateCaptureError::Admission {
                 entity: entity.clone(),
             })?;
-        let working = runtime
-            .executor()
-            .try_reserve(MemoryClass::Bulk, STAGING_BYTES)
-            .change_context_lazy(|| BackupStateCaptureError::Admission {
+        let working = Self::reserve_staging(runtime.executor()).change_context_lazy(|| {
+            BackupStateCaptureError::Admission {
                 entity: entity.clone(),
-            })?;
+            }
+        })?;
         let writer = runtime
             .try_stage_artifact(length)
             .await
@@ -171,5 +188,31 @@ impl StoredBranchCheckpoint {
                 _ => error.change_context(BackupStateCaptureError::Storage),
             })?;
         Ok(OpenedBranchCheckpoint { revision, view })
+    }
+}
+
+#[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
+mod tests {
+    use meticulous::ResultExt as _;
+    use ubyte::ByteUnit;
+
+    use super::*;
+
+    #[rstest::rstest]
+    #[case::large_chunk(ByteUnit::Mebibyte(4), 4 * 1024 * 1024 + 200 * 1024)]
+    #[case::small_chunk(ByteUnit::Kibibyte(32), 264 * 1024)]
+    #[nervix_primitives::test]
+    async fn stored_branch_capture_charges_staging_buffer(
+        #[case] chunk: ByteUnit,
+        #[case] expected: u64,
+    ) {
+        let executor = StagedSnapshotWriter::encoding_test_executor(chunk);
+        let charge = StoredBranchCheckpoint::reserve_staging(&executor)
+            .assured("the test bulk budget fits the stored branch encoder");
+        StagedSnapshotWriter::assert_staging_encoding_charge(&executor, charge, expected).await;
     }
 }
