@@ -298,6 +298,13 @@ const HTTP_REQUEST_INGESTOR_BOUNDS: DeclaredBounds = DeclaredBounds {
 const HTTP_ENDPOINT_INGESTOR_BOUNDS: DeclaredBounds = DeclaredBounds {
     buffers: &[
         DeclaredBuffer {
+            holds: "a request head",
+            bound: BufferBound::Bounded {
+                capacity: BufferCapacity::NodeSetting("listener-header-bytes"),
+                overflow: BufferOverflow::RefuseOversized,
+            },
+        },
+        DeclaredBuffer {
             holds: "a request body",
             bound: BufferBound::Bounded {
                 capacity: BufferCapacity::NodeSetting("http-body-bytes"),
@@ -340,7 +347,7 @@ const HTTP_ENDPOINT_INGESTOR_BOUNDS: DeclaredBounds = DeclaredBounds {
             bound: WaitBound::Clause("ACK TIMEOUT, or the exact intake lifetime ending"),
         },
     ],
-    driver_limits: &["Request heads above 100 headers are refused."],
+    driver_limits: &[],
 };
 
 /// What the connector of a HTTP REQUEST emitter holds and how long it waits.
@@ -990,12 +997,19 @@ mod tests {
     #[test]
     fn an_endpoint_declares_the_node_settings_that_bound_each_request() {
         let bounds = HttpEndpointIngestor::CAPABILITIES.bounds;
-        let [body, intake, unresolved] = bounds.buffers else {
+        let [head, body, intake, unresolved] = bounds.buffers else {
             panic!(
-                "an HTTP endpoint declares a request body, the node's intake pool and the \
+                "an HTTP endpoint declares a request head, body, the node's intake pool and the \
                  requests MODE ACK leaves unresolved"
             );
         };
+        assert_eq!(
+            head.bound,
+            BufferBound::Bounded {
+                capacity: BufferCapacity::NodeSetting("listener-header-bytes"),
+                overflow: BufferOverflow::RefuseOversized,
+            }
+        );
         assert_eq!(
             body.bound,
             BufferBound::Bounded {

@@ -892,6 +892,13 @@ is full, each network wait with what ends it, and the limits its driver imposes 
 changes. The [Connector Capabilities](connector-capabilities.md) reference and each entity's manual
 render these bounds from the declaration, so a reader sees the same facts a reviewer checks.
 
+HTTP and WebSocket endpoint declarations include the HTTP/1 request head they accept and its
+deadline. The WebSocket endpoint also declares its frame and assembled-message caps and the
+socket's idle deadline for the next read. A size violation uses `CloseSession`: the listener
+keeps serving its other peers and the disconnected client owns any new connection. Connection
+admission, TLS, parser storage, keepalive and post-refusal teardown belong to the shared
+[listener transport](node-settings.md#listener-bounds).
+
 A buffer is bounded by a capacity Nervix fixes, a statement clause or client key sets, a node setting
 an operator chooses when the node starts, or a driver default declares. When it is full, a protocol
 with flow control is held back: the connector stops

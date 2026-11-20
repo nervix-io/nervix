@@ -312,6 +312,7 @@ fn buffer_bound(bound: BufferBound) -> String {
         BufferOverflow::FailRead => {
             "when exceeded, fails the read and reconnects on the retry policy"
         }
+        BufferOverflow::CloseSession => "when exceeded, closes only that peer's session",
     };
     format!("{capacity}; {overflow}")
 }

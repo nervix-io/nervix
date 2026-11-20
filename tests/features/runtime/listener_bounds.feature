@@ -347,3 +347,68 @@ Feature: Declared public listener bounds
       | cluster_size |
       | 1            |
       | 3            |
+
+  Scenario Outline: A WebSocket endpoint closes only the session that exceeds its <limit> bound on <cluster_size> nodes
+    Given node-1 starts with websocket-frame-bytes = 16B
+    And node-1 starts with websocket-message-bytes = 32B
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA event (value STRING);
+      CREATE WIRE JSON SCHEMA event_wire MODE STRICT (value string);
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
+      CREATE RELAY events SCHEMA event UNBRANCHED;
+      CREATE VHOST edge bounded-{{test_id}}.example.com;
+      CREATE WEBSOCKETS ENDPOINT intake ON edge PATH '/ws';
+      CREATE WEBSOCKETS ENDPOINT INGESTOR intake_ingestor FROM intake MODE NO ACK
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
+        TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE SUBSCRIPTION received_events TO events;
+      START;
+      """
+    Then within "30s" node "node-1" eventually reports describe ingestor "intake_ingestor" as "ready: true"
+    When an endpoint websocket is opened on node "node-1" host "bounded-{{test_id}}.example.com" path "/ws"
+    Then a second WebSocket on host "bounded-{{test_id}}.example.com" path "/ws" closes without a Close frame for an oversized <limit>
+    When a payload is sent on the endpoint websocket
+      """
+      {"value":"ok"}
+      """
+    Then the relay subscription receives a payload
+      """
+      {"value":"ok"}
+      """
+
+    Examples:
+      | cluster_size | limit   |
+      | 1            | frame   |
+      | 3            | frame   |
+      | 1            | message |
+      | 3            | message |
+
+  Scenario Outline: A WebSocket upgrade keeps the listener idle deadline on <cluster_size> nodes
+    Given node-1 starts with listener-idle-timeout = 2s
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA event (value STRING);
+      CREATE WIRE JSON SCHEMA event_wire MODE STRICT (value string);
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
+      CREATE RELAY events SCHEMA event UNBRANCHED;
+      CREATE VHOST edge bounded-{{test_id}}.example.com;
+      CREATE WEBSOCKETS ENDPOINT intake ON edge PATH '/ws';
+      CREATE WEBSOCKETS ENDPOINT INGESTOR intake_ingestor FROM intake MODE NO ACK
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
+        TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      START;
+      """
+    Then within "30s" node "node-1" eventually reports describe ingestor "intake_ingestor" as "ready: true"
+    And a WebSocket on host "bounded-{{test_id}}.example.com" path "/ws" closes without a Close frame after "2s" of silence
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
