@@ -17,12 +17,18 @@ use std::io::{self, BufWriter, Write};
 
 use error_stack::{Report, ResultExt as _};
 use meticulous::{OptionExt as _, ResultExt as _};
-use nervix_execution::{Cancellation, Reservation, StorageClass};
+use nervix_execution::{Cancellation, Executor, Reservation, StorageClass};
 use nervix_primitives::sync::Arc;
 
 use super::{SnapshotStagingError, StagedArtifact, StagedSnapshotWriter};
 
 impl StagedSnapshotWriter {
+    /// The buffer a caller accounts for in the reservation it hands to the encoding job.
+    /// The job uses the same resolved size when it allocates the buffer.
+    pub(crate) fn encoding_buffer_bytes(executor: &Executor) -> u64 {
+        executor.limits().bulk_chunk_bytes.as_u64()
+    }
+
     /// Encode directly into a fresh staging file. The declared length bounds disk consumption;
     /// the finished artifact carries the actual length. The supplied reservation and anything
     /// the encoder retains stay owned by the job until encoding and synchronization finish.
@@ -76,7 +82,7 @@ impl StagedSnapshotWriter {
         let executor = self.executor.clone();
         let artifact_executor = executor.clone();
         let maximum = self.declared;
-        let chunk_bytes = usize::try_from(executor.limits().bulk_chunk_bytes.as_u64())
+        let chunk_bytes = usize::try_from(Self::encoding_buffer_bytes(&executor))
             .assured("the validated bulk chunk fits the node address width");
         let mut quota = self._reservation;
         executor
@@ -163,7 +169,7 @@ impl StagedArtifact {
         let working = length
             .checked_mul(2)
             .and_then(|bytes| bytes.checked_add(1))
-            .verified("the validated window is capped at one 64 KiB transfer chunk");
+            .verified("the validated window is capped at the node's bulk chunk size");
         let executor = artifact.executor.clone();
         let charge = executor
             .reserve(nervix_execution::MemoryClass::Bulk, working)
@@ -250,6 +256,44 @@ mod tests {
 
     use super::*;
     use crate::runtime::snapshot_staging::{SnapshotStaging, SnapshotStagingLimits};
+
+    impl StagedSnapshotWriter {
+        pub(crate) fn encoding_test_executor(bulk_chunk_bytes: ubyte::ByteUnit) -> Executor {
+            let mut config = ExecutionConfig::default();
+            config.limits.bulk_chunk_bytes = bulk_chunk_bytes;
+            Executor::new(config).assured("the staging buffer test's limits validate")
+        }
+
+        pub(crate) async fn assert_staging_encoding_charge(
+            executor: &Executor,
+            charge: Reservation,
+            expected: u64,
+        ) {
+            let directory = tempfile::tempdir().assured("the staging directory opens");
+            let staging = SnapshotStaging::new(
+                directory.path().to_path_buf(),
+                executor.clone(),
+                SnapshotStagingLimits::default(),
+            );
+            let writer = staging
+                .try_stage(64)
+                .await
+                .assured("the staging file opens while the encoding charge is held");
+            let observer = executor.clone();
+            let (_, reserved) = writer
+                .encode_artifact_with_result(charge, move |output, _| {
+                    let reserved = observer.memory(MemoryClass::Bulk).reserved_bytes;
+                    output
+                        .write_all(b"state")
+                        .change_context(SnapshotStagingError::Encode)?;
+                    Ok(reserved)
+                })
+                .await
+                .assured("the staged encoding job finishes");
+            assert_eq!(reserved, expected, "bulk bytes held by the encoding job");
+            assert_eq!(executor.memory(MemoryClass::Bulk).reserved_bytes, 0);
+        }
+    }
 
     #[nervix_primitives::test]
     async fn staging_chunk_bulk_admission_refuses_a_queued_charge_without_waiting() {

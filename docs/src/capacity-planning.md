@@ -63,9 +63,15 @@ remaining CPU claim, with one place each on small nodes; the total is at most th
 count and five. [Execution Capabilities](node-settings.md#execution-capabilities) lists the per-class
 worker and queue overrides and their validation.
 
+The staged snapshot encoder uses a buffer of one resolved bulk chunk. When sizing bulk memory
+for concurrent backup and restore work, allow that buffer for each encoding job alongside its
+checkpoint or tensor working memory. Persisted checkpoint segments are 64 KiB. The staging and
+installation charges are detailed in [Backup And Restore Architecture](backup-and-restore-architecture.md).
+
 An ONNX binding inspection reserves one bulk chunk (`--execution-bulk-chunk-bytes`, at most
 64 KiB by default) from the bulk budget for sequential native-image preparation. That buffer is
-read and released on the admitted worker, with cancellation checked between reads. Its thirty-second deadline includes waiting for that memory, the worker
+read and released on the admitted worker, with cancellation checked between reads. Its
+thirty-second deadline includes waiting for that memory, the worker
 queue, image preparation and the native session's build, metadata extraction and release. ONNX
 Runtime's own heap remains outside this buffer charge. Only an absolute `ORT_DYLIB_PATH` naming a
 regular file receives the read hint; other library discovery and load failures remain the external
