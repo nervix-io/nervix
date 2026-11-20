@@ -57,6 +57,14 @@ use crate::cluster::PrerequisitesView;
 
 /// How often the reactor delay probe asks to be woken. Short enough that one blocked poll is
 /// visible in a scrape interval, long enough that the probe itself is not the load.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the metrics chapter defines the scheduler-delay series over a timer woken every \
+                  250 milliseconds"
+    )
+)]
 const SCHEDULER_SAMPLE_INTERVAL: Duration = Duration::from_millis(250);
 
 #[cfg_attr(
