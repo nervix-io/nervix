@@ -10172,6 +10172,53 @@ mod tests {
     }
 
     #[test]
+    fn a_newcomer_refused_in_one_reconciliation_stays_refused_in_the_next() {
+        // The first pass sees node-4 refuse node-3's run, as the leader records it. By the next
+        // pass node-4 has been dropped, and only what the first pass recorded keeps the run out.
+        let mut refused = RefusedRuns::default();
+        let with_node_4 = GossipState {
+            live_nodes: vec![
+                live_voter("node-1", 1, Duration::from_millis(300)),
+                live_voter("node-2", 2, Duration::from_millis(300)),
+                live_voter("node-3", 6, Duration::from_millis(166)),
+                live_voter("node-4", 3, Duration::from_millis(400)),
+            ],
+            dead_node_ids: BTreeSet::new(),
+            dead_node_identities: BTreeSet::new(),
+        };
+        let first_pass = voters(&["node-1", "node-2", "node-4"]).automatic_mutations(
+            &with_node_4,
+            &BTreeMap::new(),
+            &refused,
+        );
+        refused.record_refused_newcomers(first_pass.refused_newcomers);
+
+        let without_node_4 = GossipState {
+            live_nodes: vec![
+                live_voter("node-1", 1, Duration::from_millis(300)),
+                live_voter("node-2", 2, Duration::from_millis(300)),
+                live_voter("node-3", 6, Duration::from_millis(166)),
+            ],
+            dead_node_ids: BTreeSet::new(),
+            dead_node_identities: BTreeSet::new(),
+        };
+        refused.retain_candidates(&without_node_4.latest_admission_candidates());
+        let next_pass = voters(&["node-1", "node-2"]).automatic_mutations(
+            &without_node_4,
+            &BTreeMap::new(),
+            &refused,
+        );
+
+        let IncompatibleVoter { voter, mismatch } = refused_beside_node_4();
+        assert!(first_pass.mutations.is_empty());
+        assert!(next_pass.mutations.is_empty());
+        assert_eq!(
+            next_pass.verdicts.get(&node_identity("node-3", 6)),
+            Some(&AdmissionVerdict::Refused { voter, mismatch })
+        );
+    }
+
+    #[test]
     fn committed_clock_authority_revisions_fence_transfer_and_stop() {
         let domain_id = domain("paced");
         let mut stopped = running_domain_state("paced");
