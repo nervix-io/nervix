@@ -195,6 +195,10 @@ pub(in crate::runtime) struct RuntimeInner {
         DashMap<DomainNodeUnitRef, ActivatedRuntimeStateHandoff, RandomState>,
     pub(in crate::runtime) prepared_forced_runtime_state_recoveries:
         DashMap<DomainNodeUnitRef, PreparedForcedRuntimeStateRecovery, RandomState>,
+    /// The newest rejected round by leader term and coordinator sequence. The automatic scheduler
+    /// prepares one round at a time. A later rejection fences delayed preparations from earlier
+    /// rounds, while deletion always compares the exact preparation for a unit.
+    pub(in crate::runtime) rejected_forced_recovery_round: watch::Sender<(u64, u64)>,
     #[cfg_attr(
         nervix_lint,
         expect(

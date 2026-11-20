@@ -1969,6 +1969,14 @@ their existing persistence steps before description. No checkpoint body enters a
 replication-class message. Preparation retains its verified checkpoint set until activation, so
 the destination's total held bytes still grow with the number and size of the entity's branches.
 
+The forced-recovery prepare and discard requests use the Replication class. Both carry the
+leader's term and a coordination identity bound to the authenticated peer process. A discard
+also names the exact preparation, including its destination incarnation and target-schedule
+fingerprint. The destination checks the declared term against its observed leadership. An
+accepted discard fences delayed prepares from that round before it removes the named staged
+state. See [Planned Ownership Handoffs And Failover](control-plane.md#planned-ownership-handoffs-and-failover)
+for the publication and rejection rules.
+
 Runtime-state synchronization replies and materialized-snapshot descriptions carry the shared
 typed remote-operation failure envelope. Rejection, absence, temporary unreadiness, and execution
 failure remain distinct across the node boundary, and the requester keeps that classification in
@@ -1991,7 +1999,7 @@ Runtime-state message properties use the production bounded encoder and decoder 
 request's Commands, Replication or Bulk class. The `runtime-state-replication-wire` target checks
 complete request and response values, including every state kind, schema and WASM generation,
 model kind, checkpoint read kind, ordered listing, full-width counters, checkpoint length and
-digest, and each remote-operation refusal and subject. Branch floats are compared by their bits,
+digest, forced-recovery round identity, and each remote-operation refusal and subject. Branch floats are compared by their bits,
 including signed zero and nested collection values. `runtime-checkpoint-listing-owner` additionally
 checks the complete runtime owner listing across its semantic conversion and the replication
 response codec. Its current branch-key domain is nonempty, has distinct canonical field names,
