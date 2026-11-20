@@ -875,6 +875,50 @@ pub struct CommittedNodeRecord {
     pub record: NodeRecord,
 }
 
+/// The committed facts visible to `SHOW NODES`, excluding operational settings.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct NodeInspectionRecord {
+    pub revision: u64,
+    pub cpu_count: Option<NonZeroU64>,
+    pub memory_limit: Option<NonZeroU64>,
+    pub properties: NodeProperties,
+    pub tags: NodeTags,
+}
+
+impl From<CommittedNodeRecord> for NodeInspectionRecord {
+    fn from(committed: CommittedNodeRecord) -> Self {
+        let capabilities = committed.record.capabilities();
+        Self {
+            revision: committed.revision,
+            cpu_count: capabilities.cpu_count,
+            memory_limit: capabilities.memory_bytes,
+            properties: committed.record.properties,
+            tags: committed.record.tags,
+        }
+    }
+}
+
+/// One observed cluster node, with its committed record when one has been applied.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct NodeInspectionRow {
+    #[cfg_attr(
+        nervix_lint,
+        nervix::identity(node, reason = "the observed cluster node")
+    )]
+    pub name: crate::ClusterNodeName,
+    pub live: bool,
+    pub voter: bool,
+    pub cordoned: bool,
+    pub terminating: bool,
+    pub record: Option<NodeInspectionRecord>,
+}
+
+/// The typed result of a node selector preview, in canonical node-name order.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct NodeInspection {
+    pub nodes: Vec<NodeInspectionRow>,
+}
+
 #[cfg(test)]
 #[path = "node_record_tests.rs"]
 mod tests;

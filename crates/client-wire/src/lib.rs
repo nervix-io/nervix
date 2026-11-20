@@ -40,6 +40,8 @@ mod consumer;
 mod domain;
 mod domain_clock;
 mod entity_labels;
+mod node_inspection;
+pub use node_inspection::node_inspection_json;
 mod event;
 mod execution_unit;
 mod frame;

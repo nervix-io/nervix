@@ -120,6 +120,14 @@ impl Outcome {
             .map(crate::EntityLabelsInspection::new)
     }
 
+    pub fn node_inspection(&self) -> Option<crate::NodeInspection> {
+        self.outcome
+            .node_inspection
+            .as_deref()
+            .cloned()
+            .map(crate::NodeInspection::new)
+    }
+
     pub fn command(&self) -> &CommandOutcome {
         &self.outcome
     }

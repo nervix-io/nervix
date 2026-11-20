@@ -20,6 +20,7 @@ use crate::{
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum BuiltinFunctionScope {
     Ordinary,
+    NodeSelector,
     IngestorEntity(IngestorEntityKind),
     EmitterInvocation(EmitterEntityKind),
 }

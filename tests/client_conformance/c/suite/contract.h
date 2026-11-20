@@ -33,6 +33,7 @@ SUITE_RELEASE(nx_schema, nx_schema_free)
 SUITE_RELEASE(nx_suggestions, nx_suggestions_free)
 SUITE_RELEASE(nx_inspection, nx_inspection_free)
 SUITE_RELEASE(nx_entity_labels, nx_entity_labels_free)
+SUITE_RELEASE(nx_node_inspection, nx_node_inspection_free)
 SUITE_RELEASE(nx_event, nx_event_release)
 SUITE_RELEASE(nx_clock_event, nx_clock_event_release)
 SUITE_RELEASE(nx_domain_clock, nx_domain_clock_release)
@@ -1190,6 +1191,30 @@ static void test_entity_labels_retain_exact_values_and_revision_views(void) {
     REQUIRE(absent == NULL);
 }
 
+static void test_node_preview_retains_committed_facts(void) {
+    nx_session *session = suite_connect(NULL, NULL);
+    // ANCHOR: node_inspection
+    nx_outcome *outcome = suite_completed(session, "SHOW NODES WHERE node.name = 'node-1';");
+    nx_node_inspection *nodes = NULL;
+    suite_check(nx_outcome_node_inspection(outcome, &nodes));
+    HOLD(nx_node_inspection, nodes);
+    suite_drop(outcome);
+    REQUIRE(nx_node_inspection_count(nodes) == 1);
+    const uint8_t *name = NULL, *json = NULL;
+    size_t name_len = 0, json_len = 0;
+    REQUIRE(nx_node_inspection_name(nodes, 0, &name, &name_len));
+    REQUIRE(name_len == sizeof "node-1" - 1 && memcmp(name, "node-1", name_len) == 0);
+    REQUIRE(!nx_node_inspection_name(nodes, 1, &name, &name_len));
+    nx_node_inspection_json(nodes, &json, &json_len);
+    REQUIRE(json_len > 0 && suite_contains(json, json_len, "\"architecture\":"));
+    suite_drop(nodes);
+    // ANCHOR_END: node_inspection
+    nodes = NULL;
+    nx_outcome *other = suite_completed(session, "DESCRIBE LICENSE;");
+    suite_kind(nx_outcome_node_inspection(other, &nodes), NX_ERROR_INVALID_ARGUMENT);
+    REQUIRE(nodes == NULL);
+}
+
 static void test_inspection_retains_typed_state_after_its_outcome_is_released(void) {
     nx_session *session = suite_connect(NULL, NULL);
     nx_outcome *created = suite_completed(session,
@@ -2158,6 +2183,7 @@ static void test_b1_an_upload_completes_again_under_its_identity_and_refuses_ano
     {"cluster", "test_b6_columns_use_size_queries_and_pointer_lengths", test_b6_columns_use_size_queries_and_pointer_lengths}, \
     {"cluster", "test_completion_pages_have_utf8_byte_ranges", test_completion_pages_have_utf8_byte_ranges}, \
     {"cluster", "test_entity_labels_retain_exact_values_and_revision_views", test_entity_labels_retain_exact_values_and_revision_views}, \
+    {"cluster", "test_node_preview_retains_committed_facts", test_node_preview_retains_committed_facts}, \
     {"cluster", "test_inspection_retains_typed_state_after_its_outcome_is_released", test_inspection_retains_typed_state_after_its_outcome_is_released}, \
     {"cluster", "test_b7_subscription_gap_end_and_variant_accessors", test_b7_subscription_gap_end_and_variant_accessors}, \
     {"cluster", "test_b7_refused_subscription_restoration_reports_its_cause_and_recovers", test_b7_refused_subscription_restoration_reports_its_cause_and_recovers}, \

@@ -80,6 +80,7 @@ mod endpoints;
 mod entity_labels;
 mod events;
 mod inspection;
+mod node_inspection;
 mod sessions;
 
 use jni::sys::jlong;

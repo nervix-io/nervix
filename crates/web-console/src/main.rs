@@ -4104,6 +4104,7 @@ fn command_outcome_lines(outcome: CommandOutcome, query: &str) -> Vec<TermLine> 
         message,
         diagnostics,
         statements,
+        node_inspection,
         ..
     } = outcome;
     if !statements.is_empty() {
@@ -4114,7 +4115,17 @@ fn command_outcome_lines(outcome: CommandOutcome, query: &str) -> Vec<TermLine> 
         return lines;
     }
     match disposition {
-        CommandDisposition::Completed { .. } => completed_lines(message),
+        CommandDisposition::Completed { .. } => {
+            let mut lines = completed_lines(message);
+            if node_inspection.is_some() {
+                lines.extend(
+                    diagnostics
+                        .into_iter()
+                        .map(|diagnostic| diagnostic_line(query, diagnostic)),
+                );
+            }
+            lines
+        }
         CommandDisposition::NotLeader(redirect) => not_leader_lines(&redirect, diagnostics, query),
         CommandDisposition::Failed
         | CommandDisposition::TransactionDetached { .. }
@@ -12090,6 +12101,30 @@ mod tests {
     }
 
     #[test]
+    fn a_node_selector_preview_prints_its_row_diagnostics() {
+        let query = "SHOW NODES WHERE (tag('zone') AS I64) = 1;";
+        let warning = "node selector failed on 'node-1': invalid cast";
+        let mut outcome = completed_outcome("no matching nodes");
+        outcome.node_inspection = Some(Box::new(nervix_models::NodeInspection {
+            nodes: Vec::new(),
+        }));
+        outcome.diagnostics.push(Diagnostic {
+            message: warning.to_string(),
+            span: None,
+        });
+
+        let lines = command_outcome_lines(outcome, query)
+            .into_iter()
+            .map(|line| line.text)
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            lines,
+            ["no matching nodes".to_string(), format!("- {warning}")]
+        );
+    }
+
+    #[test]
     fn a_command_of_several_statements_shows_the_outcome_of_each() {
         let query = "CREATE SCHEMA a ( value I64 ); CREATE SCHEMA a ( value I64 );";
         let mut outcome = completed_outcome("ignored for a command of several statements");
@@ -13209,6 +13244,7 @@ mod tests {
     fn completed_outcome(message: &str) -> CommandOutcome {
         CommandOutcome {
             entity_labels: None,
+            node_inspection: None,
             execution_reference: command_execution_reference(),
             origin: OutcomeOrigin::Executed,
             disposition: CommandDisposition::Completed {
