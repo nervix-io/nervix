@@ -84,6 +84,15 @@ committed offsets into the new reader layout. Intake resumes after the affected 
 new schedule. Kafka observation follows the leader's `control-plane-kafka-partition-watch-interval`.
 Pulsar observation and topology observer reconciliation use `partition-topology-poll-interval`.
 
+The transfer is a planned ownership handoff of the reader's units. When a reader with `INSTANCES PER
+PARTITION` grows from twelve units to sixteen, each of the sixteen new units receives its share of
+the committed offsets of all twelve old units. Nervix captures each old unit once and prepares the
+new units at the same time, and each preparation reads its old units at the same time. The transfer
+therefore takes about as long as its slowest chain of requests, not the sum of every unit's
+requests. The whole transfer must finish within the entity gate deadline (`ENTITY_GATE_DEADLINE`).
+If it does not, the publication fails, the readers continue on the previous layout, and the leader
+publishes the topology again at its next observation.
+
 Growing a topic from twelve to sixteen partitions advances the branch epoch. An automatic branch
 then has sixteen partitions. A four-group branch keeps four groups, and the new external partitions
 join their modulo groups. A source replacement also advances the epoch when its count stays the
