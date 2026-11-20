@@ -131,8 +131,8 @@ jobs:
 
       - name: Install Latest LLVM
         run: |
-          # The LLVM installer runs its own apt-get update after this refresh.
-          sudo apt update --allow-releaseinfo-change
+          # Refresh existing sources before llvm.sh runs its own APT update.
+          sudo apt-get update --allow-releaseinfo-change
           wget https://apt.llvm.org/llvm.sh
           chmod +x llvm.sh
           sudo ./llvm.sh 23
@@ -175,7 +175,7 @@ jobs:
       - name: Install the current git
         run: |
           sudo add-apt-repository --yes --no-update ppa:git-core/ppa
-          sudo apt update --allow-releaseinfo-change
+          sudo apt-get update --allow-releaseinfo-change
           sudo apt-get install --yes --no-install-recommends git
 
       - name: Install apt deps and current GitHub CLI
@@ -187,7 +187,7 @@ jobs:
           rm "${gh_keyring}"
           echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
             | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null
-          sudo apt update --allow-releaseinfo-change
+          sudo apt-get update --allow-releaseinfo-change
           sudo apt install -y \
             gh \
             libcurl4-openssl-dev \
@@ -341,7 +341,7 @@ jobs:
 
       - name: Install Latest LLVM
         run: |
-          sudo apt update --allow-releaseinfo-change
+          sudo apt-get update --allow-releaseinfo-change
           wget https://apt.llvm.org/llvm.sh
           chmod +x llvm.sh
           sudo ./llvm.sh 23
@@ -481,7 +481,7 @@ jobs:
 
       - name: Install Latest LLVM
         run: |
-          sudo apt update --allow-releaseinfo-change
+          sudo apt-get update --allow-releaseinfo-change
           wget https://apt.llvm.org/llvm.sh
           chmod +x llvm.sh
           sudo ./llvm.sh 23
@@ -515,7 +515,7 @@ jobs:
 
       - name: Install apt deps
         run: |
-          sudo apt update --allow-releaseinfo-change
+          sudo apt-get update --allow-releaseinfo-change
           sudo apt install -y \
             libcurl4-openssl-dev \
             protobuf-compiler
@@ -857,7 +857,7 @@ jobs:
 
       - name: Install Latest LLVM
         run: |
-          sudo apt update --allow-releaseinfo-change
+          sudo apt-get update --allow-releaseinfo-change
           wget https://apt.llvm.org/llvm.sh
           chmod +x llvm.sh
           sudo ./llvm.sh 23
@@ -905,7 +905,7 @@ jobs:
       # The Python package's unit tests embed CPython, so the unit tests link its library.
       - name: Install apt deps
         run: |
-          sudo apt update --allow-releaseinfo-change
+          sudo apt-get update --allow-releaseinfo-change
           sudo apt install -y \
             libcurl4-openssl-dev \
             protobuf-compiler \
@@ -1615,7 +1615,7 @@ jobs:
 
       - name: Install Latest LLVM
         run: |
-          sudo apt update --allow-releaseinfo-change
+          sudo apt-get update --allow-releaseinfo-change
           wget https://apt.llvm.org/llvm.sh
           chmod +x llvm.sh
           sudo ./llvm.sh 23
@@ -1672,7 +1672,7 @@ jobs:
 
       - name: Install apt deps
         run: |
-          sudo apt update --allow-releaseinfo-change
+          sudo apt-get update --allow-releaseinfo-change
           sudo apt install -y \
             libcurl4-openssl-dev \
             protobuf-compiler
@@ -1846,7 +1846,7 @@ jobs:
 
       - name: Install Latest LLVM
         run: |
-          sudo apt update --allow-releaseinfo-change
+          sudo apt-get update --allow-releaseinfo-change
           wget https://apt.llvm.org/llvm.sh
           chmod +x llvm.sh
           sudo ./llvm.sh 23
@@ -1885,7 +1885,7 @@ jobs:
       - name: Install the current git
         run: |
           sudo add-apt-repository --yes --no-update ppa:git-core/ppa
-          sudo apt update --allow-releaseinfo-change
+          sudo apt-get update --allow-releaseinfo-change
           sudo apt-get install --yes --no-install-recommends git
 
       # The runner diagnostics tests that `extra-runners` runs execute sysbench and fio, which Boat's
@@ -1893,7 +1893,7 @@ jobs:
       # under its own label, so none may precede those tests.
       - name: Install apt deps
         run: |
-          sudo apt update --allow-releaseinfo-change
+          sudo apt-get update --allow-releaseinfo-change
           sudo apt install -y \
             libcurl4-openssl-dev \
             protobuf-compiler \
@@ -2250,7 +2250,7 @@ jobs:
 
       - name: Install Latest LLVM
         run: |
-          sudo apt update --allow-releaseinfo-change
+          sudo apt-get update --allow-releaseinfo-change
           wget https://apt.llvm.org/llvm.sh
           chmod +x llvm.sh
           sudo ./llvm.sh 23
@@ -2284,7 +2284,7 @@ jobs:
 
       - name: Install apt deps
         run: |
-          sudo apt update --allow-releaseinfo-change
+          sudo apt-get update --allow-releaseinfo-change
           sudo apt install -y \
             libcurl4-openssl-dev \
             protobuf-compiler
@@ -2453,7 +2453,7 @@ jobs:
 
       - name: Install Latest LLVM
         run: |
-          sudo apt update --allow-releaseinfo-change
+          sudo apt-get update --allow-releaseinfo-change
           wget https://apt.llvm.org/llvm.sh
           chmod +x llvm.sh
           sudo ./llvm.sh 23
@@ -2470,7 +2470,7 @@ jobs:
 
       - name: Install apt deps
         run: |
-          sudo apt update --allow-releaseinfo-change
+          sudo apt-get update --allow-releaseinfo-change
           sudo apt install -y \
             libcurl4-openssl-dev \
             protobuf-compiler
@@ -2629,7 +2629,7 @@ jobs:
 
       - name: Install Latest LLVM
         run: |
-          sudo apt update --allow-releaseinfo-change
+          sudo apt-get update --allow-releaseinfo-change
           wget https://apt.llvm.org/llvm.sh
           chmod +x llvm.sh
           sudo ./llvm.sh 23
@@ -2661,7 +2661,7 @@ jobs:
 
       - name: Install apt deps
         run: |
-          sudo apt update --allow-releaseinfo-change
+          sudo apt-get update --allow-releaseinfo-change
           sudo apt install -y \
             libcurl4-openssl-dev \
             protobuf-compiler
@@ -2787,7 +2787,7 @@ jobs:
 
       - name: Install Latest LLVM
         run: |
-          sudo apt update --allow-releaseinfo-change
+          sudo apt-get update --allow-releaseinfo-change
           wget https://apt.llvm.org/llvm.sh
           chmod +x llvm.sh
           sudo ./llvm.sh 23

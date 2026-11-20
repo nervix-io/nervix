@@ -289,7 +289,7 @@ jobs:
 
       - name: Install Latest LLVM
         run: |
-          sudo apt update --allow-releaseinfo-change
+          sudo apt-get update --allow-releaseinfo-change
           wget https://apt.llvm.org/llvm.sh
           chmod +x llvm.sh
           sudo ./llvm.sh 23

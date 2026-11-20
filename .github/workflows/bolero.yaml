@@ -97,12 +97,12 @@ jobs:
       - name: Install the current git
         run: |
           sudo add-apt-repository --yes --no-update ppa:git-core/ppa
-          sudo apt update --allow-releaseinfo-change
+          sudo apt-get update --allow-releaseinfo-change
           sudo apt-get install --yes --no-install-recommends git
 
       - name: Install native build tools
         run: |
-          sudo apt update --allow-releaseinfo-change
+          sudo apt-get update --allow-releaseinfo-change
           wget https://apt.llvm.org/llvm.sh
           chmod +x llvm.sh
           sudo ./llvm.sh 23
@@ -260,7 +260,7 @@ jobs:
 
       - name: Install native build tools
         run: |
-          sudo apt update --allow-releaseinfo-change
+          sudo apt-get update --allow-releaseinfo-change
           wget https://apt.llvm.org/llvm.sh
           chmod +x llvm.sh
           sudo ./llvm.sh 23
