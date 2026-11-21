@@ -27,7 +27,7 @@ Feature: A START that waits for a node keeps its domain running
       CREATE JAQ JSON CODEC ingest_codec TO SCHEMA event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE SCHEMA tenant_key ( tenant STRING );
-      CREATE BRANCH by_tenant SCHEMA tenant_key TTL 1h;
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_key TTL 1h;
       CREATE RELAY outgoing SCHEMA event BRANCHED BY by_tenant;
       CREATE KAFKA CLIENT kafka_main CONFIG { 'bootstrap.servers' = '{{kafka_addr}}' };
       CREATE KAFKA TOPIC INGESTOR acked
