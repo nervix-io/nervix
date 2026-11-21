@@ -2749,10 +2749,12 @@ carries its domain and node reference. A cluster-license entity has neither a do
 name. `DESCRIBE LICENSE` uses the same page, unit, origin and Row-section contract, capturing one
 published policy revision and its committed usage. Its single unit belongs to the answering node.
 The `summary` includes typed decision issue/receipt timestamps and the active transition count.
-The `quotas` section reports current usage against each target; `transitions` reports the original
-and target quota, affected usage, identity, start, deadline, effective deadline, acknowledgement and
-current quota state. Its datetime cells retain full timestamp precision. Counts include transition
-rows, and a client preserves every section through the generic inspection contract.
+The `quotas` section reports current usage against each target; `capabilities` reports each
+catalog capability's `state` (`enabled`, `disabled` or `permitted`) with a `permitted_until`
+deadline only for `permitted`; `transitions` reports the original and target quota, affected usage,
+identity, start, deadline, effective deadline, acknowledgement and current quota state. Its
+datetime cells retain full timestamp precision. Counts include capability and transition rows, and
+a client preserves every section through the generic inspection contract.
 
 Stateful processor reads use the same envelope. Deduplicators publish `keys`; windows publish
 retained `rows` plus per-branch `header` and `accumulators` sections. Window metadata consumes

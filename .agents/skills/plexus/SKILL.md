@@ -150,7 +150,7 @@ For node tags and detected properties, read [Selecting Nodes](../../../docs/src/
 and [Node Selectors](../../../docs/src/filter-map-functions.md#node-selectors). Use `SHOW NODES WHERE ...`
 to preview the selector against the committed node records and `FORMAT JSON` for scripts.
 For activation, refresh, `ROTATE LICENSE CLUSTER KEY`, `RELEASE LICENSE`, `DESCRIBE LICENSE`,
-effective policy, credential handling and quota usage, read
+effective policy, capabilities, credential handling and quota usage, read
 [Node Settings → Cluster Licensing](../../../docs/src/node-settings.md#cluster-licensing) and
 [Licensing Metrics](../../../docs/src/metrics-and-observability.md#licensing-metrics).
 For grace, replacement allowances and over-limit outcomes, also read

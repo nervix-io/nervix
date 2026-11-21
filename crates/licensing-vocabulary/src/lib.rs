@@ -1,7 +1,8 @@
 //! Shared licensing activation, quota and refusal vocabulary.
 //!
 //! Layer: vocabulary.
-//! - **Owns.** Activation kinds, quota arithmetic, decision rejections and service refusal codes.
+//! - **Owns.** Activation kinds, quota arithmetic, capability names, decision rejections and
+//!   service refusal codes.
 //! - **Depends on.** Serialization and primitive value types.
 //! - **Must not know.** Policies, cryptography, Models, consensus or network I/O.
 
@@ -95,6 +96,23 @@ impl QuotaName {
 impl std::fmt::Display for QuotaName {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str(self.as_str())
+    }
+}
+
+/// The catalog capabilities: features a license switches on, each enabled or disabled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum CapabilityName {
+    /// Changes nothing. A license enables it so that a cluster shows a verified decision reached it.
+    Dummy,
+}
+
+impl CapabilityName {
+    pub const ALL: [Self; 1] = [Self::Dummy];
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Dummy => "licensing.dummy",
+        }
     }
 }
 

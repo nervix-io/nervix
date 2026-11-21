@@ -19,13 +19,15 @@ pub mod policy;
 use admission_metrics::AdmissionMetrics;
 use meticulous::OptionExt as _;
 use nervix_consensus::{LicensingSnapshot, Observer};
-pub use nervix_licensing_vocabulary::{LicensingRefusal, Quota, QuotaConstraint, QuotaName};
+pub use nervix_licensing_vocabulary::{
+    CapabilityName, LicensingRefusal, Quota, QuotaConstraint, QuotaName,
+};
 pub use nervix_models::LicensingStopReason;
 use nervix_primitives::{
     publication::{ArcSwap, Guard},
     sync::{Arc, CancellationToken, StdArc},
 };
-pub use policy::{CapabilityName, CapabilityVerdict, LicensingPolicy};
+pub use policy::{CapabilityVerdict, LicensingPolicy};
 
 use crate::{ConfiguredFaultInjection, metrics::RuntimeMetrics};
 

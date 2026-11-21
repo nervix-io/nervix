@@ -32,7 +32,7 @@ use super::{
 };
 use crate::{
     client_row::ArrowRowBatch,
-    licensing::{Quota, QuotaName},
+    licensing::{CapabilityName, CapabilityVerdict, Quota, QuotaName},
     runtime_schema::{batch_payload_bytes, parse_as_type_from_arrow},
 };
 
@@ -369,27 +369,35 @@ impl SessionServiceImpl {
                 ];
                 let quotas = RecordBatch::try_from_iter(columns)
                     .assured("fixed quota columns have two values each");
+                let capabilities = capabilities_batch(&policy);
                 let transitions = transitions_batch(&policy);
-                let transition_rows =
-                    u64::try_from(transitions.num_rows()).assured("bounded transitions fit u64");
+                let mut rows = 0_u64;
+                for batch in [&summary, &quotas, &capabilities, &transitions] {
+                    let batch_rows =
+                        u64::try_from(batch.num_rows()).assured("bounded licensing rows fit u64");
+                    rows = rows
+                        .checked_add(batch_rows)
+                        .verified("bounded licensing rows fit u64");
+                }
                 match (
                     section("summary", &summary),
                     section("quotas", &quotas),
+                    section("capabilities", &capabilities),
                     section("transitions", &transitions),
                 ) {
-                    (Ok(summary), Ok(quotas), Ok(transitions)) => {
+                    (Ok(summary), Ok(quotas), Ok(capabilities), Ok(transitions)) => {
+                        let mut bytes = 0_u64;
+                        for section_bytes in [summary.1, quotas.1, capabilities.1, transitions.1] {
+                            bytes = bytes
+                                .checked_add(section_bytes)
+                                .verified("bounded licensing sections fit the payload count");
+                        }
                         let counts = StateInspectionCounts {
                             branches: 0,
-                            rows: 3_u64
-                                .checked_add(transition_rows)
-                                .verified("bounded licensing rows fit u64"),
-                            bytes: summary
-                                .1
-                                .checked_add(quotas.1)
-                                .and_then(|bytes| bytes.checked_add(transitions.1))
-                                .verified("three fixed licensing rows fit the payload count"),
+                            rows,
+                            bytes,
                         };
-                        let sections = vec![summary.0, quotas.0, transitions.0];
+                        let sections = vec![summary.0, quotas.0, capabilities.0, transitions.0];
                         let mut fingerprint = Sha256::new();
                         fingerprint.update(&revision.to_le_bytes());
                         for section in &sections {
@@ -438,7 +446,10 @@ impl SessionServiceImpl {
                             wasm_binding: None,
                         })
                     }
-                    (Err(error), _, _) | (_, Err(error), _) | (_, _, Err(error)) => {
+                    (Err(error), _, _, _)
+                    | (_, Err(error), _, _)
+                    | (_, _, Err(error), _)
+                    | (_, _, _, Err(error)) => {
                         tracing::debug!(error = %format_args!("{error:#}"), "licensing inspection encoding refused");
                         StateInspectionResult::Rejected(StateInspectionRejection::ReplyTooLarge)
                     }
@@ -511,6 +522,46 @@ fn section(
         },
         batch_payload_bytes(batch),
     ))
+}
+
+/// One row per catalog capability: its state, and the deadline of a permitted one.
+fn capabilities_batch(policy: &crate::licensing::LicensingPolicy) -> RecordBatch {
+    let verdicts: Vec<CapabilityVerdict> = CapabilityName::ALL
+        .into_iter()
+        .map(|name| policy.capability(name))
+        .collect();
+    let columns: Vec<(&str, ArrayRef)> = vec![
+        (
+            "condition",
+            StdArc::new(StringArray::from(
+                CapabilityName::ALL.map(CapabilityName::as_str).to_vec(),
+            )),
+        ),
+        (
+            "state",
+            StdArc::new(StringArray::from(
+                verdicts
+                    .iter()
+                    .map(|verdict| verdict.state_name())
+                    .collect::<Vec<_>>(),
+            )),
+        ),
+        (
+            "permitted_until",
+            StdArc::new(TimestampNanosecondArray::from(
+                verdicts
+                    .iter()
+                    .map(|verdict| {
+                        verdict
+                            .permitted_until()
+                            .map(nervix_models::Timestamp::unix_nanos)
+                    })
+                    .collect::<Vec<_>>(),
+            )),
+        ),
+    ];
+    RecordBatch::try_from_iter(columns)
+        .assured("fixed capability columns have one value per catalog capability")
 }
 
 fn transitions_batch(policy: &crate::licensing::LicensingPolicy) -> RecordBatch {
