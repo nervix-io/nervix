@@ -54,7 +54,9 @@ mod enabled {
         },
         LicenseActivation,
         /// The proposal that ends one domain's stop.
-        DomainStopEnding { domain: DomainName },
+        DomainStopEnding {
+            domain: DomainName,
+        },
     }
 
     impl RefusalTarget {
