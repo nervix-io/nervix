@@ -1479,6 +1479,11 @@ coverage-partitioning output *args: download-onnxruntime
 coverage-client-core output *args:
     cargo llvm-cov --no-clean --package nervix-client-core --lib --no-default-ignore-filename-regex --lcov --output-path {{ quote(output) }} -- {{ args }}
 
+# Measure the session wire codec's unit tests and the gRPC and WebSocket sessions that carry its
+# frames, for a patch confined to it, through the configured compiler cache.
+coverage-client-wire output *args:
+    cargo llvm-cov --no-clean --package nervix-client-wire --all-features --all-targets --no-default-ignore-filename-regex --lcov --output-path {{ quote(output) }} -- {{ args }}
+
 # Measure selected console request-owner regressions without running unrelated browser tests.
 coverage-web-console output *args:
     cargo llvm-cov --package nervix-web-console --bin nervix-web-console --no-default-ignore-filename-regex --lcov --output-path {{ quote(output) }} -- {{ quote(args) }}

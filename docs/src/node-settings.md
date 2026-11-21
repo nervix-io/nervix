@@ -1396,6 +1396,13 @@ the absence markers of packed atomic encodings are fixed the same way, each at i
 charge that mirrors a buffer sized by `--execution-bulk-chunk-bytes` derives from the resolved bulk
 chunk rather than repeating its default.
 
+The shared session codec in `nervix-client-wire` fixes the WebSocket close codes RFC 6455
+assigns, the frame header and the table and traversal budgets of rule F-3 of the
+[Client Implementation Manual](client-implementation-manual.md#frames), the envelope bounds and
+table depths the session schema's frame layouts fix, and the 64 KiB below which its gRPC decoder
+copies a frame out of the read buffer (rule F-9). It takes each session limit's default and bounds
+from that limit's own setting definition rather than restating them.
+
 `just ratchet --show hidden_tunables` lists the temporary count's sites. It counts numeric
 `const` items of types `Duration`, `usize`, `u64`, `u32`, `u16`, `u8`, `i64`, `i32`, `f64`,
 `NonZero*` and `ByteUnit`, plus numeric literal policy calls for duration construction, channel

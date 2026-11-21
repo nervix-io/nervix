@@ -1390,18 +1390,14 @@ mod tests {
             ConsensusResponse::Applied
         );
         state.domain_mutations.remove(&domain("prod"));
-        let response = apply_consensus_command(
-            &mut state,
-            &ConsensusCommand::StartDomain {
-                domain_id: domain("prod"),
-                start: DomainStartPoint::Resume,
-                clock: None,
-                authority: None,
-                mutation: None,
-            },
-        )
-        .response;
-        assert!(conflict_text(&response).contains("restore state installation is incomplete"));
+        let refused = crate::tests::commit_start_step(&mut state, "prod")
+            .expect_err("an unfinished restore keeps refusing the step of a START");
+        let crate::TransactionMutationError::StepConflict { reason, .. } =
+            refused.current_context()
+        else {
+            panic!("the START step is refused by the unfinished restore, not {refused:?}");
+        };
+        assert!(reason.contains("restore state installation is incomplete"));
         assert_eq!(
             state
                 .domains

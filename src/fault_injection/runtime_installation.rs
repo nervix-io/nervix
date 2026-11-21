@@ -2,13 +2,15 @@
 //!
 //! Layer: test harness, outside the product layer order.
 //!
-//! - **Owns.** Bounded installation refusals, installation and preparation pauses, and the
-//!   forced-recovery observation that releases a held initial installation.
-//! - **Depends on.** The fault harness's shared seam registry, typed node identities and pause
-//!   points, and governed atomic ordering.
+//! - **Owns.** Bounded installation refusals, installation, preparation and readiness pauses, and
+//!   the forced-recovery observation that releases a held initial installation.
+//! - **Depends on.** The fault harness's shared seam registry, typed node and domain identities and
+//!   pause points, the committed domain status, and governed atomic ordering.
 //! - **Must not know.** Graph construction, schedules, connector drivers, or persisted runtime state.
 
-use nervix_models::ClusterNodeName;
+use std::collections::BTreeMap;
+
+use nervix_models::{ClusterNodeName, DomainName, DomainState, DomainStatus};
 use nervix_primitives::sync::atomic::Ordering;
 
 use super::{CommandPausePoint, FaultInjection};
@@ -117,5 +119,53 @@ impl FaultInjection {
 
     pub fn release_runtime_preparation_pause(&self, node_id: &ClusterNodeName) {
         self.release_command_pause(&CommandPausePoint::RuntimePreparation(node_id.clone()));
+    }
+
+    /// Holds this node's readiness for the first runtime revision it applies that runs `domain`,
+    /// as a node slow to become ready would: the node has prepared the revision and started its
+    /// ingestors, and reports the revision ready only once the scenario releases it.
+    pub fn pause_runtime_readiness_on(&self, node_id: ClusterNodeName, domain: DomainName) {
+        self.arm_command_pause(CommandPausePoint::RuntimeReadiness {
+            node: node_id,
+            domain,
+        });
+    }
+
+    pub async fn wait_for_runtime_readiness_pause(
+        &self,
+        node_id: &ClusterNodeName,
+        domain: &DomainName,
+    ) {
+        self.wait_for_command_pause(&CommandPausePoint::RuntimeReadiness {
+            node: node_id.clone(),
+            domain: domain.clone(),
+        })
+        .await;
+    }
+
+    pub fn release_runtime_readiness_pause(&self, node_id: &ClusterNodeName, domain: &DomainName) {
+        self.release_command_pause(&CommandPausePoint::RuntimeReadiness {
+            node: node_id.clone(),
+            domain: domain.clone(),
+        });
+    }
+
+    /// Holds the readiness of a revision this node applies while a scenario holds it for one of
+    /// the revision's running domains.
+    pub(crate) async fn pause_runtime_readiness_if_armed(
+        &self,
+        node_id: &ClusterNodeName,
+        domains: &BTreeMap<DomainName, DomainState>,
+    ) {
+        for (domain, state) in domains {
+            nervix_primitives::task::consume_budget().await;
+            if let DomainStatus::Running = state.status {
+                self.pause_command_if_armed(CommandPausePoint::RuntimeReadiness {
+                    node: node_id.clone(),
+                    domain: domain.clone(),
+                })
+                .await;
+            }
+        }
     }
 }

@@ -317,6 +317,15 @@ pub enum SubscribeDisposition {
 
 /// The depth of an opened subscription's schema table in its reply frame: the server message, the
 /// reply, the subscribe outcome, the opened subscription, and the schema.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "session.fbs nests an opened subscription's schema in the server message, the \
+                  reply, the subscribe outcome and the opened subscription, so the schema table \
+                  sits at this depth"
+    )
+)]
 const SUBSCRIPTION_SCHEMA_DEPTH: usize = 5;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
