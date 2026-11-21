@@ -390,25 +390,26 @@ impl Runtime {
         Ok(())
     }
 
-    /// Stops every local unit of the ingestor `entity` and starts the units `revision` plans for
-    /// this node, retiring the previous input first where the replacement requires it.
+    /// Stops every local unit of the ingestor `entity`, retiring the previous input where the
+    /// replacement requires it. The swap starts no unit: an ingestor is a source, and the
+    /// revision's activation starts the units `revision` plans for this node once every node has
+    /// prepared it, so no unit runs on two nodes at once and a unit that moved here starts only
+    /// once this node holds what it reads from, such as its Kafka DOMAIN offsets.
     pub(super) async fn swap_ingestor_entity(
         &self,
-        domain: &DomainName,
+        context: EntitySwapContext<'_, '_>,
         entity: &NodeRef,
-        revision: &Arc<ExecutionRevision>,
         retiring_ingestors: &mut BTreeMap<IngestorName, RetiringIngestorInput>,
-        local_node_id: Option<&ClusterNodeName>,
         journal: &mut EntitySwapJournal,
     ) -> error_stack::Result<(), RuntimeError> {
+        let domain = context.domain;
         let build = || RuntimeError::build_domain_execution(domain);
-        let entrypoints = &revision.entrypoints;
-        let Some(desired_node) = revision.nodes.get(entity) else {
+        if !context.revision.nodes.contains_key(entity) {
             return Err(Report::new(ExecutionBuildError::MissingDesiredNode {
                 node: entity.clone(),
             })
             .change_context(build()));
-        };
+        }
         let ingestor = IngestorName::from(&entity.identifier);
         let step = journal.record(IngestorSwap::new(ingestor.clone()));
         for unit in self.running_ingestor_units(domain, &ingestor) {
@@ -422,17 +423,8 @@ impl Runtime {
             Box::pin(self.retire_ingestor_input(retirement)).await?;
         }
         #[cfg(feature = "testing")]
-        self.hold_or_fail_entity_swap(domain, entity, local_node_id)
+        self.hold_or_fail_entity_swap(domain, entity, context.local_node_id)
             .await?;
-        for unit in desired_node.units.keys() {
-            if Self::scheduled_unit_executes_locally(desired_node, *unit, local_node_id) {
-                let plan = entrypoints
-                    .ingestor(&ingestor, *unit)
-                    .assured("each ingestor unit has its decided plan");
-                self.start_ingestor(plan).await.change_context_lazy(build)?;
-                journal.step(step).record_started(*unit);
-            }
-        }
         Ok(())
     }
 

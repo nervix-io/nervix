@@ -649,7 +649,8 @@ use relay_boundary::{
     RelayRuntimeFanIn, RemoteRuntimeConsumer, addressable_count,
 };
 pub(in crate::runtime) use relay_channel::{
-    OwnedRelayDispatchPermit, RelayDispatchGate, RelayDispatchGateLease, RelayTryRecv,
+    OwnedRelayDispatchPermit, RelayDispatchGate, RelayDispatchGateHold, RelayDispatchGateLease,
+    RelayTryRecv,
 };
 use relay_interaction::{
     RelayInteraction, RelayInteractionCommand, RelayInteractionEvent, RelayInteractionInput,

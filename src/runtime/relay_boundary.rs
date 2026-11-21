@@ -47,6 +47,21 @@ pub(super) use owner_delivery::OwnerDelivery;
 #[path = "relay_boundary_shuttle_tests.rs"]
 mod shuttle_tests;
 
+/// The permits an owner's fan-out holds through route selection and acknowledgement attachment.
+struct OwnerHandOnPermits {
+    _unit: Option<OwnedRelayDispatchPermit>,
+    _relay: OwnedRelayDispatchPermit,
+}
+
+/// Why a stopping owner hands a batch on to no consumer.
+#[derive(Debug, Clone, Copy)]
+enum OwnerHandOnRefusal {
+    /// A swap holds hand-on of the batch's partition back.
+    PartitionRouting,
+    /// A swap holds hand-on of the whole relay back.
+    RelayRouting,
+}
+
 pub(super) const RELAY_BUFFER_DIRECTION_CONCRETE: &str = "concrete";
 /// A channel that carried no batch this long, counted from its opening or its last batch, opens a
 /// fresh incarnation for its next batch. It stays below the receiver's watermark retention, so a
@@ -610,6 +625,8 @@ pub(super) struct RelayOwnerBranchState {
     /// and the handle stays valid for as long as the owner runs: rebuilding a domain execution
     /// stops its relay owners and spawns new ones.
     domain_clock: Option<DomainClock>,
+    /// Turns true when this owner is told to stop; a fan-out a swap holds back stops waiting then.
+    pub(super) owner_stop: watch::Receiver<bool>,
 }
 
 impl RelayOwnerBranchState {
@@ -2121,6 +2138,73 @@ impl RelayBoundaryServices {
             .collect()
     }
 
+    /// Takes the hand-on permits of `unit`'s gate and of the relay's gate together. It holds
+    /// neither while it waits, so a fence on one of them never waits for a fan-out that waits at
+    /// the other.
+    async fn acquire_owner_hand_on(
+        &self,
+        unit: Unit,
+        owner_stop: &watch::Receiver<bool>,
+    ) -> Result<OwnerHandOnPermits, OwnerHandOnRefusal> {
+        let unit_gate = self.unit_dispatch_gate(unit).cloned();
+        let relay_gate = self.fanout.dispatch_gate();
+        loop {
+            nervix_primitives::task::consume_budget().await;
+            let unit_permit = match &unit_gate {
+                Some(gate) => match RelayDispatchGate::try_acquire_hand_on_owned(gate) {
+                    Some(permit) => Some(permit),
+                    None => {
+                        if Self::wait_hand_on_or_stop(gate, owner_stop).await {
+                            return Err(OwnerHandOnRefusal::PartitionRouting);
+                        }
+                        continue;
+                    }
+                },
+                None => None,
+            };
+            if let Some(relay_permit) = RelayDispatchGate::try_acquire_hand_on_owned(&relay_gate) {
+                return Ok(OwnerHandOnPermits {
+                    _unit: unit_permit,
+                    _relay: relay_permit,
+                });
+            }
+            drop(unit_permit);
+            if Self::wait_hand_on_or_stop(&relay_gate, owner_stop).await {
+                return Err(OwnerHandOnRefusal::RelayRouting);
+            }
+        }
+    }
+
+    /// Waits until `gate` lets hand-on through or the owner is told to stop, and reports whether
+    /// the owner stops. A dropped stop signal is a stop.
+    async fn wait_hand_on_or_stop(
+        gate: &RelayDispatchGate,
+        owner_stop: &watch::Receiver<bool>,
+    ) -> bool {
+        if *owner_stop.borrow() {
+            return true;
+        }
+        let mut stop = owner_stop.clone();
+        nervix_primitives::select! {
+            biased;
+            stopped = stop.wait_for(|stopped| *stopped) => match stopped {
+                // The owner was told to stop.
+                Ok(_) => true,
+                // The stop sender is gone, which ends the owner as a stop would.
+                Err(_) => true,
+            },
+            () = gate.wait_hand_on_open() => false,
+        }
+    }
+
+    /// Hands a batch the owner accepted on to the relay's consumers.
+    ///
+    /// A swap that changes the routes this reads holds hand-on back, and the batch waits for the
+    /// swap to end and then goes on with the routes the swap published: an accepted batch is never
+    /// refused because the relay is being changed. Only `owner_stop` ends that wait without a
+    /// delivery. A stopping owner cannot wait for a swap that waits for the owner to stop, so it
+    /// fails the batch's acknowledgements and its source delivers it again; carrying what a
+    /// stopping owner holds is the work of a relay that saves its content through a stop.
     pub(super) async fn fanout_owner_batch(
         &self,
         domain: &DomainName,
@@ -2128,6 +2212,7 @@ impl RelayBoundaryServices {
         unit: Unit,
         batch: &RelayRecordBatch,
         fault_injection: &ConfiguredFaultInjection,
+        owner_stop: &watch::Receiver<bool>,
     ) -> RelayDispatchResult {
         fault_injection
             .pause_owner_relay_fanout_if_armed(domain)
@@ -2135,25 +2220,15 @@ impl RelayBoundaryServices {
         fault_injection
             .pause_owner_relay_partition_fanout_if_armed(domain, relay, unit)
             .await;
-        let _unit_permit = if let Some(gate) = self.unit_dispatch_gate(unit) {
-            let Some(permit) = gate.try_acquire_dispatch() else {
+        let _permits = match self.acquire_owner_hand_on(unit, owner_stop).await {
+            Ok(permits) => permits,
+            Err(refusal) => {
                 for ack in batch.acks.iter() {
-                    ack.no_ack("relay partition routing changed before owner fan-out");
+                    ack.no_ack(refusal.reason());
                 }
                 batch.ack_success();
                 return Err(Box::new(batch.clone()));
-            };
-            Some(permit)
-        } else {
-            None
-        };
-        let gate = self.fanout.dispatch_gate();
-        let Some(_dispatch_permit) = gate.try_acquire_dispatch() else {
-            for ack in batch.acks.iter() {
-                ack.no_ack("relay routing changed before owner fan-out");
             }
-            batch.ack_success();
-            return Err(Box::new(batch.clone()));
         };
         self.fanout_local_subscriptions(batch).await;
         self.fanout_remote_subscriptions(domain, relay, unit, batch)
@@ -2186,8 +2261,11 @@ impl RelayBoundaryServices {
         let routed = RelayRoutedAdmission::new(self.transit_for_unit(unit));
         async move {
             let _routed = routed;
+            // A routed delivery keeps refusing while a swap here holds hand-on back: it holds
+            // the sending owner's fan-out permit on its own node, so waiting here could make two
+            // nodes that swap at once wait for each other.
             let _unit_permit = if let Some(gate) = self.unit_dispatch_gate(unit) {
-                let Some(permit) = gate.try_acquire_dispatch() else {
+                let Some(permit) = gate.try_acquire_hand_on() else {
                     for ack in batch.acks.iter() {
                         ack.no_ack("relay partition routing changed before routed delivery");
                     }
@@ -2493,7 +2571,14 @@ impl Runtime {
         );
         services.observe_owner_buffer_length(unit, &metrics);
         let result = services
-            .fanout_owner_batch(domain, relay, unit, batch, &self.inner.fault_injection)
+            .fanout_owner_batch(
+                domain,
+                relay,
+                unit,
+                batch,
+                &self.inner.fault_injection,
+                &branches.owner_stop,
+            )
             .await;
         self.inner
             .fault_injection
@@ -2676,6 +2761,7 @@ impl Runtime {
                 physical_node_id,
                 capacity: branch_capacity,
                 domain_clock: None,
+                owner_stop: shutdown_rx.clone(),
             };
             let mut next_expiration_scan = Instant::now() + expiration_scan_interval;
             loop {
@@ -2842,6 +2928,15 @@ fn reject_relay_delivery(batch: &RelayRecordBatch, reason: &'static str) -> Rela
         ack.no_ack(reason);
     }
     Err(Box::new(batch.clone()))
+}
+
+impl OwnerHandOnRefusal {
+    fn reason(self) -> &'static str {
+        match self {
+            Self::PartitionRouting => "relay partition routing changed before owner fan-out",
+            Self::RelayRouting => "relay routing changed before owner fan-out",
+        }
+    }
 }
 
 #[cfg(test)]

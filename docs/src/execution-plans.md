@@ -380,7 +380,9 @@ entities stay gated:
 - an emitter, reingestor or generator unit starts again from the previous revision's plan, after
   any replacement that started is stopped; a failed emitter stop keeps its task, with the
   emitter's held records, as it always has;
-- an ingestor starts again the units the swap stopped, after any unit the swap started is stopped;
+- an ingestor starts again the units the swap stopped. The swap itself starts no ingestor unit: an
+  ingestor is a source, so the units the desired revision places on a node start when the revision
+  activates, once every node has prepared it, as after a rebuild;
 - a relay gets back its previous partition count's services and owner tasks, and a rebound or
   materialized node its previous placement and state tasks;
 - every consumer registration a previous task had is restored, and the routing, state identities
@@ -411,11 +413,15 @@ rebinding with the originator the new assignment issued, as
 reassignment rebinds the replicated state of every node it names, so a Kafka ingestor kept this way
 takes the originator its domain offsets' new binding issued: a change that only replaces a replica
 of those offsets never refuses the ingestor's commits. An ingestor instance the schedule stopped
-keeps the originator it last held, which every later binding refuses.
+keeps the originator it last held, which every later binding refuses. An ingestor whose instance layout
+changes, such as an `INSTANCES` alteration of a domain-offset Kafka ingestor, rebinds every unit,
+those whose owner stays included: the planned handoff captured each unit's offsets, and only a new
+binding issues their originator again, so every unit reads under the new layout with authority
+over its offsets.
 
 The affected relay gates remain closed through publication. An already buffered owner batch takes
-a nonwaiting permit before fan-out: it finishes under the prior consumer set if admitted before
-the fence, or fails its record ACKs so its ingestor retries under the published consumer set.
+its permit before fan-out: it finishes under the prior consumer set if admitted before the fence,
+or waits for the swap and fans out to the published consumer set.
 
 A forced ownership change additionally identifies the input relays of its reassigned nodes. Once
 their local dispatch gates close, installation retires the preceding channel generation of each

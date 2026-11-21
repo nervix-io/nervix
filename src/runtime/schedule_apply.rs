@@ -450,12 +450,17 @@ impl Runtime {
                 && let Some(existing) = Self::scheduled_node(&execution.revision, entity)
             {
                 layout_replaced = existing.units.keys().ne(desired_node.units.keys());
+                // An ingestor whose instance layout changed reads under a new layout in every unit:
+                // the planned handoff captured each unit's Kafka offset state, and only a new
+                // binding issues its originator again. Every unit is rebound, kept owners included.
+                let rebinds_every_unit = layout_replaced && entity.kind == ModelKind::Ingestor;
                 changed_units.retain(|unit| {
-                    existing.units.get(unit).is_none_or(|previous| {
-                        let desired = &desired_node.units[unit];
-                        previous.primary_node != desired.primary_node
-                            || previous.assigned_nodes != desired.assigned_nodes
-                    })
+                    rebinds_every_unit
+                        || existing.units.get(unit).is_none_or(|previous| {
+                            let desired = &desired_node.units[unit];
+                            previous.primary_node != desired.primary_node
+                                || previous.assigned_nodes != desired.assigned_nodes
+                        })
                 });
                 let local = existing
                     .units_executing_on(local_node_id)
@@ -966,12 +971,18 @@ impl Runtime {
         relays.extend(gate_relays.iter().cloned());
         relays.sort_by(|left, right| left.as_str().cmp(right.as_str()));
         relays.dedup();
+        // The swap changes the routes an owner's fan-out reads, so it holds that hand-on back too.
+        // The fan-out waits for the swap rather than being refused: nothing the swap waits for
+        // waits for that fan-out.
         let mut local_gate_hold = self.engage_entity_unit_gates(
             domain,
             &relays,
             &targets,
-            Instant::now() + self.entity_gate_deadline(),
-            "local scheduled node swap",
+            EntityGateLease {
+                deadline: Instant::now() + self.entity_gate_deadline(),
+                reason: "local scheduled node swap",
+            },
+            RelayDispatchGateHold::ProducersAndHandOn,
         );
         if let Some(local_node_id) = local_node_id {
             self.fence_forced_recovery_routes(
@@ -1127,11 +1138,9 @@ impl Runtime {
                 }
                 ModelKind::Ingestor => {
                     Box::pin(self.swap_ingestor_entity(
-                        domain,
+                        context,
                         entity,
-                        revision,
                         retiring_ingestors,
-                        local_node_id,
                         journal,
                     ))
                     .await?;

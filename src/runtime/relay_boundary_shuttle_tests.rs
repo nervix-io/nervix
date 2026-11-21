@@ -13,7 +13,10 @@
 use std::time::Duration;
 
 use nervix_model_harness::shuttle::{check_dfs, check_random};
-use nervix_primitives::{sync::oneshot, time::Instant};
+use nervix_primitives::{
+    sync::{oneshot, watch},
+    time::Instant,
+};
 use nonzero_ext::nonzero;
 
 use super::*;
@@ -198,6 +201,7 @@ fn shuttle_a_partition_handoff_fences_its_delivery_and_materialized_reads_while_
                 let (root, first_completion) = AckSet::root();
                 before.acks = vec![root];
                 let first_services = services.clone();
+                let (_owner_runs, owner_stop) = watch::channel(false);
                 let owner = nervix_primitives::task::spawn(async move {
                     first_services
                         .fanout_owner_batch(
@@ -206,6 +210,7 @@ fn shuttle_a_partition_handoff_fences_its_delivery_and_materialized_reads_while_
                             first,
                             &before,
                             &ConfiguredFaultInjection::default(),
+                            &owner_stop,
                         )
                         .await
                 });
@@ -252,6 +257,7 @@ fn shuttle_a_partition_handoff_fences_its_delivery_and_materialized_reads_while_
                         second,
                         &after,
                         &ConfiguredFaultInjection::default(),
+                        &watch::channel(false).1,
                     )
                     .await
                     .assured("the sibling is never fenced by the moving partition");
@@ -276,12 +282,10 @@ fn shuttle_a_partition_handoff_fences_its_delivery_and_materialized_reads_while_
                     }
                     RelayTryRecv::Empty | RelayTryRecv::Closed => false,
                 };
-                let outcome = first_completion.wait().await;
-                if outcome == AckOutcome::Ack {
-                    assert!(received && result.is_ok());
-                } else {
-                    assert!(matches!(outcome, AckOutcome::NoAck(_)));
-                }
+                // The held partition's batch waits for the hold instead of being refused: it is
+                // delivered before the fence or after the release, and acknowledged either way.
+                assert!(received && result.is_ok());
+                assert_eq!(first_completion.wait().await, AckOutcome::Ack);
             });
         },
         Some(128),
@@ -368,6 +372,7 @@ fn shuttle_emitter_instances_receive_only_their_partitions_while_a_sibling_moves
                     batches.push((*unit, batch));
                 }
                 let owner_services = services.clone();
+                let (_owner_runs, owner_stop) = watch::channel(false);
                 let owner = nervix_primitives::task::spawn(async move {
                     let mut results = Vec::new();
                     for (unit, batch) in batches {
@@ -378,6 +383,7 @@ fn shuttle_emitter_instances_receive_only_their_partitions_while_a_sibling_moves
                                 unit,
                                 &batch,
                                 &ConfiguredFaultInjection::default(),
+                                &owner_stop,
                             )
                             .await;
                         results.push((unit, result.is_ok()));
@@ -462,18 +468,17 @@ fn shuttle_emitter_instances_receive_only_their_partitions_while_a_sibling_moves
                         assert_eq!(outcome, AckOutcome::Ack);
                         continue;
                     }
-                    assert!(
-                        deliveries <= 1,
-                        "a moved partition's batch is delivered at most once"
+                    // The move holds the partition's batch back rather than refusing it, so it
+                    // reaches the old consumer before the fence or the successor after it.
+                    assert_eq!(
+                        deliveries, 1,
+                        "a moved partition's batch is delivered exactly once"
                     );
                     let admitted = published
                         .iter()
                         .any(|(published, ok)| *published == unit && *ok);
-                    if outcome == AckOutcome::Ack {
-                        assert!(deliveries == 1 && admitted);
-                    } else {
-                        assert!(matches!(outcome, AckOutcome::NoAck(_)));
-                    }
+                    assert!(admitted);
+                    assert_eq!(outcome, AckOutcome::Ack);
                 }
             });
         },
@@ -481,8 +486,12 @@ fn shuttle_emitter_instances_receive_only_their_partitions_while_a_sibling_moves
     );
 }
 
+/// An owner's fan-out racing a swap that moves one of two attached consumers off this node either
+/// completes before the swap's fence, reaching both, or waits for the swap and reaches the sibling
+/// that stays. A source is acknowledged only once every consumer it reached acknowledged it, and
+/// the batch is never refused because the relay was being changed.
 #[test]
-fn shuttle_owner_fanout_fails_its_ack_while_an_attached_consumer_moves() {
+fn shuttle_owner_fanout_waits_for_an_attached_consumer_move_and_is_acknowledged() {
     check_random(
         || {
             shuttle::future::block_on(async {
@@ -495,22 +504,19 @@ fn shuttle_owner_fanout_fails_its_ack_while_an_attached_consumer_moves() {
                 let (root, completion) = AckSet::root();
                 let mut batch = quiesce_test_batch();
                 batch.acks = vec![root];
-                let (owner_done, owner_is_done) = oneshot::channel();
                 let owner_services = services.clone();
+                let (_owner_runs, owner_stop) = watch::channel(false);
                 let owner = nervix_primitives::task::spawn(async move {
-                    let result = owner_services
+                    owner_services
                         .fanout_owner_batch(
                             &owner_domain,
                             &relay,
                             Unit::SINGLE,
                             &batch,
                             &ConfiguredFaultInjection::default(),
+                            &owner_stop,
                         )
-                        .await;
-                    owner_done
-                        .send(())
-                        .assured("the moving consumer waits until fan-out returns");
-                    result
+                        .await
                 });
 
                 let moving_services = services.clone();
@@ -530,14 +536,12 @@ fn shuttle_owner_fanout_fails_its_ack_while_an_attached_consumer_moves() {
                     };
                     drop(moving);
                     moving_services.remove_local_runtime_consumer(AckMode::Attached);
-                    owner_is_done
-                        .await
-                        .assured("the owner finishes before the schedule gate reopens");
                     drop(lease);
                     received
                 });
 
                 let owner_result = owner.await.assured("owner task completes");
+                // The moving consumer received the batch only when fan-out passed the fence first.
                 let moving_received = move_consumer.await.assured("consumer move completes");
                 let sibling_received = match sibling.try_recv() {
                     RelayTryRecv::Batch(delivered) => {
@@ -546,16 +550,19 @@ fn shuttle_owner_fanout_fails_its_ack_while_an_attached_consumer_moves() {
                     }
                     RelayTryRecv::Empty | RelayTryRecv::Closed => false,
                 };
-                let outcome = completion.wait().await;
-                if outcome == AckOutcome::Ack {
-                    assert!(
-                        moving_received && sibling_received,
-                        "a successful source ACK requires delivery to both attached consumers"
-                    );
-                    assert!(owner_result.is_ok());
-                } else {
-                    assert!(matches!(outcome, AckOutcome::NoAck(_)));
-                }
+                assert!(
+                    owner_result.is_ok(),
+                    "the batch is never refused by the move"
+                );
+                assert!(
+                    sibling_received,
+                    "the staying sibling always receives the batch"
+                );
+                assert_eq!(completion.wait().await, AckOutcome::Ack);
+                assert!(
+                    !moving_received || sibling_received,
+                    "a fan-out that passed the fence reached both attached consumers"
+                );
 
                 let (retry_root, retry_completion) = AckSet::root();
                 let mut retry = quiesce_test_batch();
@@ -567,6 +574,7 @@ fn shuttle_owner_fanout_fails_its_ack_while_an_attached_consumer_moves() {
                         Unit::SINGLE,
                         &retry,
                         &ConfiguredFaultInjection::default(),
+                        &watch::channel(false).1,
                     )
                     .await
                     .assured("a released gate admits a retry to its live sibling");
@@ -658,12 +666,11 @@ fn received_batches(consumer: &mut RelayRuntimeFanIn) -> usize {
 }
 
 /// A batch the owner publishes across a failed entity swap's hold reaches the unit's consumer
-/// exactly once and is acknowledged, or meets the hold itself and is refused before any consumer
-/// sees it. The swap stops the unit's previous task after the fence and, when it got that far,
-/// moves the registration to a replacement; the restore puts the registration back and starts the
-/// previous consumer before the hold ends, so no publication meets a counted consumer without a
-/// receiver. A held relay refuses an owner batch and fails its acknowledgement so that its source
-/// delivers it again, as it does for every hold; any other failure is the restore's.
+/// exactly once and is acknowledged: the previous consumer before the fence, or the restored one
+/// after the hold, for which the batch waits. The swap stops the unit's previous task after the
+/// fence and, when it got that far, moves the registration to a replacement; the restore puts the
+/// registration back and starts the previous consumer before the hold ends, so no publication
+/// meets a counted consumer without a receiver. The hold never refuses the batch.
 #[test]
 fn shuttle_a_batch_held_through_a_failed_swap_reaches_the_restored_consumer_once() {
     check_dfs(
@@ -714,6 +721,7 @@ fn shuttle_a_batch_held_through_a_failed_swap_reaches_the_restored_consumer_once
                         let mut previous =
                             services.add_local_unit_runtime_consumer(AckMode::Attached, unit);
                         let publishing = services.clone();
+                        let (owner_runs, owner_stop) = watch::channel(false);
                         let owner = nervix_primitives::task::spawn(async move {
                             publishing
                                 .fanout_owner_batch(
@@ -722,6 +730,7 @@ fn shuttle_a_batch_held_through_a_failed_swap_reaches_the_restored_consumer_once
                                     unit,
                                     &batch,
                                     &ConfiguredFaultInjection::default(),
+                                    &owner_stop,
                                 )
                                 .await
                         });
@@ -749,27 +758,17 @@ fn shuttle_a_batch_held_through_a_failed_swap_reaches_the_restored_consumer_once
                         drop(lease);
 
                         let published = owner.await.assured("the owner task finishes");
+                        drop(owner_runs);
                         deliveries = deliveries
                             .checked_add(received_batches(&mut restored))
                             .assured("a check publishes one batch");
-                        if published.is_ok() {
-                            assert_eq!(
-                                deliveries, 1,
-                                "a batch published across a failed swap reaches the unit's \
-                                 consumer exactly once"
-                            );
-                            assert_eq!(completion.wait().await, AckOutcome::Ack);
-                        } else {
-                            assert_eq!(deliveries, 0, "a refused batch reaches no consumer");
-                            let AckOutcome::NoAck(reason) = completion.wait().await else {
-                                panic!("a refused batch fails its acknowledgement");
-                            };
-                            assert!(
-                                reason.ends_with("routing changed before owner fan-out"),
-                                "only the hold itself refuses the batch, but it failed with: \
-                                 {reason}"
-                            );
-                        }
+                        assert!(published.is_ok(), "the hold never refuses the batch");
+                        assert_eq!(
+                            deliveries, 1,
+                            "a batch published across a failed swap reaches the unit's consumer \
+                             exactly once"
+                        );
+                        assert_eq!(completion.wait().await, AckOutcome::Ack);
                     }
                 }
             });

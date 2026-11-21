@@ -105,10 +105,12 @@ only when all attached descendants succeed. Any attached failure fails the share
 even when another descendant has already completed an external side effect.
 
 The relay owner holds a dispatch permit while it selects and fans out to attached consumers. If a
-schedule swap has already closed that gate before a buffered batch begins fan-out, the owner fails
-the batch's ACKs and lets the ingestor retry under the new schedule. This prevents a sibling attached
-consumer on the old node from completing the ingestor ACK while a moving consumer is absent from the
-owner's routes.
+schedule swap has already closed that gate before a buffered batch begins fan-out, the batch waits
+for the swap and then fans out to the consumers the swap published. A sibling attached consumer on
+the old node therefore never completes the ingestor ACK while a moving consumer is absent from the
+owner's routes, and the swap refuses nothing the relay accepted. Only an owner that is itself
+stopping while a swap holds its batch fails the batch's ACKs, because it cannot wait for a swap
+that waits for it to stop.
 
 A batch that a relay owner routes to another node for its attached consumers carries record
 acknowledgements for them. If no attached consumer of the relay runs on that node when the batch

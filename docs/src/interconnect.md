@@ -1406,11 +1406,13 @@ swap. It acquires a dispatch permit before reading the local and remote consumer
 that permit through fan-out, attachment of the consumer ACK shares, and resolution of the owner's
 share. A swap closes the gate
 and waits for existing permits before changing those sets. If the gate is already closed when a
-buffered batch starts fan-out, the owner fails its record acknowledgements and the ingestor retries
-after the schedule changes. It cannot wait for the gate while holding that buffered batch: the
-swap's drain counts the batch, so such a wait would prevent the swap from finishing. In particular,
-an attached sibling on the old destination cannot acknowledge a batch while another attached
-consumer moves to a new destination before the owner selected routes for that batch.
+buffered batch starts fan-out, the batch waits for the swap and then fans out along the routes the
+swap published. A coordinated hold that waits for relays to empty holds producers only, so the
+drain completes by delivering what the owner buffered rather than refusing it. In particular, an
+attached sibling on the old destination cannot acknowledge a batch while another attached consumer
+moves to a new destination before the owner selected routes for that batch. A routed delivery that
+reaches a node while that node's swap holds its partition still fails its record acknowledgements:
+it holds the sending owner's permit, and two nodes swapping at once must not wait for each other.
 
 The receiver decides admission before it hands the batch to the runtime consumers of the relay, and
 it hands the batch to the consumers that run on the node at that moment. An owner routes an attached

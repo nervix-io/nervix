@@ -144,11 +144,11 @@ pub(super) enum EntitySwapStep {
     EmitterFlush { emitter: EmitterName },
 }
 
-/// The units of one ingestor a swap stopped and started.
+/// The units of one ingestor a swap stopped. The swap starts none: the revision's activation
+/// starts the units it plans here, once every node has prepared it.
 pub(super) struct IngestorSwap {
     ingestor: IngestorName,
     stopped: Vec<Unit>,
-    started: Vec<Unit>,
 }
 
 /// One processor unit a swap replaced: the task it ran before and the replacement, as far as the
@@ -297,16 +297,11 @@ impl IngestorSwap {
         Self {
             ingestor,
             stopped: Vec::new(),
-            started: Vec::new(),
         }
     }
 
     pub(super) fn record_stopped(&mut self, unit: Unit) {
         self.stopped.push(unit);
-    }
-
-    pub(super) fn record_started(&mut self, unit: Unit) {
-        self.started.push(unit);
     }
 }
 
@@ -640,14 +635,8 @@ impl Runtime {
         match step {
             EntitySwapStep::StateIdentities => self.install_state_identities(restore.previous),
             EntitySwapStep::Ingestor(step) => {
-                self.restore_ingestor_units(
-                    restore,
-                    &step.ingestor,
-                    &step.started,
-                    &step.stopped,
-                    failures,
-                )
-                .await;
+                self.restore_ingestor_units(restore, &step.ingestor, &step.stopped, failures)
+                    .await;
             }
             EntitySwapStep::Repartition(step) => {
                 Box::pin(self.restore_repartition(restore, step, failures)).await;
@@ -705,31 +694,16 @@ impl Runtime {
         );
     }
 
-    /// Stops the units of `ingestor` the swap started and starts again the units it stopped, with
-    /// the plans of the revision before the swap.
+    /// Starts again the units of `ingestor` the swap stopped, with the plans of the revision before
+    /// the swap. The swap started no replacement unit, so none runs to stop.
     async fn restore_ingestor_units(
         &self,
         restore: &SwapRestore<'_>,
         ingestor: &IngestorName,
-        started: &[Unit],
         stopped: &[Unit],
         failures: &mut RestoreFailures,
     ) {
         let node = NodeRef::new(ModelKind::Ingestor, ModelName::from(ingestor));
-        for unit in started.iter().rev() {
-            nervix_primitives::task::consume_budget().await;
-            if let Err(error) = self
-                .stop_ingestor_unit(restore.domain, ingestor, *unit)
-                .await
-            {
-                self.restore_failed(
-                    restore,
-                    &node,
-                    error.change_context(EntitySwapRestoreError::StopReplacement),
-                    failures,
-                );
-            }
-        }
         for unit in stopped {
             nervix_primitives::task::consume_budget().await;
             let Some(plan) = restore.previous.entrypoints.ingestor(ingestor, *unit) else {
@@ -1281,7 +1255,6 @@ impl Runtime {
             self.restore_ingestor_units(
                 restore,
                 &IngestorName::from(&entity.identifier),
-                &[],
                 &stopped_ingestor_units,
                 failures,
             )

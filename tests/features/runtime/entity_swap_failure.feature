@@ -81,6 +81,25 @@ Feature: A failed entity swap keeps the running domain
       SHOW CLUSTER STATUS;
       """
     Then the last cluster status owner for scheduled "deduplicator" "swap_dedup" is saved as placeholder "dedup_owner"
+    # Every entity runs on the deduplicator's node, so no record reaches it as a routed delivery
+    # from another node. A routed delivery that meets a swap there is still refused, which loses a
+    # MODE NO ACK record; Relay Capacity 02 (https://app.clickup.com/t/86bd1z226) removes that
+    # refusal, and this scenario regains a cross-node placement there.
+    When these Plexus commands are executed on the leader node
+      """
+      RELOCATE INGESTOR swap_acked, INGESTOR swap_unacked, RELAY swap_events, RELAY swap_unique_events, EMITTER swap_output ONTO NODE {{dedup_owner}} IGNORE PREFERENCES;
+      SHOW CLUSTER STATUS;
+      """
+    Then the last cluster status owner for scheduled "ingestor" "swap_acked" is saved as placeholder "acked_owner"
+    And the last cluster status owner for scheduled "ingestor" "swap_unacked" is saved as placeholder "unacked_owner"
+    And the last cluster status owner for scheduled "relay" "swap_events" is saved as placeholder "input_relay_owner"
+    And the last cluster status owner for scheduled "relay" "swap_unique_events" is saved as placeholder "output_relay_owner"
+    And the last cluster status owner for scheduled "emitter" "swap_output" is saved as placeholder "emitter_owner"
+    And placeholder "acked_owner" equals placeholder "dedup_owner"
+    And placeholder "unacked_owner" equals placeholder "dedup_owner"
+    And placeholder "input_relay_owner" equals placeholder "dedup_owner"
+    And placeholder "output_relay_owner" equals placeholder "dedup_owner"
+    And placeholder "emitter_owner" equals placeholder "dedup_owner"
     When these Kafka messages are rapidly published to topic "swap_acked_{{test_id}}"
       """
       {"event_id":"a-1","tenant":"acme","content":"c-a-1"}

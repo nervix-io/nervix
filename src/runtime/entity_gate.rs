@@ -989,13 +989,15 @@ impl Runtime {
         relays
     }
 
+    /// Engages the whole-relay gate of every relay in `relays`, holding back what `hold` names.
     pub(in crate::runtime) fn engage_entity_gates(
         &self,
         domain: &DomainName,
         relays: &[RelayName],
-        deadline: Instant,
-        reason: &str,
+        lease: EntityGateLease<'_>,
+        hold: RelayDispatchGateHold,
     ) -> EntityGateHold {
+        let EntityGateLease { deadline, reason } = lease;
         let mut gates = Vec::with_capacity(relays.len());
         for relay in relays {
             let key = DomainNodeRef::node_in(domain.clone(), ModelKind::Relay, relay.clone());
@@ -1008,7 +1010,7 @@ impl Runtime {
                 continue;
             };
             let gate = fanout.dispatch_gate();
-            gates.push(RelayDispatchGateLease::engage(gate, deadline, reason));
+            gates.push(Self::engage_relay_gate(gate, deadline, reason, hold));
         }
         EntityGateHold {
             gates,
@@ -1023,12 +1025,13 @@ impl Runtime {
         domain: &DomainName,
         relays: &[RelayName],
         targets: &EntityGateTargets,
-        deadline: Instant,
-        reason: &str,
+        lease: EntityGateLease<'_>,
+        hold: RelayDispatchGateHold,
     ) -> EntityGateHold {
         let EntityGateTargets::Units(_) = targets else {
-            return self.engage_entity_gates(domain, relays, deadline, reason);
+            return self.engage_entity_gates(domain, relays, lease, hold);
         };
+        let EntityGateLease { deadline, reason } = lease;
         let revision = self
             .inner
             .executions
@@ -1051,19 +1054,36 @@ impl Runtime {
                     let gate = fanout
                         .unit_dispatch_gate(unit)
                         .verified("a partition has its own dispatch gate");
-                    gates.push(RelayDispatchGateLease::engage(gate, deadline, reason));
+                    gates.push(Self::engage_relay_gate(gate, deadline, reason, hold));
                 }
             } else {
-                gates.push(RelayDispatchGateLease::engage(
+                gates.push(Self::engage_relay_gate(
                     fanout.dispatch_gate(),
                     deadline,
                     reason,
+                    hold,
                 ));
             }
         }
         EntityGateHold {
             gates,
             branch_gates: Vec::new(),
+        }
+    }
+
+    fn engage_relay_gate(
+        gate: Arc<RelayDispatchGate>,
+        deadline: Instant,
+        reason: &str,
+        hold: RelayDispatchGateHold,
+    ) -> RelayDispatchGateLease {
+        match hold {
+            RelayDispatchGateHold::Producers => {
+                RelayDispatchGateLease::engage_producers(gate, deadline, reason)
+            }
+            RelayDispatchGateHold::ProducersAndHandOn => {
+                RelayDispatchGateLease::engage(gate, deadline, reason)
+            }
         }
     }
 
@@ -1244,16 +1264,28 @@ impl Runtime {
                 };
                 gates
             }
+            // A coordinated hold waits for the relays to empty before any node changes a route,
+            // so it holds producers only: what the relays accepted goes on to its consumers.
             EntityGatePurpose::OwnershipHandoff => self.engage_entity_unit_gates(
                 domain,
                 &scope.relays,
                 &scope.targets,
-                deadline,
-                &reason,
+                EntityGateLease {
+                    deadline,
+                    reason: &reason,
+                },
+                RelayDispatchGateHold::Producers,
             ),
-            EntityGatePurpose::ModelAlteration | EntityGatePurpose::PartitionChange => {
-                self.engage_entity_gates(domain, &scope.relays, deadline, &reason)
-            }
+            EntityGatePurpose::ModelAlteration | EntityGatePurpose::PartitionChange => self
+                .engage_entity_gates(
+                    domain,
+                    &scope.relays,
+                    EntityGateLease {
+                        deadline,
+                        reason: &reason,
+                    },
+                    RelayDispatchGateHold::Producers,
+                ),
         };
         if !gates.wait_quiescent().await {
             gates.release();
