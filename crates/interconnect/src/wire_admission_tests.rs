@@ -695,10 +695,13 @@ async fn nested_bulk_decode_cancellation_returns_input_output_and_queue_slot() {
 /// exchange and the encoding gives back its place in line and its charge. While the class stays
 /// full the end of the exchange alone ends the wait, so an encoding that ignored it would never
 /// finish. In every interleaving of a place freeing with an exchange ending, the class refuses
-/// nothing, every job leaves its worker and no charge remains.
+/// nothing, and every job leaves its worker with its charge: a job the end finds already on its
+/// worker finishes its bounded encoding first, as every running job does.
 #[cfg(feature = "shuttle")]
 #[test]
 fn shuttle_an_answer_waiting_for_a_place_ends_with_its_exchange_or_takes_the_freed_place() {
+    use nervix_execution::QueueAdmission;
+
     fn answering(
         executor: &Executor,
     ) -> (
@@ -728,7 +731,7 @@ fn shuttle_an_answer_waiting_for_a_place_ends_with_its_exchange_or_takes_the_fre
         (end, encoding)
     }
 
-    nervix_model_harness::shuttle::check_random_and_pct(|| {
+    nervix_model_harness::shuttle::check_spinning_interleavings(|| {
         shuttle::future::block_on(async {
             let executor = one_place_executor();
             let full = FullBulkClass::fill(&executor).await;
@@ -770,6 +773,25 @@ fn shuttle_an_answer_waiting_for_a_place_ends_with_its_exchange_or_takes_the_fre
             if let super::AnswerEncoding::Encoded(encoded) = outcome {
                 assert_complete_answer(&executor, encoded).await;
             }
+            // The end of an exchange can find the encoding's job already on the class's worker.
+            // Dropping the encoding cannot stop a running job: it finishes its bounded encoding and
+            // only then gives back its worker and its charge, as every running job does. So the
+            // class is idle once a charge of its whole capacity is granted and a job then runs on
+            // its one worker.
+            let capacity = executor.memory(MemoryClass::Bulk).capacity_bytes;
+            let whole_class = executor
+                .reserve(MemoryClass::Bulk, capacity)
+                .await
+                .assured("every charge returns once the last job leaves its worker");
+            executor
+                .run_cpu_with(
+                    CpuClass::Bulk,
+                    QueueAdmission::WaitForPlace,
+                    whole_class,
+                    |_charge, _cancellation| (),
+                )
+                .await
+                .assured("the last job gives back its worker");
             let class = executor.snapshot().cpu_class(CpuClass::Bulk);
             assert_eq!(class.refused, 0, "a full class refuses no answer");
             assert_eq!(class.running, 0, "every job left its worker");
