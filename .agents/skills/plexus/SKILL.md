@@ -117,8 +117,8 @@ contract. Refer users to those chapters for cursor edits, transaction-aware cand
 relay candidates narrowed to what the statement can accept, and completion status messages, and
 completing multi-word creation heads. For connector expression
 completion, including filters, HTTP request expressions, ALTER constructions, metadata fields and
-entity-specific header functions, follow
-the CLI's Completion section.
+entity-specific header functions, and for the collection aggregates a window route's bound admits,
+follow the CLI's Completion section.
 For live subscription, clock and notice output while editing, and terminal omission notices,
 follow the CLI's [Asynchronous Output](../../../docs/src/client-tools-cli.md#asynchronous-output)
 section.
