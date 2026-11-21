@@ -90,10 +90,6 @@ mod tests {
     }
 
     /// Runs `join` under a scoped subscriber that captures what it reports.
-    ///
-    /// Every join that can report runs under one: a join that first reaches the report while no
-    /// subscriber is interested caches the report's callsite as disabled, which can hide the report
-    /// from a test capturing it concurrently.
     async fn capture<T>(join: impl Future<Output = T>) -> Captured<T> {
         let logs = CapturedLogs::default();
         // `#[nervix_primitives::test]` runs the whole future on the calling thread, so the thread-local
