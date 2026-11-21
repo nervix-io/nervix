@@ -17,14 +17,14 @@ use nervix_models::{
     ClientOutcomeUncertainty, ClientProcessingFailure, ClientProducerAdmission,
     ClientProducerDescription, ClientProducerEndReason, ClientProducerGrant, ClientProducerLimits,
     ClientProducerPolicy, ClientProducerRefusal, ClientSubmissionOutcome, ClientSubmissionRefusal,
-    DomainName, IngestorName, SchemaField,
+    DomainName, IngestorName, SchemaField, SessionFrameBytes,
 };
 
 use crate::{
     codec::{Decoder, EncodedUnion, Encoder, WireDecodeError, WireEncodeError, wire_enum},
     common::RequestId,
     frame::{ClientFrame, EncodedFrame, ServerFrame, VerifiedFrame},
-    limits::{MIN_FRAME_BYTES, SessionLimits},
+    limits::SessionLimits,
     row::{decode_field, encode_field},
     server::finish_server_message,
     wire,
@@ -32,19 +32,44 @@ use crate::{
 
 /// The depth of an expected field in an open request: the client message, the request, and the
 /// field.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "session.fbs nests an open ingestor request's expected field in the client \
+                  message and the request, so the field table sits at this depth"
+    )
+)]
 const REQUEST_FIELD_DEPTH: usize = 3;
 
 /// The depth of a field in an opened producer's reply: the server message, the reply, the open
 /// outcome, the opened producer, and the field.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "session.fbs nests an opened producer's field in the server message, the reply, \
+                  the open ingestor outcome and the opened producer, so the field table sits at \
+                  this depth"
+    )
+)]
 const OPENED_FIELD_DEPTH: usize = 5;
 
 /// The bytes a submission frame holds besides its batch: the client message and request tables
 /// with their vtables, the batch vector's length prefix, the root offset and identifier, and
 /// alignment padding. A test encodes a batch of the largest size this leaves and finds it fits.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the session schema's submission frame layout encodes everything but its batch \
+                  within 256 bytes; the largest-batch test pins it"
+    )
+)]
 const SUBMISSION_ENVELOPE_BYTES: usize = 256;
 
 const _: () = assert!(
-    SUBMISSION_ENVELOPE_BYTES < MIN_FRAME_BYTES,
+    SUBMISSION_ENVELOPE_BYTES < SessionFrameBytes::MINIMUM,
     "every frame a session admits must carry a batch beside its envelope",
 );
 
@@ -53,7 +78,10 @@ impl SessionLimits {
     pub fn max_submitted_batch_bytes(&self) -> usize {
         self.frame_bytes()
             .checked_sub(SUBMISSION_ENVELOPE_BYTES)
-            .assured("every frame limit is at least MIN_FRAME_BYTES, which exceeds the envelope")
+            .assured(
+                "every frame limit is at least SessionFrameBytes::MINIMUM, which exceeds the \
+                 envelope",
+            )
     }
 }
 

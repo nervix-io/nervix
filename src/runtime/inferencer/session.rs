@@ -176,6 +176,22 @@ enum InputSlot {
     State(usize),
 }
 
+/// The threads ONNX Runtime may use inside one session, for operators and for independent graph
+/// nodes alike.
+///
+/// Each model run occupies exactly one of the node's extension workers, so a session never starts
+/// threads of its own: parallelism across branches comes from the extension class's bounded
+/// admission, which sizes the node's model CPU use.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "each model run occupies one extension worker; parallelism across branches comes \
+                  from the extension class's bounded admission, not ONNX Runtime's pools"
+    )
+)]
+const SESSION_THREADS: usize = 1;
+
 /// The branch's native session, with each model port resolved to the declaration it serves.
 struct BoundSession {
     session: Session,
@@ -527,7 +543,7 @@ impl InferenceSession {
 
 impl BoundSession {
     /// Load the model and resolve every one of its ports, which validation has already matched to
-    /// the declaration. ONNX Runtime keeps operator concurrency at one thread per session.
+    /// the declaration. ONNX Runtime keeps both of its thread pools at [`SESSION_THREADS`].
     fn load(
         path: &Path,
         definition: &PreparedInference,
@@ -539,10 +555,10 @@ impl BoundSession {
         let environment = onnx_environment().change_context(InferencerError::InitializeSession)?;
         let session = Session::builder(environment)
             .change_context(InferencerError::InitializeSession)?
-            .with_intra_threads(1)
+            .with_intra_threads(SESSION_THREADS)
             .map_err(ort::Error::<()>::from)
             .change_context(InferencerError::InitializeSession)?
-            .with_inter_threads(1)
+            .with_inter_threads(SESSION_THREADS)
             .map_err(ort::Error::<()>::from)
             .change_context(InferencerError::InitializeSession)?
             .commit_from_file(path)

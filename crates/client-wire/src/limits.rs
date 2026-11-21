@@ -3,6 +3,26 @@
 //! One value carries them all, so a transport configures its own frame limit, the verifier, the
 //! decoders that allocate, and the encoders that must never produce a frame a peer rejects from
 //! the same numbers.
+//!
+//! The session-limit settings own every default and bound: `SessionFrameBytes`,
+//! `SessionTransferBytes`, `SessionNestingDepth`, `SessionCollectionEntries` and
+//! `SessionStringBytes`. This crate reads each one from its definition and relies on them as
+//! follows:
+//!
+//! - The default frame limit matches the receive limit gRPC applies by default.
+//! - The smallest frame limit holds the session opening and a transfer part with a useful chunk,
+//!   so every envelope this crate reserves beside a chunk, a batch or rows stays below it.
+//! - The largest frame limit keeps FlatBuffers' 32-bit offsets in range, and keeps the verifier's
+//!   apparent-size budget, the frame length times `APPARENT_SIZE_FACTOR`, representable in the
+//!   32-bit `usize` of browser builds.
+//! - The deepest structure of the schema that does not recurse, a node coverage in an execution
+//!   step's affected topology inside an inspection reply, nests 13 tables. The default nesting
+//!   limit leaves the rest for nested list values and list field types.
+//! - The smallest nesting limit holds every structure of the schema that does not recurse, which a
+//!   test verifies under that limit.
+//! - The verifier and the decoders recurse once per level, so the largest nesting limit bounds the
+//!   stack a hostile frame can make a receiver use. A test verifies and decodes a frame nested that
+//!   deep on a test thread's stack in a debug build.
 
 use std::num::{NonZeroU64, NonZeroUsize};
 
@@ -29,46 +49,17 @@ use nervix_models::{
 )]
 pub const MAX_IN_FLIGHT_REQUESTS: usize = 64;
 
-/// The largest single frame by default. It matches the receive limit gRPC applies by default.
-const DEFAULT_FRAME_BYTES: usize = SessionFrameBytes::DEFAULT;
-
-/// The largest reply a transfer reassembles by default.
-const DEFAULT_TRANSFER_BYTES: usize = SessionTransferBytes::DEFAULT;
-
-/// The deepest nesting of tables by default. The deepest structure of the schema that does not
-/// recurse, a node coverage in an execution step's affected topology inside an inspection reply,
-/// nests 13 tables; the rest of the budget is for nested list values and list field types.
-const DEFAULT_NESTING_DEPTH: usize = SessionNestingDepth::DEFAULT;
-
-/// The most entries a single vector may hold by default.
-const DEFAULT_COLLECTION_ENTRIES: usize = SessionCollectionEntries::DEFAULT;
-
-/// The longest string by default.
-const DEFAULT_STRING_BYTES: usize = SessionStringBytes::DEFAULT;
-
-/// A frame must hold a transfer part with a useful chunk, and a limit below this cannot.
-pub(crate) const MIN_FRAME_BYTES: usize = SessionFrameBytes::MINIMUM;
-
-/// The largest frame any limit admits.
-///
-/// FlatBuffers offsets are 32-bit, and the verifier's apparent-size budget, which is this bound
-/// times [`APPARENT_SIZE_FACTOR`], must stay representable in a 32-bit `usize` for browser builds.
-const MAX_FRAME_BYTES: usize = SessionFrameBytes::MAXIMUM;
-
-/// The fewest nesting levels any limit admits: enough for every structure of the schema that does
-/// not recurse, which a test verifies under this limit.
-pub(crate) const MIN_NESTING_DEPTH: usize = SessionNestingDepth::MINIMUM;
-
-/// The most nesting levels any limit admits.
-///
-/// The verifier and the decoders recurse once per level, so the depth bounds the stack a hostile
-/// frame can make a receiver use. A test verifies and decodes a frame nested this deep on a test
-/// thread's stack in a debug build.
-pub(crate) const MAX_NESTING_DEPTH: usize = SessionNestingDepth::MAXIMUM;
-
 /// The smallest table occupies its four-byte vtable offset, so a frame of `n` bytes cannot hold
 /// more than `n / MIN_TABLE_BYTES` tables.
-const MIN_TABLE_BYTES: usize = 4;
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "every FlatBuffers table starts with its 4-byte vtable offset, and the client \
+                  session protocol (rule F-3) limits a frame to its length divided by 4 tables"
+    )
+)]
+const MIN_TABLE_BYTES: usize = flatbuffers::SIZE_SOFFSET;
 
 /// How much larger than the frame the verifier lets its traversal grow.
 ///
@@ -76,19 +67,31 @@ const MIN_TABLE_BYTES: usize = 4;
 /// holds: an empty table visited through its offset counts about two and a half times its own
 /// size. Anything beyond this factor is a frame whose offsets alias one another to expand the
 /// work a receiver does.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the client session protocol (rule F-3) limits the verifier's apparent size to 8 \
+                  times the frame length"
+    )
+)]
 const APPARENT_SIZE_FACTOR: usize = 8;
 
 const _: () = {
-    assert!(MIN_FRAME_BYTES <= DEFAULT_FRAME_BYTES);
-    assert!(DEFAULT_FRAME_BYTES <= DEFAULT_TRANSFER_BYTES);
-    assert!(DEFAULT_TRANSFER_BYTES <= MAX_FRAME_BYTES);
-    assert!(DEFAULT_STRING_BYTES <= DEFAULT_TRANSFER_BYTES);
-    assert!(MIN_NESTING_DEPTH <= DEFAULT_NESTING_DEPTH);
-    assert!(DEFAULT_NESTING_DEPTH <= MAX_NESTING_DEPTH);
-    assert!(DEFAULT_COLLECTION_ENTRIES > 0);
+    assert!(SessionFrameBytes::MINIMUM <= SessionFrameBytes::DEFAULT);
+    assert!(SessionFrameBytes::DEFAULT <= SessionTransferBytes::DEFAULT);
+    assert!(SessionTransferBytes::DEFAULT <= SessionFrameBytes::MAXIMUM);
+    assert!(SessionStringBytes::DEFAULT <= SessionTransferBytes::DEFAULT);
+    assert!(SessionNestingDepth::MINIMUM <= SessionNestingDepth::DEFAULT);
+    assert!(SessionNestingDepth::DEFAULT <= SessionNestingDepth::MAXIMUM);
+    assert!(SessionCollectionEntries::DEFAULT > 0);
     // The verifier counts its apparent size in `usize`. This evaluates on the target being built,
     // so a browser build proves the budget fits its 32-bit `usize`.
-    assert!(MAX_FRAME_BYTES.checked_mul(APPARENT_SIZE_FACTOR).is_some());
+    assert!(
+        SessionFrameBytes::MAXIMUM
+            .checked_mul(APPARENT_SIZE_FACTOR)
+            .is_some()
+    );
 };
 
 /// The limits a session is configured with, before they are checked against one another.
@@ -124,22 +127,23 @@ impl SessionLimits {
     )]
     pub const OPENING: Self = Self {
         settings: SessionLimitSettings {
-            frame_bytes: non_zero(MIN_FRAME_BYTES),
-            transfer_bytes: non_zero(MIN_FRAME_BYTES),
-            nesting_depth: non_zero(MIN_NESTING_DEPTH),
-            collection_entries: non_zero(MIN_FRAME_BYTES),
-            string_bytes: non_zero(MIN_FRAME_BYTES),
+            frame_bytes: non_zero(SessionFrameBytes::MINIMUM),
+            transfer_bytes: non_zero(SessionFrameBytes::MINIMUM),
+            nesting_depth: non_zero(SessionNestingDepth::MINIMUM),
+            collection_entries: non_zero(SessionFrameBytes::MINIMUM),
+            string_bytes: non_zero(SessionFrameBytes::MINIMUM),
         },
     };
 
-    /// The limits a session uses unless its transport configures others.
+    /// The limits a session uses unless its transport configures others: the default of each
+    /// session-limit setting.
     pub const DEFAULT: Self = Self {
         settings: SessionLimitSettings {
-            frame_bytes: non_zero(DEFAULT_FRAME_BYTES),
-            transfer_bytes: non_zero(DEFAULT_TRANSFER_BYTES),
-            nesting_depth: non_zero(DEFAULT_NESTING_DEPTH),
-            collection_entries: non_zero(DEFAULT_COLLECTION_ENTRIES),
-            string_bytes: non_zero(DEFAULT_STRING_BYTES),
+            frame_bytes: non_zero(SessionFrameBytes::DEFAULT),
+            transfer_bytes: non_zero(SessionTransferBytes::DEFAULT),
+            nesting_depth: non_zero(SessionNestingDepth::DEFAULT),
+            collection_entries: non_zero(SessionCollectionEntries::DEFAULT),
+            string_bytes: non_zero(SessionStringBytes::DEFAULT),
         },
     };
 
@@ -169,7 +173,7 @@ impl SessionLimits {
     }
 
     /// The verifier options for a frame of `frame_len` bytes, which verification has already held
-    /// to a limit of at most [`MAX_FRAME_BYTES`].
+    /// to a limit of at most `SessionFrameBytes::MAXIMUM`.
     ///
     /// The table and traversal budgets scale with the frame itself rather than with the limit, so
     /// a small frame whose offsets alias one another cannot make a receiver walk far more than its
@@ -177,8 +181,8 @@ impl SessionLimits {
     pub(crate) fn verifier_options(&self, frame_len: usize) -> VerifierOptions {
         let max_tables = frame_len / MIN_TABLE_BYTES;
         let max_apparent_size = frame_len.checked_mul(APPARENT_SIZE_FACTOR).assured(
-            "a verified frame is at most MAX_FRAME_BYTES long, whose apparent-size product a \
-             const assertion proves fits usize on the target being built",
+            "a verified frame is at most SessionFrameBytes::MAXIMUM long, whose apparent-size \
+             product a const assertion proves fits usize on the target being built",
         );
         VerifierOptions {
             max_depth: self.nesting_depth(),
@@ -265,31 +269,31 @@ mod tests {
     #[test]
     fn frame_limit_boundaries_are_inclusive() {
         let smallest = SessionLimitSettings {
-            frame_bytes: size(MIN_FRAME_BYTES),
+            frame_bytes: size(SessionFrameBytes::MINIMUM),
             ..settings()
         };
         assert!(SessionLimits::try_from(smallest).is_ok());
 
         let too_small = SessionLimitSettings {
-            frame_bytes: size(MIN_FRAME_BYTES - 1),
+            frame_bytes: size(SessionFrameBytes::MINIMUM - 1),
             ..settings()
         };
         let error = SessionLimits::try_from(too_small).expect_err("below the minimum");
         assert!(matches!(
             error.current_context(),
-            LimitsError::FrameBytesOutOfRange { frame_bytes, .. } if *frame_bytes == MIN_FRAME_BYTES - 1
+            LimitsError::FrameBytesOutOfRange { frame_bytes, .. } if *frame_bytes == SessionFrameBytes::MINIMUM - 1
         ));
 
         let largest = SessionLimitSettings {
-            frame_bytes: size(MAX_FRAME_BYTES),
-            transfer_bytes: size(MAX_FRAME_BYTES),
+            frame_bytes: size(SessionFrameBytes::MAXIMUM),
+            transfer_bytes: size(SessionFrameBytes::MAXIMUM),
             ..settings()
         };
         assert!(SessionLimits::try_from(largest).is_ok());
 
         let too_large = SessionLimitSettings {
-            frame_bytes: size(MAX_FRAME_BYTES + 1),
-            transfer_bytes: size(MAX_FRAME_BYTES + 1),
+            frame_bytes: size(SessionFrameBytes::MAXIMUM + 1),
+            transfer_bytes: size(SessionFrameBytes::MAXIMUM + 1),
             ..settings()
         };
         assert!(matches!(
@@ -303,7 +307,7 @@ mod tests {
     #[test]
     fn transfer_limit_cannot_undercut_the_frame_limit() {
         let undercut = SessionLimitSettings {
-            transfer_bytes: size(DEFAULT_FRAME_BYTES - 1),
+            transfer_bytes: size(SessionFrameBytes::DEFAULT - 1),
             ..settings()
         };
         assert!(matches!(
@@ -314,8 +318,8 @@ mod tests {
         ));
 
         let equal = SessionLimitSettings {
-            transfer_bytes: size(DEFAULT_FRAME_BYTES),
-            string_bytes: size(DEFAULT_FRAME_BYTES),
+            transfer_bytes: size(SessionFrameBytes::DEFAULT),
+            string_bytes: size(SessionFrameBytes::DEFAULT),
             ..settings()
         };
         assert!(SessionLimits::try_from(equal).is_ok());
@@ -323,14 +327,17 @@ mod tests {
 
     #[test]
     fn nesting_and_string_limits_are_checked() {
-        for depth in [MIN_NESTING_DEPTH, MAX_NESTING_DEPTH] {
+        for depth in [SessionNestingDepth::MINIMUM, SessionNestingDepth::MAXIMUM] {
             let within = SessionLimitSettings {
                 nesting_depth: size(depth),
                 ..settings()
             };
             assert!(SessionLimits::try_from(within).is_ok());
         }
-        for depth in [MIN_NESTING_DEPTH - 1, MAX_NESTING_DEPTH + 1] {
+        for depth in [
+            SessionNestingDepth::MINIMUM - 1,
+            SessionNestingDepth::MAXIMUM + 1,
+        ] {
             let outside = SessionLimitSettings {
                 nesting_depth: size(depth),
                 ..settings()
@@ -343,7 +350,7 @@ mod tests {
         }
 
         let long_strings = SessionLimitSettings {
-            string_bytes: size(DEFAULT_TRANSFER_BYTES + 1),
+            string_bytes: size(SessionTransferBytes::DEFAULT + 1),
             ..settings()
         };
         assert!(matches!(
@@ -356,13 +363,12 @@ mod tests {
 
     #[test]
     fn verifier_options_scale_with_the_frame_length() {
-        let options = SessionLimits::DEFAULT.verifier_options(DEFAULT_FRAME_BYTES);
-        assert_eq!(options.max_depth, DEFAULT_NESTING_DEPTH);
-        assert_eq!(options.max_tables, DEFAULT_FRAME_BYTES / MIN_TABLE_BYTES);
-        assert_eq!(
-            options.max_apparent_size,
-            DEFAULT_FRAME_BYTES * APPARENT_SIZE_FACTOR
-        );
+        let options = SessionLimits::DEFAULT.verifier_options(SessionFrameBytes::DEFAULT);
+        assert_eq!(options.max_depth, SessionNestingDepth::DEFAULT);
+        // Rule F-3 of the Client Implementation Manual: a table limit of the frame length divided
+        // by 4 and an apparent-size limit of 8 times the frame length.
+        assert_eq!(options.max_tables, SessionFrameBytes::DEFAULT / 4);
+        assert_eq!(options.max_apparent_size, SessionFrameBytes::DEFAULT * 8);
         assert!(!options.ignore_missing_null_terminator);
     }
 }

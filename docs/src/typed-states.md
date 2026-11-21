@@ -379,7 +379,7 @@ complete unsigned 64-bit range. Duration settings preserve their declared range 
 precision in eight bytes. Decoding validates the same declaration before publishing a parameter
 value.
 
-Consensus's `raft_parametrizer_node_selector_runtime_entity_labels_inherited_topology_ratelimit_stopping_` keyspaces and current
+Consensus's `raft_parametrizer_node_selector_runtime_entity_labels_inherited_topology_ratelimit_stopping_transactionalstart_` keyspaces and current
 `ClusterState` metadata encoding, 42, identify its stored shapes, including the `parametrizer` kind text, the partition count of every
 resolved parametrizer in the committed schedule, the partition epoch the schedule records for each
 parametrizer whose count changed, and the statements a transaction keeps, including per-entity

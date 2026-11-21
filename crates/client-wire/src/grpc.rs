@@ -51,6 +51,15 @@ pub const RESTORE_BACKUP_PATH: &str = "/nervix.session.Session/RestoreBackup";
 /// message the connection has carried. A small frame retained for long would keep that whole
 /// allocation alive, so small frames get an allocation of their own; a large frame dominates its
 /// allocation anyway and is taken without a copy.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the client session protocol (rule F-9) has the Rust gRPC codec copy a frame \
+                  below 64 KiB out of its read buffer, and its chapter's retained-frame memory \
+                  accounting relies on that"
+    )
+)]
 const COPY_BELOW_BYTES: usize = 64 * 1024;
 
 /// A local decoder rejection, retained as a tonic status's source.

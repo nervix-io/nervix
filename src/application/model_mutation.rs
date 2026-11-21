@@ -2263,12 +2263,9 @@ impl SessionServiceImpl {
                  restore stream beside the session"
                     .to_string(),
             ),
-            Statement::StartDomain(start) => {
-                let domain = domain
-                    .as_ref()
-                    .verified("this statement requires a request domain, which was resolved above");
-                self.start_domain(domain, start).await
-            }
+            Statement::StartDomain(_) => command_error(
+                "START runs only as an admitted command under its execution reference".to_string(),
+            ),
             Statement::StopDomain(_) => command_error(
                 "STOP runs only as an admitted command under its execution reference".to_string(),
             ),
