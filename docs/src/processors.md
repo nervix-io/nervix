@@ -534,8 +534,9 @@ as its high watermark.
 ## Inferencer
 
 Commands that bind an ONNX model inspect its tensor metadata on the node's bulk workers. Each
-inspection reserves a 16 KiB bulk buffer and uses its admitted worker to read an explicitly configured
-absolute native-library image sequentially before ONNX initialization and optimization. Its
+inspection reserves a bulk buffer of one bulk chunk (`--execution-bulk-chunk-bytes`) and uses its
+admitted worker to read an explicitly configured absolute native-library image sequentially before
+ONNX initialization and optimization. Its
 thirty-second bound covers memory admission, the worker queue, image preparation, model loading,
 metadata extraction and session release. Image preparation is advisory; native library discovery
 and loading errors remain owned by ONNX Runtime. A full bulk
@@ -653,11 +654,14 @@ the fixed size the declaration supplies.
 for each admitted message, in arrival order, and carries its tensors from one message to the next.
 All state successors advance together after a message the model accepts. A message that fails
 alone leaves the preceding state intact, and `FILTER WHERE` runs before the model, so a filtered
-row changes no state.
+row changes no state. A batch too large for one job runs its messages as several jobs, and its
+state advances only once every job's outputs are joined into the batch's outputs. Messages that
+fail because their outputs cannot be joined leave the preceding state intact as well, so each
+comes again and counts once.
 
-Each admitted batch publishes an immutable tensor generation. Nervix persists the newest
-generation on the runtime state snapshot interval and once more during a graceful stop; replicas
-receive the same generation. A restart continues from the newest surviving snapshot for that
+Each admitted batch that advances the state publishes an immutable tensor generation. Nervix
+persists the newest generation on the runtime state snapshot interval and once more during a
+graceful stop; replicas receive the same generation. A restart continues from the newest surviving snapshot for that
 model binding and branch incarnation. Recovery can skip updates made after that snapshot.
 Inference releases its input acknowledgement shares after dispatch, but another attached consumer
 can still hold the ingestor's position. A redelivered input invokes the model again, including when
@@ -698,6 +702,9 @@ again while preparing INITIAL before publishing the processor plan. A message's 
 includes the carried state, so the state counts against the relay operation limit
 [Execution](#execution) applies to every message. The state is retained once per active branch;
 use the branch's `MAX INSTANCES` to bound the number of live copies.
+
+[Inferencer State And Recovery](inferencer-state.md) describes how the carried state is owned,
+published, persisted, replicated, moved, archived and recovered.
 
 ### Inspect inference configuration and state
 

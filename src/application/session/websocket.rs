@@ -44,10 +44,6 @@ use super::{
 };
 use crate::application::session_service::SessionServiceImpl;
 
-/// The close code for a message larger than the frame limit, which tungstenite refuses before it
-/// reaches the codec.
-const CLOSE_MESSAGE_TOO_BIG: u16 = 1009;
-
 /// The WebSocket configuration of a console session: no message or frame larger than one session
 /// frame is buffered.
 pub(in crate::application) fn console_websocket_config(limits: &SessionLimits) -> WebSocketConfig {
@@ -60,14 +56,14 @@ pub(in crate::application) fn console_websocket_config(limits: &SessionLimits) -
 
 /// Why a console connection ends, when the client broke the framing of the call it carries.
 pub(in crate::application) struct Violation {
-    pub(in crate::application) code: u16,
+    pub(in crate::application) code: CloseCode,
     pub(in crate::application) reason: String,
 }
 
 impl Violation {
     fn of_decoding(error: &Report<WebSocketError>) -> Self {
         Self {
-            code: WebSocketError::close_code(error),
+            code: CloseCode::from(WebSocketError::close_code(error)),
             reason: error.current_context().to_string(),
         }
     }
@@ -96,8 +92,9 @@ impl<Inbound: FrameRoot> ConsoleMessage<Inbound> {
         let message = match message {
             Ok(message) => message,
             Err(tungstenite::Error::Capacity(CapacityError::MessageTooLong { size, max_size })) => {
+                // tungstenite refuses a message above the frame limit before the codec sees it.
                 return Self::Violation(Violation {
-                    code: CLOSE_MESSAGE_TOO_BIG,
+                    code: CloseCode::Size,
                     reason: format!("a message of {size} bytes exceeds the {max_size}-byte limit"),
                 });
             }
@@ -124,7 +121,7 @@ impl<Inbound: FrameRoot> ConsoleMessage<Inbound> {
 pub(in crate::application) fn close_frame(violation: Option<Violation>) -> CloseFrame<'static> {
     match violation {
         Some(violation) => CloseFrame {
-            code: CloseCode::from(violation.code),
+            code: violation.code,
             reason: Cow::Owned(violation.reason),
         },
         None => CloseFrame {

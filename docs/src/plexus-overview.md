@@ -918,6 +918,7 @@ SHOW REORDERER <name> STATE;
 SHOW CORRELATOR <name> STATE;
 SHOW WASM PROCESSOR <name> STATE;
 SHOW CLUSTER STATUS;
+SHOW NODES [WHERE <expression>] [FORMAT TEXT | JSON];
 DESCRIBE CLUSTER;
 DESCRIBE LICENSE;
 DROP NODE <node_id>;
@@ -941,10 +942,16 @@ a selected domain. `REFRESH LICENSE;` requests a current signed decision.
 `ROTATE LICENSE CLUSTER KEY;` replaces the signing key while preserving identity and deadlines.
 `RELEASE LICENSE;` commits release locally, with background service confirmation and retained
 grant deadlines. These statements are cluster scoped and run outside domain transactions.
-`DESCRIBE LICENSE` reports the cluster's effective licensing policy and committed quota usage.
+`DESCRIBE LICENSE` reports the cluster's effective licensing policy, committed quota usage and the
+state of every capability.
 It takes no name and works on every node without a selected domain. The embedded free policy
 ships with unlimited node and domain quotas. See
 [Cluster Licensing](node-settings.md#cluster-licensing) for its fields and admission contract.
+
+`SHOW NODES` inspects the cluster's node records from any node, including a follower, without a
+selected domain. Add `WHERE` to preview which records match a selector. See
+[Selecting Nodes](placement.md#selecting-nodes) for the results and
+[Node Selectors](filter-map-functions.md#node-selectors) for the expression scope.
 
 `DESCRIBE CLUSTER` shows the prerequisites every live node brings to the cluster, as the node the
 session is on sees them. It takes no name and needs neither a selected domain nor the leader: any

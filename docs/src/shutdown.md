@@ -159,6 +159,11 @@ and exits immediately with the status a shell reports for that signal, whichever
 started the shutdown. No destructor, exit handler, or remaining phase runs. Whichever comes first,
 the repeated signal or the deadline, decides how the process exits.
 
+Both forced exits write their record before they exit, which normally takes microseconds. When
+standard output has stopped draining, a forced exit waits at most one second for that record and
+then exits with the same status without it, so a stalled log consumer cannot keep the process
+alive.
+
 A diagnostic node that reports an active deadlock ends the same way, immediately, whatever phase it
 is in: its blocked threads hold work it can no longer finish. It describes the cycle on standard
 error, records it as evidence, and exits with `3`, or with `4` when the recording failed, without

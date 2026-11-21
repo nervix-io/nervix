@@ -563,7 +563,8 @@ consensus commands with their exact request and independent binding records, the
 connector host capabilities in each node's incarnation-bound claim, the ordered `RATE LIMIT`
 clauses of an ingestor body with their `SET RATE LIMIT` and `DROP RATE LIMIT` alterations, and the
 rate-limit hold, hold time, rejection and program rejection counters a `DESCRIBE INGESTOR` answer
-carries for a unit whose ingestor writes `RATE LIMIT`. Peers must
+carries for a unit whose ingestor writes `RATE LIMIT`. The fingerprint also includes the
+`node` expression scope and the `SHOW NODES` statement in the archived vocabulary. Peers must
 match it exactly.
 
 Execution-unit identities use an eight-byte rank with four-byte archive alignment. Single and
@@ -1652,11 +1653,13 @@ domain's capture is one management reply, at most 64 KiB.
 The fetch stream authenticates that process identity before its handler can consume the stage; a
 partitioned or cancelled fetch leaves any unconsumed stage available until expiry.
 An owner streams each branch lifecycle and Kafka offset section from the cut's database snapshot
-into its staged file under a `restore_metadata` conversion charge and a 64 KiB bulk buffer, so the
+into its staged file under a `restore_metadata` conversion charge and the staged writer's output
+buffer of one resolved bulk chunk, charged to `bulk`, so the
 inventory declares a section's exact length and digest without the owner holding the section
 whole. It also checks a WASM save's scheduled generation before opening that save, then streams
 its raw bytes from the same snapshot into a staged section under an independent
-`restore_metadata` charge and three fixed 64 KiB bulk buffers. The stored read supplies the descriptor's
+`restore_metadata` charge and a bulk charge of two 64 KiB buffers beside the staged writer's output
+buffer. The stored read supplies the descriptor's
 revision. An interruption fails the capture before its inventory is published, and the
 coordinator can retry with a new cut. Materialized inventories distinguish archive descriptors,
 scalar identity groups and Arrow column groups. Their bounded sections are staged from a fresh
@@ -2595,12 +2598,18 @@ contract.
 
 ## Ingestor Instance Observation And Intake Gates
 
-An ingestor describe request carries its exact `Unit`. The receiver resolves the current owner
-for that unit and reports only its ingestor lifetime, readiness and transient state. The control
-plane composes the logical description from all scheduled unit owners. The ingestor envelope
-also carries its complete ordered source-interaction metric lines, preserving the local counter
-and duration projection through remote inspection. The current wire fingerprint includes this
-required field.
+An ingestor describe request carries its exact `Unit`. The serving owner reports that unit's
+lifetime, readiness, transient state and metrics. The reply includes typed intake counters and
+the ordered `source_metrics` strings for reads, polls, endpoint outcomes, acknowledgements,
+lifecycle and declared events. The asking node uses the strings for display and assembles the
+description from the scheduled unit owners. The current wire fingerprint includes the required
+field.
+
+Remote emitter inspection fetches the owner-rendered `destination:` lines in the metrics reply.
+For an instanced emitter, the control plane obtains the observations from the nodes that execute
+its units. The labels retain their physical node and instance. [Connector Interaction
+Metrics](metrics-and-observability.md#connector-interaction-metrics) owns both sections' line
+formats and series lifetimes.
 
 Entity-gate engagement and drain-status requests carry `EntityGateTargets`: complete logical
 entities for model changes, or exact `NodeUnitRef` units for ownership transfer. Lease identity

@@ -166,6 +166,55 @@ fn resolver_refuses_missing_unknown_misplaced_and_inconsistent_values() {
 }
 
 #[test]
+fn licensing_dummy_is_a_cluster_capability_every_complete_plan_lists() {
+    assert_eq!(
+        FREE_POLICY.usage().capabilities.get(LICENSING_DUMMY),
+        Some(&ConditionValue::Known(Capability::Disabled))
+    );
+    let plan = plan();
+    let mut missing = plan.clone();
+    missing.usage.capabilities.clear();
+    let Err(report) = Catalog::validate(&missing, true, false, false) else {
+        panic!("a complete plan lists every catalog capability");
+    };
+    assert!(matches!(
+        report.current_context(),
+        ConditionError::Missing { name } if name == LICENSING_DUMMY
+    ));
+    assert!(
+        Catalog::validate(&missing, false, false, false).is_ok(),
+        "an override may leave the capability out"
+    );
+    let mut overrides = empty_conditions();
+    overrides.usage.capabilities.insert(
+        LICENSING_DUMMY.to_owned(),
+        ConditionValue::Known(Capability::Enabled),
+    );
+    let resolved = plan
+        .resolve(&overrides, resolution_facts(), limits().bytes)
+        .assured("a complete plan with a valid capability override resolves");
+    assert_eq!(
+        resolved.values().usage.capabilities.get(LICENSING_DUMMY),
+        Some(&ConditionValue::Known(Capability::Enabled))
+    );
+    let mut misplaced = plan.clone();
+    misplaced.usage.quotas.insert(
+        LICENSING_DUMMY.to_owned(),
+        ConditionValue::Known(Quota::Unlimited),
+    );
+    assert!(Catalog::validate(&misplaced, true, false, false).is_err());
+    let mut extension = plan.clone();
+    extension.usage.capabilities.insert(
+        LICENSING_DUMMY.to_owned(),
+        ConditionValue::Extension(serde_json::json!({"state": "enabled"})),
+    );
+    assert!(
+        Catalog::validate(&extension, true, true, false).is_err(),
+        "a known name never accepts an extension value"
+    );
+}
+
+#[test]
 fn further_reductions_protect_only_new_amounts_and_keep_each_deadline() {
     let free = FREE_POLICY.usage();
     let four = usage(Quota::Bounded { value: 4 }, Quota::Unlimited);

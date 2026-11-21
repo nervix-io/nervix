@@ -64,7 +64,7 @@ Feature: Branches inherit their external producers' partitions
         CONFIG { 'bootstrap.servers' = '{{kafka_addr}}' };
       CREATE KAFKA TOPIC INGESTOR inherited_reader
         FROM broker TOPIC 'inherited_input_{{test_id}}'
-        OFFSET BY DOMAIN INSTANCES PER PARTITION
+        OFFSET BY DOMAIN INSTANCES PER TRANSPORT PARTITION
         MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 5s
         ON QUIESCE SUSPEND DECODE USING event_codec
         TO events INHERIT ALL BRANCHED BY by_tenant SET tenant = message.tenant
@@ -198,7 +198,7 @@ Feature: Branches inherit their external producers' partitions
       CREATE PULSAR TOPIC INGESTOR inherited_reader
         FROM broker TOPIC 'inherited_pulsar_{{test_id}}'
         SUBSCRIPTION 'inherited_{{test_id}}' OWNED BY INGESTOR START AT EARLIEST
-        TYPE <subscription_type> INSTANCES PER PARTITION
+        TYPE <subscription_type> INSTANCES PER TRANSPORT PARTITION
         MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 5s
         ON QUIESCE SUSPEND DECODE USING event_codec
         TO events INHERIT ALL SET native_partition = metadata.partition BRANCHED BY by_tenant SET tenant = message.tenant
@@ -350,13 +350,13 @@ Feature: Branches inherit their external producers' partitions
     And within "30s" DESCRIBE INGESTOR "inherited_reader" metric "messages_total" "sent" relay "events" totals 6
 
     Examples:
-      | cluster_size | replicas | owners | partitioning | partitions_before | partitions_after | offset_mode                                                      | reader_instances | readers_after_growth | reader_owners |
-      | 1            | 0        | 1      | INHERITED    | 12                | 16               | OFFSET BY DOMAIN                                                 | PER PARTITION    | 16                   | 1             |
-      | 3            | 1        | 3      | INHERITED    | 12                | 16               | OFFSET BY DOMAIN                                                 | PER PARTITION    | 16                   | 3             |
-      | 1            | 0        | 1      | INHERITED    | 12                | 16               | OFFSET BY CONSUMER GROUP 'growing_{{test_id}}' START AT EARLIEST | 1                | 1                    | 1             |
-      | 3            | 1        | 3      | INHERITED    | 12                | 16               | OFFSET BY CONSUMER GROUP 'growing_{{test_id}}' START AT EARLIEST | 1                | 1                    | 1             |
-      | 1            | 0        | 1      | 4 INHERITED  | 4                 | 4                | OFFSET BY DOMAIN                                                 | PER PARTITION    | 4                    | 1             |
-      | 3            | 1        | 3      | 4 INHERITED  | 4                 | 4                | OFFSET BY DOMAIN                                                 | PER PARTITION    | 4                    | 3             |
+      | cluster_size | replicas | owners | partitioning | partitions_before | partitions_after | offset_mode                                                      | reader_instances        | readers_after_growth | reader_owners |
+      | 1            | 0        | 1      | INHERITED    | 12                | 16               | OFFSET BY DOMAIN                                                 | PER TRANSPORT PARTITION | 16                   | 1             |
+      | 3            | 1        | 3      | INHERITED    | 12                | 16               | OFFSET BY DOMAIN                                                 | PER TRANSPORT PARTITION | 16                   | 3             |
+      | 1            | 0        | 1      | INHERITED    | 12                | 16               | OFFSET BY CONSUMER GROUP 'growing_{{test_id}}' START AT EARLIEST | 1                       | 1                    | 1             |
+      | 3            | 1        | 3      | INHERITED    | 12                | 16               | OFFSET BY CONSUMER GROUP 'growing_{{test_id}}' START AT EARLIEST | 1                       | 1                    | 1             |
+      | 1            | 0        | 1      | 4 INHERITED  | 4                 | 4                | OFFSET BY DOMAIN                                                 | PER TRANSPORT PARTITION | 4                    | 1             |
+      | 3            | 1        | 3      | 4 INHERITED  | 4                 | 4                | OFFSET BY DOMAIN                                                 | PER TRANSPORT PARTITION | 4                    | 3             |
 
   # Growing the topic from 12 to 16 partitions regroups a reader's 12 units into 16, which a
   # planned handoff moves before the new epoch is committed. Every checkpoint read of that handoff
@@ -388,7 +388,7 @@ Feature: Branches inherit their external producers' partitions
       CREATE KAFKA CLIENT broker CONFIG { 'bootstrap.servers' = '{{kafka_addr}}' };
       CREATE KAFKA TOPIC INGESTOR inherited_reader
         FROM broker TOPIC 'growing_input_{{test_id}}'
-        OFFSET BY DOMAIN INSTANCES PER PARTITION
+        OFFSET BY DOMAIN INSTANCES PER TRANSPORT PARTITION
         MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 5s
         ON QUIESCE SUSPEND DECODE USING event_codec
         TO events INHERIT ALL BRANCHED BY by_tenant SET tenant = message.tenant
@@ -443,7 +443,7 @@ Feature: Branches inherit their external producers' partitions
   # minute to capture, so the publication attempt times out inside its entity gate deadline and the
   # leader reports it to its sessions. A failed attempt discards what it prepared and releases the
   # readers, which keep delivering. Once the reads are fast again, a later attempt publishes the
-  # growth and every record is delivered once.
+  # growth. Send directly from the reader to the writer so any replay reaches the broker.
   @inherited_partition_lifecycle @deloxide_stress
   Scenario Outline: A growing Kafka topology whose handoff times out is published by a later attempt with every record delivered once
     Given Kafka is running
@@ -466,19 +466,15 @@ Feature: Branches inherit their external producers' partitions
       CREATE SCHEMA tenant_key ( tenant STRING );
       CREATE BRANCH by_tenant SCHEMA tenant_key TTL 5m PARTITIONS INHERITED;
       CREATE RELAY events SCHEMA event BRANCHED BY by_tenant;
-      CREATE RELAY unique_events SCHEMA event BRANCHED BY by_tenant;
       CREATE KAFKA CLIENT broker CONFIG { 'bootstrap.servers' = '{{kafka_addr}}' };
       CREATE KAFKA TOPIC INGESTOR inherited_reader
         FROM broker TOPIC 'growing_input_{{test_id}}'
-        OFFSET BY DOMAIN INSTANCES PER PARTITION
+        OFFSET BY DOMAIN INSTANCES PER TRANSPORT PARTITION
         MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 5s
         ON QUIESCE SUSPEND DECODE USING event_codec
         TO events INHERIT ALL BRANCHED BY by_tenant SET tenant = message.tenant
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE DEDUPLICATOR distinct_events FROM events
-        DEDUPLICATE ON input.seq MAX TIME 10m BRANCHED BY by_tenant
-        TO unique_events INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
-      CREATE KAFKA TOPIC EMITTER inherited_writer FROM unique_events INSTANCES PER PARTITION
+      CREATE KAFKA TOPIC EMITTER inherited_writer FROM events INSTANCES PER PARTITION
         TO broker TOPIC 'growing_output_{{test_id}}'
         MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 5s
         ENCODE USING event_codec PARTITION FROM BRANCH INHERIT ALL
@@ -491,9 +487,20 @@ Feature: Branches inherit their external producers' partitions
       """
       {"tenant":"alpha","seq":1}
       """
-    Then within "30s" the observed broker receives payloads keeping the order of each key
+    And Kafka message is published to topic "growing_input_{{test_id}}" partition 2
       """
-      "tenant":"alpha" | "seq":1
+      {"tenant":"beta","seq":1}
+      """
+    Then within "30s" the observed broker receives exactly these partitioned messages
+      | payload                    | key base64 | partition |
+      | {"tenant":"alpha","seq":1} | none       | 7         |
+      | {"tenant":"beta","seq":1}  | none       | 2         |
+    And the current leader node is saved as placeholder "topology_reader"
+    And within "60s" DESCRIBE BRANCH "by_tenant" on node "{{topology_reader}}" contains
+      """
+      partitions: 12
+      external partitions: 12
+      partition epoch: 1
       """
     Given every ownership handoff checkpoint read in domain "{{domain}}" takes "2s"
     When Kafka topic "growing_input_{{test_id}}" partition count is changed to 16
@@ -501,32 +508,38 @@ Feature: Branches inherit their external producers' partitions
       """
       timed out capturing ingestor 'inherited_reader'
       """
-    And the current leader node is saved as placeholder "topology_reader"
     When Kafka message is published to topic "growing_input_{{test_id}}" partition 7
       """
       {"tenant":"alpha","seq":2}
       """
-    Then within "60s" the observed broker receives payloads keeping the order of each key
-      """
-      "tenant":"alpha" | "seq":2
-      """
+    Then within "60s" the observed broker receives exactly these partitioned messages
+      | payload                    | key base64 | partition |
+      | {"tenant":"alpha","seq":2} | none       | 7         |
     When every ownership handoff checkpoint read in domain "{{domain}}" takes "0ms"
     And Kafka message is published to topic "growing_input_{{test_id}}" partition 13
       """
-      {"tenant":"alpha","seq":3}
+      {"tenant":"gamma","seq":1}
       """
     Then within "60s" DESCRIBE BRANCH "by_tenant" on node "{{topology_reader}}" contains
       """
       partitions: 16
       external partitions: 16
       partition epoch: 2
-      previous partitions: 12
       """
     And within "60s" every instance of ingestor "inherited_reader" reports running and ready on its scheduled owner
-    And within "30s" the observed broker receives payloads keeping the order of each key
+    When Kafka message is published to topic "growing_input_{{test_id}}" partition 7
       """
-      "tenant":"alpha" | "seq":3
+      {"tenant":"alpha","seq":3}
       """
+    And Kafka message is published to topic "growing_input_{{test_id}}" partition 2
+      """
+      {"tenant":"beta","seq":2}
+      """
+    Then within "30s" the observed broker receives exactly these partitioned messages
+      | payload                    | key base64 | partition |
+      | {"tenant":"alpha","seq":3} | none       | 7         |
+      | {"tenant":"beta","seq":2}  | none       | 2         |
+      | {"tenant":"gamma","seq":1} | none       | 13        |
     And the observed broker does not receive a payload within "500ms"
 
     Examples:
@@ -558,7 +571,7 @@ Feature: Branches inherit their external producers' partitions
       CREATE KAFKA CLIENT broker CONFIG { 'bootstrap.servers' = '{{kafka_addr}}' };
       CREATE KAFKA TOPIC INGESTOR inherited_reader
         FROM broker TOPIC 'regroup_input_{{test_id}}'
-        OFFSET BY DOMAIN INSTANCES PER PARTITION
+        OFFSET BY DOMAIN INSTANCES PER TRANSPORT PARTITION
         MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 5s
         ON QUIESCE SUSPEND DECODE USING event_codec
         TO events INHERIT ALL BRANCHED BY by_tenant SET tenant = message.tenant
@@ -616,6 +629,32 @@ Feature: Branches inherit their external producers' partitions
       | {"tenant":"beta","seq":2}  | none       | 2         |
     And the observed broker does not receive a payload within "500ms"
     And within "30s" DESCRIBE INGESTOR "inherited_reader" metric "messages_total" "sent" relay "events" totals 4
+    And within "60s" DESCRIBE BRANCH "by_tenant" on node "{{topology_reader}}" reports no partition transition
+    When these Plexus commands are executed on the leader node
+      """
+      ALTER BRANCH by_tenant SET PARTITIONS 4 INHERITED;
+      """
+    Then within "60s" DESCRIBE BRANCH "by_tenant" on node "{{topology_reader}}" contains
+      """
+      partitions: 4
+      partition epoch: 3
+      """
+    And within "60s" every instance of ingestor "inherited_reader" reports running and ready on its scheduled owner
+    And within "60s" every instance of emitter "inherited_writer" reports running on its scheduled owner
+    When Kafka message is published to topic "regroup_input_{{test_id}}" partition 7
+      """
+      {"tenant":"alpha","seq":3}
+      """
+    And Kafka message is published to topic "regroup_input_{{test_id}}" partition 2
+      """
+      {"tenant":"beta","seq":3}
+      """
+    Then within "30s" the observed broker receives exactly these partitioned messages
+      | payload                    | key base64 | partition |
+      | {"tenant":"alpha","seq":3} | none       | 3         |
+      | {"tenant":"beta","seq":3}  | none       | 2         |
+    And the observed broker does not receive a payload within "500ms"
+    And within "30s" DESCRIBE INGESTOR "inherited_reader" metric "messages_total" "sent" relay "events" totals 6
 
     Examples:
       | cluster_size | replicas | owners |

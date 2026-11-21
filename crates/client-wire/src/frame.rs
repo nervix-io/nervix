@@ -15,7 +15,15 @@ use thiserror::Error;
 use crate::{limits::SessionLimits, wire};
 
 /// A root offset and a file identifier, which every frame starts with.
-const FRAME_HEADER_BYTES: usize = 8;
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "a FlatBuffer starts with its 4-byte root offset and 4-byte file identifier, and \
+                  the client session protocol (rule F-3) refuses a frame shorter than both"
+    )
+)]
+const FRAME_HEADER_BYTES: usize = flatbuffers::SIZE_UOFFSET + flatbuffers::FILE_IDENTIFIER_LENGTH;
 
 /// The root table a frame carries, and the identifier that marks it.
 ///

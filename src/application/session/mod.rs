@@ -410,7 +410,11 @@ impl SessionShared {
     ) -> Result<ReplyDelivery, ReplyEncodingFailure> {
         let carries_report = match &reply.body {
             ReplyBody::Inspection(InspectionOutcome::Inspected(_)) => true,
-            ReplyBody::Command(outcome) => outcome.inspection.is_some() || outcome.state.is_some(),
+            ReplyBody::Command(outcome) => {
+                outcome.inspection.is_some()
+                    || outcome.state.is_some()
+                    || outcome.node_inspection.is_some()
+            }
             _ => false,
         };
         if !carries_report {

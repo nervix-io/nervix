@@ -2,6 +2,20 @@
 
 module RubySuite
   class InspectionTest < ClusterTest
+    def test_node_preview_retains_committed_facts
+      # ANCHOR: node_inspection
+      outcome = execute("SHOW NODES WHERE node.name = 'node-1';")
+      assert_instance_of NX::Outcome, outcome
+      nodes = outcome.node_inspection
+      outcome = nil
+      GC.start
+      assert_instance_of NX::NodeInspection, nodes
+      assert_equal ['node-1'], nodes.names
+      assert_includes nodes.json, '"architecture":'
+      # ANCHOR_END: node_inspection
+      assert_nil execute('DESCRIBE LICENSE;').node_inspection
+    end
+
     def test_inspection_metadata_and_verified_frames_survive_their_parents
       relay = unique('inspected')
       ingestor = unique('inspect_in')
@@ -26,7 +40,7 @@ module RubySuite
         assert_nil license_inspection.entity_name
         assert_equal 'LICENSE', license_inspection.entity_kind
         assert_nil license_inspection.rejection
-        assert_equal 3, license_inspection.counts.rows
+        assert_equal 4, license_inspection.counts.rows
         outcome = execute("SHOW RELAY #{relay} MATERIALIZED STATE FOR UNBRANCHED LIMIT 1 FORMAT JSON;", reader)
         assert_instance_of NX::Outcome, outcome
         inspection = outcome.state_inspection

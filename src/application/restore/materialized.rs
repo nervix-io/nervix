@@ -44,6 +44,18 @@ use crate::{
     runtime_schema::{ArrowBodyError, RuntimeRecordBatch},
 };
 
+/// The share every archived record takes of the branch table a conversion holds while it admits
+/// each record identity's branch: one entry, whatever the record's values.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "restore admission charges every archived record one sixty-four-byte entry of \
+                  the conversion's branch table"
+    )
+)]
+const BRANCH_TABLE_ENTRY_BYTES: u64 = 64;
+
 #[derive(Debug, Error)]
 pub(super) enum MaterializedRestoreError {
     #[error("materialized restore conversion could not be admitted")]
@@ -135,7 +147,7 @@ pub(super) async fn prepare_materialized_checkpoint(
         .ok_or_else(|| Report::new(MaterializedRestoreError::MetadataTooLarge))?;
     let table_bytes = descriptor
         .record_count
-        .checked_mul(64)
+        .checked_mul(BRANCH_TABLE_ENTRY_BYTES)
         .ok_or_else(|| Report::new(MaterializedRestoreError::MetadataTooLarge))?;
     let identity_bytes = identity_bytes
         .checked_add(table_bytes)

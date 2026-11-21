@@ -116,7 +116,16 @@ impl SessionServiceImpl {
             }
         }
         for captured_move in &captured {
-            preparations.record_attempt(captured_move.moved);
+            let input_checkpoint_count = match &captured_move.input {
+                nervix_interconnect::OwnershipHandoffInput::Unit(checkpoints) => checkpoints.len(),
+                nervix_interconnect::OwnershipHandoffInput::IngestorUnits { sources, .. } => {
+                    sources
+                        .iter()
+                        .flat_map(|source| &source.checkpoints)
+                        .count()
+                }
+            };
+            preparations.record_attempt(captured_move.moved, input_checkpoint_count);
         }
         let mut preparing = FuturesUnordered::new();
         for CapturedPlannedMove { moved, input } in captured {
@@ -215,6 +224,15 @@ impl SessionServiceImpl {
             nervix_primitives::task::consume_budget().await;
             match capture {
                 Ok(Ok(checkpoints)) => {
+                    debug!(
+                        domain = scope.domain.as_str(),
+                        ingestor = source.entity.identifier.as_str(),
+                        unit = ?source.unit,
+                        node = %source.former_owner,
+                        coordination = %scope.coordination,
+                        checkpoint_count = checkpoints.len(),
+                        "captured frozen checkpoints for regrouped ingestor source"
+                    );
                     frozen.insert(key.clone(), checkpoints);
                 }
                 Ok(Err(reason)) => {

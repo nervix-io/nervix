@@ -739,7 +739,8 @@ remain the schema the ingestor declares; a payload field cannot replace the auth
 
 - **E-1.** A client MUST open a `TO CLIENT` emitter with `OpenEmitterRequest`, naming its domain,
   emitter and exact ordered output fields, including optionality and sensitivity. It MUST supply
-  nonzero batch and byte limits; the requested byte limit MUST hold one maximum-sized IPC batch.
+  nonzero batch and byte limits, a batch limit no larger than 1,024; the requested byte limit MUST
+  hold one maximum-sized IPC batch.
   An open inside a transaction is refused. The open's `request_id` becomes its `ConsumerId`.
 - **E-2.** A client MUST continue reading transport frames while an application waits for
   consumer credit or processes an output batch. A pending `ReadEmitterBatchRequest` does not
@@ -1460,6 +1461,21 @@ and an empty value differs from absence. Large results use the existing reply-tr
 and its typed oversize rejection. Native `EntityLabelsInspection` views outlive the outcome;
 host guides demonstrate their ownership and committed/staged accessors.
 
+## Reading Cluster Nodes
+
+Clients MUST preserve the typed `CommandOutcome.node_inspection` independently of the command's
+display message. A successful `SHOW NODES` can contain an empty vector. Keep the node names
+in order, the four membership flags and the optional committed record per node. For a record,
+retain its full-width revision, optional CPU count and byte limit, typed detection values and
+reasons, exact tags, and the per-device and execution-provider order. Read the typed fields from
+the envelope. The command's selected format only governs how it is displayed.
+
+The read can be sent directly to any ready node over a session with no selected domain.
+Clients preserve command diagnostics even on a successful read because a diagnostic can
+identify a node the selector failed to evaluate. Follow the ordinary reply-transfer contract for
+a large result. The native bindings expose an independently retained node inspection with the
+ordered names and a JSON projection of the full verified envelope.
+
 ## Reading Typed Materialized State
 
 Clients MUST retain `CommandOutcome.state` independently of the command message and preserve its
@@ -1471,10 +1487,10 @@ from the presence of `state` or parse text to reconstruct rows.
 Clients MUST preserve the inspection entity's typed scope. `DomainNodeInspectionEntity` contains
 a domain and node reference; `ClusterLicenseInspectionEntity` contains neither. Native host
 domain/name accessors return absent values for a cluster-license observation, and its entity kind
-is `LICENSE`. The page and Row-section contract is shared by both scopes. Licensing's `transitions`
-section uses that generic contract for committed grants; preserve its complete schema and typed
-rows, including datetime precision and all original/target values. The section's rows contribute
-to the page and unit counts. Native and console warnings render the same licensing transition
+is `LICENSE`. The page and Row-section contract is shared by both scopes. Licensing's
+`capabilities` and `transitions` sections use that generic contract for capability states and
+committed grants; preserve their complete schemas and typed rows, including datetime precision and
+all original/target values. Their rows contribute to the page and unit counts. Native and console warnings render the same licensing transition
 codes and parameters supplied by the server.
 
 Embedded `NXRB` frames use the existing verified Row/Cell representation and the session transfer

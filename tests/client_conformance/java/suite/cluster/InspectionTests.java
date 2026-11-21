@@ -4,12 +4,33 @@ import static org.junit.jupiter.api.Assertions.*;
 import static io.nervix.client.suite.support.Cluster.*;
 import io.nervix.client.Nervix;
 import io.nervix.client.suite.support.Cluster;
+import java.util.List;
 import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
 
 /** Current inspection metadata and independently retained frame/schema handles. */
 @Tag("cluster")
 public final class InspectionTests {
+    @Test
+    void nodePreviewRetainsCommittedFacts() throws Exception {
+        try (var session = new Cluster().connect(); var cancel = deadline()) {
+            // ANCHOR: node_inspection
+            Nervix.NodeInspection nodes;
+            try (var outcome = session.command("SHOW NODES WHERE node.name = 'node-1';", cancel)) {
+                nodes = outcome.nodeInspection();
+            }
+            assertNotNull(nodes);
+            try (nodes) {
+                assertEquals(List.of("node-1"), nodes.names());
+                assertTrue(nodes.json().contains("\"architecture\":"));
+            }
+            // ANCHOR_END: node_inspection
+            try (var outcome = session.command("DESCRIBE LICENSE;", cancel)) {
+                assertNull(outcome.nodeInspection());
+            }
+        }
+    }
+
     @Test
     void inspectionMetadataAndVerifiedFramesSurviveTheirParents() throws Exception {
         var cluster = new Cluster();
@@ -33,7 +54,7 @@ public final class InspectionTests {
                 assertNotNull(licenseInspection);
                 assertNull(licenseInspection.domain()); assertNull(licenseInspection.entityName());
                 assertEquals("LICENSE", licenseInspection.entityKind());
-                assertNull(licenseInspection.rejection()); assertEquals(3, licenseInspection.counts().rows());
+                assertNull(licenseInspection.rejection()); assertEquals(4, licenseInspection.counts().rows());
             }
             Nervix.Inspection inspection;
             try (var cancel = deadline(); var outcome = session.command(

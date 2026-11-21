@@ -293,9 +293,10 @@ impl CarriedState {
         self.bytes.recorder()
     }
 
-    /// Install the successor of an accepted message as the branch's carried generation.
-    pub(super) fn install(&mut self, successor: NativeGeneration) {
-        self.generation = Arc::new(successor);
+    /// Install the successor the accepted messages of a run left as the branch's carried
+    /// generation.
+    pub(super) fn install(&mut self, successor: Arc<NativeGeneration>) {
+        self.generation = successor;
     }
 
     /// Publish the carried generation as the branch's newest immutable generation.

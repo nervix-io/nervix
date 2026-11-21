@@ -207,6 +207,7 @@ impl StatementRunner {
         let mut end = RunEnd::of_command(&outcome.disposition);
         if outcome.statements.is_empty() {
             print_outcome(&PrintedOutcome::of_command(outcome), query);
+            print_node_inspection_diagnostics(outcome);
         } else {
             for statement in &outcome.statements {
                 print_outcome(&PrintedOutcome::of_statement(statement), query);
@@ -579,6 +580,14 @@ fn emit_terminal_line(line: impl Into<String>) {
     println!("{}", line.into());
 }
 
+pub(super) fn print_node_inspection_diagnostics(outcome: &CommandOutcome) {
+    if outcome.node_inspection.is_some() && outcome.succeeded() {
+        for diagnostic in &outcome.diagnostics {
+            eprintln!("{}", diagnostic.message);
+        }
+    }
+}
+
 fn render_progress_line(line: impl AsRef<str>) {
     print!("\r\x1b[2K{}", line.as_ref());
     io::stdout()
@@ -931,6 +940,7 @@ mod tests {
             transaction_admission: None,
             inspection: None,
             entity_labels: None,
+            node_inspection: None,
             state: None,
             resource: None,
             subscription: None,

@@ -450,10 +450,12 @@ The edge validates the tags before any I/O, and a refusal ends the process with 
 the tag and the rule it broke, such as `node tag key 'Pool' must start with a lower-case letter or a
 digit and hold only lower-case letters, digits, '.', '_' and '-'`.
 
-Tags belong to the node's identity, addresses and paths, like `--node-id`, rather than to a
-settings class: they describe the node and bound no policy. No statement reads them into a Model
-or writes them. A node changes its tags by restarting with other values, which announces a new
-record, so a tag change follows the rolling-restart procedure of a capability change.
+Tags describe the node alongside its identity, addresses and paths. A node changes its tags by
+restarting with other values and announcing a new record. Tag changes follow the rolling-restart
+procedure of a capability change.
+
+Use [`SHOW NODES`](placement.md#selecting-nodes) to see the committed tag values and preview a
+selector before using those values to choose nodes.
 
 ### In `DESCRIBE CLUSTER`
 
@@ -505,7 +507,8 @@ explains why a fresh cluster restored from an archive keeps its own UUID and key
 ## Cluster Licensing
 
 A cluster starts with the embedded free policy. Its current quotas, `cluster.nodes` and
-`cluster.domains`, are unlimited. Node usage counts committed voters and learners; domain usage
+`cluster.domains`, are unlimited, and its one capability, `licensing.dummy`, is disabled. Node usage
+counts committed voters and learners; domain usage
 counts committed domain records, including stopped domains. Returning members and updates to an
 existing domain do not consume another slot. Free mode contacts no licensing service, including
 after restart.
@@ -651,9 +654,17 @@ ephemeral activation expired, because the service released its capacity at that 
 stay stopped until an operator starts them.
 
 Every node answers `DESCRIBE LICENSE` without selecting a domain or redirecting to the leader.
-It reports the mode, policy, public identity, committed time, processing state and quotas. An
-activation adds its binding, public credential identifier, decision and conditions revisions,
-verification, signed deadlines, license facts and refresh state. A follower marks the leader's
+It reports the mode, policy, public identity, committed time, processing state, quotas and
+capabilities. An activation adds its binding, public credential identifier, decision and conditions
+revisions, verification, signed deadlines, license facts and refresh state.
+
+A capability is a feature a license switches on. The typed `capabilities` section lists every
+catalog capability with its `state`, `enabled` or `disabled`, and the text form prints one line
+per capability, such as `capability licensing.dummy: enabled`. The section's `permitted` state and
+its `permitted_until` deadline belong to a capability whose removal has a grace period; no current
+capability has one. The catalog's only capability, `licensing.dummy`, changes nothing in Nervix:
+the free policy disables it, and a license whose plan enables it shows that a verified decision
+reached the cluster. A follower marks the leader's
 incarnation- and tenure-bound connectivity observation as reported. Connectivity distinguishes
 reachable service, transport outage and non-retryable service refusal, retaining each outage or
 refusal's start and typed cause. Connectivity grants nothing; a failed request renews no deadline.
@@ -817,8 +828,8 @@ they preserve ordered cursor progress without materializing the entire catalog. 
 receives one fifteenth of the domain drain budget, two seconds at the default. Internal drain,
 freeze and replication rechecks derive from their owning deadline or replication cadence, with a
 one-nanosecond floor. ONNX sessions use one intra-operation and one inter-operation thread because
-the Data executor already owns parallel admission. State admission spins only with parallel Data
-workers; its bounded spin is followed by the selected thread yield.
+the Extension executor already owns the parallel admission of model runs. State admission spins
+only with parallel Data workers; its bounded spin is followed by the selected thread yield.
 
 Framing, packed identity bits, sequential single-slot handoffs, accounting granules and persisted
 segment sizes remain fixed contracts, with their owning code and format chapters declaring why.
@@ -1380,10 +1391,26 @@ The compiler accepts this contract on a constant, including an associated consta
 source scanner validates the gate before excluding a constant, including inactive code. The
 reason remains reviewed evidence; neither parser nor compiler proves its prose true.
 
-The one-minute and fifteen-minute metric EMA windows, their decay conversion and the published
-connector-interaction duration buckets are fixed observation contracts. Their declarations carry
-the fixed reasons in the metric owners; they are not node settings. The current resolution is
-documented in [Metrics And Observability](metrics-and-observability.md#connector-interactions).
+The one-minute and fifteen-minute metric EMA windows, their decay conversion, the steps of the
+percentile windows, the unit and precision of the HDR histograms that metric snapshots carry, the
+published histogram buckets and the published connector-interaction duration buckets are fixed
+observation contracts. Their declarations carry the fixed reasons in the metric owners; they are
+not node settings. The current resolution is documented in
+[Metrics And Observability](metrics-and-observability.md#connector-interaction-metrics).
+
+The per-session bounds of the [client session protocol](client-session-protocol.md) (requests in
+flight, producers, consumers and batch credit), the chunk bounds both peers of a stream check, the
+process exit statuses and the forced-exit report bound of [Shutdown](shutdown.md#exit-status), and
+the absence markers of packed atomic encodings are fixed the same way, each at its owner. A memory
+charge that mirrors a buffer sized by `--execution-bulk-chunk-bytes` derives from the resolved bulk
+chunk rather than repeating its default.
+
+The shared session codec in `nervix-client-wire` fixes the WebSocket close codes RFC 6455
+assigns, the frame header and the table and traversal budgets of rule F-3 of the
+[Client Implementation Manual](client-implementation-manual.md#frames), the envelope bounds and
+table depths the session schema's frame layouts fix, and the 64 KiB below which its gRPC decoder
+copies a frame out of the read buffer (rule F-9). It takes each session limit's default and bounds
+from that limit's own setting definition rather than restating them.
 
 `just ratchet --show hidden_tunables` lists the temporary count's sites. It counts numeric
 `const` items of types `Duration`, `usize`, `u64`, `u32`, `u16`, `u8`, `i64`, `i32`, `f64`,

@@ -47,8 +47,7 @@ pub const LICENSING_STOP_ENFORCE_AFTER: Duration = Duration::from_secs(60);
     RkyvDeserialize,
 )]
 pub enum DomainStopCause {
-    /// An operator's `STOP`, a transaction's `STOP` step, or the rollback of a `START` whose
-    /// application failed.
+    /// An operator's `STOP`, or a transaction's `STOP` step.
     Operator,
     /// The licensing stop gate closed while the domain ran (specification §10.7).
     Licensing(LicensingStopReason),
@@ -388,16 +387,6 @@ pub struct DomainStopReport {
     pub nodes: BTreeMap<ClusterNodeName, NodeStopReport>,
 }
 
-impl DomainStopReport {
-    /// Whether the teardown cut nothing on any node that reported, and every node reported.
-    pub fn cut_nothing(&self) -> bool {
-        self.nodes.values().all(|report| match report {
-            NodeStopReport::Reported { cuts } => cuts.is_empty(),
-            NodeStopReport::Unreported => false,
-        })
-    }
-}
-
 /// How the stop that ended a domain ended, kept while the domain stays stopped.
 #[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
@@ -412,8 +401,8 @@ pub struct DomainStopEnding {
 }
 
 impl DomainStopEnding {
-    /// The ending of a stop that came before the domain ran any work: a `START` rolled back, or a
-    /// restore whose installation the licensing stop gate kept from running. It cut nothing.
+    /// The ending of a stop that came before the domain ran any work: a restore whose
+    /// installation the licensing stop gate kept from running. It cut nothing.
     pub fn before_any_work(cause: DomainStopCause) -> Self {
         Self {
             cause,
@@ -574,17 +563,6 @@ impl crate::DomainState {
         }
         ending.report = Some(report);
         true
-    }
-
-    /// Stops a domain that has not run any work since it last stopped, as the rollback of a
-    /// failed `START` does: nothing is in motion, so nothing drains and nothing is cut. A domain
-    /// already stopped keeps the stop that ended it.
-    pub fn record_stop_before_any_work(&mut self, cause: DomainStopCause) {
-        if self.status != DomainStatus::Stopped {
-            self.stop = Some(DomainStop::Ended(DomainStopEnding::before_any_work(cause)));
-        }
-        self.status = DomainStatus::Stopped;
-        self.clock = None;
     }
 
     /// Clears the stop a start leaves behind.
@@ -798,28 +776,5 @@ mod tests {
         assert_eq!(stopping.next_operator_limit(), Some(at(13)));
         assert!(stopping.cancelled_by(at(12)).is_empty());
         assert_eq!(stopping.cancelled_by(at(13)), vec![reference("giving_up")]);
-    }
-
-    #[test]
-    fn a_stop_before_any_work_cuts_nothing_and_keeps_an_earlier_ending() {
-        let mut state = domain(DomainStatus::Running);
-        state.record_stop_before_any_work(DomainStopCause::Operator);
-        assert_eq!(state.status, DomainStatus::Stopped);
-        let ending = state
-            .stop_ending()
-            .expect("the rollback records its ending");
-        assert!(ending.resolved.is_empty());
-        assert!(
-            ending
-                .report
-                .as_ref()
-                .is_some_and(DomainStopReport::cut_nothing)
-        );
-        let kept = state.stop.clone();
-        state.record_stop_before_any_work(DomainStopCause::Licensing(expiry()));
-        assert_eq!(
-            state.stop, kept,
-            "a stopped domain keeps the stop that ended it"
-        );
     }
 }

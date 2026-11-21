@@ -104,6 +104,6 @@ Feature: Inherited partition growth with an unavailable state owner
     And the observed broker does not receive a payload within "500ms"
 
     Examples:
-      | cluster_size | replicas | owners | offset_mode                                                      | reader_instances | readers_after_growth | reader_owners |
-      | 3            | 1        | 2      | OFFSET BY DOMAIN                                                 | PER PARTITION    | 16                   | 2             |
-      | 3            | 1        | 2      | OFFSET BY CONSUMER GROUP 'growing_{{test_id}}' START AT EARLIEST | 1                | 1                    | 1             |
+      | cluster_size | replicas | owners | offset_mode                                                      | reader_instances        | readers_after_growth | reader_owners |
+      | 3            | 1        | 2      | OFFSET BY DOMAIN                                                 | PER TRANSPORT PARTITION | 16                   | 2             |
+      | 3            | 1        | 2      | OFFSET BY CONSUMER GROUP 'growing_{{test_id}}' START AT EARLIEST | 1                       | 1                    | 1             |

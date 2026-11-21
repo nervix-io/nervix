@@ -56,6 +56,7 @@ mod json;
 mod list_shape;
 mod list_statistics;
 mod membership;
+mod node_predicate;
 mod numeric;
 mod operand;
 pub mod program;
@@ -73,9 +74,9 @@ pub use cast::{CastTarget, ListCast};
 pub use compiler::{
     CompileBinding, CompileNamespace, CompileOptions, InferredSetField, OutputMode,
     PredicateCompileOptions, SchemaSensitivity, UdfParameter, UdfSignature, UdfSignatures,
-    compile_predicate_with_options_for_bindings, compile_program, compile_program_for_bindings,
-    compile_program_for_bindings_with_sensitivity, compile_program_for_relay,
-    compile_program_for_relays, compile_program_with_options,
+    compile_deterministic_predicate, compile_predicate_with_options_for_bindings, compile_program,
+    compile_program_for_bindings, compile_program_for_bindings_with_sensitivity,
+    compile_program_for_relay, compile_program_for_relays, compile_program_with_options,
     compile_program_with_options_for_bindings,
     compile_program_with_options_for_bindings_with_sensitivity,
     compile_program_with_options_for_relay, compile_program_with_options_for_relays,
@@ -101,9 +102,9 @@ pub use frontend::{
 };
 pub use ip_address::{IpFamily, IpNetwork, NetworkDefect, NetworkSource};
 pub use ir::{
-    CompiledPredicate, CompiledProgram, InputBinding, Instruction, InstructionKind,
-    InvocationBinding, OutputBinding, RegisterLayout, RegisterLayouts, RegisterRef, RegisterSpace,
-    RegisterType, ScalarValue,
+    CompiledPredicate, CompiledProgram, DeterministicPredicate, InputBinding, Instruction,
+    InstructionKind, InvocationBinding, OutputBinding, RegisterLayout, RegisterLayouts,
+    RegisterRef, RegisterSpace, RegisterType, ScalarValue,
 };
 pub use json::{
     JsonDefect, JsonExtraction, JsonKind, JsonOperation, JsonOutput, JsonPlace, JsonScanOutput,
@@ -114,15 +115,16 @@ pub use list_statistics::{
     ListStatisticName,
 };
 pub use membership::{MembershipSet, SMALL_SET_CAPACITY};
+pub use node_predicate::{NodePredicate, NodePredicateError};
 pub use regexp::{
     COMPILED_PATTERN_SIZE_LIMIT, ConstantPattern, DynamicPatternStatistics, DynamicPatterns,
     PatternSource, RegexpCall, RegexpFunction,
 };
 pub use runtime::{
-    ExecutionContext, ExecutionResult, FunctionExecutionPolicy, FunctionInjector,
-    FunctionInvocation, InjectedResult, PredicateExecutionResult, RowSelection,
-    execute_accepted_program_with_selection_in_context, execute_predicate_in_context,
-    execute_program_with_selection_in_context,
+    DeterministicPredicateResult, ExecutionContext, ExecutionResult, FunctionExecutionPolicy,
+    FunctionInjector, FunctionInvocation, InjectedResult, PredicateExecutionResult, RowSelection,
+    execute_accepted_program_with_selection_in_context, execute_deterministic_predicate,
+    execute_predicate_in_context, execute_program_with_selection_in_context,
 };
 pub use semantics::{
     BinaryDescriptor, BuiltinDescriptor, BuiltinLowering, CastDescriptor, DependencyScope,

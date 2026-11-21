@@ -2302,6 +2302,19 @@ int main(int argc, char **argv) {
     }
     if (!metadata_found) fail("typed labels lost exact metadata");
     nx_entity_labels_free(metadata);
+
+    nx_outcome *node_read = execute(session, "SHOW NODES WHERE node.name = 'node-1';");
+    nx_node_inspection *nodes = NULL;
+    check(nx_outcome_node_inspection(node_read, &nodes), "read typed node preview");
+    nx_outcome_free(node_read);
+    const uint8_t *node_name;
+    size_t node_name_len;
+    if (!nodes || nx_node_inspection_count(nodes) != 1 ||
+        !nx_node_inspection_name(nodes, 0, &node_name, &node_name_len) ||
+        node_name_len != sizeof "node-1" - 1 || memcmp(node_name, "node-1", node_name_len) != 0) {
+        fail("typed node preview lost the selected node");
+    }
+    nx_node_inspection_free(nodes);
     check_cancellation(session);
     printf("CHECKS ok\n");
 

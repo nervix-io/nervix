@@ -70,7 +70,7 @@ pub(crate) struct CapturedGuestSave {
 
 impl CapturedGuestSave {
     /// Covers the Fjall value and its decoded inline copy with room for conversion. Transfer
-    /// buffers are charged separately to the fixed bulk staging reservation.
+    /// buffers are charged separately to the bulk staging reservation.
     pub(crate) fn size_and_conversion_charge(
         &self,
     ) -> error_stack::Result<(u64, u64), BackupStateCaptureError> {

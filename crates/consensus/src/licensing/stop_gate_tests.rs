@@ -79,17 +79,6 @@ fn domain(name: &str) -> nervix_models::DomainName {
     nervix_models::DomainName::parse(name).assured("the literal follows the name rule")
 }
 
-fn start(state: &mut StateMachineData, name: &str) -> ConsensusResponse {
-    let command = ConsensusCommand::StartDomain {
-        domain_id: domain(name),
-        start: DomainStartPoint::Resume,
-        clock: None,
-        authority: None,
-        mutation: None,
-    };
-    apply_consensus_command(state, &command).response
-}
-
 fn stop_cause(state: &StateMachineData, name: &str) -> Option<DomainStopCause> {
     state
         .domains
@@ -237,7 +226,16 @@ fn a_closed_gate_refuses_every_change_that_runs_a_domain_and_records_its_stops()
     };
     let refused = ConsensusResponse::Conflict(ConsensusConflict::LicensingStop { reason });
 
-    assert_eq!(start(&mut state, "idle"), refused);
+    let start = crate::tests::commit_start_step(&mut state, "idle")
+        .expect_err("a closed gate refuses the step of a START");
+    let crate::TransactionMutationError::LicensingStop {
+        reason: start_reason,
+        ..
+    } = start.current_context()
+    else {
+        panic!("the START step is refused by the licensing stop, not {start:?}");
+    };
+    assert_eq!(*start_reason, reason);
     let resume = ConsensusCommand::ResumeDomain {
         domain_id: domain("paused"),
         mutation: None,
@@ -413,7 +411,8 @@ fn only_a_new_activation_after_the_expiry_lifts_the_gate_and_starts_stay_explici
         tenant.stop_cause(),
         Some(DomainStopCause::Licensing(reason))
     );
-    assert_eq!(start(&mut state, "tenant"), ConsensusResponse::Applied);
+    crate::tests::commit_start_step(&mut state, "tenant")
+        .assured("the lifted gate admits the step of an explicit START");
     let tenant = state
         .domains
         .get(&domain("tenant"))

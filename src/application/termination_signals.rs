@@ -51,15 +51,51 @@ use super::{
 
 /// A shell reports a process that a signal terminated as exiting with this base plus the signal
 /// number, and a forced exit reports itself the same way.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "a POSIX shell reports a process a signal ended as 128 plus the signal number"
+    )
+)]
 const SIGNALLED_EXIT_STATUS_BASE: c_int = 128;
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the shutdown chapter's exit status for a repeated SIGINT is the shell's 130"
+    )
+)]
 const INTERRUPT_EXIT_STATUS: c_int = SIGNALLED_EXIT_STATUS_BASE + SIGINT;
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the shutdown chapter's exit status for a repeated SIGTERM is the shell's 143"
+    )
+)]
 const TERMINATE_EXIT_STATUS: c_int = SIGNALLED_EXIT_STATUS_BASE + SIGTERM;
 /// A shutdown that its deadline cut short did not finish, so the process exits with the status it
 /// reports when a shutdown step fails.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the shutdown chapter's exit status for an expired shutdown deadline is 1"
+    )
+)]
 const DEADLINE_EXPIRED_EXIT_STATUS: c_int = 1;
 
 /// How long a forced exit waits for its log record before exiting without it. Writing the record
 /// normally takes microseconds; the bound matters only when standard output has stopped draining.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the shutdown chapter bounds a forced exit's wait for its log record at one \
+                  second"
+    )
+)]
 const FORCED_EXIT_REPORT_BUDGET: Duration = Duration::from_secs(1);
 
 const SIGNAL_SUPERVISOR_THREAD: &str = "nervix-termination-signals";

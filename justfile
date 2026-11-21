@@ -427,6 +427,11 @@ test-window-collection-arrays *args: build-deps build-plexus-format build-test-c
 test-reference-completion *args: build-deps build-plexus-format build-test-cli build-deadlock-report
     ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)" cargo test --package nervix-scenarios --test scenarios -- --input {{ quote(justfile_directory() / "tests/features/tools/cli_reference_completion{,}.feature") }} {{ quote(args) }}
 
+# Complete the collection aggregates of window routes through the public CLI, against each window
+# bound and expression position.
+test-window-collection-completion *args: build-deps build-plexus-format build-test-cli build-deadlock-report
+    ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)" cargo test --package nervix-scenarios --test scenarios -- --input {{ quote(justfile_directory() / "tests/features/tools/cli_window_collection_completion{,}.feature") }} {{ quote(args) }}
+
 # Observe released and installed processor keys through bounded public inspection pages.
 test-partition-state-inspection *args: build-deps build-plexus-format build-test-cli build-deadlock-report
     ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)" cargo test --package nervix-scenarios --test scenarios -- --input {{ quote(justfile_directory() / "tests/features/runtime/partition_state_inspection{,}.feature") }} {{ quote(args) }}
@@ -674,6 +679,13 @@ test-licensing-expiry *args: build-deps build-plexus-format build-test-cli build
     set -euo pipefail
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
     cargo test --package nervix-scenarios --test scenarios -- --input {{ quote(justfile_directory() / "tests/features/licensing/ephemeral_expiry{,}.feature") }} {{ quote(args) }}
+
+# DESCRIBE LICENSE lists every catalog capability; a license can enable licensing.dummy.
+test-licensing-capabilities *args: build-deps build-plexus-format build-test-cli build-deadlock-report
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    cargo test --package nervix-scenarios --test scenarios -- --input {{ quote(justfile_directory() / "tests/features/licensing/capabilities{,}.feature") }} {{ quote(args) }}
 
 # Verify a maintained SSE parser source tree with its dependency-owner regressions.
 test-licensing-parser-source source *args:
@@ -1481,6 +1493,11 @@ coverage-partitioning output *args: download-onnxruntime
 # compiler cache.
 coverage-client-core output *args:
     cargo llvm-cov --no-clean --package nervix-client-core --lib --no-default-ignore-filename-regex --lcov --output-path {{ quote(output) }} -- {{ args }}
+
+# Measure the session wire codec's unit tests and the gRPC and WebSocket sessions that carry its
+# frames, for a patch confined to it, through the configured compiler cache.
+coverage-client-wire output *args:
+    cargo llvm-cov --no-clean --package nervix-client-wire --all-features --all-targets --no-default-ignore-filename-regex --lcov --output-path {{ quote(output) }} -- {{ args }}
 
 # Measure selected console request-owner regressions without running unrelated browser tests.
 coverage-web-console output *args:
