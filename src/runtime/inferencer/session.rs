@@ -261,6 +261,13 @@ struct RunChunk {
     charge: u64,
 }
 
+/// What the admitted jobs of one run left before their public outputs are joined: the run's
+/// outcome so far and each job's outputs, in arrival order.
+struct RunJobs {
+    run: InferenceRun,
+    outputs: Vec<RecordBatch>,
+}
+
 /// What one admitted job returns: the outcome of its rows and the successor of the carried state.
 #[derive(Default)]
 struct ChunkOutcome {
@@ -324,6 +331,18 @@ impl InferenceSession {
         prepared: &Arc<PreparedInference>,
         mapped: &RuntimeRecordBatch,
     ) -> InferenceRun {
+        let jobs = self.run_jobs(executor, prepared, mapped).await;
+        self.join_outputs(prepared, jobs)
+    }
+
+    /// Runs every admitted job of `mapped`, in arrival order, and keeps each job's public outputs
+    /// for the join.
+    async fn run_jobs(
+        &mut self,
+        executor: &Executor,
+        prepared: &Arc<PreparedInference>,
+        mapped: &RuntimeRecordBatch,
+    ) -> RunJobs {
         let limit = executor.limits().relay_decoded_bytes.as_u64();
         let mut run = InferenceRun::default();
         let chunks = Self::plan_chunks(prepared, mapped, limit, &mut run);
@@ -361,6 +380,13 @@ impl InferenceSession {
                 }
             }
         }
+        RunJobs { run, outputs }
+    }
+
+    /// Joins the jobs' public outputs into the run's one output batch. A join that fails fails
+    /// every accepted message.
+    fn join_outputs(&self, prepared: &PreparedInference, jobs: RunJobs) -> InferenceRun {
+        let RunJobs { mut run, outputs } = jobs;
         match self.output_batch(prepared, outputs) {
             Ok(batch) => run.outputs = batch,
             Err(error) => {
