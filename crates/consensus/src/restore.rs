@@ -534,13 +534,13 @@ fn import_users(
                 continue;
             }
         }
-        state.validate_label_set(&user.labels).map_err(|issue| {
-            Report::new(issue).change_context(RestoreStepConflict::LabelLimits {
+        state
+            .validate_label_set(&user.labels)
+            .change_context_lazy(|| RestoreStepConflict::LabelLimits {
                 owner: nervix_models::EntityLabelOwner::User {
                     name: user.name.clone(),
                 },
-            })
-        })?;
+            })?;
     }
     let mut restored = RestoredUsers::default();
     for user in users {
@@ -609,12 +609,10 @@ fn create_domain(
     })?;
     state
         .validate_label_set(&domain_state.labels)
-        .map_err(|issue| {
-            Report::new(issue).change_context(RestoreStepConflict::LabelLimits {
-                owner: nervix_models::EntityLabelOwner::Domain {
-                    name: domain.clone(),
-                },
-            })
+        .change_context_lazy(|| RestoreStepConflict::LabelLimits {
+            owner: nervix_models::EntityLabelOwner::Domain {
+                name: domain.clone(),
+            },
         })?;
     for declared in resources {
         if state.resources.declares(domain, &declared.resource) {
@@ -625,12 +623,10 @@ fn create_domain(
         }
         state
             .validate_label_set(&declared.labels)
-            .map_err(|issue| {
-                Report::new(issue).change_context(RestoreStepConflict::LabelLimits {
-                    owner: nervix_models::EntityLabelOwner::Resource(
-                        nervix_models::ResourceCatalogKey::new(domain, &declared.resource),
-                    ),
-                })
+            .change_context_lazy(|| RestoreStepConflict::LabelLimits {
+                owner: nervix_models::EntityLabelOwner::Resource(
+                    nervix_models::ResourceCatalogKey::new(domain, &declared.resource),
+                ),
             })?;
     }
     state.domains.insert(domain.clone(), domain_state.clone());

@@ -763,7 +763,7 @@ pub enum ConsensusResponse {
     Error,
 )]
 pub enum ConsensusConflict {
-    #[error("{issue}")]
+    #[error("{}", .issue.rejection_reason())]
     EntityLabels { issue: Box<EntityLabelWriteError> },
     #[error("cluster key rotation was refused")]
     ClusterKeyRotation {
@@ -6825,7 +6825,7 @@ fn apply_consensus_command_at(
             }
             if let Err(issue) = state.validate_label_set(&domain.labels) {
                 return AppliedConsensusCommand::conflict(ConsensusConflict::EntityLabels {
-                    issue: Box::new(issue),
+                    issue: Box::new(issue.current_context().clone()),
                 });
             }
             state.domains.insert(domain.id.clone(), (**domain).clone());
@@ -6926,7 +6926,7 @@ fn apply_consensus_command_at(
             if !state.users.contains_key(&user.name) {
                 if let Err(issue) = state.validate_label_set(&user.labels) {
                     return AppliedConsensusCommand::conflict(ConsensusConflict::EntityLabels {
-                        issue: Box::new(issue),
+                        issue: Box::new(issue.current_context().clone()),
                     });
                 }
                 state.raise_password_work(user.password_credential.cost());
@@ -6945,7 +6945,7 @@ fn apply_consensus_command_at(
                 && let Err(issue) = state.validate_label_set(labels)
             {
                 return AppliedConsensusCommand::conflict(ConsensusConflict::EntityLabels {
-                    issue: Box::new(issue),
+                    issue: Box::new(issue.current_context().clone()),
                 });
             }
             state.resources.ensure_catalog(domain, identifier, labels);

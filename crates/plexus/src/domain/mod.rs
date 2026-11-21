@@ -254,15 +254,22 @@ mod tests {
     }
 
     #[test]
-    fn complete_domain_forms_offer_statement_termination() {
+    fn complete_domain_forms_offer_labels_and_statement_termination() {
         for input in [
             "CREATE DOMAIN prod ",
             "CREATE UNPACED DOMAIN prod ",
             "CREATE PACED DOMAIN prod WITH PERIOD 30s SKEW 1s ",
         ] {
-            assert_eq!(suggest_statement(input, input.len()), [";"]);
+            assert_eq!(suggest_statement(input, input.len()), [";", "LABELS"]);
             assert_eq!(
                 crate::client_statement::suggest_client_statement(input, input.len()),
+                [";", "LABELS"]
+            );
+
+            let labeled = format!("{input}LABELS {{ 'team' = 'Orders' }} ");
+            assert_eq!(suggest_statement(&labeled, labeled.len()), [";"]);
+            assert_eq!(
+                crate::client_statement::suggest_client_statement(&labeled, labeled.len()),
                 [";"]
             );
         }

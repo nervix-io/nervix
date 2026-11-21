@@ -55,10 +55,24 @@ pub enum EntityLabelWriteError {
     ParametersUnseeded,
     #[error("entity {target} does not exist")]
     UnknownEntity { target: AdministrativeLabelTarget },
-    #[error("{issue}")]
+    #[error("the candidate label map was refused")]
     InvalidLabels { issue: EntityLabelError },
     #[error("the label edit has no admitted execution")]
     ExecutionMissing,
+}
+
+impl EntityLabelWriteError {
+    fn from_invalid_labels(report: Report<EntityLabelError>) -> Report<Self> {
+        let issue = report.current_context().clone();
+        report.change_context(Self::InvalidLabels { issue })
+    }
+
+    pub(super) fn rejection_reason(&self) -> &dyn std::fmt::Display {
+        match self {
+            Self::InvalidLabels { issue } => issue,
+            other => other,
+        }
+    }
 }
 
 impl StateMachineData {
@@ -78,23 +92,21 @@ impl StateMachineData {
     pub(crate) fn validate_label_set(
         &self,
         labels: &EntityLabels,
-    ) -> Result<(), EntityLabelWriteError> {
+    ) -> error_stack::Result<(), EntityLabelWriteError> {
         if labels.is_empty() {
             return Ok(());
         }
         let limits = self.entity_label_limits()?;
         labels
             .validate(&limits)
-            .map_err(|report| EntityLabelWriteError::InvalidLabels {
-                issue: report.current_context().clone(),
-            })
+            .map_err(EntityLabelWriteError::from_invalid_labels)
     }
 
-    fn entity_label_limits(&self) -> Result<EntityLabelLimits, EntityLabelWriteError> {
+    fn entity_label_limits(&self) -> error_stack::Result<EntityLabelLimits, EntityLabelWriteError> {
         let parameters = self
             .parameters
             .as_ref()
-            .ok_or(EntityLabelWriteError::ParametersUnseeded)?;
+            .ok_or_else(|| Report::new(EntityLabelWriteError::ParametersUnseeded))?;
         Ok(EntityLabelLimits::from(&parameters.values))
     }
 
@@ -116,18 +128,16 @@ impl StateMachineData {
         &mut self,
         target: &AdministrativeLabelTarget,
         mutation: &EntityLabelMutation,
-    ) -> Result<(), EntityLabelWriteError> {
+    ) -> error_stack::Result<(), EntityLabelWriteError> {
         let limits = self.entity_label_limits()?;
-        let labels =
-            self.named_labels_mut(target)
-                .ok_or_else(|| EntityLabelWriteError::UnknownEntity {
-                    target: target.clone(),
-                })?;
-        let updated = labels.updated(mutation, &limits).map_err(|report| {
-            EntityLabelWriteError::InvalidLabels {
-                issue: report.current_context().clone(),
-            }
+        let labels = self.named_labels_mut(target).ok_or_else(|| {
+            Report::new(EntityLabelWriteError::UnknownEntity {
+                target: target.clone(),
+            })
         })?;
+        let updated = labels
+            .updated(mutation, &limits)
+            .map_err(EntityLabelWriteError::from_invalid_labels)?;
         *labels = updated;
         Ok(())
     }
@@ -170,7 +180,9 @@ pub(super) fn apply_administrative_labels(
             Err(error) => write_conflict(error.clone()),
         };
     }
-    let result = state.edit_administrative_labels(target, mutation);
+    let result = state
+        .edit_administrative_labels(target, mutation)
+        .map_err(|report| report.current_context().clone());
     // Apply the metadata and record the exact outcome in the same state-machine write. An
     // earlier request replay must leave any later edit in place.
     *outcome = Some(result.clone());
