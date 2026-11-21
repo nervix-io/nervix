@@ -405,7 +405,7 @@ async fn owner_body(executor: &Executor, rows: RecordBatch) -> (StatePageBody, C
     let rows = RuntimeRecordBatch::from_record_batch(rows.schema(), rows)
         .assured("the fixture rows are a runtime batch");
     let body = rows
-        .encode_arrow_snapshot_section(executor)
+        .encode_arrow_snapshot_section(executor, nervix_execution::QueueAdmission::RefuseWhenFull)
         .await
         .assured("a bounded section encodes");
     identified_body(executor, body)

@@ -160,12 +160,14 @@ Nervix records these raw metric families:
 - `nervix_ingestor_suspends_total`: suspensions of an ingestor's connector, by `cause`: `quiesce`,
   `read_failure` or `rejection`
 - `nervix_ingestor_unconfirmed_stop_positions_total`: positions an ingestor read but stopped before
-  its transport confirmed them, which its transport presents again
+  its transport confirmed them, which a transport that keeps positions presents again, including a
+  batch that waited for the node's extension workers when the ingestor stopped
 - `nervix_ingestor_transient_failure`: `1` while the ingestor's current task has a published
   transient failure, `0` otherwise and once the task ends
-- `nervix_ingestor_unfolding_refused_total`: raw payloads refused because extension-worker
-  admission had no place, including acknowledged intake and endpoint requests. A retained payload
-  waiting for a place is not a refusal. See [When The Extension Workers Are Full](./ingestors.md#when-the-extension-workers-are-full).
+- `nervix_ingestor_unfolding_refused_total`: endpoint request bodies answered as refused because
+  extension-worker admission had no place, which their senders send again. Every other payload,
+  acknowledged or not, waits for a place, and waiting is not a refusal. See
+  [When The Extension Workers Are Full](./ingestors.md#when-the-extension-workers-are-full).
 - `nervix_ingestor_transport_redeliveries_total`: pending acknowledgements and rejections an
   ingestor discarded after its RabbitMQ, SQS or MQTT ingestor reconnected. The broker redelivers what
   the lost connection did not acknowledge, so each counted position is ingested again
@@ -1014,7 +1016,7 @@ route, under the outcome that ingestor reached:
 | `accepted` | took it in: in `MODE NO ACK` it dispatched it into its graph or its endpoint `BUFFER` retained it (HTTP 202); in `MODE ACK` its acknowledgement root completed (HTTP 200, `completed`). |
 | `busy` | had no free slot in its `MODE ACK MAX` response window (HTTP 503, `not_admitted` with `busy`). |
 | `refused` | refused it: its quiesce refused new intake, such as `ON QUIESCE REJECT` while it is quiesced or a full endpoint `BUFFER` (HTTP 503), or in `MODE ACK` one of its routes refused the decoded input (HTTP 400). |
-| `not_admitted` | could not have it unfolded because the node's extension workers had no room, which `nervix_ingestor_unfolding_refused_total` counts too (HTTP 503). |
+| `not_admitted` | could not have an HTTP body unfolded because the node's extension workers had no room, which `nervix_ingestor_unfolding_refused_total` counts too (HTTP 503); a WebSocket frame in `MODE NO ACK` waits for a place instead. |
 | `decode_rejected` | consumed it as a decode rejection because its codec refused the payload, which `nervix_ingestor_decode_rejections_total` counts too (HTTP 202 in `MODE NO ACK`, 400 in `MODE ACK`). |
 | `processing_failed` | admitted it without completing it: its `MODE NO ACK` dispatch into the graph failed (HTTP 202), or its `MODE ACK` acknowledgement root failed, its `ACK TIMEOUT` expired or its intake stopped while the response was held (HTTP 503). |
 

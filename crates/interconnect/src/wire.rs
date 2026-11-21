@@ -20,7 +20,7 @@ use arch_into::ArchInto as _;
 use error_stack::Report;
 use nervix_execution::{
     AdmissionError, BudgetedBuffer, Cancellation, ChargedBytes, CpuClass, Executor, MemoryClass,
-    Reservation,
+    QueueAdmission, Reservation,
 };
 use nervix_models::{
     ClusterNodeName, NodePrerequisites, PrerequisiteMismatch, WireContractFingerprint,
@@ -294,10 +294,15 @@ where
         value,
         _input_charge: None,
     };
+    // A frame carries work a peer or this node already accepted, such as a response whose
+    // handler ran, so a full queue holds its encoding back rather than throwing the work away.
     executor
-        .run_cpu(cpu, reservation, move |charge, cancellation| {
-            encoding.encode(charge, limit, cancellation)
-        })
+        .run_cpu_with(
+            cpu,
+            QueueAdmission::WaitForPlace,
+            reservation,
+            move |charge, cancellation| encoding.encode(charge, limit, cancellation),
+        )
         .await
         .map_err(|error| TransportError::with_cause(error, TransportError::Encode))?
 }
@@ -319,8 +324,9 @@ pub(crate) async fn encode_stream_request(
         .try_reserve(class.memory_class(), INITIAL_MESSAGE_CHARGE.min(limit))
         .map_err(|error| TransportError::with_cause(error, TransportError::Encode))?;
     let buffer = executor
-        .run_cpu(
+        .run_cpu_with(
             class.cpu_class(),
+            QueueAdmission::WaitForPlace,
             reservation,
             move |charge, cancellation| encoding.encode(charge, limit, cancellation),
         )
@@ -424,20 +430,28 @@ where
         + rkyv::Deserialize<T, rkyv::api::high::HighDeserializer<RkyvError>>,
 {
     let max_depth = validation_depth(executor)?;
+    // Each pool class has its own connections and CPU class, so a frame that waits for a place
+    // holds back only its own class's streams, and a response whose request already ran is never
+    // thrown away.
     executor
-        .run_cpu(cpu, decoded_charge, move |charge, cancellation| {
-            cancellation.check().map_err(|error| {
-                TransportError::with_cause(Report::new(error), TransportError::Decode)
-            })?;
-            let bytes = bytes.as_bytes();
-            let mut aligned = AlignedVec::<16>::with_capacity(bytes.len());
-            aligned.extend_from_slice(bytes);
-            let value = decode_aligned::<T>(&aligned, max_depth)?;
-            Ok(Decoded {
-                value,
-                _reservation: charge,
-            })
-        })
+        .run_cpu_with(
+            cpu,
+            QueueAdmission::WaitForPlace,
+            decoded_charge,
+            move |charge, cancellation| {
+                cancellation.check().map_err(|error| {
+                    TransportError::with_cause(Report::new(error), TransportError::Decode)
+                })?;
+                let bytes = bytes.as_bytes();
+                let mut aligned = AlignedVec::<16>::with_capacity(bytes.len());
+                aligned.extend_from_slice(bytes);
+                let value = decode_aligned::<T>(&aligned, max_depth)?;
+                Ok(Decoded {
+                    value,
+                    _reservation: charge,
+                })
+            },
+        )
         .await
         .map_err(|error| TransportError::with_cause(error, TransportError::Decode))?
 }

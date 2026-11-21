@@ -197,6 +197,109 @@ async fn nested_decode_cancellation_keeps_its_own_input_charge() {
     assert_eq!(executor.memory(MemoryClass::Bulk).reserved_bytes, 0);
 }
 
+/// A frame carries work a peer or this node already accepted, so when its CPU class has no worker
+/// and no place in its queue, its encoding and its decoding wait for a place rather than being
+/// refused, and both complete once the class frees.
+#[cfg(not(feature = "shuttle"))]
+#[nervix_primitives::test]
+async fn a_frame_the_cpu_class_cannot_take_now_waits_for_a_place() {
+    use std::num::NonZeroUsize;
+
+    use nervix_execution::{ExecutionConfig, PendingJobCounts, WorkerCounts};
+
+    let executor = Executor::new(ExecutionConfig {
+        workers: WorkerCounts {
+            bulk_cpu: NonZeroUsize::MIN,
+            pending_jobs: PendingJobCounts::uniform(NonZeroUsize::MIN),
+            ..WorkerCounts::default()
+        },
+        ..ExecutionConfig::default()
+    })
+    .assured("the test changes only worker counts");
+    let (release, held) = nervix_primitives::sync::blocking::mpsc::channel::<()>();
+    let occupier = executor.clone();
+    let charge = executor
+        .try_reserve(MemoryClass::Bulk, 0)
+        .assured("a zero charge is always admitted");
+    let occupying = nervix_primitives::task::spawn(async move {
+        occupier
+            .run_cpu(CpuClass::Bulk, charge, move |_, _| {
+                held.recv()
+                    .expect_err("dropping the sender is how the test releases the worker");
+            })
+            .await
+    });
+    while executor.snapshot().cpu_class(CpuClass::Bulk).running == 0 {
+        nervix_primitives::task::yield_now().await;
+    }
+    let queued = executor.clone();
+    let charge = executor
+        .try_reserve(MemoryClass::Bulk, 0)
+        .assured("a zero charge is always admitted");
+    let queued = nervix_primitives::task::spawn(async move {
+        queued.run_cpu(CpuClass::Bulk, charge, |_, _| ()).await
+    });
+    while executor.snapshot().cpu_class(CpuClass::Bulk).pending == 0 {
+        nervix_primitives::task::yield_now().await;
+    }
+    let before = executor.snapshot().cpu_class(CpuClass::Bulk);
+
+    let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&request())
+        .assured("the current fixture envelope serializes")
+        .to_vec();
+    let input = executor
+        .try_reserve(
+            MemoryClass::Bulk,
+            u64::try_from(bytes.len()).assured("the fixture envelope's length fits u64"),
+        )
+        .assured("the encoded envelope fits");
+    let mut decoding = std::pin::pin!(super::decode_rkyv::<RequestEnvelope>(
+        &executor,
+        MemoryClass::Bulk,
+        CpuClass::Bulk,
+        ChargedBytes::from_owned(bytes, input),
+    ));
+    let mut encoding = std::pin::pin!(super::encode_rkyv(
+        &executor,
+        MemoryClass::Bulk,
+        CpuClass::Bulk,
+        1024 * 1024,
+        request(),
+    ));
+    assert!(
+        decoding.as_mut().now_or_never().is_none(),
+        "a full class holds the frame's decoding back"
+    );
+    assert!(
+        encoding.as_mut().now_or_never().is_none(),
+        "a full class holds the frame's encoding back"
+    );
+
+    drop(release);
+    let decoded = decoding
+        .await
+        .assured("the decoding runs once a place frees");
+    let encoded = encoding
+        .await
+        .assured("the encoding runs once a place frees");
+    assert_eq!(decoded.value.request, request().request);
+    assert_eq!(decoded.value.payload, request().payload);
+    assert!(!encoded.is_empty());
+    occupying
+        .await
+        .assured("the occupying job's supervisor is joined")
+        .assured("the occupying job ran");
+    queued
+        .await
+        .assured("the queued job's supervisor is joined")
+        .assured("the queued job ran once the worker freed");
+    assert_eq!(
+        executor.snapshot().cpu_class(CpuClass::Bulk).refused,
+        before.refused,
+        "a full class refuses no frame"
+    );
+}
+
 #[cfg(not(feature = "shuttle"))]
 #[nervix_primitives::test]
 async fn outer_bulk_decode_refusal_releases_its_input() {

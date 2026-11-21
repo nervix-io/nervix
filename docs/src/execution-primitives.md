@@ -465,9 +465,14 @@ hands a freed place to an existing `WaitForPlace` waiter before a later requeste
 data. `AcceptedWork` is a borrowed capability: ordinary admission adds no allocation, thread,
 lock or reference count. VM execution still owns its class and charge decisions. Branch input
 preparation, retained inference setup and runs, and relay carriage use the same waiting FIFO.
-Request work keeps its immediate refusal, including client batch decoding, statement constants,
-subscription predicates and state inspection; ingestion-boundary admission follows its source's
-own contract.
+Request work, whose caller still holds its input and waits on the answer, keeps its immediate
+refusal through the refusing `run_cpu` and `run_storage`, including client batch decoding,
+statement constants, subscription predicates, state inspection and an HTTP endpoint body. Every
+other job states `QueueAdmission::WaitForPlace` and waits: the unfolding of every payload an
+ingestor handed over, acknowledged or not, relay and subscription carriage, interconnect frames,
+checkpoints and state captures, compilation for a committed change, lifecycle steps, and the
+consensus storage worker's jobs, which `submit_storage` admits in order. A wait ends in a refusal
+only once the executor admits no more work.
 
 An accepted owner can acquire a charged CPU queue place before transferring mutable state into a
 job. Every inferencer does this before moving its branch's native session into the job that runs

@@ -28,7 +28,7 @@ use std::{collections::BTreeMap, fmt, io, num::NonZeroUsize, time::Duration};
 
 use async_trait::async_trait;
 use error_stack::{Report, ResultExt as _};
-use futures_util::StreamExt as _;
+use futures_util::{FutureExt as _, StreamExt as _};
 use meticulous::ResultExt as _;
 use nervix_connector::{
     BrokerIngestorConnector, IngestMessageHeaders, IngestMessageMetadata, IngestMetadataRow,
@@ -828,10 +828,22 @@ pub struct PulsarTopicIngestor {
 }
 
 impl PulsarTopicIngestor {
+    /// Closes the consumer, after taking off its receive queue every message already in it.
+    ///
+    /// The driver's engine hands each message the broker delivers into a bounded receive queue and
+    /// answers a close only after that hand-over, so a queue the ingestor stopped reading, such as
+    /// while a payload waited for the node's extension workers, would hold the close forever. The
+    /// messages taken off here were never taken in or acknowledged, so the subscription delivers
+    /// them again to whoever reads it next.
     async fn close_consumer(&mut self) -> PulsarTopicIngestorResult<()> {
         let Some(mut consumer) = self.consumer.take() else {
             return Ok(());
         };
+        // Each turn takes one message the queue already holds; the first that finds it empty ends
+        // the drain without waiting.
+        while let Some(Some(_unread)) = consumer.next().now_or_never() {
+            nervix_primitives::task::consume_budget().await;
+        }
         consumer.close().await.map_err(|source| {
             Report::new(PulsarTopicIngestorError::Close).attach_printable(source.to_string())
         })

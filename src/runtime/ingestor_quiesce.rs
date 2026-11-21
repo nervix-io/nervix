@@ -506,12 +506,6 @@ impl BufferedIngestPayload {
         )
     }
 
-    /// The number of ingestor payloads this buffer holds, which is how many payloads the group it
-    /// opens accepts.
-    pub(in crate::runtime) fn len(&self) -> usize {
-        self.payloads.len()
-    }
-
     /// The metadata of the first payload, for bindings that ingest one payload per buffer.
     pub(super) fn first_metadata_row(&self) -> IngestMetadataRow<'_> {
         self.metadata

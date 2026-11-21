@@ -232,6 +232,7 @@ async fn decode_bytes(
     {
         let mapping_input = RuntimeRecordBatch::decode_arrow_snapshot_section(
             runtime.executor(),
+            nervix_execution::QueueAdmission::RefuseWhenFull,
             StdArc::clone(schema),
             bytes,
         )

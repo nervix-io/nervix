@@ -335,20 +335,24 @@ pub enum IngestorSettlement {
     Individual,
 }
 
-/// Services a transport session while the host's read allowance is spent.
+/// Services a transport session while the host holds the ingestor's loop: while its read
+/// allowance is spent, and while a payload it took waits for a place on the node's extension
+/// workers.
 #[async_trait]
 #[cfg_attr(
     nervix_lint,
     nervix::context(
         recurring,
-        reason = "the host drives the transport while its read allowance is spent"
+        reason = "the host drives the transport while it holds the ingestor's loop"
     )
 )]
 pub trait IngestorReadHold: Send {
     /// Drives only session control, without taking a record. The host stops polling this future
-    /// when the allowance returns, a lifecycle change interrupts the wait, or the driver reports
-    /// a failure. Dropping the future must leave an explicit stop, suspend or next read usable.
-    async fn maintain(&mut self, until: Instant) -> Report<IngestorError>;
+    /// when its hold ends: at `until` for a read allowance that returns then, or, for a payload
+    /// waiting for the extension workers, which has no deadline (`None`), once the payload has its
+    /// place. A lifecycle change also interrupts the wait, and the driver ends it by reporting a
+    /// failure. Dropping the future must leave an explicit stop, suspend or next read usable.
+    async fn maintain(&mut self, until: Option<Instant>) -> Report<IngestorError>;
 }
 
 /// Broker operations the host drives between ingestor lifecycle transitions.
@@ -368,8 +372,9 @@ pub trait BrokerIngestorConnector: IngestorConnector {
     /// Whether one graph outcome settles a batch or only its own position.
     const SETTLEMENT: IngestorSettlement = IngestorSettlement::Batch;
 
-    /// Session control the host may need to drive during an allowance hold. A transport that
-    /// stays usable without it has no work during the hold.
+    /// Session control the host may need to drive while it holds the loop, during an allowance
+    /// hold or while a payload waits for the extension workers. A transport that stays usable
+    /// without it has no work during the hold.
     fn hold_maintenance(&mut self) -> Option<&mut dyn IngestorReadHold> {
         None
     }

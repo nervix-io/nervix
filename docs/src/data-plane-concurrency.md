@@ -913,7 +913,8 @@ connector storage class. Each job keeps its consumer and reservation until the n
 exits. An asynchronous semaphore gives each consumer one control-operation turn; the admitted
 closure retains that turn until it exits, so cancelling an assignment cannot let a following
 assignment, seek or unsubscribe overtake its native mutation. The same client deadline bounds
-waiting for this turn and for the node's worker. Cancellation checks between partitions stop
+waiting for this turn, for a place in the class's queue, where a full queue holds the job back
+rather than refusing it, and for the node's worker. Cancellation checks between partitions stop
 further work, while a native call already running retains its worker. Consumer-group commit
 ownership is separate: it is installed before awaiting its
 answer and survives cancellation of that await; another commit first consumes that exact answer.
@@ -2064,11 +2065,14 @@ it:
   in that queue. The executor's semaphore hands a freed place to waiting jobs in the order they
   asked, ahead of any job asking afterwards. The wait is scoped to the one class, holds no lock,
   and ends when a place frees or when the ingestor's shutdown or a new quiesce interrupts it
-- a live payload a paced ingestor or an ingestor whose loop may be held handed over without an
-  acknowledgement waits for a place the same way. The ingestor host registers for the next quiesce
-  publication before it compares it with the decision the payload was taken in under, so a new
-  decision always ends the wait, and the host then decides on the payload again; the ingestor's
-  stop ends it as well. The race holds no lock and no guard across an await
+- every live payload an ingestor hands over, acknowledged or not, waits for a place the same way,
+  and so does a WebSocket endpoint frame in `MODE NO ACK`. The ingestor host registers for the
+  next quiesce publication before it compares it with the decision the payload was taken in under,
+  so a new decision always ends the wait, and the host then decides on the payload again; the
+  ingestor's stop ends it as well, leaving its positions unconfirmed. While it waits, the host
+  polls the transport's hold hook beside it, and the payload counts in its unit's admitted work
+  until it reached its graph, so a drain, a handoff and a graceful stop wait for it. The race holds
+  no lock and no guard across an await
 - one concrete processor branch serializes its own batches, while other branches remain
   independent
 - accepted branch input and programs wait for a place in their bounded worker class through the

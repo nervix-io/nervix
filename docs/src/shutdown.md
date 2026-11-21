@@ -380,10 +380,13 @@ A raw quiesce buffer is not part of the drain. Payloads that a `BUFFER` mode ret
 earlier hold are outside runtime graph work: a shutdown does not replay them, and they are discarded
 and counted as dropped when the ingestor stops. A retained payload whose unfolding was still waiting
 for the extension workers stays in the buffer, so the stop ends that wait at once and discards it
-with the rest. A live payload an ingestor handed over without an acknowledgement, such as a paced
-poll, whose unfolding was still waiting for the extension workers is dropped when its ingestor
-stops; the stop ends that wait at once as well. Only work already admitted into the graph is
-drained.
+with the rest. A live payload an ingestor handed over, such as a batch it read, a paced poll or a
+WebSocket endpoint frame in `MODE NO ACK`, whose unfolding is still waiting for the extension
+workers is work its ingestor admitted, so the drain waits for it like work already admitted into the
+graph. When the drain timeout ends the wait
+first, the payload is not delivered and its positions stay unconfirmed: a transport that keeps
+positions presents it again, and one that keeps none loses it with the rest of its ingestor's
+in-flight input.
 
 ## Draining Admitted Work
 

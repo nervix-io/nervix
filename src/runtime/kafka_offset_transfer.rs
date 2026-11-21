@@ -378,8 +378,9 @@ impl Runtime {
         let installer = installer.clone();
         self.inner
             .executor
-            .run_cpu(
+            .run_cpu_with(
                 CpuClass::Bulk,
+                nervix_execution::QueueAdmission::WaitForPlace,
                 decode_charge,
                 move |_charge, cancellation| {
                     cancellation

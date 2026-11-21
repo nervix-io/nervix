@@ -235,6 +235,7 @@ pub(super) async fn prepare_materialized_checkpoint(
         let batch = {
             let mapping_input = RuntimeRecordBatch::decode_arrow_snapshot_section(
                 executor,
+                nervix_execution::QueueAdmission::RefuseWhenFull,
                 schema.clone(),
                 columns.clone(),
             )
@@ -589,6 +590,7 @@ pub(super) async fn prepare_regrouped_materialized_checkpoint(
                 read_section(runtime, archive, &group.columns, MATERIALIZED_COLUMNS_BYTES).await?;
             let decoded = RuntimeRecordBatch::decode_arrow_snapshot_section(
                 executor,
+                nervix_execution::QueueAdmission::RefuseWhenFull,
                 schema.clone(),
                 columns,
             )
@@ -602,7 +604,10 @@ pub(super) async fn prepare_regrouped_materialized_checkpoint(
                 .change_context(MaterializedRestoreError::Columns)?;
             drop(decoded);
             let encoded = regrouped
-                .encode_arrow_snapshot_section(executor)
+                .encode_arrow_snapshot_section(
+                    executor,
+                    nervix_execution::QueueAdmission::RefuseWhenFull,
+                )
                 .await
                 .map_err(MaterializedRestoreError::columns)?;
             let identity_section = materialized_identity_section(selected.identities)

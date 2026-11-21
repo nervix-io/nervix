@@ -408,6 +408,14 @@ test-node-record *args: build-deps build-test-cli
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
     cargo test --package nervix-scenarios --test scenarios -- --input tests/features/cluster/node_record.feature {{ quote(args) }}
 
+# Payloads that wait for the node's extension workers instead of being refused: every ingestor
+# family, the transports kept connected meanwhile, and the planned stop that waits for them.
+test-unfolding-backpressure *args: build-deps build-plexus-format build-test-cli build-deadlock-report
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    cargo test --package nervix-scenarios --test scenarios -- --input tests/features/cluster/bounded_execution.feature {{ quote(args) }}
+
 # Exercise fixed window collection and its sampled-sequence tensor consumer.
 test-window-collection-arrays *args: build-deps build-plexus-format build-test-cli build-deadlock-report
     #!/usr/bin/env bash

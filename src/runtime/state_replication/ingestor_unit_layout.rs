@@ -161,9 +161,14 @@ impl Runtime {
         let placement = placement.clone();
         self.inner
             .executor
-            .run_cpu(CpuClass::Bulk, reservation, move |_charge, cancellation| {
-                project_checkpoint(&placement, snapshot, selection, cancellation)
-            })
+            .run_cpu_with(
+                CpuClass::Bulk,
+                nervix_execution::QueueAdmission::WaitForPlace,
+                reservation,
+                move |_charge, cancellation| {
+                    project_checkpoint(&placement, snapshot, selection, cancellation)
+                },
+            )
             .await
             .change_context(OwnershipHandoffError::IngestorUnitLayout)?
     }
@@ -315,18 +320,23 @@ impl Runtime {
                 let target = NodeUnitRef::new(entity.clone(), unit);
                 self.inner
                     .executor
-                    .run_cpu(CpuClass::Bulk, reservation, move |_charge, cancellation| {
-                        let _inputs = charges;
-                        merge_checkpoints(
-                            domain,
-                            target,
-                            schema_fingerprint,
-                            kafka_offsets,
-                            source_count,
-                            decoded,
-                            cancellation,
-                        )
-                    })
+                    .run_cpu_with(
+                        CpuClass::Bulk,
+                        nervix_execution::QueueAdmission::WaitForPlace,
+                        reservation,
+                        move |_charge, cancellation| {
+                            let _inputs = charges;
+                            merge_checkpoints(
+                                domain,
+                                target,
+                                schema_fingerprint,
+                                kafka_offsets,
+                                source_count,
+                                decoded,
+                                cancellation,
+                            )
+                        },
+                    )
                     .await
                     .change_context(OwnershipHandoffError::IngestorUnitLayout)?
             }

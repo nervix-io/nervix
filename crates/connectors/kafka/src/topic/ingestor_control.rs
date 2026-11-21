@@ -106,8 +106,9 @@ impl KafkaControl {
                 "the control owner never closes its semaphore and this waiter owns a handle",
             );
             self.executor
-                .run_storage(
+                .run_storage_with(
                     StorageClass::Connector,
+                    nervix_execution::QueueAdmission::WaitForPlace,
                     charge,
                     move |_charge, cancellation| {
                         let _turn = turn;
@@ -158,9 +159,12 @@ impl KafkaControl {
         let executor = self.executor.clone();
         Ok(nervix_primitives::task::spawn(async move {
             executor
-                .run_storage(StorageClass::Connector, charge, move |_charge, _| {
-                    request.commit(&consumer)
-                })
+                .run_storage_with(
+                    StorageClass::Connector,
+                    nervix_execution::QueueAdmission::WaitForPlace,
+                    charge,
+                    move |_charge, _| request.commit(&consumer),
+                )
                 .await
         }))
     }

@@ -805,13 +805,17 @@ still receives grants and admission beside it, and cancelling the held batch ret
 reservation once the application drops the batch. Once the application has decoded a batch, it keeps
 only the batch's body and decoded columns charged while its runtime takes the batch in.
 
-A CPU class admits each job separately: one of its workers runs, a bounded number wait, and the
-next job is refused at once instead of joining an unbounded queue. A typed request runs several
-jobs of its class in turn, encoding its payload and envelope and later decoding the response.
-While a burst keeps the queue full, a request that was admitted for one job can therefore be
-refused at its next one. A request refused at its first encode fails with `RequestError::Encode`,
-and one refused at a later stage fails with `RequestError::Transport`. Every refused job holds no
-memory charge, and every other class keeps admitting independently.
+A CPU class admits each job separately: one of its workers runs, a bounded number hold a place in
+its queue, and no job joins an unbounded queue. Encoding or decoding a frame waits for a place when
+that queue is full instead of being refused: a frame carries work a peer or this node already
+accepted, such as a response whose handler already ran. A typed request runs several jobs of its
+class in turn, encoding its payload and envelope and later decoding the response, so a burst that
+keeps the queue full delays each of them without failing the request, whose own deadline still
+bounds the whole exchange. Each pool class has its own connections and CPU class, so a frame that
+waits holds back only its own class's streams. A job waiting for a place keeps the memory charge it
+was admitted with, and every other class keeps admitting independently. A request whose encoding
+fails fails with `RequestError::Encode`, and one that fails at a later stage with
+`RequestError::Transport`.
 
 The [stalled-peer simulation](./interconnect-simulation.md#stalled-peer-isolation) checks these
 bounds with exact values: a stalled peer and a healthy peer share one hub, and every observation of
