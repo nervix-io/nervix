@@ -415,16 +415,14 @@ impl IngestorEntityDraft {
         let Some(mode) = self.delivery else {
             return false;
         };
-        if !mode.allows_quiesce(choice) {
-            return false;
-        }
         let Some(quiesce) = kind.capabilities().declared_quiesce(choice) else {
             return false;
         };
-        quiesce
-            .requires
-            .iter()
-            .all(|requirement| self.requirement_met(requirement))
+        quiesce.allows_delivery(mode)
+            && quiesce
+                .requires
+                .iter()
+                .all(|requirement| self.requirement_met(requirement))
     }
 
     pub(super) fn build(&self) -> error_stack::Result<IngestorEntity, IngestorEntityDraftError> {
@@ -940,7 +938,9 @@ impl IngestorEntityDraft {
         }
     }
 
-    fn build_quiesce(&self) -> error_stack::Result<IngestQuiesceMode, IngestorEntityDraftError> {
+    pub(super) fn build_quiesce(
+        &self,
+    ) -> error_stack::Result<IngestQuiesceMode, IngestorEntityDraftError> {
         let choice = self
             .quiesce
             .ok_or_else(|| Report::new(IngestorEntityDraftError::Quiesce))?;
@@ -954,9 +954,16 @@ impl IngestorEntityDraft {
                 retry_after: self
                     .required(&self.retry_after, IngestorEntityDraftError::RetryAfter)?,
             }),
-            IngestQuiesceKind::EndpointBuffer => Ok(IngestQuiesceMode::EndpointBuffer {
-                max_size: self.required(&self.buffer_size, IngestorEntityDraftError::BufferSize)?,
-            }),
+            IngestQuiesceKind::EndpointBufferImmediate
+            | IngestQuiesceKind::EndpointBufferAfterResume => {
+                Ok(IngestQuiesceMode::EndpointBuffer {
+                    max_size: self
+                        .required(&self.buffer_size, IngestorEntityDraftError::BufferSize)?,
+                    response: choice
+                        .endpoint_response()
+                        .assured("an endpoint's buffer choice states when to respond"),
+                })
+            }
             IngestQuiesceKind::Buffer => Ok(IngestQuiesceMode::Buffer {
                 max_size: self.required(&self.buffer_size, IngestorEntityDraftError::BufferSize)?,
                 overflow: self
@@ -1179,7 +1186,9 @@ mod tests {
         match source.quiesce() {
             IngestQuiesceMode::Suspend | IngestQuiesceMode::Drop => {}
             IngestQuiesceMode::Reject { retry_after } => draft.retry_after = retry_after.clone(),
-            IngestQuiesceMode::EndpointBuffer { max_size } => draft.buffer_size = max_size.clone(),
+            IngestQuiesceMode::EndpointBuffer { max_size, .. } => {
+                draft.buffer_size = max_size.clone()
+            }
             IngestQuiesceMode::Buffer { max_size, overflow } => {
                 draft.buffer_size = max_size.clone();
                 draft.overflow = Some(*overflow);
@@ -1673,6 +1682,24 @@ mod tests {
             for choice in draft.available_quiesce().iter() {
                 let mut candidate = draft.clone();
                 candidate.quiesce = Some(*choice);
+                let capabilities = kind.capabilities();
+                if capabilities.reference.endpoint_type().is_some() {
+                    let quiesce = capabilities
+                        .declared_quiesce(*choice)
+                        .assured("the offered choice is declared");
+                    for delivery in draft.available_modes() {
+                        candidate.delivery = Some(delivery);
+                        assert_eq!(
+                            candidate.build().is_ok(),
+                            quiesce.allows_delivery(delivery),
+                            "{} {} {}",
+                            kind.form_label(),
+                            delivery.form_key(),
+                            choice.keyword(),
+                        );
+                    }
+                    continue;
+                }
                 if kind == IngestorEntityKind::Mqtt(MqttIngestorEntity::Topic)
                     && *choice == IngestQuiesceKind::Suspend
                 {

@@ -20,7 +20,7 @@ Feature: ZeroMQ emission
         FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
-        CREATE IF NOT EXISTS BRANCH by_mqtt_notifications SCHEMA user_id_branch TTL 5m;
+        CREATE IF NOT EXISTS PARAMETRIZER by_mqtt_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_mqtt_notifications;
         CREATE MQTT CLIENT mqtt_ingress
         CONFIG {
@@ -96,7 +96,7 @@ Feature: ZeroMQ emission
         FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
-        CREATE IF NOT EXISTS BRANCH by_state_source SCHEMA user_id_branch TTL 5m;
+        CREATE IF NOT EXISTS PARAMETRIZER by_state_source SCHEMA user_id_branch TTL 5m;
         CREATE RELAY state_notifications
         SCHEMA notification BRANCHED BY by_state_source
         WITH MATERIALIZED STATE LAST BY TIMESTAMP;
@@ -110,7 +110,7 @@ Feature: ZeroMQ emission
         PATH '/ingest';
         CREATE HTTP ENDPOINT INGESTOR state_ingestor
         FROM state_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING notification_codec
         TO state_notifications
         INHERIT ALL
         BRANCHED BY by_state_source
@@ -120,7 +120,7 @@ Feature: ZeroMQ emission
         ON GENERAL ERROR LOG;
         CREATE HTTP ENDPOINT INGESTOR notifications_ingestor
         FROM notifications_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING notification_codec
         TO notifications
         INHERIT ALL
         BRANCHED BY by_state_source
@@ -186,7 +186,7 @@ Feature: ZeroMQ emission
       CREATE HTTP ENDPOINT notifications_endpoint ON edge PATH '/notifications';
       CREATE HTTP ENDPOINT INGESTOR http_notifications
         FROM notifications_endpoint MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING notification_codec
         TO notifications INHERIT ALL UNBRANCHED
         FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG

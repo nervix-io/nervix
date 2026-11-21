@@ -69,7 +69,7 @@ struct SectionLayout {
 struct ProcessorLayout {
     node: ScheduledNode,
     sections: Vec<SectionLayout>,
-    moving_partitions: Option<nervix_models::ResolvedBranchPartitions>,
+    moving_partitions: Option<nervix_models::ResolvedParametrizerPartitions>,
     _metadata: Option<nervix_execution::Reservation>,
 }
 
@@ -302,9 +302,11 @@ fn processor_layout(
     }?;
     if let ModelKind::Deduplicator | ModelKind::WindowProcessor = processor.kind
         && let Some(ResolvedBranching::Branched {
-            branch, partitions, ..
+            parametrizer,
+            partitions,
+            ..
         }) = &layout.node.resolved_branching
-        && schedule.partition_transition_of(branch).is_some()
+        && schedule.partition_transition_of(parametrizer).is_some()
     {
         layout.moving_partitions = Some(*partitions);
     }
@@ -704,9 +706,16 @@ impl SessionServiceImpl {
         let selection = resolve_selection(show, branching)?;
         let branch = match branching {
             ResolvedBranching::Unbranched => None,
-            ResolvedBranching::Branched { branch, schema, .. }
-            | ResolvedBranching::AwaitingTopology { branch, schema } => Some(
-                RowBranch::new(branch.clone(), schema.fields.clone()).map_err(|error| {
+            ResolvedBranching::Branched {
+                parametrizer,
+                schema,
+                ..
+            }
+            | ResolvedBranching::AwaitingTopology {
+                parametrizer,
+                schema,
+            } => Some(
+                RowBranch::new(parametrizer.clone(), schema.fields.clone()).map_err(|error| {
                     inspection_refusal(error, StateInspectionRejection::NotReady)
                 })?,
             ),

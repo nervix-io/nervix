@@ -517,11 +517,14 @@ impl Runtime {
             .change_context(MaterializedReadError::StoredSnapshot {
                 placement: placement.clone(),
             })?;
+        // A stored materialized read feeds work the graph already accepted, so a full queue holds
+        // the read back rather than failing that work.
         let reader = self
             .inner
             .executor
-            .run_storage(
+            .run_storage_with(
                 nervix_execution::StorageClass::Filesystem,
+                nervix_execution::QueueAdmission::WaitForPlace,
                 charge,
                 move |_charge, cancellation| {
                     cancellation

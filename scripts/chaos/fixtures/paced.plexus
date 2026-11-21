@@ -27,7 +27,7 @@ CREATE SCHEMA chaos_paced_branch_key (
   branch_name STRING
 );
 
-CREATE BRANCH chaos_paced_branch SCHEMA chaos_paced_branch_key TTL 5m MAX INSTANCES 16 EVICT LRU;
+CREATE PARAMETRIZER chaos_paced_branch SCHEMA chaos_paced_branch_key TTL 5m MAX INSTANCES 16 EVICT LRU;
 
 CREATE RELAY chaos_paced_records SCHEMA chaos_paced_record BRANCHED BY chaos_paced_branch CAPACITY 1;
 

@@ -14,7 +14,7 @@ Feature: Composed sequence values
       """
       CREATE SCHEMA reading (tenant STRING, sample_id I64, value F64);
       CREATE SCHEMA tenant_key (tenant STRING);
-      CREATE BRANCH by_tenant SCHEMA tenant_key TTL 5m;
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_key TTL 5m;
       CREATE SCHEMA history (
         values <pair_type>,
         neighborhoods <window_type>,
@@ -45,7 +45,7 @@ Feature: Composed sequence values
       CREATE VHOST edge sequence-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT ingress ON edge PATH '/readings';
       CREATE HTTP ENDPOINT INGESTOR read_samples FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING reading_codec TIMESTAMP NOW
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING reading_codec TIMESTAMP NOW
         TO readings INHERIT ALL BRANCHED BY by_tenant SET tenant = message.tenant
           FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;

@@ -277,7 +277,7 @@ archive; see [Restore Streams](#restore-streams).
 ## Structured Choice Lookups
 
 - **Q-1.** A client that sends `ChoiceLookupRequest` MUST use the target's typed dependencies:
-  domain for internal schema, branch, relay, codec, VHOST, signaling protocol, JSON/CBOR/AVRO wire
+  domain for internal schema, parametrizer, relay, codec, VHOST, signaling protocol, JSON/CBOR/AVRO wire
   schema, or resource choices;
   domain followed by a relay `Model` reference for relay fields; domain followed by a codec
   `Model` reference for the fields of its output schema; and domain followed by a
@@ -287,9 +287,9 @@ archive; see [Restore Streams](#restore-streams).
   `WEBSOCKETS ENDPOINT` targets return endpoints of that `TYPE`, and the others return clients of
   the pair's connector. The ingestor codec target carries a
   domain and returns only decoding codecs. Its unbranched relay target carries a domain, while its
-  branched relay target carries a domain followed by a branch `Model` reference. Ingestor error
-  relays use the unbranched target. A branch-field lookup carries a domain followed by a branch
-  `Model` reference. Decoded and relay output fields
+  branched relay target carries a domain followed by a parametrizer `Model` reference. Ingestor
+  error relays use the unbranched target. A branch-field lookup carries a domain followed by a
+  parametrizer `Model` reference. Decoded and relay output fields
   use the codec-field and relay-field targets above. Processor compatible-input, input-branch
   output, and materialized-relay targets each carry a domain followed by the first input relay's
   `Model` reference. The first requires the same named schema and branch, the second the same
@@ -297,7 +297,7 @@ archive; see [Restore Streams](#restore-streams).
   uses the ingestor relay target for its selected branch; a reingestor's first input uses the
   ordinary relay target. Reingestor routes that construct a different branch use the ingestor
   relay and branch-field targets. A generator's materialized-relay target carries a domain alone
-  for an unbranched generator, or a domain followed by its branch `Model` reference, and returns
+  for an unbranched generator, or a domain followed by its parametrizer `Model` reference, and returns
   only relays with materialized state on exactly that branch declaration; the generator's routes
   then use the input-branch target with that relay as the first input. A placement-member
   target carries a domain and returns exactly the runtime nodes a placement rule accepts as
@@ -565,8 +565,8 @@ reset. A genuine reset failure arrives as `RequestFailed` and follows the failur
 ## Reading Rows
 
 The reply that opens a subscription carries a `RowSchema`: the relay's fields in declared order,
-each with its name, type, nullability, and sensitivity, and, exactly when the relay is branched, the
-declared branch with its key fields. Every later batch is positional against that schema.
+each with its name, type, nullability, and sensitivity, and, exactly when the relay is branched, its
+parametrizer with the branch key fields. Every later batch is positional against that schema.
 
 - **R-1.** A client MUST read a `RowBatch` only against the schema of the generation its frame
   names.
@@ -1449,9 +1449,10 @@ password remains refused. Clients never receive a stored credential, salt or dig
 ## Reading Entity Labels
 
 Clients MUST preserve `CommandOutcome.entity_labels` independently of the rendered command
-message. The result's existing domain/node identity, complete exact string map and captured policy
-revision/limits form one read. The required view distinguishes a committed applied revision from
-a staged `TransactionPreviewIdentity`. Clients MUST preserve that distinction, including a
+message. The result's typed owner, complete exact string map and captured policy revision and
+limits form one read. The owner union carries a Model's domain and node reference, a domain
+name, a logical resource's domain and name, or a cluster user name. The required view distinguishes a committed applied revision from
+a staged `TransactionPreviewIdentity` for a Model or resource. Clients MUST preserve that distinction, including a
 present-zero committed revision or accepted-operation position, and MUST NOT parse display text
 or substitute defaults for missing fields.
 
@@ -1487,10 +1488,10 @@ from the presence of `state` or parse text to reconstruct rows.
 Clients MUST preserve the inspection entity's typed scope. `DomainNodeInspectionEntity` contains
 a domain and node reference; `ClusterLicenseInspectionEntity` contains neither. Native host
 domain/name accessors return absent values for a cluster-license observation, and its entity kind
-is `LICENSE`. The page and Row-section contract is shared by both scopes. Licensing's `transitions`
-section uses that generic contract for committed grants; preserve its complete schema and typed
-rows, including datetime precision and all original/target values. The section's rows contribute
-to the page and unit counts. Native and console warnings render the same licensing transition
+is `LICENSE`. The page and Row-section contract is shared by both scopes. Licensing's
+`capabilities` and `transitions` sections use that generic contract for capability states and
+committed grants; preserve their complete schemas and typed rows, including datetime precision and
+all original/target values. Their rows contribute to the page and unit counts. Native and console warnings render the same licensing transition
 codes and parameters supplied by the server.
 
 Embedded `NXRB` frames use the existing verified Row/Cell representation and the session transfer
@@ -1511,9 +1512,13 @@ A `SHOW WASM PROCESSOR ... STATE` page carries typed WASM tables instead of row 
 MUST decode the page's `WasmStateBinding` and every unit's `WasmUnitStateFacts` into typed values:
 the default generation, the latest reset with its request reference, scope union, phase, reason,
 generation and readiness, the complete entry, checkpoint-stage and recovery-outcome counts, and every
-returned branch entry in order with its optional fingerprint, checkpoint and recovery. Clients MUST
-refuse a zero generation or revision, an unordered or stateless entry, more returned entries than
-the complete count, and undeclared enum values or union members, as for every other table. An
+returned branch entry in order with its optional fingerprint, checkpoint, recovery and guest-state
+description: the restored generation and optional revision, and either the sections with their
+names, fields and row counts or the failed render's stage and diagnostic. Guest state is always
+sensitive: clients MUST present every guest section field as withheld and MUST NOT expect a value.
+Clients MUST refuse a zero generation or revision, an unordered or stateless entry, more returned
+entries than the complete count, a description beside no checkpoint, a guest section field that is
+not sensitive, and undeclared enum values or union members, as for every other table. An
 absent fingerprint is the unbranched execution, never an empty or zero fingerprint. Resume a WASM
 continuation with the same domain, processor and selector; a refused resume starts a new read, and
 entries of the abandoned sequence are not combined with the new one.

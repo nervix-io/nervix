@@ -18,7 +18,7 @@ Feature: Declared public listener bounds
       CREATE VHOST edge bounded-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT intake ON edge PATH '/ingest';
       CREATE HTTP ENDPOINT INGESTOR intake_ingestor FROM intake MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING event_codec
         TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       START;
@@ -45,7 +45,7 @@ Feature: Declared public listener bounds
       CREATE VHOST edge bounded-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT intake ON edge PATH '/ingest';
       CREATE HTTP ENDPOINT INGESTOR intake_ingestor FROM intake MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING event_codec
         TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       START;
@@ -83,7 +83,7 @@ Feature: Declared public listener bounds
       CREATE VHOST edge bounded-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT intake ON edge PATH '/ingest';
       CREATE HTTP ENDPOINT INGESTOR intake_ingestor FROM intake MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING event_codec
         TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       START;
@@ -150,7 +150,7 @@ Feature: Declared public listener bounds
       CREATE VHOST edge bounded-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT intake ON edge PATH '/ingest';
       CREATE HTTP ENDPOINT INGESTOR intake_ingestor FROM intake MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING event_codec
         TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       START;
@@ -177,7 +177,7 @@ Feature: Declared public listener bounds
       CREATE VHOST edge bounded-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT intake ON edge PATH '/ingest';
       CREATE HTTP ENDPOINT INGESTOR intake_ingestor FROM intake MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING event_codec
         TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE SUBSCRIPTION received_bodies TO events;
@@ -322,7 +322,7 @@ Feature: Declared public listener bounds
       CREATE VHOST edge bounded-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT intake ON edge PATH '/ingest';
       CREATE HTTP ENDPOINT INGESTOR intake_ingestor FROM intake MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING event_codec
         TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE SUBSCRIPTION received_bodies TO events;
@@ -362,7 +362,7 @@ Feature: Declared public listener bounds
       CREATE VHOST edge bounded-{{test_id}}.example.com;
       CREATE WEBSOCKETS ENDPOINT intake ON edge PATH '/ws';
       CREATE WEBSOCKETS ENDPOINT INGESTOR intake_ingestor FROM intake MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING event_codec
         TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE SUBSCRIPTION received_events TO events;
@@ -400,7 +400,7 @@ Feature: Declared public listener bounds
       CREATE VHOST edge bounded-{{test_id}}.example.com;
       CREATE WEBSOCKETS ENDPOINT intake ON edge PATH '/ws';
       CREATE WEBSOCKETS ENDPOINT INGESTOR intake_ingestor FROM intake MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING event_codec
         TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       START;

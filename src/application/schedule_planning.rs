@@ -724,7 +724,7 @@ mod tests {
         service
             .inner
             .consensus
-            .create_resource_catalog(&domain, &resource)
+            .create_resource_catalog(&domain, &resource, nervix_models::EntityLabels::default())
             .await
             .assured("the single-node test consensus accepts the resource catalog");
         let error = service

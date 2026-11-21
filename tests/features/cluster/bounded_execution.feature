@@ -62,7 +62,8 @@ Feature: Bounded execution and transient memory
       | 1            |
       | 3            |
 
-  Scenario Outline: An emitter keeps its rows while no node can take their transformed encoding
+  @emitter_encoding_waits_for_extension_room
+  Scenario Outline: An emitter's transformed encoding waits for the extension workers while no node has room for it
     Given Kafka is running
     And a <cluster_size> node nervix cluster is started
     And the leader node is configured with these Plexus commands
@@ -83,7 +84,7 @@ Feature: Bounded execution and transient memory
       CREATE HTTP ENDPOINT ingress ON edge PATH '/notifications';
       CREATE HTTP ENDPOINT INGESTOR notification_ingestor
         FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_in
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING notification_in
         TO notifications
         INHERIT ALL
         UNBRANCHED
@@ -106,10 +107,10 @@ Feature: Bounded execution and transient memory
       """
       {"user_id":42}
       """
-    Then within "30s" DESCRIBE EMITTER "transformed_notifications" on the leader node contains
-      """
-      the node's extension workers have no room now
-      """
+    # While every extension worker and wait-queue place is held, the encoding waits for a place:
+    # the emitter keeps its rows, publishes nothing yet and reports no failure.
+    Then the observed broker does not receive a payload within "3s"
+    And DESCRIBE EMITTER "transformed_notifications" on the leader node reports no transient error for "3s"
     When extension execution is released on every node
     Then the observed broker receives a payload
       """
@@ -137,7 +138,7 @@ Feature: Bounded execution and transient memory
       CREATE HTTP ENDPOINT ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR retained_ingestor
         FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING retained_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING retained_codec
         TO retained_events INHERIT ALL UNBRANCHED
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE SUBSCRIPTION retained_subscription TO retained_events;
@@ -244,32 +245,210 @@ Feature: Bounded execution and transient memory
       """
     When the unacknowledged source "<source>" delivers the payload of user 42
     # Nothing can be unfolded while every extension worker and place in the extension wait queue
-    # is held.
+    # is held, so the ingestor holds the payload and takes nothing more from its source, which
+    # keeps the payload sent after it.
     Then the relay subscription does not receive a payload within "3s"
-    When extension execution is released on every node
-    Then within "30s" the relay subscription receives a payload
+    When the unacknowledged source "<source>" delivers the payload of user 7
+    And extension execution is released on every node
+    Then within "30s" the relay subscription receives payloads in order
       """
       "user_id":42
+      "user_id":7
       """
+    And the relay subscription does not receive a payload within "2s"
+    And the active session observes no server error containing "did not unfold" within "100ms"
 
     Examples:
-      | cluster_size | source |
-      | 1            | nats   |
-      | 3            | nats   |
-      | 1            | syslog |
-      | 3            | syslog |
-      | 1            | zeromq |
-      | 3            | zeromq |
+      | cluster_size | source           |
+      | 1            | nats             |
+      | 3            | nats             |
+      | 1            | syslog           |
+      | 3            | syslog           |
+      | 1            | zeromq           |
+      | 3            | zeromq           |
+      | 1            | kafka            |
+      | 3            | kafka            |
+      | 1            | mqtt             |
+      | 3            | mqtt             |
+      | 1            | pulsar           |
+      | 3            | pulsar           |
+      | 1            | rabbitmq         |
+      | 3            | rabbitmq         |
+      | 1            | redis            |
+      | 3            | redis            |
+      | 1            | websocket client |
+      | 3            | websocket client |
 
-  @unacknowledged_unfolding_refused_without_extension_room
-  Scenario Outline: An unacknowledged <source> payload the node cannot unfold is refused and counted
-    Given unacknowledged source "<source>" is running
+  @unacknowledged_endpoint_frame_waits_for_extension_room
+  Scenario Outline: An unacknowledged WebSocket endpoint frame waits for the extension workers when the node cannot unfold it
+    Given a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA frame_event ( seq I64 );
+      CREATE JAQ JSON CODEC frame_codec TO SCHEMA frame_event
+        WITH JAQ TRANSFORMATIONS ON INGESTION '.';
+      CREATE RELAY frame_events SCHEMA frame_event UNBRANCHED;
+      CREATE VHOST edge ws-{{test_id}}-frame-unfolding.example.com;
+      CREATE WEBSOCKETS ENDPOINT ingress ON edge PATH '/frames';
+      CREATE WEBSOCKETS ENDPOINT INGESTOR frame_ingestor
+        FROM ingress MODE NO ACK
+        ON QUIESCE REJECT RETRY AFTER 1s DECODE USING frame_codec
+        TO frame_events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE SUBSCRIPTION frame_subscription TO frame_events;
+      START;
+      """
+    When an endpoint websocket is opened on node "node-1" host "ws-{{test_id}}-frame-unfolding.example.com" path "/frames"
+    And extension execution is saturated on every node
+    And a payload is sent on the endpoint websocket
+      """
+      {"seq":1}
+      """
+    And a payload is sent on the endpoint websocket
+      """
+      {"seq":2}
+      """
+    # A frame in MODE NO ACK has no answer its sender waits for, so while every extension worker
+    # and place in the extension wait queue is held the first frame waits, and the connection
+    # reads nothing further, instead of closing with 1013 and losing the frame.
+    Then the endpoint websocket stays open and silent for "3s"
+    And the relay subscription does not receive a payload within "1s"
+    When extension execution is released on every node
+    Then within "30s" the relay subscription receives payloads in order
+      """
+      "seq":1
+      "seq":2
+      """
+    And the relay subscription does not receive a payload within "2s"
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
+  # The ingestor's client connects to the broker listener that holds it to a 10-second keep-alive
+  # and closes a connection that sends nothing for 15 seconds. The payload waits for the extension
+  # workers for longer than that, and a payload published after the broker would have closed the
+  # connection is only received by a connection that stayed open.
+  @unacknowledged_unfolding_keeps_mqtt_connected
+  Scenario Outline: An MQTT NO ACK ingestor stays connected while its payload waits for the extension workers
+    Given MQTT is running
     And a <cluster_size> node nervix cluster is started
     And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When the unacknowledged source "<source>" ingestor is created
+    When these Plexus commands are executed
+      """
+      CREATE SCHEMA waiting_event ( user_id I64 );
+      CREATE JAQ JSON CODEC waiting_codec TO SCHEMA waiting_event
+        WITH JAQ TRANSFORMATIONS ON INGESTION '.';
+      CREATE RELAY waiting_events SCHEMA waiting_event UNBRANCHED;
+      CREATE MQTT CLIENT waiting_client CONFIG {
+        'addr' = '{{mqtt_short_keepalive_addr}}',
+        'client_id' = 'nervix-cucumber-unfolding-keepalive-{{test_id}}'
+      };
+      CREATE MQTT TOPIC INGESTOR waiting_ingestor
+        FROM waiting_client TOPIC 'unfolding_keepalive_{{test_id}}' SESSION CLEAN QOS 0
+        MODE NO ACK ON QUIESCE DROP DECODE USING waiting_codec
+        TO waiting_events INHERIT ALL UNBRANCHED
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE SUBSCRIPTION waiting_subscription TO waiting_events;
+      """
+    And extension execution is saturated on every node
+    And these Plexus commands are executed
+      """
+      START;
+      """
+    Then within "30s" DESCRIBE INGESTOR "waiting_ingestor" on the leader node contains
+      """
+      ready: true
+      """
+    When 1 JSON messages with user id 42 are rapidly published to "MQTT" input "unfolding_keepalive_{{test_id}}"
+    And physical time passes for "20s"
+    And 1 JSON messages with user id 7 are rapidly published to "MQTT" input "unfolding_keepalive_{{test_id}}"
+    And extension execution is released on every node
+    Then within "30s" the relay subscription receives payloads in order
+      """
+      "user_id":42
+      "user_id":7
+      """
+    And the relay subscription does not receive a payload within "2s"
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
+  # A consumer-group member that polls nothing for max.poll.interval.ms leaves its group. The
+  # payload waits for the extension workers for longer than that while the group keeps its member.
+  @unacknowledged_unfolding_keeps_kafka_group
+  Scenario Outline: A Kafka NO ACK consumer group keeps its member while its payload waits for the extension workers
+    Given Kafka is running
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    And Kafka topic "unfolding_group_{{test_id}}" exists with 1 partitions
+    When these Plexus commands are executed
+      """
+      CREATE SCHEMA waiting_event ( user_id I64 );
+      CREATE JAQ JSON CODEC waiting_codec TO SCHEMA waiting_event
+        WITH JAQ TRANSFORMATIONS ON INGESTION '.';
+      CREATE RELAY waiting_events SCHEMA waiting_event UNBRANCHED;
+      CREATE KAFKA CLIENT waiting_client CONFIG {
+        'bootstrap.servers' = '{{kafka_addr}}',
+        'session.timeout.ms' = '6000',
+        'max.poll.interval.ms' = '6000',
+        'heartbeat.interval.ms' = '500'
+      };
+      CREATE KAFKA TOPIC INGESTOR waiting_ingestor
+        FROM waiting_client TOPIC 'unfolding_group_{{test_id}}'
+        OFFSET BY CONSUMER GROUP 'unfolding_group_{{test_id}}' START AT EARLIEST
+        MODE NO ACK ON QUIESCE SUSPEND DECODE USING waiting_codec
+        TO waiting_events INHERIT ALL UNBRANCHED
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE SUBSCRIPTION waiting_subscription TO waiting_events;
+      """
+    And extension execution is saturated on every node
+    And these Plexus commands are executed
+      """
+      START;
+      """
+    Then within "30s" Kafka consumer group "unfolding_group_{{test_id}}" eventually has 1 consumers
+    When these Kafka messages are rapidly published to topic "unfolding_group_{{test_id}}"
+      """
+      {"user_id":42}
+      {"user_id":7}
+      """
+    Then Kafka consumer group "unfolding_group_{{test_id}}" keeps its single stable member for "9s"
+    When extension execution is released on every node
+    Then within "30s" the relay subscription receives payloads in order
+      """
+      "user_id":42
+      "user_id":7
+      """
+    And within "30s" Kafka consumer group "unfolding_group_{{test_id}}" next offset for topic "unfolding_group_{{test_id}}" partition 0 is "at least 2"
+    And the relay subscription does not receive a payload within "2s"
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
+  # A graceful STOP lets the work an ingestor already took finish. A payload waiting for the
+  # extension workers is such work, so the stop waits for it rather than cutting it.
+  @unacknowledged_unfolding_holds_stop
+  Scenario Outline: A graceful STOP waits for a payload that waits for the extension workers
+    Given unacknowledged source "kafka" is running
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When the unacknowledged source "kafka" ingestor is created
     And extension execution is saturated on every node
     And these Plexus commands are executed
       """
@@ -279,28 +458,90 @@ Feature: Bounded execution and transient memory
       """
       ready: true
       """
-    When the unacknowledged source "<source>" delivers the payload of user 42
-    Then within "30s" the active session observes a server error containing
+    When the unacknowledged source "kafka" delivers the payload of user 42
+    Then the relay subscription does not receive a payload within "3s"
+    When these Plexus commands begin executing in the background
       """
-      the node's bounded execution did not unfold the payload
+      STOP;
       """
-    And the unacknowledged source ingestor eventually counts 1 refused payload
+    Then the background Plexus execution is still running after "3s"
     When extension execution is released on every node
-    And the unacknowledged source "<source>" delivers the payload of user 7
-    Then within "30s" the relay subscription receives a payload
+    Then the background Plexus execution succeeds
+    And within "30s" the relay subscription receives a payload
       """
-      "user_id":7
+      "user_id":42
       """
 
     Examples:
-      | cluster_size | source           |
-      | 1            | kafka            |
-      | 3            | kafka            |
-      | 1            | mqtt             |
-      | 3            | mqtt             |
-      | 1            | pulsar           |
-      | 3            | pulsar           |
-      | 1            | redis            |
-      | 3            | redis            |
-      | 1            | websocket client |
-      | 3            | websocket client |
+      | cluster_size |
+      | 1            |
+      | 3            |
+
+  @acknowledged_unfolding_waits_for_extension_room
+  Scenario Outline: An acknowledged Kafka payload waits for the extension workers instead of being presented again, and counts no decode rejection
+    Given Kafka is running
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    And Kafka topic "acknowledged_wait_{{test_id}}" exists with 1 partitions
+    When these Plexus commands are executed
+      """
+      CREATE SCHEMA waiting_event ( user_id I64 );
+      CREATE JAQ JSON CODEC waiting_codec TO SCHEMA waiting_event
+        WITH JAQ TRANSFORMATIONS ON INGESTION '.';
+      CREATE RELAY waiting_events SCHEMA waiting_event UNBRANCHED;
+      CREATE KAFKA CLIENT waiting_client CONFIG { 'bootstrap.servers' = '{{kafka_addr}}' };
+      CREATE KAFKA TOPIC INGESTOR waiting_ingestor
+        FROM waiting_client TOPIC 'acknowledged_wait_{{test_id}}'
+        OFFSET BY CONSUMER GROUP 'acknowledged_wait_{{test_id}}' START AT EARLIEST
+        MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 1s
+        ON QUIESCE SUSPEND DECODE USING waiting_codec
+        TO waiting_events INHERIT ALL UNBRANCHED
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE SUBSCRIPTION waiting_subscription TO waiting_events;
+      """
+    And extension execution is saturated on every node
+    And Kafka message is published to topic "acknowledged_wait_{{test_id}}"
+      """
+      {"user_id":42}
+      """
+    And these Plexus commands are executed
+      """
+      START;
+      """
+    Then the relay subscription does not receive a payload within "3s"
+    And the active session observes no server error containing "did not unfold" within "100ms"
+    When extension execution is released on every node
+    Then within "30s" the relay subscription receives a payload
+      """
+      "user_id":42
+      """
+    And the relay subscription does not receive a payload within "2s"
+    And within "30s" Kafka consumer group "acknowledged_wait_{{test_id}}" next offset for topic "acknowledged_wait_{{test_id}}" partition 0 is "at least 1"
+    # A payload that waited for a place on the extension workers was never refused by its codec.
+    And within "30s" DESCRIBE INGESTOR "waiting_ingestor" on the leader node contains
+      """
+      nervix_ingestor_decode_rejections_total: 0
+      """
+    And within "30s" DESCRIBE INGESTOR "waiting_ingestor" on the leader node contains
+      """
+      last decode rejection: -
+      """
+    When these Plexus commands are executed
+      """
+      DESCRIBE INGESTOR waiting_ingestor;
+      """
+    Then the last command output owner is saved as placeholder "waiting_owner"
+    And node "{{waiting_owner}}" observability metric "nervix_ingestor_unfolding_refused_total" with labels eventually equals 0
+      """
+      ingestor="waiting_ingestor"
+      connector="KAFKA"
+      entity="TOPIC"
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |

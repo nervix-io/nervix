@@ -563,6 +563,7 @@ fn a_source_supports_the_quiesce_modes_its_entity_declares(
         },
         IngestQuiesceMode::EndpointBuffer {
             max_size: "1MiB".to_owned(),
+            response: nervix_models::EndpointPauseResponse::Immediate,
         },
     ];
     let bytes = seeded_bytes(1);
@@ -675,6 +676,7 @@ fn a_source_references_the_client_or_endpoint_its_body_names() {
         mode: EndpointIngestMode::NoAck,
         quiesce: IngestQuiesceMode::EndpointBuffer {
             max_size: "1MiB".to_owned(),
+            response: nervix_models::EndpointPauseResponse::Immediate,
         },
     });
     assert_eq!(stream.source_ref().as_str(), "stream");
@@ -1513,6 +1515,7 @@ fn a_client_producer_window_counts_the_batches_it_admits() {
 fn an_endpoint_source_honors_no_suspend_whatever_it_holds() {
     let buffer = IngestQuiesceMode::EndpointBuffer {
         max_size: "1MiB".to_string(),
+        response: nervix_models::EndpointPauseResponse::Immediate,
     };
     let mut source = IngestorEntity::Http(HttpIngestor::Endpoint(HttpEndpointIngestor {
         endpoint: named("ingress"),

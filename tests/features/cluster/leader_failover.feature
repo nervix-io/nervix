@@ -97,8 +97,8 @@ Feature: Cluster leader failover
       CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
       CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
       CREATE IF NOT EXISTS SCHEMA transaction_id_branch ( transaction_id STRING );
-      CREATE IF NOT EXISTS BRANCH by_tenant_partition SCHEMA tenant_branch TTL 5m;
-      CREATE IF NOT EXISTS BRANCH by_notification_source SCHEMA tenant_branch TTL 5m;
+      CREATE IF NOT EXISTS PARAMETRIZER by_tenant_partition SCHEMA tenant_branch TTL 5m;
+      CREATE IF NOT EXISTS PARAMETRIZER by_notification_source SCHEMA tenant_branch TTL 5m;
       CREATE RELAY notifications SCHEMA notification BRANCHED BY by_notification_source WITH MATERIALIZED STATE LAST BY TIMESTAMP;
       CREATE RELAY source_only SCHEMA notification UNBRANCHED;
       CREATE RELAY generated_notifications SCHEMA notification BRANCHED BY by_notification_source;
@@ -106,17 +106,17 @@ Feature: Cluster leader failover
       CREATE RELAY errors_ss SCHEMA notification BRANCHED BY by_notification_source;
       CREATE RELAY info_ss SCHEMA notification BRANCHED BY by_notification_source;
       CREATE RELAY forwarded_notifications SCHEMA notification BRANCHED BY by_notification_source;
-      CREATE IF NOT EXISTS BRANCH by_notifications_a_source SCHEMA user_id_branch TTL 5m;
+      CREATE IF NOT EXISTS PARAMETRIZER by_notifications_a_source SCHEMA user_id_branch TTL 5m;
       CREATE RELAY notifications_a SCHEMA notification BRANCHED BY by_notifications_a_source;
       CREATE RELAY notifications_b SCHEMA notification BRANCHED BY by_notifications_a_source;
       CREATE RELAY notifications_all SCHEMA notification BRANCHED BY by_notifications_a_source;
-      CREATE IF NOT EXISTS BRANCH by_transaction_source SCHEMA transaction_id_branch TTL 5m;
+      CREATE IF NOT EXISTS PARAMETRIZER by_transaction_source SCHEMA transaction_id_branch TTL 5m;
       CREATE RELAY inbound SCHEMA transaction BRANCHED BY by_transaction_source;
       CREATE RELAY deduped SCHEMA transaction BRANCHED BY by_transaction_source;
-      CREATE IF NOT EXISTS BRANCH by_metric_source SCHEMA tenant_branch TTL 5m;
+      CREATE IF NOT EXISTS PARAMETRIZER by_metric_source SCHEMA tenant_branch TTL 5m;
       CREATE RELAY metrics SCHEMA metric BRANCHED BY by_metric_source;
       CREATE RELAY metric_summaries SCHEMA metric_summary BRANCHED BY by_metric_source;
-      CREATE IF NOT EXISTS BRANCH by_feature_source SCHEMA tenant_branch TTL 5m;
+      CREATE IF NOT EXISTS PARAMETRIZER by_feature_source SCHEMA tenant_branch TTL 5m;
       CREATE RELAY features SCHEMA features BRANCHED BY by_feature_source;
       CREATE RELAY scored SCHEMA scored BRANCHED BY by_feature_source;
       CREATE VHOST edge http-{{test_id}}.example.com;
@@ -129,7 +129,7 @@ Feature: Cluster leader failover
         };
       CREATE HTTP ENDPOINT INGESTOR notification_ingestor
         FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING notification_codec
         TO notifications
         INHERIT ALL
         BRANCHED BY by_notification_source
@@ -139,7 +139,7 @@ Feature: Cluster leader failover
         ON GENERAL ERROR LOG;
       CREATE HTTP ENDPOINT INGESTOR notifications_a_ingestor
         FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING notification_codec
         TO notifications_a
         INHERIT ALL
         BRANCHED BY by_notifications_a_source
@@ -149,7 +149,7 @@ Feature: Cluster leader failover
         ON GENERAL ERROR LOG;
       CREATE HTTP ENDPOINT INGESTOR notifications_b_ingestor
         FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING notification_codec
         TO notifications_b
         INHERIT ALL
         BRANCHED BY by_notifications_a_source
@@ -159,7 +159,7 @@ Feature: Cluster leader failover
         ON GENERAL ERROR LOG;
       CREATE HTTP ENDPOINT INGESTOR transaction_ingestor
         FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING transaction_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING transaction_codec
         TO inbound
         INHERIT ALL
         BRANCHED BY by_transaction_source
@@ -169,7 +169,7 @@ Feature: Cluster leader failover
         ON GENERAL ERROR LOG;
       CREATE HTTP ENDPOINT INGESTOR metric_ingestor
         FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING metric_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING metric_codec
         TO metrics
         INHERIT ALL
         BRANCHED BY by_metric_source
@@ -179,7 +179,7 @@ Feature: Cluster leader failover
         ON GENERAL ERROR LOG;
       CREATE HTTP ENDPOINT INGESTOR feature_ingestor
         FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING features_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING features_codec
         TO features
         INHERIT ALL
         BRANCHED BY by_feature_source
@@ -276,8 +276,8 @@ Feature: Cluster leader failover
       CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
       CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
       CREATE IF NOT EXISTS SCHEMA transaction_id_branch ( transaction_id STRING );
-      CREATE IF NOT EXISTS BRANCH by_tenant_partition SCHEMA tenant_branch TTL 5m;
-      CREATE IF NOT EXISTS BRANCH by_notification_source SCHEMA tenant_branch TTL 5m;
+      CREATE IF NOT EXISTS PARAMETRIZER by_tenant_partition SCHEMA tenant_branch TTL 5m;
+      CREATE IF NOT EXISTS PARAMETRIZER by_notification_source SCHEMA tenant_branch TTL 5m;
       CREATE RELAY notifications SCHEMA notification BRANCHED BY by_notification_source WITH MATERIALIZED STATE LAST BY TIMESTAMP;
       CREATE RELAY source_only SCHEMA notification UNBRANCHED;
       CREATE RELAY generated_notifications SCHEMA notification BRANCHED BY by_notification_source;
@@ -285,17 +285,17 @@ Feature: Cluster leader failover
       CREATE RELAY errors_ss SCHEMA notification BRANCHED BY by_notification_source;
       CREATE RELAY info_ss SCHEMA notification BRANCHED BY by_notification_source;
       CREATE RELAY forwarded_notifications SCHEMA notification BRANCHED BY by_notification_source;
-      CREATE IF NOT EXISTS BRANCH by_notifications_a_source SCHEMA user_id_branch TTL 5m;
+      CREATE IF NOT EXISTS PARAMETRIZER by_notifications_a_source SCHEMA user_id_branch TTL 5m;
       CREATE RELAY notifications_a SCHEMA notification BRANCHED BY by_notifications_a_source;
       CREATE RELAY notifications_b SCHEMA notification BRANCHED BY by_notifications_a_source;
       CREATE RELAY notifications_all SCHEMA notification BRANCHED BY by_notifications_a_source;
-      CREATE IF NOT EXISTS BRANCH by_transaction_source SCHEMA transaction_id_branch TTL 5m;
+      CREATE IF NOT EXISTS PARAMETRIZER by_transaction_source SCHEMA transaction_id_branch TTL 5m;
       CREATE RELAY inbound SCHEMA transaction BRANCHED BY by_transaction_source;
       CREATE RELAY deduped SCHEMA transaction BRANCHED BY by_transaction_source;
-      CREATE IF NOT EXISTS BRANCH by_metric_source SCHEMA tenant_branch TTL 5m;
+      CREATE IF NOT EXISTS PARAMETRIZER by_metric_source SCHEMA tenant_branch TTL 5m;
       CREATE RELAY metrics SCHEMA metric BRANCHED BY by_metric_source;
       CREATE RELAY metric_summaries SCHEMA metric_summary BRANCHED BY by_metric_source;
-      CREATE IF NOT EXISTS BRANCH by_feature_source SCHEMA tenant_branch TTL 5m;
+      CREATE IF NOT EXISTS PARAMETRIZER by_feature_source SCHEMA tenant_branch TTL 5m;
       CREATE RELAY features SCHEMA features BRANCHED BY by_feature_source;
       CREATE RELAY scored SCHEMA scored BRANCHED BY by_feature_source;
       CREATE VHOST edge http-{{test_id}}.example.com;
@@ -308,7 +308,7 @@ Feature: Cluster leader failover
         };
       CREATE HTTP ENDPOINT INGESTOR notification_ingestor
         FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING notification_codec
         TO notifications
         INHERIT ALL
         BRANCHED BY by_notification_source
@@ -318,7 +318,7 @@ Feature: Cluster leader failover
         ON GENERAL ERROR LOG;
       CREATE HTTP ENDPOINT INGESTOR notifications_a_ingestor
         FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING notification_codec
         TO notifications_a
         INHERIT ALL
         BRANCHED BY by_notifications_a_source
@@ -328,7 +328,7 @@ Feature: Cluster leader failover
         ON GENERAL ERROR LOG;
       CREATE HTTP ENDPOINT INGESTOR notifications_b_ingestor
         FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING notification_codec
         TO notifications_b
         INHERIT ALL
         BRANCHED BY by_notifications_a_source
@@ -338,7 +338,7 @@ Feature: Cluster leader failover
         ON GENERAL ERROR LOG;
       CREATE HTTP ENDPOINT INGESTOR transaction_ingestor
         FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING transaction_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING transaction_codec
         TO inbound
         INHERIT ALL
         BRANCHED BY by_transaction_source
@@ -348,7 +348,7 @@ Feature: Cluster leader failover
         ON GENERAL ERROR LOG;
       CREATE HTTP ENDPOINT INGESTOR metric_ingestor
         FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING metric_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING metric_codec
         TO metrics
         INHERIT ALL
         BRANCHED BY by_metric_source
@@ -358,7 +358,7 @@ Feature: Cluster leader failover
         ON GENERAL ERROR LOG;
       CREATE HTTP ENDPOINT INGESTOR feature_ingestor
         FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING features_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING features_codec
         TO features
         INHERIT ALL
         BRANCHED BY by_feature_source

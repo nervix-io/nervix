@@ -126,13 +126,13 @@ Feature: Cross-language client conformance
         TO SCHEMA typed_row
         ENCODE at AS RFC3339, raw AS BASE64;
       CREATE SCHEMA tenant_key ( tenant STRING );
-      CREATE BRANCH by_tenant SCHEMA tenant_key TTL 5m <partition_clause>;
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_key TTL 5m <partition_clause>;
       CREATE RELAY typed_rows SCHEMA typed_row BRANCHED BY by_tenant LABELS { 'probe' = ' retained Δ ' };
       CREATE VHOST edge conformance-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT typed_ingress ON edge PATH '/typed';
       CREATE HTTP ENDPOINT INGESTOR typed_ingestor
         FROM typed_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING typed_row_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING typed_row_codec
         TO typed_rows
           SET id = message.id,
               tenant = message.tenant,
@@ -195,7 +195,7 @@ Feature: Cross-language client conformance
       FIELD at DATETIME required public
       FIELD maybe I64 nullable public
       FIELD secret STRING required sensitive
-      BRANCH by_tenant
+      PARAMETRIZER by_tenant
       KEY tenant STRING required public
       SUBSCRIBED
       ROW [tenant=str:61636d65] id=u32:1 tenant=str:61636d65 u8v=u8:255 i8v=i8:127 u16v=u16:65535 i16v=i16:32767 u32v=u32:4294967295 i32v=i32:2147483647 u64v=u64:18446744073709551615 i64v=i64:9223372036854775807 f32v=f32:7f7fffff f64v=f64:7fefffffffffffff flag=bool:true text=str:68c3a96c6c6f20e4b896e7958c20f09f9a80 raw=bytes:00fffe8000 at=datetime:9223372036854775807 maybe=null secret=redacted
@@ -560,7 +560,7 @@ Feature: Cross-language client conformance
         echo U32
       );
       CREATE SCHEMA tenant_key ( tenant STRING );
-      CREATE BRANCH by_tenant SCHEMA tenant_key TTL 5m;
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_key TTL 5m;
       CREATE RELAY typed_rows SCHEMA typed_in_row BRANCHED BY by_tenant;
       CREATE CLIENT PRODUCER INGESTOR typed_in
         FROM SCHEMA typed_in_row

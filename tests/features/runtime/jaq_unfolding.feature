@@ -21,7 +21,7 @@ Feature: JAQ codec unfolding
       CREATE HTTP ENDPOINT order_lines_endpoint ON edge PATH '/order-lines';
       CREATE HTTP ENDPOINT INGESTOR order_lines_ingestor
         FROM order_lines_endpoint MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING order_lines_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING order_lines_codec
         TO order_lines
         INHERIT ALL
         UNBRANCHED
@@ -69,7 +69,7 @@ Feature: JAQ codec unfolding
       CREATE HTTP ENDPOINT order_lines_endpoint ON edge PATH '/order-lines';
       CREATE HTTP ENDPOINT INGESTOR order_lines_ingestor
         FROM order_lines_endpoint MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING order_line_stream_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING order_line_stream_codec
         TO order_lines
         INHERIT ALL
         UNBRANCHED
@@ -117,7 +117,7 @@ Feature: JAQ codec unfolding
       CREATE HTTP ENDPOINT events_endpoint ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR events_ingestor
         FROM events_endpoint MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING events_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING events_codec
         TO events
         INHERIT ALL
         UNBRANCHED
@@ -178,7 +178,7 @@ Feature: JAQ codec unfolding
       CREATE HTTP ENDPOINT flood_endpoint ON edge PATH '/flood';
       CREATE HTTP ENDPOINT INGESTOR flood_ingestor
         FROM flood_endpoint MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING flood_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING flood_codec
         TO events
         INHERIT ALL
         UNBRANCHED
@@ -457,7 +457,7 @@ Feature: JAQ codec unfolding
         TO SCHEMA tenant_event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.events[]';
       CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
-      CREATE IF NOT EXISTS BRANCH by_tenant SCHEMA tenant_branch TTL 5m;
+      CREATE IF NOT EXISTS PARAMETRIZER by_tenant SCHEMA tenant_branch TTL 5m;
       CREATE RELAY tenant_events SCHEMA sourced_tenant_event BRANCHED BY by_tenant;
       CREATE KAFKA CLIENT kafka_main
         CONFIG {
@@ -516,7 +516,7 @@ Feature: JAQ codec unfolding
       CREATE HTTP ENDPOINT notifications_endpoint ON edge PATH '/notifications';
       CREATE HTTP ENDPOINT INGESTOR notifications_ingestor
         FROM notifications_endpoint MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING notification_codec
         TO notifications
         INHERIT ALL
         UNBRANCHED

@@ -175,18 +175,18 @@ unsafe fn write_field_level(
 ///
 /// `schema` is a live schema this library returned; non-null out-parameters are writable.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn nx_schema_branch(
+pub unsafe extern "C" fn nx_schema_parametrizer(
     schema: *const Schema,
     name: *mut *const u8,
     name_len: *mut usize,
 ) -> bool {
     // SAFETY: the header requires a live schema.
     let schema = unsafe { abi::accessor(schema) };
-    let Some(branch) = schema.branch() else {
+    let Some(parametrizer) = schema.parametrizer() else {
         return false;
     };
     // SAFETY: the header requires writable out-parameters.
-    unsafe { abi::write_bytes(name, name_len, branch.as_bytes()) };
+    unsafe { abi::write_bytes(name, name_len, parametrizer.as_bytes()) };
     true
 }
 

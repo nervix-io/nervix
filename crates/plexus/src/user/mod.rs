@@ -1,29 +1,36 @@
 use chumsky::prelude::*;
 use meticulous::OptionExt as _;
-use nervix_models::{CreateStatement, CreateUser};
+use nervix_models::{CreateStatement, CreateUser, EntityLabels};
 
 use crate::{
+    labels::finish_creation,
     lexer::{Identifier, Token},
     parser_support::{
         LexedInput, ParseError, ParseFromSourceError, if_not_exists_clause, into_parse_error, kw,
-        lex_input, string_lit, tok, user_name,
+        lex_input, string_lit, user_name,
     },
 };
 
 pub fn create_user_parser<'src>()
 -> impl Parser<'src, &'src [Token], CreateStatement<CreateUser>, extra::Err<ParseError<'src>>> + Clone
 {
-    kw(Identifier::Create)
-        .ignore_then(if_not_exists_clause())
-        .then_ignore(kw(Identifier::User))
-        .then(user_name())
-        .then_ignore(kw(Identifier::With))
-        .then_ignore(kw(Identifier::Password))
-        .then(string_lit())
-        .then_ignore(tok(Token::Semicolon).or_not())
-        .map(|((if_not_exists, name), password)| {
-            CreateStatement::new(CreateUser { name, password }, if_not_exists)
-        })
+    finish_creation(
+        kw(Identifier::Create)
+            .ignore_then(if_not_exists_clause())
+            .then_ignore(kw(Identifier::User))
+            .then(user_name())
+            .then_ignore(kw(Identifier::With))
+            .then_ignore(kw(Identifier::Password))
+            .then(string_lit())
+            .map(|((if_not_exists, name), password)| {
+                let user = CreateUser {
+                    name,
+                    password,
+                    labels: EntityLabels::default(),
+                };
+                CreateStatement::new(user, if_not_exists)
+            }),
+    )
 }
 
 pub fn parse_create_user(

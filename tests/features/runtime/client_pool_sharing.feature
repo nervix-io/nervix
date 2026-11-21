@@ -25,7 +25,7 @@ Feature: Shared database client pools
       CREATE HTTP ENDPOINT ingress ON edge PATH '/ingest';
       CREATE HTTP ENDPOINT INGESTOR http_notifications
         FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING notification_codec
         TO notifications INHERIT ALL UNBRANCHED
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE POSTGRES CLIENT postgres_shared
@@ -75,7 +75,7 @@ Feature: Shared database client pools
       CREATE HTTP ENDPOINT ingress ON edge PATH '/ingest';
       CREATE HTTP ENDPOINT INGESTOR http_notifications
         FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING notification_codec
         TO notifications INHERIT ALL UNBRANCHED
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE POSTGRES CLIENT postgres_contended
@@ -136,7 +136,7 @@ Feature: Shared database client pools
       CREATE HTTP ENDPOINT ingress ON edge PATH '/ingest';
       CREATE HTTP ENDPOINT INGESTOR http_notifications
         FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING notification_codec
         TO notifications INHERIT ALL UNBRANCHED
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE POSTGRES CLIENT postgres_retired

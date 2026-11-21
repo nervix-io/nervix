@@ -21,18 +21,18 @@ Feature: Reingestor metrics
         FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
         CREATE IF NOT EXISTS SCHEMA tenant_user_id_branch ( tenant STRING, user_id I64 );
-        CREATE IF NOT EXISTS BRANCH by_reingestor_metrics_source SCHEMA tenant_user_id_branch TTL 5m;
+        CREATE IF NOT EXISTS PARAMETRIZER by_reingestor_metrics_source SCHEMA tenant_user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_reingestor_metrics_source;
         CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
-        CREATE IF NOT EXISTS BRANCH by_reingestor_metrics_node SCHEMA tenant_branch TTL 5m;
+        CREATE IF NOT EXISTS PARAMETRIZER by_reingestor_metrics_node SCHEMA tenant_branch TTL 5m;
         CREATE RELAY tenant_notifications SCHEMA notification BRANCHED BY by_reingestor_metrics_node;
-        CREATE IF NOT EXISTS BRANCH by_audit_reingestor_metrics_node SCHEMA tenant_branch TTL 5m;
+        CREATE IF NOT EXISTS PARAMETRIZER by_audit_reingestor_metrics_node SCHEMA tenant_branch TTL 5m;
         CREATE RELAY audit_notifications SCHEMA notification BRANCHED BY by_audit_reingestor_metrics_node;
         CREATE VHOST edge http-{{test_id}}.example.com;
         CREATE HTTP ENDPOINT reingestor_metrics_ingress ON edge PATH '/reingestor-metrics';
         CREATE HTTP ENDPOINT INGESTOR reingestor_metrics_ingestor
         FROM reingestor_metrics_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING notification_codec
         TO notifications
         INHERIT ALL
         BRANCHED BY by_reingestor_metrics_source

@@ -21,7 +21,7 @@ Feature: Junction metrics
       FROM WIRE SCHEMA notification_wire
       TO SCHEMA notification;
       CREATE SCHEMA tenant_branch (tenant STRING);
-      CREATE BRANCH by_junction_metrics SCHEMA tenant_branch TTL 5m;
+      CREATE PARAMETRIZER by_junction_metrics SCHEMA tenant_branch TTL 5m;
       CREATE RELAY incoming SCHEMA notification BRANCHED BY by_junction_metrics;
       CREATE RELAY routed SCHEMA notification BRANCHED BY by_junction_metrics;
       CREATE VHOST edge http-{{test_id}}.example.com;
@@ -30,7 +30,7 @@ Feature: Junction metrics
       PATH '/junction-metrics';
       CREATE HTTP ENDPOINT INGESTOR junction_metrics_ingestor
       FROM junction_metrics_ingress MODE NO ACK
-      ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
+      ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING notification_codec
       TO incoming
         INHERIT ALL
         BRANCHED BY by_junction_metrics

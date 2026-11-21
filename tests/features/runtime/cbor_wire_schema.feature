@@ -26,7 +26,7 @@ Feature: CBOR wire schemas use CBOR values
       CREATE HTTP ENDPOINT events_endpoint ON edge PATH '/ingest';
       CREATE HTTP ENDPOINT INGESTOR http_events
         FROM events_endpoint MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING event_codec
         TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE KAFKA CLIENT kafka_main CONFIG { 'bootstrap.servers' = '{{kafka_addr}}' };

@@ -285,7 +285,7 @@ wire_enum!(ALL_MODEL_KINDS: ModelKind => wire::ModelKind {
     Codec,
     Client,
     Vhost,
-    Branch,
+    Parametrizer,
     Endpoint,
     SignalingProtocol,
     Generator,

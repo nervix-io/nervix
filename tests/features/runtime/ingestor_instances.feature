@@ -20,7 +20,7 @@ Feature: Ingestor instances are independent placement units
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( tenant string, seq integer );
       CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE SCHEMA tenant_key ( tenant STRING );
-      CREATE BRANCH by_tenant SCHEMA tenant_key TTL 5m;
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_key TTL 5m;
       CREATE RELAY events SCHEMA event BRANCHED BY by_tenant;
       CREATE KAFKA CLIENT broker
         CONFIG {
@@ -82,7 +82,7 @@ Feature: Ingestor instances are independent placement units
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( tenant string, seq integer );
       CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE SCHEMA tenant_key ( tenant STRING );
-      CREATE BRANCH by_tenant SCHEMA tenant_key TTL 5m;
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_key TTL 5m;
       CREATE RELAY events SCHEMA event BRANCHED BY by_tenant;
       CREATE MQTT CLIENT broker
         CONFIG {
@@ -147,7 +147,7 @@ Feature: Ingestor instances are independent placement units
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( tenant string, seq integer );
       CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE SCHEMA tenant_key ( tenant STRING );
-      CREATE BRANCH by_tenant SCHEMA tenant_key TTL 5m;
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_key TTL 5m;
       CREATE RELAY events SCHEMA event BRANCHED BY by_tenant;
       CREATE RABBITMQ CLIENT broker
         CONFIG {
@@ -213,7 +213,7 @@ Feature: Ingestor instances are independent placement units
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( tenant string, seq integer );
       CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE SCHEMA tenant_key ( tenant STRING );
-      CREATE BRANCH by_tenant SCHEMA tenant_key TTL 5m;
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_key TTL 5m;
       CREATE RELAY events SCHEMA event BRANCHED BY by_tenant;
       CREATE SQS CLIENT broker
         CONFIG {
@@ -280,7 +280,7 @@ Feature: Ingestor instances are independent placement units
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( tenant string, seq integer );
       CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE SCHEMA tenant_key ( tenant STRING );
-      CREATE BRANCH by_tenant SCHEMA tenant_key TTL 5m;
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_key TTL 5m;
       CREATE RELAY events SCHEMA event BRANCHED BY by_tenant;
       CREATE NATS CLIENT broker
         CONFIG {
@@ -341,7 +341,7 @@ Feature: Ingestor instances are independent placement units
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( tenant string, seq integer );
       CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE SCHEMA tenant_key ( tenant STRING );
-      CREATE BRANCH by_tenant SCHEMA tenant_key TTL 5m;
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_key TTL 5m;
       CREATE RELAY events SCHEMA event BRANCHED BY by_tenant;
       CREATE PULSAR CLIENT broker
         CONFIG {
@@ -408,7 +408,7 @@ Feature: Ingestor instances are independent placement units
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( tenant string, seq integer );
       CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE SCHEMA tenant_key ( tenant STRING );
-      CREATE BRANCH by_tenant SCHEMA tenant_key TTL 5m PARTITIONS 4;
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_key TTL 5m PARTITIONS 4;
       CREATE RELAY events SCHEMA event BRANCHED BY by_tenant;
       CREATE KAFKA CLIENT broker
         CONFIG {
@@ -475,7 +475,7 @@ Feature: Ingestor instances are independent placement units
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( tenant string, seq integer );
       CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE SCHEMA tenant_key ( tenant STRING );
-      CREATE BRANCH by_tenant SCHEMA tenant_key TTL 5m;
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_key TTL 5m;
       CREATE RELAY events SCHEMA event BRANCHED BY by_tenant;
       CREATE KAFKA CLIENT broker
         CONFIG {
@@ -542,7 +542,7 @@ Feature: Ingestor instances are independent placement units
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( tenant string, seq integer );
       CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE SCHEMA tenant_key ( tenant STRING );
-      CREATE BRANCH by_tenant SCHEMA tenant_key TTL 5m;
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_key TTL 5m;
       CREATE RELAY events SCHEMA event BRANCHED BY by_tenant;
       CREATE KAFKA CLIENT broker
         CONFIG {
@@ -633,7 +633,7 @@ Feature: Ingestor instances are independent placement units
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( tenant string, seq integer );
       CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE SCHEMA tenant_key ( tenant STRING );
-      CREATE BRANCH by_tenant SCHEMA tenant_key TTL 5m PARTITIONS 4;
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_key TTL 5m PARTITIONS 4;
       CREATE RELAY events SCHEMA event BRANCHED BY by_tenant;
       CREATE PULSAR CLIENT broker CONFIG { 'addr' = 'pulsar://127.0.0.1:6650' };
       """
@@ -661,8 +661,8 @@ Feature: Ingestor instances are independent placement units
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( tenant string, seq integer );
       CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE SCHEMA tenant_key ( tenant STRING );
-      CREATE BRANCH by_tenant SCHEMA tenant_key TTL 5m PARTITIONS 4;
-      CREATE BRANCH by_other SCHEMA tenant_key TTL 5m PARTITIONS 2;
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_key TTL 5m PARTITIONS 4;
+      CREATE PARAMETRIZER by_other SCHEMA tenant_key TTL 5m PARTITIONS 2;
       CREATE RELAY events SCHEMA event BRANCHED BY by_tenant;
       CREATE RELAY other_events SCHEMA event BRANCHED BY by_other;
       CREATE RELAY plain_events SCHEMA event UNBRANCHED;
@@ -693,7 +693,7 @@ Feature: Ingestor instances are independent placement units
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( tenant string, seq integer );
       CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE SCHEMA tenant_key ( tenant STRING );
-      CREATE BRANCH by_tenant SCHEMA tenant_key TTL 5m PARTITIONS 4;
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_key TTL 5m PARTITIONS 4;
       CREATE RELAY events SCHEMA event BRANCHED BY by_tenant;
       CREATE KAFKA CLIENT broker CONFIG { 'bootstrap.servers' = '127.0.0.1:9092' };
       """
@@ -721,7 +721,7 @@ Feature: Ingestor instances are independent placement units
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( tenant string, seq integer );
       CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE SCHEMA tenant_key ( tenant STRING );
-      CREATE BRANCH by_tenant SCHEMA tenant_key TTL 5m PARTITIONS 4;
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_key TTL 5m PARTITIONS 4;
       CREATE RELAY events SCHEMA event BRANCHED BY by_tenant;
       CREATE <connector> CLIENT broker CONFIG { <config> };
       """
@@ -762,7 +762,7 @@ Feature: Ingestor instances are independent placement units
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( tenant string, seq integer );
       CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE SCHEMA tenant_key ( tenant STRING );
-      CREATE BRANCH by_tenant SCHEMA tenant_key TTL 5m PARTITIONS 4;
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_key TTL 5m PARTITIONS 4;
       CREATE RELAY events SCHEMA event BRANCHED BY by_tenant;
       CREATE PULSAR CLIENT broker
         CONFIG {

@@ -12,13 +12,13 @@ Feature: Integrated client wire qualification
       CREATE WIRE JSON SCHEMA wire_record_json MODE STRICT (tenant string, sequence integer);
       CREATE WIRE JSON CODEC wire_record_codec FROM WIRE SCHEMA wire_record_json TO SCHEMA wire_record;
       CREATE SCHEMA tenant_key (tenant STRING);
-      CREATE BRANCH by_tenant SCHEMA tenant_key TTL 5m;
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_key TTL 5m;
       CREATE RELAY wire_records SCHEMA wire_record BRANCHED BY by_tenant;
       CREATE VHOST edge qualified-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT wire_ingress ON edge PATH '/records';
       CREATE HTTP ENDPOINT INGESTOR wire_ingestor
         FROM wire_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING wire_record_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING wire_record_codec
         TO wire_records INHERIT ALL
         BRANCHED BY by_tenant SET tenant = message.tenant
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;

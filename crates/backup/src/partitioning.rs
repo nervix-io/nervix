@@ -17,10 +17,10 @@ use std::{
 
 use error_stack::Report;
 use nervix_models::{
-    BranchName, BranchPartitionEpoch, DomainName, ExternalPartitionSet, IngestorName,
-    InheritedPartitionLayout, PartitionEpochNumber, PartitionSourceFingerprint, PartitionTopology,
-    PartitionTopologySnapshot, PartitionTransition, ResolvedBranchPartitions,
-    SourcePartitionObservation,
+    DomainName, ExternalPartitionSet, IngestorName, InheritedPartitionLayout, ParametrizerName,
+    ParametrizerPartitionEpoch, PartitionEpochNumber, PartitionSourceFingerprint,
+    PartitionTopology, PartitionTopologySnapshot, PartitionTransition,
+    ResolvedParametrizerPartitions, SourcePartitionObservation,
 };
 
 use crate::{
@@ -39,10 +39,12 @@ pub struct PartitionTopologyRecord {
     pub snapshot: PartitionTopologySnapshot,
 }
 
-fn layout_wire(layout: ResolvedBranchPartitions) -> PartitionLayoutWire {
+fn layout_wire(layout: ResolvedParametrizerPartitions) -> PartitionLayoutWire {
     match layout {
-        ResolvedBranchPartitions::Direct(count) => PartitionLayoutWire::Direct(count.get()),
-        ResolvedBranchPartitions::Inherited(count) => PartitionLayoutWire::Inherited(count.get()),
+        ResolvedParametrizerPartitions::Direct(count) => PartitionLayoutWire::Direct(count.get()),
+        ResolvedParametrizerPartitions::Inherited(count) => {
+            PartitionLayoutWire::Inherited(count.get())
+        }
     }
 }
 
@@ -60,12 +62,12 @@ fn invalid_value(path: &str, field: &'static str) -> ArchiveReadError {
 fn layout(
     path: &str,
     wire: PartitionLayoutWire,
-) -> Result<ResolvedBranchPartitions, Report<ArchiveReadError>> {
+) -> Result<ResolvedParametrizerPartitions, Report<ArchiveReadError>> {
     match wire {
-        PartitionLayoutWire::Direct(count) => Ok(ResolvedBranchPartitions::Direct(
+        PartitionLayoutWire::Direct(count) => Ok(ResolvedParametrizerPartitions::Direct(
             NonZeroU16::new(count).ok_or_else(|| invalid(path, "partition count"))?,
         )),
-        PartitionLayoutWire::Inherited(count) => Ok(ResolvedBranchPartitions::Inherited(
+        PartitionLayoutWire::Inherited(count) => Ok(ResolvedParametrizerPartitions::Inherited(
             NonZeroU16::new(count).ok_or_else(|| invalid(path, "partition count"))?,
         )),
     }
@@ -110,7 +112,7 @@ fn decode_topology(
         }
     }
     for branch in branches {
-        let name = BranchName::parse(&branch.name)
+        let name = ParametrizerName::parse(&branch.name)
             .map_err(|cause| cause.change_context(invalid_value(path, "branch name")))?;
         let grouping = match branch.layout {
             InheritedGroupingWire::Identity(count) => InheritedPartitionLayout::Identity(
@@ -125,7 +127,7 @@ fn decode_topology(
                 groups: NonZeroU16::new(groups).ok_or_else(|| invalid(path, "partition count"))?,
             },
         };
-        if topology.branches.insert(name, grouping).is_some() {
+        if topology.parametrizers.insert(name, grouping).is_some() {
             return Err(invalid(path, "branch grouping"));
         }
     }
@@ -174,7 +176,7 @@ impl ArchiveRecord for PartitionTopologyRecord {
                 .collect(),
             branches: snapshot
                 .topology
-                .branches
+                .parametrizers
                 .iter()
                 .map(|(name, grouping)| InheritedLayoutWire {
                     name: name.as_str().to_owned(),
@@ -237,7 +239,7 @@ impl ArchiveRecord for PartitionTopologyRecord {
         let topology = decode_topology(path, wire.sources, wire.branches, wire.suspended)?;
         let mut epochs = BTreeMap::new();
         for epoch in wire.epochs {
-            let name = BranchName::parse(&epoch.name)
+            let name = ParametrizerName::parse(&epoch.name)
                 .map_err(|cause| cause.change_context(invalid_value(path, "branch name")))?;
             let number = PartitionEpochNumber::new(
                 NonZeroU64::new(epoch.number).ok_or_else(|| invalid(path, "partition epoch"))?,
@@ -252,7 +254,7 @@ impl ArchiveRecord for PartitionTopologyRecord {
             if epochs
                 .insert(
                     name,
-                    BranchPartitionEpoch {
+                    ParametrizerPartitionEpoch {
                         number,
                         partitions,
                         transition,
@@ -263,7 +265,7 @@ impl ArchiveRecord for PartitionTopologyRecord {
                 return Err(invalid(path, "branch epoch"));
             }
         }
-        for (branch, grouping) in &topology.branches {
+        for (branch, grouping) in &topology.parametrizers {
             if epochs
                 .get(branch)
                 .is_none_or(|epoch| epoch.partitions != grouping.partitions())
@@ -273,7 +275,7 @@ impl ArchiveRecord for PartitionTopologyRecord {
         }
         let mut holding_units = BTreeMap::new();
         for (branch, units) in wire.holding {
-            let name = BranchName::parse(&branch)
+            let name = ParametrizerName::parse(&branch)
                 .map_err(|cause| cause.change_context(invalid_value(path, "branch name")))?;
             let Some(epoch) = epochs.get(&name) else {
                 return Err(invalid(path, "holding branch"));
@@ -329,7 +331,7 @@ pub(super) mod tests {
         domain: DomainName,
     ) -> PartitionTopologyRecord {
         let ingestor = IngestorName::parse("input").assured("the fixture name is valid");
-        let branch = BranchName::parse("by_tenant").assured("the fixture name is valid");
+        let branch = ParametrizerName::parse("by_tenant").assured("the fixture name is valid");
         let count = arbitrary.entropy().pick([
             1,
             12,
@@ -367,11 +369,11 @@ pub(super) mod tests {
         for byte in &mut digest {
             *byte = arbitrary.entropy().byte();
         }
-        let epoch = BranchPartitionEpoch {
+        let epoch = ParametrizerPartitionEpoch {
             number: PartitionEpochNumber::new(arbitrary.positive_u64()),
             partitions: layout.partitions(),
             transition: arbitrary.entropy().flag().then_some(PartitionTransition {
-                previous: ResolvedBranchPartitions::Direct(
+                previous: ResolvedParametrizerPartitions::Direct(
                     NonZeroU16::new(16).assured("sixteen is positive"),
                 ),
             }),
@@ -389,7 +391,7 @@ pub(super) mod tests {
                             epoch: arbitrary.entropy().any_u64(),
                         },
                     )]),
-                    branches: if activated {
+                    parametrizers: if activated {
                         BTreeMap::from([(branch.clone(), layout)])
                     } else {
                         BTreeMap::new()

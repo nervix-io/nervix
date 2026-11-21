@@ -86,7 +86,7 @@ Feature: Emitter batch lifecycle
       CREATE HTTP ENDPOINT ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR ingestor
         FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING ingest_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING ingest_codec
         TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
       CREATE ZEROMQ CLIENT destination CONFIG {
@@ -162,7 +162,7 @@ Feature: Emitter batch lifecycle
       CREATE JAQ JSON CODEC configuration_codec TO SCHEMA tenant_configuration
         WITH JAQ TRANSFORMATIONS ON INGESTION '.';
       CREATE SCHEMA tenant_key ( tenant STRING );
-      CREATE BRANCH by_tenant SCHEMA tenant_key TTL 5m;
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_key TTL 5m;
       CREATE RELAY events SCHEMA event BRANCHED BY by_tenant;
       CREATE RELAY settings SCHEMA tenant_configuration BRANCHED BY by_tenant
         WITH MATERIALIZED STATE LAST BY TIMESTAMP;
@@ -171,14 +171,14 @@ Feature: Emitter batch lifecycle
       CREATE HTTP ENDPOINT configuration_ingress ON edge PATH '/settings';
       CREATE HTTP ENDPOINT INGESTOR ingestor
         FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING ingest_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING ingest_codec
         TIMESTAMP NOW
         TO events INHERIT ALL BRANCHED BY by_tenant SET tenant = message.tenant
           FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
       CREATE HTTP ENDPOINT INGESTOR configuration_ingestor
         FROM configuration_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING configuration_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING configuration_codec
         TIMESTAMP NOW
         TO settings INHERIT ALL BRANCHED BY by_tenant SET tenant = message.tenant
           FLUSH IMMEDIATE ON MESSAGE ERROR LOG
@@ -260,13 +260,13 @@ Feature: Emitter batch lifecycle
       CREATE JAQ JSON CODEC ingest_codec TO SCHEMA event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE SCHEMA tenant_key ( tenant STRING );
-      CREATE BRANCH by_tenant SCHEMA tenant_key TTL 5m MAX INSTANCES 1 EVICT LRU;
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_key TTL 5m MAX INSTANCES 1 EVICT LRU;
       CREATE RELAY events SCHEMA event BRANCHED BY by_tenant;
       CREATE VHOST edge batch-lifecycle-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR ingestor
         FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING ingest_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING ingest_codec
         TO events
           INHERIT ALL BRANCHED BY by_tenant SET tenant = message.tenant
           FLUSH IMMEDIATE ON MESSAGE ERROR LOG
@@ -344,8 +344,8 @@ Feature: Emitter batch lifecycle
       CREATE JAQ JSON CODEC ingest_codec TO SCHEMA event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE SCHEMA tenant_key ( tenant STRING );
-      CREATE BRANCH first_tenant SCHEMA tenant_key TTL 5m PARTITIONS 2 MAX INSTANCES 1 EVICT LRU;
-      CREATE BRANCH second_tenant SCHEMA tenant_key TTL 5m MAX INSTANCES 1 EVICT LRU;
+      CREATE PARAMETRIZER first_tenant SCHEMA tenant_key TTL 5m PARTITIONS 2 MAX INSTANCES 1 EVICT LRU;
+      CREATE PARAMETRIZER second_tenant SCHEMA tenant_key TTL 5m MAX INSTANCES 1 EVICT LRU;
       CREATE RELAY plain_events SCHEMA event UNBRANCHED;
       CREATE RELAY first_events SCHEMA event BRANCHED BY first_tenant;
       CREATE RELAY second_events SCHEMA event BRANCHED BY second_tenant;
@@ -355,18 +355,18 @@ Feature: Emitter batch lifecycle
       CREATE HTTP ENDPOINT second_ingress ON edge PATH '/second';
       CREATE HTTP ENDPOINT INGESTOR plain_ingestor
         FROM plain_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING ingest_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING ingest_codec
         TO plain_events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
       CREATE HTTP ENDPOINT INGESTOR first_ingestor
         FROM first_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING ingest_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING ingest_codec
         TO first_events INHERIT ALL BRANCHED BY first_tenant SET tenant = message.tenant
           FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
       CREATE HTTP ENDPOINT INGESTOR second_ingestor
         FROM second_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING ingest_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING ingest_codec
         TO second_events INHERIT ALL BRANCHED BY second_tenant SET tenant = message.tenant
           FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
@@ -444,13 +444,13 @@ Feature: Emitter batch lifecycle
       CREATE JAQ JSON CODEC ingest_codec TO SCHEMA event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE SCHEMA tenant_key ( tenant STRING );
-      CREATE BRANCH by_tenant SCHEMA tenant_key TTL 400s;
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_key TTL 400s;
       CREATE RELAY events SCHEMA event BRANCHED BY by_tenant;
       CREATE VHOST edge batch-expiry-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR ingestor
         FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING ingest_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING ingest_codec
         TIMESTAMP NOW
         TO events INHERIT ALL BRANCHED BY by_tenant SET tenant = message.tenant
           FLUSH IMMEDIATE ON MESSAGE ERROR LOG
@@ -518,7 +518,7 @@ Feature: Emitter batch lifecycle
       CREATE JAQ JSON CODEC configuration_codec TO SCHEMA tenant_configuration
         WITH JAQ TRANSFORMATIONS ON INGESTION '.';
       CREATE SCHEMA tenant_key ( tenant STRING );
-      CREATE BRANCH by_tenant SCHEMA tenant_key TTL 400s;
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_key TTL 400s;
       CREATE RELAY events SCHEMA event BRANCHED BY by_tenant;
       CREATE RELAY settings SCHEMA tenant_configuration BRANCHED BY by_tenant
         WITH MATERIALIZED STATE LAST BY TIMESTAMP;
@@ -527,14 +527,14 @@ Feature: Emitter batch lifecycle
       CREATE HTTP ENDPOINT configuration_ingress ON edge PATH '/settings';
       CREATE HTTP ENDPOINT INGESTOR ingestor
         FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING ingest_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING ingest_codec
         TIMESTAMP NOW
         TO events INHERIT ALL BRANCHED BY by_tenant SET tenant = message.tenant
           FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
       CREATE HTTP ENDPOINT INGESTOR configuration_ingestor
         FROM configuration_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING configuration_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING configuration_codec
         TIMESTAMP NOW
         TO settings INHERIT ALL BRANCHED BY by_tenant SET tenant = message.tenant
           FLUSH IMMEDIATE ON MESSAGE ERROR LOG

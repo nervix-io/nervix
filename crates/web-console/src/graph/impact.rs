@@ -23,10 +23,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use nervix_models::{
-    ActivationAction, AffectedTopology, BranchName, ClusterNodeName, ConcreteBranchCoverage,
+    ActivationAction, AffectedTopology, ClusterNodeName, ConcreteBranchCoverage,
     ConfigurationTransition, DomainLifecycleAction, DomainName, ExecutionStepImpactReport,
     ImpactAttribution, ImpactEdgeKind, ImpactEffects, ImpactTopology, ModelKind, NodeRef,
-    OperationImpactReport, PauseRequirement, QuiescenceOutcome, RebuildReason,
+    OperationImpactReport, ParametrizerName, PauseRequirement, QuiescenceOutcome, RebuildReason,
     RequestedResourceVersion, ResourceCatalogAction, ResourceName, StatePurge,
     TransactionImpactReport, TransactionOperationNumber, TransactionOperationRange,
 };
@@ -300,7 +300,7 @@ pub struct ImpactItem {
 impl ImpactItem {
     /// The branch group the item is drawn inside: the declared branch of every execution it
     /// covers, preferring the side the change leaves it on.
-    fn group(&self) -> Option<BranchName> {
+    fn group(&self) -> Option<ParametrizerName> {
         let coverage = if self.presence.after() {
             self.branches_after.as_ref()
         } else {
@@ -308,9 +308,9 @@ impl ImpactItem {
         };
         match coverage {
             Some(
-                ConcreteBranchCoverage::AllOfBranch { branch }
-                | ConcreteBranchCoverage::Selected { branch, .. },
-            ) => Some(branch.clone()),
+                ConcreteBranchCoverage::AllOfParametrizer { parametrizer }
+                | ConcreteBranchCoverage::Selected { parametrizer, .. },
+            ) => Some(parametrizer.clone()),
             Some(ConcreteBranchCoverage::All | ConcreteBranchCoverage::Unbranched) | None => None,
         }
     }
@@ -365,7 +365,7 @@ pub struct DomainImpact {
 pub struct ImpactGraph {
     pub items: BTreeMap<ImpactItemId, ImpactItem>,
     pub edges: BTreeMap<ImpactEdgeId, ImpactEdge>,
-    pub groups: Vec<GroupRegion<BranchName>>,
+    pub groups: Vec<GroupRegion<ParametrizerName>>,
     pub domain: DomainImpact,
     pub width: i32,
     pub height: i32,
@@ -984,7 +984,8 @@ impl ImpactRole {
     fn creates_resource(&self) -> bool {
         match self {
             Self::Catalog(ResourceCatalogAction::Create) => true,
-            Self::Configuration(_)
+            Self::Catalog(ResourceCatalogAction::EditLabels)
+            | Self::Configuration(_)
             | Self::Pause { .. }
             | Self::Gate { .. }
             | Self::Move { .. }

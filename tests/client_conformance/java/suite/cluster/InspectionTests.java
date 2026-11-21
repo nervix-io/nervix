@@ -54,7 +54,7 @@ public final class InspectionTests {
                 assertNotNull(licenseInspection);
                 assertNull(licenseInspection.domain()); assertNull(licenseInspection.entityName());
                 assertEquals("LICENSE", licenseInspection.entityKind());
-                assertNull(licenseInspection.rejection()); assertEquals(3, licenseInspection.counts().rows());
+                assertNull(licenseInspection.rejection()); assertEquals(4, licenseInspection.counts().rows());
             }
             Nervix.Inspection inspection;
             try (var cancel = deadline(); var outcome = session.command(

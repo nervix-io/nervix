@@ -24,10 +24,10 @@ use nervix_client_wire::{
     ChoiceValue,
 };
 use nervix_models::{
-    BranchName, CanonicalPlexusError, CodecDirection, CreateBranch, CreateRelay, CreateSchema,
-    DomainName, IngestorEntityKind, Model, ModelIndex, ModelKind, NodeRef, RelayBranching,
-    RelayName, RelayQuestion, RequestedResourceVersion, ResourceName, ResourceVersionStatus,
-    SchemaField, SchemaName,
+    CanonicalPlexusError, CodecDirection, CreateParametrizer, CreateRelay, CreateSchema,
+    DomainName, IngestorEntityKind, Model, ModelIndex, ModelKind, NodeRef, ParametrizerName,
+    RelayBranching, RelayName, RelayQuestion, RequestedResourceVersion, ResourceName,
+    ResourceVersionStatus, SchemaField, SchemaName,
 };
 
 use super::session_service::hash_choice_text;
@@ -96,7 +96,7 @@ impl<'a> ConfiguredQuery<'a> {
         }
         let question = match request.target() {
             ChoiceTarget::Schema => ConfiguredQuestion::Schemas,
-            ChoiceTarget::Branch => ConfiguredQuestion::Branches,
+            ChoiceTarget::Parametrizer => ConfiguredQuestion::Branches,
             ChoiceTarget::Relay => ConfiguredQuestion::Relays,
             ChoiceTarget::Codec => ConfiguredQuestion::Codecs,
             ChoiceTarget::Vhost => ConfiguredQuestion::Vhosts,
@@ -266,13 +266,13 @@ impl<'a> ConfiguredQuery<'a> {
         else {
             return None;
         };
-        if branch.kind != ModelKind::Branch {
+        if branch.kind != ModelKind::Parametrizer {
             return None;
         }
         Some(Self {
             domain,
             question: ConfiguredQuestion::CompatibleRelays(RelayQuestion::OnBranch(Some(
-                BranchName::from(&branch.identifier),
+                ParametrizerName::from(&branch.identifier),
             ))),
         })
     }
@@ -289,7 +289,7 @@ impl<'a> ConfiguredQuery<'a> {
         else {
             return None;
         };
-        if branch.kind != ModelKind::Branch {
+        if branch.kind != ModelKind::Parametrizer {
             return None;
         }
         Some(Self {
@@ -319,10 +319,12 @@ impl<'a> ConfiguredQuery<'a> {
                 ChoiceSelection {
                     value: ChoiceValue::Model(branch),
                 },
-            ] if branch.kind == ModelKind::Branch => Some(Self {
+            ] if branch.kind == ModelKind::Parametrizer => Some(Self {
                 domain,
                 question: ConfiguredQuestion::CompatibleRelays(
-                    RelayQuestion::MaterializedOnBranch(Some(BranchName::from(&branch.identifier))),
+                    RelayQuestion::MaterializedOnBranch(Some(ParametrizerName::from(
+                        &branch.identifier,
+                    ))),
                 ),
             }),
             _ => None,
@@ -458,7 +460,7 @@ impl ConfiguredChoices {
                 (ConfiguredQuestion::Schemas, Model::Schema(schema)) => {
                     ModelCandidate::schema(schema)?
                 }
-                (ConfiguredQuestion::Branches, Model::Branch(branch)) => {
+                (ConfiguredQuestion::Branches, Model::Parametrizer(branch)) => {
                     ModelCandidate::branch(branch)?
                 }
                 (ConfiguredQuestion::Relays, Model::Relay(relay)) => ModelCandidate::relay(relay)?,
@@ -816,7 +818,7 @@ impl ConfiguredChoices {
         branch: &NodeRef,
         search: &str,
     ) -> Result<ResolvedChoices, ChoiceStatus> {
-        let Some(Model::Branch(branch)) = self.models.get(branch) else {
+        let Some(Model::Parametrizer(branch)) = self.models.get(branch) else {
             return Err(ChoiceStatus::MissingContext);
         };
         let schema_ref = NodeRef::new(ModelKind::Schema, &branch.schema);
@@ -923,7 +925,7 @@ impl ModelCandidate {
         Self::new(node, detail, "Schema", schema.to_canonical_plexus())
     }
 
-    fn branch(branch: &CreateBranch) -> Result<Self, ChoiceStatus> {
+    fn branch(branch: &CreateParametrizer) -> Result<Self, ChoiceStatus> {
         let mut detail = format!("key schema {} · TTL {}", branch.schema, branch.ttl);
         if let Some(eviction) = &branch.eviction {
             detail.push_str(&format!(
@@ -931,7 +933,7 @@ impl ModelCandidate {
                 eviction.max_instances()
             ));
         }
-        let node = NodeRef::new(ModelKind::Branch, &branch.name);
+        let node = NodeRef::new(ModelKind::Parametrizer, &branch.name);
         Self::new(node, detail, "Branch", branch.to_canonical_plexus())
     }
 
@@ -952,7 +954,7 @@ impl ModelCandidate {
     fn relay(relay: &CreateRelay) -> Result<Self, ChoiceStatus> {
         let branching = match &relay.branching {
             RelayBranching::Unbranched => "unbranched".to_string(),
-            RelayBranching::BranchedBy { branch } => format!("branched by {branch}"),
+            RelayBranching::BranchedBy { parametrizer } => format!("branched by {parametrizer}"),
         };
         let mut detail = format!("schema {} · {branching}", relay.schema);
         if relay.materialized_state.is_some() {
@@ -980,16 +982,16 @@ mod tests {
         ChoiceLookupRequest, ChoiceSelection, ChoiceStatus, ChoiceTarget, ChoiceValue,
     };
     use nervix_models::{
-        AvroType, BranchEviction, BranchName, CodecDirection, CodecName, CodecWireFormat,
-        CreateBranch, CreateCodec, CreateRelay, CreateSchema, CreateSignalingProtocol, CreateVhost,
-        CreateWireSchema, DomainName, FieldName, HttpIngestorEntity, JsonType, KafkaIngestorEntity,
-        MaterializedRelayState, Model, ModelKind, ModelName, NodeRef, ParseAsType, RelayBranching,
-        RelayName, RelayQuestion, RequestedResourceVersion, ResourceName, ResourceUpload,
-        ResourceUploadIdentity, ResourceUploadKey, ResourceUploadState, ResourceUploads,
-        ResourceVersionCounter, ResourceVersionStatus, SchemaField, SchemaName,
-        SignalingProtocolName, SignalingProtocolOnConnect, SignalingStep, SignalingWireFormat,
-        UserName, VhostName, WebsocketsIngestorEntity, WireSchemaField, WireSchemaName,
-        WireSchemaStrictness,
+        AvroType, CodecDirection, CodecName, CodecWireFormat, CreateCodec, CreateParametrizer,
+        CreateRelay, CreateSchema, CreateSignalingProtocol, CreateVhost, CreateWireSchema,
+        DomainName, FieldName, HttpIngestorEntity, JsonType, KafkaIngestorEntity,
+        MaterializedRelayState, Model, ModelKind, ModelName, NodeRef, ParametrizerEviction,
+        ParametrizerName, ParseAsType, RelayBranching, RelayName, RelayQuestion,
+        RequestedResourceVersion, ResourceName, ResourceUpload, ResourceUploadIdentity,
+        ResourceUploadKey, ResourceUploadState, ResourceUploads, ResourceVersionCounter,
+        ResourceVersionStatus, SchemaField, SchemaName, SignalingProtocolName,
+        SignalingProtocolOnConnect, SignalingStep, SignalingWireFormat, UserName, VhostName,
+        WebsocketsIngestorEntity, WireSchemaField, WireSchemaName, WireSchemaStrictness,
     };
     use sorted_vec::SortedVec;
 
@@ -1028,19 +1030,22 @@ mod tests {
         })
     }
 
-    fn branch(name: &str, eviction: Option<BranchEviction>) -> Model<RequestedResourceVersion> {
-        Model::Branch(CreateBranch {
+    fn branch(
+        name: &str,
+        eviction: Option<ParametrizerEviction>,
+    ) -> Model<RequestedResourceVersion> {
+        Model::Parametrizer(CreateParametrizer {
             labels: Default::default(),
-            name: BranchName::parse(name).assured("the test branch names are valid"),
+            name: ParametrizerName::parse(name).assured("the test branch names are valid"),
             schema: SchemaName::parse("tenant_key").assured("the test schema name is valid"),
             ttl: "5m".to_string(),
-            partitions: nervix_models::BranchPartitions::ONE,
+            partitions: nervix_models::ParametrizerPartitions::ONE,
             eviction,
         })
     }
 
     fn configuration() -> ConfiguredChoices {
-        let tenant = BranchName::parse("by_tenant").assured("the test branch name is valid");
+        let tenant = ParametrizerName::parse("by_tenant").assured("the test branch name is valid");
         ConfiguredChoices::new(
             domain(),
             vec![
@@ -1059,7 +1064,7 @@ mod tests {
                 branch("by_tenant", None),
                 branch(
                     "bounded_tenants",
-                    Some(BranchEviction::Lru {
+                    Some(ParametrizerEviction::Lru {
                         max_instances: NonZeroU64::new(3).assured("three is nonzero"),
                     }),
                 ),
@@ -1140,7 +1145,7 @@ mod tests {
             ),
             ["audit", "dangling"]
         );
-        let branch = BranchName::parse("by_tenant").assured("valid branch");
+        let branch = ParametrizerName::parse("by_tenant").assured("valid branch");
         assert_eq!(
             labels(
                 &ConfiguredQuestion::CompatibleRelays(RelayQuestion::OnBranch(Some(
@@ -1150,7 +1155,7 @@ mod tests {
             ),
             ["orders"]
         );
-        let branch_ref = NodeRef::new(ModelKind::Branch, &branch);
+        let branch_ref = NodeRef::new(ModelKind::Parametrizer, &branch);
         assert_eq!(
             labels(&ConfiguredQuestion::BranchFields(branch_ref.clone()), ""),
             ["tenant"]
@@ -1186,7 +1191,7 @@ mod tests {
 
     #[test]
     fn processor_questions_filter_exact_input_contracts_and_materialized_state() {
-        let tenant = BranchName::parse("by_tenant").assured("valid branch");
+        let tenant = ParametrizerName::parse("by_tenant").assured("valid branch");
         let models = vec![
             schema(
                 "order_record",
@@ -1301,8 +1306,8 @@ mod tests {
 
     #[test]
     fn generator_questions_offer_materialized_relays_on_exactly_the_generator_branch() {
-        let tenant = BranchName::parse("by_tenant").assured("valid branch");
-        let region = BranchName::parse("by_region").assured("valid branch");
+        let tenant = ParametrizerName::parse("by_tenant").assured("valid branch");
+        let region = ParametrizerName::parse("by_region").assured("valid branch");
         let models = vec![
             schema(
                 "notification",
@@ -1347,7 +1352,7 @@ mod tests {
             ResourceVersionStatus::default(),
             Vec::new(),
         );
-        let branch_ref = NodeRef::new(ModelKind::Branch, &tenant);
+        let branch_ref = NodeRef::new(ModelKind::Parametrizer, &tenant);
         /// One generator lookup: the dependencies it sends, the question they ask, and the relays
         /// that question offers.
         struct Case {
@@ -1530,7 +1535,7 @@ mod tests {
         }];
         for (target, question) in [
             (ChoiceTarget::Schema, ConfiguredQuestion::Schemas),
-            (ChoiceTarget::Branch, ConfiguredQuestion::Branches),
+            (ChoiceTarget::Parametrizer, ConfiguredQuestion::Branches),
             (ChoiceTarget::Relay, ConfiguredQuestion::Relays),
             (
                 ChoiceTarget::PlacementMember,

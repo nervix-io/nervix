@@ -46,7 +46,7 @@ Feature: IP address, network and URL functions
       CREATE HTTP ENDPOINT endpoint_ingress ON edge PATH '/endpoints';
       CREATE HTTP ENDPOINT INGESTOR endpoint_ingestor
         FROM endpoint_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING raw_endpoint_batch_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING raw_endpoint_batch_codec
         TO raw_endpoints
           INHERIT ALL
           UNBRANCHED
@@ -139,7 +139,7 @@ Feature: IP address, network and URL functions
       CREATE HTTP ENDPOINT client_ingress ON edge PATH '/clients';
       CREATE HTTP ENDPOINT INGESTOR client_ingestor
         FROM client_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING raw_client_batch_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING raw_client_batch_codec
         TO raw_clients
           INHERIT ALL
           UNBRANCHED
@@ -223,7 +223,7 @@ Feature: IP address, network and URL functions
       CREATE HTTP ENDPOINT probe_ingress ON edge PATH '/probes';
       CREATE HTTP ENDPOINT INGESTOR probe_ingestor
         FROM probe_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING raw_probe_batch_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING raw_probe_batch_codec
         TO raw_probes
           INHERIT ALL
           UNBRANCHED
@@ -322,7 +322,7 @@ Feature: IP address, network and URL functions
       CREATE HTTP ENDPOINT visit_ingress ON edge PATH '/visits';
       CREATE HTTP ENDPOINT INGESTOR visit_ingestor
         FROM visit_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING secret_visit_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING secret_visit_codec
         TO secret_visits
           INHERIT ALL
           UNBRANCHED

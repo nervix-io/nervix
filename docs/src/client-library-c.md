@@ -91,7 +91,7 @@ bytes to recover that upload, and prepare the statement again for a different on
 ### Inspect Entity Labels
 
 `nx_outcome_entity_labels` returns an independently owned `nx_entity_labels` after `SHOW LABELS`.
-Release it with `nx_entity_labels_free`. The map's indexed key/value accessors borrow exact UTF-8
+Release it with `nx_entity_labels_free`. `nx_entity_labels_domain` returns false for a cluster user. The map's indexed key/value accessors borrow exact UTF-8
 bytes with explicit lengths, including empty values and embedded NUL bytes. The view discriminant
 separates committed revision from staged transaction preview. Policy revision and limits are
 captured with the same read. C++ uses the same handle with its usual RAII owner.
@@ -116,9 +116,9 @@ handle with a typed deleter.
 
 `SHOW RELAY <relay> MATERIALIZED STATE` returns its typed result with the command's outcome.
 `DESCRIBE LICENSE;` uses the same result for cluster scope. Its JSON has
-`"scope": "cluster_license"`, and its `summary`, `quotas` and `transitions` sections hold one
-summary row, one row per cluster quota, and one row per quota under a committed licensing
-transition.
+`"scope": "cluster_license"`, and its `summary`, `quotas`, `capabilities` and `transitions` sections
+hold one summary row, one row per cluster quota, one row per catalog capability, and one row per
+quota under a committed licensing transition.
 `nx_outcome_inspection` retains that result as an `nx_inspection` you own: it outlives the outcome
 and is released with `nx_inspection_free`. `nx_inspection_counts` reads the branches, rows and bytes
 of the complete selected cut, and returns false for a refused read, whose outcome is a failed

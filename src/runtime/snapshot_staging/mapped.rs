@@ -48,8 +48,9 @@ impl StagedArtifact {
             .change_context(SnapshotStagingError::Admission)?;
         let mapped_executor = executor.clone();
         executor
-            .run_storage(
+            .run_storage_with(
                 StorageClass::Filesystem,
+                nervix_execution::QueueAdmission::WaitForPlace,
                 memory,
                 move |memory, cancellation| {
                     cancellation
@@ -103,9 +104,12 @@ impl MappedArtifact {
         let view = self.clone();
         self.inner
             .executor
-            .run_cpu(CpuClass::Bulk, working, move |working, cancellation| {
-                inspect(&view.inner.bytes, working, cancellation)
-            })
+            .run_cpu_with(
+                CpuClass::Bulk,
+                nervix_execution::QueueAdmission::WaitForPlace,
+                working,
+                move |working, cancellation| inspect(&view.inner.bytes, working, cancellation),
+            )
             .await
             .change_context(SnapshotStagingError::Execution)
     }
@@ -135,13 +139,18 @@ impl MappedArtifact {
         let view = self.clone();
         self.inner
             .executor
-            .run_cpu(CpuClass::Bulk, working, move |working, cancellation| {
-                cancellation
-                    .check()
-                    .change_context(SnapshotStagingError::Cancelled)?;
-                let bytes = view.inner.bytes[range].to_vec();
-                Ok::<_, Report<SnapshotStagingError>>(ChargedBytes::from_owned(bytes, working))
-            })
+            .run_cpu_with(
+                CpuClass::Bulk,
+                nervix_execution::QueueAdmission::WaitForPlace,
+                working,
+                move |working, cancellation| {
+                    cancellation
+                        .check()
+                        .change_context(SnapshotStagingError::Cancelled)?;
+                    let bytes = view.inner.bytes[range].to_vec();
+                    Ok::<_, Report<SnapshotStagingError>>(ChargedBytes::from_owned(bytes, working))
+                },
+            )
             .await
             .change_context(SnapshotStagingError::Execution)?
     }

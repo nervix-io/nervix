@@ -60,20 +60,20 @@ use tracing::{debug, warn};
 use super::{
     command_result::CommandResult,
     describe_output::{
-        append_metrics_lines, dataflow_node_status_from_envelope, dataflow_node_status_to_envelope,
-        format_correlator_describe_output, format_deduplicator_describe_output,
-        format_emitter_describe_output, format_endpoint_describe_output,
-        format_ingestor_describe_output, format_ingestor_listing_line,
-        format_junction_describe_output, format_lookup_describe_output,
-        format_placement_runtime_node, format_placement_runtime_nodes,
-        format_placement_runtime_nodes_in_context, format_placement_unit_nodes,
-        format_reingestor_describe_output, format_relay_describe_output,
-        format_reorderer_describe_output, format_resource_description, format_resource_entry_lines,
-        format_resource_usage_lines, format_wasm_processor_describe_output,
-        format_window_processor_describe_output, ordered_placement_corridor, placement_claim_owner,
-        placement_groups_claimed_by_rule, placement_rule_coverage_status,
-        placement_rule_endpoint_nodes, placement_rule_runtime_nodes, placement_rule_scope,
-        runtime_ingestor_describe_to_envelope,
+        append_entity_label_lines, append_metrics_lines, dataflow_node_status_from_envelope,
+        dataflow_node_status_to_envelope, format_correlator_describe_output,
+        format_deduplicator_describe_output, format_emitter_describe_output,
+        format_endpoint_describe_output, format_ingestor_describe_output,
+        format_ingestor_listing_line, format_junction_describe_output,
+        format_lookup_describe_output, format_placement_runtime_node,
+        format_placement_runtime_nodes, format_placement_runtime_nodes_in_context,
+        format_placement_unit_nodes, format_reingestor_describe_output,
+        format_relay_describe_output, format_reorderer_describe_output,
+        format_resource_description, format_resource_entry_lines, format_resource_usage_lines,
+        format_wasm_processor_describe_output, format_window_processor_describe_output,
+        ordered_placement_corridor, placement_claim_owner, placement_groups_claimed_by_rule,
+        placement_rule_coverage_status, placement_rule_endpoint_nodes,
+        placement_rule_runtime_nodes, placement_rule_scope, runtime_ingestor_describe_to_envelope,
     },
     model_mutation::{command_error, command_failure, command_ok},
     placement_groups::PlacementGroupIndex,
@@ -432,8 +432,17 @@ impl SessionServiceImpl {
         domain: &DomainName,
         _describe: DescribeDomain,
     ) -> CommandResult {
-        let Some(domain_state) = self.inner.consensus.current_domain(domain).await else {
-            return command_error(format!("domain '{}' does not exist", domain.as_str()));
+        let (domain_state, labels) = match self.inner.consensus.domain_with_labels(domain) {
+            Ok(capture) => capture,
+            Err(error)
+                if matches!(
+                    error.current_context(),
+                    nervix_consensus::EntityLabelReadError::UnknownEntity { .. }
+                ) =>
+            {
+                return command_error(format!("domain '{}' does not exist", domain.as_str()));
+            }
+            Err(error) => return command_error(format!("cannot read domain labels: {error:#}")),
         };
         let mut lines = vec![
             format!("domain: {}", domain.as_str()),
@@ -518,7 +527,11 @@ impl SessionServiceImpl {
                 }
             }
         }
-        command_ok(lines.join("\n"))
+        append_entity_label_lines(&mut lines, labels.labels());
+        CommandResult {
+            entity_labels: Some(Box::new(labels)),
+            ..command_ok(lines.join("\n"))
+        }
     }
 
     pub(in crate::application) async fn show_placements(
@@ -1639,7 +1652,7 @@ impl SessionServiceImpl {
                 Some(domain) => match domain.nodes.get(&node) {
                     Some(node) => {
                         let epoch = node
-                            .partition_branch()
+                            .partition_parametrizer()
                             .and_then(|branch| domain.partition_epochs.get(branch));
                         (
                             Some(node.clone()),
@@ -2254,10 +2267,22 @@ impl SessionServiceImpl {
         domain: &DomainName,
         identifier: ResourceName,
     ) -> CommandResult {
-        let resources = self.inner.consensus.current_resources().await;
-        if !resources.is_declared(domain, &identifier) {
-            return command_error(format!("resource '{}' does not exist", identifier.as_str()));
-        }
+        let (resources, labels) = match self
+            .inner
+            .consensus
+            .resources_with_labels(domain, &identifier)
+        {
+            Ok(capture) => capture,
+            Err(error)
+                if matches!(
+                    error.current_context(),
+                    nervix_consensus::EntityLabelReadError::UnknownEntity { .. }
+                ) =>
+            {
+                return command_error(format!("resource '{}' does not exist", identifier.as_str()));
+            }
+            Err(error) => return command_error(format!("cannot read resource labels: {error:#}")),
+        };
         let latest = resources
             .uploads
             .completed_versions_of(domain, &identifier)
@@ -2285,9 +2310,16 @@ impl SessionServiceImpl {
             versions,
             usages,
         };
-        let mut result = command_ok(format_resource_description(&description));
-        result.resource = Some(Box::new(description));
-        result
+        let text = format!(
+            "{}\n{}",
+            format_resource_description(&description),
+            super::describe_output::entity_label_line(labels.labels()),
+        );
+        CommandResult {
+            resource: Some(Box::new(description)),
+            entity_labels: Some(Box::new(labels)),
+            ..command_ok(text)
+        }
     }
 
     /// The models of `domain` bound to `resource`, ordered by model, keeping only those bound to
@@ -2758,7 +2790,11 @@ mod tests {
             .await
             .expect("resource version should install");
         proposer
-            .create_resource_catalog(&resource_domain, &named("fraud_model"))
+            .create_resource_catalog(
+                &resource_domain,
+                &named("fraud_model"),
+                nervix_models::EntityLabels::default(),
+            )
             .await
             .expect("resource catalog should persist");
         let upload_v1 = ResourceUploadKey::new(
@@ -2835,6 +2871,7 @@ mod tests {
         proposer
             .put_domain(
                 DomainState {
+                    labels: nervix_models::EntityLabels::default(),
                     id: DomainName::parse("default").expect("valid domain"),
                     config: DomainConfig {
                         pace: DomainPace::Unpaced,
@@ -2930,7 +2967,16 @@ mod tests {
         let Some(description) = result.resource.as_deref() else {
             panic!("a description of every version carries the typed description");
         };
-        assert_eq!(result.message, format_resource_description(description));
+        assert_eq!(
+            result.message,
+            format!("{}\nlabels: {{}}", format_resource_description(description)),
+        );
+        assert!(
+            result
+                .entity_labels
+                .as_ref()
+                .is_some_and(|labels| labels.labels().is_empty())
+        );
         assert_eq!(description.latest_version, NonZeroU64::new(2));
         let versions = description
             .versions

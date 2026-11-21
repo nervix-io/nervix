@@ -163,13 +163,17 @@ impl TransactionCommitAdmissionPlan {
             }
             TransactionCommitStepKind::CreateResource {
                 resource,
+                labels,
                 already_existed,
             } => {
                 if *already_existed {
                     Ok(inputs)
                 } else {
-                    Ok(inputs.after_resource_catalog(resource.clone()))
+                    Ok(inputs.after_resource_catalog(resource.clone(), labels.clone()))
                 }
+            }
+            TransactionCommitStepKind::EditResourceLabels { resource, labels } => {
+                Ok(inputs.after_resource_catalog(resource.clone(), labels.clone()))
             }
             TransactionCommitStepKind::ResetWasmState { schedule, .. } => {
                 Ok(inputs.after_schedule(Some((**schedule).clone())))
@@ -269,10 +273,23 @@ impl FrozenTransactionCommitStep {
             (
                 TransactionCommitStepKind::CreateResource {
                     resource,
+                    labels,
                     already_existed: false,
                 },
-                Some(TransactionStepEffect::CreateResourceCatalog { inputs, identifier }),
-            ) => **inputs == expected_inputs && identifier == resource,
+                Some(TransactionStepEffect::CreateResourceCatalog {
+                    inputs,
+                    identifier,
+                    labels: applied,
+                }),
+            ) => **inputs == expected_inputs && identifier == resource && applied == labels,
+            (
+                TransactionCommitStepKind::EditResourceLabels { resource, labels },
+                Some(TransactionStepEffect::EditResourceLabels {
+                    inputs,
+                    identifier,
+                    labels: applied,
+                }),
+            ) => **inputs == expected_inputs && identifier == resource && applied == labels,
             (
                 TransactionCommitStepKind::ResetWasmState {
                     reset,
@@ -609,6 +626,7 @@ mod tests {
 
         let mut conflicting = plan.clone();
         conflicting.decision.steps[1].kind = TransactionCommitStepKind::CreateResource {
+            labels: nervix_models::EntityLabels::default(),
             resource: ResourceName::parse("different")
                 .assured("the test resource is an identifier-shaped literal"),
             already_existed: false,

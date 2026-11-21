@@ -116,11 +116,15 @@ Each admitted batch runs as follows on the branch task:
    successor is valid; then all successors advance together and become the state the next message
    reads. A message the model refuses, or whose outputs the declaration does not describe, fails
    alone and leaves the preceding state in place. A batch too large for one charge runs as several
-   admitted jobs in order; when a job fails as a whole, its messages and every later one fail
-   together and advance nothing, while the successors earlier jobs of the batch installed stay.
-4. Every route receives the accepted outputs, and the inferencer releases its acknowledgement
+   admitted jobs in order, each starting from the state the earlier jobs' accepted messages left.
+   When a job fails as a whole, its messages and every later one fail together and advance
+   nothing, while the messages earlier jobs accepted keep their outputs.
+4. The jobs' outputs are joined into the batch's outputs, and only then does the state the accepted
+   messages left become the branch's carried state. When the join fails, every accepted message
+   fails with it and the carried state stays where the preceding accepted message left it.
+5. Every route receives the accepted outputs, and the inferencer releases its acknowledgement
    share of a message once every route has taken or buffered its own.
-5. When at least one message advanced the state, the branch publishes the carried tensors as one
+6. When the batch advanced the carried state, the branch publishes the carried tensors as one
    new immutable generation, stamped with the next revision of its placement.
 
 A batch in which no message advanced the state publishes nothing. A message's working set includes
@@ -362,8 +366,9 @@ Nervix guarantees:
    the carried tensors.
 2. **Arrival order per branch.** Each branch applies its messages to its state in arrival order,
    one model call per message, and all successors advance together.
-3. **A failed message changes nothing.** A message the model refuses, or that fails alone, leaves
-   the state as the preceding message left it, and a filtered row never reaches the model.
+3. **A failed message changes nothing.** A message the model refuses, that fails alone, or that
+   fails because its batch's outputs cannot be joined leaves the state as the preceding accepted
+   message left it, and a filtered row never reaches the model.
 4. **Branch isolation.** Every branch has its own session, tensors, publications and snapshots; no
    branch reads another's state.
 5. **Bit-exact transport.** Every snapshot, replica copy, handoff transfer, archive section and
@@ -397,7 +402,7 @@ nodes with interleaved records of two branches, and through checks over the prod
 | Guarantee | Evidence |
 | --- | --- |
 | One implementation, arrival order and branch isolation | `inferencer_admission.feature` "Routes with different FLUSH policies receive the result of one model run"; `inferencer_state.feature` "Stateful inference carries one ordered sum per branch across independent routes" |
-| A failed message changes nothing | `inferencer_state.feature` "A model refusal preserves the preceding state and routes the original input" and "Unbranched inference skips filtered and failed inputs without advancing its constant initial state"; `inferencer_admission.feature` "A row the model refuses fails alone while the rows around it are delivered" |
+| A failed message changes nothing | `inferencer_state.feature` "A model refusal preserves the preceding state and routes the original input" and "Unbranched inference skips filtered and failed inputs without advancing its constant initial state"; `inferencer_admission.feature` "A row the model refuses fails alone while the rows around it are delivered"; the owner test `messages_that_fail_because_their_jobs_outputs_cannot_be_joined_leave_the_carried_state`, for a batch that runs as several jobs whose outputs cannot be joined |
 | Restart and graceful stop | `inferencer_state.feature` "Stateful inferencer snapshots preserve interleaved branch sums across a cluster restart"; `inferencer_state_lifecycle.feature` "Stateful inference resumes both interleaved branch sums after STOP and START"; `inferencer_state_handoff.feature` "A graceful cluster stop writes the final inference generation of both branches" |
 | No state across identities | `inferencer_state_lifecycle.feature` "Recreating an inferencer starts both branch sums from INITIAL", "TTL eviction starts returning inferencer branches from INITIAL" and "Capacity eviction cannot restore a previous inferencer lifetime after restart"; `inferencer_state_rebinding.feature` "Rebinding resets both branches while uploads, unchanged versions and refused models preserve them" |
 | Planned handoff | `inferencer_state_handoff.feature` "Relocating a stateful inferencer moves both branch sums exactly", "A drained owner hands both inferencer branch sums to its successor" and "An entity-paused alteration upstream of a stateful inferencer keeps both branch sums"; the Shuttle check `shuttle_inferencer_publication_keeps_captured_tensors_stable_through_handoff_freeze`; the owner tests `a_handoff_carries_an_inferencer_publication_newer_than_its_stored_snapshot` and `a_handoff_without_a_routed_inferencer_state_carries_the_stored_snapshot` |

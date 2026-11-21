@@ -1,6 +1,6 @@
 @branch_repartition
 Feature: Changing a running branch's partition count
-  ALTER BRANCH SET PARTITIONS on a running domain begins a new partition epoch without pausing the
+  ALTER PARAMETRIZER SET PARTITIONS on a running domain begins a new partition epoch without pausing the
   domain. New partitions start at once, and a key that lands in another partition under the new
   count keeps its state: the first record that reaches its new partition claims the key from the
   partition that holds it, which finishes the key's pending work and hands over every state
@@ -31,7 +31,7 @@ Feature: Changing a running branch's partition count
       CREATE WIRE JSON SCHEMA enriched_wire MODE STRICT ( tenant string, seq integer, tier string );
       CREATE WIRE JSON CODEC enriched_codec FROM WIRE SCHEMA enriched_wire TO SCHEMA enriched_event;
       CREATE SCHEMA tenant_key ( tenant STRING );
-      CREATE BRANCH by_tenant SCHEMA tenant_key TTL 5m PARTITIONS 4;
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_key TTL 5m PARTITIONS 4;
       CREATE RELAY profiles SCHEMA profile BRANCHED BY by_tenant
         WITH MATERIALIZED STATE LAST BY TIMESTAMP;
       CREATE RELAY events SCHEMA event BRANCHED BY by_tenant;
@@ -41,11 +41,11 @@ Feature: Changing a running branch's partition count
       CREATE HTTP ENDPOINT profile_ingress ON edge PATH '/profiles';
       CREATE HTTP ENDPOINT event_ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR profile_ingestor FROM profile_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING profile_codec TIMESTAMP NOW
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING profile_codec TIMESTAMP NOW
         TO profiles INHERIT ALL BRANCHED BY by_tenant SET tenant = message.tenant
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE HTTP ENDPOINT INGESTOR event_ingestor FROM event_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING event_codec
         TO events INHERIT ALL BRANCHED BY by_tenant SET tenant = message.tenant
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE DEDUPLICATOR distinct_events FROM events
@@ -136,9 +136,9 @@ Feature: Changing a running branch's partition count
       """
     When these Plexus commands are executed on the leader node
       """
-      ALTER BRANCH by_tenant SET PARTITIONS 8;
+      ALTER PARAMETRIZER by_tenant SET PARTITIONS 8;
       """
-    Then within "30s" DESCRIBE BRANCH "by_tenant" on node "<reader>" contains
+    Then within "30s" DESCRIBE PARAMETRIZER "by_tenant" on node "<reader>" contains
       """
       partitions: 8
       partition epoch: 2
@@ -213,8 +213,8 @@ Feature: Changing a running branch's partition count
       "tenant":"kappa" | "seq":2 | "tier":"bronze"
       """
     And the observed broker does not receive a payload within "2s"
-    And within "60s" DESCRIBE BRANCH "by_tenant" on node "<reader>" reports no partition transition
-    And within "30s" DESCRIBE BRANCH "by_tenant" on node "<reader>" contains
+    And within "60s" DESCRIBE PARAMETRIZER "by_tenant" on node "<reader>" reports no partition transition
+    And within "30s" DESCRIBE PARAMETRIZER "by_tenant" on node "<reader>" contains
       """
       partitions: 8
       partition epoch: 2
@@ -268,14 +268,14 @@ Feature: Changing a running branch's partition count
         last_value I32 OPTIONAL
       );
       CREATE SCHEMA tenant_key ( tenant STRING );
-      CREATE BRANCH by_tenant SCHEMA tenant_key TTL 5m PARTITIONS 4;
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_key TTL 5m PARTITIONS 4;
       CREATE RELAY metrics SCHEMA metric BRANCHED BY by_tenant;
       CREATE RELAY counted_metrics SCHEMA counted BRANCHED BY by_tenant;
       CREATE RELAY summaries SCHEMA summary BRANCHED BY by_tenant;
       CREATE VHOST edge repartition-state-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT metric_ingress ON edge PATH '/metrics';
       CREATE HTTP ENDPOINT INGESTOR metric_ingestor FROM metric_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING metric_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING metric_codec
         TO metrics INHERIT ALL BRANCHED BY by_tenant SET tenant = message.tenant
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE WINDOW PROCESSOR pair_window FROM metrics
@@ -322,7 +322,7 @@ Feature: Changing a running branch's partition count
     Then the relay subscription does not receive a payload within "3s"
     When these Plexus commands are executed on the leader node
       """
-      ALTER BRANCH by_tenant SET PARTITIONS 8;
+      ALTER PARAMETRIZER by_tenant SET PARTITIONS 8;
       """
     # The change may run in another node's session than the subscriptions, which replaces theirs.
     And these Plexus commands are executed on node "node-1"
@@ -357,7 +357,7 @@ Feature: Changing a running branch's partition count
       "tenant":"lambda" | "note":"even"
       "tenant":"kappa" | "note":"even"
       """
-    And within "60s" DESCRIBE BRANCH "by_tenant" on node "node-1" reports no partition transition
+    And within "60s" DESCRIBE PARAMETRIZER "by_tenant" on node "node-1" reports no partition transition
 
     Examples:
       | cluster_size |
@@ -378,13 +378,13 @@ Feature: Changing a running branch's partition count
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( tenant string, seq integer );
       CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE SCHEMA tenant_key ( tenant STRING );
-      CREATE BRANCH by_tenant SCHEMA tenant_key TTL 5m PARTITIONS 8;
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_key TTL 5m PARTITIONS 8;
       CREATE RELAY events SCHEMA event BRANCHED BY by_tenant;
       CREATE RELAY unique_events SCHEMA event BRANCHED BY by_tenant;
       CREATE VHOST edge repartition-shrink-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT event_ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR event_ingestor FROM event_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING event_codec
         TO events INHERIT ALL BRANCHED BY by_tenant SET tenant = message.tenant
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE DEDUPLICATOR distinct_events FROM events
@@ -426,9 +426,9 @@ Feature: Changing a running branch's partition count
       """
     When these Plexus commands are executed on the leader node
       """
-      ALTER BRANCH by_tenant SET PARTITIONS 4;
+      ALTER PARAMETRIZER by_tenant SET PARTITIONS 4;
       """
-    Then within "30s" DESCRIBE BRANCH "by_tenant" on node "node-1" contains
+    Then within "30s" DESCRIBE PARAMETRIZER "by_tenant" on node "node-1" contains
       """
       partitions: 4
       partition epoch: 2
@@ -485,7 +485,7 @@ Feature: Changing a running branch's partition count
       "tenant":"kappa" | "seq":2
       """
     And the relay subscription does not receive a payload within "2s"
-    And within "60s" DESCRIBE BRANCH "by_tenant" on node "node-1" reports no partition transition
+    And within "60s" DESCRIBE PARAMETRIZER "by_tenant" on node "node-1" reports no partition transition
     When these Plexus commands are executed through the client on the leader node
       """
       SHOW CLUSTER STATUS;
@@ -534,13 +534,13 @@ Feature: Changing a running branch's partition count
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( tenant string, seq integer );
       CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE SCHEMA tenant_key ( tenant STRING );
-      CREATE BRANCH by_tenant SCHEMA tenant_key TTL 5s PARTITIONS 4;
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_key TTL 5s PARTITIONS 4;
       CREATE RELAY events SCHEMA event BRANCHED BY by_tenant;
       CREATE RELAY unique_events SCHEMA event BRANCHED BY by_tenant;
       CREATE VHOST edge repartition-expiry-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT event_ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR event_ingestor FROM event_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING event_codec
         TO events INHERIT ALL BRANCHED BY by_tenant SET tenant = message.tenant
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE DEDUPLICATOR distinct_events FROM events
@@ -562,13 +562,13 @@ Feature: Changing a running branch's partition count
       """
     When these Plexus commands are executed on the leader node
       """
-      ALTER BRANCH by_tenant SET PARTITIONS 8;
+      ALTER PARAMETRIZER by_tenant SET PARTITIONS 8;
       """
-    Then within "30s" DESCRIBE BRANCH "by_tenant" on node "node-1" contains
+    Then within "30s" DESCRIBE PARAMETRIZER "by_tenant" on node "node-1" contains
       """
       previous partitions: 4
       """
-    And within "90s" DESCRIBE BRANCH "by_tenant" on node "node-1" reports no partition transition
+    And within "90s" DESCRIBE PARAMETRIZER "by_tenant" on node "node-1" reports no partition transition
     When http payload is posted to node "node-1" with host "repartition-expiry-{{test_id}}.example.com" path "/events"
       """
       {"tenant":"xi","seq":1}
@@ -597,13 +597,13 @@ Feature: Changing a running branch's partition count
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( tenant string, seq integer );
       CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE SCHEMA tenant_key ( tenant STRING );
-      CREATE BRANCH by_tenant SCHEMA tenant_key TTL 5m PARTITIONS 4;
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_key TTL 5m PARTITIONS 4;
       CREATE RELAY events SCHEMA event BRANCHED BY by_tenant;
       CREATE RELAY unique_events SCHEMA event BRANCHED BY by_tenant;
       CREATE VHOST edge repartition-twice-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT event_ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR event_ingestor FROM event_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING event_codec
         TO events INHERIT ALL BRANCHED BY by_tenant SET tenant = message.tenant
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE DEDUPLICATOR distinct_events FROM events
@@ -625,11 +625,11 @@ Feature: Changing a running branch's partition count
       """
     When these Plexus commands are executed on the leader node
       """
-      ALTER BRANCH by_tenant SET PARTITIONS 8;
+      ALTER PARAMETRIZER by_tenant SET PARTITIONS 8;
       """
     And these Plexus commands fail with "is still moving keys placed under its previous partition count"
       """
-      ALTER BRANCH by_tenant SET PARTITIONS 16;
+      ALTER PARAMETRIZER by_tenant SET PARTITIONS 16;
       """
     When these Plexus commands are executed on node "node-1"
       """
@@ -643,12 +643,12 @@ Feature: Changing a running branch's partition count
       """
       "tenant":"kappa" | "seq":2
       """
-    And within "60s" DESCRIBE BRANCH "by_tenant" on node "node-1" reports no partition transition
+    And within "60s" DESCRIBE PARAMETRIZER "by_tenant" on node "node-1" reports no partition transition
     When these Plexus commands are executed on the leader node
       """
-      ALTER BRANCH by_tenant SET PARTITIONS 16;
+      ALTER PARAMETRIZER by_tenant SET PARTITIONS 16;
       """
-    Then within "30s" DESCRIBE BRANCH "by_tenant" on node "node-1" contains
+    Then within "30s" DESCRIBE PARAMETRIZER "by_tenant" on node "node-1" contains
       """
       partitions: 16
       partition epoch: 3
@@ -669,13 +669,13 @@ Feature: Changing a running branch's partition count
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( tenant string, seq integer );
       CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE SCHEMA tenant_key ( tenant STRING );
-      CREATE BRANCH by_tenant SCHEMA tenant_key TTL 5m PARTITIONS 4;
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_key TTL 5m PARTITIONS 4;
       CREATE RELAY events SCHEMA event BRANCHED BY by_tenant;
       CREATE RELAY unique_events SCHEMA event BRANCHED BY by_tenant;
       CREATE VHOST edge repartition-recovery-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT event_ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR event_ingestor FROM event_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING event_codec
         TO events INHERIT ALL BRANCHED BY by_tenant SET tenant = message.tenant
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE DEDUPLICATOR distinct_events FROM events
@@ -716,7 +716,7 @@ Feature: Changing a running branch's partition count
     When physical time passes for "3s"
     And these Plexus commands are executed on node "{{leader}}"
       """
-      ALTER BRANCH by_tenant SET PARTITIONS 8;
+      ALTER PARAMETRIZER by_tenant SET PARTITIONS 8;
       """
     And these Plexus commands are executed through the client on node "{{leader}}"
       """
@@ -771,7 +771,7 @@ Feature: Changing a running branch's partition count
       "tenant":"kappa" | "seq":2
       """
     And the relay subscription does not receive a payload within "2s"
-    And within "90s" DESCRIBE BRANCH "by_tenant" on node "{{leader}}" reports no partition transition
+    And within "90s" DESCRIBE PARAMETRIZER "by_tenant" on node "{{leader}}" reports no partition transition
 
   @long_running
   Scenario Outline: A backup cut while keys are still moving restores every key into its partition under the new count
@@ -798,7 +798,7 @@ Feature: Changing a running branch's partition count
       CREATE WIRE JSON SCHEMA profile_wire MODE STRICT ( tenant string, tier string );
       CREATE WIRE JSON CODEC profile_codec FROM WIRE SCHEMA profile_wire TO SCHEMA profile;
       CREATE SCHEMA tenant_key ( tenant STRING );
-      CREATE BRANCH by_tenant SCHEMA tenant_key TTL 30m PARTITIONS 4;
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_key TTL 30m PARTITIONS 4;
       CREATE RELAY profiles SCHEMA profile BRANCHED BY by_tenant
         WITH MATERIALIZED STATE LAST BY TIMESTAMP;
       CREATE RELAY events SCHEMA event BRANCHED BY by_tenant;
@@ -810,15 +810,15 @@ Feature: Changing a running branch's partition count
       CREATE HTTP ENDPOINT metric_ingress ON edge PATH '/metrics';
       CREATE HTTP ENDPOINT profile_ingress ON edge PATH '/profiles';
       CREATE HTTP ENDPOINT INGESTOR profile_ingestor FROM profile_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING profile_codec TIMESTAMP NOW
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING profile_codec TIMESTAMP NOW
         TO profiles INHERIT ALL BRANCHED BY by_tenant SET tenant = message.tenant
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE HTTP ENDPOINT INGESTOR event_ingestor FROM event_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING event_codec
         TO events INHERIT ALL BRANCHED BY by_tenant SET tenant = message.tenant
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE HTTP ENDPOINT INGESTOR metric_ingestor FROM metric_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING metric_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING metric_codec
         TO metrics INHERIT ALL BRANCHED BY by_tenant SET tenant = message.tenant
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE DEDUPLICATOR distinct_events FROM events
@@ -894,9 +894,9 @@ Feature: Changing a running branch's partition count
       """
     And these Plexus commands are executed on the leader node
       """
-      ALTER BRANCH by_tenant SET PARTITIONS 8;
+      ALTER PARAMETRIZER by_tenant SET PARTITIONS 8;
       """
-    Then within "30s" DESCRIBE BRANCH "by_tenant" on node "node-1" contains
+    Then within "30s" DESCRIBE PARAMETRIZER "by_tenant" on node "node-1" contains
       """
       partitions: 8
       previous partitions: 4
@@ -911,7 +911,7 @@ Feature: Changing a running branch's partition count
     Then the CLI restore succeeded, restoring domain "{{domain}}" with 0 resource versions and 26 models
     And the CLI restore reports domain "{{domain}}" as "RUNNING" at start version 1
     And the CLI restore reports no warnings
-    And within "30s" DESCRIBE BRANCH "by_tenant" on node "{{leader}}" contains
+    And within "30s" DESCRIBE PARAMETRIZER "by_tenant" on node "{{leader}}" contains
       """
       partitions: 8
       partition epoch: 1
@@ -996,14 +996,14 @@ Feature: Changing a running branch's partition count
       CREATE WIRE JSON SCHEMA features_wire MODE STRICT ( tenant string, vector array );
       CREATE WIRE JSON CODEC features_codec FROM WIRE SCHEMA features_wire TO SCHEMA features;
       CREATE SCHEMA tenant_branch ( tenant STRING );
-      CREATE BRANCH by_tenant SCHEMA tenant_branch TTL 5m PARTITIONS 4;
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_branch TTL 5m PARTITIONS 4;
       CREATE RELAY features SCHEMA features BRANCHED BY by_tenant;
       CREATE RELAY scored SCHEMA scored BRANCHED BY by_tenant;
       CREATE VHOST edge repartition-infer-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT ingress ON edge PATH '/features';
       CREATE HTTP ENDPOINT INGESTOR feature_ingestor
         FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING features_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING features_codec
         TO features INHERIT ALL BRANCHED BY by_tenant SET tenant = message.tenant
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE INFERENCER running FROM features
@@ -1044,9 +1044,9 @@ Feature: Changing a running branch's partition count
       """
     When these Plexus commands are executed on the leader node
       """
-      ALTER BRANCH by_tenant SET PARTITIONS 8;
+      ALTER PARAMETRIZER by_tenant SET PARTITIONS 8;
       """
-    Then within "30s" DESCRIBE BRANCH "by_tenant" on node "node-1" contains
+    Then within "30s" DESCRIBE PARAMETRIZER "by_tenant" on node "node-1" contains
       """
       partitions: 8
       partition epoch: 2
@@ -1066,7 +1066,7 @@ Feature: Changing a running branch's partition count
       key={"tenant":"beta"} | "score":[66.0]
       key={"tenant":"eta"} | "score":[6600.0]
       """
-    And within "60s" DESCRIBE BRANCH "by_tenant" on node "node-1" reports no partition transition
+    And within "60s" DESCRIBE PARAMETRIZER "by_tenant" on node "node-1" reports no partition transition
     When http payload is posted to node "node-1" with host "repartition-infer-{{test_id}}.example.com" path "/features"
       """
       {"tenant":"beta","vector":[4.0,40.0]}
@@ -1105,14 +1105,14 @@ Feature: Changing a running branch's partition count
       CREATE WIRE JSON SCHEMA features_wire MODE STRICT ( tenant string, vector array );
       CREATE WIRE JSON CODEC features_codec FROM WIRE SCHEMA features_wire TO SCHEMA features;
       CREATE SCHEMA tenant_branch ( tenant STRING );
-      CREATE BRANCH by_tenant SCHEMA tenant_branch TTL 30m PARTITIONS <from>;
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_branch TTL 30m PARTITIONS <from>;
       CREATE RELAY features SCHEMA features BRANCHED BY by_tenant;
       CREATE RELAY scored SCHEMA scored BRANCHED BY by_tenant;
       CREATE VHOST edge repartition-infer-backup-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT ingress ON edge PATH '/features';
       CREATE HTTP ENDPOINT INGESTOR feature_ingestor
         FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING features_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING features_codec
         TO features INHERIT ALL BRANCHED BY by_tenant SET tenant = message.tenant
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE INFERENCER running FROM features
@@ -1141,9 +1141,9 @@ Feature: Changing a running branch's partition count
     When these Plexus commands are executed on the leader node
       """
       DELETE SUBSCRIPTION scores_before;
-      ALTER BRANCH by_tenant SET PARTITIONS <to>;
+      ALTER PARAMETRIZER by_tenant SET PARTITIONS <to>;
       """
-    Then within "30s" DESCRIBE BRANCH "by_tenant" on node "node-1" contains
+    Then within "30s" DESCRIBE PARAMETRIZER "by_tenant" on node "node-1" contains
       """
       partitions: <to>
       previous partitions: <from>
@@ -1160,7 +1160,7 @@ Feature: Changing a running branch's partition count
     Then the CLI restore succeeded, restoring domain "{{domain}}" with 1 resource versions and 12 models
     And the CLI restore reports domain "{{domain}}" as "RUNNING" at start version 1
     And the CLI restore reports no warnings
-    And within "30s" DESCRIBE BRANCH "by_tenant" on node "{{leader}}" contains
+    And within "30s" DESCRIBE PARAMETRIZER "by_tenant" on node "{{leader}}" contains
       """
       partitions: <to>
       partition epoch: 1

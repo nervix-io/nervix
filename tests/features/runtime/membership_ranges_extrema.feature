@@ -49,7 +49,7 @@ Feature: Membership, ranges, null-safe equality and scalar extrema
       CREATE HTTP ENDPOINT shipment_ingress ON edge PATH '/shipments';
       CREATE HTTP ENDPOINT INGESTOR shipment_ingestor
         FROM shipment_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING shipment_batch_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING shipment_batch_codec
         TO shipments
           INHERIT ALL
           UNBRANCHED
@@ -132,7 +132,7 @@ Feature: Membership, ranges, null-safe equality and scalar extrema
       CREATE HTTP ENDPOINT parcel_ingress ON edge PATH '/parcels';
       CREATE HTTP ENDPOINT INGESTOR parcel_ingestor
         FROM parcel_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING parcel_batch_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING parcel_batch_codec
         FILTER WHERE input.id NOT IN ('heartbeat', 'ping')
           AND input.id NOT BETWEEN 'probe-000' AND 'probe-999'
         TO parcels
@@ -228,7 +228,7 @@ Feature: Membership, ranges, null-safe equality and scalar extrema
       CREATE HTTP ENDPOINT meter_ingress ON edge PATH '/meters';
       CREATE HTTP ENDPOINT INGESTOR meter_ingestor
         FROM meter_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING meter_batch_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING meter_batch_codec
         TO meters
           INHERIT ALL
           UNBRANCHED
@@ -344,7 +344,7 @@ Feature: Membership, ranges, null-safe equality and scalar extrema
       CREATE HTTP ENDPOINT order_ingress ON edge PATH '/orders';
       CREATE HTTP ENDPOINT INGESTOR order_ingestor
         FROM order_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING order_line_batch_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING order_line_batch_codec
         TO order_lines
           INHERIT ALL
           UNBRANCHED
@@ -419,7 +419,7 @@ Feature: Membership, ranges, null-safe equality and scalar extrema
       CREATE HTTP ENDPOINT ingress ON edge PATH '/values';
       CREATE HTTP ENDPOINT INGESTOR banded_value_ingestor
         FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING banded_value_batch_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING banded_value_batch_codec
         TO banded_values
           INHERIT ALL
           UNBRANCHED

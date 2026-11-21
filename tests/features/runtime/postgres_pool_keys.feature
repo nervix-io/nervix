@@ -21,7 +21,7 @@ Feature: Postgres connection pool keys
       CREATE HTTP ENDPOINT notifications_endpoint ON edge PATH '/notifications';
       CREATE HTTP ENDPOINT INGESTOR http_notifications
         FROM notifications_endpoint MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING notification_codec
         TO notifications INHERIT ALL UNBRANCHED
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE POSTGRES CLIENT db POOL SIZE MIN 1 MAX 1 CONFIG {
@@ -77,7 +77,7 @@ Feature: Postgres connection pool keys
       CREATE HTTP ENDPOINT notifications_endpoint ON edge PATH '/notifications';
       CREATE HTTP ENDPOINT INGESTOR http_notifications
         FROM notifications_endpoint MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING notification_codec
         TO notifications INHERIT ALL UNBRANCHED
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE POSTGRES CLIENT db POOL SIZE MIN 1 MAX 1 CONFIG {
@@ -140,7 +140,7 @@ Feature: Postgres connection pool keys
       CREATE HTTP ENDPOINT notifications_endpoint ON edge PATH '/notifications';
       CREATE HTTP ENDPOINT INGESTOR http_notifications
         FROM notifications_endpoint MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING notification_codec
         TO notifications INHERIT ALL UNBRANCHED
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE POSTGRES CLIENT db POOL SIZE MIN 1 MAX 1 CONFIG {
@@ -207,7 +207,7 @@ Feature: Postgres connection pool keys
       CREATE HTTP ENDPOINT notifications_endpoint ON edge PATH '/notifications';
       CREATE HTTP ENDPOINT INGESTOR http_notifications
         FROM notifications_endpoint MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING notification_codec
         TO notifications INHERIT ALL UNBRANCHED
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE POSTGRES CLIENT db POOL SIZE MIN 1 MAX 1 CONFIG {

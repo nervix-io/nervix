@@ -20,13 +20,13 @@ Feature: Emitter metrics
         FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
-        CREATE IF NOT EXISTS BRANCH by_emitter_metrics_source SCHEMA user_id_branch TTL 5m;
+        CREATE IF NOT EXISTS PARAMETRIZER by_emitter_metrics_source SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_emitter_metrics_source;
         CREATE VHOST edge http-{{test_id}}.example.com;
         CREATE HTTP ENDPOINT emitter_metrics_ingress ON edge PATH '/emitter-metrics';
         CREATE HTTP ENDPOINT INGESTOR emitter_metrics_ingestor
         FROM emitter_metrics_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING notification_codec
         TO notifications
         INHERIT ALL
         BRANCHED BY by_emitter_metrics_source
@@ -537,7 +537,7 @@ Feature: Emitter metrics
       CREATE VHOST edge retry-replace-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR events_in FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING event_codec
         TIMESTAMP NOW TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE HTTP CLIENT api CONFIG {

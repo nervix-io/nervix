@@ -18,13 +18,13 @@ Feature: Partitioned processor recovery and handoff
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT (tenant string, seq integer, amount integer);
       CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE SCHEMA tenant_key (tenant STRING);
-      CREATE BRANCH tenants SCHEMA tenant_key TTL 5m PARTITIONS 2;
+      CREATE PARAMETRIZER tenants SCHEMA tenant_key TTL 5m PARTITIONS 2;
       CREATE RELAY events SCHEMA event BRANCHED BY tenants;
       CREATE RELAY unique_events SCHEMA event BRANCHED BY tenants;
       CREATE VHOST edge partition-recovery-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR event_ingestor FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING event_codec
         TO events INHERIT ALL BRANCHED BY tenants SET tenant = message.tenant
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE DEDUPLICATOR distinct_events FROM events

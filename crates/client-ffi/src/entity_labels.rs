@@ -62,7 +62,6 @@ macro_rules! text_getter {
         }
     };
 }
-text_getter!(nx_entity_labels_domain, domain);
 text_getter!(nx_entity_labels_entity_kind, entity_kind);
 text_getter!(nx_entity_labels_entity_name, entity_name);
 
@@ -100,24 +99,31 @@ macro_rules! optional_count {
 optional_count!(nx_entity_labels_revision, revision);
 optional_count!(nx_entity_labels_position, position);
 
-/// # Safety
-/// The handle is live and non-null output pointers are writable. Bytes borrow the handle.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn nx_entity_labels_transaction_id(
-    labels: *const EntityLabelsInspection,
-    data: *mut *const u8,
-    len: *mut usize,
-) -> bool {
-    // SAFETY: the caller guarantees the handle's lifetime.
-    let Some(value) = (unsafe { abi::accessor(labels) }).transaction_id() else {
-        return false;
+macro_rules! optional_text {
+    ($name:ident, $getter:ident) => {
+        /// # Safety
+        /// The handle is live and non-null output pointers are writable. Bytes borrow the handle.
+        #[unsafe(no_mangle)]
+        pub unsafe extern "C" fn $name(
+            labels: *const EntityLabelsInspection,
+            data: *mut *const u8,
+            len: *mut usize,
+        ) -> bool {
+            // SAFETY: the caller guarantees the handle's lifetime.
+            let Some(value) = (unsafe { abi::accessor(labels) }).$getter() else {
+                return false;
+            };
+            // SAFETY: the caller guarantees writable non-null output pointers.
+            unsafe {
+                abi::write_bytes(data, len, value.as_bytes());
+            }
+            true
+        }
     };
-    // SAFETY: the caller guarantees writable non-null output pointers.
-    unsafe {
-        abi::write_bytes(data, len, value.as_bytes());
-    }
-    true
 }
+
+optional_text!(nx_entity_labels_domain, domain);
+optional_text!(nx_entity_labels_transaction_id, transaction_id);
 
 /// # Safety
 /// The handle is live and non-null output pointers are writable. Bytes borrow the handle.

@@ -37,6 +37,22 @@ fn policy() -> EntityLabelPolicy {
 }
 
 pub(crate) fn inspection(staged: bool, revision: u64) -> EntityLabelsInspection {
+    owner_inspection(
+        EntityLabelOwner::Model(DomainNodeRef::node_in(
+            name("sales"),
+            ModelKind::WireJsonSchema,
+            name::<nervix_models::WireSchemaName>("payload"),
+        )),
+        staged,
+        revision,
+    )
+}
+
+pub(crate) fn owner_inspection(
+    owner: EntityLabelOwner,
+    staged: bool,
+    revision: u64,
+) -> EntityLabelsInspection {
     let labels =
         serde_json::from_str(r#"{"empty":"","owner":" Δ ","team/path":"Mixed Case / east"}"#)
             .assured("the exact fixture keys are valid and distinct");
@@ -51,17 +67,8 @@ pub(crate) fn inspection(staged: bool, revision: u64) -> EntityLabelsInspection 
     } else {
         EntityLabelView::Committed { revision }
     };
-    EntityLabelsInspection::new(
-        DomainNodeRef::node_in(
-            name("sales"),
-            ModelKind::WireJsonSchema,
-            name::<nervix_models::WireSchemaName>("payload"),
-        ),
-        labels,
-        view,
-        policy(),
-    )
-    .assured("the complete map fits its captured policy")
+    EntityLabelsInspection::new(owner, labels, view, policy())
+        .assured("the complete map fits its captured policy")
 }
 
 fn round_trip(value: EntityLabelsInspection, message: String) -> EntityLabelsInspection {
@@ -85,20 +92,36 @@ fn round_trip(value: EntityLabelsInspection, message: String) -> EntityLabelsIns
 
 #[test]
 fn exact_empty_and_unicode_values_keep_both_views_and_every_revision_bit() {
-    for staged in [false, true] {
-        for revision in [0, u64::MAX] {
-            let expected = inspection(staged, revision);
-            assert_eq!(
-                round_trip(expected.clone(), "metadata in TEXT".to_owned()),
-                expected
-            );
-            let json = serde_json::to_string(&expected).assured("the typed view is serializable");
-            assert_eq!(round_trip(expected.clone(), json.clone()), expected);
-            assert_eq!(
-                serde_json::from_str::<EntityLabelsInspection>(&json)
-                    .assured("the same captured complete value decodes"),
-                expected
-            );
+    let owners = [
+        inspection(false, 0).entity().clone(),
+        EntityLabelOwner::Domain {
+            name: name("sales"),
+        },
+        EntityLabelOwner::Resource(ResourceCatalogKey::new(&name("sales"), &name("bundle"))),
+        EntityLabelOwner::User {
+            name: name("operator"),
+        },
+    ];
+    for owner in owners {
+        for staged in [false, true] {
+            if staged && !owner.supports_staged_view() {
+                continue;
+            }
+            for revision in [0, u64::MAX] {
+                let expected = owner_inspection(owner.clone(), staged, revision);
+                assert_eq!(
+                    round_trip(expected.clone(), "metadata in TEXT".to_owned()),
+                    expected
+                );
+                let json =
+                    serde_json::to_string(&expected).assured("the typed view is serializable");
+                assert_eq!(round_trip(expected.clone(), json.clone()), expected);
+                assert_eq!(
+                    serde_json::from_str::<EntityLabelsInspection>(&json)
+                        .assured("the same captured complete value decodes"),
+                    expected
+                );
+            }
         }
     }
 }
@@ -111,6 +134,24 @@ fn serde_views_validate_the_complete_map_against_their_recorded_policy() {
     assert!(serde_json::from_value::<EntityLabelsInspection>(json).is_err());
 }
 
+#[test]
+fn administrative_owners_refuse_a_staged_preview() {
+    let mut json = serde_json::to_value(inspection(true, 0)).assured("the staged view encodes");
+    for owner in [
+        EntityLabelOwner::Domain {
+            name: name("sales"),
+        },
+        EntityLabelOwner::User {
+            name: name("operator"),
+        },
+    ] {
+        json["entity"] = serde_json::to_value(owner).assured("the owner encodes");
+        let error = serde_json::from_value::<EntityLabelsInspection>(json.clone())
+            .expect_err("administrative labels are committed only");
+        assert!(error.to_string().contains("no staged transaction view"));
+    }
+}
+
 fn raw(entries: &[(&str, &str)], limits: EntityLabelLimits) -> Vec<u8> {
     let mut builder = FlatBufferBuilder::new();
     let domain = builder.create_string("sales");
@@ -120,6 +161,13 @@ fn raw(entries: &[(&str, &str)], limits: EntityLabelLimits) -> Vec<u8> {
         &wire::NodeRefArgs {
             kind: Some(wire::ModelKind::WireJsonSchema),
             name: Some(name),
+        },
+    );
+    let owner = wire::ModelLabelOwner::create(
+        &mut builder,
+        &wire::ModelLabelOwnerArgs {
+            domain: Some(domain),
+            model: Some(entity),
         },
     );
     let mut labels = Vec::new();
@@ -158,8 +206,8 @@ fn raw(entries: &[(&str, &str)], limits: EntityLabelLimits) -> Vec<u8> {
     let root = wire::EntityLabelsInspection::create(
         &mut builder,
         &wire::EntityLabelsInspectionArgs {
-            domain: Some(domain),
-            entity: Some(entity),
+            owner_type: wire::EntityLabelOwner::ModelLabelOwner,
+            owner: Some(owner.as_union_value()),
             labels: Some(labels),
             policy: Some(policy),
             view_type: wire::EntityLabelView::CommittedEntityLabels,
@@ -205,22 +253,24 @@ fn current_wire_maps_refuse_invalid_duplicate_unordered_and_over_limit_entries()
 #[test]
 fn bolero_entity_label_views_preserve_the_complete_map_identity_revision_and_policy() {
     bolero::check!().with_type::<[u8; 128]>().for_each(|input| {
-        let labels = nervix_arbitrary::Arbitrary::new(input, nervix_arbitrary::Domain::Vocabulary)
-            .entity_labels();
+        let mut arbitrary =
+            nervix_arbitrary::Arbitrary::new(input, nervix_arbitrary::Domain::Vocabulary);
+        let labels = arbitrary.entity_labels();
+        let target = arbitrary.entity_label_target();
+        let domain = name("sales");
+        let owner = target
+            .resolve(Some(&domain))
+            .assured("every relative label target has a selected domain");
         let revision = u64::from_le_bytes(
             input[..8]
                 .try_into()
                 .assured("the bounded input holds eight revision bytes"),
         );
-        let mut view = inspection(input[0] & 1 == 1, revision);
+        let staged = input[0] & 1 == 1 && owner.supports_staged_view();
+        let base = inspection(staged, revision);
         // Reconstruct through the production constructor; no mutable field can break the bound.
-        view = EntityLabelsInspection::new(
-            view.entity().clone(),
-            labels,
-            view.view().clone(),
-            view.policy(),
-        )
-        .assured("the bounded map fits the declared captured policy");
+        let view = EntityLabelsInspection::new(owner, labels, base.view().clone(), base.policy())
+            .assured("the bounded map fits the declared captured policy");
         assert_eq!(round_trip(view.clone(), "metadata".to_owned()), view);
     });
 }

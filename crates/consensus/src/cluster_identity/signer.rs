@@ -91,10 +91,14 @@ impl ClusterSigner {
         reservation: Reservation,
     ) -> Result<String, Report<ClusterIdentityError>> {
         let inner = self.inner.clone();
+        // A document is signed for a licensing exchange the cluster carries on by itself as well
+        // as for an operator's request, so a full queue holds the signature back rather than
+        // refusing it.
         self.inner
             .executor
-            .run_cpu(
+            .run_cpu_with(
                 CpuClass::Control,
+                nervix_execution::QueueAdmission::WaitForPlace,
                 reservation,
                 move |_reservation, cancellation| -> Result<String, Report<ClusterIdentityError>> {
                     cancellation
@@ -168,8 +172,9 @@ impl Proposer {
             .change_context(ConsensusError::ClusterIdentity)?;
         let signer_executor = executor.clone();
         let signer = executor
-            .run_cpu(
+            .run_cpu_with(
                 CpuClass::Control,
+                nervix_execution::QueueAdmission::WaitForPlace,
                 reservation,
                 move |_reservation,
                       cancellation|

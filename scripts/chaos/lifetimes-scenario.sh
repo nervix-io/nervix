@@ -294,18 +294,18 @@ lifetimes_emitter_status_is() {
     grep -Fxq "status: ${status}" "${output}.txt"
 }
 
-# Sums nervix_branch_evictions_total for BRANCH and REASON over every node's metrics. A node whose
-# metrics cannot be read counts nothing.
+# Sums nervix_branch_evictions_total for PARAMETRIZER and REASON over every node's metrics. A node
+# whose metrics cannot be read counts nothing.
 lifetimes_evictions() {
-    local branch="$1"
+    local parametrizer="$1"
     local reason="$2"
     local total=0 host value metrics
     metrics="$(mktemp "${artifact_dir}/.metrics.XXXXXX")"
     for host in "${node_hosts[@]}"; do
         value=0
         if node_metrics "${host}" "${metrics}"; then
-            value="$(awk -v branch="${branch}" -v reason="${reason}" '
-                /^nervix_branch_evictions_total\{/ && index($0, "branch=\"" branch "\"") && index($0, "reason=\"" reason "\"") {
+            value="$(awk -v parametrizer="${parametrizer}" -v reason="${reason}" '
+                /^nervix_branch_evictions_total\{/ && index($0, "parametrizer=\"" parametrizer "\"") && index($0, "reason=\"" reason "\"") {
                     sum += $NF
                 }
                 END { printf "%d\n", sum }' "${metrics}")"

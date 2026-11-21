@@ -65,14 +65,14 @@ fn layout(
         .ok_or(StateInspectionRejection::NotReady)?;
     let (branch, moving_partitions) = match &inferencer.node.resolved_branching {
         Some(ResolvedBranching::Branched {
-            branch,
+            parametrizer,
             partitions,
             schema,
             ..
         }) => (
             schema.fields.as_slice(),
             schedule
-                .partition_transition_of(branch)
+                .partition_transition_of(parametrizer)
                 .map(|_| *partitions),
         ),
         // An inherited branch whose external topology is not yet committed has its key fields

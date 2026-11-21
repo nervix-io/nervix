@@ -16,11 +16,11 @@ Feature: Generator node
         tenant STRING
       );
 
-      CREATE BRANCH input_branch
+      CREATE PARAMETRIZER input_branch
         SCHEMA tenant_branch
         TTL 5m;
 
-      CREATE BRANCH output_branch
+      CREATE PARAMETRIZER output_branch
         SCHEMA tenant_branch
         TTL 5m;
 
@@ -82,7 +82,7 @@ Feature: Generator node
         tenant STRING
       );
 
-      CREATE BRANCH tenant_branch
+      CREATE PARAMETRIZER tenant_branch
         SCHEMA tenant_branch_schema
         TTL 5m;
 
@@ -103,7 +103,7 @@ Feature: Generator node
 
       CREATE HTTP ENDPOINT INGESTOR left_ingestor
         FROM left_endpoint MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING notification_codec
         TIMESTAMP NOW
         TO left_notifications
           INHERIT ALL
@@ -162,14 +162,14 @@ Feature: Generator node
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (tenant string, amount integer);
       CREATE WIRE JSON CODEC notification_codec FROM WIRE SCHEMA notification_wire TO SCHEMA notification;
       CREATE SCHEMA tenant_branch_schema (tenant STRING);
-      CREATE BRANCH tenant_branch SCHEMA tenant_branch_schema TTL 5m MAX INSTANCES 1 EVICT LRU;
+      CREATE PARAMETRIZER tenant_branch SCHEMA tenant_branch_schema TTL 5m MAX INSTANCES 1 EVICT LRU;
       CREATE RELAY notifications SCHEMA notification BRANCHED BY tenant_branch
         WITH MATERIALIZED STATE LAST BY TIMESTAMP;
       CREATE RELAY generated_notifications SCHEMA generated_notification BRANCHED BY tenant_branch;
       CREATE VHOST edge generator-lru-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR notification_ingestor FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec TIMESTAMP NOW
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING notification_codec TIMESTAMP NOW
         TO notifications INHERIT ALL BRANCHED BY tenant_branch
           SET tenant = message.tenant FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
@@ -251,7 +251,7 @@ Feature: Generator node
         tenant STRING
       );
 
-      CREATE BRANCH generator_tenant_branch
+      CREATE PARAMETRIZER generator_tenant_branch
         SCHEMA generator_tenant_branch_schema
         TTL 5m;
 
@@ -272,7 +272,7 @@ Feature: Generator node
 
       CREATE HTTP ENDPOINT INGESTOR generator_metric_ingestor
         FROM generator_metric_endpoint MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING generator_metric_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING generator_metric_codec
         TIMESTAMP NOW
         TO generator_metrics
           INHERIT ALL
@@ -353,7 +353,7 @@ Feature: Generator node
 
       CREATE HTTP ENDPOINT INGESTOR http_notifications
         FROM http_notifications_endpoint MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING notification_codec
         TIMESTAMP NOW
         TO notifications
           INHERIT ALL
@@ -428,7 +428,7 @@ Feature: Generator node
 
       CREATE HTTP ENDPOINT INGESTOR http_notifications
         FROM http_notifications_endpoint MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING notification_codec
         TIMESTAMP NOW
         TO notifications
           INHERIT ALL
@@ -501,7 +501,7 @@ Feature: Generator node
         tenant STRING
       );
 
-      CREATE BRANCH tenant_branch
+      CREATE PARAMETRIZER tenant_branch
         SCHEMA tenant_branch_schema
         TTL 2d;
 
@@ -520,7 +520,7 @@ Feature: Generator node
 
       CREATE HTTP ENDPOINT INGESTOR http_notifications
         FROM http_notifications_endpoint MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING notification_codec
         TIMESTAMP NOW
         TO notifications
           INHERIT ALL
@@ -606,7 +606,7 @@ Feature: Generator node
       CREATE HTTP ENDPOINT generator_source_endpoint ON edge PATH '/values';
       CREATE HTTP ENDPOINT INGESTOR generator_ingestor
         FROM generator_source_endpoint MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING generator_source_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING generator_source_codec
         TIMESTAMP NOW
         TO generator_source_values
           INHERIT ALL
@@ -687,7 +687,7 @@ Feature: Generator node
       CREATE HTTP ENDPOINT generator_error_endpoint ON edge PATH '/values';
       CREATE HTTP ENDPOINT INGESTOR generator_error_ingestor
         FROM generator_error_endpoint MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING generator_error_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING generator_error_codec
         TIMESTAMP NOW
         TO generator_error_sources
           INHERIT ALL

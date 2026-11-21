@@ -1554,11 +1554,11 @@ async fn a_routed_detached_batch_needs_no_attached_consumer() {
 #[rstest::rstest]
 #[case::whole(RelayPartitioning::Whole, false)]
 #[case::partition(
-    RelayPartitioning::of_partitions(nervix_models::ResolvedBranchPartitions::Direct(nonzero!(2u16))),
+    RelayPartitioning::of_partitions(nervix_models::ResolvedParametrizerPartitions::Direct(nonzero!(2u16))),
     false
 )]
 #[case::partition_common(
-    RelayPartitioning::of_partitions(nervix_models::ResolvedBranchPartitions::Direct(nonzero!(2u16))),
+    RelayPartitioning::of_partitions(nervix_models::ResolvedParametrizerPartitions::Direct(nonzero!(2u16))),
     true
 )]
 #[nervix_primitives::test]

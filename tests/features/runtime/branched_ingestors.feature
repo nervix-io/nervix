@@ -8,7 +8,7 @@ Feature: Ingestor branch consistency
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these Plexus commands fail with "must use its exact declared branch"
+    When these Plexus commands fail with "must use its exact parametrizer"
       """
       CREATE SCHEMA notification (
         tenant STRING,
@@ -33,7 +33,7 @@ Feature: Ingestor branch consistency
         FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
 
-      CREATE IF NOT EXISTS BRANCH by_mqtt_notifications SCHEMA tenant_user_branch TTL 5m;
+      CREATE IF NOT EXISTS PARAMETRIZER by_mqtt_notifications SCHEMA tenant_user_branch TTL 5m;
 
       CREATE RELAY notifications SCHEMA notification BRANCHED BY by_mqtt_notifications;
 
@@ -60,7 +60,7 @@ Feature: Ingestor branch consistency
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
 
-      CREATE IF NOT EXISTS BRANCH by_redis_notifications SCHEMA user_branch TTL 5m; CREATE REDIS PUBSUB INGESTOR redis_notifications
+      CREATE IF NOT EXISTS PARAMETRIZER by_redis_notifications SCHEMA user_branch TTL 5m; CREATE REDIS PUBSUB INGESTOR redis_notifications
         FROM redis_main CHANNEL 'notifications_{{test_id}}' MODE NO ACK
         ON QUIESCE DROP DECODE USING notification_codec
         TO notifications
@@ -86,7 +86,7 @@ Feature: Ingestor branch consistency
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these Plexus commands fail with "must use its exact declared branch"
+    When these Plexus commands fail with "must use its exact parametrizer"
       """
       CREATE SCHEMA notification (
         tenant STRING,
@@ -107,7 +107,7 @@ Feature: Ingestor branch consistency
         FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
 
-      CREATE IF NOT EXISTS BRANCH by_mqtt_notifications_secondary SCHEMA tenant_user_branch TTL 5m;
+      CREATE IF NOT EXISTS PARAMETRIZER by_mqtt_notifications_secondary SCHEMA tenant_user_branch TTL 5m;
 
       CREATE RELAY notifications SCHEMA notification BRANCHED BY by_mqtt_notifications_secondary;
 
@@ -123,7 +123,7 @@ Feature: Ingestor branch consistency
           'client_id' = 'nervix-cucumber-branched-mqtt-b-{{test_id}}'
         };
 
-      CREATE IF NOT EXISTS BRANCH by_mqtt_notifications SCHEMA tenant_user_branch TTL 5m; CREATE MQTT TOPIC INGESTOR mqtt_notifications
+      CREATE IF NOT EXISTS PARAMETRIZER by_mqtt_notifications SCHEMA tenant_user_branch TTL 5m; CREATE MQTT TOPIC INGESTOR mqtt_notifications
         FROM mqtt_main TOPIC 'notifications_a_{{test_id}}' SESSION CLEAN QOS 0 MODE NO ACK
         ON QUIESCE DROP DECODE USING notification_codec
         TO notifications

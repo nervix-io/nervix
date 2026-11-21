@@ -14,13 +14,13 @@ Feature: Snapshot receive decoding under overlapping bulk memory
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( tenant string, value integer, source string );
       CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE SCHEMA tenant_key ( tenant STRING );
-      CREATE BRANCH by_tenant SCHEMA tenant_key TTL 30m;
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_key TTL 30m;
       CREATE RELAY events SCHEMA event BRANCHED BY by_tenant;
       CREATE RELAY accepted SCHEMA event BRANCHED BY by_tenant;
       CREATE VHOST edge snapshot-receive-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR ingestor FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING event_codec
         TO events INHERIT ALL BRANCHED BY by_tenant SET tenant = message.tenant
           FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;

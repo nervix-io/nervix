@@ -10,7 +10,7 @@ use std::{fmt, num::NonZeroU32};
 use error_stack::Report;
 use flatbuffers::{ForwardsUOffset, Vector, WIPOffset};
 use meticulous::{OptionExt as _, ResultExt as _};
-use nervix_models::{BranchName, FieldName, ParseAsType, SchemaField, Timestamp};
+use nervix_models::{FieldName, ParametrizerName, ParseAsType, SchemaField, Timestamp};
 use thiserror::Error;
 
 use crate::{
@@ -30,7 +30,7 @@ pub struct RowSchema {
 /// The declared branch of a branched relay and the fields of its key.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RowBranch {
-    branch: BranchName,
+    parametrizer: ParametrizerName,
     fields: Vec<SchemaField>,
 }
 
@@ -41,17 +41,20 @@ pub struct EmptyBranchKey;
 
 impl RowBranch {
     pub fn new(
-        branch: BranchName,
+        parametrizer: ParametrizerName,
         fields: Vec<SchemaField>,
     ) -> Result<Self, Report<EmptyBranchKey>> {
         if fields.is_empty() {
             return Err(Report::new(EmptyBranchKey));
         }
-        Ok(Self { branch, fields })
+        Ok(Self {
+            parametrizer,
+            fields,
+        })
     }
 
-    pub fn branch(&self) -> &BranchName {
-        &self.branch
+    pub fn parametrizer(&self) -> &ParametrizerName {
+        &self.parametrizer
     }
 
     /// The branch key fields in key order.
@@ -78,7 +81,7 @@ impl RowSchema {
         })?;
         let branch = match &self.branch {
             Some(branch) => {
-                let name = encoder.text("RowBranch.branch", branch.branch.as_str())?;
+                let name = encoder.text("RowBranch.parametrizer", branch.parametrizer.as_str())?;
                 let fields = encoder.table_vector(
                     "RowBranch.fields",
                     &branch.fields,
@@ -87,7 +90,7 @@ impl RowSchema {
                 Some(wire::RowBranch::create(
                     encoder.fbb(),
                     &wire::RowBranchArgs {
-                        branch: Some(name),
+                        parametrizer: Some(name),
                         fields: Some(fields),
                     },
                 ))
@@ -112,7 +115,7 @@ impl RowSchema {
         })?;
         let branch = match schema.branch() {
             Some(branch) => {
-                let name = decoder.name("RowBranch.branch", branch.branch())?;
+                let name = decoder.name("RowBranch.parametrizer", branch.parametrizer())?;
                 let fields =
                     decoder.table_vector("RowBranch.fields", branch.fields(), |field| {
                         decode_field(decoder, field)
@@ -324,6 +327,14 @@ fn decode_field_type(
 /// The most bytes one cell's tables add to a frame beyond the string it may hold: the cell table
 /// and its value table, their vtables, and alignment padding. A test measures every cell kind
 /// against it.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the session schema's Cell layout encodes a cell table and its value table \
+                  within 64 bytes beyond the string a cell holds; the every-kind test pins it"
+    )
+)]
 pub(crate) const CELL_TABLES_BYTES: usize = 64;
 
 /// Writes the cells of one row, one branch key, or one list value, in field order.
@@ -514,7 +525,8 @@ impl<'e, 'fbb> CellWriter<'e, 'fbb> {
     /// Checks one more cell, holding `payload` bytes beyond its tables, against the limits.
     fn admit(&self, payload: usize) -> Result<(), Report<WireEncodeError>> {
         let value_depth = self.depth.checked_add(1).assured(
-            "a writer is at most one level past a nesting limit of at most MAX_NESTING_DEPTH",
+            "a writer is at most one level past a nesting limit of at most \
+             SessionNestingDepth::MAXIMUM",
         );
         self.encoder.nesting(self.field, value_depth)?;
         let cells = self

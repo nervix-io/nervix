@@ -1,7 +1,7 @@
 //! Relay-tab restoration through the production tab and reply owners.
 
 use nervix_client_wire::RowBranch;
-use nervix_models::{BranchName, FieldName, ParseAsType, SchemaField};
+use nervix_models::{FieldName, ParametrizerName, ParseAsType, SchemaField};
 
 use super::*;
 
@@ -26,7 +26,7 @@ fn restoring_a_tab_carries_the_schema_its_acknowledged_generation_announced() {
             ],
             branch: Some(
                 RowBranch::new(
-                    BranchName::parse("tenant").assured("a valid branch name"),
+                    ParametrizerName::parse("tenant").assured("a valid branch name"),
                     vec![SchemaField {
                         name: FieldName::parse("tenant_id").assured("a valid key field name"),
                         ty: ParseAsType::String,

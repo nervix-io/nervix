@@ -58,7 +58,7 @@ Feature: Committed outward TLS algorithm policy
       CREATE HTTP ENDPOINT policy_ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR policy_ingestor
         FROM policy_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING policy_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING policy_codec
         TO outgoing INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE HTTP CLIENT policy_client MOUNT policy_tls VERSION 1 CONFIG {

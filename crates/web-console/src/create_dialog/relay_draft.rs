@@ -17,8 +17,8 @@ use std::num::NonZeroUsize;
 
 use error_stack::Report;
 use nervix_models::{
-    BranchName, CreateRelay, MaterializedRelayState, ModelKind, NodeRef, RelayBranching, RelayName,
-    SchemaName, default_relay_buffer,
+    CreateRelay, MaterializedRelayState, ModelKind, NodeRef, ParametrizerName, RelayBranching,
+    RelayName, SchemaName, default_relay_buffer,
 };
 use thiserror::Error;
 
@@ -57,7 +57,7 @@ pub(super) enum BranchingDraft {
     Unselected,
     Unbranched,
     /// `BRANCHED BY`, together with the branch its picker selected once there is one.
-    BranchedBy(Option<SelectedReference<BranchName>>),
+    BranchedBy(Option<SelectedReference<ParametrizerName>>),
 }
 
 impl BranchingDraft {
@@ -76,7 +76,7 @@ impl BranchingDraft {
     }
 
     /// The branch the picker selected, whether or not it still belongs to the draft's domain.
-    pub(super) fn selected_branch(&self) -> Option<&SelectedReference<BranchName>> {
+    pub(super) fn selected_parametrizer(&self) -> Option<&SelectedReference<ParametrizerName>> {
         match self {
             Self::BranchedBy(branch) => branch.as_ref(),
             Self::Unselected | Self::Unbranched => None,
@@ -113,15 +113,15 @@ impl RelayDraft {
     }
 
     pub(super) fn select_branch(&mut self, node: &NodeRef) {
-        if node.kind == ModelKind::Branch {
-            let branch = SelectedReference::chosen(BranchName::from(&node.identifier));
+        if node.kind == ModelKind::Parametrizer {
+            let branch = SelectedReference::chosen(ParametrizerName::from(&node.identifier));
             self.branching = BranchingDraft::BranchedBy(Some(branch));
         }
     }
 
     pub(super) fn selects_branch(&self, node: &NodeRef) -> bool {
-        match self.branching.selected_branch() {
-            Some(branch) => branch.selects(ModelKind::Branch, node),
+        match self.branching.selected_parametrizer() {
+            Some(branch) => branch.selects(ModelKind::Parametrizer, node),
             None => false,
         }
     }
@@ -185,9 +185,9 @@ pub(super) enum RelayDraftError {
     SchemaRequired,
     #[error("The selected schema belongs to a changed context; select it again")]
     SchemaChanged,
-    #[error("Choose UNBRANCHED or a branch")]
+    #[error("Choose UNBRANCHED or a parametrizer")]
     BranchingRequired,
-    #[error("Choose a branch for BRANCHED BY")]
+    #[error("Choose a parametrizer for BRANCHED BY")]
     BranchRequired,
     #[error("The selected branch belongs to a changed context; select it again")]
     BranchChanged,
@@ -205,8 +205,8 @@ mod tests {
 
     use meticulous::{OptionExt as _, ResultExt as _};
     use nervix_models::{
-        BranchName, CreateStatement, MaterializedRelayState, Model, ModelKind, ModelName, NodeRef,
-        RelayBranching, RequestedResourceVersion, SchemaName, Statement,
+        CreateStatement, MaterializedRelayState, Model, ModelKind, ModelName, NodeRef,
+        ParametrizerName, RelayBranching, RequestedResourceVersion, SchemaName, Statement,
     };
     use nervix_plexus::client_statement::{ClientStatement, parse_client_statement};
     use strum::IntoEnumIterator as _;
@@ -250,7 +250,7 @@ mod tests {
         assert_eq!(draft.capacity, "1");
         draft.select_schema(&node(ModelKind::Schema, "order_record"));
         draft.choose_branched();
-        draft.select_branch(&node(ModelKind::Branch, "by_tenant"));
+        draft.select_branch(&node(ModelKind::Parametrizer, "by_tenant"));
         draft.choose_branched();
         draft.capacity = " 4 ".to_string();
         for state in MaterializedRelayState::iter() {
@@ -259,7 +259,7 @@ mod tests {
             assert_eq!(
                 relay.branching,
                 RelayBranching::branched_by(
-                    BranchName::parse("by_tenant").assured("valid branch name")
+                    ParametrizerName::parse("by_tenant").assured("valid branch name")
                 )
             );
             assert_eq!(relay.buffer.get(), 4);
@@ -303,7 +303,7 @@ mod tests {
         assert_eq!(draft_error(&draft), RelayDraftError::BranchRequired);
         draft.select_branch(&node(ModelKind::Schema, "by_tenant"));
         assert_eq!(draft_error(&draft), RelayDraftError::BranchRequired);
-        draft.select_branch(&node(ModelKind::Branch, "by_tenant"));
+        draft.select_branch(&node(ModelKind::Parametrizer, "by_tenant"));
         draft.capacity = "0".to_string();
         assert_eq!(draft_error(&draft), RelayDraftError::Capacity);
         draft.capacity = "many".to_string();
@@ -313,7 +313,7 @@ mod tests {
     #[test]
     fn a_changed_domain_keeps_both_references_visible_until_they_are_selected_again() {
         let schema = node(ModelKind::Schema, "order_record");
-        let branch = node(ModelKind::Branch, "by_tenant");
+        let branch = node(ModelKind::Parametrizer, "by_tenant");
         let mut draft = RelayDraft {
             name: "orders".to_string(),
             ..RelayDraft::default()
@@ -343,7 +343,7 @@ mod tests {
 
         draft.choose_unbranched();
         assert!(!draft.selects_branch(&branch));
-        assert_eq!(draft.branching.selected_branch(), None);
+        assert_eq!(draft.branching.selected_parametrizer(), None);
         draft.invalidate_references();
         assert_eq!(draft_error(&draft), RelayDraftError::SchemaChanged);
         assert_eq!(

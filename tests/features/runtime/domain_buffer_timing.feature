@@ -23,8 +23,8 @@ Feature: Domain-paced branch buffering
         FROM WIRE SCHEMA timed_event_wire
         TO SCHEMA timed_event;
       CREATE SCHEMA tenant_branch (tenant STRING);
-      CREATE BRANCH by_tenant SCHEMA tenant_branch TTL 5h;
-      CREATE BRANCH observed_by_tenant SCHEMA tenant_branch TTL 5h;
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_branch TTL 5h;
+      CREATE PARAMETRIZER observed_by_tenant SCHEMA tenant_branch TTL 5h;
       CREATE RELAY fast_ingested SCHEMA timed_event BRANCHED BY by_tenant;
       CREATE RELAY observed SCHEMA timed_event BRANCHED BY observed_by_tenant;
       CREATE VHOST edge fast-buffering-{{test_id}}.example.com;
@@ -33,7 +33,7 @@ Feature: Domain-paced branch buffering
         PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR fast_buffering_ingestor
         FROM fast_buffering_endpoint MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING timed_event_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING timed_event_codec
         TIMESTAMP NOW
         TO fast_ingested
           INHERIT ALL
@@ -112,8 +112,8 @@ Feature: Domain-paced branch buffering
         FROM WIRE SCHEMA timed_event_wire
         TO SCHEMA timed_event;
       CREATE SCHEMA tenant_branch (tenant STRING);
-      CREATE BRANCH by_tenant SCHEMA tenant_branch TTL 5h;
-      CREATE BRANCH observed_by_tenant SCHEMA tenant_branch TTL 5h;
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_branch TTL 5h;
+      CREATE PARAMETRIZER observed_by_tenant SCHEMA tenant_branch TTL 5h;
       CREATE RELAY fast_ingested SCHEMA timed_event BRANCHED BY by_tenant;
       CREATE RELAY observed SCHEMA timed_event BRANCHED BY observed_by_tenant;
       CREATE VHOST edge fast-buffering-{{test_id}}.example.com;
@@ -122,7 +122,7 @@ Feature: Domain-paced branch buffering
         PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR fast_buffering_ingestor
         FROM fast_buffering_endpoint MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING timed_event_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING timed_event_codec
         TIMESTAMP NOW
         TO fast_ingested
           INHERIT ALL
@@ -199,7 +199,7 @@ Feature: Domain-paced branch buffering
         FROM WIRE SCHEMA timed_event_wire
         TO SCHEMA timed_event;
       CREATE SCHEMA tenant_branch (tenant STRING);
-      CREATE BRANCH by_tenant SCHEMA tenant_branch TTL 5m;
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_branch TTL 5m;
       CREATE RELAY immediate_ingested SCHEMA timed_event BRANCHED BY by_tenant;
       CREATE RELAY observed SCHEMA timed_event BRANCHED BY by_tenant;
       CREATE VHOST edge immediate-buffering-{{test_id}}.example.com;
@@ -208,7 +208,7 @@ Feature: Domain-paced branch buffering
         PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR immediate_buffering_ingestor
         FROM immediate_buffering_endpoint MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING timed_event_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING timed_event_codec
         TIMESTAMP NOW
         TO immediate_ingested
           INHERIT ALL
@@ -275,8 +275,8 @@ Feature: Domain-paced branch buffering
         FROM WIRE SCHEMA timed_event_wire
         TO SCHEMA timed_event;
       CREATE SCHEMA tenant_branch (tenant STRING);
-      CREATE BRANCH by_tenant SCHEMA tenant_branch TTL 5m;
-      CREATE BRANCH observed_by_tenant SCHEMA tenant_branch TTL 5m;
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_branch TTL 5m;
+      CREATE PARAMETRIZER observed_by_tenant SCHEMA tenant_branch TTL 5m;
       CREATE RELAY collect_ingested SCHEMA timed_event BRANCHED BY by_tenant;
       CREATE RELAY observed SCHEMA timed_event BRANCHED BY observed_by_tenant;
       CREATE VHOST edge collect-buffering-{{test_id}}.example.com;
@@ -285,7 +285,7 @@ Feature: Domain-paced branch buffering
         PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR collect_buffering_ingestor
         FROM collect_buffering_endpoint MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING timed_event_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING timed_event_codec
         TIMESTAMP NOW
         TO collect_ingested
           INHERIT ALL
@@ -349,7 +349,7 @@ Feature: Domain-paced branch buffering
         FROM WIRE SCHEMA timed_event_wire
         TO SCHEMA timed_event;
       CREATE SCHEMA tenant_branch (tenant STRING);
-      CREATE BRANCH by_tenant SCHEMA tenant_branch TTL 5m;
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_branch TTL 5m;
       CREATE RELAY held_ingested SCHEMA timed_event BRANCHED BY by_tenant;
       CREATE RELAY gate_ingested SCHEMA timed_event BRANCHED BY by_tenant;
       CREATE VHOST edge held-buffering-{{test_id}}.example.com;
@@ -361,7 +361,7 @@ Feature: Domain-paced branch buffering
         PATH '/gate';
       CREATE HTTP ENDPOINT INGESTOR held_buffering_ingestor
         FROM held_buffering_endpoint MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING timed_event_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING timed_event_codec
         TIMESTAMP NOW
         TO held_ingested
           INHERIT ALL
@@ -372,7 +372,7 @@ Feature: Domain-paced branch buffering
         ON GENERAL ERROR LOG;
       CREATE HTTP ENDPOINT INGESTOR gate_buffering_ingestor
         FROM gate_buffering_endpoint MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING timed_event_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING timed_event_codec
         TIMESTAMP NOW
         TO gate_ingested
           INHERIT ALL
@@ -414,7 +414,7 @@ Feature: Domain-paced branch buffering
       """
     When these Plexus commands are executed
       """
-      ALTER HTTP ENDPOINT INGESTOR gate_buffering_ingestor SET QUIESCE BUFFER MAX SIZE 2MiB;
+      ALTER HTTP ENDPOINT INGESTOR gate_buffering_ingestor SET QUIESCE BUFFER MAX SIZE 2MiB RESPOND IMMEDIATE;
       """
     Then within "10s" the relay subscription receives payloads
       """

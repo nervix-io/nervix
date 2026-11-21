@@ -117,6 +117,9 @@ nervix-recovery = { workspace = true }
 nervix-server = { workspace = true, features = ["testing"] }
 nervix-test-environment = { workspace = true }
 nervix-wasm = { workspace = true }
+# The scenario guests written as text carry guest messages the host only decodes, such as a state
+# description, which the scenarios encode themselves.
+nervix-wasm-protocol = { workspace = true }
 nix = { workspace = true, features = ["fs", "signal", "term"] }
 # The features the OTEL connector builds the crate with, so the scenarios decode the Export
 # requests it sends without compiling the crate a second time.

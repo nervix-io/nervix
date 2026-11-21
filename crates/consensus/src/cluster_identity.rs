@@ -232,9 +232,12 @@ impl ClusterIdentityRecord {
                 executor.limits().management_event_bytes.as_u64(),
             )
             .change_context(ClusterIdentityError::Admission)?;
+        // Generating the cluster's key pair answers no waiting caller, so a full queue holds it
+        // back rather than refusing it.
         executor
-            .run_cpu(
+            .run_cpu_with(
                 CpuClass::Control,
+                nervix_execution::QueueAdmission::WaitForPlace,
                 reservation,
                 move |_reservation, cancellation| Self::generate_key(created_at, cancellation),
             )

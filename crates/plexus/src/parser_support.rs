@@ -27,17 +27,17 @@ pub(crate) use entity_reference::model_ref;
 use error_stack::Report;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::{
-    AckMode, AckWindow, AlterProcessorOperation, AssignmentTargetScope, BranchName,
-    BranchSelection, ClientConfigEntry, ClientName, ClusterNodeName, CodecName,
-    ConstructionAlteration, CorrelatorName, DeduplicatorName, DomainClockPeriod, DomainName,
-    EmitterName, EndpointName, Expression, ExternalName, FieldName, FlushPolicy,
-    GeneralErrorPolicy, GeneratorName, InferencerName, IngestorName, InputCollectPolicy,
-    InspectionFormat, JunctionName, LookupName, MaterializedStateDependency,
-    MaterializedStatePolicy, MessageErrorPolicy, ModelName, MqttQos, NameError, OutputBranch,
-    PayloadSizeLimit, PlacementName, ProcessorInputWhere, ProcessorInputs, ProcessorOutput,
-    ProcessorOutputs, ReingestorName, RelayName, ReordererName, RequestedResourceVersion,
-    ResourceName, RetryPolicy, RouteConstruction, SchemaName, SignalingProtocolName,
-    SubscriptionName, TransactionOperationNumber, UdfName, UserName, VhostName, WasmProcessorName,
+    AckMode, AckWindow, AlterProcessorOperation, AssignmentTargetScope, BranchSelection,
+    ClientConfigEntry, ClientName, ClusterNodeName, CodecName, ConstructionAlteration,
+    CorrelatorName, DeduplicatorName, DomainClockPeriod, DomainName, EmitterName, EndpointName,
+    Expression, ExternalName, FieldName, FlushPolicy, GeneralErrorPolicy, GeneratorName,
+    InferencerName, IngestorName, InputCollectPolicy, InspectionFormat, JunctionName, LookupName,
+    MaterializedStateDependency, MaterializedStatePolicy, MessageErrorPolicy, ModelName, MqttQos,
+    NameError, OutputBranch, ParametrizerName, PayloadSizeLimit, PlacementName,
+    ProcessorInputWhere, ProcessorInputs, ProcessorOutput, ProcessorOutputs, ReingestorName,
+    RelayName, ReordererName, RequestedResourceVersion, ResourceName, RetryPolicy,
+    RouteConstruction, SchemaName, SignalingProtocolName, SubscriptionName,
+    TransactionOperationNumber, UdfName, UserName, VhostName, WasmProcessorName,
     WindowProcessorName, WireSchemaName,
 };
 use sorted_vec::SortedSet;
@@ -570,7 +570,7 @@ pub fn runtime_node_ref<'src>()
     parse_name("ref:runtime_node", ModelName::parse)
 }
 
-pub fn branch_definition_header<'src>()
+pub fn parametrizer_definition_header<'src>()
 -> impl Parser<'src, &'src [Token], (SchemaName, String), extra::Err<ParseError<'src>>> + Clone {
     kw(Identifier::Schema)
         .ignore_then(schema_ref())
@@ -582,7 +582,7 @@ pub fn branch_definition_header<'src>()
 pub fn branch_selection<'src>()
 -> impl Parser<'src, &'src [Token], BranchSelection, extra::Err<ParseError<'src>>> + Clone {
     let branched = kw_phrase2(Identifier::Branched, Identifier::By)
-        .ignore_then(branch_ref())
+        .ignore_then(parametrizer_ref())
         .map(BranchSelection::branched_by);
     let unbranched = kw(Identifier::Unbranched).to(BranchSelection::unbranched());
 
@@ -592,9 +592,9 @@ pub fn branch_selection<'src>()
 pub fn output_branch<'src>()
 -> impl Parser<'src, &'src [Token], OutputBranch, extra::Err<ParseError<'src>>> + Clone {
     let branched = kw_phrase2(Identifier::Branched, Identifier::By)
-        .ignore_then(branch_ref())
+        .ignore_then(parametrizer_ref())
         .then(set_only_route_construction())
-        .try_map(|(branch, construction), span| {
+        .try_map(|(parametrizer, construction), span| {
             if construction.inherit.is_some()
                 || construction.where_clause.is_some()
                 || !construction.invocations.is_empty()
@@ -611,7 +611,7 @@ pub fn output_branch<'src>()
                 ));
             }
             Ok(OutputBranch::BranchedBy {
-                branch,
+                parametrizer,
                 assignments: construction.assignments,
             })
         });
@@ -819,14 +819,14 @@ pub fn vhost_name<'src>()
     parse_name("vhost_name", VhostName::parse)
 }
 
-pub fn branch_ref<'src>()
--> impl Parser<'src, &'src [Token], BranchName, extra::Err<ParseError<'src>>> + Clone {
-    parse_name("ref:branch", BranchName::parse)
+pub fn parametrizer_ref<'src>()
+-> impl Parser<'src, &'src [Token], ParametrizerName, extra::Err<ParseError<'src>>> + Clone {
+    parse_name("ref:parametrizer", ParametrizerName::parse)
 }
 
-pub fn branch_name<'src>()
--> impl Parser<'src, &'src [Token], BranchName, extra::Err<ParseError<'src>>> + Clone {
-    parse_name("branch_name", BranchName::parse)
+pub fn parametrizer_name<'src>()
+-> impl Parser<'src, &'src [Token], ParametrizerName, extra::Err<ParseError<'src>>> + Clone {
+    parse_name("parametrizer_name", ParametrizerName::parse)
 }
 
 pub fn endpoint_ref<'src>()

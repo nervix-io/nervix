@@ -20,9 +20,9 @@ Feature: Branched branch expiration
         FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
-        CREATE IF NOT EXISTS BRANCH by_http_notifications SCHEMA user_id_branch TTL 500ms;
+        CREATE IF NOT EXISTS PARAMETRIZER by_http_notifications SCHEMA user_id_branch TTL 500ms;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_http_notifications;
-        CREATE IF NOT EXISTS BRANCH by_reproject_notifications SCHEMA user_id_branch TTL 500ms;
+        CREATE IF NOT EXISTS PARAMETRIZER by_reproject_notifications SCHEMA user_id_branch TTL 500ms;
         CREATE RELAY reingested_notifications SCHEMA notification BRANCHED BY by_reproject_notifications;
         CREATE RELAY projected_notifications SCHEMA notification BRANCHED BY by_reproject_notifications;
         CREATE VHOST edge http-{{test_id}}.example.com;
@@ -31,7 +31,7 @@ Feature: Branched branch expiration
         PATH '/ingest';
         CREATE HTTP ENDPOINT INGESTOR http_notifications
         FROM http_notifications_endpoint MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING notification_codec
         TIMESTAMP NOW
         TO notifications
         INHERIT ALL
@@ -115,7 +115,7 @@ Feature: Branched branch expiration
 
       CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
 
-      CREATE IF NOT EXISTS BRANCH by_http_notifications SCHEMA user_id_branch TTL 200ms;
+      CREATE IF NOT EXISTS PARAMETRIZER by_http_notifications SCHEMA user_id_branch TTL 200ms;
 
       CREATE RELAY notifications SCHEMA notification BRANCHED BY by_http_notifications;
 
@@ -129,7 +129,7 @@ Feature: Branched branch expiration
 
       CREATE HTTP ENDPOINT INGESTOR http_notifications
         FROM http_notifications_endpoint MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING notification_codec
         TIMESTAMP NOW
         TO notifications
         INHERIT ALL
@@ -192,7 +192,7 @@ Feature: Branched branch expiration
 
       CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
 
-      CREATE IF NOT EXISTS BRANCH by_correlated_users SCHEMA user_id_branch TTL 5s;
+      CREATE IF NOT EXISTS PARAMETRIZER by_correlated_users SCHEMA user_id_branch TTL 5s;
 
       CREATE RELAY left_events SCHEMA notification BRANCHED BY by_correlated_users;
 
@@ -212,7 +212,7 @@ Feature: Branched branch expiration
 
       CREATE HTTP ENDPOINT INGESTOR left_ingestor
         FROM left_endpoint MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING notification_codec
         TO left_events
         INHERIT ALL
         BRANCHED BY by_correlated_users
@@ -223,7 +223,7 @@ Feature: Branched branch expiration
 
       CREATE HTTP ENDPOINT INGESTOR right_ingestor
         FROM right_endpoint MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING notification_codec
         TO right_events
         INHERIT ALL
         BRANCHED BY by_correlated_users
@@ -265,7 +265,7 @@ Feature: Branched branch expiration
     And node "{{correlator_owner}}" observability metric "nervix_branch_instances" with labels eventually equals 1
       """
       domain="{{domain}}"
-      branch="by_correlated_users"
+      parametrizer="by_correlated_users"
       physical_node_id="{{correlator_owner}}"
       """
     And within "30s" node "node-1" eventually reports describe relay as "not exists"
@@ -275,7 +275,7 @@ Feature: Branched branch expiration
     And node "{{correlator_owner}}" observability metric "nervix_branch_instances" with labels eventually equals 0
       """
       domain="{{domain}}"
-      branch="by_correlated_users"
+      parametrizer="by_correlated_users"
       physical_node_id="{{correlator_owner}}"
       """
     Then the relay subscription does not receive a payload within "500ms"
@@ -326,7 +326,7 @@ Feature: Branched branch expiration
 
       CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
 
-      CREATE IF NOT EXISTS BRANCH by_suppressed_users SCHEMA user_id_branch TTL 500ms;
+      CREATE IF NOT EXISTS PARAMETRIZER by_suppressed_users SCHEMA user_id_branch TTL 500ms;
 
       CREATE RELAY notifications SCHEMA notification BRANCHED BY by_suppressed_users;
 
@@ -340,7 +340,7 @@ Feature: Branched branch expiration
 
       CREATE HTTP ENDPOINT INGESTOR http_notifications
         FROM http_notifications_endpoint MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING notification_codec
         TO notifications
         INHERIT ALL
         BRANCHED BY by_suppressed_users
@@ -420,7 +420,7 @@ Feature: Branched branch expiration
 
       CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
 
-      CREATE IF NOT EXISTS BRANCH by_limited_users SCHEMA user_id_branch TTL 5m MAX INSTANCES 1 EVICT LRU;
+      CREATE IF NOT EXISTS PARAMETRIZER by_limited_users SCHEMA user_id_branch TTL 5m MAX INSTANCES 1 EVICT LRU;
 
       CREATE RELAY notifications SCHEMA notification BRANCHED BY by_limited_users;
 
@@ -434,7 +434,7 @@ Feature: Branched branch expiration
 
       CREATE HTTP ENDPOINT INGESTOR http_notifications
         FROM http_notifications_endpoint MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING notification_codec
         TO notifications
         INHERIT ALL
         BRANCHED BY by_limited_users

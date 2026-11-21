@@ -35,7 +35,7 @@ Feature: Expression function semantics
       CREATE HTTP ENDPOINT ingress ON edge PATH '/greetings';
       CREATE HTTP ENDPOINT INGESTOR greeting_ingestor
         FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING greeting_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING greeting_codec
         TO greetings
           INHERIT ALL
           UNBRANCHED
@@ -109,7 +109,7 @@ Feature: Expression function semantics
       CREATE HTTP ENDPOINT ingress ON edge PATH '/measurements';
       CREATE HTTP ENDPOINT INGESTOR measurement_ingestor
         FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING measurement_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING measurement_codec
         TO measurements
           INHERIT ALL
           UNBRANCHED
@@ -197,7 +197,7 @@ Feature: Expression function semantics
       CREATE HTTP ENDPOINT ingress ON edge PATH '/notes';
       CREATE HTTP ENDPOINT INGESTOR note_ingestor
         FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING note_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING note_codec
         TO notes
           INHERIT ALL
           UNBRANCHED
@@ -298,7 +298,7 @@ Feature: Expression function semantics
       CREATE HTTP ENDPOINT ingress ON edge PATH '/growths';
       CREATE HTTP ENDPOINT INGESTOR growth_ingestor
         FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING growth_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING growth_codec
         TO growths
           INHERIT ALL
           UNBRANCHED
@@ -378,7 +378,7 @@ Feature: Expression function semantics
       CREATE HTTP ENDPOINT ingress ON edge PATH '/readings';
       CREATE HTTP ENDPOINT INGESTOR reading_ingestor
         FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING reading_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING reading_codec
         TO readings
           INHERIT ALL
           UNBRANCHED
@@ -459,7 +459,7 @@ Feature: Expression function semantics
       CREATE HTTP ENDPOINT sizing_ingress ON edge PATH '/sizings';
       CREATE HTTP ENDPOINT INGESTOR sizing_ingestor
         FROM sizing_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING sizing_batch_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING sizing_batch_codec
         TO sizings
           INHERIT ALL
           UNBRANCHED

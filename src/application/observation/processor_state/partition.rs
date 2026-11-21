@@ -14,12 +14,12 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use nervix_execution::{Cancellation, CpuClass, MemoryClass, Reservation};
-use nervix_models::{ClusterNodeIncarnation, ClusterNodeName, ResolvedBranchPartitions};
+use nervix_models::{ClusterNodeIncarnation, ClusterNodeName, ResolvedParametrizerPartitions};
 
 use super::*;
 
 pub(in crate::application::observation) struct PartitionInspection {
-    partitions: ResolvedBranchPartitions,
+    partitions: ResolvedParametrizerPartitions,
     catalogs: BTreeMap<Unit, nervix_models::StateInspectionKeyCatalog>,
     #[cfg_attr(
         nervix_lint,
@@ -41,7 +41,7 @@ struct InspectionKeyOwner {
 
 impl PartitionInspection {
     pub(in crate::application::observation) fn new(
-        partitions: ResolvedBranchPartitions,
+        partitions: ResolvedParametrizerPartitions,
         executor: &nervix_execution::Executor,
         max_bytes: u64,
     ) -> Result<Self, StateInspectionRejection> {
@@ -291,7 +291,7 @@ mod tests {
 
     fn fixture(executor: &Executor, count: u16, max_bytes: u64) -> PartitionInspection {
         PartitionInspection {
-            partitions: ResolvedBranchPartitions::Direct(
+            partitions: ResolvedParametrizerPartitions::Direct(
                 NonZeroU16::new(count).assured("fixture counts are positive"),
             ),
             catalogs: BTreeMap::new(),
@@ -421,7 +421,9 @@ mod tests {
         let key = key(5);
         for order in [[0usize, 1, 2], [2, 1, 0], [1, 0, 2]] {
             let mut inspection = PartitionInspection::new(
-                ResolvedBranchPartitions::Inherited(NonZeroU16::new(4).assured("four is positive")),
+                ResolvedParametrizerPartitions::Inherited(
+                    NonZeroU16::new(4).assured("four is positive"),
+                ),
                 &executor,
                 1_048_576,
             )

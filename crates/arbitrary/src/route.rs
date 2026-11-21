@@ -224,7 +224,7 @@ impl Arbitrary<'_> {
     fn output_branch(&mut self) -> OutputBranch {
         if self.entropy.flag() {
             OutputBranch::BranchedBy {
-                branch: self.name(),
+                parametrizer: self.name(),
                 assignments: self.assignments(1, false),
             }
         } else {

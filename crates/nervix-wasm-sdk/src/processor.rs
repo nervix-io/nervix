@@ -2,6 +2,7 @@ use error_stack::Result;
 
 use crate::{
     context::{BranchContext, GuestContext, TimeoutHandle},
+    description::StateDescription,
     envelope::InputBatch,
     error::GuestError,
 };
@@ -85,5 +86,20 @@ pub trait Processor: Sized {
         } else {
             Err(GuestError::failed("processor does not restore saved state"))
         }
+    }
+
+    /// Describes the processor's durable computation state for an operator's state inspection, as
+    /// named sections of typed rows built with [`StateDescription::add_section`].
+    ///
+    /// The host calls this on a scratch instance it restored from the branch's committed checkpoint
+    /// and discards afterwards, never on the instance that processes input, so describing state
+    /// cannot change, delay or fail the branch. An error is reported in the branch's entry of the
+    /// inspection, with its reason, and changes nothing else.
+    ///
+    /// Nervix treats a guest's state as sensitive, always: an inspection reports each section's
+    /// name, fields and their types, and row count, and never a value. The default describes no
+    /// state.
+    fn describe_state(&self) -> Result<StateDescription, GuestError> {
+        Ok(StateDescription::new())
     }
 }

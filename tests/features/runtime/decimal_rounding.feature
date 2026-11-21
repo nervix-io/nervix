@@ -31,7 +31,7 @@ Feature: Exact decimal rounding in Plexus
       CREATE HTTP ENDPOINT rounding_ingress ON edge PATH '/round';
       CREATE HTTP ENDPOINT INGESTOR rounding_ingestor
         FROM rounding_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING rounding_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING rounding_codec
         TO rounding_inputs
           INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG

@@ -21,7 +21,7 @@ deadlines; logical timers due during a wait run in order afterwards. See
 
 Ordinary multi-source processors require every `FROM` relay to reference the same declared schema
 Model. Merely having structurally equal schemas is not enough. The relays must also use the same
-exact named branch, or all be unbranched.
+exact parametrizer, or all be unbranched.
 
 Relay inputs may optionally collect incoming Arrow batches before node execution:
 
@@ -61,7 +61,7 @@ bound to the source relay, concrete branch, domain, and `START` generation.
 Branch-preserving processors declare one node-wide contract:
 
 ```plexus,ignore
-BRANCHED BY <branch>
+BRANCHED BY <parametrizer>
 ```
 
 or:
@@ -76,7 +76,7 @@ construct branch keys.
 
 ### Partitioned processing
 
-A processor or generator whose named branch declares `PARTITIONS n` runs as one independently
+A processor or generator whose parametrizer declares `PARTITIONS n` runs as one independently
 owned unit per partition. A concrete key selects the same partition index throughout the branch.
 Each unit has its own supervisor, branch registry, collection and output buffers, retained state,
 and state replicas. Branch TTL and `MAX INSTANCES` apply inside each unit's registry; account for
@@ -654,7 +654,10 @@ the fixed size the declaration supplies.
 for each admitted message, in arrival order, and carries its tensors from one message to the next.
 All state successors advance together after a message the model accepts. A message that fails
 alone leaves the preceding state intact, and `FILTER WHERE` runs before the model, so a filtered
-row changes no state.
+row changes no state. A batch too large for one job runs its messages as several jobs, and its
+state advances only once every job's outputs are joined into the batch's outputs. Messages that
+fail because their outputs cannot be joined leave the preceding state intact as well, so each
+comes again and counts once.
 
 Each admitted batch that advances the state publishes an immutable tensor generation. Nervix
 persists the newest generation on the runtime state snapshot interval and once more during a
@@ -826,8 +829,23 @@ rejection, request and outcome. Required and confirmed replica counts are shown 
 captured on the current owner; a restored checkpoint whose earlier boundary is unknown reports those
 counts as unknown. `LIMIT` bounds the entries of one reply, and a reply that stops early carries a
 continuation that `AFTER` resumes under the same committed schedule. `FORMAT JSON` renders the same
-typed envelope the command returns to clients in either format. See
-[Checkpoints And Acknowledgements](wasm-processor-guests.md#checkpoints-and-acknowledgements) and
+typed envelope the command returns to clients in either format.
+
+Each entry with a checkpoint also carries the guest's own description of that checkpoint: the
+owner restores the committed checkpoint on a scratch instance, asks the guest's
+[`nervix_describe_state`](wasm-processor-guests.md#state-description) export for its sections, and
+discards the instance. The entry reports the generation and revision the render restored and each
+section's name, its fields and their types, and its row count, or the failed render's stage and
+diagnostic. Guest state is always sensitive, so no value a guest describes is ever shown, whatever
+the processor reads; there is no clause that reveals them, and a separate permission to read
+guest-state values will come later:
+
+```text
+guest state branch=40238306d5ebf339fe640ae723e4705c5bb1743e39d0ec207ed8de19fead54b1 generation=1 revision=2: values withheld, guest state is always sensitive
+guest section branch=40238306d5ebf339fe640ae723e4705c5bb1743e39d0ec207ed8de19fead54b1 name=counters rows=1 fields=count U32
+```
+
+See [Checkpoints And Acknowledgements](wasm-processor-guests.md#checkpoints-and-acknowledgements) and
 [WASM State And Recovery](wasm-state.md#observability).
 
 ### Reset guest state from Plexus
@@ -846,7 +864,7 @@ RESET WASM PROCESSOR normalize_events STATE FOR BRANCH KEY { tenant = 'acme' };
 ```
 
 Use `FOR UNBRANCHED` only for an unbranched processor. Use `FOR ALL BRANCHES` or exact
-`FOR BRANCH KEY` fields only for a branched processor. Key fields must match the declared branch
+`FOR BRANCH KEY` fields only for a branched processor. Key fields must match the parametrizer's branch
 schema exactly. A selected branch must already be active; the command does not create one.
 The selected branch loses its previous guest computation state and starts from the guest's initial
 state. Sibling branches keep their state and continue processing.
@@ -910,7 +928,7 @@ batch counted once however many of its records are pending.
 ## Reingestor
 
 A reingestor transforms records and can change how they are grouped. Each route uses
-`UNBRANCHED` or constructs a key with `BRANCHED BY <branch> SET ...`. The named
+`UNBRANCHED` or constructs a key with `BRANCHED BY <parametrizer> SET ...`. The named
 parametrization must match the destination relay and be distinct from every input relay's
 parametrization.
 
@@ -959,7 +977,7 @@ ALTER REINGESTOR repartition_events
 
 The input, collection, filter, attachment, and materialized-state forms are the same as for
 junctions. Branching is set on each route. Added and replaced routes declare
-`BRANCHED BY <branch> SET ...` or `UNBRANCHED` for their destination.
+`BRANCHED BY <parametrizer> SET ...` or `UNBRANCHED` for their destination.
 
 Every reingestor change uses entity pause because inputs, route construction, attachment, and
 dependency changes affect its relay consumers or branch-entrypoint wiring. Nervix gates both old
@@ -991,7 +1009,7 @@ execution snapshot taken after the materialized-state read.
 ### Altering Generators
 
 `ALTER GENERATOR` supports `SET MATERIALIZED STATE <relay>`, `SET EACH <duration>`,
-`SET BRANCHED BY <branch>`, `SET UNBRANCHED`, and the ordered `ADD ROUTE`, `DROP ROUTE`, and
+`SET BRANCHED BY <parametrizer>`, `SET UNBRANCHED`, and the ordered `ADD ROUTE`, `DROP ROUTE`, and
 `REPLACE ROUTE` operations:
 
 ```plexus
@@ -1038,6 +1056,6 @@ ordinary `SET`, so deterministic scalar functions, casts, unary expressions, bin
 and ordered reads of earlier error-record assignments are supported. Window aggregates and
 side-effect functions are not available in error construction.
 
-The error relay must declare the same exact named branch as the source route, or be unbranched
+The error relay must declare the same exact parametrizer as the source route, or be unbranched
 when the source is unbranched. A rejected binding identifies the node, source route, error relay,
-and both branch declarations.
+and both parametrizers.

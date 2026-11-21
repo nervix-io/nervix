@@ -20,7 +20,7 @@
 )]
 
 use nervix_models::{
-    BranchKeyFingerprint, BranchName, DomainName, NodeRef, PartitionEpochNumber,
+    BranchKeyFingerprint, DomainName, NodeRef, ParametrizerName, PartitionEpochNumber,
     RemoteRuntimeRecordMetadata, Timestamp, Unit,
 };
 use rkyv::{Archive, Deserialize, Serialize};
@@ -147,7 +147,7 @@ pub enum PartitionTransitionRequest {
     /// partition, and the keys each claimed in the epoch.
     Holdings {
         domain: DomainName,
-        branch: BranchName,
+        parametrizer: ParametrizerName,
         epoch: PartitionEpochNumber,
     },
 }
@@ -269,7 +269,8 @@ mod properties {
                 },
                 PartitionTransitionRequest::Holdings {
                     domain: self.subject().domain,
-                    branch: BranchName::parse("by_tenant").assured("the branch name is valid"),
+                    parametrizer: ParametrizerName::parse("by_tenant")
+                        .assured("the branch name is valid"),
                     epoch: self.subject().epoch,
                 },
             ]

@@ -12,7 +12,6 @@
 
 use std::future::pending;
 
-use meticulous::OptionExt as _;
 use nervix_model_harness::shuttle::check_interleavings;
 use nervix_models::{DomainName, DomainNodeRef, IngestorName, ModelKind};
 use nervix_primitives::{
@@ -27,9 +26,10 @@ const JOIN: &str = "a panicking check task fails its Shuttle execution";
 
 fn window(max: usize) -> Arc<EndpointRequestWindow> {
     Arc::new(EndpointRequestWindow {
-        permits: Semaphore::new(max),
+        capacity: Arc::new(EndpointRequestCapacity::default()),
+        max,
         timeout: Duration::from_secs(5),
-        retry_after: Duration::from_secs(1),
+        retry_after: Some(Duration::from_secs(1)),
     })
 }
 
@@ -74,7 +74,7 @@ fn responses_release_their_own_slot_in_completion_order() {
         second_is_started
             .await
             .assured("the second request enters its window");
-        assert_eq!(window.permits.available_permits(), 0);
+        assert_eq!(window.available_slots(), 0);
         let full = window
             .run_until(pending(), pending(), async {
                 panic!("a full window must not dispatch the refused payload")
@@ -90,13 +90,13 @@ fn responses_release_their_own_slot_in_completion_order() {
             EndpointRequestOutcome::ProcessingFailed(ClientProcessingFailure::Rejected)
         );
         assert_eq!(
-            window.permits.available_permits(),
+            window.available_slots(),
             1,
             "the first response remains held"
         );
         first_ack.send(()).assured("the first request remains held");
         assert_eq!(first.await.assured(JOIN), EndpointRequestOutcome::Completed);
-        assert_eq!(window.permits.available_permits(), 2);
+        assert_eq!(window.available_slots(), 2);
     });
 }
 
@@ -152,7 +152,7 @@ fn ending_a_retained_intake_resolves_its_held_response_and_preserves_replacement
             response.await.assured(JOIN),
             EndpointRequestOutcome::Interrupted
         );
-        assert_eq!(window.permits.available_permits(), 1);
+        assert_eq!(window.available_slots(), 1);
         assert!(replacement.intake().is_some());
         let current = routes
             .resolve(&key.host, &key.path)
@@ -207,7 +207,7 @@ fn a_deadline_racing_an_ack_resolves_once_and_returns_its_slot() {
         ));
         expiring.await.assured(JOIN);
         completing.await.assured(JOIN);
-        assert_eq!(window.permits.available_permits(), 1);
+        assert_eq!(window.available_slots(), 1);
         assert_eq!(
             window
                 .run_until(pending(), pending(), async {
@@ -216,7 +216,7 @@ fn a_deadline_racing_an_ack_resolves_once_and_returns_its_slot() {
                 .await,
             EndpointRequestOutcome::Completed
         );
-        assert_eq!(window.permits.available_permits(), 1);
+        assert_eq!(window.available_slots(), 1);
     });
 }
 
@@ -277,7 +277,7 @@ fn intake_stop_wakes_a_held_response_without_waiting_for_source_close() {
             EndpointRequestOutcome::Interrupted
         );
         stopping.await.assured(JOIN);
-        assert_eq!(window.permits.available_permits(), 1);
+        assert_eq!(window.available_slots(), 1);
     });
 }
 
@@ -341,16 +341,16 @@ fn every_binding_starts_before_a_shared_request_waits_for_acknowledgements() {
         second_is_started
             .await
             .assured("the second binding receives the same request before either ACK");
-        assert_eq!(first_window.permits.available_permits(), 0);
-        assert_eq!(second_window.permits.available_permits(), 0);
+        assert_eq!(first_window.available_slots(), 0);
+        assert_eq!(second_window.available_slots(), 0);
         second_ack
             .send(())
             .assured("the second consumer finishes first");
         second_is_done
             .await
             .assured("the second window returns its slot");
-        assert_eq!(first_window.permits.available_permits(), 0);
-        assert_eq!(second_window.permits.available_permits(), 1);
+        assert_eq!(first_window.available_slots(), 0);
+        assert_eq!(second_window.available_slots(), 1);
         let mut response = std::pin::pin!(response);
         std::future::poll_fn(|context| {
             assert!(
@@ -370,11 +370,11 @@ fn every_binding_starts_before_a_shared_request_waits_for_acknowledgements() {
             response.await.assured(JOIN),
             EndpointDispatchOutcome::Ack(EndpointRequestReply {
                 outcome: EndpointRequestOutcome::Completed,
-                retry_after: Duration::from_secs(1),
+                retry_after: Some(Duration::from_secs(1)),
             })
         );
-        assert_eq!(first_window.permits.available_permits(), 1);
-        assert_eq!(second_window.permits.available_permits(), 1);
+        assert_eq!(first_window.available_slots(), 1);
+        assert_eq!(second_window.available_slots(), 1);
     });
 }
 

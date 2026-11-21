@@ -847,6 +847,9 @@ fn operation_label(operation: &OperationImpactReport) -> String {
         TransactionOperation::CreateResource { resource, .. } => {
             format!("CREATE RESOURCE {resource}")
         }
+        TransactionOperation::EditResourceLabels { resource, .. } => {
+            format!("EDIT LABELS ON RESOURCE {resource}")
+        }
         TransactionOperation::RebindResource { resource, .. } => {
             format!("REBIND RESOURCE {resource}")
         }

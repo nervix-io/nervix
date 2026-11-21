@@ -57,7 +57,7 @@ public final class Probe {
                 + (sensitive ? "sensitive" : "public");
         }
     }
-    record Schema(List<Field> fields, List<Field> keyFields, String branch) {}
+    record Schema(List<Field> fields, List<Field> keyFields, String parametrizer) {}
     static List<Field> fields(Nervix.Schema schema, Nervix.Part part) {
         return schema.fields(part).stream().map(f -> new Field(f.name(), f.type().name(), f.nullable(), f.sensitive())).toList();
     }
@@ -1080,7 +1080,7 @@ public final class Probe {
         Nervix.Schema automatic = event.handle.schema();
         require(fields(automatic, Nervix.Part.ROWS).equals(expected.fields())
                 && fields(automatic, Nervix.Part.BRANCH).equals(expected.keyFields())
-                && java.util.Objects.equals(automatic.branch(), expected.branch()), "a schema handle keeps its complete description");
+                && java.util.Objects.equals(automatic.parametrizer(), expected.parametrizer()), "a schema handle keeps its complete description");
         return cleanup(automatic);
     }
     static void checkCollectedRelease(List<Event> retained, List<List<String>> printed, Schema schema) throws InterruptedException {
@@ -1153,10 +1153,10 @@ public final class Probe {
         require(identity != null, "the subscribe command opened no subscription");
         Schema schema;
         try (var nativeSchema = opened.handle().schema()) {
-            schema = new Schema(fields(nativeSchema, Nervix.Part.ROWS), fields(nativeSchema, Nervix.Part.BRANCH), nativeSchema.branch());
+            schema = new Schema(fields(nativeSchema, Nervix.Part.ROWS), fields(nativeSchema, Nervix.Part.BRANCH), nativeSchema.parametrizer());
         }
         schema.fields().forEach(f -> report(f.line("FIELD")));
-        if (schema.branch() != null) report("BRANCH " + schema.branch());
+        if (schema.parametrizer() != null) report("PARAMETRIZER " + schema.parametrizer());
         schema.keyFields().forEach(f -> report(f.line("KEY"))); report("SUBSCRIBED");
         List<Event> retained = new ArrayList<>(); List<List<String>> printed = new ArrayList<>();
         try (var deadline = Nervix.Cancel.deadline(120)) {
@@ -1209,8 +1209,8 @@ public final class Probe {
         }
         try (var outcome = session.handle.command("DESCRIBE LICENSE;", null); var license = outcome.stateInspection()) {
             require(license.domain() == null && license.entityName() == null, "cluster licensing scope");
-            require(license.entityKind().equals("LICENSE") && license.counts().rows() == 3 && license.counts().branches() == 0, "typed licensing observation");
-            report("INSPECTION license rows=3");
+            require(license.entityKind().equals("LICENSE") && license.counts().rows() == 4 && license.counts().branches() == 0, "typed licensing observation");
+            report("INSPECTION license rows=4");
         }
         Nervix.Inspection inspection;
         try (var outcome = session.handle.command(
@@ -1239,13 +1239,13 @@ public final class Probe {
         var section = unit.sections().getFirst();
         var schema = section.schema();
         var fields = schema.fields(Nervix.Part.ROWS);
-        require(schema.branch().equals("by_tenant") && schema.fields(Nervix.Part.BRANCH).getFirst().sensitive(), "branch sensitivity");
+        require(schema.parametrizer().equals("by_tenant") && schema.fields(Nervix.Part.BRANCH).getFirst().sensitive(), "branch sensitivity");
         require(fields.subList(0, 3).stream().map(Nervix.Field::name).toList().equals(List.of("tenant", "secret", "sequence")), "schema order");
         require(fields.get(0).sensitive() && fields.get(1).sensitive() && fields.get(2).type() == Nervix.FieldType.I64, "field metadata");
         require(section.omittedRows() == 1 && !section.watermarkLow().equals(section.watermarkHigh()), "section metadata");
         var frame = section.frames().getFirst();
         require(frame.rowCount() == 1, "verified frame rows");
-        try (var frameSchema = frame.schema()) { require(frameSchema.branch().equals(schema.branch()), "frame schema"); }
+        try (var frameSchema = frame.schema()) { require(frameSchema.parametrizer().equals(schema.parametrizer()), "frame schema"); }
         var buffer = frame.frame();
         byte[] expected = new byte[buffer.remaining()]; buffer.duplicate().get(expected);
         require(buffer.isReadOnly() && expected.length > 0, "verified read-only frame");

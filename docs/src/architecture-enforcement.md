@@ -386,9 +386,13 @@ the collection. The compiler reports the resolved declaration and the reason eve
 expectation is fulfilled. The gate uses the complete checked compiler matrix. It counts one
 declaration across build configurations, requires a repair task link, and compares each declaration
 with the recorded sites in `debt-baseline.json`. Replacing a recorded site with a different one
-fails even at the same total. `just ratchet --show branch_inversions` lists the current sites and
-their repair references. `just ratchet --update` drops the retired declarations from the baseline
-with their count.
+fails even at the same total. Declarations are compared without the compiler's impl
+disambiguators and counted: adding or removing an impl block earlier in a module renumbers the
+declarations after it, `{impl#14}` becoming `{impl#13}`, without changing which declaration each
+is, so a renumbered declaration keeps its pin, while one more declaration under an equal stable
+form is still new. `just ratchet --show branch_inversions` lists the current sites and their repair
+references. `just ratchet --update` drops the retired declarations from the baseline with their
+count and records a renumbered declaration under its current identity.
 
 Source counts and refusals have no semantic exception channel. A current structural occurrence
 remains counted, or refused, until its owner changes it; a compiler expectation cannot hide its

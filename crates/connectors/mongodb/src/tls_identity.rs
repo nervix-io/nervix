@@ -188,8 +188,9 @@ impl IdentityFiles {
             .await
             .change_context(MongoDbTlsError::PrepareIdentity)?;
         executor
-            .run_storage(
+            .run_storage_with(
                 StorageClass::Filesystem,
+                nervix_execution::QueueAdmission::WaitForPlace,
                 reservation,
                 move |_, cancellation| {
                     cancellation
