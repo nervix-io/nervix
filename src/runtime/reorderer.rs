@@ -801,8 +801,8 @@ mod tests {
         let output = accepted_work_after_cpu_room(
             &executor,
             nervix_execution::CpuClass::Data,
-            execute_accepted_program_with_selection_in_context(
-                executor.accepted_work(),
+            execute_program_with_selection_in_context(
+                &executor,
                 &program.program,
                 &input,
                 &VmExecutionContext {

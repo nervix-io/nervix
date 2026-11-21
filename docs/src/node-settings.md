@@ -112,8 +112,12 @@ admission.
 
 HTTP endpoint bodies use the independent `intake` executor memory class. It accounts the
 transport read buffers a request holds conservatively, and its body buffer exactly, including both
-allocations while a body moves to a larger buffer. Input contention refuses immediately with 503;
-it never holds relay decode capacity while waiting for relay work.
+allocations while a body moves to a larger buffer. Input contention holds a request back rather
+than refusing it: the request's read scratch, with the whole copy of a body whose length it
+declared, is charged up front, a read into an allocation the charge does not cover yet waits for
+room before it reads, and the growth of an undeclared body waits the same way, each within the
+body's deadline. A request that waits gives up its place when it ends. Waiting never holds relay
+decode capacity.
 
 A body that arrives in a single data frame keeps the shared byte buffer it was read into, with no
 copy. From the second data frame on, the endpoint copies each frame into one body buffer as it
@@ -132,12 +136,13 @@ The endpoint's public input outcomes are:
 | 413 | `http_body_capacity` | The declared length or accumulated chunked payload exceeds the cap |
 | 408 | `http_body_timeout` | The complete body did not arrive by its deadline |
 | 431 | HTTP header capacity | Hyper refuses an oversized request head and closes the connection |
-| 503 | `http_input_memory_capacity` | The intake pool cannot back retained input |
-| 503 | `http_input_worker_capacity` | Moving a body larger than one read buffer cannot be admitted on a data worker, expires or finishes cancelled |
+| 503 | `http_input_memory_capacity` | The intake pool cannot back retained input before the body's deadline passes while the request waits for room, the input is larger than the whole pool, or the node stops |
+| 503 | `http_input_worker_capacity` | Moving a body larger than one read buffer waits for a data worker until the body's deadline passes, expires on it or finishes cancelled, or the node stops |
 | 400 | `http_body_invalid` | Malformed or interrupted HTTP body framing, including oversized chunked trailers |
 
 The HTTP input completion budget distinguishes phases: expiry while receiving bytes returns 408;
-expiry while the server waits for or performs a body move on a data worker returns 503. The move
+expiry while the server waits for input memory, or waits for or performs a body move on a data
+worker, returns 503. The move
 retains its reservation until the worker actually exits after cancellation.
 
 Input refusals admit no payload to the graph. Hyper completes the response and closes its write

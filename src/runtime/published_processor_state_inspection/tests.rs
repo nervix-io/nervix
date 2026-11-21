@@ -52,7 +52,7 @@ async fn page(
                     rows,
                     bytes: 1024 * 1024,
                 },
-                memory,
+                GrowingCharge::new(memory),
                 cancellation,
             )
         })

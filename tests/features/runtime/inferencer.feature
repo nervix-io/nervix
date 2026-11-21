@@ -1,6 +1,6 @@
 Feature: Inferencer resources
   @inferencer_inspection_admission @deloxide_stress
-  Scenario Outline: Inferencer model inspection refuses a full bulk queue and recovers
+  Scenario Outline: Inferencer model inspection waits for a full bulk queue and completes once it frees
     Given a <cluster_size> node nervix cluster is started
     And node "node-1" has ONNX fixture resource directory "onnx_model"
     And the leader node is configured with these Plexus commands
@@ -15,7 +15,7 @@ Feature: Inferencer resources
       """
     Then the current leader node is saved as placeholder "inspection_leader"
     When bulk execution on node "{{inspection_leader}}" is saturated
-    And these Plexus commands fail with "the node's bounded execution did not take the inspection"
+    And this Plexus command request begins executing in the background on the leader node
       """
       CREATE INFERENCER score_model FROM features
         USING RESOURCE inference VERSION 1
@@ -28,20 +28,9 @@ Feature: Inferencer resources
         FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG;
       """
-    And bulk execution on node "{{inspection_leader}}" is released
-    And these Plexus commands are executed on the leader node
-      """
-      CREATE INFERENCER score_model FROM features
-        USING RESOURCE inference VERSION 1
-        FILE 'models/simple_score.onnx'
-        INPUTS { "features" <input_tensor_type> = input.vector }
-        OUTPUT SCHEMA { "score" <output_tensor_type> }
-        UNBRANCHED
-        TO scored
-        SET score = score
-        FLUSH IMMEDIATE
-        ON MESSAGE ERROR LOG;
-      """
+    Then the background command request has not completed within "2s"
+    When bulk execution on node "{{inspection_leader}}" is released
+    Then the background command request succeeds
     Then the last command output contains
       """
       quiesce level: DYNAMIC

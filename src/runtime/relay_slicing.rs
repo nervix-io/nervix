@@ -119,10 +119,7 @@ impl RemoteDispatcher {
                     }
                     // A relay delivery answers no waiting caller, so a full queue holds the
                     // delivery back rather than failing it.
-                    let encoding = selected.encode_arrow_ipc(
-                        self.executor(),
-                        nervix_execution::QueueAdmission::WaitForPlace,
-                    );
+                    let encoding = selected.encode_arrow_ipc(self.executor());
                     let encoded = channel
                         .while_producer_lives(encoding)
                         .await

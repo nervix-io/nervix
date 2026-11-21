@@ -68,18 +68,21 @@ impl CapturedInferencer {
         })
     }
 
+    /// The stored inferencer checkpoint, read and charged through `executor`, which may draw from
+    /// the capture's allowances.
     pub(crate) async fn stored(
         checkpoint: StoredBranchCheckpoint,
         runtime: &Runtime,
+        executor: &Executor,
         limit: u64,
     ) -> Result<Option<Self>, Report<SnapshotStagingError>> {
         crate::inferencer_state_snapshot::check_bound(
             limit,
-            runtime.executor().limits().snapshot_section_bytes.as_u64(),
+            executor.limits().snapshot_section_bytes.as_u64(),
         )
         .change_context(SnapshotStagingError::Read)?;
         let opened = checkpoint
-            .open(runtime)
+            .open(runtime, executor)
             .await
             .change_context(SnapshotStagingError::Read)?;
         let length = u64::try_from(opened.view.length())
@@ -90,9 +93,9 @@ impl CapturedInferencer {
         let working = limit
             .checked_mul(2)
             .ok_or_else(|| Report::new(SnapshotStagingError::Admission))?;
-        let charge = runtime
-            .executor()
-            .try_reserve(MemoryClass::Bulk, working.max(1))
+        let charge = executor
+            .reserve(MemoryClass::Bulk, working.max(1))
+            .await
             .change_context(SnapshotStagingError::Admission)?;
         let (snapshot, charge) = opened
             .view
@@ -120,28 +123,34 @@ impl CapturedInferencer {
     }
 
     /// Only one branch is projected at a time. Staging's writer bounds and checks every write.
+    /// The staging working set is charged through `executor`, which may draw from the capture's
+    /// allowances.
     pub(crate) async fn stage(
         mut self,
         runtime: &Runtime,
+        executor: &Executor,
         raw_bytes: u64,
         snapshot_bytes: u64,
     ) -> Result<(StagedArtifact, InferencerArchiveMetadata), Report<SnapshotStagingError>> {
-        let charge = self
-            .reserve_staging(runtime.executor(), snapshot_bytes)
-            .await?;
+        let (charge, retained) = self.reserve_staging(executor, snapshot_bytes).await?;
         let writer = runtime.try_stage_artifact(raw_bytes).await?;
         writer
             .encode_artifact_with_result(charge, move |output, cancellation| {
+                let _retained = retained;
                 self.write(output, cancellation)
             })
             .await
     }
 
+    /// The staging working set: the capture's retained charge, which it keeps, and a charge for
+    /// the rest of the set, drawn through `executor`. The retained charge is not grown: it may
+    /// come from another budget than the one the rest is drawn from, and growing it would refuse
+    /// rather than wait.
     async fn reserve_staging(
         &mut self,
         executor: &Executor,
         snapshot_bytes: u64,
-    ) -> Result<Reservation, Report<SnapshotStagingError>> {
+    ) -> Result<(Reservation, Option<Reservation>), Report<SnapshotStagingError>> {
         let tensors_working = snapshot_bytes
             .checked_mul(2)
             .ok_or_else(|| Report::new(SnapshotStagingError::Admission))?;
@@ -157,18 +166,13 @@ impl CapturedInferencer {
         let working = tensors_working
             .checked_add(buffers)
             .ok_or_else(|| Report::new(SnapshotStagingError::Admission))?;
-        match self.charge.take() {
-            Some(mut charge) => {
-                charge
-                    .grow_to(working)
-                    .change_context(SnapshotStagingError::Admission)?;
-                Ok(charge)
-            }
-            None => executor
-                .reserve(MemoryClass::Bulk, working)
-                .await
-                .change_context(SnapshotStagingError::Admission),
-        }
+        let retained = self.charge.take();
+        let held = retained.as_ref().map_or(0, Reservation::bytes);
+        let charge = executor
+            .reserve(MemoryClass::Bulk, working.saturating_sub(held).max(1))
+            .await
+            .change_context(SnapshotStagingError::Admission)?;
+        Ok((charge, retained))
     }
 
     fn write(
@@ -255,10 +259,16 @@ mod tests {
             }),
             charge: Some(charge),
         };
-        let charge = captured
+        let (charge, retained) = captured
             .reserve_staging(&executor, snapshot_bytes)
             .await
             .assured("the test bulk budget fits the tensor encoder");
+        let charge = match retained {
+            Some(retained) => charge
+                .merge(retained)
+                .assured("both charges come from the test's bulk class"),
+            None => charge,
+        };
         StagedSnapshotWriter::assert_staging_encoding_charge(&executor, charge, expected).await;
     }
 }

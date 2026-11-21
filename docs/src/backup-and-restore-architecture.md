@@ -365,6 +365,17 @@ Capture then runs as one storage job:
    checkpoints only, materialized relays included.
 6. Each selected state becomes archive sections in node staging, one checkpoint at a time.
 
+The cut keeps what it captured while it stages it, and staging takes more of the same memory
+classes, so the cut and its staging are one attempt within an owner's shares of `restore_metadata`
+and then `bulk`, which the owner waits for while it holds nothing of either. The bulk share starts
+from the fresh materialized generations the cut would capture now, beside the staging working set;
+the restore metadata share starts at 1 MiB. Every charge of the attempt, the stored views it maps
+and the readers it opens included, is drawn from those shares, so the attempt never waits for room.
+An attempt that needs more gives everything back, the sections it staged included, and the owner
+cuts again within shares at least twice as large. A full class therefore holds a capture back and
+never refuses it. The lifecycle checkpoints a quiesced cut asks its entities for run before the
+owner takes its shares: they run on the entities' own tasks, which take charges of their own.
+
 | State | How it becomes sections |
 | --- | --- |
 | Inferencer tensors | Current inference routes provide immutable published generations. The cut freezes one generation per active lifecycle key, superseding its stored checkpoint. Quiesced and live captures request the scheduled primary's branch checkpoint, publishing its current session and lifecycle without running the model; live capture keeps intake running and retains crash-consistent semantics. Stopped cuts read the selected native checkpoint under bounded admission. Capture projects shapes and streams exact F32 bits into `state.bin`; its descriptor records the same publication revision and incarnation with the staged length/digest. The archive exposes no native snapshot frame. |
@@ -587,17 +598,22 @@ therefore grows with entry count, while strings and encoded checkpoint output st
 and received uploads retain their staged file and its disk quota through the storage job that reads
 them, including its cancellation.
 
-A conversion the node refuses only for room does not fail the restore. A bulk or `restore_metadata`
-class without room, a full worker queue and a full staging quota judged nothing of the archive, so
-the conversion releases what it holds and converts the refused unit again every 50 milliseconds for
-up to 30 seconds after the node first refused it. For a window the unit is one section, read and
-decoded again into a checkpoint exactly as it was before the refused attempt, whose staged pieces
-were dropped; a window refused while its sealed pieces are finished into one checkpoint is converted
-again from its first group; and a keyspace is converted again from its first group, because its
-admitted keys are what held its charge. A refusal that outlasts that wait ends the conversion and is
-reported as the node having had no room for it, since what the restore itself holds can be what
-fills the budget. A request larger than a whole budget, and content that does not fit the restored
-shapes, end it at once. Materialized conversion has no such wait: a refusal ends it.
+A full memory class or worker queue never fails a restore. Each conversion is one attempt within its
+own shares, which it waits for while it holds nothing of their classes: a keyspace within a
+`restore_metadata` share for its keys and a bulk share for its groups and encoding, taken in that
+order; a window, and a materialized relay's conversion or regrouping, within one bulk share. Every
+charge the attempt takes is drawn from its shares, so the attempt never waits, and each group gives
+its charges back to the share before the next. An attempt that needs more than a share gives
+everything back, its staged pieces and admitted keys included, and the conversion runs again from
+its first group within a share at least twice as large. The starting shares come from the largest
+archived group and the native encoding working set, so a conversion rarely runs twice. A full
+staging quota judged nothing of the archive either: the conversion releases what it holds and runs
+again every 50 milliseconds for up to 30 seconds after the quota first refused it. A refusal that
+outlasts that wait ends the conversion and is reported as the staging quota having had no room for
+it, since what the restore itself stages can be what fills the quota. A request larger than a whole
+memory class, and content that does not fit the restored shapes, end it at once. The restore's
+description charge, the archive's metadata and the fixed share of every archived key admitted once
+before planning, is the restore's own resident state while its conversions run.
 
 ## Planning
 
@@ -1322,10 +1338,10 @@ four selections; pointer publication, native tensors, async admission and transp
 outside its detector. The [stateful inference qualification](https://app.clickup.com/t/86bcyakvx)
 owns chaos qualification.
 
-Backup retry cadence and restore conversion's admission wait/retry are node capabilities, with
-50ms backup retries and a 30s conversion wait with 50ms retries by default. Each conversion unit
-keeps its first-refusal time and captured policy; a retry releases the failed attempt's charges
-and does not renew that wait. Capture and restored-state staging expiry use two thirds of command
+Backup retry cadence and restore conversion's staging wait/retry are node capabilities, with
+50ms backup retries and a 30s conversion staging wait with 50ms retries by default. Each conversion
+keeps its first staging refusal's time and captured policy; a retry releases the failed attempt's
+charges and does not renew that wait. Capture and restored-state staging expiry use two thirds of command
 retry validity, ten minutes by default. Their maintenance sweep uses the local restore-staging
 cadence. Local capture/install revision waits use twenty Raft heartbeats, five seconds by default.
 

@@ -31,7 +31,7 @@ async fn an_interrupted_worker_closes_its_queued_jobs_and_returns_the_class() {
     let charge = executor
         .try_reserve(MemoryClass::Management, 1)
         .assured("one byte fits in the management budget");
-    let mut queued = Box::pin(pool.run(QueueAdmission::RefuseWhenFull, charge, |_, _| ()));
+    let mut queued = Box::pin(pool.run(charge, |_, _| ()));
     assert!(
         std::future::poll_fn(|cx| Poll::Ready(queued.as_mut().poll(cx)))
             .await
@@ -40,7 +40,7 @@ async fn an_interrupted_worker_closes_its_queued_jobs_and_returns_the_class() {
     let charge = executor
         .try_reserve(MemoryClass::Management, 1)
         .assured("a second byte fits in the management budget");
-    let mut successor = Box::pin(pool.run(QueueAdmission::RefuseWhenFull, charge, |_, _| ()));
+    let mut successor = Box::pin(pool.run(charge, |_, _| ()));
     assert!(
         std::future::poll_fn(|cx| Poll::Ready(successor.as_mut().poll(cx)))
             .await
@@ -82,7 +82,7 @@ async fn an_interrupted_worker_closes_its_queued_jobs_and_returns_the_class() {
         .try_reserve(MemoryClass::Management, 1)
         .assured("the interrupted job returned its charge");
     assert_eq!(
-        pool.run(QueueAdmission::RefuseWhenFull, charge, |_, _| 7)
+        pool.run(charge, |_, _| 7)
             .await
             .assured("the returned active place admits a replacement"),
         7
@@ -101,9 +101,8 @@ async fn a_panicking_job_reports_its_own_failure_and_the_worker_drains_its_succe
     let charge = executor
         .try_reserve(MemoryClass::Management, 1)
         .assured("one byte fits in the management budget");
-    let mut panicking = Box::pin(pool.run(QueueAdmission::RefuseWhenFull, charge, |_, _| {
-        panic!("the callback's deliberate panic")
-    }));
+    let mut panicking =
+        Box::pin(pool.run(charge, |_, _| panic!("the callback's deliberate panic")));
     assert!(
         std::future::poll_fn(|cx| Poll::Ready(panicking.as_mut().poll(cx)))
             .await
@@ -112,7 +111,7 @@ async fn a_panicking_job_reports_its_own_failure_and_the_worker_drains_its_succe
     let charge = executor
         .try_reserve(MemoryClass::Management, 1)
         .assured("a second byte fits in the management budget");
-    let mut succeeding = Box::pin(pool.run(QueueAdmission::RefuseWhenFull, charge, |_, _| 7));
+    let mut succeeding = Box::pin(pool.run(charge, |_, _| 7));
     assert!(
         std::future::poll_fn(|cx| Poll::Ready(succeeding.as_mut().poll(cx)))
             .await
@@ -159,19 +158,16 @@ async fn a_single_worker_drains_its_backlog_without_polling_submitters_again() {
             .assured("eight bytes fit in the untouched management budget");
         let release = gate.take();
         let completed = completed.clone();
-        let mut submission =
-            Box::pin(
-                pool.run(QueueAdmission::RefuseWhenFull, charge, move |_, _| {
-                    if let Some(release) = release {
-                        release
-                            .blocking_recv()
-                            .assured("the test releases the first job");
-                    }
-                    completed
-                        .try_send(index)
-                        .assured("the channel holds all eight results");
-                }),
-            );
+        let mut submission = Box::pin(pool.run(charge, move |_, _| {
+            if let Some(release) = release {
+                release
+                    .blocking_recv()
+                    .assured("the test releases the first job");
+            }
+            completed
+                .try_send(index)
+                .assured("the channel holds all eight results");
+        }));
         let state = std::future::poll_fn(|cx| Poll::Ready(submission.as_mut().poll(cx))).await;
         assert!(state.is_pending(), "the first job holds the class's worker");
         submissions.push(submission);

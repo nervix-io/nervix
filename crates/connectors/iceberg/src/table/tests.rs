@@ -1174,8 +1174,10 @@ async fn staged_batches_are_appended_and_loaded_on_the_filesystem_workers_under_
     .assured("the filesystem workers append the staged batch to a new staging file");
     let range = staged.appended.ranges[0].clone();
     let written = range.end - range.start;
+    let host = nervix_connector_fake::FakeEmitterHost::on(executor.clone()).host();
     let IcebergLoadedGroup { batches, charge } = IcebergTableEmitter::load_group(
         &executor,
+        &host,
         schema,
         vec![staging::Span {
             path,

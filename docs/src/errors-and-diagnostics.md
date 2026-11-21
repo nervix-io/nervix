@@ -526,7 +526,7 @@ generation as committed. Successful replies build no failure context.
 | Vocabulary Models and the execution-graph description | Alterations the stored Model refuses; invalid placement members, inferencer tensor schemas, and upload identities; values canonical Plexus cannot spell; and execution-graph encoding or decoding | Refuse the command and keep the stored Model unchanged, or report which statement or graph could not be rendered or decoded. |
 | Plexus language and formatter | Source text the lexer or parser rejects, with the stage that rejected it, the rejected text, and every diagnostic's message and byte span; statements the formatter cannot render, and formatted output that does not reparse to the statements it came from | Report the stage and underline each diagnostic in the text that was submitted, or leave a file unchanged and report the formatter defect. |
 | Arrow record and batch layer | Schema, field, column, row, and batch construction or decoding failures | Reject a malformed batch or a field operation without inventing a replacement value. |
-| Bounded execution | A memory charge a class could not grant (`AdmissionError`), a budgeted buffer whose growth its class did not back (`BufferGrowthError::NotCharged`, with that `AdmissionError` beneath it) or that would pass its operation's limit (`BufferGrowthError::LimitExceeded`), request work refused because its class's wait queue is full, a closed pool, a job that panicked on its worker (`ExecutionError`), and a job that stopped at a `Cancelled` check because its caller stopped waiting | The job's owner maps each to its own typed outcome. Already accepted data waits for a CPU place under its owner's lifetime. A refusal judged nothing, so it stays retryable: an endpoint answers a body its sender still holds as a retryable rejection, a credential check answers `UNAVAILABLE` rather than failing authentication, and a restore's deduplicator or window conversion releases what it holds and converts the refused window section or keyspace again, within a 30-second wait for room, rather than reporting archived state of another shape. Work a source or a peer already handed over, and every planned step of the node's own lifecycle, is never refused for a full queue: it waits for a place, and whatever feeds it is held back meanwhile. That covers every payload an ingestor takes, acknowledged or not, a payload a quiesce buffer retained, a paced poll, a WebSocket frame in `MODE NO ACK`, a consensus log write, checkpoints, state transfers and partition moves, relay slicing, subscription fan-out, the answer to an interconnect request whose handler already ran and an ack resolution, module and UDF compilation, the resource store's file work, and the job that admits one key group into a keyspace a restore is converting. A processor task's restore of its branches is the one lifecycle step still refused: it runs inline before the task answers its commands, so a full bulk queue fails the attempt, the task keeps answering as unrestored and retries after a backoff, and the checkpoint stays where it is ([Restoring Processor Branches](./shutdown.md#restoring-processor-branches)). An Iceberg commit's read of the staged files its emitter already accepted waits for a place as well, while the bulk memory charge it takes first, without queueing, is refused when the class has no room and the emitter retries the commit with its policy. A panic is the job's own defect. The executor catches it at that callback, reports `JobPanicked` to its caller, completes its service accounting and continues draining its admitted successors. |
+| Bounded execution | A memory charge larger than its whole class, or taken from a class that closed because the node stops (`AdmissionError`), a budgeted buffer that would pass its operation's limit (`BufferGrowthError::LimitExceeded`), a closed pool, a job that panicked on its worker (`ExecutionError`), and a job that stopped at a `Cancelled` check because its caller stopped waiting | The job's owner maps each to its own typed outcome. A full memory class or a full wait queue is never a failure: the executor's pools are backpressure, so every charge waits for room and every job waits for a place in FIFO order, requests included, and whatever feeds the waiting work is held back meanwhile. A caller bounds the wait by its own limit (a statement's deadline, an HTTP body's deadline, an interconnect request's deadline) or by dropping it, which gives up the place. Work that already holds part of a class never waits for more of it: it takes its whole working set as one share up front (`Executor::reserve_allowance`, `Executor::within_allowance`), and a charge its share has no room for fails at once with the share it needs (`Shortfall`), so its owner gives everything back and runs it again within that share, waited for while it holds nothing. A synchronous job whose buffer finds its class full does the same (`BufferGrowthError::NotCharged` with the `Shortfall` beneath it, `Executor::run_cpu_growing`). None of these reaches a caller as a refusal: an endpoint body, a client batch, an inspection, a checkpoint, a state transfer, a backup cut, a restore conversion and an Iceberg commit all wait. A processor task's restore of its branches waits for its place and room while the task answers its commands as unrestored ([Restoring Processor Branches](./shutdown.md#restoring-processor-branches)). An Iceberg commit that waits for room shows the wait as its emitter's transient status until the charge is granted. A panic is the job's own defect. The executor catches it at that callback, reports `JobPanicked` to its caller, completes its service accounting and continues draining its admitted successors. |
 | Expression VM frontend and runtime bridge | Invalid expression scopes, types, sensitivity, compiled program inputs, and evaluation failures | Refuse a model during validation, or classify an affected row or batch during execution. [VM Functions](./vm-functions.md) owns execution detail. |
 | Stateful processors | Branch-local deduplication, ordering, window, correlation, inference, and WASM execution or state failures, and a processor task's restore of the branches its lifecycle checkpoint names (`ProcessorBranchTaskError`) | Apply the processor's message or node policy, or fail a checkpoint and its held acknowledgements. A restore that fails installs no branch and stays pending: the task retries it after a backoff, holds its input, and refuses a lifecycle checkpoint or guest-state reset with `BranchesUnrestored` until an attempt succeeds. [Shutdown And Recovery](./shutdown.md#restoring-processor-branches) owns that sequence. |
 | Connector crates and host | Integration-specific configuration, decoding, external ingestor and emitter outcomes; host-owned routing, retry, flush, and acknowledgement failures | Separate a record rejection from an ingestor or emitter failure and follow the configured retry or acknowledgement contract. [Connector Crates And The Connector Contract](./connector-contract.md) owns those contracts. |
@@ -1859,10 +1859,10 @@ row, byte, descriptor and executor admission bounds keep their existing typed ou
 
 ### Client Inspection Admission
 
-Client inspection during incoming preflight may refuse full command-memory or filesystem queue
-capacity. An accepted transaction or restore model step waits for that capacity instead: temporary
-pressure is not an invalid configuration or a failed restore step. Oversized charges and closed
-executors retain their typed admission causes beneath the inspection context. Existing service-task
+Client inspection during incoming preflight waits for command memory and a filesystem place when
+the node has none free, as an accepted transaction or restore model step does: temporary pressure
+is not an invalid configuration or a failed restore step. Oversized charges and closed executors
+retain their typed admission causes beneath the inspection context. Existing service-task
 cancellation ends a waiting inspection without converting it into an invalid-key diagnosis.
 
 ### Runtime Installation
@@ -1988,15 +1988,15 @@ names the staging file and that failure. Cleanup failures for a new staging file
 failed, for an append that could not be cut back off, or for a rejected data file are logged with
 their paths or noted on the report without replacing the original publish or commit failure.
 
-An Iceberg commit charges the bulk memory class for the staged batches it reads back with
-`Executor::try_reserve`, so a charge the class has no room for is refused rather than queued. The
-refusal keeps the typed `AdmissionError` beneath `EmitterWriteError::Commit` and attaches the
-description the emitter shows as its transient error: `Iceberg commit waits for room in the bulk
-memory class for <bytes> staged bytes` when the class has no room now, and `Iceberg commit waits
-for the whole bulk memory class of <capacity> bytes for a staged batch of <bytes> bytes` when one
-staged batch is larger than the class, which charges the whole class and so waits until all of it
-is free. The emitter retries either with its policy, and neither releases a staged record's
-acknowledgement.
+An Iceberg commit charges the bulk memory class for the staged batches it reads back. A class
+with no room for the charge now holds the commit back until it has: the commit holds nothing of the
+class while it waits, and the emitter shows the wait as its transient status until the charge is
+granted, `Iceberg commit waits for room in the bulk memory class for <bytes> staged bytes`, or
+`Iceberg commit waits for the whole bulk memory class of <capacity> bytes for a staged batch of
+<bytes> bytes` when one staged batch is larger than the class, which charges the whole class and so
+waits until all of it is free. Waiting releases no staged record's acknowledgement. Only a closed
+class, while the node stops, fails the commit: the typed `AdmissionError` stays beneath
+`EmitterWriteError::Commit`, and the emitter retries with its policy.
 
 Starting an emitter on a node returns an `EmitterStartError` report. `EmitterStartError::Start`
 names the emitter and its domain, and the step that failed stays beneath it: an input relay the
@@ -3060,8 +3060,9 @@ whose acknowledgement failed and may have had effects, and `OutcomeUnknown` repo
 effects cannot be established. An invalid batch names one `ClientBatchDefect`; its message and the
 detail of a processing failure are bounded to 1 KiB, never quote a payload value, and are display
 text only. A temporary refusal, `Suspended` or `Busy`, is an ordinary outcome that a producer
-resends on its declared backoff, not a failure. A node that cannot reserve memory or a worker to
-validate a batch answers `Busy` rather than holding the batch, and a batch that fails after it was
+resends on its declared backoff, not a failure. A node with no room or worker free to validate a
+batch holds the batch until they free; it answers `Busy` only while it stops and its executor
+admits no more work. A batch that fails after it was
 dispatched resolves its acknowledgement root negatively, which the producer receives as
 `ProcessingFailed` with `Rejected`.
 
@@ -4151,11 +4152,14 @@ the committed grant deadline later.
 ## Public Listener Input Refusals
 
 The [Listener Bounds](node-settings.md#listener-bounds) table owns HTTP input status/reason pairs.
-Body size and completion deadline produce 413 and 408; memory and body-move admission produce 503;
-malformed body framing produces 400. Their typed causes remain attached until the HTTP reporting
+Body size and completion deadline produce 413 and 408. Input memory and a body move wait for room
+and a data worker within the body's deadline, and produce 503 only when the deadline passes while
+the server waits, when the input is larger than the whole input memory class, or while the node
+stops; malformed body framing produces 400. Their typed causes remain attached until the HTTP reporting
 boundary. Hyper enforces header capacity with 431 and closes incomplete headers at their deadline.
-An input-memory refusal passes its complete admission report through the foreign I/O error; the
-request ledger retains only its status classification. Idle and TLS setup expiry also carry typed
+A read into an allocation the input charge does not cover yet waits for room before it reads;
+an input-memory refusal passes its complete admission report through the foreign I/O error, and
+the request ledger retains only its status classification. Idle and TLS setup expiry also carry typed
 connection-expiry reports in their I/O errors.
 After an input refusal, Hyper completes the response and half-closes writes before the node
 discards residual transport bytes within `http-refusal-drain-timeout`. This prevents an ongoing
@@ -4169,8 +4173,9 @@ TLS/gRPC refusal ends that connection. None of these paths claims graph admissio
 rejection, and retryable memory/worker refusal is never classified as a codec failure.
 
 The HTTP input completion budget distinguishes phases: expiry while receiving bytes returns 408;
-expiry while the server waits for or performs a body move on a data worker returns 503. The move
-retains its reservation until the worker actually exits after cancellation.
+expiry while the server waits for input memory, or waits for or performs a body move on a data
+worker, returns 503. The move retains its reservation until the worker actually exits after
+cancellation.
 
 ## Licensing Notification Failures
 

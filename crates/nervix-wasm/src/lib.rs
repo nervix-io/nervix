@@ -603,23 +603,18 @@ impl WasmRuntime {
             .await
             .change_context(WasmProcessorError::CompileExecution)?;
         let compiled = executor
-            .run_cpu_with(
-                CpuClass::Bulk,
-                nervix_execution::QueueAdmission::WaitForPlace,
-                reservation,
-                move |_charge, cancellation| {
-                    cancellation
-                        .check()
-                        .change_context(WasmProcessorError::CompileExecution)?;
-                    let module = Module::new(&engine, wasm)
-                        .map_err(|source| Report::new(WasmProcessorError::Compile(source)))?;
-                    let mut linker = Linker::<BranchStore>::new(&engine);
-                    define_host_functions(&mut linker)?;
-                    linker
-                        .instantiate_pre(&module)
-                        .map_err(|source| Report::new(WasmProcessorError::Link(source)))
-                },
-            )
+            .run_cpu(CpuClass::Bulk, reservation, move |_charge, cancellation| {
+                cancellation
+                    .check()
+                    .change_context(WasmProcessorError::CompileExecution)?;
+                let module = Module::new(&engine, wasm)
+                    .map_err(|source| Report::new(WasmProcessorError::Compile(source)))?;
+                let mut linker = Linker::<BranchStore>::new(&engine);
+                define_host_functions(&mut linker)?;
+                linker
+                    .instantiate_pre(&module)
+                    .map_err(|source| Report::new(WasmProcessorError::Link(source)))
+            })
             .await
             .change_context(WasmProcessorError::CompileExecution)?;
         let instance_pre = compiled?;

@@ -398,8 +398,8 @@ pub(super) async fn plan_filter_map_messages(
     let state_snapshot = relay_state_snapshot_from_side_inputs(side_inputs);
     let result = match acks
         .as_slice()
-        .keep_alive_while_pending(execute_accepted_program_with_selection_in_context(
-            run.executor.accepted_work(),
+        .keep_alive_while_pending(execute_program_with_selection_in_context(
+            &run.executor,
             &program.compiled,
             &vm_batch,
             &VmExecutionContext {
@@ -826,8 +826,8 @@ pub(super) async fn execute_prepared_filter_map(
 ) -> Result<ExecutedFilterMap, PlannedGeneralFailure> {
     let result = match acks
         .as_slice()
-        .keep_alive_while_pending(execute_accepted_program_with_selection_in_context(
-            run.executor.accepted_work(),
+        .keep_alive_while_pending(execute_program_with_selection_in_context(
+            &run.executor,
             &program.compiled,
             &vm_batch,
             &VmExecutionContext {
@@ -1032,8 +1032,8 @@ pub(super) async fn evaluate_output_branch_program(
         None,
     )
     .change_context(PlannedGeneralError::PrepareInput { operation })?;
-    let result = execute_accepted_program_with_selection_in_context(
-        run.executor.accepted_work(),
+    let result = execute_program_with_selection_in_context(
+        &run.executor,
         &program.program.compiled,
         &vm_input,
         &VmExecutionContext {
@@ -1789,7 +1789,6 @@ mod tests {
                 ))
             );
         }
-        assert_eq!(executor.snapshot().data_cpu.refused, 0);
     }
 
     #[test]
@@ -2931,8 +2930,8 @@ mod tests {
         let input = vm_input_from_test_rows(&records, &program.program.input_schema)
             .expect("VM input batch should build");
 
-        let output = execute_accepted_program_with_selection_in_context(
-            Executor::default().accepted_work(),
+        let output = execute_program_with_selection_in_context(
+            &Executor::default(),
             &program.program,
             &input,
             &VmExecutionContext {

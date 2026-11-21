@@ -390,12 +390,7 @@ async fn run_filesystem_work<T: Send + 'static>(
         .await
         .change_context(PreflightError::Execution)?;
     executor
-        .run_storage_with(
-            StorageClass::Filesystem,
-            nervix_execution::QueueAdmission::WaitForPlace,
-            reservation,
-            move |_, _| work(),
-        )
+        .run_storage(StorageClass::Filesystem, reservation, move |_, _| work())
         .await
         .change_context(PreflightError::Execution)
 }

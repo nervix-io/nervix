@@ -412,8 +412,8 @@ pub(super) async fn execute_generator_program_on_context(
     input: &VmTypedBatch,
     execution_now: Timestamp,
 ) -> error_stack::Result<GeneratorProgramOutcome, GeneratorError> {
-    let result = execute_accepted_program_with_selection_in_context(
-        executor.accepted_work(),
+    let result = execute_program_with_selection_in_context(
+        executor,
         &program.compiled,
         input,
         &VmExecutionContext {

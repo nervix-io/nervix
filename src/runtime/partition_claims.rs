@@ -737,7 +737,8 @@ impl Runtime {
         let _memory = self
             .inner
             .executor
-            .try_reserve(nervix_execution::MemoryClass::Bulk, bytes.max(1))
+            .reserve(nervix_execution::MemoryClass::Bulk, bytes.max(1))
+            .await
             .change_context_lazy(admission)?;
         let mut copies = Vec::new();
         let mut located = None::<Candidate>;

@@ -181,28 +181,24 @@ impl MongoDbClient {
         let bytes = u64::try_from(std::mem::size_of::<PreparedMongoDbClient>())
             .change_context(EmitterOpenError::Initialize { connector: MONGODB })?;
         let charge = executor
-            .try_reserve(MemoryClass::Management, bytes)
+            .reserve(MemoryClass::Management, bytes)
+            .await
             .change_context(EmitterOpenError::Initialize { connector: MONGODB })?;
         executor
-            .run_storage_with(
-                StorageClass::Filesystem,
-                nervix_execution::QueueAdmission::WaitForPlace,
-                charge,
-                move |_, cancellation| {
-                    cancellation
-                        .check()
-                        .change_context(EmitterOpenError::Initialize { connector: MONGODB })?;
-                    let PreparedMongoDbClient { options, identity } = prepared;
-                    // The native constructor synchronously reads CA/identity files and parses PEM.
-                    let driver = DriverClient::with_options(options).change_context(
-                        EmitterOpenError::InvalidConfiguration { connector: MONGODB },
-                    )?;
-                    Ok(Self(Arc::new(MongoDbClientInner {
-                        driver,
-                        _identity: identity,
-                    })))
-                },
-            )
+            .run_storage(StorageClass::Filesystem, charge, move |_, cancellation| {
+                cancellation
+                    .check()
+                    .change_context(EmitterOpenError::Initialize { connector: MONGODB })?;
+                let PreparedMongoDbClient { options, identity } = prepared;
+                // The native constructor synchronously reads CA/identity files and parses PEM.
+                let driver = DriverClient::with_options(options).change_context(
+                    EmitterOpenError::InvalidConfiguration { connector: MONGODB },
+                )?;
+                Ok(Self(Arc::new(MongoDbClientInner {
+                    driver,
+                    _identity: identity,
+                })))
+            })
             .await
             .change_context(EmitterOpenError::Initialize { connector: MONGODB })?
     }

@@ -39,8 +39,7 @@ pub(crate) use checkpoint_reader::CapturedMaterializedCheckpoint;
 use error_stack::{Report, ResultExt as _};
 use meticulous::OptionExt as _;
 use nervix_execution::{
-    AdmissionError, BudgetedBuffer, ChargedBytes, CpuClass, Executor, MemoryClass, QueueAdmission,
-    StorageClass,
+    AdmissionError, BudgetedBuffer, ChargedBytes, CpuClass, Executor, MemoryClass, StorageClass,
 };
 use nervix_models::RemoteRuntimeRecordMetadata;
 use nervix_primitives::sync::{Arc, StdArc};
@@ -494,24 +493,32 @@ impl SealedMaterializedSnapshot {
         self,
         executor: &Executor,
     ) -> Result<super::PersistedRuntimeStateEntry, Report<MaterializedSnapshotError>> {
-        let size = self
-            .descriptor
-            .length
-            .checked_mul(2)
+        let length = self.descriptor.length;
+        let chunk_bytes = executor.limits().bulk_chunk_bytes.as_u64();
+        // The payload and the one chunk it is read in at a time are one share of the bulk class,
+        // which the read waits for while holding nothing, so no chunk waits while the payload
+        // holds part of the class.
+        let share = length
+            .checked_add(chunk_bytes.min(length))
             .ok_or_else(|| Report::new(MaterializedSnapshotError::Admission))?;
-        let _charge = executor
-            .try_reserve(MemoryClass::Bulk, size.max(1))
+        let bulk = executor
+            .reserve_allowance(MemoryClass::Bulk, share)
+            .await
+            .change_context(MaterializedSnapshotError::Admission)?;
+        let _payload_charge = bulk
+            .reserve(MemoryClass::Bulk, length)
+            .await
             .change_context(MaterializedSnapshotError::Admission)?;
         let mut reader = self
             .artifact
-            .open_reader()
+            .open_reader_with(&bulk)
             .await
             .change_context(MaterializedSnapshotError::Execution)?;
         let mut payload = Vec::with_capacity(
             usize::try_from(self.descriptor.length).map_err(MaterializedSnapshotError::encoding)?,
         );
         while let Some(chunk) = reader
-            .next_chunk(executor.limits().bulk_chunk_bytes.as_u64())
+            .next_chunk(chunk_bytes)
             .await
             .change_context(MaterializedSnapshotError::Execution)?
         {
@@ -715,44 +722,39 @@ impl MaterializedGeneration {
             .checked_mul(3)
             .ok_or_else(|| Report::new(MaterializedSnapshotError::Admission))?;
         let reservation = executor
-            .try_reserve(MemoryClass::Bulk, bytes.max(1))
+            .reserve(MemoryClass::Bulk, bytes.max(1))
+            .await
             .change_context(MaterializedSnapshotError::Admission)?;
         let records = Arc::clone(&self.records);
         let group = group.clone();
         let bytes = executor
-            .run_cpu_with(
-                CpuClass::Bulk,
-                nervix_execution::QueueAdmission::WaitForPlace,
-                reservation,
-                move |charge, cancellation| {
-                    let mut identities = Vec::with_capacity(group.len());
-                    for record in &records[group] {
-                        cancellation
-                            .check()
-                            .change_context(MaterializedSnapshotError::Execution)?;
-                        identities.push(SealedRecordIdentity {
-                            branch: BranchKey::to_remote_key(&record.branch),
-                            watermarks: record.row.metadata().to_remote(),
-                        });
-                    }
-                    let encoded = rkyv::to_bytes::<rkyv::rancor::Error>(&SealedRecordIdentities {
-                        identities,
-                    })
-                    .map_err(MaterializedSnapshotError::encoding)?;
-                    let size = encoded.len().arch_into();
-                    if size > limit {
-                        return Err(Report::new(MaterializedSnapshotError::RecordTooLarge {
-                            size,
-                            limit,
-                        }));
-                    }
-                    let mut buffer = BudgetedBuffer::with_limit(charge, limit);
-                    buffer
-                        .write_all(&encoded)
+            .run_cpu(CpuClass::Bulk, reservation, move |charge, cancellation| {
+                let mut identities = Vec::with_capacity(group.len());
+                for record in &records[group] {
+                    cancellation
+                        .check()
+                        .change_context(MaterializedSnapshotError::Execution)?;
+                    identities.push(SealedRecordIdentity {
+                        branch: BranchKey::to_remote_key(&record.branch),
+                        watermarks: record.row.metadata().to_remote(),
+                    });
+                }
+                let encoded =
+                    rkyv::to_bytes::<rkyv::rancor::Error>(&SealedRecordIdentities { identities })
                         .map_err(MaterializedSnapshotError::encoding)?;
-                    Ok(ChargedBytes::from_buffer(buffer))
-                },
-            )
+                let size = encoded.len().arch_into();
+                if size > limit {
+                    return Err(Report::new(MaterializedSnapshotError::RecordTooLarge {
+                        size,
+                        limit,
+                    }));
+                }
+                let mut buffer = BudgetedBuffer::with_limit(charge, limit);
+                buffer
+                    .write_all(&encoded)
+                    .map_err(MaterializedSnapshotError::encoding)?;
+                Ok(ChargedBytes::from_buffer(buffer))
+            })
             .await
             .change_context(MaterializedSnapshotError::Execution)??;
         Ok(SealedSection {
@@ -804,13 +806,12 @@ impl MaterializedGeneration {
         let group = group.clone();
         let bytes = RuntimeRecordBatch::encode_arrow_snapshot_projection(
             executor,
-            nervix_execution::QueueAdmission::WaitForPlace,
             projection_bytes,
             encoded_estimate,
             move || {
                 RuntimeRecordBatch::from_rows(
-                    schema,
-                    records[group].iter().map(|record| &record.row),
+                    StdArc::clone(&schema),
+                    records[group.clone()].iter().map(|record| &record.row),
                 )
             },
         )
@@ -969,10 +970,9 @@ impl SealedContainerPieces {
         section: SealedSection,
     ) -> Result<(), Report<MaterializedSnapshotError>> {
         let frame = section_frame(section.kind, section.bytes.len())?;
-        let frame = executor
-            .charge_owned(MemoryClass::Bulk, frame)
-            .await
-            .change_context(MaterializedSnapshotError::Admission)?;
+        // A frame is five bytes, staged at once. It takes no charge of its own: a wait for one
+        // would hold its section's charge while it waited.
+        let frame = ChargedBytes::from_owned(frame, executor.charge_nothing(MemoryClass::Bulk));
         self.sections
             .stage(frame)
             .await
@@ -1181,20 +1181,10 @@ impl RestoredMaterializedSnapshot {
     ) -> Result<Self, Report<MaterializedSnapshotError>> {
         // A relay's sealed state is opened for a transfer, a replication stream or a stored read,
         // none of which answers a caller that waits on it, so a full bulk queue holds it back.
-        let snapshot = Self::open(
-            executor,
-            QueueAdmission::WaitForPlace,
-            schema,
-            source,
-            RestoredRows::Relay,
-        )
-        .await?;
-        let charge = executor
-            .reserve(MemoryClass::Bulk, 1)
-            .await
-            .change_context(MaterializedSnapshotError::Admission)?;
+        let snapshot = Self::open(executor, schema, source, RestoredRows::Relay).await?;
+        let charge = executor.charge_nothing(MemoryClass::Bulk);
         executor
-            .run_cpu_with(CpuClass::Bulk, nervix_execution::QueueAdmission::WaitForPlace, charge, move |_charge, cancellation| {
+            .run_cpu(CpuClass::Bulk, charge, move |_charge, cancellation| {
                 #[cfg_attr(nervix_lint, expect(nervix::branch_inversion, reason = "materialized or emitter state groups its data by branch; move it to the branch in https://app.clickup.com/t/86bd1z3bd"))]
                 let mut branches = ahash::HashSet::with_capacity_and_hasher(
                     snapshot.records.len(),
@@ -1229,13 +1219,12 @@ impl RestoredMaterializedSnapshot {
     /// refused before it allocates anything.
     pub(in crate::runtime) async fn open(
         executor: &Executor,
-        admission: QueueAdmission,
         schema: &StdArc<ArrowSchema>,
         source: SealedSource<'_>,
         rows: RestoredRows,
     ) -> Result<Self, Report<MaterializedSnapshotError>> {
         let mut cursor = source;
-        let header = cursor.take_header(executor, admission).await?;
+        let header = cursor.take_header(executor).await?;
         let identity_limit = executor.limits().snapshot_record_bytes.as_u64();
         let section_limit = executor.limits().snapshot_section_bytes.as_u64();
         let layout =
@@ -1270,13 +1259,8 @@ impl RestoredMaterializedSnapshot {
             metadata_charge
                 .grow_to(identity_bytes)
                 .map_err(|error| error.change_context(MaterializedSnapshotError::Admission))?;
-            let identities = decode_rkyv::<SealedRecordIdentities>(
-                executor,
-                admission,
-                identities,
-                identity_limit,
-            )
-            .await?;
+            let identities =
+                decode_rkyv::<SealedRecordIdentities>(executor, identities, identity_limit).await?;
             let columns = cursor
                 .take_section(SealedSectionKind::RecordColumns, section_limit)
                 .await?;
@@ -1296,7 +1280,6 @@ impl RestoredMaterializedSnapshot {
             );
             let batch = RuntimeRecordBatch::decode_arrow_snapshot_section(
                 executor,
-                admission,
                 StdArc::clone(schema),
                 columns,
             )
@@ -1393,7 +1376,6 @@ impl<'a> SealedSource<'a> {
     async fn take_header(
         &mut self,
         executor: &Executor,
-        admission: QueueAdmission,
     ) -> Result<SealedSnapshotHeader, Report<MaterializedSnapshotError>> {
         let magic = self
             .take(SEALED_SNAPSHOT_MAGIC.len().arch_into(), "magic")
@@ -1411,7 +1393,7 @@ impl<'a> SealedSource<'a> {
             }));
         }
         let header = self.take(header_bytes, "header").await?;
-        decode_rkyv::<SealedSnapshotHeader>(executor, admission, header, header_limit).await
+        decode_rkyv::<SealedSnapshotHeader>(executor, header, header_limit).await
     }
 
     fn finish(&self) -> Result<(), Report<MaterializedSnapshotError>> {
@@ -1496,9 +1478,8 @@ impl<'a> SealedSource<'a> {
                     .take()
                     .assured("the selected checkpoint is held between storage reads");
                 let result = executor
-                    .run_storage_with(
+                    .run_storage(
                         StorageClass::Filesystem,
-                        nervix_execution::QueueAdmission::WaitForPlace,
                         charge,
                         move |charge, cancellation| {
                             let result = (|| {
@@ -1632,47 +1613,43 @@ async fn encode_resident_container(
         length = next;
     }
     let reservation = executor
-        .try_reserve(MemoryClass::Bulk, length)
+        .reserve(MemoryClass::Bulk, length)
+        .await
         .change_context(MaterializedSnapshotError::Admission)?;
     let bytes = executor
-        .run_cpu_with(
-            CpuClass::Bulk,
-            nervix_execution::QueueAdmission::WaitForPlace,
-            reservation,
-            move |charge, cancellation| {
+        .run_cpu(CpuClass::Bulk, reservation, move |charge, cancellation| {
+            cancellation
+                .check()
+                .change_context(MaterializedSnapshotError::Execution)?;
+            let mut buffer = BudgetedBuffer::with_limit(charge, length);
+            buffer
+                .write_all(&SEALED_SNAPSHOT_MAGIC)
+                .map_err(MaterializedSnapshotError::encoding)?;
+            buffer
+                .write_all(&header_length.to_le_bytes())
+                .map_err(MaterializedSnapshotError::encoding)?;
+            buffer
+                .write_all(header.as_ref())
+                .map_err(MaterializedSnapshotError::encoding)?;
+            for section in &sections {
                 cancellation
                     .check()
                     .change_context(MaterializedSnapshotError::Execution)?;
-                let mut buffer = BudgetedBuffer::with_limit(charge, length);
+                let section_length = u32::try_from(section.bytes.len()).map_err(|_| {
+                    MaterializedSnapshotError::encoding("a section is unaddressable")
+                })?;
                 buffer
-                    .write_all(&SEALED_SNAPSHOT_MAGIC)
+                    .write_all(&[u8::from(section.kind)])
                     .map_err(MaterializedSnapshotError::encoding)?;
                 buffer
-                    .write_all(&header_length.to_le_bytes())
+                    .write_all(&section_length.to_le_bytes())
                     .map_err(MaterializedSnapshotError::encoding)?;
                 buffer
-                    .write_all(header.as_ref())
+                    .write_all(section.bytes.as_ref())
                     .map_err(MaterializedSnapshotError::encoding)?;
-                for section in &sections {
-                    cancellation
-                        .check()
-                        .change_context(MaterializedSnapshotError::Execution)?;
-                    let section_length = u32::try_from(section.bytes.len()).map_err(|_| {
-                        MaterializedSnapshotError::encoding("a section is unaddressable")
-                    })?;
-                    buffer
-                        .write_all(&[u8::from(section.kind)])
-                        .map_err(MaterializedSnapshotError::encoding)?;
-                    buffer
-                        .write_all(&section_length.to_le_bytes())
-                        .map_err(MaterializedSnapshotError::encoding)?;
-                    buffer
-                        .write_all(section.bytes.as_ref())
-                        .map_err(MaterializedSnapshotError::encoding)?;
-                }
-                Ok::<_, Report<MaterializedSnapshotError>>(ChargedBytes::from_buffer(buffer))
-            },
-        )
+            }
+            Ok::<_, Report<MaterializedSnapshotError>>(ChargedBytes::from_buffer(buffer))
+        })
         .await
         .change_context(MaterializedSnapshotError::Execution)??;
     Ok(bytes)
@@ -1698,37 +1675,31 @@ where
         .await
         .change_context(MaterializedSnapshotError::Admission)?;
     executor
-        .run_cpu_with(
-            CpuClass::Bulk,
-            nervix_execution::QueueAdmission::WaitForPlace,
-            reservation,
-            move |charge, cancellation| {
-                cancellation
-                    .check()
-                    .change_context(MaterializedSnapshotError::Execution)?;
-                let encoded = rkyv::to_bytes::<rkyv::rancor::Error>(&value)
-                    .map_err(MaterializedSnapshotError::encoding)?;
-                let encoded_bytes: u64 = encoded.len().arch_into();
-                if encoded_bytes > limit {
-                    return Err(Report::new(MaterializedSnapshotError::RecordTooLarge {
-                        size: encoded_bytes,
-                        limit,
-                    }));
-                }
-                let mut buffer = BudgetedBuffer::with_limit(charge, limit);
-                buffer
-                    .write_all(&encoded)
-                    .map_err(MaterializedSnapshotError::encoding)?;
-                Ok(ChargedBytes::from_buffer(buffer))
-            },
-        )
+        .run_cpu(CpuClass::Bulk, reservation, move |charge, cancellation| {
+            cancellation
+                .check()
+                .change_context(MaterializedSnapshotError::Execution)?;
+            let encoded = rkyv::to_bytes::<rkyv::rancor::Error>(&value)
+                .map_err(MaterializedSnapshotError::encoding)?;
+            let encoded_bytes: u64 = encoded.len().arch_into();
+            if encoded_bytes > limit {
+                return Err(Report::new(MaterializedSnapshotError::RecordTooLarge {
+                    size: encoded_bytes,
+                    limit,
+                }));
+            }
+            let mut buffer = BudgetedBuffer::with_limit(charge, limit);
+            buffer
+                .write_all(&encoded)
+                .map_err(MaterializedSnapshotError::encoding)?;
+            Ok(ChargedBytes::from_buffer(buffer))
+        })
         .await
         .change_context(MaterializedSnapshotError::Execution)?
 }
 
 async fn decode_rkyv<T>(
     executor: &Executor,
-    admission: QueueAdmission,
     bytes: ChargedBytes,
     limit: u64,
 ) -> Result<T, Report<MaterializedSnapshotError>>
@@ -1743,17 +1714,12 @@ where
         .try_reserve(MemoryClass::Bulk, limit)
         .change_context(MaterializedSnapshotError::Admission)?;
     executor
-        .run_cpu_with(
-            CpuClass::Bulk,
-            admission,
-            reservation,
-            move |_charge, cancellation| {
-                cancellation
-                    .check()
-                    .change_context(MaterializedSnapshotError::Execution)?;
-                decode_aligned_rkyv(bytes.as_ref())
-            },
-        )
+        .run_cpu(CpuClass::Bulk, reservation, move |_charge, cancellation| {
+            cancellation
+                .check()
+                .change_context(MaterializedSnapshotError::Execution)?;
+            decode_aligned_rkyv(bytes.as_ref())
+        })
         .await
         .change_context(MaterializedSnapshotError::Execution)?
 }
@@ -1852,13 +1818,7 @@ mod tests {
             .try_reserve(MemoryClass::Bulk, occupied_bytes)
             .assured("the test occupies the memory outside the decoder's input");
 
-        let result = decode_rkyv::<SealedSnapshotHeader>(
-            &executor,
-            QueueAdmission::RefuseWhenFull,
-            input,
-            limit,
-        )
-        .now_or_never();
+        let result = decode_rkyv::<SealedSnapshotHeader>(&executor, input, limit).now_or_never();
         assert!(
             result.is_some(),
             "a snapshot decoder must refuse rather than wait while its input holds bulk memory"
@@ -1883,14 +1843,9 @@ mod tests {
         let input = encode_rkyv(&executor, expected.clone(), limit)
             .await
             .assured("the current snapshot header encodes after contention ends");
-        let decoded = decode_rkyv::<SealedSnapshotHeader>(
-            &executor,
-            QueueAdmission::RefuseWhenFull,
-            input,
-            limit,
-        )
-        .await
-        .assured("the complete header remains readable once bulk room is available");
+        let decoded = decode_rkyv::<SealedSnapshotHeader>(&executor, input, limit)
+            .await
+            .assured("the complete header remains readable once bulk room is available");
         assert_eq!(decoded, expected);
         assert_eq!(executor.memory(MemoryClass::Bulk).reserved_bytes, 0);
     }
@@ -2193,7 +2148,6 @@ mod tests {
                         .assured("exact columns encode");
                     let decoded = RuntimeRecordBatch::decode_arrow_snapshot_section(
                         &executor,
-                        nervix_execution::QueueAdmission::RefuseWhenFull,
                         batch.schema(),
                         columns.clone(),
                     )
@@ -2202,10 +2156,7 @@ mod tests {
                     assert_eq!(decoded.schema(), batch.schema());
                     assert_eq!(
                         decoded
-                            .encode_arrow_snapshot_section(
-                                &executor,
-                                nervix_execution::QueueAdmission::RefuseWhenFull
-                            )
+                            .encode_arrow_snapshot_section(&executor)
                             .await
                             .assured("restored columns encode")
                             .as_ref(),
@@ -2315,19 +2266,13 @@ mod tests {
                         let actual_columns = actual
                             .row
                             .one_row_batch()
-                            .encode_arrow_snapshot_section(
-                                &executor,
-                                nervix_execution::QueueAdmission::RefuseWhenFull,
-                            )
+                            .encode_arrow_snapshot_section(&executor)
                             .await
                             .assured("native restored row encodes");
                         let expected_columns = expected
                             .row
                             .one_row_batch()
-                            .encode_arrow_snapshot_section(
-                                &executor,
-                                nervix_execution::QueueAdmission::RefuseWhenFull,
-                            )
+                            .encode_arrow_snapshot_section(&executor)
                             .await
                             .assured("captured row encodes");
                         assert_eq!(actual_columns.as_ref(), expected_columns.as_ref());
@@ -2522,10 +2467,7 @@ mod tests {
         let batch = RuntimeRecordBatch::from_rows(schema.clone(), rows.iter())
             .assured("two columnar rows have the same schema");
         let columns = batch
-            .encode_arrow_snapshot_section(
-                &executor,
-                nervix_execution::QueueAdmission::RefuseWhenFull,
-            )
+            .encode_arrow_snapshot_section(&executor)
             .await
             .assured("bounded fixture columns encode");
         let alpha = Some(tenant_branch("alpha"));

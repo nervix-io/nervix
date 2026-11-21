@@ -57,7 +57,7 @@ use nervix_branch_instances::{
 };
 use nervix_checkpoint_replication::{Announcer, AnnouncerStep, CheckpointReplication};
 use nervix_dns::DnsResolver;
-use nervix_execution::{ChargedBytes, Executor, QueueAdmission};
+use nervix_execution::{ChargedBytes, Executor};
 use nervix_interconnect::{
     EntityGatePurpose, Envelope, InterconnectRequest, RelayAdmission, RelayAdmissionDecision,
     RelayAdmissionStatus, RelayCancellationGuard, RelayDelivery, RelayPayload, RelayPayloadKind,
@@ -124,8 +124,8 @@ use nervix_vm::{
     UdfSignatures as VmUdfSignatures,
     compile_predicate_with_options_for_bindings as compile_vm_predicate_with_options_for_bindings,
     compile_program_with_options_for_bindings_with_sensitivity as compile_vm_program_with_options_for_bindings_with_sensitivity,
-    execute_accepted_program_with_selection_in_context,
     execute_predicate_in_context as execute_vm_predicate_in_context,
+    execute_program_with_selection_in_context,
     infer_set_expr_types_for_bindings_with_udfs as infer_vm_set_expr_types_for_bindings_with_udfs,
     lower_finalized_output_filter, lower_generated_route, lower_route_construction,
     lower_transforming_route,
@@ -393,7 +393,7 @@ mod subscription_predicate;
 mod test_fixtures;
 
 pub(crate) use backup_state::{
-    BackupBranchLifecycleEntry, BackupKafkaPartitionOffset, CapturedBranchState,
+    BackupBranchLifecycleEntry, BackupCut, BackupKafkaPartitionOffset, CapturedBranchState,
     CapturedBranchStateKind, CapturedDomainState, CapturedGuestSave, CapturedMaterializedRelay,
     CapturedMaterializedState, CapturedNativeMetadata, CapturedStoredMaterializedRelay,
     RESTORE_STATE_CHUNK_BYTES, RESTORE_STATE_WORKING_BYTES, RestoredRuntimeState,
@@ -616,7 +616,8 @@ use processor_state_inspection::{
 };
 pub(crate) use processor_state_inspection::{
     BranchStateReadError, ProcessorStatePageBounds, ProcessorStatePageError,
-    ProcessorStatePageMemory, ProcessorStateSectionColumns, ProcessorStateSelection,
+    ProcessorStatePageMemory, ProcessorStatePageRead, ProcessorStateSectionColumns,
+    ProcessorStateSelection,
 };
 use processor_template::{
     MaterializedDependencyResolution, ProcessorInputFilterKind, ProcessorTemplateError,

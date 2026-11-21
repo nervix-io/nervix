@@ -589,8 +589,8 @@ The node counts the payloads its ingestor consumed this way in
 `last decode rejection:`, the latest rejection on the node that runs the ingestor, or `-` before
 the first.
 
-A payload the node's extension workers have no room to unfold has not been judged by its codec, so
-it is not a decode rejection; see [When The Extension Workers Are Full](#when-the-extension-workers-are-full).
+A payload that waits for the node's extension workers to unfold it has not been judged by its
+codec, so it is not a decode rejection; see [When The Extension Workers Are Full](#when-the-extension-workers-are-full).
 An endpoint ingestor in `MODE NO ACK` accepts a body its codec refuses and reports it the same way, including a body
 its quiesce buffer retained.
 
@@ -609,11 +609,13 @@ late, and it never drops what it was handed.
   [Quiesce Modes](#quiesce-modes).
 - A paced ingestor's poll waits the same way. Waiting delays the next poll, and the domain cadence
   coalesces the occurrences it missed into one poll at the newest due instant.
-- An [endpoint ingestor](#http-endpoint-and-websockets-endpoint) answers an HTTP body 503 without
-  `Retry-After`, counts the refused request payload in `nervix_ingestor_unfolding_refused_total`, and
-  lets the sender send it again: an HTTP sender still holds its body and waits for the answer. A
-  WebSocket frame in `MODE NO ACK` has no answer its sender waits for, so it waits for a place like
-  an ingestor's payload, and its connection reads nothing further meanwhile. The frame counts as
+- An [endpoint ingestor](#http-endpoint-and-websockets-endpoint)'s HTTP body waits for a place too,
+  for as long as its request lasts: its sender still holds the body and waits for the answer, and a
+  sender that gives up the request gives up the place. Only a node that is stopping, or a body
+  whose unfolding needs a charge larger than its whole memory class, is answered 503 without
+  `Retry-After`, counted in `nervix_ingestor_unfolding_refused_total` and left for the sender to
+  send again. A WebSocket frame in `MODE NO ACK` has no answer its sender waits for, so it waits for
+  a place like an ingestor's payload, and its connection reads nothing further meanwhile. The frame counts as
   work its ingestor admitted, so a drain, an ownership handoff and a graceful stop wait for it, and
   it ends unprocessed only when its ingestor's intake ends.
 

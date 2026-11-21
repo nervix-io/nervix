@@ -98,7 +98,7 @@ impl FaultInjection {
     }
 
     /// Fill every worker of `class` on `node_id`, then every place in its wait queue, and return
-    /// once the class refuses the next job it is handed.
+    /// once the next job the class is handed waits for a place.
     pub async fn saturate_execution(&self, node_id: &ClusterNodeName, class: CpuClass) {
         self.occupy_execution(node_id, class).await;
         let executor = match self.inner.executions.get(node_id) {
@@ -140,7 +140,7 @@ impl FaultInjection {
     }
 
     /// Hold every byte of `node_id`'s bulk memory but `room`, so that a charge needing more room
-    /// than that is refused until the scenario releases the hold. A node that already holds bulk
+    /// than that waits until the scenario releases the hold. A node that already holds bulk
     /// memory for the scenario adds what is free beyond `room` to its hold.
     pub fn hold_bulk_memory_leaving_room_on(&self, node_id: &ClusterNodeName, room: u64) {
         let Some(mut node) = self.inner.executions.get_mut(node_id) else {

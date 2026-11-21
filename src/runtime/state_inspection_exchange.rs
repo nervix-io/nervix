@@ -49,9 +49,7 @@ async fn identified_body(
     executor: &Executor,
     body: ChargedBytes,
 ) -> Result<(StatePageBody, ChargedBytes), Report<StreamHandlerError>> {
-    let charge = executor
-        .try_reserve(MemoryClass::Bulk, 1)
-        .map_err(StreamHandlerError::with_cause)?;
+    let charge = executor.charge_nothing(MemoryClass::Bulk);
     executor
         .run_cpu(
             nervix_execution::CpuClass::Bulk,
@@ -79,9 +77,9 @@ fn page_stream(
     header_charge: Reservation,
     bodies: Vec<ChargedBytes>,
 ) -> Result<StreamingResponse, Report<StreamHandlerError>> {
-    let prefix_charge = executor
-        .try_reserve(MemoryClass::Bulk, 8)
-        .map_err(StreamHandlerError::with_cause)?;
+    // The eight-byte length rides on the page's own charges: this is no place to wait, since the
+    // descriptor and the bodies already hold part of the class.
+    let prefix_charge = executor.charge_nothing(MemoryClass::Bulk);
     let prefix = ChargedBytes::from_owned(
         u64::try_from(header.len())
             .assured("a resident descriptor fits u64")
@@ -221,10 +219,7 @@ pub(crate) async fn stream_processor_page(
                 let batch = RuntimeRecordBatch::from_record_batch(batch.schema(), batch)
                     .map_err(StreamHandlerError::with_cause)?;
                 let body = batch
-                    .encode_arrow_snapshot_section(
-                        executor,
-                        nervix_execution::QueueAdmission::RefuseWhenFull,
-                    )
+                    .encode_arrow_snapshot_section(executor)
                     .await
                     .map_err(StreamHandlerError::with_cause)?;
                 bytes = bytes
@@ -351,9 +346,7 @@ async fn verified_body(
     body: ChargedBytes,
     identity: StatePageBody,
 ) -> Result<ChargedBytes, Report<StatePageExchangeError>> {
-    let charge = executor
-        .try_reserve(MemoryClass::Bulk, 1)
-        .change_context(StatePageExchangeError::Admission)?;
+    let charge = executor.charge_nothing(MemoryClass::Bulk);
     executor
         .run_cpu(
             nervix_execution::CpuClass::Bulk,
@@ -578,14 +571,9 @@ impl ProcessorPageBodies<'_> {
         self.offset = end;
         let body = verified_body(executor, body, identity.clone()).await?;
         let schema = StdArc::new(SchemaField::arrow_schema(&transfer.fields));
-        let decoded = RuntimeRecordBatch::decode_arrow_snapshot_section(
-            executor,
-            nervix_execution::QueueAdmission::RefuseWhenFull,
-            schema,
-            body,
-        )
-        .await
-        .change_context(StatePageExchangeError::Columns)?;
+        let decoded = RuntimeRecordBatch::decode_arrow_snapshot_section(executor, schema, body)
+            .await
+            .change_context(StatePageExchangeError::Columns)?;
         let decoded_rows =
             u64::try_from(decoded.batch().num_rows()).assured("a decoded row count fits u64");
         if decoded_rows != rows {

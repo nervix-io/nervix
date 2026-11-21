@@ -38,7 +38,8 @@ use nervix_backup::{
     read_archive_contents,
 };
 use nervix_execution::{
-    Cancellation, ChargedBytes, CpuClass, Executor, MemoryClass, Reservation, StorageClass,
+    AdmissionError, Cancellation, ChargedBytes, CpuClass, Executor, MemoryClass, Reservation,
+    StorageClass,
 };
 use nervix_models::{
     CreateStatement, DomainName, Model, ModelKind, ModelName, RequestedResourceVersion,
@@ -192,17 +193,18 @@ impl VerifiedArchive {
 
     /// Reads `section` whole into memory charged to the bulk budget, refusing a section longer
     /// than `limit` before reading a byte of it. Each read is one bounded window of the file.
+    /// Read one archived section of at most `limit` bytes, charging it through `executor`, which
+    /// draws from its conversion's share.
     pub(in crate::application) async fn read_bounded_section(
         &self,
-        runtime: &Runtime,
+        executor: &Executor,
         section: &DescribedSection,
         limit: u64,
     ) -> Result<ChargedBytes, Report<ArchiveSectionReadError>> {
         if section.length > limit {
             return Err(Report::new(ArchiveSectionReadError::TooLong { limit }));
         }
-        let charge = runtime
-            .executor()
+        let charge = executor
             .reserve(MemoryClass::Bulk, section.length.max(1))
             .await
             .change_context(ArchiveSectionReadError::Admission)?;
@@ -365,34 +367,61 @@ impl SessionServiceImpl {
         let executor = self.inner.runtime.executor().clone();
         let artifact = Arc::new(artifact);
         let reader_artifact = artifact.clone();
-        let reservation = metadata::reserve_metadata(&executor, artifact.clone()).await?;
-        let read = executor
-            .run_storage(
-                StorageClass::Filesystem,
-                reservation,
-                move |charge, cancellation| {
-                    let file = std::fs::File::open(reader_artifact.path())
-                        .map_err(Report::new)
-                        .change_context(ArchiveReadError::Read)?;
-                    let contents = read_archive_contents(CancellableRead {
-                        inner: BufReader::new(file),
-                        cancellation,
-                    })?;
-                    Ok::<_, Report<ArchiveReadError>>((contents, charge))
-                },
-            )
-            .await
-            .change_context(RestoreRefusal::Unreadable)?;
-        let (contents, mut reservation) = read.change_context(RestoreRefusal::InvalidArchive)?;
-        let branch_state = metadata::branch_state_working_bytes(&contents)
-            .ok_or_else(|| Report::new(RestoreRefusal::MetadataAdmission))?;
-        let admitted = reservation
-            .bytes()
-            .checked_add(branch_state)
-            .ok_or_else(|| Report::new(RestoreRefusal::MetadataAdmission))?;
-        reservation
-            .grow_to(admitted)
-            .change_context(RestoreRefusal::MetadataAdmission)?;
+        let mut reservation = metadata::reserve_metadata(&executor, artifact.clone()).await?;
+        let measured = reservation.bytes();
+        // The description also admits the fixed share of every archived key, which only its
+        // contents count. A class with no room to grow the charge while the contents hold it gives
+        // both back, and the archive is read again under the whole charge, waited for while the
+        // restore holds nothing of the class.
+        let (contents, reservation) = loop {
+            nervix_primitives::task::consume_budget().await;
+            let reader_artifact = reader_artifact.clone();
+            let read = executor
+                .run_storage(
+                    StorageClass::Filesystem,
+                    reservation,
+                    move |charge, cancellation| {
+                        let file = std::fs::File::open(reader_artifact.path())
+                            .map_err(Report::new)
+                            .change_context(ArchiveReadError::Read)?;
+                        let contents = read_archive_contents(CancellableRead {
+                            inner: BufReader::new(file),
+                            cancellation,
+                        })?;
+                        Ok::<_, Report<ArchiveReadError>>((contents, charge))
+                    },
+                )
+                .await
+                .change_context(RestoreRefusal::Unreadable)?;
+            let (contents, mut held) = read.change_context(RestoreRefusal::InvalidArchive)?;
+            let branch_state = metadata::branch_state_working_bytes(&contents)
+                .ok_or_else(|| Report::new(RestoreRefusal::MetadataAdmission))?;
+            let admitted = measured
+                .checked_add(branch_state)
+                .ok_or_else(|| Report::new(RestoreRefusal::MetadataAdmission))?;
+            if held.bytes() >= admitted {
+                break (contents, held);
+            }
+            match held.grow_to(admitted) {
+                Ok(()) => break (contents, held),
+                Err(refusal)
+                    if matches!(
+                        refusal.current_context(),
+                        AdmissionError::BudgetExhausted { .. }
+                    ) =>
+                {
+                    drop(contents);
+                    drop(held);
+                    reservation = executor
+                        .reserve(MemoryClass::RestoreMetadata, admitted)
+                        .await
+                        .change_context(RestoreRefusal::MetadataAdmission)?;
+                }
+                Err(refusal) => {
+                    return Err(refusal.change_context(RestoreRefusal::MetadataAdmission));
+                }
+            }
+        };
         let data = executor
             .run_cpu(CpuClass::Bulk, reservation, move |charge, cancellation| {
                 let mut models = BTreeMap::new();
@@ -463,10 +492,7 @@ impl SessionServiceImpl {
         let recorded = recorded.clone();
         let label_limits = nervix_models::EntityLabelLimits::from(&self.cluster_parameters());
         let executor = self.inner.runtime.executor();
-        let charge = executor
-            .reserve(MemoryClass::Bulk, 1)
-            .await
-            .change_context(RestoreRefusal::MetadataAdmission)?;
+        let charge = executor.charge_nothing(MemoryClass::Bulk);
         executor
             .run_cpu(CpuClass::Bulk, charge, move |_charge, cancellation| {
                 cancellation.check().change_context(RestoreRefusal::Plan)?;

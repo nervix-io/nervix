@@ -1577,7 +1577,8 @@ Feature: Iceberg emission
       """
     Then the temp directory eventually contains an Iceberg staging file
     # The row is staged and its commit comes due 30 seconds later. Loading the staged file charges
-    # every byte of it, and the commit takes that charge only when the class has room for it now.
+    # every byte of it, and the commit waits for that charge, showing the wait, while the class has
+    # no room for it.
     When bulk memory on every node keeps only "64" bytes free
     Then within "90s" DESCRIBE EMITTER "iceberg_memory" on the leader node reports an Iceberg commit waiting for bulk memory, whose staged bytes are saved as placeholder "commit_bytes"
     And the Iceberg table "memory_notifications_{{test_id}}" does not contain a row within "1s"

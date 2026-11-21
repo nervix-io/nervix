@@ -41,7 +41,7 @@ use imbl::{GenericHashMap, shared_ptr::DefaultSharedPtr};
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_dns::{LookupShare, OperationBudget};
 use nervix_execution::{
-    BudgetedBuffer, ChargedBytes, CpuClass, Executor, MemoryClass, QueueAdmission, Reservation,
+    BudgetedBuffer, ChargedBytes, CpuClass, Executor, MemoryClass, Reservation,
 };
 use nervix_models::{
     ClusterNodeName, CoordinationIdentity, NodeEndpoint, RemoteAckOutcome, RemoteAckRegistration,
@@ -2543,11 +2543,10 @@ impl TransportState {
             .await?;
             // An ack carries the outcome of a delivery the peer already resolved, so a full control
             // queue holds it back rather than losing that outcome.
-            let decoded = wire::decode_rkyv_with::<nervix_models::RemoteAckResolution>(
+            let decoded = wire::decode_rkyv::<nervix_models::RemoteAckResolution>(
                 &self.executor,
                 MemoryClass::Management,
                 CpuClass::Control,
-                QueueAdmission::WaitForPlace,
                 bytes,
             )
             .await?;
@@ -2706,12 +2705,11 @@ impl TransportState {
             // the work away. The request still decoded under a refusing admission above, so a
             // burst beyond the class is refused before it takes any charge. The caller's reset
             // ends the wait.
-            let encoding = wire::encode_rkyv_with(
+            let encoding = wire::encode_rkyv(
                 &self.executor,
                 peer.class.memory_class(),
                 peer.class.cpu_class(),
                 peer.class.control_body_limit(&self.executor),
-                QueueAdmission::WaitForPlace,
                 ControlEnvelope::Response(response),
             );
             let response = nervix_primitives::select! {

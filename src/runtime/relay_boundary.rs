@@ -1861,14 +1861,7 @@ impl RelayBoundaryServices {
             };
             let (batch_ipc, decoded_bytes) = match encoded_body.clone() {
                 Some(bytes) => bytes,
-                None => match batch
-                    .batch
-                    .encode_arrow_ipc(
-                        dispatcher.executor(),
-                        nervix_execution::QueueAdmission::WaitForPlace,
-                    )
-                    .await
-                {
+                None => match batch.batch.encode_arrow_ipc(dispatcher.executor()).await {
                     Ok(bytes) => {
                         let bytes = (
                             bytes,

@@ -630,17 +630,15 @@ impl RelayProcessorNode {
                         }
                     };
                     let key_result = batch
-                        .keep_alive_while_pending(
-                            execute_accepted_program_with_selection_in_context(
-                                branch.runtime.executor().accepted_work(),
-                                &key_program.program,
-                                &vm_batch,
-                                &VmExecutionContext {
-                                    now: execution_now,
-                                    injector: None,
-                                },
-                            ),
-                        )
+                        .keep_alive_while_pending(execute_program_with_selection_in_context(
+                            branch.runtime.executor(),
+                            &key_program.program,
+                            &vm_batch,
+                            &VmExecutionContext {
+                                now: execution_now,
+                                injector: None,
+                            },
+                        ))
                         .await;
                     let key_result = match key_result {
                         Ok(result) => result,
@@ -981,8 +979,8 @@ impl RelayProcessorNode {
                     let key_result = batch
                         .keep_alive_while_pending(
                             output_buffers.as_slice().keep_alive_while_pending(
-                                execute_accepted_program_with_selection_in_context(
-                                    branch.runtime.executor().accepted_work(),
+                                execute_program_with_selection_in_context(
+                                    branch.runtime.executor(),
                                     &program.program,
                                     &vm_batch,
                                     &VmExecutionContext {
@@ -2319,7 +2317,6 @@ mod tests {
                 Duration::from_secs(60)
             )
         );
-        assert_eq!(executor.snapshot().data_cpu.refused, 0);
     }
 
     fn text_batch(acks: AckSet) -> RelayRecordBatch {

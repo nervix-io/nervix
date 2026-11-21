@@ -11,6 +11,7 @@
 )]
 
 use std::{
+    future::Future,
     io,
     pin::Pin,
     task::{Context, Poll},
@@ -22,7 +23,9 @@ use error_stack::{Report, ResultExt as _};
 use http_body_util::BodyExt as _;
 use hyper::body::{Body as _, Incoming};
 use meticulous::{OptionExt as _, ResultExt as _};
-use nervix_execution::{Cancellation, CpuClass, Executor, MemoryClass, Reservation};
+use nervix_execution::{
+    AdmissionError, Cancellation, CpuClass, Executor, MemoryClass, Reservation,
+};
 use nervix_primitives::{
     sync::{Arc, CancellationToken, blocking::Mutex},
     time::{Instant, timeout},
@@ -106,8 +109,27 @@ enum InputDisposition {
 }
 struct ActiveInput {
     reservation: Reservation,
+    /// What the request's read allocations take of `reservation`.
     required: u64,
+    /// The part of `reservation` held for the copy of a body whose length the request declared,
+    /// until the copy takes it.
+    body_share: u64,
     refusal: Option<InputRefusal>,
+    executor: Executor,
+    /// The room a read waits for before it reads into an allocation the charge does not cover
+    /// yet. It ends with the request, which gives up its place in the class's queue.
+    growth: Option<GrowthWait>,
+}
+
+/// A wait for the bytes a newly observed read allocation adds to the request's charge.
+type GrowthWait = Pin<Box<dyn Future<Output = Result<Reservation, Report<AdmissionError>>> + Send>>;
+
+/// What one observation of a read allocation decided under the ledger's lock.
+enum Observed {
+    /// The charge covers the allocation; the read goes ahead.
+    Covered,
+    /// The read waits for room for the allocation.
+    Waiting,
 }
 
 /// The foreign I/O contract carries the complete admission report, including its typed cause.
@@ -155,50 +177,159 @@ impl InputAccounting {
             () = transport.finish() => {},
         }
     }
-    fn begin(&self, executor: &Executor) -> Result<InputGuard, Report<InputRefusal>> {
+    /// Admit one request's input: its read scratch, and the copy of a body whose length the
+    /// request declared, `body_share` bytes. A full class holds the request back until room frees
+    /// or the body's deadline passes; only input larger than the whole class is refused at once.
+    async fn begin(
+        &self,
+        executor: &Executor,
+        deadline: &InputDeadline,
+        body_share: u64,
+    ) -> Result<InputGuard, Report<InputRefusal>> {
         // The first frame may have arrived with the headers. BytesMut can retain its original
         // allocation after splitting; four configured read buffers conservatively cover it.
         let initial = self
             .settings
             .input_scratch_bytes()
             .ok_or_else(|| Report::new(InputRefusal::MemoryCapacity))?;
-        let reservation = executor
-            .try_reserve(MemoryClass::Intake, initial)
-            .change_context(InputRefusal::MemoryCapacity)?;
+        let charge = initial
+            .checked_add(body_share)
+            .ok_or_else(|| Report::new(InputRefusal::MemoryCapacity))?;
+        let reservation = timeout(
+            deadline.remaining(),
+            executor.reserve(MemoryClass::Intake, charge),
+        )
+        .await
+        .map_err(Report::new)
+        .change_context(InputRefusal::MemoryCapacity)?
+        .change_context(InputRefusal::MemoryCapacity)?;
+        Ok(self.admit(executor, reservation, initial, body_share))
+    }
+
+    /// Make `reservation`, which holds `initial` bytes of read scratch and `body_share` bytes for
+    /// the body's copy, the request's input charge.
+    fn admit(
+        &self,
+        executor: &Executor,
+        reservation: Reservation,
+        initial: u64,
+        body_share: u64,
+    ) -> InputGuard {
         let mut ledger = self.ledger.lock();
         ledger.active = Some(ActiveInput {
             reservation,
             required: initial,
+            body_share,
             refusal: None,
+            executor: executor.clone(),
+            growth: None,
         });
-        Ok(InputGuard {
+        InputGuard {
             accounting: self.clone(),
-        })
-    }
-    fn observe(&self, range: ReadAllocation) -> Result<(), Report<InputRefusal>> {
-        let mut ledger = self.ledger.lock();
-        let Some(growth) = ledger.grow_window(range) else {
-            return Ok(());
-        };
-        if let Some(active) = ledger.active.as_mut() {
-            // Hyper asks for body I/O only when its read buffer is empty. Chunk framing is
-            // consumed incrementally, and trailers have their own bounded decoder buffer.
-            // The initial scratch covers the backing shared with the request head; each new
-            // body backing needs its exposed capacity, without another request-head allowance.
-            let uncharged = u64::try_from(growth.uncharged)
-                .map_err(|_| Report::new(InputRefusal::MemoryCapacity))?;
-            let target = active
-                .required
-                .checked_add(uncharged)
-                .ok_or_else(|| Report::new(InputRefusal::MemoryCapacity))?;
-            active
-                .reservation
-                .grow_to(target)
-                .change_context(InputRefusal::MemoryCapacity)?;
-            active.required = target;
         }
+    }
+
+    /// Charge the read allocation `range` before a read fills it. An allocation the charge does
+    /// not cover yet waits for room in the class, holding the read back, and wakes `context`
+    /// once it is granted; only one larger than the whole class is refused.
+    fn poll_observe(
+        &self,
+        range: ReadAllocation,
+        context: &mut Context<'_>,
+    ) -> Poll<Result<(), Report<InputRefusal>>> {
+        let mut ledger = self.ledger.lock();
+        loop {
+            match Self::observe_locked(&mut ledger, range) {
+                Ok(Observed::Covered) => return Poll::Ready(Ok(())),
+                Ok(Observed::Waiting) => {}
+                Err(refusal) => return Poll::Ready(Err(refusal)),
+            }
+            let Some(mut active) = ledger.active.take() else {
+                return Poll::Ready(Ok(()));
+            };
+            let wait = active
+                .growth
+                .as_mut()
+                .assured("an observation that waits has parked its growth");
+            match wait.as_mut().poll(context) {
+                Poll::Pending => {
+                    ledger.active = Some(active);
+                    return Poll::Pending;
+                }
+                Poll::Ready(Ok(extra)) => {
+                    active.growth = None;
+                    let reservation = active
+                        .reservation
+                        .merge(extra)
+                        .assured("two charges of one class granted by one executor merge");
+                    ledger.active = Some(ActiveInput {
+                        reservation,
+                        ..active
+                    });
+                }
+                Poll::Ready(Err(refusal)) => {
+                    active.growth = None;
+                    ledger.active = Some(active);
+                    return Poll::Ready(Err(refusal.change_context(InputRefusal::MemoryCapacity)));
+                }
+            }
+        }
+    }
+
+    /// Charge `range` from what the request holds or can take now, or park a wait for the bytes
+    /// it adds when the class has no room for them now.
+    fn observe_locked(
+        ledger: &mut Ledger,
+        range: ReadAllocation,
+    ) -> Result<Observed, Report<InputRefusal>> {
+        let Some(growth) = ledger.grow_window(range) else {
+            return Ok(Observed::Covered);
+        };
+        let Some(active) = ledger.active.as_mut() else {
+            ledger.current = Some(growth.window);
+            return Ok(Observed::Covered);
+        };
+        if active.growth.is_some() {
+            return Ok(Observed::Waiting);
+        }
+        // Hyper asks for body I/O only when its read buffer is empty. Chunk framing is
+        // consumed incrementally, and trailers have their own bounded decoder buffer.
+        // The initial scratch covers the backing shared with the request head; each new
+        // body backing needs its exposed capacity, without another request-head allowance.
+        let uncharged = u64::try_from(growth.uncharged)
+            .map_err(|_| Report::new(InputRefusal::MemoryCapacity))?;
+        let target = active
+            .required
+            .checked_add(uncharged)
+            .ok_or_else(|| Report::new(InputRefusal::MemoryCapacity))?;
+        // The share held for the body's copy is not room for read allocations.
+        let charged = target
+            .checked_add(active.body_share)
+            .ok_or_else(|| Report::new(InputRefusal::MemoryCapacity))?;
+        if charged > active.reservation.bytes() {
+            match active.reservation.grow_to(charged) {
+                Ok(()) => {}
+                Err(refusal)
+                    if matches!(
+                        refusal.current_context(),
+                        AdmissionError::BudgetExhausted { .. }
+                    ) =>
+                {
+                    let extra = charged
+                        .checked_sub(active.reservation.bytes())
+                        .assured("a charge that could not grow holds less than its target");
+                    let executor = active.executor.clone();
+                    active.growth = Some(Box::pin(async move {
+                        executor.reserve(MemoryClass::Intake, extra).await
+                    }));
+                    return Ok(Observed::Waiting);
+                }
+                Err(refusal) => return Err(refusal.change_context(InputRefusal::MemoryCapacity)),
+            }
+        }
+        active.required = target;
         ledger.current = Some(growth.window);
-        Ok(())
+        Ok(Observed::Covered)
     }
     fn refuse_read(&self, error: Report<InputRefusal>) -> io::Error {
         if let Some(active) = self.ledger.lock().active.as_mut() {
@@ -226,6 +357,35 @@ struct InputGuard {
     accounting: InputAccounting,
 }
 impl InputGuard {
+    /// The share admitted for the copy of the body the request declared, once.
+    fn take_body_share(&self) -> Option<Reservation> {
+        let mut ledger = self.accounting.ledger.lock();
+        let mut active = ledger
+            .active
+            .take()
+            .assured("the body share is taken while the request's input is admitted");
+        let share = active.body_share;
+        if share == 0 {
+            ledger.active = Some(active);
+            return None;
+        }
+        let kept = active
+            .reservation
+            .bytes()
+            .checked_sub(share)
+            .assured("the input charge holds the body share it was admitted with");
+        let (reservation, body) = active
+            .reservation
+            .split(kept)
+            .assured("a charge splits at a size it holds");
+        active.body_share = 0;
+        ledger.active = Some(ActiveInput {
+            reservation,
+            ..active
+        });
+        Some(body)
+    }
+
     fn take(&self) -> Reservation {
         self.accounting
             .ledger
@@ -316,12 +476,18 @@ struct BodyBuffer {
 impl BodyBuffer {
     /// Copy the first two data frames into a buffer sized to the declared length, or to twice
     /// what they hold when the request declared none. Each frame is at most one read buffer.
-    fn start(
+    ///
+    /// A declared body's copy uses the `share` admitted with the request. Any other copy waits
+    /// for its charge, holding the request's read scratch, until the body's deadline: the bytes
+    /// received so far cannot be given back and read again.
+    async fn start(
         first: &Bytes,
         second: &Bytes,
         declared: Option<u64>,
         growth: BodyGrowth,
         executor: &Executor,
+        deadline: &InputDeadline,
+        share: Option<Reservation>,
     ) -> Result<Self, Report<InputRefusal>> {
         let needed = first
             .len()
@@ -334,9 +500,20 @@ impl BodyBuffer {
             None => growth.grown(needed, needed),
         };
         let charge = u64::try_from(capacity).assured("a native capacity fits a byte count");
-        let reservation = executor
-            .try_reserve(MemoryClass::Intake, charge)
-            .change_context(InputRefusal::MemoryCapacity)?;
+        let reservation = match share {
+            Some(share) if share.bytes() >= charge => share,
+            share => {
+                drop(share);
+                timeout(
+                    deadline.remaining(),
+                    executor.reserve(MemoryClass::Intake, charge),
+                )
+                .await
+                .map_err(Report::new)
+                .change_context(InputRefusal::MemoryCapacity)?
+                .change_context(InputRefusal::MemoryCapacity)?
+            }
+        };
         let mut bytes = Vec::with_capacity(capacity);
         bytes.extend_from_slice(first);
         bytes.extend_from_slice(second);
@@ -369,6 +546,10 @@ impl BodyBuffer {
     /// bytes move, so both stay charged until the old one is released. A body of at most one
     /// read buffer moves on the connection; a larger one moves on a data worker, whose charge
     /// follows it until the worker exits.
+    ///
+    /// A class with no room for the larger allocation holds the body back until room frees or
+    /// the body's deadline passes, while the body keeps what it holds: its bytes cannot be read
+    /// again. Only a body larger than the whole class is refused at once.
     async fn grow(
         self,
         needed: usize,
@@ -386,9 +567,28 @@ impl BodyBuffer {
         let overlap = held
             .checked_add(grown)
             .ok_or_else(|| Report::new(InputRefusal::MemoryCapacity))?;
-        reservation
-            .grow_to(overlap)
+        if let Err(refusal) = reservation.grow_to(overlap) {
+            if !matches!(
+                refusal.current_context(),
+                AdmissionError::BudgetExhausted { .. }
+            ) {
+                return Err(refusal.change_context(InputRefusal::MemoryCapacity));
+            }
+            let extra = overlap
+                .checked_sub(reservation.bytes())
+                .assured("a charge that could not grow holds less than its target");
+            let granted = timeout(
+                deadline.remaining(),
+                executor.reserve(MemoryClass::Intake, extra),
+            )
+            .await
+            .map_err(Report::new)
+            .change_context(InputRefusal::MemoryCapacity)?
             .change_context(InputRefusal::MemoryCapacity)?;
+            reservation = reservation
+                .merge(granted)
+                .change_context(InputRefusal::MemoryCapacity)?;
+        }
         if bytes.len() <= growth.inline_copy {
             let mut moved = Vec::with_capacity(capacity);
             moved.extend_from_slice(&bytes);
@@ -463,11 +663,15 @@ impl ArrivedBody {
         growth: BodyGrowth,
         executor: &Executor,
         deadline: &InputDeadline,
+        guard: &InputGuard,
     ) -> Result<Self, Report<InputRefusal>> {
         match self {
             Self::Empty => Ok(Self::Shared(frame)),
             Self::Shared(first) => {
-                let buffer = BodyBuffer::start(&first, &frame, declared, growth, executor)?;
+                let share = guard.take_body_share();
+                let buffer =
+                    BodyBuffer::start(&first, &frame, declared, growth, executor, deadline, share)
+                        .await?;
                 Ok(Self::Copied(buffer))
             }
             Self::Copied(buffer) => {
@@ -482,14 +686,21 @@ impl ArrivedBody {
     /// charge for its own allocation, and the read buffers' charge is returned.
     fn into_body(self, guard: InputGuard) -> AccountedBody {
         match self {
-            Self::Empty => AccountedBody {
-                bytes: Bytes::new(),
-                _reservation: guard.take(),
-            },
-            Self::Shared(bytes) => AccountedBody {
-                bytes,
-                _reservation: guard.take(),
-            },
+            // A body that needed no copy gives back the share admitted for one.
+            Self::Empty => {
+                drop(guard.take_body_share());
+                AccountedBody {
+                    bytes: Bytes::new(),
+                    _reservation: guard.take(),
+                }
+            }
+            Self::Shared(bytes) => {
+                drop(guard.take_body_share());
+                AccountedBody {
+                    bytes,
+                    _reservation: guard.take(),
+                }
+            }
             Self::Copied(buffer) => {
                 drop(guard);
                 AccountedBody {
@@ -516,7 +727,11 @@ pub(super) async fn collect(
     let declared = hint.exact();
     let deadline = InputDeadline::start(settings.http_body_timeout());
     let growth = BodyGrowth::new(settings);
-    let guard = accounting.begin(executor)?;
+    // A body whose length the request declared is admitted whole with it, so its copy never
+    // waits for room while the request holds its read scratch.
+    let guard = accounting
+        .begin(executor, &deadline, declared.unwrap_or(0))
+        .await?;
     let mut arrived = ArrivedBody::Empty;
     let mut total = 0_u64;
     loop {
@@ -544,15 +759,16 @@ pub(super) async fn collect(
             return Err(Report::new(InputRefusal::BodyCapacity));
         }
         arrived = arrived
-            .receive(bytes, declared, growth, executor, &deadline)
+            .receive(bytes, declared, growth, executor, &deadline, &guard)
             .await?;
     }
     Ok(arrived.into_body(guard))
 }
 
 /// Hyper passes a buffer's spare window to this owner. Admission occurs before reading into a
-/// newly observed allocation; the constant per-connection scratch bound covers the allocation
-/// Hyper made before asking for I/O. Captured ranges contain no data and are never dereferenced.
+/// newly observed allocation, and a class without room for it holds the read back until room
+/// frees; the constant per-connection scratch bound covers the allocation Hyper made before asking
+/// for I/O. Captured ranges contain no data and are never dereferenced.
 pub(super) struct AccountedIo<IO> {
     io: IO,
     accounting: InputAccounting,
@@ -578,8 +794,15 @@ impl<IO: AsyncRead + Unpin> AsyncRead for AccountedIo<IO> {
                 .accounting
                 .refuse_read(Report::new(InputRefusal::MemoryCapacity))));
         };
-        if let Err(error) = this.accounting.observe(ReadAllocation { start, end }) {
-            return Poll::Ready(Err(this.accounting.refuse_read(error)));
+        match this
+            .accounting
+            .poll_observe(ReadAllocation { start, end }, cx)
+        {
+            Poll::Pending => return Poll::Pending,
+            Poll::Ready(Err(error)) => {
+                return Poll::Ready(Err(this.accounting.refuse_read(error)));
+            }
+            Poll::Ready(Ok(())) => {}
         }
         Pin::new(&mut this.io).poll_read(cx, buf)
     }
@@ -619,6 +842,35 @@ mod tests {
     use nervix_recovery::{Discarded as _, NoReceiver as _};
 
     use super::*;
+
+    /// Admit a request's read scratch from a class with room for it now.
+    fn admitted(accounting: &InputAccounting, executor: &Executor) -> InputGuard {
+        let initial = accounting
+            .settings
+            .input_scratch_bytes()
+            .assured("the default scratch fits");
+        let reservation = executor
+            .try_reserve(MemoryClass::Intake, initial)
+            .assured("the class has room for the scratch");
+        accounting.admit(executor, reservation, initial, 0)
+    }
+
+    /// Observe `range` once, as a read would before filling it.
+    fn observed(
+        accounting: &InputAccounting,
+        range: ReadAllocation,
+    ) -> Poll<Result<(), Report<InputRefusal>>> {
+        let mut context = Context::from_waker(std::task::Waker::noop());
+        accounting.poll_observe(range, &mut context)
+    }
+
+    /// Observe `range`, which the class has room for now.
+    fn observed_now(accounting: &InputAccounting, range: ReadAllocation) {
+        let Poll::Ready(observation) = observed(accounting, range) else {
+            panic!("an allocation the class has room for is charged at once");
+        };
+        observation.assured("the allocation is charged");
+    }
 
     #[nervix_primitives::test]
     async fn refusal_teardown_keeps_its_write_eof_readable_while_draining_and_cancels() {
@@ -684,7 +936,7 @@ mod tests {
     fn read_allocations_are_charged_once_and_released_on_input_cancellation() {
         let executor = Executor::new(ExecutionConfig::default()).assured("valid executor");
         let accounting = InputAccounting::new(ListenerSettings::default());
-        let guard = accounting.begin(&executor).assured("input admission");
+        let guard = admitted(&accounting, &executor);
         let scratch = executor.memory(MemoryClass::Intake).reserved_bytes;
         assert!(scratch > 0);
         let charged_beyond_scratch = || {
@@ -695,29 +947,24 @@ mod tests {
                 .assured("observations only add to the scratch")
         };
         let window = |start: usize, end: usize| ReadAllocation { start, end };
-        accounting
-            .observe(window(4096, 12288))
-            .assured("a fresh allocation's spare window");
+        // A fresh allocation's spare window.
+        observed_now(&accounting, window(4096, 12288));
         assert_eq!(charged_beyond_scratch(), 8192);
-        accounting
-            .observe(window(8192, 12288))
-            .assured("the rest of the same window after a read");
+        // The rest of the same window after a read.
+        observed_now(&accounting, window(8192, 12288));
         assert_eq!(charged_beyond_scratch(), 8192);
-        accounting
-            .observe(window(0, 12288))
-            .assured("the same allocation rewound to its start");
+        // The same allocation rewound to its start.
+        observed_now(&accounting, window(0, 12288));
         assert_eq!(
             charged_beyond_scratch(),
             12288,
             "a rewound allocation is charged only for its bytes outside the charged window"
         );
-        accounting
-            .observe(window(0, 16384))
-            .assured("the same allocation extended in place");
+        // The same allocation extended in place.
+        observed_now(&accounting, window(0, 16384));
         assert_eq!(charged_beyond_scratch(), 16384);
-        accounting
-            .observe(window(65536, 73728))
-            .assured("another allocation");
+        // Another allocation.
+        observed_now(&accounting, window(65536, 73728));
         assert_eq!(charged_beyond_scratch(), 24576);
         drop(guard);
         assert_eq!(executor.memory(MemoryClass::Intake).reserved_bytes, 0);
@@ -808,13 +1055,17 @@ mod tests {
             inline_copy: 16,
             copy_unit: 1,
         };
+        let started = InputDeadline::start(std::time::Duration::from_secs(30));
         let buffer = BodyBuffer::start(
             &Bytes::from_static(b"left"),
             &Bytes::from_static(b"right"),
             None,
             growth,
             &executor,
+            &started,
+            None,
         )
+        .await
         .assured("the first two frames are charged");
         assert_eq!(buffer.bytes.capacity(), 18);
         // A worker would miss this deadline; the move of nine bytes needs none.
@@ -849,13 +1100,17 @@ mod tests {
             inline_copy: 4,
             copy_unit: 1,
         };
+        let started = InputDeadline::start(std::time::Duration::from_secs(30));
         let buffer = BodyBuffer::start(
             &Bytes::from_static(b"left"),
             &Bytes::from_static(b"right"),
             None,
             growth,
             &executor,
+            &started,
+            None,
         )
+        .await
         .assured("the first two frames are charged");
         let deadline = InputDeadline::start(std::time::Duration::from_millis(1));
         let result = buffer
@@ -882,14 +1137,21 @@ mod tests {
         intake_returns_to_zero(&executor).await;
     }
 
-    #[test]
-    fn input_memory_refuses_immediately_and_keeps_its_typed_admission_cause() {
+    /// A read allocation the whole class could never hold is refused at once, before any I/O,
+    /// and the refusal keeps its typed admission cause.
+    #[nervix_primitives::test]
+    async fn input_memory_beyond_the_class_refuses_immediately_and_keeps_its_typed_cause() {
         let mut config = ExecutionConfig::default();
         config.budgets.intake = ubyte::ByteUnit::Mebibyte(2);
         let executor = Executor::new(config).assured("positive independent input pool");
         let accounting = InputAccounting::new(ListenerSettings::default());
         let guard = accounting
-            .begin(&executor)
+            .begin(
+                &executor,
+                &InputDeadline::start(std::time::Duration::from_secs(30)),
+                0,
+            )
+            .await
             .assured("initial read scratch fits");
         let mut stream = AccountedIo::new(tokio::io::empty(), accounting.clone());
         let mut bytes = vec![0; 1048576];
@@ -897,7 +1159,7 @@ mod tests {
         let mut context = Context::from_waker(std::task::Waker::noop());
         let Poll::Ready(Err(error)) = Pin::new(&mut stream).poll_read(&mut context, &mut read)
         else {
-            panic!("a new backing exceeds remaining capacity before I/O");
+            panic!("a new backing the whole class cannot hold is refused before I/O");
         };
         let cause = error
             .get_ref()
@@ -914,6 +1176,84 @@ mod tests {
         drop(ledger);
         drop(guard);
         assert_eq!(executor.memory(MemoryClass::Intake).reserved_bytes, 0);
+    }
+
+    /// A read into an allocation the class has no room for now waits for room rather than
+    /// failing the request, and reads once other input releases enough.
+    #[nervix_primitives::test]
+    async fn a_read_into_a_new_allocation_waits_for_intake_room_and_reads_once_it_frees() {
+        let mut config = ExecutionConfig::default();
+        config.budgets.intake = ubyte::ByteUnit::Mebibyte(4);
+        let executor = Executor::new(config).assured("positive independent input pool");
+        let accounting = InputAccounting::new(ListenerSettings::default());
+        let guard = admitted(&accounting, &executor);
+        let free = executor.memory(MemoryClass::Intake);
+        let room = free
+            .capacity_bytes
+            .checked_sub(free.reserved_bytes)
+            .assured("the scratch fits the class");
+        // Other input holds all but 64 KiB of the room, which a 1 MiB allocation needs more of.
+        let held = executor
+            .try_reserve(MemoryClass::Intake, room - 64 * 1024)
+            .assured("the rest of the class is free");
+        let mut stream = AccountedIo::new(tokio::io::empty(), accounting.clone());
+        let mut bytes = vec![0; 1048576];
+        let mut read = ReadBuf::new(&mut bytes);
+        let mut context = Context::from_waker(std::task::Waker::noop());
+        assert!(
+            Pin::new(&mut stream)
+                .poll_read(&mut context, &mut read)
+                .is_pending(),
+            "a full class holds the read back instead of refusing it"
+        );
+        drop(held);
+        let read_once_room_frees =
+            std::future::poll_fn(|context| Pin::new(&mut stream).poll_read(context, &mut read));
+        timeout(std::time::Duration::from_secs(30), read_once_room_frees)
+            .await
+            .assured("the released room reaches the waiting read")
+            .assured("the read goes ahead once its allocation is charged");
+        let charged = executor.memory(MemoryClass::Intake).reserved_bytes;
+        assert!(
+            charged >= 1048576,
+            "the read's allocation is charged before it is filled, found {charged}"
+        );
+        drop(guard);
+        assert_eq!(executor.memory(MemoryClass::Intake).reserved_bytes, 0);
+    }
+
+    /// A request that ends while its read waits for room gives up its place in the class's
+    /// queue and every charge it held.
+    #[nervix_primitives::test]
+    async fn a_request_ending_while_its_read_waits_gives_up_its_place_and_charge() {
+        let mut config = ExecutionConfig::default();
+        config.budgets.intake = ubyte::ByteUnit::Mebibyte(4);
+        let executor = Executor::new(config).assured("positive independent input pool");
+        let accounting = InputAccounting::new(ListenerSettings::default());
+        let guard = admitted(&accounting, &executor);
+        let free = executor.memory(MemoryClass::Intake);
+        let room = free
+            .capacity_bytes
+            .checked_sub(free.reserved_bytes)
+            .assured("the scratch fits the class");
+        let held = executor
+            .try_reserve(MemoryClass::Intake, room - 64 * 1024)
+            .assured("the rest of the class is free");
+        let window = ReadAllocation {
+            start: 0,
+            end: 1048576,
+        };
+        assert!(
+            observed(&accounting, window).is_pending(),
+            "the read waits for room"
+        );
+        drop(guard);
+        drop(held);
+        let whole = executor.memory(MemoryClass::Intake).capacity_bytes;
+        let after = executor
+            .try_reserve(MemoryClass::Intake, whole)
+            .assured("the ended request left no waiter ahead and held nothing");
+        drop(after);
     }
 }
 
@@ -935,15 +1275,28 @@ mod shuttle_checks {
                 let executor = Executor::new(nervix_execution::ExecutionConfig::default())
                     .assured("valid executor");
                 let accounting = InputAccounting::new(ListenerSettings::default());
-                let guard = accounting.begin(&executor).assured("input admission");
+                let initial = accounting
+                    .settings
+                    .input_scratch_bytes()
+                    .assured("the default scratch fits");
+                let reservation = executor
+                    .try_reserve(MemoryClass::Intake, initial)
+                    .assured("input admission");
+                let guard = accounting.admit(&executor, reservation, initial, 0);
                 let reader = accounting.clone();
                 let observation = nervix_primitives::thread::spawn(move || {
-                    reader
-                        .observe(ReadAllocation {
+                    let mut context = Context::from_waker(std::task::Waker::noop());
+                    let observed = reader.poll_observe(
+                        ReadAllocation {
                             start: 4096,
                             end: 12288,
-                        })
-                        .assured("bounded observation");
+                        },
+                        &mut context,
+                    );
+                    let Poll::Ready(observed) = observed else {
+                        panic!("a bounded observation within the class is charged at once");
+                    };
+                    observed.assured("bounded observation");
                 });
                 drop(guard);
                 observation.join().assured("the observation completes");

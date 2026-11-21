@@ -81,8 +81,20 @@ impl Runtime {
         placement: &RuntimeStatePlacement,
         snapshot: PersistedRuntimeStateEntry,
     ) -> error_stack::Result<StateSnapshotEnvelope, StateReplicationError> {
+        self.describe_state_checkpoint_with(&self.inner.executor, placement, snapshot)
+            .await
+    }
+
+    /// Describe a checkpoint, charging its working memory through `executor`, which may draw from
+    /// its caller's allowance.
+    pub(crate) async fn describe_state_checkpoint_with(
+        &self,
+        executor: &nervix_execution::Executor,
+        placement: &RuntimeStatePlacement,
+        snapshot: PersistedRuntimeStateEntry,
+    ) -> error_stack::Result<StateSnapshotEnvelope, StateReplicationError> {
         Ok(self
-            .describe_retained_state_checkpoint(placement, snapshot)
+            .describe_retained_state_checkpoint_with(executor, placement, snapshot)
             .await?
             .descriptor)
     }
@@ -90,6 +102,17 @@ impl Runtime {
     /// Non-security BLAKE3: describes checkpoint consistency; the interconnect authenticates peers.
     pub(super) async fn describe_retained_state_checkpoint(
         &self,
+        placement: &RuntimeStatePlacement,
+        snapshot: PersistedRuntimeStateEntry,
+    ) -> error_stack::Result<DescribedStateCheckpoint, StateReplicationError> {
+        self.describe_retained_state_checkpoint_with(&self.inner.executor, placement, snapshot)
+            .await
+    }
+
+    /// Non-security BLAKE3: describes checkpoint consistency, charging through `executor`.
+    async fn describe_retained_state_checkpoint_with(
+        &self,
+        executor: &nervix_execution::Executor,
         placement: &RuntimeStatePlacement,
         snapshot: PersistedRuntimeStateEntry,
     ) -> error_stack::Result<DescribedStateCheckpoint, StateReplicationError> {
@@ -104,43 +127,29 @@ impl Runtime {
             })
             .change_context(capture()));
         }
-        let reservation = self
-            .inner
-            .executor
+        let reservation = executor
             .reserve(MemoryClass::RestoreMetadata, length.max(1))
             .await
             .change_context_lazy(capture)?;
-        let chunk_bytes = self
-            .inner
-            .executor
-            .limits()
-            .bulk_chunk_bytes
-            .as_u64()
-            .arch_into();
-        self.inner
-            .executor
-            .run_cpu_with(
-                CpuClass::Bulk,
-                nervix_execution::QueueAdmission::WaitForPlace,
-                reservation,
-                move |charge, cancellation| {
-                    let mut hasher = blake3::Hasher::new();
-                    for chunk in snapshot.payload.chunks(chunk_bytes) {
-                        cancellation.check()?;
-                        hasher.update(chunk);
-                    }
-                    let descriptor = StateSnapshotEnvelope {
-                        lsm: snapshot.lsm,
-                        length,
-                        digest: *hasher.finalize().as_bytes(),
-                    };
-                    Ok::<_, nervix_execution::Cancelled>(DescribedStateCheckpoint {
-                        snapshot,
-                        descriptor,
-                        reservation: charge,
-                    })
-                },
-            )
+        let chunk_bytes = executor.limits().bulk_chunk_bytes.as_u64().arch_into();
+        executor
+            .run_cpu(CpuClass::Bulk, reservation, move |charge, cancellation| {
+                let mut hasher = blake3::Hasher::new();
+                for chunk in snapshot.payload.chunks(chunk_bytes) {
+                    cancellation.check()?;
+                    hasher.update(chunk);
+                }
+                let descriptor = StateSnapshotEnvelope {
+                    lsm: snapshot.lsm,
+                    length,
+                    digest: *hasher.finalize().as_bytes(),
+                };
+                Ok::<_, nervix_execution::Cancelled>(DescribedStateCheckpoint {
+                    snapshot,
+                    descriptor,
+                    reservation: charge,
+                })
+            })
             .await
             .change_context_lazy(capture)?
             .change_context_lazy(capture)
@@ -282,15 +291,24 @@ impl Runtime {
         descriptor: &StateSnapshotEnvelope,
         read: StateCheckpointRead,
     ) -> error_stack::Result<PersistedRuntimeStateEntry, StateReplicationError> {
-        self.fetch_state_checkpoint_charged(target, placement, descriptor, read)
-            .await
-            .map(|(snapshot, _charge)| snapshot)
+        self.fetch_state_checkpoint_charged(
+            &self.inner.executor,
+            target,
+            placement,
+            descriptor,
+            read,
+        )
+        .await
+        .map(|(snapshot, _charge)| snapshot)
     }
 
     /// A layout join retains each admitted allocation until its bounded merge has consumed it.
     /// Non-security BLAKE3: checks selected checkpoint bytes; peer/placement admission is separate.
+    /// Fetch a checkpoint from `target`, charging its payload through `executor`, which may draw
+    /// from its caller's allowance.
     pub(super) async fn fetch_state_checkpoint_charged(
         &self,
+        executor: &nervix_execution::Executor,
         target: &ClusterNodeName,
         placement: &RuntimeStatePlacement,
         descriptor: &StateSnapshotEnvelope,
@@ -401,9 +419,7 @@ impl Runtime {
             })
             .change_context(failure()));
         }
-        let admission = self
-            .inner
-            .executor
+        let admission = executor
             .reserve(MemoryClass::RestoreMetadata, descriptor.length.max(1))
             .await
             .change_context_lazy(failure)?;

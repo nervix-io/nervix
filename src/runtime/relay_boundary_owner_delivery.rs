@@ -192,10 +192,7 @@ impl RelayBoundaryServices {
                 return OwnerDelivery::Failed(Box::new(batch.clone()));
             }
         };
-        let encoding = batch.batch.encode_arrow_ipc(
-            dispatcher.executor(),
-            nervix_execution::QueueAdmission::WaitForPlace,
-        );
+        let encoding = batch.batch.encode_arrow_ipc(dispatcher.executor());
         let batch_ipc = match channel.while_producer_lives(encoding).await {
             Some(Ok(bytes)) => bytes,
             Some(Err(error)) => {

@@ -160,8 +160,8 @@ pub struct WorkerCounts {
     pub consensus_storage: NonZeroUsize,
     pub filesystem_storage: NonZeroUsize,
     pub connector_storage: Setting<ConnectorStorageWorkers>,
-    /// The number of jobs one class may hold waiting for a worker. Beyond it, admission is refused
-    /// with typed backpressure rather than growing an unbounded queue in front of the pool.
+    /// The number of jobs one class may hold waiting for a worker. Beyond it, a job waits for a
+    /// place rather than growing an unbounded queue in front of the pool.
     pub pending_jobs: crate::PendingJobCounts,
 }
 

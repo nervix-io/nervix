@@ -2621,12 +2621,8 @@ mod tests {
                 let charge = executor
                     .try_reserve(MemoryClass::Relay, 1)
                     .assured("the relay class has room for one more byte");
-                let unfolding = executor.run_cpu_with(
-                    CpuClass::Extension,
-                    QueueAdmission::WaitForPlace,
-                    charge,
-                    |_charge, _cancellation| (),
-                );
+                let unfolding =
+                    executor.run_cpu(CpuClass::Extension, charge, |_charge, _cancellation| ());
                 let outcome = delivery.run_until_interrupted(&shutdown, unfolding).await;
                 assert!(
                     outcome.is_none(),
@@ -2739,12 +2735,8 @@ mod tests {
                 let charge = executor
                     .try_reserve(MemoryClass::Relay, 1)
                     .assured("the relay class has room for one more byte");
-                let unfolding = executor.run_cpu_with(
-                    CpuClass::Extension,
-                    QueueAdmission::WaitForPlace,
-                    charge,
-                    |_charge, _cancellation| (),
-                );
+                let unfolding =
+                    executor.run_cpu(CpuClass::Extension, charge, |_charge, _cancellation| ());
                 let end = control
                     .run_until_redecided(&mut decided, &mut stop, unfolding)
                     .await;

@@ -475,29 +475,18 @@ impl EndpointIntakeRoute<EndpointIngestBinding> {
         shutdown: &CancellationToken,
         pause: Option<&EndpointFramePause>,
     ) -> EndpointDispatchOutcome {
-        let intake_protocol = match self.endpoint_type() {
-            // An HTTP sender still holds its body and waits on the answer, so a full queue refuses
-            // the body for its sender to send again.
-            EndpointType::Http => EndpointIntakeProtocol {
-                label: "http",
-                unacknowledged_admission: QueueAdmission::RefuseWhenFull,
-            },
-            // A WebSocket frame in `MODE NO ACK` has no answer its sender waits for, so it waits
-            // for a place, and its connection reads nothing further meanwhile.
-            EndpointType::Websockets => EndpointIntakeProtocol {
-                label: "websocket",
-                unacknowledged_admission: QueueAdmission::WaitForPlace,
-            },
+        // The transport names the message in diagnostics only. Whatever it is, a message the node's
+        // extension workers have no place for yet waits for one: an HTTP sender waits on its
+        // answer meanwhile, and a WebSocket connection reads nothing further.
+        let protocol = match self.endpoint_type() {
+            EndpointType::Http => "http",
+            EndpointType::Websockets => "websocket",
         };
         let mut dispatches = Vec::with_capacity(self.bindings().len());
         for lifetime in self.bindings() {
-            dispatches.push(runtime.dispatch_endpoint_intake(
-                lifetime,
-                payload,
-                shutdown,
-                intake_protocol,
-                pause,
-            ));
+            dispatches.push(
+                runtime.dispatch_endpoint_intake(lifetime, payload, shutdown, protocol, pause),
+            );
         }
         dispatch_endpoint_bindings(dispatches).await
     }
@@ -586,24 +575,15 @@ where
     }
 }
 
-/// How a route's transport takes in what its sender hands over: the label its diagnostics name, and
-/// what an unacknowledged message does when the node's extension workers have no room for it.
-#[derive(Debug, Clone, Copy)]
-struct EndpointIntakeProtocol {
-    label: &'static str,
-    unacknowledged_admission: QueueAdmission,
-}
-
 impl Runtime {
     async fn dispatch_endpoint_intake(
         &self,
         lifetime: &endpoint_route_table::EndpointBinding<EndpointIngestBinding>,
         payload: EndpointPayload<'_>,
         shutdown: &CancellationToken,
-        intake_protocol: EndpointIntakeProtocol,
+        protocol: &'static str,
         pause: Option<&EndpointFramePause>,
     ) -> EndpointDispatchOutcome {
-        let protocol = intake_protocol.label;
         let EndpointPayload {
             bytes: payload,
             metadata,
@@ -697,7 +677,7 @@ impl Runtime {
                     BufferedIngestMetadata::retain(&metadata),
                     observed_at,
                 );
-                self.dispatch_endpoint_binding(lifetime, binding, payload, intake_protocol)
+                self.dispatch_endpoint_binding(lifetime, binding, payload, protocol)
                     .await
             }
             EndpointPauseIntake::Waiting(wait) => match wait.finish(shutdown).await {
@@ -746,7 +726,6 @@ impl Runtime {
         match collector
             .decode_payload(
                 self.executor(),
-                QueueAdmission::RefuseWhenFull,
                 &binding.codec,
                 payload,
                 usize::try_from(self.cluster_parameters().payload_unfold_limit())
@@ -830,9 +809,8 @@ impl Runtime {
         lifetime: &endpoint_route_table::EndpointBinding<EndpointIngestBinding>,
         binding: &EndpointIngestBinding,
         payload: BufferedIngestPayload,
-        intake_protocol: EndpointIntakeProtocol,
+        protocol: &'static str,
     ) -> EndpointNoAckIntake {
-        let protocol = intake_protocol.label;
         let _admitted = NodeQuiesceWorkGuard::begin(binding.work.clone());
         // One request is one group, so its builders are sized for the single payload this binding
         // decodes; a payload that unfolds into several messages grows them.
@@ -842,13 +820,12 @@ impl Runtime {
             binding.metrics.clone(),
             self.inner.data_plane.ingest_group_idle_flush(),
         );
-        // An HTTP body the extension workers have no room for is refused for its sender to send
-        // again, while a WebSocket frame waits for a place, as its transport says. A later quiesce
-        // decision does not take back a frame its quiesce let dispatch; the frame ends unprocessed
-        // only when its ingestor's intake ends, which a graceful stop does only after the frame.
+        // A message the extension workers have no place for yet waits for one, whatever its
+        // transport. A later quiesce decision does not take back a message its quiesce let
+        // dispatch; the message ends unprocessed only when its ingestor's intake ends, which a
+        // graceful stop does only after the message.
         let decode = collector.decode_payload(
             self.executor(),
-            intake_protocol.unacknowledged_admission,
             &binding.codec,
             payload.payload(),
             usize::try_from(self.cluster_parameters().payload_unfold_limit())

@@ -29,10 +29,11 @@ name = "nervix-relay-channel"
 [[package]]
 checks = [
   "tests::shuttle_checks::shuttle_a_dropped_job_waiting_for_a_place_gives_up_its_place_and_charge",
+  "tests::shuttle_checks::shuttle_a_full_wait_queue_holds_the_next_job_until_a_place_frees",
+  "tests::shuttle_checks::shuttle_a_growing_job_that_ran_short_waits_for_its_charge_holding_nothing",
   "tests::shuttle_checks::shuttle_a_job_waiting_for_a_place_takes_the_first_freed_place",
-  "tests::shuttle_checks::shuttle_accepted_cpu_preparation_returns_waiting_and_reserved_places_with_their_charges",
   "tests::shuttle_checks::shuttle_consensus_storage_preserves_admission_order_and_returns_every_permit",
-  "tests::shuttle_checks::shuttle_full_wait_queue_is_exact_typed_backpressure",
+  "tests::shuttle_checks::shuttle_cpu_preparation_returns_waiting_and_reserved_places_with_their_charges",
   "tests::shuttle_checks::shuttle_occupied_bulk_execution_leaves_control_execution_untouched",
   "tests::shuttle_checks::shuttle_occupied_connector_leaves_filesystem_and_consensus_execution_untouched",
   "tests::shuttle_checks::shuttle_queued_job_drop_releases_its_reservation_and_exact_queue_slot",

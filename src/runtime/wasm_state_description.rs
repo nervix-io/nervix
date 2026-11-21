@@ -644,7 +644,12 @@ impl Runtime {
             .assured("a checkpoint held in memory has a length that fits u64")
             .max(1);
         let executor = self.executor();
-        let reservation = match executor.try_reserve(MemoryClass::StateRead, restored_bytes) {
+        // A full class holds the render back until room frees; the inspection that asked for it
+        // bounds the wait by its own deadline.
+        let reservation = match executor
+            .reserve(MemoryClass::StateRead, restored_bytes)
+            .await
+        {
             Ok(reservation) => reservation,
             Err(error) => {
                 return Err(instantiation_failure(module.render_failure(

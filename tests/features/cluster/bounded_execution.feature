@@ -38,21 +38,18 @@ Feature: Bounded execution and transient memory
       | cluster_size | node_id |
       | 3            | node-2  |
 
-  Scenario Outline: Credentials a node cannot verify now are answered as unavailable
+  Scenario Outline: Credentials a node cannot verify now wait for its credentials worker and connect once it frees
     Given a <cluster_size> node nervix cluster is started
     When these Plexus commands are executed through the client on the leader node
       """
       CREATE USER busy_user WITH PASSWORD 'busy-password';
       """
     And credential verification on the leader node is saturated
-    And the client connects to the saturated node as user "busy_user" with password "busy-password"
-    Then the last command error contains
-      """
-      the node could not verify credentials now; retry
-      """
+    And the client begins connecting to the saturated node as user "busy_user" with password "busy-password"
+    Then the pending client connection has not completed within "2s"
     When the saturated credential verification is released
-    And the client connects to the leader node as user "busy_user" with password "busy-password"
-    Then the last command output contains
+    Then the pending client connection completes
+    And the last command output contains
       """
       raft.current_leader:
       """

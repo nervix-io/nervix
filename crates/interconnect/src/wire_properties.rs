@@ -693,13 +693,7 @@ where
     T: rkyv::Archive
         + Send
         + 'static
-        + for<'a> rkyv::Serialize<
-            rkyv::api::high::HighSerializer<
-                rkyv::ser::writer::IoWriter<nervix_execution::BudgetedBuffer>,
-                rkyv::ser::allocator::ArenaHandle<'a>,
-                rkyv::rancor::Error,
-            >,
-        >,
+        + for<'a, 'b> rkyv::Serialize<super::MessageSerializer<'a, 'b>>,
     T::Archived: for<'a> rkyv::bytecheck::CheckBytes<rkyv::api::high::HighValidator<'a, rkyv::rancor::Error>>
         + rkyv::Deserialize<T, rkyv::api::high::HighDeserializer<rkyv::rancor::Error>>,
 {
@@ -1203,13 +1197,7 @@ where
         + Clone
         + Send
         + 'static
-        + for<'a> rkyv::Serialize<
-            rkyv::api::high::HighSerializer<
-                rkyv::ser::writer::IoWriter<nervix_execution::BudgetedBuffer>,
-                rkyv::ser::allocator::ArenaHandle<'a>,
-                rkyv::rancor::Error,
-            >,
-        >,
+        + for<'a, 'b> rkyv::Serialize<super::MessageSerializer<'a, 'b>>,
     T::Archived: for<'a> rkyv::bytecheck::CheckBytes<rkyv::api::high::HighValidator<'a, rkyv::rancor::Error>>
         + rkyv::Deserialize<T, rkyv::api::high::HighDeserializer<rkyv::rancor::Error>>,
 {

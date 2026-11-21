@@ -50,9 +50,7 @@ impl StoredKeyspaceView {
         executor: &Executor,
         view: MappedArtifact,
     ) -> error_stack::Result<Self, DeduplicatorArchiveError> {
-        let working = executor
-            .try_reserve(MemoryClass::RestoreMetadata, 1)
-            .change_context(DeduplicatorArchiveError::Admission)?;
+        let working = executor.charge_nothing(MemoryClass::RestoreMetadata);
         let inspecting = executor.clone();
         let index = view
             .inspect(working, move |bytes, _working, cancellation| {
@@ -199,7 +197,8 @@ impl StoredKeyspaceView {
             .checked_add(row_bytes)
             .ok_or_else(|| Report::new(DeduplicatorArchiveError::Admission))?;
         let working = executor
-            .try_reserve(MemoryClass::RestoreMetadata, memory_bytes.max(1))
+            .reserve(MemoryClass::RestoreMetadata, memory_bytes.max(1))
+            .await
             .change_context(DeduplicatorArchiveError::Admission)?;
         self.view
             .inspect(working, move |bytes, memory, cancellation| {

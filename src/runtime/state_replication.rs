@@ -978,9 +978,8 @@ impl Runtime {
                     .await
                     .change_context(OwnershipHandoffError::Persistence)?;
                 let payload = executor
-                    .run_cpu_with(
+                    .run_cpu(
                         nervix_execution::CpuClass::Bulk,
-                        nervix_execution::QueueAdmission::WaitForPlace,
                         charge,
                         move |_charge, cancellation| entry.encode(limit, cancellation),
                     )
@@ -2624,9 +2623,8 @@ impl Runtime {
                 let reader = self
                     .inner
                     .executor
-                    .run_storage_with(
+                    .run_storage(
                         nervix_execution::StorageClass::Filesystem,
-                        nervix_execution::QueueAdmission::WaitForPlace,
                         charge,
                         move |_charge, cancellation| {
                             cancellation
@@ -2772,9 +2770,8 @@ impl Runtime {
                     .change_context(RuntimePersistenceError::StorageAdmission)?;
                 self.inner
                     .executor
-                    .run_storage_with(
+                    .run_storage(
                         nervix_execution::StorageClass::Filesystem,
-                        nervix_execution::QueueAdmission::WaitForPlace,
                         charge,
                         move |charge, cancellation| {
                             cancellation

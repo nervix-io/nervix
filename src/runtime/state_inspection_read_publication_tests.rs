@@ -109,6 +109,7 @@ async fn subscription_delivery_can_precede_the_materialized_inspection_generatio
         };
         let before = runtime
             .capture_materialized_state_page(
+                runtime.inspection_executor(),
                 &domain,
                 &relay,
                 MaterializedPageQuery {
@@ -152,6 +153,7 @@ async fn subscription_delivery_can_precede_the_materialized_inspection_generatio
         );
         let after_subscription = runtime
             .capture_materialized_state_page(
+                runtime.inspection_executor(),
                 &domain,
                 &relay,
                 MaterializedPageQuery {
@@ -199,6 +201,7 @@ async fn subscription_delivery_can_precede_the_materialized_inspection_generatio
             .assured("the actual materialized task drains and publishes its queued update");
         let after_application = runtime
             .capture_materialized_state_page(
+                runtime.inspection_executor(),
                 &domain,
                 &relay,
                 MaterializedPageQuery {

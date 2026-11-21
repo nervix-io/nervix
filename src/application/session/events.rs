@@ -328,9 +328,8 @@ impl SessionServiceImpl {
         };
         let snapshot_domain = domain.clone();
         let encoded = executor
-            .run_cpu_with(
+            .run_cpu(
                 CpuClass::Bulk,
-                nervix_execution::QueueAdmission::WaitForPlace,
                 reservation,
                 move |_charge, _cancellation| {
                     encode_snapshot(&snapshot_domain, &graph, &entities, &limits)

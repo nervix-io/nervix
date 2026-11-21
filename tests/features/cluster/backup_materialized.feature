@@ -96,7 +96,8 @@ Feature: Materialized backup and archived lifecycle resumption
       """
       class="bulk",direction="received"
       """
-    And within "60s" node "node-3" observability metric "nervix_execution_memory_rejections_total" with labels eventually reaches at least 1
+    # The fetch's restore waits for room while the class is held full; nothing is refused for room.
+    And node "node-3" observability metric "nervix_execution_memory_rejections_total" with labels eventually equals 0
       """
       class="bulk"
       """

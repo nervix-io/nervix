@@ -1,10 +1,11 @@
 //! Page coordination every state inspection shares, whichever kind of state it reads.
 //!
 //! Layer: control plane.
-//! - **Owns.** Projecting an observed failure to its fixed refusal, the unit owner an inspection
-//!   asks, the resume position of a continuation within one unit, complete count accumulation, the
-//!   distinct names of the columns a section appends to its payload, and the command result that
-//!   carries a read's envelope beside its requested projection.
+//! - **Owns.** Projecting an observed failure to its fixed refusal, growing an inspection's charge
+//!   without waiting while it holds part of its class, the unit owner an inspection asks, the
+//!   resume position of a continuation within one unit, complete count accumulation, the distinct
+//!   names of the columns a section appends to its payload, and the command result that carries a
+//!   read's envelope beside its requested projection.
 //! - **Depends on.** Committed schedules, typed inspection identities and bounded execution.
 //! - **Must not know.** How any kind of state is held, captured, carried or encoded.
 
@@ -50,6 +51,36 @@ pub(super) fn rendered_inspection(
         format,
     }));
     result
+}
+
+/// How growing an inspection's charge went: it grew, or its class had no room for it now.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum InspectionGrowth {
+    Grown,
+    /// The inspection gives back everything it holds and runs again under a charge of `needed`
+    /// bytes once its class has room for them, so it never waits while holding part of the class.
+    Short {
+        needed: u64,
+    },
+}
+
+/// Grow an inspection's charge by `bytes`. A class without room now is backpressure, never a
+/// refusal: the inspection reports the charge it needs. Only a charge larger than the whole class
+/// refuses, since no wait could grant it.
+pub(super) fn grow_inspection(
+    memory: &mut nervix_execution::GrowingCharge,
+    bytes: u64,
+) -> Result<InspectionGrowth, StateInspectionRejection> {
+    let Err(refusal) = memory.grow_by(bytes) else {
+        return Ok(InspectionGrowth::Grown);
+    };
+    if let Some(needed) = nervix_execution::Shortfall::of(&refusal) {
+        return Ok(InspectionGrowth::Short { needed });
+    }
+    Err(inspection_refusal(
+        refusal,
+        StateInspectionRejection::NotReady,
+    ))
 }
 
 /// Project an observed internal failure to the fixed inspection protocol refusal.

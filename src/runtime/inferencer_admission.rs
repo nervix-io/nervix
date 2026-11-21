@@ -351,8 +351,8 @@ impl<'a> InferencerAdmission<'a> {
         let executed = batch
             .acks
             .as_slice()
-            .keep_alive_while_pending(execute_accepted_program_with_selection_in_context(
-                self.branch.runtime.executor().accepted_work(),
+            .keep_alive_while_pending(execute_program_with_selection_in_context(
+                self.branch.runtime.executor(),
                 &self.program.compiled,
                 &projected,
                 &VmExecutionContext {

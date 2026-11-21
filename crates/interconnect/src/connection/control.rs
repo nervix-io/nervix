@@ -18,7 +18,6 @@
 use std::time::Duration;
 
 use error_stack::Report;
-use nervix_execution::QueueAdmission;
 use nervix_models::ClusterNodeName;
 use nervix_primitives::time::Instant;
 
@@ -92,11 +91,10 @@ impl TransportState {
             .await?;
         // The response carries work the peer already did, so a full queue holds it back until the
         // request's own deadline rather than discarding it.
-        wire::decode_rkyv_with::<ControlEnvelope>(
+        wire::decode_rkyv::<ControlEnvelope>(
             &self.executor,
             class.memory_class(),
             class.cpu_class(),
-            QueueAdmission::WaitForPlace,
             response,
         )
         .await

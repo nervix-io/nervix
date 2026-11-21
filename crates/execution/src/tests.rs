@@ -8,8 +8,8 @@ use ubyte::ByteUnit;
 
 use crate::{
     AdmissionError, BudgetedBuffer, BufferGrowthError, BufferLimitExceeded, ExecutionConfig,
-    ExecutionConfigError, ExecutionError, Executor, MemoryBudgets, MemoryClass, OperationLimits,
-    QueueAdmission, StorageClass, WorkerCounts,
+    ExecutionConfigError, Executor, MemoryBudgets, MemoryClass, OperationLimits, StorageClass,
+    WorkerCounts,
 };
 
 fn one() -> NonZeroUsize {
@@ -531,51 +531,58 @@ async fn a_reservation_holds_its_class_until_it_is_dropped() {
 }
 
 #[nervix_primitives::test]
-async fn accepted_cpu_places_hold_the_charge_and_return_reusable_capacity_when_run_or_abandoned() {
+async fn prepared_cpu_places_hold_the_charge_and_return_reusable_capacity_when_run_or_abandoned() {
     let executor = small_executor();
-    let work = executor.accepted_work();
-    let charge = work
+    let charge = executor
         .reserve(MemoryClass::Relay, 1024)
         .await
         .expect("the operation fits");
-    let place = work
+    let place = executor
         .prepare_cpu(crate::CpuClass::Data, charge)
         .await
         .expect("a place is available");
-    let request = executor
+    let later = executor
         .try_reserve(MemoryClass::Relay, 0)
         .expect("a zero charge fits");
-    let refusal = executor
-        .run_cpu(crate::CpuClass::Data, request, |_, _| ())
-        .await
-        .expect_err("a request cannot overtake a retained place");
-    assert!(matches!(
-        refusal.current_context(),
-        ExecutionError::QueueFull { .. }
-    ));
+    let mut waiting = Box::pin(executor.run_cpu(crate::CpuClass::Data, later, |_, _| 3));
+    let first_poll = std::future::poll_fn(|context| {
+        std::task::Poll::Ready(std::future::Future::poll(waiting.as_mut(), context))
+    })
+    .await;
+    assert!(
+        first_poll.is_pending(),
+        "a later job waits behind a retained place instead of being refused"
+    );
     drop(place);
+    assert_eq!(
+        waiting
+            .await
+            .expect("the later job takes the place the prepared one gave back"),
+        3
+    );
     assert_eq!(executor.snapshot().relay_memory.reserved_bytes, 0);
     assert_eq!(executor.snapshot().data_cpu.pending, 0);
-    let charge = work
+    let charge = executor
         .reserve(MemoryClass::Relay, 1024)
         .await
         .expect("the returned charge is reusable");
-    let result = work
+    let result = executor
         .prepare_cpu(crate::CpuClass::Data, charge)
         .await
         .expect("the place is reusable")
         .run(|_, _| 7)
         .await
-        .expect("prepared accepted work completes");
+        .expect("prepared work completes");
     assert_eq!(result, 7);
-    let charge = work
+    let charge = executor
         .reserve(MemoryClass::Relay, 1024)
         .await
         .expect("the completed charge is reusable");
     assert_eq!(
-        work.run_cpu(crate::CpuClass::Data, charge, |_, _| 14)
+        executor
+            .run_cpu(crate::CpuClass::Data, charge, |_, _| 14)
             .await
-            .expect("accepted work runs"),
+            .expect("the job runs"),
         14
     );
     let snapshot = executor.snapshot();
@@ -603,10 +610,333 @@ async fn an_operation_larger_than_its_class_is_refused_rather_than_queued() {
     );
 }
 
-/// A storage job that waits for a place is not refused by a full wait queue, unlike one refused
-/// when full, and runs once the occupying job frees a place.
+/// A full wait queue is backpressure: a storage job that finds the class's one worker busy and its
+/// one queue place taken waits for a place, whatever the job does, and runs once one frees.
+/// A job that writes `input` into a budgeted buffer under its charge, and reports the charge it
+/// needs when its class has no room for the growth, as every growing writer does.
+fn write_growing(
+    input: Vec<u8>,
+    charge: crate::Reservation,
+) -> crate::Attempt<crate::ChargedBytes, Vec<u8>> {
+    let mut buffer = BudgetedBuffer::with_limit(charge, 1024 * 1024);
+    if buffer.write_all(&input).is_ok() {
+        return crate::Attempt::Finished(crate::ChargedBytes::from_buffer(buffer));
+    }
+    let needed = buffer
+        .shortfall()
+        .expect("the only refusal this writer meets is a class without room");
+    crate::Attempt::Short { input, needed }
+}
+
+/// A growing job whose class has no room for its growth gives back everything it holds before it
+/// waits for the charge it needs: a charge queued behind its attempt is granted the room the
+/// attempt held, and the job runs again under its larger charge once room frees.
 #[nervix_primitives::test]
-async fn a_storage_job_waiting_for_a_place_runs_once_the_full_queue_frees_one() {
+async fn a_growing_job_that_ran_short_gives_back_its_charge_waits_and_runs_again() {
+    use nervix_primitives::sync::{
+        StdArc,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    let executor = small_executor();
+    let capacity = executor.memory(MemoryClass::Bulk).capacity_bytes;
+    let first_charge = 4096;
+    let held = executor
+        .try_reserve(
+            MemoryClass::Bulk,
+            capacity
+                .checked_sub(first_charge)
+                .expect("the bulk class is larger than one first charge"),
+        )
+        .expect("the empty bulk class holds all but one first charge");
+    let attempts = StdArc::new(AtomicUsize::new(0));
+    let counted = StdArc::clone(&attempts);
+    let (started, attempt_started) = nervix_primitives::sync::oneshot::channel();
+    let (proceed, attempt_proceeds) = nervix_primitives::sync::blocking::mpsc::channel::<()>();
+    let mut gate = Some((started, attempt_proceeds));
+    let growing = executor.clone();
+    let task = nervix_primitives::task::spawn(async move {
+        growing
+            .run_cpu_growing(
+                crate::CpuClass::Bulk,
+                MemoryClass::Bulk,
+                first_charge,
+                vec![7_u8; 64 * 1024],
+                move |input, charge, _cancellation| {
+                    counted.fetch_add(1, Ordering::AcqRel);
+                    // The first attempt holds its charge until a charge is queued behind it.
+                    if let Some((started, proceeds)) = gate.take() {
+                        started
+                            .send(())
+                            .expect("the test waits for the first attempt");
+                        proceeds
+                            .recv()
+                            .expect("the test lets the first attempt go on");
+                    }
+                    write_growing(input, charge)
+                },
+            )
+            .await
+    });
+    attempt_started
+        .await
+        .expect("the first attempt runs under the one free charge");
+    let mut waiting = Box::pin(executor.reserve(MemoryClass::Bulk, first_charge));
+    let first_poll = std::future::poll_fn(|context| {
+        std::task::Poll::Ready(std::future::Future::poll(waiting.as_mut(), context))
+    })
+    .await;
+    assert!(
+        first_poll.is_pending(),
+        "the class has no room while the attempt holds its charge"
+    );
+    proceed
+        .send(())
+        .expect("the first attempt waits for the test");
+    let granted = nervix_primitives::time::timeout(std::time::Duration::from_secs(60), waiting)
+        .await
+        .expect("a job that ran short gives back its charge rather than waiting while it holds it")
+        .expect("the waiter's charge is no larger than the class");
+    assert!(
+        !task.is_finished(),
+        "a job that ran short waits for its larger charge instead of failing"
+    );
+    assert_eq!(attempts.load(Ordering::Acquire), 1);
+    drop(held);
+    drop(granted);
+    let written = task
+        .await
+        .expect("the growing job's task is joined")
+        .expect("the job runs again once its class has room");
+    assert_eq!(&*written, vec![7_u8; 64 * 1024].as_slice());
+    assert_eq!(attempts.load(Ordering::Acquire), 2);
+    drop(written);
+    assert_eq!(executor.memory(MemoryClass::Bulk).reserved_bytes, 0);
+}
+
+/// A job whose need is larger than its whole class fails rather than waiting for room that could
+/// never exist.
+#[nervix_primitives::test]
+async fn a_growing_job_that_needs_more_than_its_class_fails() {
+    let executor = small_executor();
+    let capacity = executor.memory(MemoryClass::Bulk).capacity_bytes;
+    let failure = executor
+        .run_cpu_growing(
+            crate::CpuClass::Bulk,
+            MemoryClass::Bulk,
+            4096,
+            (),
+            move |(), _charge, _cancellation| crate::Attempt::<(), ()>::Short {
+                input: (),
+                needed: capacity + 1,
+            },
+        )
+        .await
+        .expect_err("a need beyond the class cannot be granted");
+    assert!(matches!(
+        failure.current_context(),
+        crate::ExecutionFailure::Admission
+    ));
+    assert!(matches!(
+        failure.downcast_ref::<AdmissionError>(),
+        Some(AdmissionError::ExceedsBudget { .. })
+    ));
+    assert_eq!(executor.memory(MemoryClass::Bulk).reserved_bytes, 0);
+}
+
+/// An operation waits once for its allowance, while it holds nothing, and draws every charge of
+/// the class from it without waiting: a charge the allowance has no room for fails at once with
+/// the share the whole operation needs.
+#[nervix_primitives::test]
+async fn an_allowance_draws_without_waiting_and_reports_the_operation_s_whole_need() {
+    let executor = small_executor();
+    let allowance = executor
+        .reserve_allowance(MemoryClass::Bulk, 8192)
+        .await
+        .expect("the empty bulk class grants the share");
+    assert_eq!(executor.memory(MemoryClass::Bulk).reserved_bytes, 8192);
+    let first = allowance
+        .reserve(MemoryClass::Bulk, 4096)
+        .await
+        .expect("the share has room for the first charge");
+    let second = allowance
+        .try_reserve(MemoryClass::Bulk, 4096)
+        .expect("the share has room for the second charge");
+    let refused = {
+        let mut refusing = std::pin::pin!(allowance.reserve(MemoryClass::Bulk, 1));
+        let polled = std::future::poll_fn(|context| {
+            std::task::Poll::Ready(std::future::Future::poll(refusing.as_mut(), context))
+        })
+        .await;
+        let std::task::Poll::Ready(result) = polled else {
+            panic!("a charge within an allowance never waits");
+        };
+        result.expect_err("the full share has no room for another byte")
+    };
+    assert_eq!(crate::Shortfall::of(&refused), Some(8193));
+    assert_eq!(
+        executor.memory(MemoryClass::Bulk).reserved_bytes,
+        8192,
+        "draws come out of the share, not out of the class"
+    );
+    // Other classes are the executor's own.
+    let other = allowance
+        .reserve(MemoryClass::Relay, 4096)
+        .await
+        .expect("the relay class has room");
+    assert_eq!(executor.memory(MemoryClass::Relay).reserved_bytes, 4096);
+    drop(other);
+    drop(first);
+    drop(second);
+    drop(allowance);
+    assert_eq!(executor.memory(MemoryClass::Bulk).reserved_bytes, 0);
+}
+
+/// An operation that ran short of its share runs again within the share it needed, even when it
+/// reported the shortfall as an answer of its own rather than as a failure.
+#[nervix_primitives::test]
+async fn an_operation_short_of_its_share_runs_again_within_the_share_it_needed() {
+    let executor = small_executor();
+    let mut attempts = Vec::new();
+    let answer = executor
+        .within_allowance(MemoryClass::Bulk, 4096, |bulk| {
+            attempts.push(bulk.memory(MemoryClass::Bulk).reserved_bytes);
+            async move {
+                // The operation turns a charge its share has no room for into a degraded answer.
+                let degraded = bulk.reserve(MemoryClass::Bulk, 16_384).await.is_err();
+                Ok::<_, error_stack::Report<AdmissionError>>(!degraded)
+            }
+        })
+        .await
+        .expect("the class holds the larger share")
+        .expect("the operation never fails");
+    assert!(
+        answer,
+        "the attempt within the share it needed answers in full"
+    );
+    assert_eq!(
+        attempts,
+        vec![4096, 16_384],
+        "the operation runs again within the share it was found to need"
+    );
+    assert_eq!(executor.memory(MemoryClass::Bulk).reserved_bytes, 0);
+}
+
+/// An operation that grows one step at a time runs again only a few times: each share it runs
+/// again within at least doubles, rather than covering only the step where it ran short, which
+/// would end the next attempt one step later and run the operation once per step.
+#[nervix_primitives::test]
+async fn an_operation_growing_step_by_step_runs_again_a_logarithmic_number_of_times() {
+    const STEP: u64 = 1024;
+    const STEPS: u64 = 64;
+    let executor = small_executor();
+    let mut attempts = 0_u32;
+    let drawn = executor
+        .within_allowance(MemoryClass::Bulk, STEP, |bulk| {
+            attempts += 1;
+            async move {
+                let mut charges = Vec::new();
+                for _ in 0..STEPS {
+                    charges.push(bulk.reserve(MemoryClass::Bulk, STEP).await?);
+                }
+                Ok::<_, error_stack::Report<AdmissionError>>(charges.len())
+            }
+        })
+        .await
+        .expect("the class holds the whole operation")
+        .expect("the operation finishes within the share it needs");
+    assert_eq!(u64::try_from(drawn).expect("a step count fits u64"), STEPS);
+    // Shares of 1, 2, 4, 8, 16, 32 and 64 steps.
+    assert_eq!(
+        attempts, 7,
+        "the share doubles from one attempt to the next"
+    );
+    assert_eq!(executor.memory(MemoryClass::Bulk).reserved_bytes, 0);
+}
+
+/// A charge drawn from an allowance keeps the allowance's share of the class held for as long as
+/// it lives, and growing it past the share reports the share the operation needs.
+#[nervix_primitives::test]
+async fn a_charge_drawn_from_an_allowance_keeps_its_share_and_reports_growth_beyond_it() {
+    let executor = small_executor();
+    let allowance = executor
+        .reserve_allowance(MemoryClass::Bulk, 8192)
+        .await
+        .expect("the empty bulk class grants the share");
+    let mut drawn = allowance
+        .reserve(MemoryClass::Bulk, 4096)
+        .await
+        .expect("the share has room");
+    drop(allowance);
+    assert_eq!(
+        executor.memory(MemoryClass::Bulk).reserved_bytes,
+        8192,
+        "the share stays held while a charge drawn from it lives"
+    );
+    drawn
+        .grow_to(8192)
+        .expect("the share has room to grow the charge to its whole size");
+    let refused = drawn
+        .grow_to(12_288)
+        .expect_err("the share has no room to grow further");
+    assert_eq!(crate::Shortfall::of(&refused), Some(12_288));
+    drop(drawn);
+    assert_eq!(executor.memory(MemoryClass::Bulk).reserved_bytes, 0);
+}
+
+/// A charge in a class without room for it outside any allowance still waits, and a growth
+/// refusal there reports the charge's own target.
+#[nervix_primitives::test]
+async fn growth_outside_an_allowance_reports_its_own_target() {
+    let executor = small_executor();
+    let capacity = executor.memory(MemoryClass::Bulk).capacity_bytes;
+    let _held = executor
+        .try_reserve(MemoryClass::Bulk, capacity - 4096)
+        .expect("the empty class holds all but one charge");
+    let mut charge = executor
+        .try_reserve(MemoryClass::Bulk, 4096)
+        .expect("the class has room for one charge");
+    let refused = charge
+        .grow_to(8192)
+        .expect_err("the full class has no room to grow");
+    assert_eq!(crate::Shortfall::of(&refused), Some(8192));
+}
+
+/// An operation counted under a larger charge than it needs counts its own bytes once, keeps the
+/// room it started with until it ends, and gives the rest back when it narrows.
+#[nervix_primitives::test]
+async fn a_growing_charge_counts_its_own_bytes_and_keeps_its_starting_room() {
+    let executor = small_executor();
+    let start = executor
+        .reserve(MemoryClass::Bulk, 8192)
+        .await
+        .expect("the empty class grants the starting charge");
+    let mut charge = crate::GrowingCharge::new(start);
+    charge.grow_by(4096).expect("the starting charge covers it");
+    charge.grow_by(4096).expect("the starting charge covers it");
+    assert_eq!(charge.required(), 8192);
+    assert_eq!(
+        executor.memory(MemoryClass::Bulk).reserved_bytes,
+        8192,
+        "bytes the starting charge covers are not charged again"
+    );
+    charge.release(6144);
+    assert_eq!(charge.required(), 2048);
+    assert_eq!(
+        executor.memory(MemoryClass::Bulk).reserved_bytes,
+        8192,
+        "the charge keeps the room it started with until it ends"
+    );
+    charge.grow_by(8192).expect("the class has room to grow");
+    assert_eq!(executor.memory(MemoryClass::Bulk).reserved_bytes, 10_240);
+    let narrowed = charge.into_reservation();
+    assert_eq!(narrowed.bytes(), 10_240);
+    drop(narrowed);
+    assert_eq!(executor.memory(MemoryClass::Bulk).reserved_bytes, 0);
+}
+
+#[nervix_primitives::test]
+async fn a_full_storage_queue_holds_every_job_until_a_place_frees() {
     let executor = small_executor();
     let (started, has_started) = nervix_primitives::sync::oneshot::channel();
     let (release, released) = nervix_primitives::sync::oneshot::channel::<()>();
@@ -644,34 +974,22 @@ async fn a_storage_job_waiting_for_a_place_runs_once_the_full_queue_frees_one() 
         nervix_primitives::task::yield_now().await;
     }
 
-    let refused = executor
-        .run_storage(
-            StorageClass::Filesystem,
-            executor
-                .try_reserve(MemoryClass::Bulk, 1)
-                .expect("the bulk class has room for the refused job"),
-            |_charge, _| (),
-        )
-        .await
-        .expect_err("a full wait queue refuses a job that answers a request");
-    assert!(
-        matches!(refused.current_context(), ExecutionError::QueueFull { .. }),
-        "a job refused when full is refused for the full queue, got {refused}"
-    );
     let waiting_charge = executor
         .try_reserve(MemoryClass::Bulk, 1)
         .expect("the bulk class has room for the waiting job");
-    let waiter = executor.clone();
-    let waiting = nervix_primitives::task::spawn(async move {
-        waiter
-            .run_storage_with(
-                StorageClass::Filesystem,
-                QueueAdmission::WaitForPlace,
-                waiting_charge,
-                |_charge, _| "waited",
-            )
-            .await
-    });
+    let mut waiting = Box::pin(executor.run_storage(
+        StorageClass::Filesystem,
+        waiting_charge,
+        |_charge, _| "waited",
+    ));
+    let first_poll = std::future::poll_fn(|context| {
+        std::task::Poll::Ready(std::future::Future::poll(waiting.as_mut(), context))
+    })
+    .await;
+    assert!(
+        first_poll.is_pending(),
+        "a full wait queue holds the job instead of refusing it"
+    );
     release
         .send(())
         .expect("the occupying job holds its worker until the test releases it");
@@ -683,13 +1001,83 @@ async fn a_storage_job_waiting_for_a_place_runs_once_the_full_queue_frees_one() 
         .expect("the queued job runs once the worker frees");
     let waited = waiting
         .await
-        .expect("the waiting job is joined")
-        .expect("a job waiting for a place is never refused");
+        .expect("a job that found the queue full runs once a place frees");
     assert_eq!(waited, "waited");
     let snapshot = executor.snapshot();
-    assert_eq!(snapshot.filesystem_storage.refused, 1);
     assert_eq!(snapshot.filesystem_storage.completed, 3);
+    assert_eq!(snapshot.filesystem_storage.pending, 0);
     assert_eq!(snapshot.bulk_memory.reserved_bytes, 0);
+}
+
+/// The same for a CPU class: a job that finds the class's one worker busy and its one queue place
+/// taken waits for a place and runs once one frees.
+#[nervix_primitives::test]
+async fn a_full_cpu_queue_holds_every_job_until_a_place_frees() {
+    let executor = small_executor();
+    let (started, has_started) = nervix_primitives::sync::oneshot::channel();
+    let (release, released) = nervix_primitives::sync::blocking::mpsc::channel::<()>();
+    let occupying = executor
+        .try_reserve(MemoryClass::Relay, 1)
+        .expect("the untouched relay class has room");
+    let occupied = executor.clone();
+    let running = nervix_primitives::task::spawn(async move {
+        occupied
+            .run_cpu(crate::CpuClass::Data, occupying, move |_charge, _| {
+                started
+                    .send(())
+                    .expect("the test waits for the occupying job");
+                released
+                    .recv()
+                    .expect_err("dropping the sender is how the test releases the worker");
+            })
+            .await
+            .expect("the occupying job runs");
+    });
+    has_started
+        .await
+        .expect("the occupying job reports once it holds the one worker");
+    let queued_charge = executor
+        .try_reserve(MemoryClass::Relay, 1)
+        .expect("the relay class has room for the queued job");
+    let queue_holder = executor.clone();
+    let queued = nervix_primitives::task::spawn(async move {
+        queue_holder
+            .run_cpu(crate::CpuClass::Data, queued_charge, |_charge, _| ())
+            .await
+    });
+    while executor.snapshot().data_cpu.pending < 1 {
+        nervix_primitives::task::consume_budget().await;
+        nervix_primitives::task::yield_now().await;
+    }
+
+    let waiting_charge = executor
+        .try_reserve(MemoryClass::Relay, 1)
+        .expect("the relay class has room for the waiting job");
+    let mut waiting =
+        Box::pin(executor.run_cpu(crate::CpuClass::Data, waiting_charge, |_charge, _| 7));
+    let first_poll = std::future::poll_fn(|context| {
+        std::task::Poll::Ready(std::future::Future::poll(waiting.as_mut(), context))
+    })
+    .await;
+    assert!(
+        first_poll.is_pending(),
+        "a full wait queue holds the job instead of refusing it"
+    );
+    drop(release);
+
+    running.await.expect("the occupying job is joined");
+    queued
+        .await
+        .expect("the queued job is joined")
+        .expect("the queued job runs once the worker frees");
+    let value = waiting
+        .await
+        .expect("a job that found the queue full runs once a place frees");
+    assert_eq!(value, 7);
+    let snapshot = executor.snapshot();
+    assert_eq!(snapshot.data_cpu.completed, 3);
+    assert_eq!(snapshot.data_cpu.pending, 0);
+    assert_eq!(snapshot.relay_memory.reserved_bytes, 0);
 }
 
 async fn connector_storage_isolation() {
@@ -755,7 +1143,7 @@ mod shuttle_checks {
     use nervix_primitives::sync::StdArc;
 
     use super::*;
-    use crate::{CpuClass, ExecutionError, QueueAdmission, StorageClass};
+    use crate::{CpuClass, ExecutionError, StorageClass};
 
     struct ReservationProbe {
         started: nervix_primitives::sync::oneshot::Receiver<()>,
@@ -1012,7 +1400,7 @@ mod shuttle_checks {
             let occupied = executor.clone();
             let running = nervix_primitives::task::spawn(async move {
                 occupied
-                    .run_cpu(CpuClass::Data, occupying, move |_charge, _| {
+                    .run_cpu(crate::CpuClass::Data, occupying, move |_charge, _| {
                         started
                             .send(())
                             .assured("the test awaits the occupying data job");
@@ -1176,7 +1564,7 @@ mod shuttle_checks {
             let occupied = executor.clone();
             let running = nervix_primitives::task::spawn(async move {
                 occupied
-                    .run_cpu(CpuClass::Data, occupying, move |_charge, _| {
+                    .run_cpu(crate::CpuClass::Data, occupying, move |_charge, _| {
                         started
                             .send(())
                             .assured("the test awaits the occupying data job");
@@ -1212,31 +1600,33 @@ mod shuttle_checks {
             assert_eq!(full_snapshot.data_cpu.pending, 1);
             assert_live_reservations_fit(&executor);
 
-            let refused = executor
+            let next_charge = executor
                 .try_reserve(MemoryClass::Relay, 1024)
                 .assured("memory remains independent from worker queue admission");
-            let error = executor
-                .run_cpu(CpuClass::Data, refused, |_, _| ())
+            let (next_registered, is_next_registered) = nervix_primitives::sync::oneshot::channel();
+            let next_executor = executor.clone();
+            let next = nervix_primitives::task::spawn(async move {
+                announce_after_first_pending(
+                    next_executor.run_cpu(CpuClass::Data, next_charge, |_, _| ()),
+                    next_registered,
+                )
                 .await
-                .expect_err("the single wait slot is already taken");
-            assert!(
-                matches!(
-                    error.current_context(),
-                    crate::ExecutionError::QueueFull { class, pending }
-                        if *class == "data_cpu" && *pending == 1
-                ),
-                "expected typed queue backpressure, got {error}"
-            );
+            });
+            is_next_registered
+                .await
+                .assured("the next job reports once the full queue holds it");
 
-            let refused_snapshot = executor.snapshot();
-            assert_eq!(refused_snapshot.data_cpu.running, 1);
-            assert_eq!(refused_snapshot.data_cpu.pending, 1);
-            assert_eq!(refused_snapshot.data_cpu.refused, 1);
+            let held_snapshot = executor.snapshot();
+            assert_eq!(held_snapshot.data_cpu.running, 1);
+            assert_eq!(
+                held_snapshot.data_cpu.pending, 1,
+                "a job held by the full queue takes no place"
+            );
             assert_live_reservations_fit(&executor);
 
             release
                 .send(())
-                .assured("the occupying job remains blocked until backpressure is observed");
+                .assured("the occupying job remains blocked until the next job waits");
             running
                 .await
                 .assured("the occupying job exits after its release");
@@ -1244,12 +1634,17 @@ mod shuttle_checks {
                 .await
                 .assured("the queued job is joined")
                 .assured("the queued job runs once the worker permit returns");
+            next.await
+                .assured("the next job is joined")
+                .assured("the next job runs once a place frees");
             assert_every_permit_returned(&executor);
         });
     }
 
+    /// A full wait queue is backpressure: the next job waits for a place instead of being refused,
+    /// takes no place and no worker while it waits, and runs once one frees.
     #[test]
-    fn shuttle_full_wait_queue_is_exact_typed_backpressure() {
+    fn shuttle_a_full_wait_queue_holds_the_next_job_until_a_place_frees() {
         check_random_and_pct(full_wait_queue_invariant);
     }
 
@@ -1271,7 +1666,7 @@ mod shuttle_checks {
             let occupied = executor.clone();
             let running = nervix_primitives::task::spawn(async move {
                 occupied
-                    .run_cpu(CpuClass::Data, occupying, move |_charge, _| {
+                    .run_cpu(crate::CpuClass::Data, occupying, move |_charge, _| {
                         started
                             .send(())
                             .assured("the check awaits the occupying data job");
@@ -1293,7 +1688,7 @@ mod shuttle_checks {
             let queue_holder = executor.clone();
             let queued = nervix_primitives::task::spawn(async move {
                 announce_after_first_pending(
-                    queue_holder.run_cpu(CpuClass::Data, queued_charge, |_, _| ()),
+                    queue_holder.run_cpu(crate::CpuClass::Data, queued_charge, |_, _| ()),
                     admitted,
                 )
                 .await
@@ -1345,11 +1740,9 @@ mod shuttle_checks {
             let job_order = StdArc::clone(order);
             let task = nervix_primitives::task::spawn(async move {
                 announce_after_first_pending(
-                    waiter
-                        .accepted_work()
-                        .run_cpu(CpuClass::Data, charge, move |_, _| {
-                            job_order.lock().push(label)
-                        }),
+                    waiter.run_cpu(CpuClass::Data, charge, move |_, _| {
+                        job_order.lock().push(label)
+                    }),
                     registered,
                 )
                 .await
@@ -1376,11 +1769,9 @@ mod shuttle_checks {
                 .assured("the waiting job reports once the full queue holds it");
             let held = executor.snapshot();
             assert_eq!(held.data_cpu.pending, 1, "a waiting job takes no place");
-            assert_eq!(held.data_cpu.refused, 0, "a waiting job is not refused");
             assert_eq!(held.relay_memory.reserved_bytes, 3 * 1024);
 
-            // A job refused when full asks after the waiting one, racing the release that frees a
-            // place.
+            // A later job asks after the waiting one, racing the release that frees a place.
             let late_charge = executor
                 .try_reserve(MemoryClass::Relay, 1024)
                 .assured("the relay class has room for the late job");
@@ -1398,12 +1789,9 @@ mod shuttle_checks {
                 .await
                 .assured("the waiting job is joined")
                 .assured("the waiting job runs once a place frees");
-            if let Err(error) = late.await.assured("the late job is joined") {
-                assert!(
-                    matches!(error.current_context(), ExecutionError::QueueFull { .. }),
-                    "a late job is only ever refused for a full queue, got {error}"
-                );
-            }
+            late.await
+                .assured("the late job is joined")
+                .assured("the late job waits for a place too and runs");
 
             let order = order.lock().clone();
             assert_eq!(
@@ -1415,8 +1803,8 @@ mod shuttle_checks {
         });
     }
 
-    /// A job waiting for a place takes the first place the full queue frees, ahead of a job refused
-    /// when full that asks after it, and runs first.
+    /// A job waiting for a place takes the first place the full queue frees, ahead of a job that
+    /// asks after it, and runs first.
     #[test]
     fn shuttle_a_job_waiting_for_a_place_takes_the_first_freed_place() {
         check_random_and_pct(waiting_admission_order_invariant);
@@ -1474,8 +1862,92 @@ mod shuttle_checks {
         check_random_and_pct(dropped_waiting_admission_invariant);
     }
 
+    fn growing_job_holds_nothing_while_waiting_invariant() {
+        shuttle::future::block_on(async {
+            let executor = small_executor();
+            let capacity = executor.memory(MemoryClass::Bulk).capacity_bytes;
+            let first_charge = 4096;
+            // The holder leaves exactly one first charge free, and lets go only once the waiter
+            // below has its charge.
+            let holder = executor
+                .try_reserve(
+                    MemoryClass::Bulk,
+                    capacity
+                        .checked_sub(first_charge)
+                        .assured("the bulk class is larger than one first charge"),
+                )
+                .assured("the empty bulk class holds all but one first charge");
+            let (started, attempt_started) = nervix_primitives::sync::oneshot::channel();
+            let (proceed, attempt_proceeds) =
+                nervix_primitives::sync::blocking::mpsc::channel::<()>();
+            let mut gate = Some((started, attempt_proceeds));
+            let growing = executor.clone();
+            let job = nervix_primitives::task::spawn(async move {
+                growing
+                    .run_cpu_growing(
+                        CpuClass::Bulk,
+                        MemoryClass::Bulk,
+                        first_charge,
+                        vec![7_u8; 64 * 1024],
+                        move |input, charge, _cancellation| {
+                            // The first attempt holds its charge until a charge is queued behind
+                            // it.
+                            if let Some((started, proceeds)) = gate.take() {
+                                started.send(()).assured(
+                                    "the test waits for the first attempt while it holds its \
+                                     charge",
+                                );
+                                proceeds
+                                    .recv()
+                                    .assured("the test lets the first attempt go on");
+                            }
+                            write_growing(input, charge)
+                        },
+                    )
+                    .await
+            });
+            attempt_started
+                .await
+                .assured("the first attempt runs under the one free charge");
+            // This waiter queues for the very charge the first attempt holds. A job that waited for
+            // its growth while holding that charge would leave the waiter, and so the holder and the
+            // job itself, waiting forever.
+            let mut waiting = std::pin::pin!(executor.reserve(MemoryClass::Bulk, first_charge));
+            let first_poll =
+                std::future::poll_fn(|context| Poll::Ready(waiting.as_mut().poll(context))).await;
+            assert!(
+                first_poll.is_pending(),
+                "the class has no room while the attempt holds its charge"
+            );
+            proceed
+                .send(())
+                .assured("the first attempt waits for the test");
+            let granted = waiting
+                .await
+                .assured("the waiter is granted the charge the short attempt gave back");
+            assert_live_reservations_fit(&executor);
+            drop(holder);
+            drop(granted);
+            let written = job
+                .await
+                .assured("the growing job is joined")
+                .assured("the growing job runs again once its class has room");
+            assert_eq!(written.len(), 64 * 1024);
+            drop(written);
+            assert_every_permit_returned(&executor);
+        });
+    }
+
+    /// A growing job that runs short gives its charge back before it waits for the larger one, so
+    /// a charge queued behind it is granted the room it held: it never waits for room while holding
+    /// any.
     #[test]
-    fn shuttle_accepted_cpu_preparation_returns_waiting_and_reserved_places_with_their_charges() {
+    fn shuttle_a_growing_job_that_ran_short_waits_for_its_charge_holding_nothing() {
+        check_random_and_pct(growing_job_holds_nothing_while_waiting_invariant);
+    }
+
+    #[test]
+    fn shuttle_cpu_preparation_returns_waiting_and_reserved_places_with_their_charges() {
         check_random_and_pct(|| {
             shuttle::future::block_on(async {
                 let executor = small_executor();
@@ -1483,8 +1955,7 @@ mod shuttle_checks {
                 let charge = executor
                     .try_reserve(MemoryClass::Relay, 1024)
                     .assured("the waiting operation has a bounded charge");
-                let mut waiting =
-                    Box::pin(executor.accepted_work().prepare_cpu(CpuClass::Data, charge));
+                let mut waiting = Box::pin(executor.prepare_cpu(CpuClass::Data, charge));
                 assert!(
                     std::future::poll_fn(|cx| Poll::Ready(waiting.as_mut().poll(cx)))
                         .await
@@ -1500,29 +1971,29 @@ mod shuttle_checks {
                     .try_reserve(MemoryClass::Relay, 1024)
                     .assured("the prepared operation has a bounded charge");
                 let place = executor
-                    .accepted_work()
                     .prepare_cpu(CpuClass::Data, charge)
                     .await
                     .assured("the prepared operation takes the freed place");
                 assert_eq!(executor.snapshot().data_cpu.pending, 1);
-                let request_charge = executor
+                let later_charge = executor
                     .try_reserve(MemoryClass::Relay, 1024)
-                    .assured("the request's independent charge fits");
-                let refusal = executor
-                    .run_cpu(CpuClass::Data, request_charge, |_, _| ())
-                    .await
-                    .expect_err("a request cannot overtake the reserved place");
-                assert!(matches!(
-                    refusal.current_context(),
-                    ExecutionError::QueueFull { .. }
-                ));
+                    .assured("the later job's independent charge fits");
+                let mut later = Box::pin(executor.run_cpu(CpuClass::Data, later_charge, |_, _| ()));
+                assert!(
+                    std::future::poll_fn(|cx| Poll::Ready(later.as_mut().poll(cx)))
+                        .await
+                        .is_pending(),
+                    "a later job waits behind the reserved place instead of being refused"
+                );
                 drop(place);
+                later
+                    .await
+                    .assured("the later job takes the place the prepared operation gave back");
                 assert_every_permit_returned(&executor);
                 let charge = executor
                     .try_reserve(MemoryClass::Relay, 1024)
                     .assured("returned capacity is reusable");
                 let result = executor
-                    .accepted_work()
                     .prepare_cpu(CpuClass::Data, charge)
                     .await
                     .assured("a successor gets the returned place")
@@ -1624,12 +2095,7 @@ mod shuttle_checks {
                         .assured("three bytes fit in the management budget");
                     submissions.push(nervix_primitives::task::spawn(async move {
                         submitted
-                            .run_cpu_with(
-                                CpuClass::Control,
-                                QueueAdmission::WaitForPlace,
-                                charge,
-                                move |_, _| value,
-                            )
+                            .run_cpu(CpuClass::Control, charge, move |_, _| value)
                             .await
                     }));
                 }

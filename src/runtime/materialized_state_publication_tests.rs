@@ -858,10 +858,15 @@ fn inspection_and_backup_capture_share_carriers_within_the_resolved_metadata_bud
             .assured("each branch is new");
     }
     let read = ReplicatedMaterializedRelayState::read(&state);
+    let mut memory = nervix_execution::GrowingCharge::new(
+        executor
+            .try_reserve(MemoryClass::Bulk, 0)
+            .assured("no bytes always fit"),
+    );
     let captured = read
-        .capture_for_inspection(&executor)
+        .capture_for_inspection(&mut memory)
         .assured("inspection admits row views independently of backup grouping metadata");
-    let generation = &captured.0;
+    let generation = &captured.generation;
     assert_eq!(generation.records().len(), count);
     assert!(
         generation

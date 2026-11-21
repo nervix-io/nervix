@@ -14,7 +14,7 @@
 
 use arch_into::ArchInto as _;
 use error_stack::{Report, ResultExt as _};
-use nervix_execution::{CpuClass, Executor, MemoryClass, QueueAdmission, Reservation};
+use nervix_execution::{CpuClass, Executor, MemoryClass, Reservation};
 use nervix_primitives::sync::Arc;
 
 use super::{
@@ -83,29 +83,24 @@ impl ReplicatedInferencerState {
         // Restoring a branch's model state answers no waiting caller, so a full queue holds the
         // restore back rather than failing the domain's start.
         let value = executor
-            .run_cpu_with(
-                CpuClass::Bulk,
-                QueueAdmission::WaitForPlace,
-                reservation,
-                move |_charge, cancellation| {
-                    let snapshot =
-                        Snapshot::decode(initial.payload, limit.min(snapshot_bytes), cancellation)
-                            .change_context(RuntimePersistenceError::InferencerSnapshot)?;
-                    if snapshot.revision != revision {
-                        return Err(Report::new(RuntimePersistenceError::InferencerSnapshot));
-                    }
-                    let Some(branch) = snapshot.branch else {
-                        return Ok(None);
-                    };
-                    let generation = NativeGeneration::restore(branch.tensors, &plan, cancellation)
+            .run_cpu(CpuClass::Bulk, reservation, move |_charge, cancellation| {
+                let snapshot =
+                    Snapshot::decode(initial.payload, limit.min(snapshot_bytes), cancellation)
                         .change_context(RuntimePersistenceError::InferencerSnapshot)?;
-                    Ok::<_, Report<RuntimePersistenceError>>(Some(InferencerGeneration {
-                        incarnation: branch.incarnation,
-                        generation: Arc::new(generation),
-                        snapshot_bytes,
-                    }))
-                },
-            )
+                if snapshot.revision != revision {
+                    return Err(Report::new(RuntimePersistenceError::InferencerSnapshot));
+                }
+                let Some(branch) = snapshot.branch else {
+                    return Ok(None);
+                };
+                let generation = NativeGeneration::restore(branch.tensors, &plan, cancellation)
+                    .change_context(RuntimePersistenceError::InferencerSnapshot)?;
+                Ok::<_, Report<RuntimePersistenceError>>(Some(InferencerGeneration {
+                    incarnation: branch.incarnation,
+                    generation: Arc::new(generation),
+                    snapshot_bytes,
+                }))
+            })
             .await
             .change_context(RuntimePersistenceError::StorageExecution)??;
         Ok(Self::from_generations(
@@ -147,38 +142,33 @@ impl ReplicatedInferencerState {
             .await
             .change_context(RuntimePersistenceError::StorageAdmission)?;
         executor
-            .run_cpu_with(
-                CpuClass::Bulk,
-                QueueAdmission::WaitForPlace,
-                reservation,
-                move |charge, cancellation| {
-                    let branch = if let Some(value) = &published.value {
-                        let tensors = value
-                            .generation
-                            .snapshot(cancellation)
-                            .change_context(RuntimePersistenceError::InferencerSnapshot)?;
-                        Some(BranchSnapshot {
-                            incarnation: value.incarnation,
-                            tensors,
-                        })
-                    } else {
-                        None
-                    };
-                    let payload = Snapshot {
-                        revision: published.revision,
-                        branch,
-                    }
-                    .encode(limit, cancellation)
-                    .change_context(RuntimePersistenceError::InferencerSnapshot)?;
-                    Ok((
-                        PersistedRuntimeStateEntry {
-                            lsm: published.revision,
-                            payload,
-                        },
-                        charge,
-                    ))
-                },
-            )
+            .run_cpu(CpuClass::Bulk, reservation, move |charge, cancellation| {
+                let branch = if let Some(value) = &published.value {
+                    let tensors = value
+                        .generation
+                        .snapshot(cancellation)
+                        .change_context(RuntimePersistenceError::InferencerSnapshot)?;
+                    Some(BranchSnapshot {
+                        incarnation: value.incarnation,
+                        tensors,
+                    })
+                } else {
+                    None
+                };
+                let payload = Snapshot {
+                    revision: published.revision,
+                    branch,
+                }
+                .encode(limit, cancellation)
+                .change_context(RuntimePersistenceError::InferencerSnapshot)?;
+                Ok((
+                    PersistedRuntimeStateEntry {
+                        lsm: published.revision,
+                        payload,
+                    },
+                    charge,
+                ))
+            })
             .await
             .change_context(RuntimePersistenceError::StorageExecution)?
     }

@@ -1045,8 +1045,8 @@ pub(super) async fn dispatch_wasm_output_route(
     };
     let executed = match decoded
         .batch
-        .keep_alive_while_pending(execute_accepted_program_with_selection_in_context(
-            context.branch.runtime.executor().accepted_work(),
+        .keep_alive_while_pending(execute_program_with_selection_in_context(
+            context.branch.runtime.executor(),
             &program.compiled,
             &vm_input,
             &VmExecutionContext {
@@ -1571,7 +1571,6 @@ mod tests {
         );
         assert_eq!(completed.wait().await, AckOutcome::Ack);
         assert_no_runtime_events(&mut events).await;
-        assert_eq!(executor.snapshot().data_cpu.refused, 0);
     }
 
     #[nervix_primitives::test]
@@ -1604,7 +1603,6 @@ mod tests {
             input.acks.ack_success();
         }
         assert_eq!(completed.wait().await, AckOutcome::Ack);
-        assert_eq!(executor.snapshot().data_cpu.refused, 0);
     }
 
     #[test]

@@ -194,12 +194,9 @@ pub(crate) async fn probe_onnx_runtime(
         .await
         .change_context(OnnxRuntimeProbeError::Execution)?;
     executor
-        .run_cpu_with(
-            CpuClass::Bulk,
-            nervix_execution::QueueAdmission::WaitForPlace,
-            reservation,
-            |_charge, cancellation| OnnxRuntimeProbe::run(cancellation),
-        )
+        .run_cpu(CpuClass::Bulk, reservation, |_charge, cancellation| {
+            OnnxRuntimeProbe::run(cancellation)
+        })
         .await
         .change_context(OnnxRuntimeProbeError::Execution)
 }

@@ -24,7 +24,7 @@ use error_stack::{Report, ResultExt as _};
 use fjall::{Database, Keyspace, KeyspaceCreateOptions, Readable as _, Snapshot as FjallSnapshot};
 use futures_util::{FutureExt as _, Stream, StreamExt as _, stream};
 use meticulous::{OptionExt as _, ResultExt as _};
-use nervix_execution::{Executor, MemoryClass, QueueAdmission, Reservation, StorageClass};
+use nervix_execution::{Executor, MemoryClass, Reservation, StorageClass};
 use nervix_primitives::sync::{
     Arc, OwnedSemaphorePermit, Semaphore, StdArc,
     atomic::{AtomicBool, AtomicU64, Ordering},
@@ -918,9 +918,8 @@ impl StoreInner {
         // Consensus storage answers no waiting caller with a refusal: a full queue holds the
         // operation back until the ordered worker has room.
         self.executor
-            .run_storage_with(
+            .run_storage(
                 StorageClass::Consensus,
-                QueueAdmission::WaitForPlace,
                 reservation,
                 move |reservation, cancellation| {
                     let working_set = WorkingSet { reservation, turn };
@@ -1425,9 +1424,8 @@ impl StoreInner {
         let executor = self.executor.clone();
         let inner = self.clone();
         executor
-            .run_storage_with(
+            .run_storage(
                 StorageClass::Consensus,
-                QueueAdmission::WaitForPlace,
                 reservation,
                 move |reservation, cancellation| {
                     let working_set = WorkingSet { reservation, turn };
@@ -1517,9 +1515,8 @@ impl FjallStore {
             admission.admit(&executor, StorageCharge::Commands).await?;
         let store_executor = executor.clone();
         let opened = executor
-            .run_storage_with(
+            .run_storage(
                 StorageClass::Consensus,
-                QueueAdmission::WaitForPlace,
                 reservation,
                 move |reservation, _| {
                     let working_set = WorkingSet { reservation, turn };

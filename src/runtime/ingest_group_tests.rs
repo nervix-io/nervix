@@ -269,7 +269,6 @@ async fn ingest_group_builds_one_record_column_set_for_all_of_its_messages() {
         collector
             .decode_payload(
                 &Executor::default(),
-                QueueAdmission::RefuseWhenFull,
                 &codec,
                 payload.as_bytes(),
                 usize::try_from(nervix_models::PayloadUnfoldLimit::DEFAULT)
@@ -332,7 +331,6 @@ async fn ingest_group_accepts_its_decoded_payloads_one_at_a_time() {
         collector
             .decode_payload(
                 &Executor::default(),
-                QueueAdmission::RefuseWhenFull,
                 &codec,
                 payload.as_bytes(),
                 usize::try_from(nervix_models::PayloadUnfoldLimit::DEFAULT)
@@ -379,7 +377,6 @@ async fn ingest_group_keeps_its_other_messages_when_one_payload_fails_to_decode(
     collector
         .decode_payload(
             &Executor::default(),
-            QueueAdmission::RefuseWhenFull,
             &codec,
             br#"{"user_id":1}"#,
             usize::try_from(nervix_models::PayloadUnfoldLimit::DEFAULT)
@@ -393,7 +390,6 @@ async fn ingest_group_keeps_its_other_messages_when_one_payload_fails_to_decode(
     let rejected = collector
         .decode_payload(
             &Executor::default(),
-            QueueAdmission::RefuseWhenFull,
             &codec,
             br#"{"user_id":"two"}"#,
             usize::try_from(nervix_models::PayloadUnfoldLimit::DEFAULT)
@@ -415,7 +411,6 @@ async fn ingest_group_keeps_its_other_messages_when_one_payload_fails_to_decode(
     collector
         .decode_payload(
             &Executor::default(),
-            QueueAdmission::RefuseWhenFull,
             &codec,
             br#"{"user_id":3}"#,
             usize::try_from(nervix_models::PayloadUnfoldLimit::DEFAULT)
@@ -536,11 +531,6 @@ async fn a_batch_the_node_cannot_unfold_now_waits_for_the_extension_workers() {
     })
     .await
     .expect("the batch's first unfolding reaches the full extension class");
-    assert_eq!(
-        executor.snapshot().extension_cpu.refused,
-        0,
-        "the unfolding waits for a place instead of being refused"
-    );
     assert!(
         !decoding.is_finished(),
         "the batch waits while the class is full"
@@ -575,7 +565,6 @@ async fn ingest_group_gives_every_unfolded_message_its_payload_metadata_and_an_a
     collector
         .decode_payload(
             &Executor::default(),
-            QueueAdmission::RefuseWhenFull,
             &codec,
             br#"[{"user_id":1},{"user_id":2},{"user_id":3}]"#,
             usize::try_from(nervix_models::PayloadUnfoldLimit::DEFAULT)
@@ -642,7 +631,6 @@ async fn ingest_group_acknowledges_a_payload_that_unfolds_into_no_messages() {
     collector
         .decode_payload(
             &Executor::default(),
-            QueueAdmission::RefuseWhenFull,
             &codec,
             br#"[{"user_id":1,"keep":false}]"#,
             usize::try_from(nervix_models::PayloadUnfoldLimit::DEFAULT)
@@ -685,7 +673,6 @@ async fn ingest_group_keeps_no_message_of_a_payload_that_fails_part_way_through_
     collector
         .decode_payload(
             &Executor::default(),
-            QueueAdmission::RefuseWhenFull,
             &codec,
             br#"[{"user_id":1}]"#,
             usize::try_from(nervix_models::PayloadUnfoldLimit::DEFAULT)
@@ -699,7 +686,6 @@ async fn ingest_group_keeps_no_message_of_a_payload_that_fails_part_way_through_
     let failure = collector
         .decode_payload(
             &Executor::default(),
-            QueueAdmission::RefuseWhenFull,
             &codec,
             br#"[{"user_id":2},{"user_id":"confidential"}]"#,
             usize::try_from(nervix_models::PayloadUnfoldLimit::DEFAULT)
@@ -717,7 +703,6 @@ async fn ingest_group_keeps_no_message_of_a_payload_that_fails_part_way_through_
     collector
         .decode_payload(
             &Executor::default(),
-            QueueAdmission::RefuseWhenFull,
             &codec,
             br#"[{"user_id":3},{"user_id":4}]"#,
             usize::try_from(nervix_models::PayloadUnfoldLimit::DEFAULT)
@@ -757,7 +742,6 @@ async fn ingest_group_releases_the_rows_a_rejected_payload_abandoned_in_an_empty
     let rejected = collector
         .decode_payload(
             &Executor::default(),
-            QueueAdmission::RefuseWhenFull,
             &codec,
             br#"[{"user_id":1},{"user_id":"two"}]"#,
             usize::try_from(nervix_models::PayloadUnfoldLimit::DEFAULT)
@@ -988,7 +972,6 @@ async fn ingest_route_collector_reports_identity_and_unaccepted_payloads() {
     undispatched
         .decode_payload(
             &Executor::default(),
-            QueueAdmission::RefuseWhenFull,
             &codec,
             br#"{"user_id":1}"#,
             usize::try_from(nervix_models::PayloadUnfoldLimit::DEFAULT)
@@ -1015,7 +998,6 @@ async fn ingest_route_collector_reports_identity_and_unaccepted_payloads() {
     collector
         .decode_payload(
             &Executor::default(),
-            QueueAdmission::RefuseWhenFull,
             &codec,
             br#"{"user_id":1}"#,
             usize::try_from(nervix_models::PayloadUnfoldLimit::DEFAULT)
@@ -1028,7 +1010,6 @@ async fn ingest_route_collector_reports_identity_and_unaccepted_payloads() {
     collector
         .decode_payload(
             &Executor::default(),
-            QueueAdmission::RefuseWhenFull,
             &codec,
             br#"{"user_id":2}"#,
             usize::try_from(nervix_models::PayloadUnfoldLimit::DEFAULT)
@@ -1662,7 +1643,6 @@ async fn accepted_work_branched_input_waits_for_room_and_keeps_its_acknowledgeme
         "accepted input must wait for a worker place without failing or losing its \
          acknowledgements"
     );
-    assert_eq!(executor.snapshot().data_cpu.refused, 0);
     filled.release().await;
 
     let branches = prepared
@@ -1676,7 +1656,6 @@ async fn accepted_work_branched_input_waits_for_room_and_keeps_its_acknowledgeme
         .assured("the input's only branch is valid");
     assert_eq!(batch.message_count(), 1);
     assert_eq!(batch.acks.len(), 1);
-    assert_eq!(executor.snapshot().data_cpu.refused, 0);
     assert_eq!(executor.snapshot().relay_memory.reserved_bytes, 0);
 }
 
@@ -1719,7 +1698,6 @@ async fn accepted_work_branch_input_keeps_acknowledgements_alive_during_wait() {
         }
     }
     assert_eq!(completion.wait().await, AckOutcome::Ack);
-    assert_eq!(executor.snapshot().data_cpu.refused, 0);
 }
 
 #[nervix_primitives::test]
@@ -1736,7 +1714,6 @@ async fn an_unfolding_payload_runs_on_the_extension_workers() {
     collector
         .decode_payload(
             &executor,
-            QueueAdmission::RefuseWhenFull,
             &codec,
             br#"[{"user_id":1},{"user_id":2}]"#,
             usize::try_from(nervix_models::PayloadUnfoldLimit::DEFAULT)
@@ -1777,19 +1754,20 @@ fn an_unfolding_that_panicked_fails_its_payload_and_a_refused_one_judges_nothing
 
     let refused = PayloadDecodeFailure::from_unfolding_execution(
         &codec,
-        Report::new(ExecutionError::QueueFull {
+        Report::new(ExecutionError::PoolClosed {
             class: "extension_cpu",
-            pending: 1,
         }),
     );
     assert!(
         matches!(refused, PayloadDecodeFailure::NotAdmitted(_)),
-        "a refused unfolding must not be judged: {refused:?}"
+        "an unfolding the stopping node no longer admits must not be judged: {refused:?}"
     );
 }
 
+/// A full extension class is backpressure: a payload's unfolding waits for a place, judging
+/// nothing meanwhile, and the payload unfolds once one frees.
 #[nervix_primitives::test]
-async fn a_node_without_room_to_unfold_a_payload_refuses_it_without_judging_it() {
+async fn a_node_without_room_to_unfold_a_payload_holds_it_until_a_place_frees() {
     let executor = single_worker_executor();
     let filled = FilledCpuClass::fill(&executor, CpuClass::Extension).await;
     let codec = unfolding_event_codec(".[]");
@@ -1801,35 +1779,27 @@ async fn a_node_without_room_to_unfold_a_payload_refuses_it_without_judging_it()
         nervix_models::DataPlaneSettings::default().ingest_group_idle_flush(),
     );
 
-    let refused = collector
-        .decode_payload(
+    let mut unfolding = Box::pin(
+        collector.decode_payload(
             &executor,
-            QueueAdmission::RefuseWhenFull,
             &codec,
             payload,
             usize::try_from(nervix_models::PayloadUnfoldLimit::DEFAULT)
                 .assured("the current default fits usize"),
-        )
-        .await
-        .expect_err("a full extension class refuses the unfolding");
-
-    assert!(
-        matches!(refused, PayloadDecodeFailure::NotAdmitted(_)),
-        "a payload the node could not unfold must not be judged: {refused:?}"
+        ),
     );
-    assert_eq!(collector.pending.undispatched_payloads(), 0);
+    let first_poll = std::future::poll_fn(|context| {
+        std::task::Poll::Ready(std::future::Future::poll(unfolding.as_mut(), context))
+    })
+    .await;
+    assert!(
+        first_poll.is_pending(),
+        "a full extension class holds the unfolding back instead of refusing it"
+    );
     filled.release().await;
-    collector
-        .decode_payload(
-            &executor,
-            QueueAdmission::RefuseWhenFull,
-            &codec,
-            payload,
-            usize::try_from(nervix_models::PayloadUnfoldLimit::DEFAULT)
-                .assured("the current default fits usize"),
-        )
+    unfolding
         .await
-        .expect("the same payload unfolds once the class has room");
+        .expect("the payload unfolds once the class has room");
     assert_eq!(collector.pending.undispatched_payloads(), 1);
 }
 

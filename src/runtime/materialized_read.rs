@@ -438,7 +438,7 @@ impl Runtime {
         }
         for placement in &placements {
             let Some(restored) = self
-                .open_stored_materialized_snapshot(Some(routing), placement)
+                .open_stored_materialized_snapshot(&self.inner.executor, Some(routing), placement)
                 .await?
             else {
                 continue;
@@ -493,8 +493,11 @@ impl Runtime {
     }
 
     /// Open the sealed snapshot this node persisted for a placement, if it has one.
+    /// Open the stored materialized snapshot of `placement`, taking every charge through
+    /// `executor`, which may draw from its caller's allowances.
     pub(in crate::runtime) async fn open_stored_materialized_snapshot(
         &self,
+        executor: &nervix_execution::Executor,
         routing: Option<&DomainRoutingSnapshot>,
         placement: &RuntimeStatePlacement,
     ) -> error_stack::Result<Option<RestoredMaterializedSnapshot>, MaterializedReadError> {
@@ -506,9 +509,7 @@ impl Runtime {
         };
         let store = store.clone();
         let selected = placement.clone();
-        let charge = self
-            .inner
-            .executor
+        let charge = executor
             .reserve(
                 nervix_execution::MemoryClass::Bulk,
                 RESTORE_STATE_WORKING_BYTES,
@@ -519,12 +520,9 @@ impl Runtime {
             })?;
         // A stored materialized read feeds work the graph already accepted, so a full queue holds
         // the read back rather than failing that work.
-        let reader = self
-            .inner
-            .executor
-            .run_storage_with(
+        let reader = executor
+            .run_storage(
                 nervix_execution::StorageClass::Filesystem,
-                nervix_execution::QueueAdmission::WaitForPlace,
                 charge,
                 move |_charge, cancellation| {
                     cancellation
@@ -544,9 +542,9 @@ impl Runtime {
             return Ok(None);
         };
         RestoredMaterializedSnapshot::open_relay(
-            &self.inner.executor,
+            executor,
             &schema,
-            SealedSource::stored(self.inner.executor.clone(), reader),
+            SealedSource::stored(executor.clone(), reader),
         )
         .await
         .map(Some)
@@ -973,7 +971,7 @@ impl Runtime {
         };
         if states.is_empty() {
             let Some(restored) = self
-                .open_stored_materialized_snapshot(Some(routing), &placement)
+                .open_stored_materialized_snapshot(&self.inner.executor, Some(routing), &placement)
                 .await?
             else {
                 return Ok(Vec::new().into());
@@ -1535,7 +1533,7 @@ mod tests {
             ..DomainRoutingSnapshot::default()
         };
         let restored = runtime
-            .open_stored_materialized_snapshot(Some(&routing), &placement)
+            .open_stored_materialized_snapshot(&runtime.inner.executor, Some(&routing), &placement)
             .await
             .assured("stored read fits the default bulk budget")
             .expect("the persisted generation exists");

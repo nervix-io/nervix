@@ -332,7 +332,6 @@ async fn an_accepted_run_waits_for_extension_room_and_keeps_its_rows() {
     filled.release().await;
     let run = run.await;
     assert_eq!(run.accepted, vec![0]);
-    assert_eq!(executor.snapshot().extension_cpu.refused, 0);
 }
 
 #[nervix_primitives::test]
@@ -356,7 +355,6 @@ async fn the_first_batch_waits_for_bulk_room_to_load_its_session() {
     .await
     .assured("the retained batch waits for its session");
     assert!(!session.needs_load());
-    assert_eq!(executor.snapshot().bulk_cpu.refused, 0);
 }
 
 #[nervix_primitives::test]

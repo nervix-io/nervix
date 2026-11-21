@@ -120,6 +120,7 @@ impl SessionServiceImpl {
     /// staged section, one at a time.
     pub(super) async fn stage_native_metadata_sections(
         &self,
+        executor: &Executor,
         captured: Vec<CapturedNativeMetadata>,
         schedule: Option<&DomainSchedule>,
         request: &CaptureDomainStateRequest,
@@ -155,7 +156,9 @@ impl SessionServiceImpl {
                 path: section.path().as_str().to_string(),
             };
             let content = SectionContent::Record(section.record.kind());
-            let artifact = self.stage_native_section(section, &request.domain).await?;
+            let artifact = self
+                .stage_native_section(executor, section, &request.domain)
+                .await?;
             staged.push(CapturedSection {
                 key,
                 content,
@@ -170,10 +173,11 @@ impl SessionServiceImpl {
     /// charges; nothing of it is staged for the coordinator.
     async fn stage_native_section(
         &self,
+        executor: &Executor,
         section: NativeSection,
         domain: &DomainName,
     ) -> Result<StagedArtifact, Report<RemoteOperationFailure>> {
-        let executor = self.inner.runtime.executor().clone();
+        let executor = executor.clone();
         let conversion_bytes = section
             .captured
             .conversion_bytes()

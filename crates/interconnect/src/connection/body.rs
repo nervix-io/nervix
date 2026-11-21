@@ -88,7 +88,7 @@ pub(super) async fn send_decode_refusal(
     let admission = error.contains::<AdmissionError>()
         || matches!(
             error.downcast_ref::<ExecutionError>(),
-            Some(ExecutionError::QueueFull { .. } | ExecutionError::PoolClosed { .. })
+            Some(ExecutionError::PoolClosed { .. })
         );
     if !admission {
         return Err(error);

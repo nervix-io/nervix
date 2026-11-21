@@ -521,8 +521,14 @@ async fn input_memory_above(world: &ScenarioWorld, node: &str, threshold: f64) {
     .assured("the open request retains its declared input charge");
 }
 
-#[then(expr = "node {string} refuses retained HTTP input growth for host {string} with status 503")]
-async fn refused_input_growth(world: &mut ScenarioWorld, node: String, host: String) {
+/// A request whose retained input grows past the room another request holds waits for that room
+/// instead of being refused, and completes once the other request ends and gives its charge
+/// back.
+#[then(
+    expr = "node {string} holds retained HTTP input growth for host {string} until other input \
+            frees room"
+)]
+async fn held_input_growth(world: &mut ScenarioWorld, node: String, host: String) {
     let host = expand_placeholders(world, &host);
     let address = address(world, &node, "http");
     let mut held = TcpStream::connect(address)
@@ -549,27 +555,30 @@ async fn refused_input_growth(world: &mut ScenarioWorld, node: String, host: Str
     }));
     // In the configured 4 MiB pool, two incomplete requests retain more than 3 MiB.
     // The payload is below its 1 MiB cap but exceeds the remaining memory, independently
-    // of packetization. Keep its stream open so assembly and peer timeout cannot answer it.
+    // of packetization, so its growth waits for room the first request holds.
     input_memory_above(world, &node, 3_145_728.0).await;
     payloads
         .send(Ok(vec![b'x'; 1_048_575]))
         .await
         .assured("the bounded fixture publishes one payload");
+    drop(payloads);
+    nervix_primitives::time::sleep(Duration::from_secs(2)).await;
+    assert!(
+        !request.is_finished(),
+        "a full intake class holds the growing request back instead of refusing it"
+    );
+    // The first request ends and gives its charge back, which the waiting growth takes.
+    drop(held);
     let response = timeout(WAIT, request)
         .await
-        .assured("memory refusal ends the request")
+        .assured("the freed room reaches the waiting request")
         .assured("the fixture request task completes")
-        .assured("HTTP preserves the refusal response");
-    assert_eq!(response.status(), 503);
+        .assured("the waiting request is answered");
     assert_eq!(
-        response
-            .text()
-            .await
-            .assured("the typed reason is readable"),
-        "http_input_memory_capacity"
+        response.status(),
+        202,
+        "a request held for input memory is admitted once room frees"
     );
-    drop(payloads);
-    drop(held);
     world
         .cluster()
         .wait_for_observability_metric_value(
@@ -580,7 +589,7 @@ async fn refused_input_growth(world: &mut ScenarioWorld, node: String, host: Str
             Some(WAIT),
         )
         .await
-        .assured("both cancelled inputs return their entire reservation");
+        .assured("both inputs return their entire reservation");
 }
 
 #[then(expr = "node {string} admits an ordinary fragmented HTTP body for host {string}")]

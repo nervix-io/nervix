@@ -84,15 +84,15 @@ share of admission; it is not guaranteed an idle thread. Apart from the classes,
 waits rather than computes uses the pool: a Kafka producer's final drain and partition
 inspection, which wait on the broker, and the one read of the resolver configuration at startup.
 Each class defaults to 64 pending jobs per worker, capped at 1,024; an explicit per-class queue
-can override this bound. A full queue never costs data: only a request whose caller still holds
-its input and waits on the answer, such as an HTTP endpoint body, a statement or an inspection, is
-refused, and its caller answers that the node is busy. Every other job waits for a place: the
-unfolding of every payload an ingestor handed over, acknowledged or not, of a poll a paced ingestor
-handed over and of a payload a quiesce buffer retained, an Iceberg commit's read of the staged rows
-its emitter already accepted, relay and subscription deliveries, the answer of an interconnect
-request whose handler already ran, checkpoints, consensus storage and lifecycle steps. Holding an
-ingestor loop pushes back into its transport, so a node whose extension workers stay full delays
-polls and reads, and lets each transport keep what it holds within its own bounds; see
+can override this bound. A full queue or memory class is backpressure on the machine's resources,
+never a reason to refuse work: every job waits for a place and every charge waits for room,
+requests included. An HTTP endpoint body, a statement or an inspection waits within its own limit
+(the request's lifetime or the statement's deadline) exactly as the unfolding of a payload an
+ingestor handed over, relay and subscription deliveries, the answer of an interconnect request
+whose handler already ran, checkpoints, consensus storage and lifecycle steps do. Only an operation
+larger than its whole class fails, since no wait could hold it. Holding an ingestor loop pushes
+back into its transport, so a node whose extension workers stay full delays polls and reads, and
+lets each transport keep what it holds within its own bounds; see
 [When The Extension Workers Are Full](./ingestors.md#when-the-extension-workers-are-full).
 
 Transient memory ceilings derive from the node's known memory. Management gets 1/128, commands

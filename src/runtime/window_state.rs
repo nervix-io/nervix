@@ -374,6 +374,17 @@ impl WindowSnapshotHeader {
 impl WindowProcessorStateSnapshot {
     /// Whether the retained rows' input and argument columns, as their Arrow slices measure them,
     /// occupy more than `limit` bytes. A total past u64::MAX is past every limit.
+    /// The bytes the window's rows retain, or nothing when they are beyond counting.
+    fn retained_bytes(&self) -> Option<u64> {
+        let mut bytes = 0_u64;
+        for entry in &self.entries {
+            let input = entry.record.one_row_batch().estimated_bytes();
+            let arguments = entry.arguments.one_row_batch().estimated_bytes();
+            bytes = bytes.checked_add(input.checked_add(arguments)?)?;
+        }
+        Some(bytes)
+    }
+
     fn retains_more_than(&self, limit: u64) -> bool {
         let mut bytes = 0_u64;
         for entry in &self.entries {
@@ -405,10 +416,39 @@ pub(super) async fn encode_window_processor_snapshot(
 ) -> Result<Vec<u8>, Report<WindowSnapshotError>> {
     // A window whose rows alone exceed the whole bulk budget can never be held whole, so it is
     // refused before any section is encoded for nothing.
-    let bulk_capacity = executor.snapshot().bulk_memory.capacity_bytes;
+    let bulk_capacity = executor.memory(MemoryClass::Bulk).capacity_bytes;
     if snapshot.retains_more_than(bulk_capacity) {
         return Err(Report::new(WindowSnapshotError::Admission));
     }
+    // The encoding holds every section it built while it builds the next one, so it takes its
+    // whole working set as one share of the bulk class, which it waits for while holding nothing:
+    // its containers and the checkpoint that copies them are about three times its rows. A
+    // window that needs more gives everything back and is encoded again within the share it
+    // needed, so a full class holds the checkpoint back and never refuses it.
+    let retained = snapshot
+        .retained_bytes()
+        .ok_or_else(|| Report::new(WindowSnapshotError::Admission))?;
+    let mut share = bulk_capacity;
+    if let Some(tripled) = retained.checked_mul(3)
+        && let Some(padded) = tripled.checked_add(64 * 1024)
+    {
+        share = padded.min(bulk_capacity);
+    }
+    executor
+        .within_allowance(MemoryClass::Bulk, share, |bulk| async move {
+            encode_window_processor_snapshot_within(snapshot, revision, &bulk).await
+        })
+        .await
+        .change_context(WindowSnapshotError::Admission)?
+}
+
+/// Encode the window checkpoint through `executor`, whose every bulk charge is drawn from the
+/// encoding's share of the class.
+async fn encode_window_processor_snapshot_within(
+    snapshot: &WindowProcessorStateSnapshot,
+    revision: u64,
+    executor: &Executor,
+) -> Result<Vec<u8>, Report<WindowSnapshotError>> {
     // An empty forced-recovery checkpoint has no concrete branch lifetime. The nested Arrow
     // container requires a numeric generation, but the outer `None` makes restore return before
     // those empty sections are opened; only the outer typed incarnation selects behavior.
@@ -435,7 +475,8 @@ pub(super) async fn encode_window_processor_snapshot(
         nervix_primitives::task::consume_budget().await;
         let encoded = section.encode(typed.limit)?;
         let encoded = executor
-            .try_charge_owned(MemoryClass::Bulk, encoded.to_vec())
+            .charge_owned(MemoryClass::Bulk, encoded.to_vec())
+            .await
             .change_context(WindowSnapshotError::Admission)?;
         typed_sections.push(encoded);
     }
@@ -483,56 +524,51 @@ pub(super) async fn encode_window_processor_snapshot(
         section: WindowSnapshotSection::Container,
     })?;
     let reservation = executor
-        .try_reserve(MemoryClass::Bulk, length_u64)
+        .reserve(MemoryClass::Bulk, length_u64)
+        .await
         .change_context(WindowSnapshotError::Admission)?;
     let sealed = executor
-        .run_cpu_with(
-            CpuClass::Bulk,
-            nervix_execution::QueueAdmission::WaitForPlace,
-            reservation,
-            move |charge, cancellation| {
+        .run_cpu(CpuClass::Bulk, reservation, move |charge, cancellation| {
+            cancellation
+                .check()
+                .change_context(WindowSnapshotError::Execution)?;
+            let mut buffer = BudgetedBuffer::with_limit(charge, length_u64);
+            buffer
+                .write_all(&framed)
+                .change_context(WindowSnapshotError::Encode {
+                    section: WindowSnapshotSection::Header,
+                })?;
+            buffer
+                .write_all(input.as_ref())
+                .change_context(WindowSnapshotError::Encode {
+                    section: WindowSnapshotSection::Input,
+                })?;
+            buffer
+                .write_all(arguments.as_ref())
+                .change_context(WindowSnapshotError::Encode {
+                    section: WindowSnapshotSection::Arguments,
+                })?;
+            for section in typed_sections {
                 cancellation
                     .check()
                     .change_context(WindowSnapshotError::Execution)?;
-                let mut buffer = BudgetedBuffer::with_limit(charge, length_u64);
-                buffer
-                    .write_all(&framed)
-                    .change_context(WindowSnapshotError::Encode {
-                        section: WindowSnapshotSection::Header,
+                let section_length =
+                    u32::try_from(section.len()).change_context(WindowSnapshotError::Encode {
+                        section: WindowSnapshotSection::DelayedRemovals,
                     })?;
                 buffer
-                    .write_all(input.as_ref())
+                    .write_all(&section_length.to_le_bytes())
                     .change_context(WindowSnapshotError::Encode {
-                        section: WindowSnapshotSection::Input,
+                        section: WindowSnapshotSection::DelayedRemovals,
                     })?;
-                buffer.write_all(arguments.as_ref()).change_context(
-                    WindowSnapshotError::Encode {
-                        section: WindowSnapshotSection::Arguments,
-                    },
-                )?;
-                for section in typed_sections {
-                    cancellation
-                        .check()
-                        .change_context(WindowSnapshotError::Execution)?;
-                    let section_length = u32::try_from(section.len()).change_context(
-                        WindowSnapshotError::Encode {
-                            section: WindowSnapshotSection::DelayedRemovals,
-                        },
-                    )?;
-                    buffer
-                        .write_all(&section_length.to_le_bytes())
-                        .change_context(WindowSnapshotError::Encode {
-                            section: WindowSnapshotSection::DelayedRemovals,
-                        })?;
-                    buffer.write_all(section.as_ref()).change_context(
-                        WindowSnapshotError::Encode {
-                            section: WindowSnapshotSection::DelayedRemovals,
-                        },
-                    )?;
-                }
-                Ok::<_, Report<WindowSnapshotError>>(ChargedBytes::from_buffer(buffer))
-            },
-        )
+                buffer
+                    .write_all(section.as_ref())
+                    .change_context(WindowSnapshotError::Encode {
+                        section: WindowSnapshotSection::DelayedRemovals,
+                    })?;
+            }
+            Ok::<_, Report<WindowSnapshotError>>(ChargedBytes::from_buffer(buffer))
+        })
         .await
         .change_context(WindowSnapshotError::Execution)??;
     Ok(sealed.as_ref().to_vec())
@@ -835,7 +871,6 @@ pub(in crate::runtime) async fn decode_window_processor_layout(
     // as unrestored and retries on its backoff, and the checkpoint it reads stays where it is.
     let mut input = RestoredMaterializedSnapshot::open(
         executor,
-        nervix_execution::QueueAdmission::RefuseWhenFull,
         schemas.input,
         SealedSource::borrowed(executor, input),
         RestoredRows::Window,
@@ -846,7 +881,6 @@ pub(in crate::runtime) async fn decode_window_processor_layout(
     })?;
     let mut arguments = RestoredMaterializedSnapshot::open(
         executor,
-        nervix_execution::QueueAdmission::RefuseWhenFull,
         schemas.arguments,
         SealedSource::borrowed(executor, arguments),
         RestoredRows::Window,

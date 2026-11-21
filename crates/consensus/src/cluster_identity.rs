@@ -227,17 +227,15 @@ impl ClusterIdentityRecord {
         created_at: Timestamp,
     ) -> Result<Self, Report<ClusterIdentityError>> {
         let reservation = executor
-            .try_reserve(
+            .reserve(
                 MemoryClass::Management,
                 executor.limits().management_event_bytes.as_u64(),
             )
+            .await
             .change_context(ClusterIdentityError::Admission)?;
-        // Generating the cluster's key pair answers no waiting caller, so a full queue holds it
-        // back rather than refusing it.
         executor
-            .run_cpu_with(
+            .run_cpu(
                 CpuClass::Control,
-                nervix_execution::QueueAdmission::WaitForPlace,
                 reservation,
                 move |_reservation, cancellation| Self::generate_key(created_at, cancellation),
             )

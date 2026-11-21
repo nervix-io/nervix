@@ -4210,8 +4210,11 @@ Public connection leases are owned by the socket I/O wrapper and survive HTTP up
 expiry observes read and write progress; completed connection tasks are reaped during service.
 The HTTP/1 body collector and its plaintext I/O owner share only a bounded allocation-accounting
 ledger behind one selected blocking mutex. It stores one read range, an aggregate executor
-reservation and an optional typed refusal; no records, ACKs or graph state are shared there. The
-lock is never held over I/O, a wait, a copy or graph dispatch. Its input guard releases the charge
-on cancellation/refusal, or transfers it to the exclusively owned assembled body. Multi-frame
+reservation, an optional typed refusal and, while a read waits for room for an allocation its
+charge does not cover yet, that read's pending charge; no records, ACKs or graph state are shared
+there. The read polls its pending charge under the lock without blocking and returns pending until
+the class grants it, so the lock is never held over I/O, a wait, a copy or graph dispatch. Its input
+guard releases the charge, and drops a pending one with its place in the class's queue, on
+cancellation/refusal, or transfers it to the exclusively owned assembled body. Multi-frame
 assembly carries its reservation onto the executor worker through cancellation. The registered production-owner Shuttle check explores allocation observation racing input cancellation
 and verifies that the entire charge returns. This adds no concurrent map and changes no concurrent-map ledger entry.

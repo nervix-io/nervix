@@ -517,14 +517,16 @@ as misframed, and one that declares a field type Nervix does not carry, a dictio
 compression, or a record batch at odds with its own schema, as undecodable, when planning reads it,
 a dry run included. Nothing is allocated from a length the section only declares.
 
-A conversion the node refuses only for room does not fail the restore. A memory class with no room
-left, a worker queue that is full and a staging quota that cannot hold another piece judged nothing
-of the archive, so the deduplicator or window conversion is tried again every 50 ms for up to 30
-seconds after the node first refused it. A refusal that outlasts that wait ends the conversion and
-is reported as the node having had no room for it, since what the restore itself holds can be what
-fills the budget. A request larger than a whole budget, and archived content that does not fit the
-restored shapes, end it at once. A materialized relay's conversion is not tried again: a refusal
-ends it.
+A full memory class or worker queue never fails a restore: it holds the conversion back until it
+has room. Each deduplicator, window or materialized relay conversion takes its memory as shares of
+the classes it uses, which it waits for while it holds nothing of them, so it never waits behind its
+own charges. A conversion that needs more than its share gives everything back and converts again
+from its first group within a share at least twice as large. A staging quota that cannot hold
+another piece judged nothing of the archive either, so the deduplicator or window conversion is
+tried again every 50 ms for up to 30 seconds after the quota first refused it; a refusal that
+outlasts that wait ends the conversion and is reported as the staging quota having had no room for
+it, since what the restore itself stages can be what fills the quota. A request larger than a whole
+memory class, and archived content that does not fit the restored shapes, end it at once.
 
 ### Restore Checkpoint Storage Quota And Metrics
 
@@ -959,7 +961,7 @@ that compare restored and re-exported state.
 | Stored window structure conversion | `restore_metadata` admits a conservative eight times the native length plus 256 KiB for typed removals, descriptor projection and header scratch, independently of the mapping and bounded column buffers. A checkpoint that cannot fit these reservations is refused with its entity named. |
 | One archived deduplicator keyspace or window | Not bounded by the bulk budget. A keyspace's key parts and values are charged to `restore_metadata` while it converts, beside the fixed per-key share admitted with the description; a window conversion holds one archived section at a time |
 | Window checkpoint identity record | 1 MiB of row identities; a larger archived group splits into groups that fit |
-| Restore conversion admission wait | 30 seconds after the node first refuses one unit for room: a window section, a window while its checkpoint is finished, or a keyspace. The unit is converted again every 50 ms |
+| Restore conversion staging wait | 30 seconds after the staging quota first refuses a deduplicator or window conversion for room. The conversion is tried again every 50 ms. A full memory class or worker queue holds a conversion back without limit and never ends it |
 | Restored window rows a branch reopens | No row ceiling of their own; their row views are charged to the independent state-read memory class while the branch reopens the window |
 | Physical checkpoint placement encoding | 60 KiB, including domain and installation namespace |
 | Unpublished restore checkpoint keys and values per node | The smaller of 128 GiB and the size of the volume that holds the node database by default; configurable with `--restore-staging-max-bytes`, up to that size |

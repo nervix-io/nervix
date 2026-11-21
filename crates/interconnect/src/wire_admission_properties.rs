@@ -33,7 +33,6 @@ fn bolero_receive_admission_outcomes_preserve_every_field() {
             let requested = capacity
                 .checked_add(1)
                 .assured("one byte above a u32 budget fits u64");
-            let pending = entropy.boundary_biased(1..=65536);
             let memory = class.memory_class().as_str();
             // Worker labels are diagnostic; dispatch supplies the traffic class separately.
             let cpu = "bulk_cpu";
@@ -74,18 +73,6 @@ fn bolero_receive_admission_outcomes_preserve_every_field() {
                         TransportError::Decode,
                     ),
                     RemoteRequestFailure::MemoryBudgetClosed { class },
-                    http::StatusCode::SERVICE_UNAVAILABLE,
-                ),
-                (
-                    TransportError::with_cause(
-                        error_stack::Report::new(ExecutionError::QueueFull {
-                            class: cpu,
-                            pending: usize::try_from(pending)
-                                .assured("the bounded queue count fits supported targets"),
-                        }),
-                        TransportError::Decode,
-                    ),
-                    RemoteRequestFailure::ExecutionQueueFull { class, pending },
                     http::StatusCode::SERVICE_UNAVAILABLE,
                 ),
                 (

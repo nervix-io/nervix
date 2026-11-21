@@ -53,7 +53,9 @@ pub(in crate::runtime) struct OpenedBranchCheckpoint {
 impl StoredBranchCheckpoint {
     /// A retained segment, its Fjall read, the transfer block and the staged output buffer
     /// overlap. Inline value copies have their own metadata charge.
-    fn reserve_staging(executor: &Executor) -> error_stack::Result<Reservation, AdmissionError> {
+    async fn reserve_staging(
+        executor: &Executor,
+    ) -> error_stack::Result<Reservation, AdmissionError> {
         let segment_bytes: u64 = CHUNK_BYTES.arch_into();
         let read_bytes = segment_bytes
             .checked_mul(3)
@@ -65,7 +67,7 @@ impl StoredBranchCheckpoint {
         let working = working
             .checked_add(output_bytes)
             .verified("the resolved output buffer fits in the validated u32 chunk bound");
-        executor.try_reserve(MemoryClass::Bulk, working)
+        executor.reserve(MemoryClass::Bulk, working).await
     }
 
     pub(super) fn new(
@@ -82,46 +84,44 @@ impl StoredBranchCheckpoint {
         })
     }
 
+    /// The stored keyspace, read and charged through `executor`, which may draw from the
+    /// capture's allowances.
     pub(crate) async fn open_keyspace(
         self,
         runtime: &Runtime,
+        executor: &Executor,
     ) -> error_stack::Result<crate::runtime::CapturedDeduplicatorKeyspace, BackupStateCaptureError>
     {
         let entity = self.checkpoint.placement.identifier.clone();
-        let opened = self.open(runtime).await?;
-        crate::runtime::CapturedDeduplicatorKeyspace::stored(
-            runtime.executor(),
-            opened.revision,
-            opened.view,
-        )
-        .await
-        .change_context(BackupStateCaptureError::Keyspace { entity })
+        let opened = self.open(runtime, executor).await?;
+        crate::runtime::CapturedDeduplicatorKeyspace::stored(executor, opened.revision, opened.view)
+            .await
+            .change_context(BackupStateCaptureError::Keyspace { entity })
     }
 
+    /// The stored window, read and charged through `executor`, which may draw from the capture's
+    /// allowances.
     pub(crate) async fn open_window(
         self,
         runtime: &Runtime,
+        executor: &Executor,
         input: &nervix_primitives::sync::StdArc<arrow_schema::Schema>,
         arguments: &nervix_primitives::sync::StdArc<arrow_schema::Schema>,
     ) -> error_stack::Result<Option<CapturedWindowState>, BackupStateCaptureError> {
         let entity = self.checkpoint.placement.identifier.clone();
-        let opened = self.open(runtime).await?;
-        CapturedWindowState::stored(
-            runtime.executor(),
-            opened.revision,
-            opened.view,
-            input,
-            arguments,
-        )
-        .await
-        .change_context(BackupStateCaptureError::Window { entity })
+        let opened = self.open(runtime, executor).await?;
+        CapturedWindowState::stored(executor, opened.revision, opened.view, input, arguments)
+            .await
+            .change_context(BackupStateCaptureError::Window { entity })
     }
 
     /// The caller has selected the current scheduled owner and schema before calling this.
     /// Only this checkpoint is read. Its view, rather than decoded rows or keys, survives staging.
+    /// Every charge is taken through `executor`, which may draw from the capture's allowances.
     pub(in crate::runtime) async fn open(
         self,
         runtime: &Runtime,
+        executor: &Executor,
     ) -> error_stack::Result<OpenedBranchCheckpoint, BackupStateCaptureError> {
         let entity = self.checkpoint.placement.identifier.clone();
         let length = self.stored_bytes;
@@ -132,17 +132,17 @@ impl StoredBranchCheckpoint {
         })?;
         // ListedCheckpoint also permits inline values. Admission precedes opening either form,
         // covering the Fjall value, aligned stored header and decoded inline payload together.
-        let conversion = runtime
-            .executor()
-            .try_reserve(MemoryClass::RestoreMetadata, conversion_bytes.max(1))
+        let conversion = executor
+            .reserve(MemoryClass::RestoreMetadata, conversion_bytes.max(1))
+            .await
             .change_context_lazy(|| BackupStateCaptureError::Admission {
                 entity: entity.clone(),
             })?;
-        let working = Self::reserve_staging(runtime.executor()).change_context_lazy(|| {
-            BackupStateCaptureError::Admission {
+        let working = Self::reserve_staging(executor)
+            .await
+            .change_context_lazy(|| BackupStateCaptureError::Admission {
                 entity: entity.clone(),
-            }
-        })?;
+            })?;
         let writer = runtime
             .try_stage_artifact(length)
             .await
@@ -178,15 +178,14 @@ impl StoredBranchCheckpoint {
             })
             .await
             .change_context(BackupStateCaptureError::Storage)?;
-        let view = artifact
-            .into_mapped()
-            .await
-            .map_err(|error| match error.current_context() {
+        let view = artifact.into_mapped_with(executor).await.map_err(|error| {
+            match error.current_context() {
                 SnapshotStagingError::Admission => {
                     error.change_context(BackupStateCaptureError::Admission { entity })
                 }
                 _ => error.change_context(BackupStateCaptureError::Storage),
-            })?;
+            }
+        })?;
         Ok(OpenedBranchCheckpoint { revision, view })
     }
 }
@@ -212,6 +211,7 @@ mod tests {
     ) {
         let executor = StagedSnapshotWriter::encoding_test_executor(chunk);
         let charge = StoredBranchCheckpoint::reserve_staging(&executor)
+            .await
             .assured("the test bulk budget fits the stored branch encoder");
         StagedSnapshotWriter::assert_staging_encoding_charge(&executor, charge, expected).await;
     }

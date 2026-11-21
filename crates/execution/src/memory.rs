@@ -41,8 +41,39 @@ pub enum AdmissionError {
     },
 }
 
+/// The whole charge an operation needed when its class had no room to grow its reservation to it.
+///
+/// A growth refusal attaches it to its [`AdmissionError::BudgetExhausted`], where it stays beneath
+/// every context the failure gains on its way out, so the owner that meets the failure can give
+/// back what the operation held and wait for exactly this charge before running it again.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Shortfall {
+    pub class: MemoryClass,
+    pub needed: u64,
+}
+
+impl Shortfall {
+    /// The charge a growth refusal beneath `report` needed, when one is beneath it.
+    pub fn of<C>(report: &Report<C>) -> Option<u64> {
+        Self::beneath(report).map(|shortfall| shortfall.needed)
+    }
+
+    /// The shortfall beneath `report`, with the class it fell short in, when one is beneath it.
+    pub fn beneath<C>(report: &Report<C>) -> Option<Self> {
+        for frame in report.frames() {
+            if let Some(shortfall) = frame.downcast_ref::<Self>() {
+                return Some(*shortfall);
+            }
+        }
+        None
+    }
+}
+
 /// One class's ceiling, expressed as one permit per byte so that a reservation and its release are
 /// the same operation the pool already performs for its workers.
+///
+/// An allowance is a budget too: a share of a class one operation waited for, whose own permits
+/// every charge of that class the operation takes is drawn from.
 #[derive(Debug)]
 pub(crate) struct MemoryBudget {
     class: MemoryClass,
@@ -50,6 +81,53 @@ pub(crate) struct MemoryBudget {
     permits: SemaphoreRef,
     granted: AtomicU64,
     refused: AtomicU64,
+    /// Present on an allowance: the share of the class it holds, for as long as anything drawn
+    /// from it lives.
+    allowance: Option<StdArc<AllowanceHold>>,
+}
+
+/// The share of a class an allowance holds, the most that was drawn from it at once, and the
+/// largest share its operation was found to need, which its owner runs it again within.
+#[derive(Debug)]
+pub(crate) struct AllowanceHold {
+    _share: Reservation,
+    peak: AtomicU64,
+    wanted: AtomicU64,
+}
+
+impl AllowanceHold {
+    /// The capacity of the class the share was taken from: no share can be larger.
+    fn class_capacity(&self) -> u32 {
+        self._share.capacity
+    }
+
+    /// Record that `drawn` bytes are drawn now.
+    fn drawn(&self, drawn: u64) {
+        self.peak.fetch_max(drawn, Ordering::AcqRel);
+    }
+
+    /// The share an operation needs to take `more` bytes beyond the `drawn` it holds now, counting
+    /// the most it held at once.
+    fn needed(&self, drawn: u64, more: u64) -> u64 {
+        drawn
+            .checked_add(more)
+            .unwrap_or(u64::MAX)
+            .max(self.peak.load(Ordering::Acquire))
+    }
+
+    /// Record that a charge the operation needed found the share too small, so its owner runs the
+    /// operation again within a share of `needed` bytes however the operation reported the failure.
+    fn wanted(&self, needed: u64) {
+        self.wanted.fetch_max(needed, Ordering::AcqRel);
+    }
+
+    /// The largest share a charge the operation needed found missing, if any did.
+    pub(crate) fn shortfall(&self) -> Option<u64> {
+        match self.wanted.load(Ordering::Acquire) {
+            0 => None,
+            needed => Some(needed),
+        }
+    }
 }
 
 /// What one class of the budget currently holds, and how much it has admitted and refused.
@@ -72,7 +150,68 @@ impl MemoryBudget {
             permits: StdArc::new(Semaphore::new(capacity.arch_into())),
             granted: AtomicU64::new(0),
             refused: AtomicU64::new(0),
+            allowance: None,
         }
+    }
+
+    /// A budget over `share`, which an operation waited for, that every charge of its class the
+    /// operation takes is drawn from.
+    pub(crate) fn allowance(share: Reservation) -> Self {
+        let class = share.class;
+        let capacity = share.bytes;
+        Self {
+            class,
+            capacity,
+            permits: StdArc::new(Semaphore::new(capacity.arch_into())),
+            granted: AtomicU64::new(0),
+            refused: AtomicU64::new(0),
+            allowance: Some(StdArc::new(AllowanceHold {
+                _share: share,
+                peak: AtomicU64::new(0),
+                wanted: AtomicU64::new(0),
+            })),
+        }
+    }
+
+    pub(crate) fn class(&self) -> MemoryClass {
+        self.class
+    }
+
+    /// What is drawn from this budget now.
+    fn drawn(&self) -> u64 {
+        let available: u64 = self.permits.available_permits().arch_into();
+        u64::from(self.capacity)
+            .checked_sub(available)
+            .verified("a budget never holds more permits than the capacity it was built with")
+    }
+
+    /// The refusal of `bytes` this budget has no room for now. An allowance's refusal carries
+    /// the [`Shortfall`] its operation needs, so the operation's owner can give back everything
+    /// and wait for a share that holds all of it; a charge the operation `required`, unlike an
+    /// optional one, is also recorded on the allowance.
+    fn exhausted(&self, bytes: u64, required: bool) -> Report<AdmissionError> {
+        let refusal = Report::new(AdmissionError::BudgetExhausted {
+            class: self.class.as_str(),
+            requested: bytes,
+        });
+        match &self.allowance {
+            Some(hold) => {
+                let needed = hold.needed(self.drawn(), bytes);
+                if required {
+                    hold.wanted(needed);
+                }
+                refusal.attach(Shortfall {
+                    class: self.class,
+                    needed,
+                })
+            }
+            None => refusal,
+        }
+    }
+
+    /// The allowance this budget is, when it is one.
+    pub(crate) fn allowance_hold(&self) -> Option<&StdArc<AllowanceHold>> {
+        self.allowance.as_ref()
     }
 
     pub(crate) fn capacity_bytes(&self) -> u64 {
@@ -98,10 +237,9 @@ impl MemoryBudget {
         let requested = self.checked_request(bytes)?;
         match StdArc::clone(&self.permits).try_acquire_many_owned(requested) {
             Ok(permit) => Ok(self.reservation(requested, permit)),
-            Err(TryAcquireError::NoPermits) => Err(self.refusal(AdmissionError::BudgetExhausted {
-                class: self.class.as_str(),
-                requested: bytes,
-            })),
+            // An optional charge that finds no room now refuses nothing the node owes: its owner
+            // proceeds without it, so it is not counted as a refusal.
+            Err(TryAcquireError::NoPermits) => Err(self.exhausted(bytes, false)),
             Err(TryAcquireError::Closed) => Err(self.refusal(AdmissionError::BudgetClosed {
                 class: self.class.as_str(),
             })),
@@ -125,6 +263,11 @@ impl MemoryBudget {
                     class: self.class.as_str(),
                 }));
             }
+            // Within an allowance nothing waits: everything else drawn from it belongs to the same
+            // operation, which would wait behind itself. Its owner waits for a larger share instead.
+            Err(TryAcquireError::NoPermits) if self.allowance.is_some() => {
+                return Err(self.exhausted(bytes, true));
+            }
             Err(TryAcquireError::NoPermits) => {}
         }
         let permit = StdArc::clone(&self.permits)
@@ -138,23 +281,35 @@ impl MemoryBudget {
         Ok(self.reservation(requested, permit))
     }
 
+    /// A reservation of no bytes, granted at once whatever the class holds.
+    pub(crate) fn nothing(&self) -> Reservation {
+        let permit = StdArc::clone(&self.permits)
+            .try_acquire_many_owned(0)
+            .assured("no permits are always available, and nothing closes a memory budget");
+        self.reservation(0, permit)
+    }
+
     /// Refuse an operation the class could never hold, rather than letting it wait for capacity
-    /// that will never exist.
+    /// that will never exist. Within an allowance, a charge beyond the share but within the class
+    /// is a shortfall its operation's owner ends with a larger share.
     fn checked_request(&self, bytes: u64) -> Result<u32, Report<AdmissionError>> {
-        let capacity = self.capacity.into();
-        let requested = u32::try_from(bytes).map_err(|_| {
+        let ceiling = match &self.allowance {
+            Some(hold) => hold.class_capacity(),
+            None => self.capacity,
+        };
+        let exceeds = || {
             self.refusal(AdmissionError::ExceedsBudget {
                 class: self.class.as_str(),
                 requested: bytes,
-                capacity,
+                capacity: ceiling.into(),
             })
-        })?;
+        };
+        let requested = u32::try_from(bytes).map_err(|_| exceeds())?;
+        if requested > ceiling {
+            return Err(exceeds());
+        }
         if requested > self.capacity {
-            return Err(self.refusal(AdmissionError::ExceedsBudget {
-                class: self.class.as_str(),
-                requested: bytes,
-                capacity,
-            }));
+            return Err(self.exhausted(bytes, true));
         }
         Ok(requested)
     }
@@ -168,18 +323,25 @@ impl MemoryBudget {
 
     fn reservation(&self, bytes: u32, permit: OwnedSemaphorePermit) -> Reservation {
         self.granted.fetch_add(1, Ordering::AcqRel);
+        if let Some(hold) = &self.allowance {
+            hold.drawn(self.drawn());
+        }
         Reservation {
             class: self.class,
             capacity: self.capacity,
             bytes,
             permits: StdArc::clone(&self.permits),
             permit,
+            allowance: self.allowance.clone(),
         }
     }
 }
 
 /// Transient memory an operation has been charged for. Dropping it returns the bytes, so the
 /// charge lasts exactly as long as the allocation it stands for.
+///
+/// A charge drawn from an allowance returns its bytes to the allowance, and keeps the allowance's
+/// share of the class held for as long as it lives.
 #[derive(Debug)]
 pub struct Reservation {
     class: MemoryClass,
@@ -187,6 +349,7 @@ pub struct Reservation {
     bytes: u32,
     permits: SemaphoreRef,
     permit: OwnedSemaphorePermit,
+    allowance: Option<StdArc<AllowanceHold>>,
 }
 
 impl Reservation {
@@ -225,6 +388,7 @@ impl Reservation {
             bytes,
             permits,
             mut permit,
+            allowance,
         } = self;
         let first_permit = permit
             .split(first.arch_into())
@@ -239,6 +403,7 @@ impl Reservation {
                 bytes: first,
                 permits: StdArc::clone(&permits),
                 permit: first_permit,
+                allowance: allowance.clone(),
             },
             Self {
                 class,
@@ -246,6 +411,7 @@ impl Reservation {
                 bytes: second,
                 permits,
                 permit,
+                allowance,
             },
         ))
     }
@@ -279,10 +445,15 @@ impl Reservation {
     }
 
     /// Charge the class for everything up to `bytes`, so an incremental writer knows it may grow
-    /// to that size before it does. Growth that the class cannot back fails here, with the writer
-    /// still holding only what it had.
+    /// to that size before it does. Growth that the class cannot back now fails here, with the
+    /// writer still holding only what it had, and the [`Shortfall`] it needed attached: the
+    /// writer's owner gives back what it holds and waits for that charge, rather than waiting
+    /// while holding part of the class.
     pub fn grow_to(&mut self, bytes: u64) -> Result<(), Report<AdmissionError>> {
-        let capacity = self.capacity.into();
+        // A charge drawn from an allowance can grow past the share by a larger share, but none can
+        // grow past its class.
+        let ceiling = self.ceiling();
+        let capacity = ceiling.into();
         let target = u32::try_from(bytes).map_err(|_| {
             Report::new(AdmissionError::ExceedsBudget {
                 class: self.class.as_str(),
@@ -293,7 +464,7 @@ impl Reservation {
         if target <= self.bytes {
             return Ok(());
         }
-        if target > self.capacity {
+        if target > ceiling {
             return Err(Report::new(AdmissionError::ExceedsBudget {
                 class: self.class.as_str(),
                 requested: bytes,
@@ -311,16 +482,52 @@ impl Reservation {
             Ok(extra) => {
                 self.permit.merge(extra);
                 self.bytes = target;
+                if let Some(hold) = &self.allowance {
+                    hold.drawn(self.drawn());
+                }
                 Ok(())
             }
-            Err(TryAcquireError::NoPermits) => Err(Report::new(AdmissionError::BudgetExhausted {
-                class: self.class.as_str(),
-                requested: additional.into(),
-            })),
+            Err(TryAcquireError::NoPermits) => {
+                // Drawn from an allowance, the operation needs a share holding everything it
+                // draws; on its own, the charge needs room for its whole target.
+                let needed = match &self.allowance {
+                    Some(hold) => {
+                        let needed = hold.needed(self.drawn(), additional.into());
+                        hold.wanted(needed);
+                        needed
+                    }
+                    None => target.into(),
+                };
+                Err(Report::new(AdmissionError::BudgetExhausted {
+                    class: self.class.as_str(),
+                    requested: additional.into(),
+                })
+                .attach(Shortfall {
+                    class: self.class,
+                    needed,
+                }))
+            }
             Err(TryAcquireError::Closed) => Err(Report::new(AdmissionError::BudgetClosed {
                 class: self.class.as_str(),
             })),
         }
+    }
+
+    /// The most this charge can ever grow to: its class's capacity, even when it was drawn from an
+    /// allowance of that class.
+    fn ceiling(&self) -> u32 {
+        match &self.allowance {
+            Some(hold) => hold.class_capacity(),
+            None => self.capacity,
+        }
+    }
+
+    /// What is drawn from the budget this charge came from now.
+    fn drawn(&self) -> u64 {
+        let available: u64 = self.permits.available_permits().arch_into();
+        u64::from(self.capacity)
+            .checked_sub(available)
+            .verified("a budget never holds more permits than the capacity it was built with")
     }
 
     /// Give back everything above `bytes`.
@@ -350,6 +557,86 @@ impl Reservation {
         if self.permit.split(excess.arch_into()).is_some() {
             self.bytes = target;
         }
+    }
+}
+
+/// A charge for an operation that learns its size as it goes.
+///
+/// It counts what the operation holds apart from what its reservation holds. An operation that ran
+/// short gives everything back and runs again under the larger charge it needed: counting its own
+/// bytes from nothing again keeps that charge from being added to, rather than covering, what it
+/// asks for the second time, and the charge never shrinks below what it started with, so the
+/// operation keeps the room it waited for until it ends.
+#[derive(Debug)]
+pub struct GrowingCharge {
+    reservation: Reservation,
+    /// What the operation holds now.
+    required: u64,
+    /// The most the operation has held at once.
+    peak: u64,
+    /// What the charge was granted at the start, which it keeps until the operation ends.
+    floor: u64,
+}
+
+impl GrowingCharge {
+    /// Count an operation from nothing under `reservation`, which may already hold more.
+    pub fn new(reservation: Reservation) -> Self {
+        let floor = reservation.bytes();
+        Self {
+            reservation,
+            required: 0,
+            peak: 0,
+            floor,
+        }
+    }
+
+    /// What the operation holds now.
+    pub fn required(&self) -> u64 {
+        self.required
+    }
+
+    /// Count `bytes` more and grow the charge to cover what the operation holds. A class without
+    /// room for it now fails with the [`Shortfall`] the operation needs, the most it has held at
+    /// once included, and counts nothing.
+    pub fn grow_by(&mut self, bytes: u64) -> Result<(), Report<AdmissionError>> {
+        let Some(required) = self.required.checked_add(bytes) else {
+            return Err(Report::new(AdmissionError::ExceedsBudget {
+                class: self.reservation.class.as_str(),
+                requested: u64::MAX,
+                capacity: self.reservation.capacity.into(),
+            }));
+        };
+        if let Err(refusal) = self.reservation.grow_to(required) {
+            // Only a class without room now can grant the charge later; a charge larger than the
+            // whole class, or one a closed class refuses, is the operation's answer as it is.
+            if !matches!(
+                refusal.current_context(),
+                AdmissionError::BudgetExhausted { .. }
+            ) {
+                return Err(refusal);
+            }
+            return Err(refusal.attach(Shortfall {
+                class: self.reservation.class,
+                needed: required.max(self.peak),
+            }));
+        }
+        self.required = required;
+        self.peak = self.peak.max(required);
+        Ok(())
+    }
+
+    /// The operation freed `bytes` it held. The charge gives back what it holds beyond what the
+    /// operation still holds, but never less than it was granted at the start. A release of more
+    /// than the operation holds leaves it holding nothing.
+    pub fn release(&mut self, bytes: u64) {
+        self.required = self.required.saturating_sub(bytes);
+        self.reservation.shrink_to(self.required.max(self.floor));
+    }
+
+    /// The charge, narrowed to what the operation holds.
+    pub fn into_reservation(mut self) -> Reservation {
+        self.reservation.shrink_to(self.required);
+        self.reservation
     }
 }
 
@@ -408,18 +695,24 @@ impl GrowthRefusal {
 /// A byte buffer that never grows past what its class has been charged for. Serializers that write
 /// incrementally build into it, so an output larger than its budget fails at the boundary instead
 /// of after the allocation has already happened.
+///
+/// A synchronous writer cannot wait for room. When its class has none for the growth it needs, the
+/// buffer refuses the write and records the charge it needed as its [`Self::shortfall`], so the
+/// job's owner can give back everything the job held, wait for that charge, and run the job again
+/// under it (see [`crate::Executor::run_cpu_growing`]).
 #[derive(Debug)]
 pub struct BudgetedBuffer {
     reservation: Reservation,
     limit: u64,
     bytes: Vec<u8>,
+    shortfall: Option<u64>,
 }
 
 impl BudgetedBuffer {
     /// Start a buffer that may grow up to `reservation`, and further only while the class can back
     /// it.
     pub fn new(reservation: Reservation) -> Self {
-        let limit = reservation.capacity.into();
+        let limit = reservation.ceiling().into();
         Self::with_limit(reservation, limit)
     }
 
@@ -432,7 +725,15 @@ impl BudgetedBuffer {
             reservation,
             limit,
             bytes: Vec::with_capacity(capacity),
+            shortfall: None,
         }
+    }
+
+    /// The charge this buffer needed and its class had no room for, once a write was refused for
+    /// that reason. A writer that meets it gives back what it holds rather than waiting, because a
+    /// wait while holding part of the class can stall behind the very bytes it holds.
+    pub fn shortfall(&self) -> Option<u64> {
+        self.shortfall
     }
 
     pub fn len(&self) -> usize {
@@ -505,7 +806,8 @@ impl BudgetedBuffer {
         // Grow geometrically, so a serializer that writes a megabyte in small pieces takes the
         // budget a logarithmic number of times rather than once per piece, and a frame that writes
         // a hundred bytes does not hold a granule it will never use. Doubling can overshoot the
-        // limit, which is where the charge stops.
+        // limit or the whole class, which is where the charge stops; only the bytes the write
+        // itself needs can exceed the class.
         let doubled = self
             .reservation
             .bytes()
@@ -514,10 +816,18 @@ impl BudgetedBuffer {
         let rounded = target
             .checked_next_multiple_of(MINIMUM_GROWTH)
             .unwrap_or(target);
-        let charged = rounded.max(doubled).min(self.limit).max(target);
-        self.reservation
-            .grow_to(charged)
-            .map_err(GrowthRefusal::Admission)?;
+        let class_capacity = u64::from(self.reservation.ceiling());
+        let charged = rounded
+            .max(doubled)
+            .min(self.limit)
+            .min(class_capacity)
+            .max(target);
+        if let Err(refusal) = self.reservation.grow_to(charged) {
+            if let AdmissionError::BudgetExhausted { .. } = refusal.current_context() {
+                self.shortfall = Some(charged);
+            }
+            return Err(GrowthRefusal::Admission(refusal));
+        }
         let reserve: usize = self.reservation.bytes.arch_into();
         if self.bytes.capacity() < reserve {
             let extra = reserve.checked_sub(self.bytes.len()).verified(

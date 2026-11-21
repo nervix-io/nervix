@@ -34,7 +34,7 @@ use std::io::{Read, Write};
 use arch_into::ArchInto as _;
 use error_stack::{Report, ResultExt as _};
 use meticulous::OptionExt as _;
-use nervix_execution::{Cancellation, MemoryClass};
+use nervix_execution::{Cancellation, Executor, MemoryClass};
 use nervix_interconnect::StatePlacementEnvelope;
 use nervix_models::{
     BranchKeyFingerprint, DomainName, DomainStatus, ModelName, NodeRef, NodeUnitRef, Timestamp,
@@ -126,6 +126,16 @@ impl CapturedGuestSave {
 }
 
 /// One domain cut, including the materialized source selected by the domain's lifecycle.
+/// One node's share of a backup cut: the domain, whether it is quiesced, its status, and the
+/// entities the cut's schedule names this node the primary of.
+#[derive(Clone, Copy)]
+pub(crate) struct BackupCut<'a> {
+    pub(crate) domain: &'a DomainName,
+    pub(crate) quiesced: bool,
+    pub(crate) status: &'a DomainStatus,
+    pub(crate) primaries: &'a ahash::HashSet<NodeUnitRef>,
+}
+
 pub(crate) struct CapturedDomainState {
     pub(crate) guest_saves: Vec<CapturedGuestSave>,
     /// The Kafka offset and branch lifecycle checkpoints, still in the cut's database snapshot.
@@ -644,10 +654,8 @@ impl Runtime {
             .change_context(BackupStateCaptureError::Storage)
     }
 
-    /// Publishes volatile state and reads it with durable WASM saves from one database snapshot.
-    /// The caller holds the domain cut or accepts a live checkpoint. Only the placements of
-    /// `primaries`, the entities the cut's schedule names this node the primary of, are sealed,
-    /// listed, read and charged: a replica's copy is never archived, so it is never touched.
+    /// [`Self::capture_backup_state_with`], charging the node's executor directly.
+    #[cfg(test)]
     pub(crate) fn capture_backup_state(
         &self,
         domain: &DomainName,
@@ -656,6 +664,39 @@ impl Runtime {
         primaries: &ahash::HashSet<NodeUnitRef>,
         cancellation: &Cancellation,
     ) -> error_stack::Result<CapturedDomainState, BackupStateCaptureError> {
+        self.capture_backup_state_with(
+            self.executor(),
+            BackupCut {
+                domain,
+                quiesced,
+                status: &status,
+                primaries,
+            },
+            cancellation,
+        )
+    }
+
+    /// Publishes volatile state and reads it with durable WASM saves from one database snapshot.
+    /// The caller holds the domain cut or accepts a live checkpoint. Only the placements of
+    /// the cut's `primaries`, the entities its schedule names this node the primary of, are
+    /// sealed, listed, read and charged: a replica's copy is never archived, so it is never
+    /// touched.
+    ///
+    /// Everything the cut holds is charged through `executor`, which draws from the capture's
+    /// allowances: a share without room for the cut fails with the share it needs, and the
+    /// capture is made again within it.
+    pub(crate) fn capture_backup_state_with(
+        &self,
+        executor: &Executor,
+        cut: BackupCut<'_>,
+        cancellation: &Cancellation,
+    ) -> error_stack::Result<CapturedDomainState, BackupStateCaptureError> {
+        let BackupCut {
+            domain,
+            quiesced,
+            status,
+            primaries,
+        } = cut;
         let Some(store) = self.inner.state_store.as_ref() else {
             return Err(Report::new(BackupStateCaptureError::Unavailable));
         };
@@ -753,7 +794,7 @@ impl Runtime {
         for identity in self.published_branch_state_identities(domain, primaries) {
             needed.insert(identity);
         }
-        let keys = self.lifecycle_keys(&current, &needed, cancellation)?;
+        let keys = self.lifecycle_keys(executor, &current, &needed, cancellation)?;
         let mut branch_states = match status {
             DomainStatus::Stopped => Vec::new(),
             // A stopping domain still runs its graph until its stop ends.
@@ -866,7 +907,7 @@ impl Runtime {
                         placement: placement.to_remote(),
                         checkpoint:
                             super::materialized_snapshot::CapturedMaterializedCheckpoint::new(
-                                self.executor().clone(),
+                                executor.clone(),
                                 reader,
                             ),
                     });
@@ -893,7 +934,7 @@ impl Runtime {
                     }
                     let (generation, charge) =
                         ReplicatedMaterializedRelayState::read(state.value())
-                            .capture_for_backup(self.executor())
+                            .capture_for_backup(executor)
                             .change_context(BackupStateCaptureError::Storage)?;
                     materialized.push(CapturedMaterializedRelay {
                         placement: placement.to_remote(),
@@ -910,6 +951,34 @@ impl Runtime {
             materialized,
             branch_states,
         })
+    }
+
+    /// The bulk share a backup capture of `domain` starts from: the live materialized generations
+    /// the cut of `primaries` would hold, and the staging working set beside them, up to the whole
+    /// class. A capture that needs more is cut again within a larger share.
+    pub(crate) fn backup_capture_bulk_bytes(
+        &self,
+        domain: &DomainName,
+        primaries: &ahash::HashSet<NodeUnitRef>,
+    ) -> u64 {
+        let mut bytes =
+            crate::runtime::StagedSnapshotWriter::encoding_buffer_bytes(self.executor())
+                .max(4 * nervix_backup::MATERIALIZED_IDENTITIES_BYTES);
+        for state in self.inner.replicated_materialized_stream_states.iter() {
+            let placement = state.key();
+            let entity = NodeUnitRef::new(
+                NodeRef::new(placement.kind, placement.identifier.clone()),
+                placement.unit,
+            );
+            if &placement.domain != domain || !primaries.contains(&entity) {
+                continue;
+            }
+            let held = ReplicatedMaterializedRelayState::read(state.value())
+                .backup_capture_bytes()
+                .unwrap_or(u64::MAX);
+            bytes = bytes.saturating_add(held.max(1));
+        }
+        bytes.min(self.executor().memory(MemoryClass::Bulk).capacity_bytes)
     }
 
     /// Whether a stored checkpoint of `domain` is state its entity's current identity names.
@@ -936,6 +1005,7 @@ impl Runtime {
     /// no longer holds was evicted and has no key.
     fn lifecycle_keys(
         &self,
+        executor: &Executor,
         current: &[ListedCheckpoint],
         needed: &ahash::HashSet<BranchStateIdentity>,
         cancellation: &Cancellation,
@@ -973,8 +1043,9 @@ impl Runtime {
             let Some(conversion) = native_conversion_bytes(stored_bytes) else {
                 return Err(Report::new(entity()));
             };
-            let _charge = self
-                .executor()
+            // The cut runs on a storage worker, which cannot wait: the charge is drawn from the
+            // capture's share, and a share without room for it fails with the share it needs.
+            let _charge = executor
                 .try_reserve(MemoryClass::RestoreMetadata, conversion)
                 .change_context_lazy(|| BackupStateCaptureError::Admission {
                     entity: stored.identifier.clone(),
@@ -1474,15 +1545,13 @@ mod tests {
             .assured("the cut retains unopened branch checkpoints");
         assert_eq!(captured.branch_states.len(), 2);
         assert_eq!(captured.native_metadata.len(), 2);
-        let budget = runtime
+        // A capture opens its stored checkpoints within its share of restore metadata: a share
+        // without room for one fails at once with the share the capture needs, and never waits.
+        let share = runtime
             .executor()
-            .snapshot()
-            .restore_metadata_memory
-            .capacity_bytes;
-        let occupied = runtime
-            .executor()
-            .try_reserve(MemoryClass::RestoreMetadata, budget)
-            .assured("the test occupies conversion admission");
+            .reserve_allowance(MemoryClass::RestoreMetadata, 1)
+            .await
+            .assured("the untouched class grants a one-byte share");
         let alpha = super::super::string_branch_key("tenant", "alpha");
         for state in captured.branch_states {
             assert_eq!(state.placement.branch_key, BranchKey::to_remote_key(&alpha));
@@ -1495,24 +1564,43 @@ mod tests {
                 | CapturedBranchStateKind::StoredWindow(checkpoint) => checkpoint,
                 _ => panic!("the stopped cut retains its unopened stored checkpoint"),
             };
-            let refusal = match checkpoint.open(&runtime).await {
-                Ok(_) => panic!("an occupied conversion budget refuses before opening bytes"),
-                Err(refusal) => refusal,
+            let refusal = {
+                let mut opening = std::pin::pin!(checkpoint.open(&runtime, &share));
+                let polled = std::future::poll_fn(|context| {
+                    std::task::Poll::Ready(std::future::Future::poll(opening.as_mut(), context))
+                })
+                .await;
+                match polled {
+                    std::task::Poll::Ready(Ok(_)) => {
+                        panic!(
+                            "a share without room for the conversion refuses before opening bytes"
+                        )
+                    }
+                    std::task::Poll::Ready(Err(refusal)) => refusal,
+                    std::task::Poll::Pending => {
+                        panic!("a checkpoint opened within its capture's share never waits")
+                    }
+                }
             };
             assert!(matches!(refusal.current_context(),
                 BackupStateCaptureError::Admission { entity }
                     if entity == &state.placement.identifier
             ));
+            assert!(
+                nervix_execution::Shortfall::of(&refusal).is_some(),
+                "the refusal names the share the capture needs"
+            );
             assert_eq!(
                 runtime
                     .executor()
                     .snapshot()
                     .restore_metadata_memory
                     .reserved_bytes,
-                budget
+                1,
+                "only the share is held"
             );
         }
-        drop(occupied);
+        drop(share);
         assert_eq!(
             runtime
                 .executor()

@@ -188,11 +188,8 @@ async fn waiting_branch_task_for_test(
         let charge = executor
             .try_reserve(nervix_execution::MemoryClass::Relay, 1)
             .assured("the test's accepted job has one byte of working memory");
-        let mut run = Box::pin(executor.accepted_work().run_cpu(
-            nervix_execution::CpuClass::Data,
-            charge,
-            |_, _| (),
-        ));
+        let mut run =
+            Box::pin(executor.run_cpu(nervix_execution::CpuClass::Data, charge, |_, _| ()));
         assert!(futures_util::poll!(run.as_mut()).is_pending());
         ready
             .send(())
@@ -256,7 +253,6 @@ async fn accepted_work_stop_bounds_a_full_command_queue_while_the_branch_waits()
         "the existing shutdown grace must include waiting to send STOP"
     );
     assert_eq!(executor.snapshot().data_cpu.pending, 0);
-    assert_eq!(executor.snapshot().data_cpu.refused, 0);
 }
 
 #[cfg(feature = "shuttle")]
@@ -343,7 +339,6 @@ mod accepted_work_shuttle {
                     assert!((3..=4).contains(&snapshot.data_cpu.completed));
                     assert!(snapshot.data_cpu.completed <= snapshot.data_cpu.admitted);
                     assert!(snapshot.data_cpu.admitted - snapshot.data_cpu.completed <= 1);
-                    assert_eq!(snapshot.data_cpu.refused, 0);
                 }
             });
         });
