@@ -85,6 +85,10 @@ pub enum FrontendErrorKind {
     UnknownInputField { field: FieldName },
     #[error("{found:?} is unavailable during branch construction")]
     ScopeUnavailableDuringBranchConstruction { found: FieldScope },
+    #[error("the node scope is available only in node selectors")]
+    NodeScopeOutsideSelector,
+    #[error("{found:?} is unavailable in a node selector. Use the node scope")]
+    ScopeUnavailableInNodeSelector { found: FieldScope },
     #[error("INHERIT is not valid for set-only routes")]
     InheritInSetOnlyRoute,
     #[error("INVOKE is not valid for internal set-only routes")]
@@ -347,6 +351,7 @@ pub enum SemanticScopePolicy<'a> {
     WriteOnly {
         namespace: &'a str,
     },
+    NodeSelector,
     Unavailable,
 }
 
@@ -374,10 +379,9 @@ impl<'a> SemanticScopePolicy<'a> {
         match self {
             Self::ReadWrite { read_namespace, .. } => Ok(read_namespace),
             Self::ReadOnly { namespace } => Ok(namespace),
-            Self::WriteOnly { .. } | Self::Unavailable => Err(FrontendError::report(
-                span,
-                FrontendErrorKind::BareFieldReadUnavailable,
-            )),
+            Self::WriteOnly { .. } | Self::NodeSelector | Self::Unavailable => Err(
+                FrontendError::report(span, FrontendErrorKind::BareFieldReadUnavailable),
+            ),
         }
     }
 
@@ -387,10 +391,9 @@ impl<'a> SemanticScopePolicy<'a> {
                 write_namespace, ..
             } => Ok(write_namespace),
             Self::WriteOnly { namespace } => Ok(namespace),
-            Self::ReadOnly { .. } | Self::Unavailable => Err(FrontendError::report(
-                span,
-                FrontendErrorKind::BareSetTargetUnavailable,
-            )),
+            Self::ReadOnly { .. } | Self::NodeSelector | Self::Unavailable => Err(
+                FrontendError::report(span, FrontendErrorKind::BareSetTargetUnavailable),
+            ),
         }
     }
 }
@@ -613,6 +616,7 @@ pub fn lower_branch_construction(
                 | FieldScope::Metadata
                 | FieldScope::Payload
                 | FieldScope::PartialOutput
+                | FieldScope::Node
                 | FieldScope::Error => Err(FrontendError::report(
                     span,
                     FrontendErrorKind::ScopeUnavailableDuringBranchConstruction {
@@ -1427,6 +1431,16 @@ fn lower_expression_with_span(
             ModelLiteral::Null => Literal::Null,
         }),
         ModelExpression::Field(reference) => {
+            if scope_policy == SemanticScopePolicy::NodeSelector
+                && reference.scope != FieldScope::Node
+            {
+                return Err(FrontendError::report(
+                    span,
+                    FrontendErrorKind::ScopeUnavailableInNodeSelector {
+                        found: reference.scope.clone(),
+                    },
+                ));
+            }
             let relay = match &reference.scope {
                 FieldScope::Bare => scope_policy.read_namespace(span)?.to_string(),
                 FieldScope::Message => "message".to_string(),
@@ -1442,6 +1456,15 @@ fn lower_expression_with_span(
                 FieldScope::Payload => "payload".to_string(),
                 FieldScope::PartialOutput => "partial_output".to_string(),
                 FieldScope::Error => "error".to_string(),
+                FieldScope::Node => {
+                    if scope_policy != SemanticScopePolicy::NodeSelector {
+                        return Err(FrontendError::report(
+                            span,
+                            FrontendErrorKind::NodeScopeOutsideSelector,
+                        ));
+                    }
+                    nervix_models::NODE_SCOPE.to_string()
+                }
             };
             Expr::FieldRef(FieldRef {
                 relay,

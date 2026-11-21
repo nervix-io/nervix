@@ -1918,10 +1918,17 @@ pub fn filter_where_clause<'src>()
         .boxed()
 }
 
-fn explicit_processor_output_route<'src>()
--> impl Parser<'src, &'src [Token], ProcessorOutput, extra::Err<ParseError<'src>>> + Clone {
+/// The `TO <relay>` that begins an explicit output route and names the relay it writes.
+pub(crate) fn output_route_head<'src>()
+-> impl Parser<'src, &'src [Token], RelayName, extra::Err<ParseError<'src>>> + Clone {
     kw(Identifier::To)
         .ignore_then(relay_in_role(RelayRole::Output))
+        .boxed()
+}
+
+fn explicit_processor_output_route<'src>()
+-> impl Parser<'src, &'src [Token], ProcessorOutput, extra::Err<ParseError<'src>>> + Clone {
+    output_route_head()
         .then(explicit_route_construction())
         .then(message_error_policy())
         .map(

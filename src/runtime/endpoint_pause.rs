@@ -109,7 +109,12 @@ pub(crate) struct EndpointFramePause {
 
 impl EndpointFramePause {
     pub(super) fn observe(&self, wait: &EndpointPauseWait<'_>) {
-        self.claims.lock().push(wait.claim.clone());
+        nervix_primitives::expect_lint!(
+            nervix::sync_acquisition,
+            "one frame registers at most one claim per route binding before notifying its reader",
+            self.claims.lock(),
+        )
+        .push(wait.claim.clone());
         self.changed.notify_waiters();
     }
 
@@ -118,7 +123,14 @@ impl EndpointFramePause {
             let changed = self.changed.notified();
             let mut changed = std::pin::pin!(changed);
             changed.as_mut().enable();
-            if self.claims.lock().iter().any(|claim| claim.waiting()) {
+            let is_buffered = nervix_primitives::expect_lint!(
+                nervix::sync_acquisition,
+                "the reader checks one frame's route bindings and releases them before waiting",
+                self.claims.lock(),
+            )
+            .iter()
+            .any(|claim| claim.waiting());
+            if is_buffered {
                 return;
             }
             changed.await;
@@ -129,7 +141,12 @@ impl EndpointFramePause {
     /// distinguishes a second frame that arrived during a pause from one that raced its end.
     pub(crate) fn abandon_waiting(&self) -> bool {
         let mut abandoned = false;
-        for claim in self.claims.lock().iter() {
+        let claims = nervix_primitives::expect_lint!(
+            nervix::sync_acquisition,
+            "a departing client cancels at most one claim per route binding of one frame",
+            self.claims.lock(),
+        );
+        for claim in claims.iter() {
             abandoned |= claim.abandon();
         }
         abandoned
@@ -243,13 +260,14 @@ impl EndpointPauseWait<'_> {
         let work = async {
             match (&mut self.receiver).await {
                 Ok(EndpointPauseOutcome::Finished(result)) => Some(result),
-                Ok(EndpointPauseOutcome::Acknowledging { completion, mut intake_ending }) => Some(
-                    nervix_primitives::select! {
-                        biased;
-                        outcome = await_acknowledgement(completion) => outcome,
-                        _ = intake_ending.wait_for(|ending| *ending) => EndpointRequestOutcome::Interrupted,
-                    }
-                ),
+                Ok(EndpointPauseOutcome::Acknowledging {
+                    completion,
+                    mut intake_ending,
+                }) => Some(nervix_primitives::select! {
+                    biased;
+                    outcome = await_acknowledgement(completion) => outcome,
+                    _ = intake_ending.wait_for(|ending| *ending) => EndpointRequestOutcome::Interrupted,
+                }),
                 Err(_) => None,
             }
         };

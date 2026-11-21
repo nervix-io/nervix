@@ -85,10 +85,10 @@ impl EndpointPauseDraft {
         &self,
         public_plexus: &str,
     ) -> error_stack::Result<IngestorEntityDraft, ReadPauseSettingsError> {
-        let Ok(ClientStatement::Server(Statement::Create(create))) =
-            parse_client_statement(public_plexus)
-        else {
-            return Err(Report::new(ReadPauseSettingsError::UnreadableConfiguration));
+        let statement = parse_client_statement(public_plexus)
+            .change_context(ReadPauseSettingsError::UnreadableConfiguration)?;
+        let ClientStatement::Server(Statement::Create(create)) = statement else {
+            return Err(Report::new(ReadPauseSettingsError::ExpectedIngestor));
         };
         let Model::Ingestor(ingestor) = create.body.as_ref() else {
             return Err(Report::new(ReadPauseSettingsError::ExpectedIngestor));
@@ -194,8 +194,9 @@ pub(super) fn EndpointPauseEditor(signals: CreateSignals) -> impl IntoView {
     };
     view! {
         <p class="endpoint-pause-ingestor">
-            {move || signals.endpoint_pause.with(|draft| {
-                draft.as_ref().map(|draft| draft.name.to_string()).unwrap_or_default()
+            {move || signals.endpoint_pause.with(|draft| match draft {
+                Some(draft) => draft.name.to_string(),
+                None => String::new(),
             })}
         </p>
         <Show when=move || signals.endpoint_pause.with(|draft| matches!(draft, Some(EndpointPauseDraft { settings: EndpointPauseSettings::Loading, .. }))) fallback=|| ()>

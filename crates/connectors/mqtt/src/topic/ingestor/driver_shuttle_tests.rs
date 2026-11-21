@@ -54,7 +54,7 @@ fn default_admission() -> NonZeroU32 {
 }
 use crate::topic::ingestor::{
     IngestorAcknowledgement, MqttTopicIngestor, MqttTopicIngestorError, MqttTopicIngestorPosition,
-    PublishRead as _, PublishReadOutcome, metrics_fixture::IngestorMetricsFixture,
+    PublishRead as _, PublishReadOutcome, overflow_fixture::ReadAheadOverflowFixture,
 };
 
 const CHECK_TASK_JOINS: &str =
@@ -164,7 +164,7 @@ fn connection(
         },
         None,
         default_admission(),
-        IngestorMetricsFixture::new().counter(),
+        ReadAheadOverflowFixture::new().report(),
     );
     (connection, deliveries, record)
 }
@@ -279,7 +279,7 @@ impl ConnectionEvents for OverflowObservedEventLoop {
 /// QoS 0 overflow cannot stop polling or occupy the capacity the following QoS 1 publish needs.
 fn an_acknowledgement_stays_writable_during_qos_zero_overflow() {
     shuttle::future::block_on(async {
-        let metrics = IngestorMetricsFixture::new();
+        let overflow = ReadAheadOverflowFixture::new();
         let (requests, requested) = mpsc::unbounded_channel();
         let (deliveries, delivered) = mpsc::unbounded_channel();
         let (written_to, mut record) = mpsc::unbounded_channel();
@@ -301,7 +301,7 @@ fn an_acknowledgement_stays_writable_during_qos_zero_overflow() {
             },
             None,
             default_admission(),
-            metrics.counter(),
+            overflow.report(),
         );
         let first = publish(1, QoS::AtLeastOnce);
         deliveries
@@ -348,7 +348,7 @@ fn an_acknowledgement_stays_writable_during_qos_zero_overflow() {
             .await
             .assured("the following QoS 1 acknowledgement is written");
         assert_eq!(written(&mut record), [200]);
-        assert_eq!(metrics.dropped(), 2);
+        assert_eq!(overflow.dropped(), 2);
         drop(broker.await.assured(CHECK_TASK_JOINS));
     });
 }

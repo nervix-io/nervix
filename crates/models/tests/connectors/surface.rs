@@ -722,7 +722,7 @@ fn the_runtime_capabilities_of_a_pair_are_its_modes_options_metadata_batching_an
             "OFFSET BY CONSUMER GROUP START AT EARLIEST",
             "OFFSET BY CONSUMER GROUP START AT LATEST",
             "INSTANCES <count>",
-            "INSTANCES PER PARTITION",
+            "INSTANCES PER TRANSPORT PARTITION",
             "metadata.topic",
             "metadata.partition",
             "metadata.offset",

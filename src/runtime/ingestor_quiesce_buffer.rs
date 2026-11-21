@@ -114,9 +114,13 @@ impl EndpointRetainedQueue {
     }
 
     fn len(&self) -> usize {
+        let indexed_count = match &self.indexed {
+            Some(indexed) => indexed.len(),
+            None => 0,
+        };
         self.immediate
             .len()
-            .checked_add(self.indexed.as_ref().map_or(0, BTreeMap::len))
+            .checked_add(indexed_count)
             .assured("both queues contain payloads this node holds in memory")
     }
 }

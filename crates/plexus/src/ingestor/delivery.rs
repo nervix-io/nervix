@@ -104,8 +104,13 @@ pub(super) fn instances<'src, S: IngestorEntityModel>()
         .map(IngestorInstances::Count);
     let capability = S::KIND.capabilities().instancing;
     let grammar = match capability {
-        nervix_models::IngestorInstancingCapability::PerPartition => choice((
-            kw_phrase2(Identifier::Per, Identifier::Partition).to(IngestorInstances::PerPartition),
+        nervix_models::IngestorInstancingCapability::PerTransportPartition => choice((
+            kw_phrase3(
+                Identifier::Per,
+                Identifier::Transport,
+                Identifier::Partition,
+            )
+            .to(IngestorInstances::PerTransportPartition),
             count,
         ))
         .boxed(),

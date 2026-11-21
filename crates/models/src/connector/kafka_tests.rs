@@ -141,7 +141,7 @@ fn offsets_belong_to_the_domain_or_to_a_named_consumer_group() {
         panic!("a Kafka topic ingestor declares its offset ownership and its instances");
     };
 
-    assert_eq!(*instances, OptionDeclaration::INSTANCES);
+    assert_eq!(*instances, OptionDeclaration::TRANSPORT_PARTITION_INSTANCES);
     assert_eq!(offsets.keywords, "OFFSET BY");
     assert_eq!(offsets.presence, OptionPresence::Required);
     let OptionForm::Choice([domain, earliest, latest]) = offsets.form else {

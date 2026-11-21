@@ -366,8 +366,8 @@ cannot police import paths, so it keeps only genuinely forbidden types and opera
   coordinate, and only tests of elapsed-time behavior enable the `test-util` paused clock.
 - **The bounded executor.** Work off the async workers goes through `nervix-execution` with its CPU
   or storage class, a charged memory class and `Cancellation` checks between bounded units; operator
-  code the node cannot bound (UDF calls, JAQ transformations) takes the extension class and password
-  hashing the credentials class. A refusal is a typed error the caller maps to its own outcome, and
+  code the node cannot bound (UDF calls, JAQ transformations, ONNX model runs) takes the extension
+  class and password hashing the credentials class. A refusal is a typed error the caller maps to its own outcome, and
   one that judged nothing stays retryable, never a decode, encode or authentication failure. A full
   queue refuses work that answers a request; accepted work nothing can present again (a payload a
   quiesce buffer retained, a poll a paced ingestor moved past) states
@@ -522,6 +522,11 @@ keeps the chapter current in the same change. Where areas meet, each chapter kee
   guest state, state generations and the events that advance them, ownership fencing or forced
   recovery of guest state, coordinated, guest-requested or rejected-state resets, the guest save,
   restore and reset ABI, how rebinding affects guest state.
+- [Inferencer State And Recovery](docs/src/inferencer-state.md): the tensors an inferencer's
+  `STATE` carries per branch, their schema and model identity, publication after admitted batches,
+  the snapshot frame, cadence and bound, restore under the branch incarnation, eviction, replica
+  copies, planned handoff and forced recovery of inferencer state, its archive sections, how
+  rebinding or redeclaration affects it, and what recovery can skip or replay.
 - [Backup And Restore Architecture](docs/src/backup-and-restore-architecture.md): the archive crate
   or format; how a backup cuts a domain or captures, stages, transfers, assembles, retains or serves
   state; how a restore receives, prepares, plans, admits, records or resumes its steps; how restored
@@ -773,6 +778,29 @@ No justification makes an inversion acceptable: not that it is temporary, smalle
   justifiably shared, because several owners register into it or observers read it across owners,
   and whose accesses stay off recurring data-plane paths. State one owner mutates stays in an
   ordinary collection that owner holds.
+
+### Branch-local runtime state
+
+- A branch-local runtime state kind, state a placement names by its branch, joins the shared
+  periodic snapshot owner, `ReplicatedBranchState`, instead of a persistence path of its own: its
+  branch task publishes immutable generations there, and the shared writer persists, announces and
+  replicates them. The change that adds the kind also ships its fingerprinted placement identity,
+  its archive section, its typed inspection, its external chaos coverage and its qualification
+  ledger. [Data-Plane
+  Concurrency](docs/src/data-plane-concurrency.md#periodically-snapshotted-branch-state) owns the
+  carrier; WASM guest state keeps the per-callback checkpoint [WASM State And
+  Recovery](docs/src/wasm-state.md) owns.
+
+### Inference
+
+- Every inferencer runs through one implementation: the model runs once for each admitted batch,
+  before any route, batched or one message at a time, and a route's `FLUSH` governs dispatch only.
+  `STATE` is a variation of one message at a time that carries its tensors from message to message,
+  never a second execution path, and an inferencer behaves differently with and without `STATE`
+  only where [State tensors](docs/src/processors.md#state-tensors) declares it.
+- An inferencer form the grammar accepts is honoured by the runtime in the same change; no accepted
+  clause, declaration or mode is stored and ignored. [Inferencer State And
+  Recovery](docs/src/inferencer-state.md) owns the carried state's contract.
 
 ### Domains and external systems
 

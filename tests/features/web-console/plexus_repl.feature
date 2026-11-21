@@ -565,6 +565,30 @@ Feature: Web console Plexus REPL
     Then selector ".suggestions" contains "value"
     And selector ".suggestions" does not contain "other_schema_field"
 
+  @window_collection_completion
+  Scenario: Web console completes the collection aggregates a window route's bound admits
+    Given a 1 node nervix cluster is started
+    And the active domain is "{{domain}}"
+    When these Plexus commands are executed on the leader node
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA reading ( device STRING, cpu F64 );
+      CREATE SCHEMA history ( cpu_values ARRAY<F64, 3> );
+      CREATE RELAY readings SCHEMA reading UNBRANCHED;
+      CREATE RELAY histories SCHEMA history UNBRANCHED;
+      """
+    And the web console is opened on the leader node
+    Then selector ".topbar-status .pill.ok" contains "CONNECTED"
+    When selector ".prompt-row input" is filled with "CREATE WINDOW PROCESSOR history FROM readings WIDTH 3 MESSAGES STEP 1 MESSAGES UNBRANCHED TO histories SET cpu_values = COLLECT_"
+    Then selector ".suggestions" contains "COLLECT_ARRAY"
+    And selector ".suggestions" contains "COLLECT_VEC"
+    When selector ".prompt-row input" is filled with "CREATE WINDOW PROCESSOR history FROM readings WIDTH 10s DURATION STEP 1s DURATION MAX STATE SIZE 1MiB UNBRANCHED TO histories SET cpu_values = COLLECT_"
+    Then selector ".suggestions" contains "COLLECT_VEC"
+    And selector ".suggestions" does not contain "COLLECT_ARRAY"
+    When selector ".prompt-row input" is filled with "CREATE WINDOW PROCESSOR history FROM readings WIDTH 3 MESSAGES STEP 1 MESSAGES UNBRANCHED TO histories SET cpu_values = COLLECT_ARRAY(co"
+    Then selector ".suggestions" contains "coalesce"
+    And selector ".suggestions" does not contain "COLLECT_"
+
   @connector_completion
   Scenario: Web console offers header functions only where the transport supports headers
     Given a 1 node nervix cluster is started

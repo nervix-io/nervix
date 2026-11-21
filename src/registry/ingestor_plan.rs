@@ -607,7 +607,7 @@ impl IngestorStartPlan {
                         )
                     })
             }
-            Some(nervix_models::IngestorInstances::PerPartition) => {
+            Some(nervix_models::IngestorInstances::PerTransportPartition) => {
                 !scheduled.units.is_empty()
                     && scheduled.units.len() <= usize::from(u16::MAX)
                     && (0..scheduled.units.len()).all(|index| {

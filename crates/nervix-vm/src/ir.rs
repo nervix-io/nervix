@@ -374,6 +374,24 @@ pub struct CompiledPredicate {
     program: nervix_primitives::sync::Arc<CompiledProgram>,
 }
 
+/// A read-only predicate that needs no clock, entropy or external function.
+#[derive(Debug, Clone)]
+pub struct DeterministicPredicate(CompiledPredicate);
+
+impl DeterministicPredicate {
+    pub(crate) fn new(predicate: CompiledPredicate) -> Self {
+        Self(predicate)
+    }
+
+    pub fn input_schema(&self) -> &StdArc<Schema> {
+        self.0.input_schema()
+    }
+
+    pub(crate) fn program(&self) -> &CompiledProgram {
+        self.0.program()
+    }
+}
+
 impl CompiledPredicate {
     pub(crate) fn new(program: nervix_primitives::sync::Arc<CompiledProgram>) -> Self {
         Self { program }

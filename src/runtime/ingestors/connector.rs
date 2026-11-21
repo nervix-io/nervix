@@ -1877,10 +1877,13 @@ impl RuntimeIngestorHost {
             .await
             .change_context(IngestorIntakeError::Dispatch);
         let flush = self.flush().await;
-        let completion = response_root.map(|(root, completion)| {
-            root.ack_success();
-            completion
-        });
+        let completion = match response_root {
+            Some((root, completion)) => {
+                root.ack_success();
+                Some(completion)
+            }
+            None => None,
+        };
         if let Err(error) = dispatch.and(flush) {
             reply.answer(EndpointPauseOutcome::Finished(
                 EndpointRequestOutcome::ProcessingFailed(

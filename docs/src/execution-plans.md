@@ -514,8 +514,9 @@ after it starts the tasks. The restore installs every branch its lifecycle names
 task takes no input until it has; [Restoring Processor Branches](./shutdown.md#restoring-processor-branches)
 owns its retry and its failure semantics. A stopped domain reconstructs
 passive surfaces; a running or paused domain reconstructs the applicable execution and intake
-state. [Shutdown And Recovery](./shutdown.md) and [WASM State And Recovery](./wasm-state.md) own
-the detailed handoff, checkpoint, duplicate-window, and restart guarantees.
+state. [Shutdown And Recovery](./shutdown.md), [WASM State And Recovery](./wasm-state.md) and
+[Inferencer State And Recovery](./inferencer-state.md) own the detailed handoff, checkpoint,
+duplicate-window, and restart guarantees.
 
 An archive restore first publishes the restored models as a stopped domain and recomputes its
 schedule. Archived node assignments are never installation authority. The coordinator requires

@@ -547,7 +547,87 @@ impl RuntimeMetrics {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use super::*;
+
+    /// The value Prometheus exposes for the `nervix_ingestor_read_ahead_dropped_payloads_total`
+    /// child whose labels are exactly `labels`, if it exposes one.
+    fn read_ahead_dropped(metrics: &RuntimeMetrics, labels: &BTreeMap<&str, &str>) -> Option<f64> {
+        let families = metrics.series.prometheus.registry.gather();
+        for family in &families {
+            if family.name() != "nervix_ingestor_read_ahead_dropped_payloads_total" {
+                continue;
+            }
+            for sample in family.get_metric() {
+                let mut exposed = BTreeMap::new();
+                for pair in sample.get_label() {
+                    exposed.insert(pair.name(), pair.value());
+                }
+                if exposed == *labels {
+                    return Some(sample.get_counter().value());
+                }
+            }
+        }
+        None
+    }
+
+    #[test]
+    fn a_read_ahead_overflow_report_counts_each_drop_in_its_units_registered_child() {
+        let metrics = RuntimeMetrics::default();
+        let domain = DomainName::parse("read_ahead").expect("valid domain");
+        let name = IngestorName::parse("input").expect("valid ingestor");
+        let node = ClusterNodeName::parse("node-1").expect("valid node");
+        let kind = IngestorEntityKind::Mqtt(nervix_models::MqttIngestorEntity::Topic);
+        let second_unit =
+            Unit::try_instance(1).assured("the fixture index fits the execution-unit range");
+        let first = metrics.ingestor_read_ahead_dropped_payloads(
+            &domain,
+            &name,
+            Unit::FIRST_INSTANCE,
+            Some(&node),
+            kind,
+        );
+        let second = metrics.ingestor_read_ahead_dropped_payloads(
+            &domain,
+            &name,
+            second_unit,
+            Some(&node),
+            kind,
+        );
+        let labels = |instance| {
+            BTreeMap::from([
+                ("domain", "read_ahead"),
+                ("ingestor", "input"),
+                ("physical_node_id", "node-1"),
+                ("instance", instance),
+                ("connector", "MQTT"),
+                ("entity", "TOPIC"),
+            ])
+        };
+        assert_eq!(
+            read_ahead_dropped(&metrics, &labels("0")),
+            Some(0.0),
+            "resolving a unit's report registers its child at zero"
+        );
+        assert_eq!(read_ahead_dropped(&metrics, &labels("1")), Some(0.0));
+
+        let connection = first.clone();
+        first.record_dropped_payload();
+        connection.record_dropped_payload();
+        second.record_dropped_payload();
+
+        assert_eq!(
+            read_ahead_dropped(&metrics, &labels("0")),
+            Some(2.0),
+            "the report and its clones count each drop once, in their unit's child"
+        );
+        assert_eq!(
+            read_ahead_dropped(&metrics, &labels("1")),
+            Some(1.0),
+            "another unit's report counts only into its own child"
+        );
+    }
 
     #[test]
     fn ingestor_reads_preserve_totals_and_retire_only_the_selected_unit() {

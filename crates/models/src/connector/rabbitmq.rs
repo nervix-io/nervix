@@ -247,7 +247,7 @@ impl IngestorDeclaration for RabbitMqQueueIngestor {
     const CAPABILITIES: IngestorEntityCapabilities = IngestorEntityCapabilities {
         external_partitions: crate::IngestorExternalPartitions::None,
         events: crate::DeclaredEvents::NONE,
-        instancing: crate::IngestorInstancingCapability::PerPartition,
+        instancing: crate::IngestorInstancingCapability::Instances,
         // An AMQP field table holds one value per name, in ascending order of name.
         headers: Some(HeaderModel::exact(HeaderLayout::SortedByName)),
         metadata: RABBITMQ_QUEUE_METADATA,
