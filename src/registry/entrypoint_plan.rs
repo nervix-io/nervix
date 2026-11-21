@@ -655,7 +655,7 @@ impl EntrypointPlans {
                                 ) => {
                                     source.assignment = Some(
                                         if ingestor.input.instances()
-                                            == Some(nervix_models::IngestorInstances::PerPartition)
+                                            == Some(nervix_models::IngestorInstances::PerTransportPartition)
                                         {
                                             nervix_models::ExternalPartitionRead::Assigned(
                                                 nervix_models::ExternalPartitionAssignment {

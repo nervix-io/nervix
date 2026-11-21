@@ -159,22 +159,35 @@ pub struct OptionDeclaration {
 }
 
 impl OptionDeclaration {
-    /// Independent consumers by count, or one consumer for each constructed branch partition.
+    /// Independent consumers by count, which compete for the same source: what an entity whose
+    /// transport keeps no partitions offers.
     pub const INSTANCES: Self = Self {
         keywords: "INSTANCES",
         presence: OptionPresence::Optional { default: Some("1") },
+        form: OptionForm::Choice(&[Self::INSTANCE_COUNT]),
+    };
+
+    /// Independent consumers by count, or one consumer for each constructed branch partition with
+    /// the transport's partitions dealt among them: what an entity whose transport keeps partitions
+    /// offers.
+    pub const TRANSPORT_PARTITION_INSTANCES: Self = Self {
+        keywords: "INSTANCES",
+        presence: OptionPresence::Optional { default: Some("1") },
         form: OptionForm::Choice(&[
+            Self::INSTANCE_COUNT,
             OptionChoice {
-                name: "<count>",
-                value: Some(OptionValue::Count),
-                example: "INSTANCES 2",
-            },
-            OptionChoice {
-                name: "PER PARTITION",
+                name: crate::IngestorInstances::PerTransportPartition.choice(),
                 value: None,
-                example: "INSTANCES PER PARTITION",
+                example: "INSTANCES PER TRANSPORT PARTITION",
             },
         ]),
+    };
+
+    /// `INSTANCES <count>`: a positive count of independent consumers.
+    const INSTANCE_COUNT: OptionChoice = OptionChoice {
+        name: "<count>",
+        value: Some(OptionValue::Count),
+        example: "INSTANCES 2",
     };
 
     /// `EVERY <duration>`: the domain-time cadence on which a polled ingestor reads.
