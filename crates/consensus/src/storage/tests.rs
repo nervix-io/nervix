@@ -52,7 +52,8 @@ async fn password_work_and_complete_credentials_survive_recovery() -> TestResult
         .await?;
     let mut expected = BTreeMap::new();
     for (index, name, iterations, seed) in [(2, "first", 10, 1), (3, "second", 20, 2)] {
-        let user = crate::UserCredentials {
+        let user = crate::UserRecord {
+            labels: nervix_models::EntityLabels::default(),
             name: nervix_models::UserName::parse(name)?,
             password_credential: nervix_models::PasswordCredential::from_parts(
                 iterations, [seed; 16], [seed; 64],
@@ -68,7 +69,8 @@ async fn password_work_and_complete_credentials_survive_recovery() -> TestResult
             )
             .await?;
     }
-    let unchanged = crate::UserCredentials {
+    let unchanged = crate::UserRecord {
+        labels: nervix_models::EntityLabels::default(),
         name: nervix_models::UserName::parse("first")?,
         password_credential: nervix_models::PasswordCredential::from_parts(30, [3; 16], [3; 64])?,
     };
@@ -374,6 +376,7 @@ impl Harness {
     fn domain(name: &str) -> DomainState {
         use meticulous::ResultExt as _;
         DomainState {
+            labels: nervix_models::EntityLabels::default(),
             id: DomainName::try_from(name).assured("the fixture generates identifier-shaped names"),
             config: DomainConfig {
                 pace: DomainPace::Unpaced,
@@ -575,6 +578,7 @@ async fn wasm_state_generation_transitions_survive_restart_and_require_the_mutat
                     [7; 32],
                     nervix_models::Timestamp::from_unix_nanos(1_700_000_010_000_000_000),
                     crate::CommandExecutionEffect::CreateUser {
+                        labels: nervix_models::EntityLabels::default(),
                         if_not_exists: false,
                         name: owner,
                         password_credential: nervix_models::PasswordCredential::from_parts(
@@ -1637,18 +1641,44 @@ async fn retained_log_bytes_follow_purge_truncation_and_reopen_without_flushing(
 #[nervix_primitives::test]
 async fn snapshots_recover_state_and_snapshot_metadata_atomically() -> TestResult {
     let mut source = Harness::new().await?;
-    source
-        .apply(
-            1,
-            ConsensusCommand::PutDomain {
-                domain_quota: nervix_licensing_vocabulary::Quota::Unlimited,
-                domain: Box::new(Harness::domain("source")),
-                mutation: None,
-            },
-        )
-        .await?;
+    let mut domain = Harness::domain("source");
+    let labels: nervix_models::EntityLabels = serde_json::from_value(serde_json::json!({
+        "owner": " Operations Δ ",
+        "empty": ""
+    }))?;
+    domain.labels = labels.clone();
+    let user = crate::UserRecord {
+        name: nervix_models::UserName::parse("operator")?,
+        password_credential: nervix_models::PasswordCredential::from_parts(10, [11; 16], [17; 64])?,
+        labels: labels.clone(),
+    };
+    let commands = [
+        ConsensusCommand::SeedClusterParameters {
+            values: Box::new(nervix_models::ClusterParameterValues::default()),
+        },
+        ConsensusCommand::CreateResourceCatalog {
+            domain: domain.id.clone(),
+            identifier: ResourceName::parse("orders")?,
+            labels: labels.clone(),
+        },
+        ConsensusCommand::PutDomain {
+            domain_quota: nervix_licensing_vocabulary::Quota::Unlimited,
+            domain: Box::new(domain),
+            mutation: None,
+        },
+        ConsensusCommand::CreateUser {
+            user: Box::new(user),
+        },
+    ];
+    for (index, command) in (1_u64..).zip(commands) {
+        source.apply(index, command).await?;
+    }
     let built = source.store.build_snapshot().await?;
     let expected = source.store.inner.state();
+    assert_eq!(
+        expected.entity_label_sets().collect::<Vec<_>>(),
+        [&labels; 3]
+    );
     for boundary in [StorageBoundary::BeforeCommit, StorageBoundary::AfterSync] {
         nervix_primitives::task::consume_budget().await;
         let mut target = Harness::new().await?;

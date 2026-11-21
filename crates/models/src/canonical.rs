@@ -763,7 +763,10 @@ impl Statement {
                         format!("UNPACED DOMAIN {}", create.body.id.as_str())
                     }
                 };
-                Ok(format!("CREATE {modifier}{pacing};"))
+                Ok(entity_labels::append_labels(
+                    format!("CREATE {modifier}{pacing};"),
+                    &create.labels,
+                ))
             }
             Self::CreateUser(create) => {
                 let modifier = if create.if_not_exists {
@@ -771,11 +774,12 @@ impl Statement {
                 } else {
                     ""
                 };
-                Ok(format!(
+                let creation = format!(
                     "CREATE {modifier}USER {} WITH PASSWORD {};",
                     create.body.name.as_str(),
                     string_literal(&create.body.password)
-                ))
+                );
+                Ok(entity_labels::append_labels(creation, &create.labels))
             }
             Self::CreateResource(create) => {
                 let modifier = if create.if_not_exists {
@@ -783,10 +787,8 @@ impl Statement {
                 } else {
                     ""
                 };
-                Ok(format!(
-                    "CREATE {modifier}RESOURCE {};",
-                    create.body.identifier.as_str()
-                ))
+                let creation = format!("CREATE {modifier}RESOURCE {};", create.identifier);
+                Ok(entity_labels::append_labels(creation, &create.labels))
             }
             Self::RebindResource(rebind) => {
                 let latest = match rebind.version {
@@ -3318,8 +3320,8 @@ pub fn ingest_quiesce_to_plexus(quiesce: &crate::IngestQuiesceMode) -> String {
         crate::IngestQuiesceMode::Reject { retry_after } => {
             format!("REJECT RETRY AFTER {retry_after}")
         }
-        crate::IngestQuiesceMode::EndpointBuffer { max_size } => {
-            format!("BUFFER MAX SIZE {max_size}")
+        crate::IngestQuiesceMode::EndpointBuffer { max_size, response } => {
+            format!("BUFFER MAX SIZE {max_size} {}", response.phrase())
         }
     }
 }
@@ -5627,11 +5629,12 @@ mod tests {
                         mode: EndpointIngestMode::NoAck,
                         quiesce: crate::IngestQuiesceMode::EndpointBuffer {
                             max_size: "1MiB".to_string(),
+                            response: crate::EndpointPauseResponse::Immediate,
                         },
                     }),
                 ),
                 "CREATE WEBSOCKETS ENDPOINT INGESTOR ws_endpoint_ingestor\n  FROM orders_socket \
-                 MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB",
+                 MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE",
             ),
             (
                 orders_ingestor(

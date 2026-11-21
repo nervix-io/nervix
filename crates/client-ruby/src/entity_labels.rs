@@ -27,7 +27,7 @@ impl EntityLabelsInspection {
     pub(crate) fn new(owner: host::EntityLabelsInspection) -> Self {
         Self { owner }
     }
-    fn domain(&self) -> &str {
+    fn domain(&self) -> Option<&str> {
         self.owner.domain()
     }
     fn entity_kind(&self) -> &str {

@@ -53,7 +53,7 @@ CREATE HTTP ENDPOINT partner_ingress ON edge PATH '/partner-orders';
 
 CREATE HTTP ENDPOINT INGESTOR partner_order_source
   FROM partner_ingress MODE NO ACK
-  ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING partner_order_codec
+  ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING partner_order_codec
   TO partner_orders
     INHERIT ALL
     UNBRANCHED

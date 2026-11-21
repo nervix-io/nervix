@@ -575,6 +575,9 @@ into the REPL and runs it, so the console never does anything you could not have
 
 - **DESCRIBE** — the runtime view of the item, where the item has a `DESCRIBE` form
 - **SHOW CREATE** — the Plexus that declares it
+- **Change pause settings** opens the current settings of an HTTP or WebSocket endpoint ingestor.
+  Choose when to respond, enter a buffer size or retry delay, and select **Save** to run
+  `ALTER … SET QUIESCE`. You can type the same command in the REPL.
 - **SUBSCRIBE** — relays only; opens the subscription form described below for that relay, whose
   tab runs the same `CREATE SUBSCRIPTION` the REPL accepts
 - **PLACE** — ingestors, processors, emitters and relays; opens a new corridor placement draft

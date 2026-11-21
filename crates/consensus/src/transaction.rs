@@ -272,6 +272,7 @@ pub(crate) fn test_commit_plan(
             TransactionCommitPlanStep {
                 impact,
                 kind: TransactionCommitStepKind::CreateResource {
+                    labels: nervix_models::EntityLabels::default(),
                     resource: ResourceName::parse(&resource)
                         .assured("the bounded test index produces an identifier-shaped resource"),
                     already_existed: false,
@@ -1308,6 +1309,12 @@ pub enum TransactionStepEffect {
     CreateResourceCatalog {
         inputs: Box<DomainPlanningInputs>,
         identifier: ResourceName,
+        labels: nervix_models::EntityLabels,
+    },
+    EditResourceLabels {
+        inputs: Box<DomainPlanningInputs>,
+        identifier: ResourceName,
+        labels: nervix_models::EntityLabels,
     },
     ResetWasmState {
         inputs: Box<DomainPlanningInputs>,
@@ -1323,7 +1330,8 @@ impl TransactionStepEffect {
             Self::ReplaceDomainSchedule { inputs, .. }
             | Self::StartDomain { inputs, .. }
             | Self::StopDomain { inputs, .. }
-            | Self::CreateResourceCatalog { inputs, .. } => inputs,
+            | Self::CreateResourceCatalog { inputs, .. }
+            | Self::EditResourceLabels { inputs, .. } => inputs,
             Self::ResetWasmState { inputs, .. } => inputs,
         }
     }

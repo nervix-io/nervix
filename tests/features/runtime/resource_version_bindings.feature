@@ -516,7 +516,7 @@ Feature: Resource version bindings
     When these Plexus commands are executed through the client on the leader node
       """
       CREATE UNPACED DOMAIN {{domain}};
-      CREATE RESOURCE lookup_bundle;
+      CREATE RESOURCE lookup_bundle LABELS { 'owner' = 'Orders' };
       UPLOAD RESOURCE lookup_bundle VERSION '{{lookup_v1}}';
       CREATE SCHEMA lookup_entry (id STRING, value I64);
       CREATE WIRE JSON SCHEMA lookup_wire MODE STRICT (id string, value integer);
@@ -527,6 +527,15 @@ Feature: Resource version bindings
         PATH 'lookup.jsonl'
         DECODE USING lookup_codec;
       UPLOAD RESOURCE lookup_bundle VERSION '{{lookup_v2}}';
+      """
+    When these Plexus commands are executed on the leader node
+      """
+      SET LABELS ON RESOURCE lookup_bundle { 'status' = 'checked' };
+      SHOW CREATE HASH MAP lookup_by_id;
+      """
+    Then the last command output contains
+      """
+      FROM RESOURCE lookup_bundle VERSION 1
       """
     When these Plexus commands are executed on the leader node
       """
@@ -598,6 +607,14 @@ Feature: Resource version bindings
     And the last command output contains
       """
       - kind=hash_map name=lookup_by_id from=2 to=2 unchanged
+      """
+    When these Plexus commands are executed on the leader node
+      """
+      SHOW LABELS ON RESOURCE lookup_bundle FORMAT JSON;
+      """
+    Then the last command output is a JSON document where
+      """
+      /labels = {"owner":"Orders","status":"checked"}
       """
 
     Examples:
@@ -906,7 +923,7 @@ Feature: Resource version bindings
       CREATE HTTP ENDPOINT ingress ON edge PATH '/features';
       CREATE HTTP ENDPOINT INGESTOR feature_ingestor
         FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING features_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING features_codec
         TO features
         INHERIT ALL
         UNBRANCHED

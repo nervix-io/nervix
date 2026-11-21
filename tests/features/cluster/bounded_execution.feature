@@ -84,7 +84,7 @@ Feature: Bounded execution and transient memory
       CREATE HTTP ENDPOINT ingress ON edge PATH '/notifications';
       CREATE HTTP ENDPOINT INGESTOR notification_ingestor
         FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_in
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING notification_in
         TO notifications
         INHERIT ALL
         UNBRANCHED
@@ -138,7 +138,7 @@ Feature: Bounded execution and transient memory
       CREATE HTTP ENDPOINT ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR retained_ingestor
         FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING retained_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING retained_codec
         TO retained_events INHERIT ALL UNBRANCHED
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE SUBSCRIPTION retained_subscription TO retained_events;

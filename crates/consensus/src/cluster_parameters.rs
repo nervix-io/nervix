@@ -110,6 +110,20 @@ pub(super) fn apply(
             issue: error.current_context().clone(),
         });
     }
+    let label_limits = nervix_models::EntityLabelLimits::from(&values);
+    if label_limits != nervix_models::EntityLabelLimits::from(&expected.current.values) {
+        // These records are checked in the same state-machine write that publishes the policy,
+        // so a concurrent label edit and a limit reduction cannot both admit a forbidden set.
+        for labels in state.entity_label_sets() {
+            if let Err(error) = labels.validate(&label_limits) {
+                return AppliedConsensusCommand::conflict(ConsensusConflict::EntityLabels {
+                    issue: Box::new(crate::EntityLabelWriteError::InvalidLabels {
+                        issue: error.current_context().clone(),
+                    }),
+                });
+            }
+        }
+    }
     let record = ClusterParameterRecord {
         revision: expected
             .current

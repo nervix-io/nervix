@@ -37,7 +37,10 @@ use crate::registry::{
 #[derive(Debug, Clone)]
 pub(crate) enum RegistryMutation<Version = u64> {
     Create(Box<Model<Version>>),
-    Labels(nervix_models::MutateEntityLabels),
+    Labels {
+        entity: NodeRef,
+        mutation: nervix_models::EntityLabelMutation,
+    },
     AlterSchema(AlterSchema),
     AlterWireJsonSchema(AlterWireSchema<JsonType>),
     AlterWireCborSchema(AlterWireSchema<CborType>),
@@ -71,7 +74,13 @@ impl TryFrom<&Statement> for RegistryMutation<RequestedResourceVersion> {
 
     fn try_from(statement: &Statement) -> Result<Self, Self::Error> {
         let mutation = match statement {
-            Statement::MutateEntityLabels(edit) => Self::Labels(edit.clone()),
+            Statement::MutateEntityLabels(nervix_models::MutateEntityLabels {
+                entity: nervix_models::EntityLabelTarget::Model(entity),
+                mutation,
+            }) => Self::Labels {
+                entity: entity.clone(),
+                mutation: mutation.clone(),
+            },
             Statement::Create(create) => Self::Create(create.body.clone()),
             Statement::AlterSchema(alter) => Self::AlterSchema(alter.clone()),
             Statement::AlterWireJsonSchema(alter) => Self::AlterWireJsonSchema(alter.clone()),
@@ -125,7 +134,7 @@ impl RegistryMutation<RequestedResourceVersion> {
             Self::Create(model) => {
                 RegistryMutation::Create(Box::new(model.try_map_resource_versions(pin)?))
             }
-            Self::Labels(edit) => RegistryMutation::Labels(edit),
+            Self::Labels { entity, mutation } => RegistryMutation::Labels { entity, mutation },
             Self::AlterSchema(alter) => RegistryMutation::AlterSchema(alter),
             Self::AlterWireJsonSchema(alter) => RegistryMutation::AlterWireJsonSchema(alter),
             Self::AlterWireCborSchema(alter) => RegistryMutation::AlterWireCborSchema(alter),
@@ -150,7 +159,7 @@ impl<Version: Clone> RegistryMutation<Version> {
     pub(in crate::registry) fn target_key(&self) -> NodeRef {
         match self {
             Self::Create(model) => model.node_ref(),
-            Self::Labels(edit) => edit.entity.clone(),
+            Self::Labels { entity, .. } => entity.clone(),
             Self::AlterSchema(alter) => NodeRef::new(ModelKind::Schema, alter.schema.clone()),
             Self::AlterWireJsonSchema(alter) => {
                 NodeRef::new(ModelKind::WireJsonSchema, alter.schema.clone())
@@ -216,7 +225,7 @@ impl<Version: Clone> RegistryMutation<Version> {
     /// name the statement that caused it.
     fn apply_alteration(&self, model: &mut Model<Version>) {
         match (self, model) {
-            (Self::Labels(edit), model) => model.labels_mut().apply(&edit.mutation),
+            (Self::Labels { mutation, .. }, model) => model.labels_mut().apply(mutation),
             (Self::AlterSchema(alter), Model::Schema(schema)) => {
                 schema
                     .apply_alter(alter)

@@ -33,7 +33,7 @@ Feature: Materialized relay state
 
       CREATE HTTP ENDPOINT INGESTOR root_state_ingestor
         FROM root_state_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING root_event_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING root_event_codec
         TO root_state
           INHERIT ALL
           UNBRANCHED
@@ -80,7 +80,7 @@ Feature: Materialized relay state
       CREATE HTTP ENDPOINT readings_ingress ON edge PATH '/readings';
       CREATE HTTP ENDPOINT INGESTOR reading_ingestor
         FROM readings_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING reading_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING reading_codec
         TO readings INHERIT ALL BRANCHED BY by_reading_tenant
         SET tenant = message.tenant
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
@@ -157,7 +157,7 @@ Feature: Materialized relay state
         PATH '/ingest';
         CREATE HTTP ENDPOINT INGESTOR state_notifications
         FROM state_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING notification_codec
         TO tenant_state
         INHERIT ALL
         BRANCHED BY by_state_notifications
@@ -167,7 +167,7 @@ Feature: Materialized relay state
         ON GENERAL ERROR LOG;
         CREATE HTTP ENDPOINT INGESTOR http_notifications
         FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING notification_codec
         TO incoming_notifications
         INHERIT ALL
         BRANCHED BY by_state_notifications
@@ -285,7 +285,7 @@ Feature: Materialized relay state
       CREATE HTTP ENDPOINT dependency_ingress ON edge PATH '/dependency-input';
       CREATE HTTP ENDPOINT INGESTOR first_state_ingestor
         FROM first_state_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING dependency_event_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING dependency_event_codec
         TO first_dependency_state
           INHERIT ALL
           BRANCHED BY by_dependency_tenant
@@ -295,7 +295,7 @@ Feature: Materialized relay state
         ON GENERAL ERROR LOG;
       CREATE HTTP ENDPOINT INGESTOR second_state_ingestor
         FROM second_state_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING dependency_event_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING dependency_event_codec
         TO second_dependency_state
           INHERIT ALL
           BRANCHED BY by_dependency_tenant
@@ -305,7 +305,7 @@ Feature: Materialized relay state
         ON GENERAL ERROR LOG;
       CREATE HTTP ENDPOINT INGESTOR dependency_ingestor
         FROM dependency_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING dependency_event_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING dependency_event_codec
         TO dependency_input
           INHERIT ALL
           BRANCHED BY by_dependency_tenant
@@ -428,7 +428,7 @@ Feature: Materialized relay state
         PATH '/ingest';
         CREATE HTTP ENDPOINT INGESTOR http_notifications
         FROM http_notifications_endpoint MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING notification_codec
         TO notifications
         INHERIT ALL
         BRANCHED BY by_http_notifications
@@ -504,7 +504,7 @@ Feature: Materialized relay state
         PATH '/ingest';
         CREATE HTTP ENDPOINT INGESTOR http_notifications
         FROM http_notifications_endpoint MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING notification_codec
         TIMESTAMP NOW
         TO notifications
         INHERIT ALL
@@ -572,7 +572,7 @@ Feature: Materialized relay state
         PATH '/ingest';
         CREATE HTTP ENDPOINT INGESTOR http_notifications
         FROM http_notifications_endpoint MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING notification_codec
         TO notifications
         INHERIT ALL
         BRANCHED BY by_http_notifications
@@ -653,7 +653,7 @@ Feature: Materialized relay state
         PATH '/state';
         CREATE HTTP ENDPOINT INGESTOR state_notifications
         FROM state_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 32MiB DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 32MiB RESPOND IMMEDIATE DECODE USING notification_codec
         TO tenant_state
         INHERIT ALL
         BRANCHED BY by_tenant_notifications

@@ -11,11 +11,25 @@
 )]
 
 use meticulous::ResultExt as _;
-use nervix_models::{EntityLabels, LabelAssignment, LabelKey};
+use nervix_models::{
+    AdministrativeLabelTarget, EntityLabelTarget, EntityLabels, LabelAssignment, LabelKey, NodeRef,
+};
 
 use crate::Arbitrary;
 
 impl Arbitrary<'_> {
+    pub fn entity_label_target(&mut self) -> EntityLabelTarget {
+        match self.entropy.byte() % 4 {
+            0 => {
+                let kind = self.model_kind();
+                EntityLabelTarget::Model(NodeRef::new(kind, self.model_name_of(kind)))
+            }
+            1 => EntityLabelTarget::Resource(self.name()),
+            2 => EntityLabelTarget::Administrative(AdministrativeLabelTarget::Domain(self.name())),
+            _ => EntityLabelTarget::Administrative(AdministrativeLabelTarget::User(self.name())),
+        }
+    }
+
     pub fn entity_labels(&mut self) -> EntityLabels {
         let count = usize::from(self.entropy.byte() % 8);
         let mut entries = Vec::with_capacity(count);

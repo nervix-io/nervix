@@ -190,7 +190,7 @@ Feature: A domain STOP lets the work already inside the domain finish
       CREATE VHOST edge stop-state-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT ingress ON edge PATH '/readings';
       CREATE HTTP ENDPOINT INGESTOR reading_ingestor FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING reading_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING reading_codec
         TO readings INHERIT ALL BRANCHED BY by_tenant SET tenant = message.tenant
         FLUSH EACH 20s MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE DEDUPLICATOR unique_ids
@@ -1055,8 +1055,9 @@ Feature: A domain STOP lets the work already inside the domain finish
       """
     Then HTTP receiver "down" eventually receives at least 1 request
     # The destination refuses every attempt, so the emitter keeps the record waiting for a retry,
-    # which the stop does not wait for.
-    When these Plexus commands are executed on the leader node
+    # which the stop does not wait for. A STOP that outlasts its bound fails with every node's
+    # description of the domain, which names what the stop still waits for.
+    When within "60s" these Plexus commands complete on the leader node
       """
       STOP;
       """
@@ -1071,7 +1072,7 @@ Feature: A domain STOP lets the work already inside the domain finish
     And within "2s" Kafka consumer group "stop_down_group_{{test_id}}" next offset for topic "stop_down_{{test_id}}" partition 0 is "below 1"
     # The destination recovers, and the acknowledged source delivers the cut record again.
     Given HTTP receiver "down" answers unscripted requests with "respond 204"
-    When these Plexus commands are executed on the leader node
+    When within "60s" these Plexus commands complete on the leader node
       """
       START;
       """

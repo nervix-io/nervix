@@ -802,6 +802,7 @@ impl Arbitrary<'_> {
             DomainStatus::Running | DomainStatus::Paused => None,
         };
         DomainState {
+            labels: nervix_models::EntityLabels::default(),
             id,
             config: DomainConfig { pace },
             status,

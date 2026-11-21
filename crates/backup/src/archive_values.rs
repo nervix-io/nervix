@@ -207,9 +207,18 @@ impl<'a> Values<'a> {
                 name: UserName::parse(&format!("user_{index}"))
                     .assured("indexed synthetic user names are valid"),
                 password_credential: self.0.password_credential(),
+                labels: self.0.entity_labels(),
             });
         }
-        UsersRecord { users }
+        UsersRecord {
+            users,
+            label_policy: nervix_models::EntityLabelPolicy {
+                revision: std::num::NonZeroU64::MIN,
+                limits: nervix_models::EntityLabelLimits::from(
+                    &nervix_models::ClusterParameterValues::default(),
+                ),
+            },
+        }
     }
 
     pub fn domain_record(&mut self, domain: DomainName) -> DomainRecord {
@@ -254,10 +263,12 @@ impl<'a> Values<'a> {
                 resource: ResourceName::parse(&format!("resource_{index}"))
                     .assured("indexed resource names are valid"),
                 next_version: self.0.positive_u64(),
+                labels: self.0.entity_labels(),
             });
         }
         DomainRecord {
             domain,
+            labels: self.0.entity_labels(),
             pace,
             status: self.0.entropy().pick([
                 DomainStatus::Stopped,
@@ -440,6 +451,7 @@ impl<'a> Values<'a> {
             record.resources = vec![DeclaredResource {
                 resource: resource_name.clone(),
                 next_version: NonZeroU64::new(4).assured("four is positive"),
+                labels: self.0.entity_labels(),
             }];
             let capture = DomainCapture {
                 entity_label_policy: nervix_models::EntityLabelPolicy {

@@ -436,6 +436,7 @@ impl Arbitrary<'_> {
                     CreateDomain {
                         id: self.name(),
                         config: DomainConfig { pace },
+                        labels: self.entity_labels(),
                     },
                     if_not_exists,
                 ))
@@ -446,6 +447,7 @@ impl Arbitrary<'_> {
                     CreateUser {
                         name: self.name(),
                         password: self.string(),
+                        labels: self.entity_labels(),
                     },
                     if_not_exists,
                 ))
@@ -455,6 +457,7 @@ impl Arbitrary<'_> {
                 Statement::CreateResource(CreateStatement::new(
                     CreateResource {
                         identifier: self.name(),
+                        labels: self.entity_labels(),
                     },
                     if_not_exists,
                 ))
@@ -786,8 +789,7 @@ impl Arbitrary<'_> {
                 key: self.subscription_literal(),
             }),
             StatementVariant::MutateEntityLabels => {
-                let kind = self.model_kind();
-                let entity = nervix_models::NodeRef::new(kind, self.model_name_of(kind));
+                let entity = self.entity_label_target();
                 let labels = self.entity_labels();
                 let mutation = if self.entropy.flag() {
                     nervix_models::EntityLabelMutation::Set(labels)
@@ -806,14 +808,10 @@ impl Arbitrary<'_> {
                     mutation,
                 })
             }
-            StatementVariant::ShowLabels => {
-                let kind = self.model_kind();
-                let entity = nervix_models::NodeRef::new(kind, self.model_name_of(kind));
-                Statement::ShowLabels(nervix_models::ShowLabels {
-                    entity,
-                    format: self.inspection_format(),
-                })
-            }
+            StatementVariant::ShowLabels => Statement::ShowLabels(nervix_models::ShowLabels {
+                entity: self.entity_label_target(),
+                format: self.inspection_format(),
+            }),
             StatementVariant::ShowCreate => {
                 let kind = self.model_kind();
                 Statement::ShowCreate(ShowCreate {
@@ -1065,7 +1063,7 @@ impl Arbitrary<'_> {
 
     /// The name of a Model of `kind`. Plexus reads a relay's name wherever it names a relay, so in
     /// the Plexus domain the name of a relay avoids the words Plexus refuses for one.
-    fn model_name_of(&mut self, kind: ModelKind) -> ModelName {
+    pub(crate) fn model_name_of(&mut self, kind: ModelKind) -> ModelName {
         match kind {
             ModelKind::Relay => self.name_refusing::<ModelName>(RelayName::REFUSED_IN_PLEXUS),
             _ => self.name(),

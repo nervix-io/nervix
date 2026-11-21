@@ -73,15 +73,15 @@ Client CONFIG keys below come from the same declaration used by validation, comp
 | Connector events | None declared. |  |
 | Instancing | single |  |
 | External partitions | No enumerable external partition set. |  |
-| Quiesce (complete bodies after ON QUIESCE) | REJECT RETRY AFTER 5s<br>BUFFER MAX SIZE 64MiB |  |
+| Quiesce (complete bodies after ON QUIESCE) | REJECT RETRY AFTER 5s<br>BUFFER MAX SIZE 64MiB RESPOND IMMEDIATE<br>BUFFER MAX SIZE 64MiB RESPOND AFTER RESUME |  |
 | RATE LIMIT | Refused in every mode: the entity cannot hold its source back. |  |
 | Metadata | metadata.method: STRING OPTIONAL<br>metadata.path: STRING OPTIONAL<br>metadata.query: STRING OPTIONAL<br>metadata.remote_addr: STRING OPTIONAL<br>metadata.host: STRING OPTIONAL<br>metadata.remote_ip: STRING OPTIONAL |  |
 | Payload facts | payload.bytes: U64 |  |
 | Every live node | yes |  |
 | Position class | none |  |
 | Acknowledgement confirmation | none |  |
-| Buffers | a request head: set by node setting `--listener-header-bytes`; when exceeded, refuses the request as too large; the same request sent again is refused again<br>a request body: set by node setting `--http-body-bytes`; when exceeded, refuses the request as too large; the same request sent again is refused again<br>the request input of every HTTP endpoint connection on the node together, read buffers included: set by node setting `--execution-intake-memory-bytes`; when full, immediately refuses the request for its sender to retry<br>unresolved requests under MODE ACK, per node and ingestor: set by MODE ACK MAX; when full, immediately refuses the request for its sender to retry |  |
-| Network waits | a client's request head: node setting `--listener-header-timeout`; at the bound, closes the connection without an answer<br>a client's request body: node setting `--http-body-timeout`; at the bound, refuses the request as timed out<br>graph acknowledgement under MODE ACK: `ACK TIMEOUT, or the exact intake lifetime ending` |  |
+| Buffers | a request head: set by node setting `--listener-header-bytes`; when exceeded, refuses the request as too large; the same request sent again is refused again<br>a request body: set by node setting `--http-body-bytes`; when exceeded, refuses the request as too large; the same request sent again is refused again<br>the request input of every HTTP endpoint connection on the node together, read buffers included: set by node setting `--execution-intake-memory-bytes`; when full, immediately refuses the request for its sender to retry<br>unresolved requests under MODE ACK, per node and ingestor: set by MODE ACK MAX; when full, immediately refuses the request for its sender to retry<br>request bodies and their metadata retained during a pause, per node and ingestor: set by ON QUIESCE BUFFER MAX SIZE; when full, immediately refuses the request for its sender to retry |  |
+| Network waits | a client's request head: node setting `--listener-header-timeout`; at the bound, closes the connection without an answer<br>a client's request body: node setting `--http-body-timeout`; at the bound, refuses the request as timed out<br>graph acknowledgement under MODE ACK: `ACK TIMEOUT from complete body arrival, client disconnect, or intake ending`<br>HTTP MODE NO ACK response under RESPOND AFTER RESUME: `resume, client disconnect, or intake ending` |  |
 | Driver limits | None declared. |  |
 | Stalled-peer checks | None: no client deadline key bounds a wait. |  |
 
@@ -373,15 +373,15 @@ Client CONFIG keys below come from the same declaration used by validation, comp
 | Connector events | None declared. |  |
 | Instancing | single |  |
 | External partitions | No enumerable external partition set. |  |
-| Quiesce (complete bodies after ON QUIESCE) | REJECT RETRY AFTER 5s<br>BUFFER MAX SIZE 64MiB |  |
+| Quiesce (complete bodies after ON QUIESCE) | REJECT RETRY AFTER 5s<br>BUFFER MAX SIZE 64MiB RESPOND IMMEDIATE<br>BUFFER MAX SIZE 64MiB RESPOND AFTER RESUME |  |
 | RATE LIMIT | Refused in every mode: the entity cannot hold its source back. |  |
 | Metadata | metadata.frame_type: STRING OPTIONAL<br>metadata.remote_addr: STRING OPTIONAL<br>metadata.path: STRING OPTIONAL<br>metadata.remote_ip: STRING OPTIONAL |  |
 | Payload facts | payload.bytes: U64 |  |
 | Every live node | yes |  |
 | Position class | none |  |
 | Acknowledgement confirmation | none |  |
-| Buffers | the upgrade request head: set by node setting `--listener-header-bytes`; when exceeded, refuses the request as too large; the same request sent again is refused again<br>an incoming frame payload, per session: set by node setting `--websocket-frame-bytes`; when exceeded, closes only that peer's session<br>an incoming message assembled from frames, per session: set by node setting `--websocket-message-bytes`; when exceeded, closes only that peer's session<br>unresolved data frames under MODE ACK, per node and ingestor: set by MODE ACK MAX; when full, immediately refuses the request for its sender to retry |  |
-| Network waits | the upgrade request head: node setting `--listener-header-timeout`; at the bound, closes the connection without an answer<br>the signaling handshake: `the signaling protocol's TIMEOUT`<br>reading the next frame: node setting `--listener-idle-timeout`; at the bound, closes that session after no read or write byte progress<br>graph acknowledgement under MODE ACK: `ACK TIMEOUT, or the exact intake lifetime ending` |  |
+| Buffers | the upgrade request head: set by node setting `--listener-header-bytes`; when exceeded, refuses the request as too large; the same request sent again is refused again<br>an incoming frame payload, per session: set by node setting `--websocket-frame-bytes`; when exceeded, closes only that peer's session<br>an incoming message assembled from frames, per session: set by node setting `--websocket-message-bytes`; when exceeded, closes only that peer's session<br>unresolved data frames under MODE ACK, per node and ingestor: set by MODE ACK MAX; when full, immediately refuses the request for its sender to retry<br>data frames and their metadata retained during a pause, per node and ingestor: set by ON QUIESCE BUFFER MAX SIZE; when exceeded, closes only that peer's session<br>a data frame waiting for admission under RESPOND AFTER RESUME: at most 1 frame per connection; when exceeded, closes only that peer's session<br>a message read as the previous frame enters the graph: at most 1 message per connection; when full, holds back what fills it |  |
+| Network waits | the upgrade request head: node setting `--listener-header-timeout`; at the bound, closes the connection without an answer<br>the signaling handshake: `the signaling protocol's TIMEOUT`<br>reading the next frame: node setting `--listener-idle-timeout`; at the bound, closes that session after no read or write byte progress<br>graph acknowledgement under MODE ACK: `ACK TIMEOUT from complete frame arrival, client disconnect, or intake ending` |  |
 | Driver limits | None declared. |  |
 | Stalled-peer checks | None: no client deadline key bounds a wait. |  |
 

@@ -18,7 +18,7 @@ Feature: Window statistics
       CREATE VHOST edge overflow-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT ingress ON edge PATH '/readings';
       CREATE HTTP ENDPOINT INGESTOR overflow_ingestor FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING overflow_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING overflow_codec
         TO overflow_readings INHERIT ALL BRANCHED BY overflow_branch SET tenant = message.tenant
         FLUSH EACH 1s MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE WINDOW PROCESSOR overflow_window FROM overflow_readings WIDTH 17 MESSAGES STEP 17 MESSAGES
@@ -96,7 +96,7 @@ Feature: Window statistics
       CREATE VHOST edge run-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT ingress ON edge PATH '/runs';
       CREATE HTTP ENDPOINT INGESTOR run_ingestor FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING run_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING run_codec
         TO run_readings INHERIT ALL BRANCHED BY run_branch
         SET tenant = message.tenant
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
@@ -188,7 +188,7 @@ Feature: Window statistics
       CREATE HTTP ENDPOINT ingress ON edge PATH '/readings';
       CREATE HTTP ENDPOINT INGESTOR reading_ingestor
         FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING reading_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING reading_codec
         TO readings
         INHERIT ALL
         BRANCHED BY by_reading_tenant
@@ -315,7 +315,7 @@ Feature: Window statistics
       CREATE HTTP ENDPOINT ingress ON edge PATH '/sparse';
       CREATE HTTP ENDPOINT INGESTOR sparse_ingestor
         FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING sparse_reading_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING sparse_reading_codec
         TO sparse_readings
         INHERIT ALL
         BRANCHED BY by_sparse_tenant
@@ -440,7 +440,7 @@ Feature: Window statistics
       CREATE HTTP ENDPOINT ingress ON edge PATH '/measurements';
       CREATE HTTP ENDPOINT INGESTOR measurement_ingestor
         FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING measurement_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING measurement_codec
         TO measurements
         INHERIT ALL
         BRANCHED BY by_measurement_tenant
@@ -585,7 +585,7 @@ Feature: Window statistics
       CREATE HTTP ENDPOINT ingress ON edge PATH '/readings';
       CREATE HTTP ENDPOINT INGESTOR reading_ingestor
         FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING reading_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING reading_codec
         TO readings
         INHERIT ALL
         BRANCHED BY by_restart_tenant

@@ -60,7 +60,8 @@ fn topic_declarations_match_the_replayable_log_and_its_producer() {
         IngestQuiesceKind::Buffer,
         IngestQuiesceKind::Drop,
         IngestQuiesceKind::Reject,
-        IngestQuiesceKind::EndpointBuffer,
+        IngestQuiesceKind::EndpointBufferImmediate,
+        IngestQuiesceKind::EndpointBufferAfterResume,
     ] {
         assert_eq!(ingest.declared_quiesce(undeclared), None);
     }

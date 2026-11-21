@@ -17,7 +17,7 @@ Feature: Web console visual deduplicator and reorderer creation
       CREATE VHOST visual_dedup_host dedup-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT visual_dedup_endpoint ON visual_dedup_host PATH '/dedup';
       CREATE HTTP ENDPOINT INGESTOR visual_dedup_ingestor FROM visual_dedup_endpoint MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING visual_dedup_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING visual_dedup_codec
         TO visual_dedup_input INHERIT ALL BRANCHED BY visual_dedup_tenant SET tenant = message.tenant
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
@@ -108,7 +108,7 @@ Feature: Web console visual deduplicator and reorderer creation
       CREATE VHOST visual_reorder_host reorder-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT visual_reorder_endpoint ON visual_reorder_host PATH '/reorder';
       CREATE HTTP ENDPOINT INGESTOR visual_reorder_ingestor FROM visual_reorder_endpoint MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING visual_reorder_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING visual_reorder_codec
         TO visual_reorder_input INHERIT ALL BRANCHED BY visual_reorder_tenant SET tenant = message.tenant
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;

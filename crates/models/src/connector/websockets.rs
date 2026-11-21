@@ -208,6 +208,33 @@ const WEBSOCKETS_ENDPOINT_BOUNDS: DeclaredBounds = DeclaredBounds {
                 overflow: BufferOverflow::RefuseRequest,
             },
         },
+        DeclaredBuffer {
+            holds: "data frames and their metadata retained during a pause, per node and ingestor",
+            bound: BufferBound::Bounded {
+                capacity: BufferCapacity::Setting("ON QUIESCE BUFFER MAX SIZE"),
+                overflow: BufferOverflow::CloseSession,
+            },
+        },
+        DeclaredBuffer {
+            holds: "a data frame waiting for admission under RESPOND AFTER RESUME",
+            bound: BufferBound::Bounded {
+                capacity: BufferCapacity::Items {
+                    count: 1,
+                    unit: "frame per connection",
+                },
+                overflow: BufferOverflow::CloseSession,
+            },
+        },
+        DeclaredBuffer {
+            holds: "a message read as the previous frame enters the graph",
+            bound: BufferBound::Bounded {
+                capacity: BufferCapacity::Items {
+                    count: 1,
+                    unit: "message per connection",
+                },
+                overflow: BufferOverflow::Backpressure,
+            },
+        },
     ],
     waits: &[
         DeclaredWait {
@@ -230,7 +257,9 @@ const WEBSOCKETS_ENDPOINT_BOUNDS: DeclaredBounds = DeclaredBounds {
         },
         DeclaredWait {
             wait: "graph acknowledgement under MODE ACK",
-            bound: WaitBound::Clause("ACK TIMEOUT, or the exact intake lifetime ending"),
+            bound: WaitBound::Clause(
+                "ACK TIMEOUT from complete frame arrival, client disconnect, or intake ending",
+            ),
         },
     ],
     driver_limits: &[],
@@ -346,7 +375,11 @@ impl IngestorDeclaration for WebsocketsEndpointIngestor {
         position_class: PositionClass::None,
         acknowledgement_confirmation: AcknowledgementConfirmation::None,
         delivery: &[DeclaredDelivery::NO_ACK, DeclaredDelivery::ACK_REQUEST],
-        quiesce: &[DeclaredQuiesce::REJECT, DeclaredQuiesce::ENDPOINT_BUFFER],
+        quiesce: &[
+            DeclaredQuiesce::REJECT,
+            DeclaredQuiesce::ENDPOINT_BUFFER_IMMEDIATE,
+            DeclaredQuiesce::ACKNOWLEDGED_ENDPOINT_BUFFER_AFTER_RESUME,
+        ],
         // Clients send frames over their connections whenever they choose.
         rate_limit: crate::RateLimitDeclaration::Unheld,
         locator: None,

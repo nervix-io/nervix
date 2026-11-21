@@ -2702,11 +2702,13 @@ policies are applicable. Domain pace is a separate domain-creation choice.
 ## Entity Label Inspection
 
 `CommandOutcome.entity_labels` carries one `EntityLabelsInspection`, independently of the display
-message and selected `TEXT` or `JSON` presentation. It contains the existing domain/node identity,
-the complete exact string map, captured committed policy revision and four acceptance limits.
-Its required view union is committed, with a required applied revision (zero included), or staged,
-with the complete existing transaction preview identity. Neither variant supplies the other's
-identity by default.
+message and selected `TEXT` or `JSON` presentation. The required owner union carries a Model's
+domain and node reference, a domain's name, a logical resource's domain and name, or a cluster
+user's name. It also carries the complete exact string map, captured committed policy revision
+and four acceptance limits. Its required view union is committed, with an applied revision (zero
+included), or staged, with the complete transaction preview identity. A staged view is defined
+for Models and resources. The logical `DESCRIBE DOMAIN` and `DESCRIBE RESOURCE` outcomes
+also use this envelope.
 
 The receiver validates every key, duplicate-key absence, complete-set limits and ordinary outer
 string/vector/transfer bounds. Missing required policy or view fields, undeclared discriminants
@@ -2778,11 +2780,16 @@ count, `WasmCheckpointCounts` and `WasmRecoveryCounts`, and the returned `WasmBr
 strictly increasing branch order. An entry's absent `branch` is the unbranched execution; it carries
 a `WasmCheckpointFacts` (generation, optional committed and latest revisions, stage and optional
 required and confirmed replica counts), a `WasmRecoveryFacts` (refused generation, rejection,
-request reference and outcome) or both, never neither. Generations and revisions are positive; a
-decoder refuses a zero, an unordered or stateless entry, more returned entries than the complete
-count, and every undeclared enum value or union member. Other kinds carry neither table. A WASM
-page has no row sections, so its `rows` and `bytes` counts are zero and `branches` counts the
-selected branches.
+request reference and outcome) or both, never neither. An entry with a checkpoint also carries a
+`WasmGuestStateDescription`: the generation and optional committed revision the scratch render
+restored, and the `WasmGuestStateRender` union of `WasmGuestStateSections`, each
+`WasmGuestStateSection` with its name, its `RowField`s and its row count, or
+`WasmGuestStateRenderFailure` with its `WasmGuestStateRenderStage` and diagnostic. Guest state is
+always sensitive, so every guest section field is `sensitive` and no row of a guest section is
+carried. Generations and revisions are positive; a decoder refuses a zero, an unordered or stateless
+entry, more returned entries than the complete count, a description beside no checkpoint, a guest
+section field that is not sensitive, and every undeclared enum value or union member. Other kinds carry neither table. A WASM page has no
+row sections, so its `rows` and `bytes` counts are zero and `branches` counts the selected branches.
 
 The shared host runtime keeps this envelope in `Inspection`. Python, Ruby and JVM applications
 read its typed metadata and lossless JSON through their native binding, using the host guides'
@@ -2800,8 +2807,9 @@ single-terminal reply gate still govern that outcome. Other typed reasons are `U
 
 The JSON projection preserves cell types: integer values, float bits, datetime nanoseconds, base64
 bytes, nested typed lists, null and redacted cells. Counts and origin fields remain structural
-metadata; WASM stages, phases, reasons, readiness, rejections and outcomes render as snake-case
-strings and reset scopes as `{"kind": ..., "branch": ...}`. See
+metadata; WASM stages, phases, reasons, readiness, rejections, outcomes and render stages render as
+snake-case strings and reset scopes as `{"kind": ..., "branch": ...}`, and a guest-state
+description's fields carry their Plexus type text. See
 [Inspect Materialized State](./relay.md#inspect-materialized-state) and
 [WASM State And Recovery](./wasm-state.md#observability) for token fencing and query semantics. This operator page protocol does not change subscription batches or the
 internal dependency/generator full-snapshot protocol.

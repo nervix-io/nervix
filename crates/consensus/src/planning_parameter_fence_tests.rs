@@ -170,6 +170,7 @@ fn planning_parameter_fence_preserves_existing_conflict_precedence() {
     let captured = state.domain_planning_inputs(&domain);
     publish_timeout(&mut state, 20);
     let changed = Box::new(DomainState {
+        labels: nervix_models::EntityLabels::default(),
         id: domain.clone(),
         config: nervix_models::DomainConfig {
             pace: nervix_models::DomainPace::Unpaced,

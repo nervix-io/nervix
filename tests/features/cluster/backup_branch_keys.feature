@@ -19,7 +19,7 @@ Feature: Archived branch keys checked against the restored branch declarations
       CREATE VHOST edge backup-branch-keys-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT order_ingress ON edge PATH '/orders';
       CREATE HTTP ENDPOINT INGESTOR order_ingestor FROM order_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING order_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING order_codec
         TO orders INHERIT ALL BRANCHED BY by_tenant_shard SET tenant = message.tenant, shard = message.shard
           FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;

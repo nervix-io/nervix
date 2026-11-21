@@ -475,20 +475,23 @@ impl SessionServiceImpl {
 
         for (index, statement) in statements.into_iter().enumerate() {
             match statement {
-                Statement::MutateEntityLabels(edit) => {
-                    let model_id = edit.entity.identifier.clone();
+                Statement::MutateEntityLabels(nervix_models::MutateEntityLabels {
+                    entity: nervix_models::EntityLabelTarget::Model(entity),
+                    mutation,
+                }) => {
+                    let model_id = entity.identifier.clone();
                     applied.push(AppliedModelMutation {
                         index,
                         model: model_id.clone(),
                         message: format!(
                             "updated labels on {} '{}' in domain '{}'",
-                            edit.entity.kind.keyword_phrase(),
+                            entity.kind.keyword_phrase(),
                             model_id.as_str(),
                             domain.as_str()
                         )
                         .into(),
                     });
-                    mutations.push(RegistryMutation::Labels(edit));
+                    mutations.push(RegistryMutation::Labels { entity, mutation });
                 }
                 Statement::Create(create) => {
                     let if_not_exists = create.if_not_exists;
@@ -2269,8 +2272,10 @@ impl SessionServiceImpl {
             Statement::StopDomain(_) => command_error(
                 "STOP runs only as an admitted command under its execution reference".to_string(),
             ),
-            Statement::MutateEntityLabels(_)
-            | Statement::Create(_)
+            Statement::MutateEntityLabels(_) => command_error(
+                "label edits run as admitted commands under their execution reference".to_string(),
+            ),
+            Statement::Create(_)
             | Statement::AlterSchema(_)
             | Statement::AlterWireJsonSchema(_)
             | Statement::AlterWireCborSchema(_)
@@ -2432,10 +2437,8 @@ impl SessionServiceImpl {
                 self.lookup_query(domain, query).await
             }
             Statement::ShowLabels(show) => {
-                let domain = domain
-                    .as_ref()
-                    .verified("this statement requires a request domain, which was resolved above");
-                self.show_entity_labels(domain, show, session).await
+                self.show_entity_labels(domain.as_ref(), show, session)
+                    .await
             }
             Statement::ShowCreate(show) => {
                 let domain = domain

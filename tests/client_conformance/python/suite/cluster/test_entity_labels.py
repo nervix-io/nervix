@@ -49,3 +49,15 @@ def test_entity_labels_keep_exact_values_revisions_and_staged_views(
     assert staged.labels == {"empty": "", "owner": "Platform", "team/path": "east"}
     assert staged.transaction_id and staged.position == 1
     # ANCHOR_END: entity_labels
+
+    completed(session, f"CREATE USER {name} WITH PASSWORD 'probe-password' LABELS {{ 'owner' = ' Δ ' }};")
+    user = execute(session, f"SHOW LABELS ON USER {name} FORMAT JSON;").entity_labels
+    assert isinstance(user, nx.EntityLabelsInspection)
+    assert (user.domain, user.entity_kind, user.entity_name) == (None, "USER", name)
+    assert user.labels == {"owner": " Δ "}
+
+    completed(session, f"CREATE RESOURCE {name} LABELS {{ 'empty' = '' }};")
+    resource = execute(session, f"DESCRIBE RESOURCE {name};").entity_labels
+    assert isinstance(resource, nx.EntityLabelsInspection)
+    assert (resource.domain, resource.entity_kind, resource.entity_name) == (cluster.domain, "RESOURCE", name)
+    assert resource.labels == {"empty": ""}

@@ -17,7 +17,7 @@ Feature: MySQL operation deadlines
       CREATE VHOST edge deadline-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT ingress ON edge PATH '/notifications';
       CREATE HTTP ENDPOINT INGESTOR incoming FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING notification_codec
         TO notifications INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE MYSQL CLIENT db POOL SIZE MIN 0 MAX 1 CONFIG {
@@ -114,7 +114,7 @@ Feature: MySQL operation deadlines
       CREATE VHOST edge deadline-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT ingress ON edge PATH '/notifications';
       CREATE HTTP ENDPOINT INGESTOR incoming FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING notification_codec
         TO notifications INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE MYSQL CLIENT db POOL SIZE MIN 0 MAX 1 CONFIG {

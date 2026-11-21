@@ -3,8 +3,9 @@
 //! Layer: engines and infrastructure.
 //!
 //! - **Owns.** Engine configuration, instance lifetime, linear-memory limits, epoch deadlines, the
-//!   host half of the C ABI, the guest snapshot calls, and the classification of every failed
-//!   guest operation, including a guest's verdict on the saved state it was asked to restore.
+//!   host half of the C ABI, the guest snapshot and state description calls, and the
+//!   classification of every failed guest operation, including a guest's verdict on the saved
+//!   state it was asked to restore.
 //! - **Depends on.** The vocabulary for processor limits and timestamps, `nervix-wasm-protocol`
 //!   for the envelopes it exchanges with a guest, and the node's bounded executor, whose bulk
 //!   workers compile a module.
@@ -22,7 +23,7 @@
 mod settings;
 use std::{
     convert::Infallible,
-    num::NonZeroU64,
+    num::{NonZeroU32, NonZeroU64},
     ops::{Deref, DerefMut},
     time::Duration,
 };
@@ -119,6 +120,10 @@ pub enum WasmGuestOperation {
     /// `nervix_reset_state`.
     #[strum(serialize = "state reset")]
     StateReset,
+    /// `nervix_describe_state`, which a state inspection calls on a scratch instance it restored
+    /// from the branch's committed checkpoint, and decoding what it wrote.
+    #[strum(serialize = "state description")]
+    StateDescription,
     /// `nervix_current_domain_time_nanos`.
     #[strum(serialize = "domain-time read")]
     DomainTimeRead,
@@ -136,6 +141,7 @@ impl WasmGuestOperation {
             Self::QuiesceFlush => Some("nervix_flush"),
             Self::StateSnapshot => Some("nervix_dump_state"),
             Self::StateReset => Some("nervix_reset_state"),
+            Self::StateDescription => Some("nervix_describe_state"),
             Self::DomainTimeRead => Some("nervix_current_domain_time_nanos"),
         }
     }
@@ -183,6 +189,8 @@ pub enum WasmGuestCallError {
     GlobalError { reason: String },
     #[error("wasm guest emitted an output envelope the host cannot decode")]
     InvalidEmission,
+    #[error("wasm guest wrote a state description the host cannot decode")]
+    InvalidStateDescription,
     #[error("failed to write guest memory")]
     MemoryWrite(#[source] wasmtime::MemoryAccessError),
     #[error("failed to read guest memory")]
@@ -268,6 +276,7 @@ impl WasmGuestCallError {
             Self::Instantiate(_)
             | Self::ResetFuel { .. }
             | Self::GlobalError { .. }
+            | Self::InvalidStateDescription
             | Self::MemoryWrite(_)
             | Self::MemoryRead(_)
             | Self::InvalidOffset(_)
@@ -720,6 +729,134 @@ pub enum WasmProcessorType {
     Vec {
         element: Box<WasmProcessorType>,
     },
+}
+
+/// What a guest described of its state: its sections in its order, each a schema naming the
+/// section and its columns and one Arrow IPC stream of its rows.
+///
+/// The host has only decoded the guest's message. The caller validates names, types and rows
+/// against the rules of the read that asked, because only the caller knows them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WasmStateDescription {
+    pub sections: Vec<WasmStateSection>,
+}
+
+/// One section a guest described of its state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WasmStateSection {
+    pub schema: WasmProcessorSchema,
+    pub arrow_ipc_batch: Vec<u8>,
+}
+
+/// Why a type a guest declared names no Nervix type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::error_boundary(
+        outcome,
+        reason = "a guest-declared type outside the Nervix types is a typed refusal of the \
+                  declaration that carries it; nothing is converted in part"
+    )
+)]
+pub enum WasmProcessorTypeError {
+    #[error("an ARRAY type declares zero elements")]
+    EmptyArray,
+}
+
+impl WasmStateDescription {
+    fn from_protocol(description: protocol::StateDescription) -> Self {
+        Self {
+            sections: description
+                .sections
+                .into_iter()
+                .map(|section| WasmStateSection {
+                    schema: WasmProcessorSchema::from_protocol(section.schema),
+                    arrow_ipc_batch: section.arrow_ipc_batch,
+                })
+                .collect(),
+        }
+    }
+}
+
+impl WasmProcessorSchema {
+    fn from_protocol(schema: protocol::ProcessorSchema) -> Self {
+        Self {
+            name: schema.name,
+            fields: schema
+                .fields
+                .into_iter()
+                .map(|field| WasmProcessorField {
+                    name: field.name,
+                    ty: WasmProcessorType::from_protocol(field.ty),
+                    optional: field.optional,
+                })
+                .collect(),
+        }
+    }
+}
+
+impl WasmProcessorType {
+    fn from_protocol(ty: protocol::ProcessorType) -> Self {
+        match ty {
+            protocol::ProcessorType::U8 => Self::U8,
+            protocol::ProcessorType::I8 => Self::I8,
+            protocol::ProcessorType::U16 => Self::U16,
+            protocol::ProcessorType::I16 => Self::I16,
+            protocol::ProcessorType::U32 => Self::U32,
+            protocol::ProcessorType::I32 => Self::I32,
+            protocol::ProcessorType::U64 => Self::U64,
+            protocol::ProcessorType::I64 => Self::I64,
+            protocol::ProcessorType::Bool => Self::Bool,
+            protocol::ProcessorType::String => Self::String,
+            protocol::ProcessorType::Bytes => Self::Bytes,
+            protocol::ProcessorType::Datetime => Self::Datetime,
+            protocol::ProcessorType::F32 => Self::F32,
+            protocol::ProcessorType::F64 => Self::F64,
+            protocol::ProcessorType::Array { element, len } => Self::Array {
+                element: Box::new(Self::from_protocol(*element)),
+                len,
+            },
+            protocol::ProcessorType::Vec { element } => Self::Vec {
+                element: Box::new(Self::from_protocol(*element)),
+            },
+        }
+    }
+}
+
+impl TryFrom<&WasmProcessorType> for ParseAsType {
+    type Error = Report<WasmProcessorTypeError>;
+
+    fn try_from(ty: &WasmProcessorType) -> Result<Self, Self::Error> {
+        let parsed = match ty {
+            WasmProcessorType::U8 => Self::U8,
+            WasmProcessorType::I8 => Self::I8,
+            WasmProcessorType::U16 => Self::U16,
+            WasmProcessorType::I16 => Self::I16,
+            WasmProcessorType::U32 => Self::U32,
+            WasmProcessorType::I32 => Self::I32,
+            WasmProcessorType::U64 => Self::U64,
+            WasmProcessorType::I64 => Self::I64,
+            WasmProcessorType::Bool => Self::Bool,
+            WasmProcessorType::String => Self::String,
+            WasmProcessorType::Bytes => Self::Bytes,
+            WasmProcessorType::Datetime => Self::Datetime,
+            WasmProcessorType::F32 => Self::F32,
+            WasmProcessorType::F64 => Self::F64,
+            WasmProcessorType::Array { element, len } => {
+                let Some(len) = NonZeroU32::new(*len) else {
+                    return Err(Report::new(WasmProcessorTypeError::EmptyArray));
+                };
+                Self::Array {
+                    element: Box::new(Self::try_from(element.as_ref())?),
+                    len,
+                }
+            }
+            WasmProcessorType::Vec { element } => Self::Vec {
+                element: Box::new(Self::try_from(element.as_ref())?),
+            },
+        };
+        Ok(parsed)
+    }
 }
 
 impl From<&nervix_models::CreateSchema> for WasmProcessorSchema {
@@ -1635,6 +1772,7 @@ pub struct WasmBranchInstance {
     dump_state: TypedFunc<(), i32>,
     load_state: TypedFunc<(i32, i32), i32>,
     reset_state: TypedFunc<(), i32>,
+    describe_state: TypedFunc<(), i32>,
     read_emit: TypedFunc<(), i32>,
     current_domain_time_nanos: TypedFunc<(), i64>,
     buffer_ptr: TypedFunc<(), i32>,
@@ -1675,6 +1813,7 @@ impl WasmBranchInstance {
             dump_state: typed_export(&mut store, &instance, "nervix_dump_state")?,
             load_state: typed_export(&mut store, &instance, "nervix_load_state")?,
             reset_state: typed_export(&mut store, &instance, "nervix_reset_state")?,
+            describe_state: typed_export(&mut store, &instance, "nervix_describe_state")?,
             read_emit: typed_export(&mut store, &instance, "nervix_read_emit")?,
             current_domain_time_nanos: typed_export(
                 &mut store,
@@ -2024,6 +2163,53 @@ impl WasmBranchInstance {
         context: WasmExecutionContext,
     ) -> StackResult<(), WasmGuestError> {
         self.reset_state(context).await
+    }
+
+    /// Asks the guest to describe its state. `nervix_describe_state` returns the size of the
+    /// `StateDescription` it wrote, zero when it describes no state, or a negative code when it
+    /// cannot describe its state. A description of no state has no sections.
+    async fn describe_state(
+        &mut self,
+        context: WasmExecutionContext,
+    ) -> StackResult<WasmStateDescription, WasmGuestError> {
+        let description = INVOCATION_NOW
+            .scope(context.now(), async {
+                let export = "nervix_describe_state";
+                self.begin_operation()?;
+                let size = self
+                    .describe_state
+                    .call_async(&mut self.store, ())
+                    .await
+                    .map_err(|source| WasmGuestCallError::call(self.limits, export, source))?;
+                if size < 0 {
+                    if let Some(reason) = self.take_global_error().await? {
+                        return Err(Report::new(WasmGuestCallError::GlobalError { reason }));
+                    }
+                    return Err(Report::new(WasmGuestCallError::ErrorCode {
+                        export,
+                        code: size,
+                    }));
+                }
+                if size == 0 {
+                    return Ok(WasmStateDescription {
+                        sections: Vec::new(),
+                    });
+                }
+                let message = self.read_guest_buffer(size).await?;
+                let decoded = protocol::StateDescription::decode(&message)
+                    .change_context(WasmGuestCallError::InvalidStateDescription)?;
+                Ok(WasmStateDescription::from_protocol(decoded))
+            })
+            .await;
+        description
+            .map_err(|cause| WasmGuestError::failed(WasmGuestOperation::StateDescription, cause))
+    }
+
+    pub async fn describe_state_in_context(
+        &mut self,
+        context: WasmExecutionContext,
+    ) -> StackResult<WasmStateDescription, WasmGuestError> {
+        self.describe_state(context).await
     }
 
     pub fn timeout_requests(&self) -> &[WasmTimeoutRequest] {
@@ -2546,6 +2732,9 @@ mod tests {
                 i32.const 0
                 global.set $emit_len
                 i32.const 0)
+
+            (func (export "nervix_describe_state") (result i32)
+                i32.const 0)
         )
     "#;
 
@@ -2607,6 +2796,9 @@ mod tests {
 
             (func (export "nervix_reset_state") (result i32)
                 i32.const 0)
+
+            (func (export "nervix_describe_state") (result i32)
+                i32.const 0)
         )
     "#;
 
@@ -2630,6 +2822,7 @@ mod tests {
             (func (export "nervix_dump_state") (result i32) i32.const 0)
             (func (export "nervix_load_state") (param i32 i32) (result i32) i32.const 0)
             (func (export "nervix_reset_state") (result i32) i32.const 0)
+            (func (export "nervix_describe_state") (result i32) i32.const 0)
         )
     "#;
 
@@ -3069,6 +3262,7 @@ mod tests {
                 (func (export "nervix_dump_state") (result i32) {dump_state_body})
                 (func (export "nervix_load_state") (param i32 i32) (result i32) {load_state_body})
                 (func (export "nervix_reset_state") (result i32) i32.const 0)
+                (func (export "nervix_describe_state") (result i32) i32.const 0)
                 (func (export "nervix_global_error_ptr") (result i32) i32.const 2048)
                 (func (export "nervix_global_error_len") (result i32) global.get $reason_len)
                 (func (export "nervix_clear_global_error") (result i32)
@@ -3109,6 +3303,212 @@ mod tests {
         error
             .downcast_ref::<WasmGuestCallError>()
             .expect("a failed guest operation keeps its typed call cause")
+    }
+
+    /// A guest that describes its state with `describe_body` after pointing its buffer at
+    /// `message`, which a data segment holds at 8192, away from the buffer the host writes into.
+    fn describing_wasm(describe_body: &str, message: &[u8]) -> String {
+        let mut data = String::with_capacity(message.len() * 3);
+        for byte in message {
+            data.push_str(&format!("\\{byte:02x}"));
+        }
+        format!(
+            r#"
+            (module
+                (memory (export "memory") 1)
+                (data (i32.const 2048) "{LIFECYCLE_REASON}")
+                (data (i32.const 8192) "{data}")
+                (global $reason_len (mut i32) (i32.const 0))
+                (global $read_ptr (mut i32) (i32.const 1024))
+                (func (export "nervix_buffer_ptr") (result i32) global.get $read_ptr)
+                (func (export "nervix_alloc") (param i32) (result i32)
+                    i32.const 1024
+                    global.set $read_ptr
+                    i32.const 1024)
+                (func (export "nervix_init") (param i32 i32) (result i32) i32.const 0)
+                (func (export "nervix_current_domain_time_nanos") (result i64) i64.const 0)
+                (func (export "nervix_process_batch") (param i32 i32) (result i32) i32.const 0)
+                (func (export "nervix_on_timeout") (param i64) (result i32) i32.const 0)
+                (func (export "nervix_flush") (result i32) i32.const 0)
+                (func (export "nervix_read_emit") (result i32) i32.const 0)
+                (func (export "nervix_dump_state") (result i32) i32.const 0)
+                (func (export "nervix_load_state") (param i32 i32) (result i32) i32.const 0)
+                (func (export "nervix_reset_state") (result i32) i32.const 0)
+                (func (export "nervix_describe_state") (result i32)
+                    i32.const 8192
+                    global.set $read_ptr
+                    {describe_body})
+                (func (export "nervix_global_error_ptr") (result i32) i32.const 2048)
+                (func (export "nervix_global_error_len") (result i32) global.get $reason_len)
+                (func (export "nervix_clear_global_error") (result i32)
+                    i32.const 0
+                    global.set $reason_len
+                    i32.const 0)
+            )
+            "#
+        )
+    }
+
+    async fn described(
+        wasm: impl AsRef<[u8]>,
+    ) -> StackResult<WasmStateDescription, WasmGuestError> {
+        let runtime = runtime();
+        let compiled = runtime
+            .compile_processor(&Executor::default(), wasm)
+            .await
+            .expect("module should compile");
+        let mut branch = compiled
+            .instantiate_branch(
+                limits(),
+                init(),
+                WasmExecutionContext::new(Timestamp::from_unix_nanos(0)),
+                None,
+            )
+            .await
+            .expect("the branch instance must come up");
+        branch
+            .describe_state_in_context(WasmExecutionContext::new(Timestamp::from_unix_nanos(0)))
+            .await
+    }
+
+    #[nervix_primitives::test]
+    async fn a_described_state_reaches_the_host_section_by_section_in_the_guests_order() {
+        let message = protocol::StateDescription {
+            sections: vec![
+                protocol::StateSection {
+                    schema: protocol::ProcessorSchema {
+                        name: "progress".into(),
+                        fields: vec![protocol::ProcessorField {
+                            name: "processed_rows".into(),
+                            ty: protocol::ProcessorType::U64,
+                            optional: false,
+                        }],
+                    },
+                    arrow_ipc_batch: vec![1, 2, 3],
+                },
+                protocol::StateSection {
+                    schema: protocol::ProcessorSchema {
+                        name: "windows".into(),
+                        fields: vec![protocol::ProcessorField {
+                            name: "opened".into(),
+                            ty: protocol::ProcessorType::Vec {
+                                element: Box::new(protocol::ProcessorType::Datetime),
+                            },
+                            optional: true,
+                        }],
+                    },
+                    arrow_ipc_batch: Vec::new(),
+                },
+            ],
+        }
+        .encode();
+        let wasm = describing_wasm(&format!("i32.const {}", message.len()), &message);
+
+        let description = described(wasm).await.expect("a valid description decodes");
+
+        assert_eq!(
+            description,
+            WasmStateDescription {
+                sections: vec![
+                    WasmStateSection {
+                        schema: WasmProcessorSchema {
+                            name: "progress".into(),
+                            fields: vec![WasmProcessorField {
+                                name: "processed_rows".into(),
+                                ty: WasmProcessorType::U64,
+                                optional: false,
+                            }],
+                        },
+                        arrow_ipc_batch: vec![1, 2, 3],
+                    },
+                    WasmStateSection {
+                        schema: WasmProcessorSchema {
+                            name: "windows".into(),
+                            fields: vec![WasmProcessorField {
+                                name: "opened".into(),
+                                ty: WasmProcessorType::Vec {
+                                    element: Box::new(WasmProcessorType::Datetime),
+                                },
+                                optional: true,
+                            }],
+                        },
+                        arrow_ipc_batch: Vec::new(),
+                    },
+                ],
+            }
+        );
+    }
+
+    #[nervix_primitives::test]
+    async fn a_guest_that_describes_no_state_reaches_the_host_without_sections() {
+        let wasm = describing_wasm("i32.const 0", &[]);
+
+        let description = described(wasm).await.expect("describing no state succeeds");
+
+        assert!(description.sections.is_empty());
+    }
+
+    #[nervix_primitives::test]
+    async fn a_refused_description_fails_the_state_description_with_the_guest_reason() {
+        let wasm = describing_wasm("i32.const 32 global.set $reason_len i32.const -6", &[]);
+
+        let error = described(wasm)
+            .await
+            .expect_err("a refused description fails");
+
+        assert_eq!(error.export(), Some("nervix_describe_state"));
+        assert!(matches!(
+            call_failure(&error, WasmGuestOperation::StateDescription),
+            WasmGuestCallError::GlobalError { reason } if reason == LIFECYCLE_REASON
+        ));
+        assert_eq!(
+            error.current_context().to_string(),
+            "wasm guest state description failed"
+        );
+    }
+
+    #[nervix_primitives::test]
+    async fn a_negative_description_code_without_a_reason_names_the_code() {
+        let wasm = describing_wasm("i32.const -6", &[]);
+
+        let error = described(wasm).await.expect_err("a negative code fails");
+
+        assert!(matches!(
+            call_failure(&error, WasmGuestOperation::StateDescription),
+            WasmGuestCallError::ErrorCode {
+                export: "nervix_describe_state",
+                code: -6
+            }
+        ));
+    }
+
+    #[nervix_primitives::test]
+    async fn a_description_the_host_cannot_decode_fails_the_state_description() {
+        let wasm = describing_wasm("i32.const 16", &[0xff; 16]);
+
+        let error = described(wasm).await.expect_err("undecodable bytes fail");
+
+        assert_eq!(error.export(), Some("nervix_describe_state"));
+        assert!(matches!(
+            call_failure(&error, WasmGuestOperation::StateDescription),
+            WasmGuestCallError::InvalidStateDescription
+        ));
+    }
+
+    #[nervix_primitives::test]
+    async fn a_module_without_the_state_description_export_fails_instantiation_naming_it() {
+        let export = r#"(func (export "nervix_describe_state") (result i32) i32.const 0)"#;
+        let complete = lifecycle_wasm("i32.const 0", "i32.const 0", "i32.const 0");
+        assert!(complete.contains(export));
+        let wasm = complete.replace(export, "");
+
+        let error = failed_instantiation(wasm, limits(), None).await;
+
+        assert_eq!(error.export(), Some("nervix_describe_state"));
+        assert!(matches!(
+            call_failure(&error, WasmGuestOperation::Instantiation),
+            WasmGuestCallError::MissingExport("nervix_describe_state")
+        ));
     }
 
     #[nervix_primitives::test]
@@ -3296,6 +3696,7 @@ mod tests {
                 (func (export "nervix_dump_state") (result i32) i32.const 0)
                 (func (export "nervix_load_state") (param i32 i32) (result i32) i32.const 0)
                 (func (export "nervix_reset_state") (result i32) i32.const 0)
+                (func (export "nervix_describe_state") (result i32) i32.const 0)
             )
             "#
         )
@@ -3320,6 +3721,7 @@ mod tests {
                 (func (export "nervix_dump_state") (result i32) {dump_state_body})
                 (func (export "nervix_load_state") (param i32 i32) (result i32) i32.const 0)
                 (func (export "nervix_reset_state") (result i32) i32.const 0)
+                (func (export "nervix_describe_state") (result i32) i32.const 0)
             )
             "#
         )
@@ -3617,6 +4019,7 @@ mod tests {
                 (func (export "nervix_dump_state") (result i32) i32.const 0)
                 (func (export "nervix_load_state") (param i32 i32) (result i32) i32.const 0)
                 (func (export "nervix_reset_state") (result i32) i32.const 0)
+                (func (export "nervix_describe_state") (result i32) i32.const 0)
             )
         "#;
         let runtime = runtime();
@@ -3669,6 +4072,7 @@ mod tests {
                 (func (export "nervix_dump_state") (result i32) i32.const 0)
                 (func (export "nervix_load_state") (param i32 i32) (result i32) i32.const 0)
                 (func (export "nervix_reset_state") (result i32) i32.const 0)
+                (func (export "nervix_describe_state") (result i32) i32.const 0)
                 (func (export "nervix_global_error_ptr") (result i32) i32.const 2048)
                 (func (export "nervix_global_error_len") (result i32) global.get $err_len)
                 (func (export "nervix_clear_global_error") (result i32)
@@ -3744,6 +4148,7 @@ mod tests {
                 (func (export "nervix_dump_state") (result i32) i32.const 0)
                 (func (export "nervix_load_state") (param i32 i32) (result i32) i32.const 0)
                 (func (export "nervix_reset_state") (result i32) i32.const 0)
+                (func (export "nervix_describe_state") (result i32) i32.const 0)
             )
         "#;
         let runtime = runtime();
@@ -3782,6 +4187,7 @@ mod tests {
                 (func (export "nervix_dump_state") (result i32) i32.const 0)
                 (func (export "nervix_load_state") (param i32 i32) (result i32) i32.const 0)
                 (func (export "nervix_reset_state") (result i32) i32.const 0)
+                (func (export "nervix_describe_state") (result i32) i32.const 0)
             )
         "#;
         let runtime = runtime();
