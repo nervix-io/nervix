@@ -108,10 +108,11 @@ and one twelfth for scratch, capped at 32, 32 and 16 MiB respectively. The valid
 complete operations so a blocked channel leaves room for another. Bulk streams retain their own
 1 MiB default receive window, drawn from the dedicated bulk-window pool; the stream waits within
 its request deadline when that pool is full.
-An Iceberg commit charges the bulk budget for the staged batches it reads back, only when the
-budget has room for them now, so a commit whose staged batches exceed the budget reads them in
-groups, a single staged batch larger than the budget waits until the whole budget is free and is
-charged all of it, and a commit refused for room is retried by its emitter.
+An Iceberg commit charges the bulk budget for the staged batches it reads back, one group at a
+time, so a commit whose staged batches exceed the budget reads them in groups, a single staged batch
+larger than the budget waits until the whole budget is free and is charged all of it, and a commit
+whose group finds the budget full waits for room, holding nothing of it, while its emitter shows
+the wait.
 The relay budget also carries the acknowledgement watches a relay owner keeps for rows another node
 delivered with acknowledgements: 1 KiB per row until the owner reports that row's outcome, and
 4 KiB per delivery. A delivery of 8 MiB of 164-byte rows therefore needs about 51 MiB of watches

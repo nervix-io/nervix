@@ -438,7 +438,7 @@ impl Runtime {
         }
         for placement in &placements {
             let Some(restored) = self
-                .open_stored_materialized_snapshot(&self.inner.executor, Some(routing), placement)
+                .open_stored_materialized_snapshot_within_shares(Some(routing), placement)
                 .await?
             else {
                 continue;
@@ -492,9 +492,44 @@ impl Runtime {
         ])
     }
 
-    /// Open the sealed snapshot this node persisted for a placement, if it has one.
-    /// Open the stored materialized snapshot of `placement`, taking every charge through
-    /// `executor`, which may draw from its caller's allowances.
+    /// Open the sealed snapshot this node persisted for `placement`, if it has one, within shares
+    /// of the state-read and bulk classes, which the read waits for while it holds nothing of
+    /// either. A share without room for the snapshot fails with the share it needs, and the open
+    /// runs again within it, so a full class holds the read back and never skips it. The shares
+    /// stay held for as long as the opened snapshot lives.
+    async fn open_stored_materialized_snapshot_within_shares(
+        &self,
+        routing: Option<&DomainRoutingSnapshot>,
+        placement: &RuntimeStatePlacement,
+    ) -> error_stack::Result<Option<RestoredMaterializedSnapshot>, MaterializedReadError> {
+        let stored = || MaterializedReadError::StoredSnapshot {
+            placement: placement.clone(),
+        };
+        self.inner
+            .executor
+            .within_allowance(
+                nervix_execution::MemoryClass::StateRead,
+                0,
+                |state_read| async move {
+                    state_read
+                        .within_allowance(
+                            nervix_execution::MemoryClass::Bulk,
+                            RESTORE_STATE_WORKING_BYTES,
+                            |bulk| async move {
+                                self.open_stored_materialized_snapshot(&bulk, routing, placement)
+                                    .await
+                            },
+                        )
+                        .await
+                        .change_context_lazy(stored)?
+                },
+            )
+            .await
+            .change_context_lazy(stored)?
+    }
+
+    /// Open the sealed snapshot this node persisted for `placement`, if it has one, taking every
+    /// charge through `executor`, which may draw from its caller's allowances.
     pub(in crate::runtime) async fn open_stored_materialized_snapshot(
         &self,
         executor: &nervix_execution::Executor,
@@ -971,7 +1006,7 @@ impl Runtime {
         };
         if states.is_empty() {
             let Some(restored) = self
-                .open_stored_materialized_snapshot(&self.inner.executor, Some(routing), &placement)
+                .open_stored_materialized_snapshot_within_shares(Some(routing), &placement)
                 .await?
             else {
                 return Ok(Vec::new().into());
