@@ -155,7 +155,7 @@ fn route_branch(value: Option<&OutputBranch>) -> RouteBranchDraft {
             parametrizer,
             assignments: values,
         }) => RouteBranchDraft::Branched {
-            branch: Some(SelectedReference::chosen(parametrizer.clone())),
+            parametrizer: Some(SelectedReference::chosen(parametrizer.clone())),
             assignments: assignments(values),
         },
     }

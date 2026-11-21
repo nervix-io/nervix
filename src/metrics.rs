@@ -7382,7 +7382,7 @@ mod tests {
     fn branch_lifecycle_metrics_count_concrete_keys_once_per_node() {
         let metrics = RuntimeMetrics::default();
         let domain = DomainName::parse("main").expect("valid domain");
-        let branch = ParametrizerName::parse("by_tenant").expect("valid identifier");
+        let parametrizer = ParametrizerName::parse("by_tenant").expect("valid identifier");
         let concrete_branch = tenant_branch("acme");
         let has_sample = |rendered: &str, metric: &str, label_fragments: &[&str], value: u64| {
             let expected_suffix = format!(" {value}");
@@ -7397,18 +7397,18 @@ mod tests {
 
         metrics.register_branch(
             &domain,
-            &branch,
+            &parametrizer,
             Some(&ClusterNodeName::parse("node-1").expect("valid name")),
         );
         metrics.observe_branch_instance_created(
             &domain,
-            &branch,
+            &parametrizer,
             Some(&ClusterNodeName::parse("node-1").expect("valid name")),
             Some(concrete_branch),
         );
         metrics.observe_branch_instance_created(
             &domain,
-            &branch,
+            &parametrizer,
             Some(&ClusterNodeName::parse("node-1").expect("valid name")),
             Some(concrete_branch),
         );
@@ -7428,7 +7428,7 @@ mod tests {
 
         metrics.observe_branch_instance_removed(
             &domain,
-            &branch,
+            &parametrizer,
             Some(&ClusterNodeName::parse("node-1").expect("valid name")),
             Some(concrete_branch),
             BranchEvictionReason::Lru,
@@ -7458,7 +7458,7 @@ mod tests {
 
         metrics.observe_branch_instance_removed(
             &domain,
-            &branch,
+            &parametrizer,
             Some(&ClusterNodeName::parse("node-1").expect("valid name")),
             Some(concrete_branch),
             BranchEvictionReason::Ttl,

@@ -293,8 +293,8 @@ impl<Version: Clone> RegistryMutation<Version> {
                     .apply_alter(alter)
                     .discarded(ALTERATIONS_ARE_VALIDATED_ON_THE_FINAL_MODELS);
             }
-            (Self::AlterParametrizer(alter), Model::Parametrizer(branch)) => {
-                branch
+            (Self::AlterParametrizer(alter), Model::Parametrizer(parametrizer)) => {
+                parametrizer
                     .apply_alter(alter)
                     .discarded(ALTERATIONS_ARE_VALIDATED_ON_THE_FINAL_MODELS);
             }

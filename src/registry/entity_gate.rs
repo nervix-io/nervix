@@ -139,13 +139,13 @@ pub(crate) fn scheduled_impact_coverage(node: &ScheduledNode) -> ImpactNodeCover
     if !is_schedulable_model(node.config.as_ref()) {
         return ImpactNodeCoverage::configuration(identity);
     }
-    let declared_branch = match node.config.as_ref() {
+    let declared_parametrizer = match node.config.as_ref() {
         Model::Relay(relay) => relay.branching.parametrizer(),
         model => model_branch_selection(model).and_then(|selection| selection.parametrizer_ref()),
     };
-    let branches = match declared_branch {
-        Some(branch) => ConcreteBranchCoverage::AllOfParametrizer {
-            parametrizer: branch.clone(),
+    let branches = match declared_parametrizer {
+        Some(parametrizer) => ConcreteBranchCoverage::AllOfParametrizer {
+            parametrizer: parametrizer.clone(),
         },
         None if node.resolved_branching.is_some()
             && matches!(node.kind(), ModelKind::Emitter | ModelKind::Reingestor) =>
