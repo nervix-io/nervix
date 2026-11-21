@@ -722,40 +722,35 @@ impl SessionServiceImpl {
             "ONNX metadata inspection submitted to bulk execution"
         );
         match executor
-            .run_cpu_with(
-                CpuClass::Bulk,
-                nervix_execution::QueueAdmission::WaitForPlace,
-                reservation,
-                move |charge, cancellation| {
-                    tracing::debug!(
-                        node = %processor_name,
-                        model_file = %processor_file,
-                        "ONNX metadata inspection worker started"
-                    );
-                    let configured_image = std::env::var_os("ORT_DYLIB_PATH");
-                    tracing::debug!(
-                        node = %processor_name,
-                        model_file = %processor_file,
-                        "ONNX metadata native image preparing"
-                    );
-                    Self::prepare_onnx_metadata_image(
-                        configured_image.as_deref(),
-                        &charge,
-                        cancellation,
-                    )
-                    .change_context_lazy(|| {
-                        InferencerBindingValidationError::InspectionCancelled {
-                            node: processor_name.clone(),
-                        }
-                    })?;
-                    tracing::debug!(
-                        node = %processor_name,
-                        model_file = %processor_file,
-                        "ONNX metadata native image preparation ended"
-                    );
-                    Self::inspect_onnx_model_metadata(&processor_name, &processor_file, &path)
-                },
-            )
+            .run_cpu(CpuClass::Bulk, reservation, move |charge, cancellation| {
+                tracing::debug!(
+                    node = %processor_name,
+                    model_file = %processor_file,
+                    "ONNX metadata inspection worker started"
+                );
+                let configured_image = std::env::var_os("ORT_DYLIB_PATH");
+                tracing::debug!(
+                    node = %processor_name,
+                    model_file = %processor_file,
+                    "ONNX metadata native image preparing"
+                );
+                Self::prepare_onnx_metadata_image(
+                    configured_image.as_deref(),
+                    &charge,
+                    cancellation,
+                )
+                .change_context_lazy(|| {
+                    InferencerBindingValidationError::InspectionCancelled {
+                        node: processor_name.clone(),
+                    }
+                })?;
+                tracing::debug!(
+                    node = %processor_name,
+                    model_file = %processor_file,
+                    "ONNX metadata native image preparation ended"
+                );
+                Self::inspect_onnx_model_metadata(&processor_name, &processor_file, &path)
+            })
             .await
         {
             Ok(metadata) => metadata,
@@ -1413,20 +1408,19 @@ mod tests {
             nervix_primitives::task::consume_budget().await;
             nervix_primitives::task::yield_now().await;
         }
-        use std::{future::poll_fn, task::Poll};
-
-        // A full bulk queue holds the inspection back rather than refusing it, and the inspection
-        // runs once a place frees.
-        let mut waiting = Box::pin(service.validate_inferencer_model_metadata(&processor, &model));
-        let first_poll = poll_fn(|context| Poll::Ready(waiting.as_mut().poll(context))).await;
-        assert!(
-            first_poll.is_pending(),
-            "a full bulk queue holds the inspection back"
-        );
-        drop(releases);
-        waiting
+        let refusal = service
+            .validate_inferencer_model_metadata(&processor, &model)
             .await
-            .assured("the inspection runs once a place frees, within its bound");
+            .expect_err("the full queue refuses an uninspected model");
+        assert!(matches!(
+            refusal.current_context(),
+            InferencerBindingValidationError::InspectionTask { .. }
+        ));
+        assert!(matches!(
+            refusal.downcast_ref::<ExecutionError>(),
+            Some(ExecutionError::QueueFull { .. })
+        ));
+        drop(releases);
         let pending_limit = before
             .queue_capacity
             .checked_sub(4)
@@ -1462,19 +1456,17 @@ mod tests {
             nervix_primitives::task::consume_budget().await;
             holder.assured("the released holder completed");
         }
-        // The occupying and queued jobs, the inspection that waited for a place, and the four
-        // preflights.
         let completed = before
             .workers
             .checked_add(before.queue_capacity)
-            .and_then(|jobs| jobs.checked_add(5))
+            .and_then(|jobs| jobs.checked_add(4))
             .assured("the bounded default workers, queue and preflights fit usize");
         let completed =
             u64::try_from(completed).assured("the bounded job count fits the execution counters");
         let after = executor.snapshot();
         assert_eq!(after.bulk_cpu.admitted - before.admitted, completed);
         assert_eq!(after.bulk_cpu.completed - before.completed, completed);
-        assert_eq!(after.bulk_cpu.refused - before.refused, 0);
+        assert_eq!(after.bulk_cpu.refused - before.refused, 1);
         assert_eq!(after.bulk_cpu.running, 0);
         assert_eq!(after.bulk_cpu.pending, 0);
         assert_eq!(after.bulk_memory.reserved_bytes, 0);
@@ -1778,7 +1770,7 @@ mod tests {
 
     #[cfg(feature = "testing")]
     #[nervix_primitives::test]
-    async fn a_model_the_bulk_workers_cannot_take_now_waits_for_a_place_and_is_inspected() {
+    async fn a_model_the_bulk_workers_cannot_take_now_is_refused_as_an_inspection_task() {
         let executor = crate::runtime::single_worker_executor();
         let crate::application::test_fixtures::TestService {
             service,
@@ -1792,32 +1784,23 @@ mod tests {
         let processor = inferencer();
         let model = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("tests/fixtures/onnx/matrix_identity.onnx");
-        use std::{future::poll_fn, task::Poll};
-
         let filled = crate::runtime::FilledCpuClass::fill(&executor, CpuClass::Bulk).await;
-        let before = executor.snapshot().bulk_cpu;
 
-        let mut waiting = Box::pin(service.validate_inferencer_model_metadata(&processor, &model));
-        let first_poll = poll_fn(|context| Poll::Ready(waiting.as_mut().poll(context))).await;
-        assert!(
-            first_poll.is_pending(),
-            "a full bulk class holds the inspection back rather than refusing it"
-        );
-        filled.release().await;
-        // The fixture binds none of the model's tensors, so the inspection that ran reads the
-        // model and reports its first unbound tensor: a verdict only a completed inspection gives.
-        let verdict = waiting
+        let refused = service
+            .validate_inferencer_model_metadata(&processor, &model)
             .await
-            .expect_err("the inspected model has a tensor the fixture does not bind");
+            .expect_err("a full bulk class refuses the inspection");
+
         assert!(
             matches!(
-                verdict.current_context(),
-                InferencerBindingValidationError::MissingBinding { node, tensor, .. }
-                    if node == &processor.name && tensor == "matrix"
+                refused.current_context(),
+                InferencerBindingValidationError::InspectionTask { node, .. }
+                    if node == &processor.name
             ),
-            "the inspection runs once a place frees, within its bound: {verdict:?}"
+            "{refused:?}"
         );
-        assert_eq!(executor.snapshot().bulk_cpu.refused, before.refused);
+        assert!(refused.contains::<ExecutionError>(), "{refused:?}");
+        filled.release().await;
         let _ = std::fs::remove_dir_all(&path);
     }
 }

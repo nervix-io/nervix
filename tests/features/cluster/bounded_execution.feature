@@ -478,7 +478,7 @@ Feature: Bounded execution and transient memory
       | 3            |
 
   @acknowledged_unfolding_waits_for_extension_room
-  Scenario Outline: An acknowledged Kafka payload waits for the extension workers instead of being presented again
+  Scenario Outline: An acknowledged Kafka payload waits for the extension workers instead of being presented again, and counts no decode rejection
     Given Kafka is running
     And a <cluster_size> node nervix cluster is started
     And the leader node is configured with these Plexus commands
@@ -520,6 +520,15 @@ Feature: Bounded execution and transient memory
       """
     And the relay subscription does not receive a payload within "2s"
     And within "30s" Kafka consumer group "acknowledged_wait_{{test_id}}" next offset for topic "acknowledged_wait_{{test_id}}" partition 0 is "at least 1"
+    # A payload that waited for a place on the extension workers was never refused by its codec.
+    And within "30s" DESCRIBE INGESTOR "waiting_ingestor" on the leader node contains
+      """
+      nervix_ingestor_decode_rejections_total: 0
+      """
+    And within "30s" DESCRIBE INGESTOR "waiting_ingestor" on the leader node contains
+      """
+      last decode rejection: -
+      """
     When these Plexus commands are executed
       """
       DESCRIBE INGESTOR waiting_ingestor;
