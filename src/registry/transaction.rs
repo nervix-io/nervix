@@ -1250,7 +1250,7 @@ fn ensure_branch_partitions_change_is_settled(
             requested == current
         }
         _ => schedule.nodes.get(&NodeRef::new(nervix_models::ModelKind::Parametrizer, &alter.parametrizer))
-            .is_some_and(|node| matches!(node.config.as_ref(), nervix_models::Model::Parametrizer(branch) if branch.partitions == requested)),
+            .is_some_and(|node| matches!(node.config.as_ref(), nervix_models::Model::Parametrizer(parametrizer) if parametrizer.partitions == requested)),
     };
     if unchanged {
         return Ok(());

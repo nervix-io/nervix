@@ -184,7 +184,7 @@ impl DomainActivationPlan {
     ) -> error_stack::Result<Self, DomainActivationPlanError> {
         let mut plan = Self::default();
         let mut wire_schemas = WireSchemas::default();
-        let mut branches = BTreeMap::new();
+        let mut parametrizers = BTreeMap::new();
 
         for node in nodes.values() {
             match node.config.as_ref() {
@@ -201,8 +201,8 @@ impl DomainActivationPlan {
                 Model::WireAvroSchema(schema) => {
                     wire_schemas.insert_avro(schema.definition().to_owned())
                 }
-                Model::Parametrizer(branch) => {
-                    branches.insert(branch.name.clone(), branch);
+                Model::Parametrizer(parametrizer) => {
+                    parametrizers.insert(parametrizer.name.clone(), parametrizer);
                 }
                 Model::Vhost(vhost) => {
                     let tls = vhost.tls.as_ref().map(|tls| {
@@ -247,21 +247,22 @@ impl DomainActivationPlan {
                     })?;
                     let retention = match branching.parametrizer() {
                         None => PlannedRelayRetention::default(),
-                        Some(branch_name) => {
-                            let branch = branches.get(branch_name).ok_or_else(|| {
-                                Report::new(DomainActivationPlanError::MissingRelayBranch {
-                                    relay: relay.name.clone(),
-                                    parametrizer: branch_name.clone(),
-                                })
-                            })?;
-                            let branch_ttl =
-                                parse_duration_text(&branch.ttl).change_context_lazy(|| {
+                        Some(parametrizer_name) => {
+                            let parametrizer =
+                                parametrizers.get(parametrizer_name).ok_or_else(|| {
+                                    Report::new(DomainActivationPlanError::MissingRelayBranch {
+                                        relay: relay.name.clone(),
+                                        parametrizer: parametrizer_name.clone(),
+                                    })
+                                })?;
+                            let branch_ttl = parse_duration_text(&parametrizer.ttl)
+                                .change_context_lazy(|| {
                                     DomainActivationPlanError::InvalidRelayBranchTtl {
                                         relay: relay.name.clone(),
-                                        parametrizer: branch_name.clone(),
+                                        parametrizer: parametrizer_name.clone(),
                                     }
                                 })?;
-                            let branch_capacity = branch.eviction.as_ref().map(|eviction| {
+                            let branch_capacity = parametrizer.eviction.as_ref().map(|eviction| {
                                 NonZeroUsize::new(eviction.max_instances().get().arch_into())
                                     .assured(
                                         "non-zero configured branch counts fit the supported \
