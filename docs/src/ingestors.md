@@ -598,42 +598,52 @@ its quiesce buffer retained.
 
 A codec with an `ON INGESTION` transformation [unfolds](schemas-and-codecs.md#unfolding-payloads)
 every payload on the node's extension workers. When every worker is busy and the class's wait queue
-is full, what happens to a payload depends on whether its sender can present it again:
+is full, a payload a source handed over waits for a place and is never refused: a busy node delivers
+late, and it never drops what it was handed.
 
-- An acknowledged delivery mode counts the refused raw payloads in
-  `nervix_ingestor_unfolding_refused_total`, rejects the batch, and delivers it again on its
-  `RETRY POLICY`.
-- An [endpoint ingestor](#http-endpoint-and-websockets-endpoint) answers an HTTP body 503 without
-  `Retry-After` and closes an established WebSocket with 1013, counts the refused request payload,
-  and lets the sender send it again.
+- An ingestor's payload, acknowledged or not, waits in its host before it is decoded. The ingestor
+  takes nothing further from its source while it waits, so the wait reaches the transport as
+  backpressure, and the payloads behind it stay with the transport, in order. An acknowledged batch
+  is not rejected and presented again, and its `ACK TIMEOUT` starts only once it is dispatched.
 - A payload that `BUFFER` retained waits for a place when its buffer drains; see
   [Quiesce Modes](#quiesce-modes).
-- A paced ingestor has already moved past its poll, so the poll waits for a place. Waiting delays the
-  next poll, and the domain cadence coalesces the occurrences it missed into one poll at the newest
-  due instant.
-- An ingestor read in `MODE NO ACK` cannot present a payload again either. The payload waits for a
-  place when holding the ingestor's loop keeps its transport connected with bounded memory. Otherwise
-  it is refused: the ingestor reports the refusal as an error and counts the payload in
-  `nervix_ingestor_unfolding_refused_total`.
+- A paced ingestor's poll waits the same way. Waiting delays the next poll, and the domain cadence
+  coalesces the occurrences it missed into one poll at the newest due instant.
+- An [endpoint ingestor](#http-endpoint-and-websockets-endpoint) answers an HTTP body 503 without
+  `Retry-After`, counts the refused request payload in `nervix_ingestor_unfolding_refused_total`, and
+  lets the sender send it again: an HTTP sender still holds its body and waits for the answer. A
+  WebSocket frame in `MODE NO ACK` has no answer its sender waits for, so it waits for a place like
+  an ingestor's payload, and its connection reads nothing further meanwhile. The frame counts as
+  work its ingestor admitted, so a drain, an ownership handoff and a graceful stop wait for it, and
+  it ends unprocessed only when its ingestor's intake ends.
 
-| Entity | A payload the extension workers cannot take now | Why |
-| --- | --- | --- |
-| `HTTP REQUEST`, `PROMETHEUS QUERY` | Waits | Holding the loop only delays the next poll. |
-| `NATS SUBJECT` | Waits | The client keeps its connection and reads the subscription while the loop waits, holding up to 65,536 messages before it drops the newest as a slow consumer. |
-| `ZEROMQ PULL` | Waits | Unread messages stay in the socket's kernel buffers, and then the pushing peers wait. Nothing is dropped. |
-| `SYSLOG LISTENER` | Waits | The listener stays bound. The kernel drops UDP datagrams beyond the socket's receive buffer, and TCP and TLS senders wait once the listener's 64-frame queue is full. |
-| `MQTT TOPIC` | Refused and counted | The connection keeps sending its keep-alive while the loop is held, but reads only 64 publishes ahead of it and then stops reading, and its keep-alive with it, so the broker closes the connection once one and a half keep-alive intervals pass without a packet from it, and what is published until the ingestor reconnects is lost. |
-| `REDIS PUBSUB` | Refused and counted | The subscription reader holds at most `subscription_buffer_messages` messages. The host keeps polling it so its same-connection idle probes can continue instead of waiting for extension-worker admission. |
-| `WEBSOCKETS CONNECTION` | Refused and counted | The client answers the server's pings only while the loop reads, so a server that pings would close the connection and lose what it sent until the ingestor reconnects. |
-| `KAFKA TOPIC` in `MODE NO ACK` | Refused and counted | A consumer-group member that stops polling for `max.poll.interval.ms` leaves its group, and an instance reading domain offsets would keep its partitions assigned through an ownership handoff. |
-| `PULSAR TOPIC` in `MODE NO ACK` | Refused and counted | A consumer whose receive queue fills cannot complete its close, so a later suspension or stop would wait on it. The refused message stays unacknowledged until the consumer reconnects, when the broker delivers it again. |
+While a payload waits, its ingestor keeps its transport within the transport's own bounds:
 
-A wait never delays a stop or a new quiesce. Stopping the ingestor ends the wait and drops the
-payload with the rest of the ingestor's in-flight input. A new quiesce decides on the payload again,
-as on input that arrives while quiesced: `BUFFER` retains it, `DROP` drops it and counts it in
-`nervix_ingestor_quiesce_dropped_total`, and a suspension, under which a payload the ingestor already
-handed over still dispatches, lets it wait on until the workers have room. While a payload waits,
-the ones behind it stay with the transport, in order.
+| Entity | While a payload waits for a place |
+| --- | --- |
+| `HTTP REQUEST`, `PROMETHEUS QUERY` | Nothing is read. The next poll is delayed. |
+| `NATS SUBJECT` | The client keeps its connection and reads the subscription, holding up to 65,536 messages before it drops the newest as a slow consumer. |
+| `NATS STREAM`, `SQS QUEUE` | Every delivery mode is acknowledged, and the transport keeps what the ingestor has not read yet. |
+| `ZEROMQ PULL` | Unread messages stay in the socket's kernel buffers, and then the pushing peers wait. Nothing is dropped. |
+| `SYSLOG LISTENER` | The listener stays bound. The kernel drops UDP datagrams beyond the socket's receive buffer, and TCP and TLS senders wait once the listener's 64-frame queue is full. |
+| `KAFKA TOPIC` | A consumer group's member stays in its group: Nervix pauses fetching and services the group for as long as the payload waits, and fetching resumes at the next unread offset. A domain-offset reader keeps its assignment. Kafka's retention keeps what the ingestor has not read. |
+| `PULSAR TOPIC` | The consumer keeps its connection, and the broker stops sending once the receiver queue's flow permits are spent. |
+| `RABBITMQ QUEUE` | The connection keeps its heartbeats. In an acknowledged mode the prefetch bounds what the broker sends; in `MODE NO ACK` the client keeps receiving deliveries into a buffer without a bound, as it does whenever the ingestor falls behind. |
+| `MQTT TOPIC` | The connection keeps polling, and with it its keep-alive, while it reads up to 64 publishes ahead in `MODE NO ACK`. Once those fill it stops reading, and a broker closes a connection that sends nothing for one and a half keep-alive intervals, so a wait longer than that ends the connection until the ingestor reconnects. |
+| `REDIS PUBSUB` | The dedicated reader keeps reading and probing until `subscription_buffer_messages` messages wait, then stops reading. Redis closes a subscriber whose output buffer passes its `client-output-buffer-limit`. |
+| `WEBSOCKETS CONNECTION` | The connection keeps reading, so the client answers the server's pings and writes its own on their cadence, and it parks the first data frame it reads. Once a frame is parked it reads nothing further, so a server that pings with a deadline shorter than the rest of the wait closes the connection until the ingestor reconnects. |
+
+A wait never delays a stop or a new quiesce beyond their own limits. A graceful stop, a shutdown
+drain and an ownership handoff wait for a payload that waits for a place, as for any other work in
+motion, because the payload counts as work its ingestor admitted. When the ingestor stops before
+the payload has its place, the payload is not delivered and its positions stay unconfirmed, so a
+transport that keeps positions presents it again: a Kafka offset is not committed, and a Pulsar or
+RabbitMQ acknowledgement is not sent. A transport that keeps no positions loses it with the rest of
+the ingestor's in-flight input; see [Shutdown And Recovery](shutdown.md#connector-contracts). A new
+quiesce decides on the payload again, as on input that arrives while quiesced: `BUFFER` retains it,
+`DROP` drops it and counts it in `nervix_ingestor_quiesce_dropped_total`, and a suspension, under
+which a payload the ingestor already handed over still dispatches, lets it wait on until the workers
+have room.
 
 ## Branch Semantics
 
@@ -1558,9 +1568,9 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Every live node | no; scheduled owner |
 | Position class | replayable |
 | Acknowledgement confirmation | answered |
-| Buffers | an inherited consumer group's unadmitted native partition position: at most 1 position per inherited group reader; when full, holds back what fills it<br>a record conversion report after a gathered prefix: at most 1 report per ingestor instance; when full, holds back what fills it<br>messages librdkafka prefetches: driver default, queued.min.messages 100000 per partition, queued.max.messages.kbytes 65536; when full, holds back what fills it<br>admitted synchronous control jobs per node: at most 1024 pending jobs; when full, immediately refuses the request for its sender to retry |
+| Buffers | an inherited consumer group's unadmitted native partition position: at most 1 position per inherited group reader; when full, holds back what fills it<br>a record conversion report after a gathered prefix: at most 1 report per ingestor instance; when full, holds back what fills it<br>messages librdkafka prefetches: driver default, queued.min.messages 100000 per partition, queued.max.messages.kbytes 65536; when full, holds back what fills it<br>admitted synchronous control jobs per node: at most 1024 pending jobs; when full, holds back what fills it |
 | Network waits | name resolution: unbounded<br>connection setup: TCP, TLS and SASL: driver default, socket.connection.setup.timeout.ms, 30 s<br>a fetch: driver default, socket.timeout.ms, 60 s<br>a consumer-group offset commit: fixed 30s<br>metadata, partition inspection, offset lookups, watermarks and seeks including executor admission: driver default, socket.timeout.ms, 60 s per control job<br>subscribe, assign, pause, resume fetches and unsubscribe: unbounded<br>destroying a consumer that joined its group, for its LeaveGroup answer: driver default, 5 s per LeaveGroup request |
-| Driver limits | Kafka clients accept one name per property and refuse Nervix-owned keys. The ingestor supplies group.id, auto.offset.reset and enable.auto.commit, and disables enable.partition.eof and allow.auto.create.topics.<br>An inherited consumer-group reader disables automatic offset storage and stores only positions in its committed external partition set. It pauses and rewinds an unadmitted partition through connector control execution, retaining its position until that work finishes. The broker confirms that exact unread starting offset before the reader can retire, so even a subsequent START AT LATEST join cannot skip it; replacing the reader after a topology commit admits the partition.<br>Connector control execution has two workers per node by default. A commit still unanswered after its caller's 30 s deadline retains its worker and the ingestor's one in-flight commit until the native call ends. Native subscribe, assign, pause, resume and unsubscribe have no cancellable deadline; their caller waits socket.timeout.ms at most.<br>During a long read allowance hold, a consumer-group ingestor pauses fetching and services its group through the same control turn. Each job polls once. The driver can discard its own prefetched copies; the next admitted read resumes from its unread position. No record buffer is added.<br>A consumer whose last handle is gone is destroyed by one connector control job, which waits for a place rather than being refused; no Nervix key changes librdkafka's 5 s LeaveGroup timeout.<br>receive.message.max.bytes 100000000 |
+| Driver limits | Kafka clients accept one name per property and refuse Nervix-owned keys. The ingestor supplies group.id, auto.offset.reset and enable.auto.commit, and disables enable.partition.eof and allow.auto.create.topics.<br>An inherited consumer-group reader disables automatic offset storage and stores only positions in its committed external partition set. It pauses and rewinds an unadmitted partition through connector control execution, retaining its position until that work finishes. The broker confirms that exact unread starting offset before the reader can retire, so even a subsequent START AT LATEST join cannot skip it; replacing the reader after a topology commit admits the partition.<br>Connector control execution has two workers per node by default. A commit still unanswered after its caller's 30 s deadline retains its worker and the ingestor's one in-flight commit until the native call ends. Native subscribe, assign, pause, resume and unsubscribe have no cancellable deadline; their caller waits socket.timeout.ms at most.<br>While the host holds the loop, during a long read allowance hold or while a payload waits for the node's extension workers, a consumer-group ingestor pauses fetching and services its group through the same control turn. Each job polls once. The driver can discard its own prefetched copies; the next admitted read resumes from its unread position. No record buffer is added.<br>A consumer whose last handle is gone is destroyed by one connector control job, which waits for a place rather than being refused; no Nervix key changes librdkafka's 5 s LeaveGroup timeout.<br>receive.message.max.bytes 100000000 |
 | Stalled-peer checks | None: no client deadline key bounds a wait. |
 
 See the [KAFKA TOPIC capability and mirror reference](connector-capabilities.md#kafka-topic-ingest).
@@ -2133,8 +2143,9 @@ a parallel read. Neither replaces consumer prefetch. These are consumer controls
 no delivery acknowledgements or rejections. RabbitMQ considers a delivery complete when it sends
 it, so connection loss, broker restart or a stopped consumer can lose a delivery the graph has not
 processed. Lapin's existing delivery queue has no bound in this mode; a publisher that outpaces the
-host can grow that queue. A payload the node's extension workers cannot admit is refused and
-counted. Use an acknowledged mode when the broker must retain unprocessed deliveries.
+host can grow that queue, and so does a payload that waits for the node's extension workers; see
+[When The Extension Workers Are Full](#when-the-extension-workers-are-full). Use an acknowledged
+mode when the broker must retain unprocessed deliveries.
 
 `ACK SEQUENTIAL` uses a prefetch of one. `ACK PARALLEL MAX n` uses a prefetch of `n` per instance,
 where `n` is in `1..=65535`, the range of AMQP's prefetch field. Each read gathers up to that count,
@@ -3539,10 +3550,11 @@ A codec refusal becomes a decode rejection consumed by `ON GENERAL ERROR`; it al
 WebSocket data frames receive no per-frame graph-completion reply in this mode; signaling replies
 still follow their protocol. Under `RESPOND AFTER RESUME`, an unacknowledged HTTP request waits
 until resume, it disconnects, or the intake ends. A request still waiting when the domain stops
-receives HTTP 503 and its body is discarded. If extension workers
-cannot unfold a fresh payload,
-HTTP answers 503 and a WebSocket closes with 1013; buffered payloads instead retain their place
-until workers can take them. See [When The Codec Refuses A Payload](#when-the-codec-refuses-a-payload).
+receives HTTP 503 and its body is discarded. If extension workers cannot unfold a fresh HTTP body,
+HTTP answers 503; a fresh WebSocket frame waits for a place, its connection reading nothing further
+meanwhile, and buffered payloads retain their place until workers can take them. See
+[When The Extension Workers Are Full](#when-the-extension-workers-are-full) and
+[When The Codec Refuses A Payload](#when-the-codec-refuses-a-payload).
 
 Quiesce is enforced independently on every serving node. `REJECT` refuses new requests and
 WebSocket upgrades with 503. A stopped or absent intake refuses new requests too. A route shared
@@ -3645,7 +3657,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Every live node | no; scheduled owner |
 | Position class | none |
 | Acknowledgement confirmation | none |
-| Buffers | accepted signaling frames retained for ingestor reads: set by handshake_buffer_capacity messages (default 16), each at most max_message_size bytes; when full, holds back what fills it<br>one accepted frame waiting for handoff room: set by max_message_size bytes (default 67108864); when full, holds back what fills it<br>the incoming message assembled by the transport: set by max_message_size bytes (default 67108864), with each frame bounded by max_frame_size bytes (default 16777216); when exceeded, fails the read and reconnects on the retry policy |
+| Buffers | accepted signaling frames retained for ingestor reads: set by handshake_buffer_capacity messages (default 16), each at most max_message_size bytes; when full, holds back what fills it<br>one accepted frame waiting for handoff room: set by max_message_size bytes (default 67108864); when full, holds back what fills it<br>one data frame read while the host holds the ingestor's loop, which keeps the connection answering pings: set by max_message_size bytes (default 67108864); when full, holds back what fills it<br>the incoming message assembled by the transport: set by max_message_size bytes (default 67108864), with each frame bounded by max_frame_size bytes (default 16777216); when exceeded, fails the read and reconnects on the retry policy |
 | Network waits | connection: name resolution, address attempts, TLS and the opening upgrade: `connect_timeout_ms`; 30s when omitted<br>the signaling handshake: `the signaling protocol's TIMEOUT`<br>reading the next frame, including one catch-up response window after a missed client ping: `idle_timeout_ms`; when omitted, three ping_interval_ms intervals, or 30 s without configured pings<br>writing a configured ping: fixed 1s<br>close: fixed 1s |
 | Driver limits | The opening upgrade response carries at most 124 header fields, and at most 64 KiB arrives before its head ends; a larger response fails that connection attempt.<br>The response head arrives within 512 reads that, after the 64th, average at least 128 bytes; a peer that trickles it fails that connection attempt. |
 | Stalled-peer checks | `STALLED PEER connect_timeout_ms`<br>`STALLED PEER idle_timeout_ms` |

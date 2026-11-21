@@ -534,7 +534,7 @@ use ingest_group::{
     BatchPayload, BoundIngestor, BoundIngestorInput, BranchedEntrypointInput, ClientBatchDispatch,
     ClientBatchMetadata, IngestGroupDispatch, IngestRouteCollector, IngestorDependencies,
     IngestorRouteRuntimes, PayloadDecodeFailure, RawIngestAcceptance, RefusedEntry, SplitPayloads,
-    UnfoldingNotAdmitted, decode_ingested_payload, prepare_branched_entrypoint_input,
+    decode_ingested_payload, prepare_branched_entrypoint_input,
 };
 use ingest_metadata::{
     BRANCH_NAMESPACE, INGEST_METADATA_NAMESPACE, INGEST_PAYLOAD_NAMESPACE,

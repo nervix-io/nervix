@@ -486,25 +486,30 @@ impl Runtime {
             .change_context_lazy(failure)?;
         self.inner
             .executor
-            .run_cpu(CpuClass::Bulk, reservation, move |_charge, cancellation| {
-                cancellation
-                    .check()
-                    .change_context(RuntimePersistenceError::Cancelled)?;
-                match seed {
-                    Some((generation, selection)) => {
-                        captured.start_seed(generation, selection, || {
+            .run_cpu_with(
+                CpuClass::Bulk,
+                nervix_execution::QueueAdmission::WaitForPlace,
+                reservation,
+                move |_charge, cancellation| {
+                    cancellation
+                        .check()
+                        .change_context(RuntimePersistenceError::Cancelled)?;
+                    match seed {
+                        Some((generation, selection)) => {
+                            captured.start_seed(generation, selection, || {
+                                cancellation
+                                    .check()
+                                    .change_context(RuntimePersistenceError::Cancelled)
+                            })
+                        }
+                        None => captured.snapshot(|| {
                             cancellation
                                 .check()
                                 .change_context(RuntimePersistenceError::Cancelled)
-                        })
+                        }),
                     }
-                    None => captured.snapshot(|| {
-                        cancellation
-                            .check()
-                            .change_context(RuntimePersistenceError::Cancelled)
-                    }),
-                }
-            })
+                },
+            )
             .await
             .change_context_lazy(failure)?
             .change_context_lazy(failure)
@@ -532,9 +537,14 @@ impl Runtime {
             .change_context_lazy(failure)?;
         self.inner
             .executor
-            .run_cpu(CpuClass::Bulk, reservation, move |_charge, cancellation| {
-                decode_start_positions(&snapshot.payload, generation, cancellation)
-            })
+            .run_cpu_with(
+                CpuClass::Bulk,
+                nervix_execution::QueueAdmission::WaitForPlace,
+                reservation,
+                move |_charge, cancellation| {
+                    decode_start_positions(&snapshot.payload, generation, cancellation)
+                },
+            )
             .await
             .change_context_lazy(failure)?
             .change_context_lazy(failure)
@@ -749,12 +759,17 @@ impl Runtime {
         let payload = self
             .inner
             .executor
-            .run_cpu(CpuClass::Bulk, reservation, move |_charge, cancellation| {
-                cancellation
-                    .check()
-                    .change_context(RuntimePersistenceError::Cancelled)?;
-                encode_start_candidate(generation, positions)
-            })
+            .run_cpu_with(
+                CpuClass::Bulk,
+                nervix_execution::QueueAdmission::WaitForPlace,
+                reservation,
+                move |_charge, cancellation| {
+                    cancellation
+                        .check()
+                        .change_context(RuntimePersistenceError::Cancelled)?;
+                    encode_start_candidate(generation, positions)
+                },
+            )
             .await
             .change_context_lazy(failure)?
             .change_context_lazy(failure)?;

@@ -33,7 +33,6 @@ async fn a_held_group_poll_preserves_the_next_position_until_an_admitted_read() 
     publish(&broker).await;
     publish(&broker).await;
     let mut plan = plan(&broker, KafkaGroupCommit::EachAcknowledgedBatch);
-    plan.maintain_rate_limit_holds = true;
     for key in ["session.timeout.ms", "max.poll.interval.ms"] {
         plan.config.push(ClientConfigEntry {
             key: key.to_owned(),
@@ -69,7 +68,7 @@ async fn a_held_group_poll_preserves_the_next_position_until_an_admitted_read() 
         }
     };
     nervix_primitives::select! {
-        failed = held.maintain(hold_deadline) => {
+        failed = held.maintain(Some(hold_deadline)) => {
             panic!("servicing the held group should continue without taking a record: {failed:?}");
         }
         observed = timeout(READ_DEADLINE, observe_hold) => {

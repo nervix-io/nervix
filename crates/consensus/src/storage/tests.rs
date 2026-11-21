@@ -1196,6 +1196,95 @@ fn the_store_has_as_many_commands_turns_as_leave_room_beside_its_working_sets()
     Ok(())
 }
 
+/// The consensus storage worker and every place in its wait queue held by jobs that have not run
+/// yet. Releasing the fill lets the holding job end, so the queue drains in order.
+struct FilledConsensusStorage {
+    release: nervix_primitives::sync::blocking::mpsc::Sender<()>,
+}
+
+impl FilledConsensusStorage {
+    /// Fills an executor whose consensus class has one worker and one waiting place: one job holds
+    /// the worker until the fill is released, and a second waits behind it.
+    async fn fill(executor: &Executor) -> Self {
+        let (release, held) = nervix_primitives::sync::blocking::mpsc::channel::<()>();
+        let (started, is_started) = nervix_primitives::sync::oneshot::channel();
+        let holder = executor.clone();
+        nervix_primitives::task::spawn(async move {
+            let reservation = holder
+                .try_reserve(MemoryClass::Commands, 0)
+                .assured("an empty charge always fits");
+            holder
+                .run_storage(StorageClass::Consensus, reservation, move |_, _| {
+                    started
+                        .send(())
+                        .assured("the fixture waits for its occupied worker");
+                    // Releasing the fill disconnects the channel, which is the release.
+                    match held.recv() {
+                        Ok(()) | Err(nervix_primitives::sync::blocking::mpsc::RecvError) => {}
+                    }
+                })
+                .await
+                .assured("the holding job runs on the idle worker");
+        });
+        is_started
+            .await
+            .assured("the fixture's only worker is occupied");
+        let (queued, is_queued) = nervix_primitives::sync::oneshot::channel();
+        let waiter = executor.clone();
+        nervix_primitives::task::spawn(async move {
+            let reservation = waiter
+                .try_reserve(MemoryClass::Commands, 0)
+                .assured("an empty charge always fits");
+            let mut run =
+                std::pin::pin!(waiter.run_storage(StorageClass::Consensus, reservation, |_, _| ()));
+            assert!(run.as_mut().now_or_never().is_none());
+            queued
+                .send(())
+                .assured("the fixture waits for its occupied queue place");
+            run.await
+                .assured("the waiting job runs once the holder leaves");
+        });
+        is_queued
+            .await
+            .assured("the fixture's only waiting place is occupied");
+        Self { release }
+    }
+
+    fn release(self) {
+        drop(self.release);
+    }
+}
+
+/// A full consensus storage queue is a temporary condition: a log append waits for a place rather
+/// than being refused, so it never marks the store failed, and the store appends again once the
+/// worker frees.
+#[nervix_primitives::test]
+async fn a_full_consensus_storage_queue_holds_an_append_back_instead_of_failing_the_store()
+-> TestResult {
+    let mut workers = ExecutionConfig::default().workers;
+    workers.pending_jobs.consensus_storage = std::num::NonZeroUsize::MIN;
+    let executor = Executor::new(ExecutionConfig {
+        workers,
+        ..ExecutionConfig::default()
+    })?;
+    let mut harness = Harness::with_executor(executor.clone()).await?;
+    let filled = FilledConsensusStorage::fill(&executor).await;
+
+    {
+        let mut append = std::pin::pin!(harness.append(1));
+        assert!(
+            append.as_mut().now_or_never().is_none(),
+            "the append waits for a place in the full consensus queue"
+        );
+        filled.release();
+        nervix_primitives::time::timeout(Duration::from_secs(10), append)
+            .await
+            .map_err(|_| "the append did not complete once the consensus worker freed")??;
+    }
+    harness.append(2).await?;
+    Ok(())
+}
+
 #[nervix_primitives::test]
 async fn commands_progress_independently_of_a_waiting_bulk_working_set() -> TestResult {
     let executor = Executor::default();

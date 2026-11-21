@@ -221,7 +221,10 @@ pub(crate) async fn stream_processor_page(
                 let batch = RuntimeRecordBatch::from_record_batch(batch.schema(), batch)
                     .map_err(StreamHandlerError::with_cause)?;
                 let body = batch
-                    .encode_arrow_snapshot_section(executor)
+                    .encode_arrow_snapshot_section(
+                        executor,
+                        nervix_execution::QueueAdmission::RefuseWhenFull,
+                    )
                     .await
                     .map_err(StreamHandlerError::with_cause)?;
                 bytes = bytes
@@ -575,9 +578,14 @@ impl ProcessorPageBodies<'_> {
         self.offset = end;
         let body = verified_body(executor, body, identity.clone()).await?;
         let schema = StdArc::new(SchemaField::arrow_schema(&transfer.fields));
-        let decoded = RuntimeRecordBatch::decode_arrow_snapshot_section(executor, schema, body)
-            .await
-            .change_context(StatePageExchangeError::Columns)?;
+        let decoded = RuntimeRecordBatch::decode_arrow_snapshot_section(
+            executor,
+            nervix_execution::QueueAdmission::RefuseWhenFull,
+            schema,
+            body,
+        )
+        .await
+        .change_context(StatePageExchangeError::Columns)?;
         let decoded_rows =
             u64::try_from(decoded.batch().num_rows()).assured("a decoded row count fits u64");
         if decoded_rows != rows {

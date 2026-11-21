@@ -982,8 +982,9 @@ impl IcebergTableEmitter {
             .change_context(EmitterWriteError::Publish { connector: ICEBERG })?;
         let target = target.clone();
         executor
-            .run_storage(
+            .run_storage_with(
                 StorageClass::Filesystem,
+                nervix_execution::QueueAdmission::WaitForPlace,
                 reservation,
                 move |_charge, cancellation: &Cancellation| {
                     target

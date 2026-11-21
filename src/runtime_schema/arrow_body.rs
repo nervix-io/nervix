@@ -174,27 +174,29 @@ impl RuntimeRecordBatch {
 
     /// Encode this batch as one Arrow section of a sealed runtime snapshot, charged to the bulk
     /// budget and bounded by the section limit rather than by the relay body limit.
+    ///
+    /// `admission` says what a full bulk queue does with the job: state the node moves, captures
+    /// or restores for itself waits for a place, while a request may be refused.
     pub async fn encode_arrow_snapshot_section(
         &self,
         executor: &Executor,
+        admission: QueueAdmission,
     ) -> Result<ChargedBytes, Report<ArrowBodyError>> {
-        self.encode_body(
-            executor,
-            ArrowBodyCarriage::SnapshotSection,
-            QueueAdmission::RefuseWhenFull,
-        )
-        .await
+        self.encode_body(executor, ArrowBodyCarriage::SnapshotSection, admission)
+            .await
     }
 
     /// Admit projection and its encoded result together, so neither allocation waits for a
     /// second grant while retaining the first. The projection and IPC writer run as one bounded
-    /// CPU job; only the encoded allocation survives that job.
+    /// CPU job; only the encoded allocation survives that job, which `admission` queues or refuses
+    /// when the bulk queue is full.
     #[cfg_attr(
         nervix_lint,
         nervix::dispatch(reason = "the caller supplies the admitted bounded row projection")
     )]
     pub(crate) async fn encode_arrow_snapshot_projection<E: error_stack::Context>(
         executor: &Executor,
+        admission: QueueAdmission,
         projection_bytes: u64,
         encoded_estimate: u64,
         project: impl FnOnce() -> error_stack::Result<Self, E> + Send + 'static,
@@ -208,19 +210,24 @@ impl RuntimeRecordBatch {
             .try_reserve(MemoryClass::Bulk, bytes.max(1))
             .change_context(ArrowBodyError::Admission)?;
         executor
-            .run_cpu(CpuClass::Bulk, reservation, move |charge, cancellation| {
-                let (_projection_charge, encoded_charge) = charge
-                    .split(projection_bytes)
-                    .change_context(ArrowBodyError::Admission)?;
-                cancellation
-                    .check()
-                    .change_context(ArrowBodyError::Cancelled)?;
-                let batch = project().map_err(ArrowBodyError::encoding)?;
-                cancellation
-                    .check()
-                    .change_context(ArrowBodyError::Cancelled)?;
-                encode_admitted_body(batch.batch, encoded_charge, limit)
-            })
+            .run_cpu_with(
+                CpuClass::Bulk,
+                admission,
+                reservation,
+                move |charge, cancellation| {
+                    let (_projection_charge, encoded_charge) = charge
+                        .split(projection_bytes)
+                        .change_context(ArrowBodyError::Admission)?;
+                    cancellation
+                        .check()
+                        .change_context(ArrowBodyError::Cancelled)?;
+                    let batch = project().map_err(ArrowBodyError::encoding)?;
+                    cancellation
+                        .check()
+                        .change_context(ArrowBodyError::Cancelled)?;
+                    encode_admitted_body(batch.batch, encoded_charge, limit)
+                },
+            )
             .await
             .change_context(ArrowBodyError::Execution)?
     }
@@ -278,9 +285,10 @@ impl RuntimeRecordBatch {
 
     /// Decode one Arrow section of a sealed runtime snapshot, which must carry exactly one section
     /// of `expected_schema`. Charged to the bulk budget and bounded by the section limit rather
-    /// than by the relay body limit.
+    /// than by the relay body limit; `admission` says what a full bulk queue does with the job.
     pub async fn decode_arrow_snapshot_section(
         executor: &Executor,
+        admission: QueueAdmission,
         expected_schema: StdArc<ArrowSchema>,
         body: ChargedBytes,
     ) -> Result<Self, Report<ArrowBodyError>> {
@@ -292,7 +300,7 @@ impl RuntimeRecordBatch {
                 decoded_limit: executor.limits().snapshot_section_bytes.as_u64(),
                 max_sections: NonZeroUsize::MIN,
                 carriage: ArrowBodyCarriage::SnapshotSection,
-                admission: QueueAdmission::RefuseWhenFull,
+                admission,
             },
         )
         .await
@@ -511,7 +519,7 @@ mod projection_tests {
             .assured("the test holds the bulk budget");
         let result = RuntimeRecordBatch::encode_arrow_snapshot_projection::<
             super::super::RuntimeSchemaError,
-        >(&executor, 1024, 1024, || {
+        >(&executor, QueueAdmission::WaitForPlace, 1024, 1024, || {
             panic!("a refused projection must not allocate or convert rows")
         })
         .await;
@@ -612,7 +620,10 @@ mod framing_tests {
             let batch = RuntimeRecordBatch::from_record_batch(StdArc::clone(&schema), batch)
                 .assured("the batch has the schema it was built with");
             let section = batch
-                .encode_arrow_snapshot_section(executor)
+                .encode_arrow_snapshot_section(
+                    executor,
+                    nervix_execution::QueueAdmission::RefuseWhenFull,
+                )
                 .await
                 .assured("a three-row section seals");
             Self {
@@ -634,6 +645,7 @@ mod framing_tests {
                 .assured("the bulk budget holds one small section");
             RuntimeRecordBatch::decode_arrow_snapshot_section(
                 executor,
+                nervix_execution::QueueAdmission::RefuseWhenFull,
                 StdArc::clone(&self.schema),
                 section,
             )
@@ -725,6 +737,7 @@ mod framing_tests {
 
         let result = RuntimeRecordBatch::decode_arrow_snapshot_section(
             &executor,
+            nervix_execution::QueueAdmission::RefuseWhenFull,
             section.schema.clone(),
             input,
         )

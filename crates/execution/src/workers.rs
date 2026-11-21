@@ -226,8 +226,9 @@ impl WorkerPool {
         })
     }
 
-    /// Return once the job has been handed to a worker. Until then the submitting future still
-    /// owns queued cancellation; afterwards the job runs independently of its submitter.
+    /// Return once the job has been handed to a worker, waiting for a place in the class's queue
+    /// rather than being refused. Until then the submitting future still owns queued cancellation;
+    /// afterwards the job runs independently of its submitter.
     #[cfg_attr(
         nervix_lint,
         nervix::dispatch(reason = "adapts the caller's synchronous callback for its admitted \
@@ -241,7 +242,7 @@ impl WorkerPool {
     ) -> Result<(), Report<ExecutionError>> {
         let RunningJob { handle, obligation } = self
             .start(
-                QueueAdmission::RefuseWhenFull,
+                QueueAdmission::WaitForPlace,
                 reservation,
                 move |reservation, _| job(reservation),
             )

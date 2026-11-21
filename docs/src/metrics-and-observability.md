@@ -746,7 +746,7 @@ route, under the outcome that ingestor reached:
 | `accepted` | took it in: in `MODE NO ACK` it dispatched it into its graph or its endpoint `BUFFER` retained it (HTTP 202); in `MODE ACK` its acknowledgement root completed (HTTP 200, `completed`). |
 | `busy` | had no free slot in its `MODE ACK MAX` response window or could not fit an acknowledged request in the pause buffer (HTTP 503, `not_admitted` with `busy`). |
 | `refused` | refused new intake under quiesce, overflowed or ended a waiting `MODE NO ACK` request (HTTP 503), or in `MODE ACK` one of its routes refused the decoded input (HTTP 400). |
-| `not_admitted` | had no extension-worker capacity to unfold the request or removed a waiting acknowledged body when its deadline or intake ended (HTTP 503). Extension-worker refusals also count in `nervix_ingestor_unfolding_refused_total`. |
+| `not_admitted` | had no extension-worker capacity to unfold an HTTP body or removed a waiting acknowledged body when its deadline or intake ended (HTTP 503). Extension-worker refusals also count in `nervix_ingestor_unfolding_refused_total`. A WebSocket frame in `MODE NO ACK` waits for a place instead. |
 | `decode_rejected` | consumed it as a decode rejection because its codec refused the payload, which `nervix_ingestor_decode_rejections_total` counts too (HTTP 202 in `MODE NO ACK`, 400 in `MODE ACK`). |
 | `processing_failed` | admitted it without completing it: its `MODE NO ACK` dispatch into the graph failed (HTTP 202), or its `MODE ACK` acknowledgement root failed, its `ACK TIMEOUT` expired or its intake stopped while the response was held (HTTP 503). |
 
@@ -791,7 +791,7 @@ These three additional counters are available in `/metrics`:
 
 | Family | Meaning |
 | --- | --- |
-| `nervix_ingestor_unfolding_refused_total` | Payloads refused because the extension workers had no room to unfold them. Waiting for a place leaves the count unchanged. [When The Extension Workers Are Full](ingestors.md#when-the-extension-workers-are-full) explains the admission paths. |
+| `nervix_ingestor_unfolding_refused_total` | Endpoint request bodies answered as refused because the extension workers had no room to unfold them, which their senders send again. Every other payload, acknowledged or not, waits for a place, and waiting leaves the count unchanged. [When The Extension Workers Are Full](ingestors.md#when-the-extension-workers-are-full) explains the admission paths. |
 | `nervix_ingestor_header_values_dropped_total` | Invalid UTF-8 header values skipped while retaining their valid siblings and the payload. Applies to `HTTP REQUEST` responses, `HTTP ENDPOINT` requests and `WEBSOCKETS ENDPOINT` upgrades. Requests and upgrades count once per invalid value for each bound ingestor. |
 | `nervix_ingestor_read_ahead_dropped_payloads_total` | QoS 0 publishes that exceed the separate read-ahead quota of an ACK-mode MQTT ingestor, counted immediately, including during a downstream acknowledgement wait. [MQTT ingestor connections](connector-contract.md#mqtt-ingestor-connections) owns the bound. |
 
@@ -811,7 +811,7 @@ with its full selector and `total`, `count` and `sum_seconds` for the duration h
 | `nervix_ingestor_transport_acknowledgement_duration_seconds` | `operation="acknowledge\|reject"` | Elapsed wall seconds of each of those transport operations, such as a Kafka consumer-group commit or an SQS deletion, failed operations included. |
 | `nervix_ingestor_resumes_total` | `outcome="ready\|waiting\|failed"` | Every resume of the ingestor's connector that completed: ready to read, waiting for an external assignment, or failed. A resume a stop or a quiesce change ended before it completed is not counted. |
 | `nervix_ingestor_suspends_total` | `cause="quiesce\|read_failure\|rejection"` | Every suspension of a ready connector: by a quiesce that suspends intake, by a read that failed and left the connector needing a resume, or because a rejection failed and the transport must be reopened before the same positions are read again. A connector asking for a resume without a failed read, such as after a Kafka domain-offset reassignment, counts only its resume. |
-| `nervix_ingestor_unconfirmed_stop_positions_total` | None | Positions the ingestor read whose acknowledgement trees had not all resolved when it stopped. Their transport presents them again by its own redelivery contract. |
+| `nervix_ingestor_unconfirmed_stop_positions_total` | None | Positions the ingestor read whose acknowledgement trees had not all resolved when it stopped, including a batch that still waited for the node's extension workers. A transport that keeps positions presents them again by its own redelivery contract. |
 | `nervix_ingestor_transient_failure` | None | `1` while the current task has a published transient failure, which `DESCRIBE INGESTOR` shows as its transient error, otherwise `0`. Ending the task resets the observation to `0`; an ending predecessor cannot clear its replacement. |
 
 Broker ingestors record every family. Paced ingestors acknowledge nothing on a transport, so they

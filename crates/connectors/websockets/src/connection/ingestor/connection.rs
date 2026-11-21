@@ -299,6 +299,12 @@ impl WebsocketConnection {
             .verified("client deadlines are held to the schedulable duration bound")
     }
 
+    /// Restarts the idle window as the host resumes reading after it held the loop with a frame
+    /// parked: the time this client read nothing is not the peer's silence.
+    pub(super) fn resume_reading(&mut self) {
+        self.last_received = Instant::now();
+    }
+
     pub(super) fn ping_written(&mut self) {
         self.pings
             .as_mut()

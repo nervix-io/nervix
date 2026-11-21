@@ -86,8 +86,9 @@ impl StagedSnapshotWriter {
             .assured("the validated bulk chunk fits the node address width");
         let mut quota = self._reservation;
         executor
-            .run_storage(
+            .run_storage_with(
                 StorageClass::Filesystem,
+                nervix_execution::QueueAdmission::WaitForPlace,
                 charge,
                 move |_charge, cancellation| {
                     cancellation
@@ -176,8 +177,9 @@ impl StagedArtifact {
             .await
             .change_context(SnapshotStagingError::Admission)?;
         executor
-            .run_storage(
+            .run_storage_with(
                 StorageClass::Filesystem,
+                nervix_execution::QueueAdmission::WaitForPlace,
                 charge,
                 move |charge, cancellation| {
                     cancellation

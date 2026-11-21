@@ -454,7 +454,6 @@ mod tests {
                 acknowledgement: nervix_models::IngestAcknowledgement::Unacknowledged,
                 buffered_intake: true,
                 flush_each_intake: true,
-                unacknowledged_admission: QueueAdmission::WaitForPlace,
                 client_mounts: Vec::new(),
             };
             // Only the selected global slot exists, even when index 2 is the first local unit.

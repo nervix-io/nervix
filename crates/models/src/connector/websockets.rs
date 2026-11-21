@@ -118,6 +118,14 @@ const WEBSOCKETS_CONNECTION_BOUNDS: DeclaredBounds = DeclaredBounds {
             },
         },
         DeclaredBuffer {
+            holds: "one data frame read while the host holds the ingestor's loop, which keeps the \
+                    connection answering pings",
+            bound: BufferBound::Bounded {
+                capacity: BufferCapacity::Setting("max_message_size bytes (default 67108864)"),
+                overflow: BufferOverflow::Backpressure,
+            },
+        },
+        DeclaredBuffer {
             holds: "the incoming message assembled by the transport",
             bound: BufferBound::Bounded {
                 capacity: BufferCapacity::Setting(

@@ -218,9 +218,6 @@ impl EndpointIntakeStartPlan {
             // them. What the endpoint buffer retained replays one request per ingest group.
             buffered_intake: false,
             flush_each_intake: true,
-            // The request path answers a body the extension workers cannot unfold now with a
-            // refusal its sender retries, so no request reaches the loop's live intake.
-            unacknowledged_admission: QueueAdmission::RefuseWhenFull,
             client_mounts: Vec::new(),
             connector_label: C::KIND.connector().keyword().to_ascii_lowercase(),
             domain_offsets: None,
