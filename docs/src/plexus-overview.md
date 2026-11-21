@@ -947,7 +947,8 @@ a selected domain. `REFRESH LICENSE;` requests a current signed decision.
 `ROTATE LICENSE CLUSTER KEY;` replaces the signing key while preserving identity and deadlines.
 `RELEASE LICENSE;` commits release locally, with background service confirmation and retained
 grant deadlines. These statements are cluster scoped and run outside domain transactions.
-`DESCRIBE LICENSE` reports the cluster's effective licensing policy and committed quota usage.
+`DESCRIBE LICENSE` reports the cluster's effective licensing policy, committed quota usage and the
+state of every capability.
 It takes no name and works on every node without a selected domain. The embedded free policy
 ships with unlimited node and domain quotas. See
 [Cluster Licensing](node-settings.md#cluster-licensing) for its fields and admission contract.

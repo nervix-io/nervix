@@ -45,7 +45,7 @@ Feature: Typed state inspection through the native host libraries
     Then within "180s" the client probe reports
       """
       INSPECTION nodes names=node-1
-      INSPECTION license rows=3
+      INSPECTION license rows=4
       INSPECTION page rows=0
       INSPECTION refused not_materialized
       INSPECTION branched rows=2 pages=2

@@ -96,6 +96,8 @@ pub enum ConditionKind {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ConditionShape {
+    /// A cluster usage condition a license enables or disables.
+    Capability,
     Quota {
         scope: Scope,
         affects_existing: bool,
@@ -117,6 +119,7 @@ pub struct ConditionDefinition {
 impl ConditionDefinition {
     pub const fn kind(self) -> ConditionKind {
         match self.shape {
+            ConditionShape::Capability => ConditionKind::Capability,
             ConditionShape::Quota { .. } => ConditionKind::Quota,
             ConditionShape::Duration { .. } => ConditionKind::Duration,
             ConditionShape::Policy => ConditionKind::Policy,
@@ -126,6 +129,7 @@ impl ConditionDefinition {
 
     pub const fn scope(self) -> Scope {
         match self.shape {
+            ConditionShape::Capability => Scope::Cluster,
             ConditionShape::Quota { scope, .. } => scope,
             _ => Scope::Organization,
         }
@@ -134,6 +138,7 @@ impl ConditionDefinition {
 
 pub const CLUSTER_NODES: &str = nervix_licensing_vocabulary::QuotaName::ClusterNodes.as_str();
 pub const CLUSTER_DOMAINS: &str = nervix_licensing_vocabulary::QuotaName::ClusterDomains.as_str();
+pub const LICENSING_DUMMY: &str = nervix_licensing_vocabulary::CapabilityName::Dummy.as_str();
 pub const PERSISTENT_ACTIVATIONS: &str = "license.activations.persistent";
 pub const EPHEMERAL_ACTIVATIONS: &str = "license.activations.ephemeral";
 pub const ACTIVATION_KINDS: &str = "activation.kinds";
@@ -145,7 +150,8 @@ pub const OFFLINE_LAPSE: &str = "offline.on_lapse";
 pub const CAPABILITY_GRACE: &str = "transition.capability_removal_grace";
 pub const QUOTA_GRACE: &str = "transition.quota_reduction_grace";
 
-/// The current catalog is finite and read by every resolver; a new name lands with its owner.
+/// The current catalog is finite and read by every resolver; a new name lands with its owner, and a
+/// name nothing reads says so as its owner.
 pub const CATALOG: &[ConditionDefinition] = &[
     ConditionDefinition {
         name: CLUSTER_NODES,
@@ -162,6 +168,11 @@ pub const CATALOG: &[ConditionDefinition] = &[
             affects_existing: true,
         },
         owner: "domain admission; committed domain records",
+    },
+    ConditionDefinition {
+        name: LICENSING_DUMMY,
+        shape: ConditionShape::Capability,
+        owner: "none: it changes nothing, and DESCRIBE LICENSE shows its state",
     },
     ConditionDefinition {
         name: PERSISTENT_ACTIVATIONS,
@@ -338,6 +349,7 @@ impl Catalog {
                 continue;
             }
             let present = match definition.shape {
+                ConditionShape::Capability => usage.capabilities.contains_key(definition.name),
                 ConditionShape::Quota {
                     scope: Scope::Cluster,
                     ..
@@ -412,7 +424,8 @@ impl OperatingConditions {
     }
 }
 
-/// A free cluster has no operating half and grants every current cluster quota without a limit.
+/// A free cluster has no operating half, grants every current cluster quota without a limit and
+/// disables every capability.
 pub const FREE_POLICY: FreePolicy = FreePolicy;
 
 #[derive(Clone, Copy, Debug)]
@@ -420,21 +433,33 @@ pub struct FreePolicy;
 
 impl FreePolicy {
     pub fn usage(self) -> UsageConditions {
+        let mut capabilities = BTreeMap::new();
         let mut quotas = BTreeMap::new();
         for definition in CATALOG {
-            if let ConditionShape::Quota {
-                scope: Scope::Cluster,
-                ..
-            } = definition.shape
-            {
-                quotas.insert(
-                    definition.name.to_owned(),
-                    ConditionValue::Known(Quota::Unlimited),
-                );
+            match definition.shape {
+                ConditionShape::Capability => {
+                    capabilities.insert(
+                        definition.name.to_owned(),
+                        ConditionValue::Known(Capability::Disabled),
+                    );
+                }
+                ConditionShape::Quota {
+                    scope: Scope::Cluster,
+                    ..
+                } => {
+                    quotas.insert(
+                        definition.name.to_owned(),
+                        ConditionValue::Known(Quota::Unlimited),
+                    );
+                }
+                ConditionShape::Quota { .. }
+                | ConditionShape::Duration { .. }
+                | ConditionShape::Policy
+                | ConditionShape::ActivationKinds => {}
             }
         }
         UsageConditions {
-            capabilities: BTreeMap::new(),
+            capabilities,
             quotas,
         }
     }

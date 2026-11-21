@@ -276,6 +276,15 @@ impl WasmGuestState {
     }
 }
 
+#[cfg(test)]
+impl WasmGuestState {
+    /// The guest state saved at `revision`, which an owner test restores without a checkpoint
+    /// lifecycle around it.
+    pub(super) fn saved_at(revision: u64, bytes: Vec<u8>) -> Self {
+        Self { revision, bytes }
+    }
+}
+
 impl ReplicatedWasmProcessorState {
     /// The checkpoints of a branch whose committed checkpoint is `initial`: what this node's
     /// storage holds for the branch or an ownership transfer handed over, or nothing for a branch

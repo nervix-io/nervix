@@ -1443,8 +1443,66 @@ func wasmUnitLines(state *session.WasmUnitStateFacts) ([]string, error) {
 			}
 			lines = append(lines, fmt.Sprintf("STATE_WASM_RECOVERY branch=%s generation=%d rejection=%s request=%s outcome=%s", branch, recovery.Generation(), session.EnumNamesWasmSavedStateRejection[*rejection], recovery.Request(), session.EnumNamesWasmRecoveryOutcome[*outcome]))
 		}
+		if description := entry.Description(nil); description != nil {
+			if entry.Checkpoint(nil) == nil {
+				return nil, errors.New("a WASM guest-state description has no checkpoint beside it")
+			}
+			described, err := wasmDescriptionLines(branch, description)
+			if err != nil {
+				return nil, err
+			}
+			lines = append(lines, described...)
+		}
 	}
 	return lines, nil
+}
+
+// wasmDescriptionLines prints a guest-state description: its restored generation and revision,
+// then its sections with their fields, which are always sensitive, or its failed render's stage
+// and diagnostic.
+func wasmDescriptionLines(branch string, description *session.WasmGuestStateDescription) ([]string, error) {
+	restored := fmt.Sprintf("STATE_WASM_DESCRIPTION branch=%s generation=%d revision=%s", branch, description.Generation(), optionalNumber(description.Revision()))
+	switch description.RenderType() {
+	case session.WasmGuestStateRenderWasmGuestStateSections:
+		described := new(session.WasmGuestStateSections)
+		if err := union(description.Render, described); err != nil {
+			return nil, err
+		}
+		lines := []string{fmt.Sprintf("%s outcome=described sections=%d", restored, described.SectionsLength())}
+		for i := 0; i < described.SectionsLength(); i++ {
+			section := new(session.WasmGuestStateSection)
+			described.Sections(section, i)
+			lines = append(lines, fmt.Sprintf("STATE_WASM_SECTION branch=%s name=%s rows=%d fields=%d", branch, section.Name(), section.Rows(), section.FieldsLength()))
+			for j := 0; j < section.FieldsLength(); j++ {
+				row := new(session.RowField)
+				section.Fields(row, j)
+				decoded, err := readField(row)
+				if err != nil {
+					return nil, err
+				}
+				if !decoded.sensitive {
+					return nil, fmt.Errorf("guest section %s field %s is not sensitive", section.Name(), decoded.name)
+				}
+				lines = append(lines, decoded.line("STATE_WASM_FIELD"))
+			}
+		}
+		return lines, nil
+	case session.WasmGuestStateRenderWasmGuestStateRenderFailure:
+		failure := new(session.WasmGuestStateRenderFailure)
+		if err := union(description.Render, failure); err != nil {
+			return nil, err
+		}
+		stage := failure.Stage()
+		if stage == nil {
+			return nil, errors.New("a failed WASM render lacks its stage")
+		}
+		name, known := session.EnumNamesWasmGuestStateRenderStage[*stage]
+		if !known {
+			return nil, fmt.Errorf("undeclared WASM render stage %d", *stage)
+		}
+		return []string{fmt.Sprintf("%s outcome=failed stage=%s diagnostic=%s", restored, name, text(failure.Diagnostic()))}, nil
+	}
+	return nil, fmt.Errorf("unknown WASM guest-state render %d", description.RenderType())
 }
 
 func stateInspectionLines(state *session.StateInspection) ([]string, error) {

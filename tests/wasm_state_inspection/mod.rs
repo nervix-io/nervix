@@ -1,8 +1,8 @@
 //! Public WASM guest-state inspections read through Plexus and the envelope's JSON projection.
 //!
 //! Layer: test harness, outside the product layer order.
-//! - **Owns.** Polling the WASM state statement and reading branch entries, reset facts and
-//!   continuations from its JSON rendering.
+//! - **Owns.** Polling the WASM state statement and reading branch entries, reset facts,
+//!   guest-state descriptions, unit owners and continuations from its JSON rendering.
 //! - **Depends on.** The scenario world, leader command execution and placeholder expansion.
 //! - **Must not know.** Checkpoint storage, the owner page operation or the envelope's encoding.
 
@@ -172,6 +172,64 @@ fn reset_scope_names_the_entry(world: &mut ScenarioWorld) {
         scopes.contains(&entry["branch"].as_str().assured("a branched entry")),
         "the reset scope names the selected branch: {document}"
     );
+}
+
+#[then(
+    expr = "the last WASM state inspection JSON owner of unit {int} is saved as placeholder \
+            {string}"
+)]
+fn unit_owner_is_saved(world: &mut ScenarioWorld, unit: usize, placeholder: String) {
+    let document = last_document(world);
+    let owner = match document.pointer(&format!("/units/{unit}/owner")) {
+        Some(Value::String(owner)) => owner.clone(),
+        _ => panic!("the WASM state page names the owner of unit {unit}: {document}"),
+    };
+    world.placeholders.insert(placeholder, owner);
+}
+
+#[then(expr = "a cluster node other than placeholder {string} is saved as placeholder {string}")]
+fn another_node_is_saved(world: &mut ScenarioWorld, excluded: String, placeholder: String) {
+    let excluded = world
+        .placeholders
+        .get(&excluded)
+        .unwrap_or_else(|| panic!("placeholder '{excluded}' was saved"))
+        .clone();
+    let node_ids = world.cluster().node_ids();
+    let Some(other) = node_ids.iter().find(|node| **node != excluded) else {
+        panic!("the cluster has a node other than {excluded}: {node_ids:?}");
+    };
+    world.placeholders.insert(placeholder, other.clone());
+}
+
+/// Every returned branch entry that has a checkpoint and a guest-state description restored
+/// exactly the lifetime and committed revision its checkpoint reports.
+#[then(
+    "the last WASM state inspection JSON descriptions restored their checkpoints' committed \
+     revisions"
+)]
+fn descriptions_restored_committed_revisions(world: &mut ScenarioWorld) {
+    let document = last_document(world);
+    let entries = branch_entries(&document);
+    assert!(
+        !entries.is_empty(),
+        "the page lists branch entries: {document}"
+    );
+    for entry in entries {
+        let checkpoint = &entry["checkpoint"];
+        let description = &entry["description"];
+        assert!(
+            checkpoint.is_object() && description.is_object(),
+            "every entry has a checkpoint and a guest-state description: {entry}"
+        );
+        assert_eq!(
+            description["generation"], checkpoint["generation"],
+            "the render restored the checkpoint's lifetime: {entry}"
+        );
+        assert_eq!(
+            description["revision"], checkpoint["committed_revision"],
+            "the render restored the committed revision: {entry}"
+        );
+    }
 }
 
 #[then("the last WASM state inspection JSON reset names a request reference")]

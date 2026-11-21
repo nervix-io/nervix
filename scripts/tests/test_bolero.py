@@ -351,8 +351,10 @@ class InventoryTests(unittest.TestCase):
             "wasm-branch-metadata",
             "wasm-envelopes",
             "wasm-snapshots",
+            "wasm-state-descriptions",
             "wasm-abi-codes",
             "wasm-host-schema",
+            "wasm-host-state-descriptions",
             "wasm-host-envelopes",
             "wasm-sdk-snapshots",
             "wasm-sdk-rejections",
@@ -662,7 +664,7 @@ class InventoryTests(unittest.TestCase):
         for name, version in (
             ("client-state-inspection", 16),
             ("state-inspection-cursor", 17),
-            ("interconnect-wasm-state-inspection", 9),
+            ("interconnect-wasm-state-inspection", 10),
             ("wasm-state-inspection-cursor", 8),
             ("client-published-processor-sections", 3),
         ):
