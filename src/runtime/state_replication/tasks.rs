@@ -488,6 +488,15 @@ impl Runtime {
                         if !state.is_dirty() {
                             return Ok(None);
                         }
+                        let checkpointed = state.read().placement();
+                        runtime
+                            .inner
+                            .fault_injection
+                            .pause_materialized_checkpoint_if_armed(
+                                &checkpointed.domain,
+                                &checkpointed.identifier,
+                            )
+                            .await;
                         let last_persisted = state.last_persisted_lsm();
                         let sealed = state
                             .read()

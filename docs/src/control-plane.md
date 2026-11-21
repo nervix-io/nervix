@@ -1073,7 +1073,9 @@ waiting operator's signal. Failed refreshes retain their pending work and respec
 The coalesced hint retains its activation and the revisions reported by a sync. After acquiring
 the request turn, an automatic refresh compares that requirement with the fresh committed
 observation. A foreground response that already covers those decision, conditions and trust
-revisions satisfies the sync without another service request. An explicit refresh still runs.
+revisions satisfies the sync without another service request. A refused response commits nothing
+and covers nothing, so a sync that reports the decision the service issued for it still
+refreshes. An explicit refresh still runs.
 A notification-revision gap, decision or trust event remains an invalidation, including a change
 that arrived after an in-flight response was issued; a due deadline or revoked signing key also
 continues to require refresh.

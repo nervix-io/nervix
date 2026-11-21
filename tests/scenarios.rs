@@ -247,6 +247,7 @@ mod inherited_partitions;
 mod kafka_metadata;
 mod licensing;
 mod listener_bounds;
+mod materialized_row_boundaries;
 mod materialized_state_inspection;
 mod mqtt_fixtures;
 mod mqtt_properties;
@@ -290,6 +291,7 @@ mod web_console_restore_faults;
 mod web_console_unreadable;
 mod websocket_lifecycle;
 mod wide_row_intake;
+mod worker_saturation;
 
 const SCENARIOS_PATH: &str = "tests/features";
 const TEST_LOG_DIR: &str = "tests/logs";
@@ -492,6 +494,9 @@ struct ScenarioWorld {
     cluster: Option<Cluster>,
     /// Bulk-worker holds that cleanup releases even when a step fails before explicit release.
     occupied_bulk_nodes: BTreeSet<nervix_models::ClusterNodeName>,
+    /// The worker classes the scenario holds full, with each node's refusals once its class was
+    /// full.
+    worker_saturation: worker_saturation::SaturatedClasses,
     active_session: Option<TestSession>,
     unread_session: Option<session_protocol::UnreadSession>,
     /// A bounded next-row reader installed before the publication whose delay it measures.
@@ -22100,23 +22105,6 @@ async fn when_bulk_execution_is_occupied_on_every_node_for(
     });
 }
 
-/// Fill every bulk worker and every place in the bulk wait queue on a node, so the next bulk job
-/// the node is handed is refused for room rather than queued.
-#[when(expr = "bulk execution on node {string} is saturated")]
-async fn when_bulk_execution_is_saturated(world: &mut ScenarioWorld, node_id: String) {
-    let node_id = expand_placeholders(world, &node_id);
-    let node_name = crate::common::cluster::node_name(&node_id);
-    let fault_injection = world.fault_injection.clone();
-    nervix_primitives::time::timeout(
-        Duration::from_secs(60),
-        fault_injection.saturate_execution(&node_name, nervix_execution::CpuClass::Bulk),
-    )
-    .await
-    .unwrap_or_else(|error| {
-        panic!("bulk execution on '{node_id}' never filled its workers and wait queue: {error}")
-    });
-}
-
 /// Leave room for transport on the selected node while refusing larger decoding reservations.
 #[when(expr = "bulk memory on node {string} keeps only {string} bytes free")]
 async fn when_bulk_memory_on_node_keeps_only_bytes_free(
@@ -22365,38 +22353,6 @@ async fn when_the_saturated_credential_verification_is_released(world: &mut Scen
     world
         .fault_injection
         .release_execution(&crate::common::cluster::node_name(&node_id));
-}
-
-/// Fill every extension worker and every place in the extension wait queue on every node, so the
-/// next operator-supplied program any node is handed is refused rather than queued.
-#[when("extension execution is saturated on every node")]
-async fn when_extension_execution_is_saturated_on_every_node(world: &mut ScenarioWorld) {
-    let fault_injection = world.fault_injection.clone();
-    for node_id in world.cluster().node_ids() {
-        nervix_primitives::time::timeout(
-            Duration::from_secs(60),
-            fault_injection.saturate_execution(
-                &crate::common::cluster::node_name(&node_id),
-                nervix_execution::CpuClass::Extension,
-            ),
-        )
-        .await
-        .unwrap_or_else(|error| {
-            panic!(
-                "extension execution on '{node_id}' never filled its workers and wait queue: \
-                 {error}"
-            )
-        });
-    }
-}
-
-#[when("extension execution is released on every node")]
-async fn when_extension_execution_is_released_on_every_node(world: &mut ScenarioWorld) {
-    for node_id in world.cluster().node_ids() {
-        world
-            .fault_injection
-            .release_execution(&crate::common::cluster::node_name(&node_id));
-    }
 }
 
 /// Waits until the HTTP mock has answered this scenario's one polled payload, so the steps after
@@ -33072,6 +33028,56 @@ async fn then_named_client_receives_subscription_payload(
     world.last_subscription_payload = Some(payload);
 }
 
+/// Posts the docstring to one node, once a second, until the active session's subscription
+/// receives a row, so the relay's owner is known to deliver to the session's node before the
+/// scenario relies on it. Rows of later posts may still follow; a step that waits for a payload
+/// containing its own fragment passes over them.
+#[when(
+    expr = "within {string} the relay subscription receives a payload from repeated http posts to \
+            node {string} with host {string} path {string}"
+)]
+async fn when_the_relay_subscription_receives_from_repeated_http_posts(
+    world: &mut ScenarioWorld,
+    duration: String,
+    node_id: String,
+    host: String,
+    path: String,
+    #[step] step: &Step,
+) {
+    let duration = parse_duration_text(&duration)
+        .assured("the scenario delivery deadline is a valid duration");
+    let node_id = expand_placeholders(world, &node_id);
+    let host = expand_placeholders(world, &host);
+    let path = expand_placeholders(world, &path);
+    let payload = expand_placeholders(world, docstring(step));
+    let deadline = Instant::now() + duration;
+    loop {
+        nervix_primitives::task::consume_budget().await;
+        assert!(
+            Instant::now() < deadline,
+            "the relay subscription did not receive a row from repeated posts within {duration:?}"
+        );
+        world
+            .cluster()
+            .publish_http(&node_id, &host, &path, &payload)
+            .await
+            .unwrap_or_else(|error| panic!("failed to post http payload: {error}"));
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let wait = remaining.min(Duration::from_secs(1));
+        let event = world
+            .active_session
+            .as_mut()
+            .expect("an active session with a subscription must exist")
+            .try_next_subscription(wait)
+            .await
+            .expect("failed to receive subscription event");
+        if let Some(event) = event {
+            world.last_subscription_payload = Some(event.payload);
+            return;
+        }
+    }
+}
+
 #[when(
     expr = "within {string} client {string} receives a subscription payload from repeated http \
             posts to node {string} with host {string} path {string}"
@@ -39066,6 +39072,9 @@ async fn run_scenarios(parallelism: TestParallelism) -> SuiteOutcome {
                     world.fault_injection.release_execution(&node);
                     append_cucumber_log_line(&format!("bulk execution cleanup: node={node}"));
                 }
+                // A step that failed while any class was held full leaves no node's workers parked
+                // behind its shutdown.
+                world.fault_injection.release_all_execution();
 
                 if let Some(broker) = &world.kafka_mock_broker {
                     broker

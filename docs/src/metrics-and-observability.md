@@ -447,6 +447,11 @@ a second of flushing; see [Kafka client retirement](./connector-contract.md#kafk
   queues and memory capacities report the actual [resolved execution settings](node-settings.md#execution-capabilities).
 - `nervix_execution_workers`, `nervix_execution_jobs_running`, `nervix_execution_jobs_pending`: how
   many jobs one class may have on the blocking pool at once, how many it holds, and how many wait
+- `nervix_execution_jobs_waiting`: jobs that found their class's wait queue full and wait for a
+  place in it instead of being refused. They carry work no caller is waiting to be answered about,
+  such as a payload an ingestor handed over, a relay or subscription delivery, a checkpoint or the
+  compilation for a committed change. A nonzero value is backpressure, never loss: the jobs take
+  the places the class frees, in the order they asked
 - `nervix_execution_jobs_total`, `nervix_execution_jobs_completed_total`,
   `nervix_execution_job_rejections_total`: jobs admitted, jobs that left a worker, and jobs refused
   because the class already held its whole wait queue
