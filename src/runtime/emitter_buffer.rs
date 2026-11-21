@@ -227,13 +227,15 @@ impl EmitterPublishBatch {
     ) -> Result<Self, PlannedGeneralFailure> {
         let envelopes = envelope
             .evaluate(
-                executor,
-                ack_timing,
+                ProgramRun {
+                    executor,
+                    now: execution_now,
+                    ack_timing,
+                },
                 &self.source_relay,
                 &mut self.batch,
                 input,
                 side_inputs,
-                execution_now,
             )
             .await?;
         self.envelopes = Some(envelopes);

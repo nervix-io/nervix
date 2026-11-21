@@ -124,13 +124,15 @@ async fn evaluate(
 ) -> RowEnvelopes {
     envelope
         .evaluate(
-            &Executor::default(),
-            &SharedRemoteAckTiming::default(),
+            ProgramRun {
+                executor: &Executor::default(),
+                now: Timestamp::from_unix_nanos(1),
+                ack_timing: &SharedRemoteAckTiming::default(),
+            },
             &named("source"),
             published,
             input,
             &HashMap::default(),
-            Timestamp::from_unix_nanos(1),
         )
         .await
         .expect("the envelope evaluates over the batch")
@@ -818,13 +820,15 @@ async fn partition_only_envelopes_select_each_source_count_without_a_value_progr
         published.key = Some(key.clone());
         let envelopes = compiled
             .evaluate(
-                &Executor::default(),
-                &SharedRemoteAckTiming::default(),
+                ProgramRun {
+                    executor: &Executor::default(),
+                    now: Timestamp::from_unix_nanos(1),
+                    ack_timing: &SharedRemoteAckTiming::default(),
+                },
                 &named(source),
                 &mut published,
                 EnvelopeInput::Published,
                 &HashMap::default(),
-                Timestamp::from_unix_nanos(1),
             )
             .await
             .expect("the partition resolves");

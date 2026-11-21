@@ -19,9 +19,9 @@ use rustc_span::{
     def_id::{DefId, LOCAL_CRATE, LocalDefId},
 };
 
-use crate::contracts::{Flow, contract_attribute};
+use crate::contracts::{Flow, contract_attribute, meta_items};
 
-declare_tool_lint! { pub nervix::HIDDEN_TUNABLE, Deny, "numeric policy belongs to a class-typed setting, a derivation from typed input or a fixed-value contract", report_in_external_macro: true }
+declare_tool_lint! { pub nervix::HIDDEN_TUNABLE, Deny, "numeric policy belongs to a class-typed setting, a derivation from typed input or a fixed-value contract", @report_in_external_macro = true }
 
 /// Generators, benchmarks, model checks and test services: their numbers shape test inputs and
 /// measurements, never node or client policy.
@@ -75,7 +75,7 @@ fn fixed(tcx: TyCtxt<'_>, definition: DefId) -> bool {
     let Some(attribute) = contract_attribute(tcx, definition, "constant") else {
         return false;
     };
-    let Some(arguments) = attribute.meta_item_list() else {
+    let Some(arguments) = meta_items(attribute) else {
         return false;
     };
     let Some(kind) = arguments.first().and_then(|argument| argument.meta_item()) else {
