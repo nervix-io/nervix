@@ -32,7 +32,7 @@ ROOT = coverage_full.ROOT
 RUN = "77"
 CI_ROOT = "/ci/runner/nervix"
 TOOLCHAIN = {"rustc": "rustc 1.100.1 (58cf8f9c3 2026-09-01)", "commit": "58cf8f9c3", "host": "x86_64-unknown-linux-gnu", "llvm": "23.1.0"}
-INVENTORY = '[tool]\nnightly = "nightly-2026-09-17"\n\n[[target]]\nid = "alpha-values"\n\n[[target]]\nid = "beta-values"\n'
+INVENTORY = '[tool]\nnightly = "nightly-2026-11-21"\n\n[[target]]\nid = "alpha-values"\n\n[[target]]\nid = "beta-values"\n'
 TARGETS = ["alpha-values", "beta-values"]
 FILES = {
     "src/lib.rs": 6,

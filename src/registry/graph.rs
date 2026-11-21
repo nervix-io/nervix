@@ -190,9 +190,9 @@ impl ActiveGraph {
                 Some(layout.partitions())
             } else if let Some(existing) = existing
                 && let Some(prior) = existing.nodes.get(&node.node_ref())
-                && let Model::Parametrizer(branch) = prior.config.as_ref()
+                && let Model::Parametrizer(parametrizer) = prior.config.as_ref()
             {
-                branch.partitions.direct_layout()
+                parametrizer.partitions.direct_layout()
             } else {
                 None
             };
@@ -202,10 +202,10 @@ impl ActiveGraph {
         }
         for node in self.graph.node_weights() {
             if let Some(branching) = &node.resolved_branching
-                && let (Some(branch), Some(layout)) =
+                && let (Some(parametrizer), Some(layout)) =
                     (branching.parametrizer(), branching.partitions())
             {
-                partitions.entry(branch.clone()).or_insert(layout);
+                partitions.entry(parametrizer.clone()).or_insert(layout);
             }
         }
         partitions
@@ -707,15 +707,15 @@ impl ActiveNode {
             return ImpactNodeCoverage::configuration(node);
         }
 
-        let declared_branch = match self.config.as_ref() {
+        let declared_parametrizer = match self.config.as_ref() {
             Model::Relay(relay) => relay.branching.parametrizer(),
             model => {
                 model_branch_selection(model).and_then(|selection| selection.parametrizer_ref())
             }
         };
-        let branches = match declared_branch {
-            Some(branch) => ConcreteBranchCoverage::AllOfParametrizer {
-                parametrizer: branch.clone(),
+        let branches = match declared_parametrizer {
+            Some(parametrizer) => ConcreteBranchCoverage::AllOfParametrizer {
+                parametrizer: parametrizer.clone(),
             },
             None if self.resolved_branching.is_some()
                 && matches!(self.kind, ModelKind::Emitter | ModelKind::Reingestor) =>

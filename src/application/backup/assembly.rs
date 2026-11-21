@@ -158,27 +158,27 @@ fn plan_domain(
 
     if let Some(schedule) = capture.schedule.domain(domain)
         && (schedule.nodes.values().any(|node| {
-            matches!(node.config.as_ref(), Model::Parametrizer(branch) if branch.partitions.is_inherited())
+            matches!(node.config.as_ref(), Model::Parametrizer(parametrizer) if parametrizer.partitions.is_inherited())
         }) || schedule.partition_epochs.values().any(|epoch| epoch.partitions.is_inherited()
             || epoch.transition.as_ref().is_some_and(|transition| transition.previous.is_inherited())))
     {
         let mut holding_units = std::collections::BTreeMap::new();
-        for branch in schedule.partition_epochs.keys() {
+        for parametrizer in schedule.partition_epochs.keys() {
             let mut units = std::collections::BTreeSet::new();
             for node in schedule.nodes.values() {
-                if node.partition_parametrizer() == Some(branch) {
+                if node.partition_parametrizer() == Some(parametrizer) {
                     units.extend(schedule.holding_units_of(node));
                 }
             }
             if !units.is_empty() {
-                holding_units.insert(branch.clone(), units);
+                holding_units.insert(parametrizer.clone(), units);
             }
         }
         let mut epochs = schedule.partition_epochs.clone();
         for node in schedule.nodes.values() {
             if let Some(branching) = &node.resolved_branching
-                && let (Some(branch), Some(partitions)) = (branching.parametrizer(), branching.partitions()) {
-                epochs.entry(branch.clone()).or_insert(nervix_models::ParametrizerPartitionEpoch {
+                && let (Some(parametrizer), Some(partitions)) = (branching.parametrizer(), branching.partitions()) {
+                epochs.entry(parametrizer.clone()).or_insert(nervix_models::ParametrizerPartitionEpoch {
                     number: nervix_models::PartitionEpochNumber::FIRST, partitions, transition: None,
                 });
             }

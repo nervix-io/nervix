@@ -804,7 +804,7 @@ target. Every compiled Bolero recipe builds the embedded web console before disc
 properties, using the same configured compiler wrapper as the product build.
 
 ```bash
-rustup toolchain install nightly-2026-09-17 --profile minimal --component llvm-tools
+rustup toolchain install nightly-2026-11-21 --profile minimal --component llvm-tools
 just install-cargo-bolero
 just help
 just fuzz-list

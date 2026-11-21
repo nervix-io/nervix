@@ -872,12 +872,16 @@ fn typed_choice_selection_updates_only_the_draft_its_control_edits() {
                 .is_none()
         );
 
-        let branch = ChoiceValue::Model(node(ModelKind::Parametrizer, "by_tenant"));
-        select_choice(signals, ChoiceControl::RelayParametrizer, branch.clone());
+        let parametrizer = ChoiceValue::Model(node(ModelKind::Parametrizer, "by_tenant"));
+        select_choice(
+            signals,
+            ChoiceControl::RelayParametrizer,
+            parametrizer.clone(),
+        );
         assert!(selected_choice(
             signals,
             ChoiceControl::RelayParametrizer,
-            &branch
+            &parametrizer
         ));
 
         let relay = ChoiceValue::Model(node(ModelKind::Relay, "orders"));

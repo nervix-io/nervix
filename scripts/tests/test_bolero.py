@@ -721,7 +721,7 @@ class InventoryTests(unittest.TestCase):
         text = bolero.INVENTORY.read_text()
         for before, after, message in (
             ('cargo_bolero = "0.13.4"', 'cargo_bolero = "0.13"', "exact version"),
-            ('nightly = "nightly-2026-09-17"', 'nightly = "nightly"', "dated toolchain"),
+            ('nightly = "nightly-2026-11-21"', 'nightly = "nightly"', "dated toolchain"),
             ('sanitizer = "address"', 'sanitizer = "none"', "real sanitizer"),
             ('id = "plexus-expression"', 'id = "Invalid ID"', "invalid target id"),
             ('test_target = "lib"', 'test_target = "bin"', "invalid cargo test target"),

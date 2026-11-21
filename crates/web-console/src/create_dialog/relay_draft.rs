@@ -114,8 +114,8 @@ impl RelayDraft {
 
     pub(super) fn select_branch(&mut self, node: &NodeRef) {
         if node.kind == ModelKind::Parametrizer {
-            let branch = SelectedReference::chosen(ParametrizerName::from(&node.identifier));
-            self.branching = BranchingDraft::BranchedBy(Some(branch));
+            let parametrizer = SelectedReference::chosen(ParametrizerName::from(&node.identifier));
+            self.branching = BranchingDraft::BranchedBy(Some(parametrizer));
         }
     }
 
@@ -313,21 +313,21 @@ mod tests {
     #[test]
     fn a_changed_domain_keeps_both_references_visible_until_they_are_selected_again() {
         let schema = node(ModelKind::Schema, "order_record");
-        let branch = node(ModelKind::Parametrizer, "by_tenant");
+        let parametrizer = node(ModelKind::Parametrizer, "by_tenant");
         let mut draft = RelayDraft {
             name: "orders".to_string(),
             ..RelayDraft::default()
         };
         draft.select_schema(&schema);
-        draft.select_branch(&branch);
+        draft.select_branch(&parametrizer);
         assert!(draft.selects_schema(&schema));
-        assert!(draft.selects_branch(&branch));
+        assert!(draft.selects_branch(&parametrizer));
         assert!(draft.branching.is_branched());
         assert!(!draft.branching.is_unbranched());
 
         draft.invalidate_references();
         assert!(!draft.selects_schema(&schema));
-        assert!(!draft.selects_branch(&branch));
+        assert!(!draft.selects_branch(&parametrizer));
         assert_eq!(
             draft
                 .schema
@@ -338,11 +338,11 @@ mod tests {
         assert_eq!(draft_error(&draft), RelayDraftError::SchemaChanged);
         draft.select_schema(&schema);
         assert_eq!(draft_error(&draft), RelayDraftError::BranchChanged);
-        draft.select_branch(&branch);
+        draft.select_branch(&parametrizer);
         assert!(draft.build().is_ok());
 
         draft.choose_unbranched();
-        assert!(!draft.selects_branch(&branch));
+        assert!(!draft.selects_branch(&parametrizer));
         assert_eq!(draft.branching.selected_parametrizer(), None);
         draft.invalidate_references();
         assert_eq!(draft_error(&draft), RelayDraftError::SchemaChanged);

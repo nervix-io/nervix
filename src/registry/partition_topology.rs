@@ -272,18 +272,18 @@ pub(in crate::registry) fn validate_producers(
             continue;
         }
         for route in routes.outputs() {
-            let Some(branch) = route
+            let Some(parametrizer) = route
                 .branch
                 .as_ref()
-                .and_then(|branch| branch.constructed_parametrizer())
+                .and_then(|branching| branching.constructed_parametrizer())
             else {
                 continue;
             };
-            if matches!(models.get(&NodeRef::new(ModelKind::Parametrizer, branch)), Some(Model::Parametrizer(declaration))
+            if matches!(models.get(&NodeRef::new(ModelKind::Parametrizer, parametrizer)), Some(Model::Parametrizer(declaration))
                 if declaration.partitions.is_inherited())
             {
                 return Err(Report::new(PartitionTopologyError::Producer {
-                    parametrizer: branch.clone(),
+                    parametrizer: parametrizer.clone(),
                     producer: node.clone(),
                 })
                 .change_context(RegistryError::PartitionTopology {
@@ -334,15 +334,15 @@ pub(crate) fn decide(
         .collect::<BTreeSet<_>>();
     let mut errors = BTreeMap::new();
     for model in models.models() {
-        let Model::Parametrizer(branch) = model else {
+        let Model::Parametrizer(parametrizer) = model else {
             continue;
         };
-        if !branch.partitions.is_inherited() {
+        if !parametrizer.partitions.is_inherited() {
             continue;
         }
         let producers = specs
             .values()
-            .filter(|spec| spec.parametrizers.contains(&branch.name))
+            .filter(|spec| spec.parametrizers.contains(&parametrizer.name))
             .collect::<Vec<_>>();
         let counts = producers
             .iter()
@@ -358,7 +358,7 @@ pub(crate) fn decide(
         let distinct = counts.values().copied().collect::<BTreeSet<_>>();
         let issue = if distinct.len() > 1 {
             Some(PartitionTopologyError::CountMismatch {
-                parametrizer: branch.name.clone(),
+                parametrizer: parametrizer.name.clone(),
                 counts: counts.clone(),
             })
         } else if distinct.first().is_some_and(|count| {
@@ -368,18 +368,18 @@ pub(crate) fn decide(
                 > i32::MAX.cast_unsigned()
         }) {
             Some(PartitionTopologyError::MetadataBound {
-                parametrizer: branch.name.clone(),
+                parametrizer: parametrizer.name.clone(),
                 count: *distinct
                     .first()
                     .verified("a bound failure observed a count"),
             })
-        } else if branch.partitions == ParametrizerPartitions::Inherited
+        } else if parametrizer.partitions == ParametrizerPartitions::Inherited
             && distinct
                 .first()
                 .is_some_and(|count| *count > u32::from(u16::MAX))
         {
             Some(PartitionTopologyError::CountBound {
-                parametrizer: branch.name.clone(),
+                parametrizer: parametrizer.name.clone(),
                 count: *distinct
                     .first()
                     .verified("a bound failure observed a count"),
@@ -394,7 +394,7 @@ pub(crate) fn decide(
                 None
             };
         let source_count = observed.and_then(std::num::NonZeroU32::new);
-        let layout = match (branch.partitions, source_count) {
+        let layout = match (parametrizer.partitions, source_count) {
             (ParametrizerPartitions::Inherited, Some(count)) => {
                 let count = u16::try_from(count.get()).verified("the bound was checked above");
                 Some(InheritedPartitionLayout::Identity(
@@ -407,10 +407,12 @@ pub(crate) fn decide(
                     groups,
                 })
             }
-            _ => existing.parametrizers.get(&branch.name).copied(),
+            _ => existing.parametrizers.get(&parametrizer.name).copied(),
         };
         if let Some(layout) = layout {
-            topology.parametrizers.insert(branch.name.clone(), layout);
+            topology
+                .parametrizers
+                .insert(parametrizer.name.clone(), layout);
         }
         if observed.is_none() {
             for producer in producers {
@@ -438,10 +440,10 @@ pub(in crate::registry) fn changed_source_branches(
     };
     let previous = source_specs(domain, existing)?;
     let mut changed = BTreeSet::new();
-    for branch in topology.parametrizers.keys() {
+    for parametrizer in topology.parametrizers.keys() {
         let current = specs
             .values()
-            .filter(|spec| spec.parametrizers.contains(branch));
+            .filter(|spec| spec.parametrizers.contains(parametrizer));
         let mut basis = BTreeMap::new();
         let mut coherent = true;
         for spec in current {
@@ -462,7 +464,7 @@ pub(in crate::registry) fn changed_source_branches(
         let mut prior = BTreeMap::new();
         for spec in previous
             .values()
-            .filter(|spec| spec.parametrizers.contains(branch))
+            .filter(|spec| spec.parametrizers.contains(parametrizer))
         {
             if let Some(observation) = existing.partition_topology.sources.get(&spec.ingestor) {
                 prior.insert(
@@ -472,7 +474,7 @@ pub(in crate::registry) fn changed_source_branches(
             }
         }
         if basis != prior {
-            changed.insert(branch.clone());
+            changed.insert(parametrizer.clone());
         }
     }
     Ok(changed)
@@ -829,11 +831,17 @@ mod tests {
                 None,
             )
             .assured("growth keeps the group count");
-        let branch = parametrizer_name_for_relay("events");
-        assert_eq!(next.partition_epochs[&branch].number.get(), 2);
-        assert_eq!(next.partition_epochs[&branch].partitions.count().get(), 4);
+        let parametrizer = parametrizer_name_for_relay("events");
+        assert_eq!(next.partition_epochs[&parametrizer].number.get(), 2);
         assert_eq!(
-            next.partition_topology.parametrizers[&branch]
+            next.partition_epochs[&parametrizer]
+                .partitions
+                .count()
+                .get(),
+            4
+        );
+        assert_eq!(
+            next.partition_topology.parametrizers[&parametrizer]
                 .source_count()
                 .get(),
             16
