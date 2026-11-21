@@ -394,7 +394,7 @@ chaos_stale_domain|default|CREATE UNPACED DOMAIN chaos_stale;|created domain 'ch
 chaos_stale_schema_kept|chaos_stale|CREATE SCHEMA chaos_stale_kept (value STRING);|quiesce level:|schema-kept
 chaos_stale_schema_dropped|chaos_stale|CREATE SCHEMA chaos_stale_dropped (value STRING);|quiesce level:|schema-dropped
 chaos_stale_schema_drop|chaos_stale|DROP SCHEMA chaos_stale_dropped;|dropped model 'chaos_stale_dropped'|schema-drop
-chaos_stale_relocation|chaos_baseline|RELOCATE RELAY chaos_records ONTO NODE ${relay_target} IGNORE PREFERENCES;|relocated 1 of 1 runtime node(s) onto node '${relay_target}'|relocation
+chaos_stale_relocation|chaos_baseline|RELOCATE RELAY chaos_records ONTO NODE ${relay_target} IGNORE PREFERENCES;|relocated 1 of 1 execution unit(s) onto node '${relay_target}'|relocation
 EOF
     local round=0
     while true; do
