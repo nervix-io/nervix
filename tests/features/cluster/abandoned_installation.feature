@@ -33,7 +33,7 @@ Feature: An installation a node began finishes when the request that began it en
       CREATE VHOST edge abandoned-installation-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT ingress ON edge PATH '/state';
       CREATE HTTP ENDPOINT INGESTOR ingestor FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING event_codec
         TO state INHERIT ALL BRANCHED BY by_tenant SET tenant = message.tenant
           FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
@@ -72,7 +72,7 @@ Feature: An installation a node began finishes when the request that began it en
       CREATE VHOST edge abandoned-installation-paused-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR ingestor FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING event_codec
         TO events INHERIT ALL UNBRANCHED
           FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
