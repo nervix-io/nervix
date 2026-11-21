@@ -218,7 +218,8 @@ pub struct PartitionTopologySnapshot {
     pub topology: PartitionTopology,
     pub epochs: BTreeMap<BranchName, crate::BranchPartitionEpoch>,
     pub holding_units: BTreeMap<BranchName, BTreeSet<Unit>>,
-    /// Installed PER PARTITION intakes retain their native positions while discovery is pending.
+    /// Installed PER TRANSPORT PARTITION intakes retain their native positions while discovery is
+    /// pending.
     pub intake_units: BTreeMap<IngestorName, NonZeroU16>,
 }
 

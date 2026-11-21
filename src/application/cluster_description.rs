@@ -305,7 +305,7 @@ fn record_lines(committed: Option<&CommittedNodeRecord>) -> Vec<String> {
 
 /// One line per detected property, named as a node selector reads it, an undetected value with its
 /// reason.
-fn property_lines(properties: &NodeProperties) -> Vec<String> {
+pub(super) fn property_lines(properties: &NodeProperties) -> Vec<String> {
     let mut lines = vec![
         format!("    architecture: {}", properties.architecture),
         format!(
@@ -479,7 +479,7 @@ fn infrastructure_lines(record: &NodeCapabilityRecord) -> Vec<String> {
 }
 
 /// One line per tag, `key=value` in key order, or that the node has none.
-fn tag_lines(tags: &NodeTags) -> Vec<String> {
+pub(super) fn tag_lines(tags: &NodeTags) -> Vec<String> {
     if tags.is_empty() {
         return vec!["  tags: none".to_string()];
     }

@@ -122,6 +122,14 @@ pub(super) fn announce(
     AppliedConsensusCommand::applied(StateMachineChanges::default())
 }
 
+/// Local observation of membership and node facts from one applied consensus state.
+pub struct CommittedNodeObservations {
+    pub members: BTreeSet<ClusterNodeName>,
+    pub voters: BTreeSet<ClusterNodeName>,
+    pub cordoned: BTreeSet<ClusterNodeName>,
+    pub records: BTreeMap<ClusterNodeName, CommittedNodeRecord>,
+}
+
 impl Observer {
     pub fn node_record(&self, node: &ClusterNodeName) -> Option<CommittedNodeRecord> {
         self.inner
@@ -136,6 +144,18 @@ impl Observer {
     /// One coherent committed view, including the last record of departed nodes.
     pub fn node_records(&self) -> BTreeMap<ClusterNodeName, CommittedNodeRecord> {
         (&self.inner.store.inner.state().node_records).into()
+    }
+
+    /// Observe membership, cordons and retained records at the same applied state.
+    pub fn committed_node_observations(&self) -> CommittedNodeObservations {
+        let state = self.inner.store.inner.state();
+        let membership = state.last_membership.membership();
+        CommittedNodeObservations {
+            members: membership.nodes().map(|(node, _)| node.clone()).collect(),
+            voters: membership.voter_ids().collect(),
+            cordoned: state.cordoned_node_ids.keys().cloned().collect(),
+            records: (&state.node_records).into(),
+        }
     }
 
     /// The capacity claim of every committed record, the part peers adopt receive bounds from.

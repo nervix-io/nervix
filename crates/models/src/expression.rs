@@ -513,6 +513,7 @@ pub enum FieldScope {
     Payload,
     PartialOutput,
     Error,
+    Node,
 }
 
 #[derive(

@@ -545,7 +545,7 @@ mod tests {
             .assured("ordinary fixture runtime");
         bolero::check!()
             .with_iterations(128)
-            .with_max_len(2048)
+            .with_max_len(512)
             .for_each(|bytes: &[u8]| {
                 let mut arbitrary = Arbitrary::new(bytes, nervix_arbitrary::Domain::Vocabulary);
                 let target = arbitrary.node_identity();

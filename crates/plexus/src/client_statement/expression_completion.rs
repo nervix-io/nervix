@@ -13,7 +13,8 @@
     )
 )]
 
-use nervix_models::IngestorMetadataType;
+use nervix_models::{IngestorMetadataType, NODE_SCOPE, NodeSelectorField};
+use strum::IntoEnumIterator as _;
 
 use super::{
     BuiltinFunctionScope, CompletionExpectation, IngestorEntityKind, IngestorReferenceKind,
@@ -47,9 +48,15 @@ impl<'a> ExpressionCompletion<'a> {
             "ref:expression_invocation" | "invocations" => self.invocations(),
             "ref:expression_field" => self.fields(),
             "ref:expression_target" | "set_assignments" => self.targets(),
-            "ref:expression_udf" => vec![CompletionExpectation::Semantic(
-                SemanticReference::Model(ModelKind::Udf),
-            )],
+            "ref:expression_udf" => {
+                if crate::show_nodes::has_head(self.tokens) {
+                    Vec::new()
+                } else {
+                    vec![CompletionExpectation::Semantic(SemanticReference::Model(
+                        ModelKind::Udf,
+                    ))]
+                }
+            }
             "ref:ingestor_timestamp_metadata" => {
                 self.metadata_fields(Some(IngestorMetadataType::Datetime))
             }
@@ -60,13 +67,30 @@ impl<'a> ExpressionCompletion<'a> {
     }
 
     fn functions(&self) -> Vec<CompletionExpectation> {
-        let scope = match self.ingestor {
-            Some(kind) => BuiltinFunctionScope::IngestorEntity(kind),
-            None => BuiltinFunctionScope::Ordinary,
-        };
+        if crate::show_nodes::has_head(self.tokens) {
+            return vec![
+                CompletionExpectation::Literal(format!("{NODE_SCOPE}.")),
+                CompletionExpectation::Semantic(SemanticReference::BuiltinFunction(
+                    BuiltinFunctionScope::NodeSelector,
+                )),
+            ];
+        }
         vec![CompletionExpectation::Semantic(
-            SemanticReference::BuiltinFunction(scope),
+            SemanticReference::BuiltinFunction(self.function_scope()),
         )]
+    }
+
+    /// Which builtins the statement lets a function position call: the header reads of its ingestor
+    /// entity, the aggregates of the window whose route value is being written, or the ordinary
+    /// functions alone.
+    fn function_scope(&self) -> BuiltinFunctionScope {
+        if let Some(kind) = self.ingestor {
+            return BuiltinFunctionScope::IngestorEntity(kind);
+        }
+        if let Some(value) = crate::window_processor::route_value(self.tokens) {
+            return BuiltinFunctionScope::WindowRoute(value);
+        }
+        BuiltinFunctionScope::Ordinary
     }
 
     fn invocations(&self) -> Vec<CompletionExpectation> {
@@ -79,6 +103,9 @@ impl<'a> ExpressionCompletion<'a> {
     }
 
     fn fields(&self) -> Vec<CompletionExpectation> {
+        if crate::show_nodes::has_head(self.tokens) {
+            return self.node_fields();
+        }
         match self.tokens.last_chunk::<2>() {
             Some(
                 [
@@ -116,6 +143,36 @@ impl<'a> ExpressionCompletion<'a> {
             }
             _ => Vec::new(),
         }
+    }
+
+    fn node_fields(&self) -> Vec<CompletionExpectation> {
+        let prefix = match self.tokens {
+            [
+                ..,
+                Token::Word(Word::KnownWord {
+                    iden: Keyword::Node,
+                    ..
+                }),
+                Token::Dot,
+            ] => String::new(),
+            [
+                ..,
+                Token::Word(Word::KnownWord {
+                    iden: Keyword::Node,
+                    ..
+                }),
+                Token::Dot,
+                Token::Word(Word::KnownWord { raw, .. } | Word::UnknownWord(raw)),
+                Token::Dot,
+            ] => {
+                format!("{}.", raw.to_ascii_lowercase())
+            }
+            _ => return Vec::new(),
+        };
+        NodeSelectorField::iter()
+            .filter_map(|field| field.name().strip_prefix(&prefix))
+            .map(|suffix| CompletionExpectation::Literal(suffix.to_string()))
+            .collect()
     }
 
     fn targets(&self) -> Vec<CompletionExpectation> {

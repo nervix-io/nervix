@@ -33,8 +33,32 @@ use crate::runtime::{StagedArtifact, restored_key_fixed_bytes};
 /// restore-plan copies, and placement descriptions. Plexus additionally overlaps tokens, parser
 /// state, semantic Models and transaction-planner copies. Resources, guest saves and Arrow columns stay on
 /// disk and do not contribute to this retained-memory admission.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "restore admission charges an archived record sixteen copies of its bytes for \
+                  the decoded values and plan copies that overlap it"
+    )
+)]
 const RECORD_WORKING_MULTIPLIER: u64 = 16;
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "restore admission charges archived Plexus sixty-four copies of its bytes for \
+                  tokens, parser state, Models and planner copies"
+    )
+)]
 const MODEL_WORKING_MULTIPLIER: u64 = 64;
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "restore admission reserves two MiB for the conversion state no archived byte \
+                  count scales"
+    )
+)]
 const FIXED_WORKING_BYTES: u64 = 2 * 1024 * 1024;
 
 /// The share every archived deduplicator key takes of its restore conversion whatever its values:
