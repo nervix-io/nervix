@@ -251,7 +251,8 @@ pub(in crate::runtime) struct InferenceRun {
     pub(in crate::runtime) accepted: Vec<usize>,
     pub(in crate::runtime) refused: Vec<RefusedMessage>,
     pub(in crate::runtime) failed: Vec<FailedMessages>,
-    /// Whether a message advanced the carried state.
+    /// Whether the run installed the state its accepted messages left, which it does only once
+    /// their outputs are joined.
     pub(in crate::runtime) advanced: bool,
 }
 
@@ -262,10 +263,12 @@ struct RunChunk {
 }
 
 /// What the admitted jobs of one run left before their public outputs are joined: the run's
-/// outcome so far and each job's outputs, in arrival order.
+/// outcome so far, each job's outputs in arrival order, and the carried state after the last
+/// accepted message, which the join installs only once every job's outputs are joined.
 struct RunJobs {
     run: InferenceRun,
     outputs: Vec<RecordBatch>,
+    successor: Option<Arc<NativeGeneration>>,
 }
 
 /// What one admitted job returns: the outcome of its rows and the successor of the carried state.
@@ -323,8 +326,10 @@ impl InferenceSession {
 
     /// Run the model over every row of `mapped`, the admitted batch's `INPUTS` in arrival order,
     /// on the node's extension workers. Rows run one at a time unless the tensors declare `BATCH`,
-    /// and a batch too large for one charge runs as several admitted jobs. The carried state
-    /// advances with each accepted message and stays installed when the run fails.
+    /// and a batch too large for one charge runs as several admitted jobs, each starting from the
+    /// state the previous jobs' accepted messages left. The carried state takes that state only
+    /// once every job's outputs are joined, so a message that fails, alone or because the outputs
+    /// cannot be joined, leaves it where the preceding accepted message left it.
     pub(in crate::runtime) async fn run(
         &mut self,
         executor: &Executor,
@@ -347,21 +352,21 @@ impl InferenceSession {
         let mut run = InferenceRun::default();
         let chunks = Self::plan_chunks(prepared, mapped, limit, &mut run);
         let mut outputs = Vec::new();
+        let mut successor = None::<Arc<NativeGeneration>>;
         let mut chunks = chunks.into_iter();
         while let Some(chunk) = chunks.next() {
             nervix_primitives::task::consume_budget().await;
+            let start = match &successor {
+                Some(successor) => Some(successor.clone()),
+                None => self.carried.as_ref().map(CarriedState::generation),
+            };
             match self
-                .run_chunk(executor, prepared, mapped, &chunk, limit)
+                .run_chunk(executor, prepared, mapped, &chunk, start, limit)
                 .await
             {
                 Ok(outcome) => {
-                    if let Some(successor) = outcome.successor {
-                        let carried = self
-                            .carried
-                            .as_mut()
-                            .verified("only a run that carries state returns a successor");
-                        carried.install(successor);
-                        run.advanced = true;
+                    if let Some(next) = outcome.successor {
+                        successor = Some(Arc::new(next));
                     }
                     if let Some(batch) = outcome.outputs {
                         outputs.push(batch);
@@ -380,15 +385,34 @@ impl InferenceSession {
                 }
             }
         }
-        RunJobs { run, outputs }
+        RunJobs {
+            run,
+            outputs,
+            successor,
+        }
     }
 
-    /// Joins the jobs' public outputs into the run's one output batch. A join that fails fails
-    /// every accepted message.
-    fn join_outputs(&self, prepared: &PreparedInference, jobs: RunJobs) -> InferenceRun {
-        let RunJobs { mut run, outputs } = jobs;
+    /// Joins the jobs' public outputs into the run's one output batch and only then installs the
+    /// state the accepted messages left. A join that fails fails every accepted message, and the
+    /// state they left is dropped with them.
+    fn join_outputs(&mut self, prepared: &PreparedInference, jobs: RunJobs) -> InferenceRun {
+        let RunJobs {
+            mut run,
+            outputs,
+            successor,
+        } = jobs;
         match self.output_batch(prepared, outputs) {
-            Ok(batch) => run.outputs = batch,
+            Ok(batch) => {
+                run.outputs = batch;
+                if let Some(successor) = successor {
+                    let carried = self
+                        .carried
+                        .as_mut()
+                        .verified("only a run that carries state returns a successor");
+                    carried.install(successor);
+                    run.advanced = true;
+                }
+            }
             Err(error) => {
                 run.failed.push(FailedMessages {
                     rows: std::mem::take(&mut run.accepted),
@@ -480,15 +504,17 @@ impl InferenceSession {
         chunks
     }
 
-    /// One admitted job over `chunk`. The branch keeps its session while the job waits for a
-    /// place; once admitted, the session moves into the job and returns with its outcome. A job
-    /// that panicked loses the session, and the next batch loads it again.
+    /// One admitted job over `chunk`, starting from the carried state `carried`. The branch keeps
+    /// its session while the job waits for a place; once admitted, the session moves into the job
+    /// and returns with its outcome. A job that panicked loses the session, and the next batch
+    /// loads it again.
     async fn run_chunk(
         &mut self,
         executor: &Executor,
         prepared: &Arc<PreparedInference>,
         mapped: &RuntimeRecordBatch,
         chunk: &RunChunk,
+        carried: Option<Arc<NativeGeneration>>,
         limit: u64,
     ) -> error_stack::Result<ChunkOutcome, InferencerError> {
         let charge = executor
@@ -504,7 +530,6 @@ impl InferenceSession {
             .bound
             .take()
             .ok_or_else(|| Report::new(InferencerError::SessionUnavailable))?;
-        let carried = self.carried.as_ref().map(CarriedState::generation);
         let definition = prepared.clone();
         let mapped = mapped.clone();
         let rows = chunk.rows.clone();
