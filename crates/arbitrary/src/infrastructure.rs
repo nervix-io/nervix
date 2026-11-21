@@ -52,7 +52,7 @@ impl Arbitrary<'_> {
 
     /// A branch declaration of any partition count, with or without an LRU bound on its live
     /// instances.
-    pub fn create_branch(&mut self) -> CreateParametrizer {
+    pub fn create_parametrizer(&mut self) -> CreateParametrizer {
         let name = self.name();
         let schema = self.name();
         let ttl = self.duration();
