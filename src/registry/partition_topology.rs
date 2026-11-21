@@ -93,7 +93,19 @@ pub(crate) struct PartitionSourceSpec {
     pub(crate) source: PartitionSourcePlan,
     pub(crate) fingerprint: PartitionSourceFingerprint,
     pub(crate) branches: BTreeSet<BranchName>,
+    /// Whether the ingestor is a Pulsar reader declared `INSTANCES PER TRANSPORT PARTITION`, whose
+    /// instances are dealt the topic's partition topics whatever branch it constructs.
+    pub(crate) deals_partition_topics: bool,
     pub(crate) general_error_policy: GeneralErrorPolicy,
+}
+
+impl PartitionSourceSpec {
+    /// Whether the ingestor's intake waits until its source has been observed: an inherited
+    /// producer needs the committed layout, and a reader dealt partition topics needs the topics to
+    /// deal. Kafka domain-offset readers keep their native metadata diagnostics meanwhile.
+    pub(crate) fn waits_for_observation(&self) -> bool {
+        !self.branches.is_empty() || self.deals_partition_topics
+    }
 }
 
 /// Borrowed semantic inputs shared by validation snapshots and the already validated graph.
@@ -129,8 +141,10 @@ impl PartitionModels for super::ActiveGraph {
     }
 }
 
-/// Source configurations that require observations: every inherited producer and Kafka readers
-/// whose offsets Nervix owns. Client and entity projection happens here, before observation runs.
+/// Source configurations that require observations: every inherited producer, Kafka readers whose
+/// offsets Nervix owns, and Pulsar readers dealt the topic's partition topics by
+/// `INSTANCES PER TRANSPORT PARTITION`. Client and entity projection happens here, before
+/// observation runs.
 /// Non-security BLAKE3: pins observations to their typed client and locator configuration; it
 /// authenticates no peer and grants no source access.
 pub(crate) fn source_specs(
@@ -159,7 +173,8 @@ pub(crate) fn source_specs(
         }
         let entity = ingestor.input.transport_entity();
         let domain_offsets = owns_domain_offsets(ingestor);
-        if branches.is_empty() && !domain_offsets {
+        let deals_partition_topics = deals_pulsar_partition_topics(ingestor);
+        if branches.is_empty() && !domain_offsets && !deals_partition_topics {
             continue;
         }
         let missing = || {
@@ -213,6 +228,7 @@ pub(crate) fn source_specs(
                 source,
                 fingerprint,
                 branches,
+                deals_partition_topics,
                 general_error_policy: ingestor.general_error_policy.clone(),
             },
         );
@@ -292,8 +308,9 @@ pub(crate) fn decide(
     let mut waiting = specs
         .values()
         // Ordinary domain-offset readers retain their native metadata diagnostics while their
-        // committed assignment is unknown. Inherited producers must wait for branch coherence.
-        .filter(|spec| !spec.branches.is_empty())
+        // committed assignment is unknown. Inherited producers must wait for branch coherence, and
+        // Pulsar readers dealt partition topics for the topics to deal.
+        .filter(|spec| spec.waits_for_observation())
         .filter(|spec| {
             topology
                 .sources
@@ -456,6 +473,16 @@ pub(in crate::registry) fn owns_domain_offsets(ingestor: &nervix_models::CreateI
         if matches!(topic.offset_mode, KafkaOffsetMode::Domain))
 }
 
+/// A Pulsar reader declared `INSTANCES PER TRANSPORT PARTITION` is dealt the topic's partition
+/// topics whatever branch it constructs, so its topic is observed even without an inherited branch.
+pub(in crate::registry) fn deals_pulsar_partition_topics(
+    ingestor: &nervix_models::CreateIngestor,
+) -> bool {
+    matches!(ingestor.input.transport_entity(),
+        Some(IngestorEntity::Pulsar(PulsarIngestor::Topic(topic)))
+        if topic.instances == nervix_models::IngestorInstances::PerTransportPartition)
+}
+
 /// Source epochs fence an exact observation and reader layout. The layout is already present in
 /// ScheduledNode, so only the counter is recorded with the source; no assignment table repeats it.
 pub(in crate::registry) fn continue_source_epochs(
@@ -529,7 +556,7 @@ mod tests {
                 unreachable!("the fixture reads Kafka")
             };
             topic.offset_mode = KafkaOffsetMode::Domain;
-            topic.instances = IngestorInstances::PerPartition;
+            topic.instances = IngestorInstances::PerTransportPartition;
             values.push(Model::Ingestor(source));
         }
         let Model::Emitter(mut output) = emitter("output", "events", "json", "broker") else {
@@ -575,6 +602,94 @@ mod tests {
         assert!(decision.topology.suspended.is_empty());
         assert!(decision.topology.sources.is_empty());
         assert!(decision.topology.branches.is_empty());
+    }
+
+    /// One Pulsar reader of `orders` into a branch Nervix partitions by key.
+    fn pulsar_reader(instances: IngestorInstances) -> ModelIndex {
+        let mut branch = branch_for_relay("events", "row");
+        let Model::Branch(declaration) = &mut branch else {
+            unreachable!("the fixture declares a branch")
+        };
+        declaration.partitions = BranchPartitions::Direct(nonzero!(4u16));
+        let mut source = ingestor_statement("reader", "events", "json", "broker", &["value"]);
+        let IngestorInput::Transport(input) = &mut source.input else {
+            unreachable!("the fixture reads a transport")
+        };
+        input.source =
+            IngestorEntity::Pulsar(PulsarIngestor::Topic(nervix_models::PulsarTopicIngestor {
+                client: named("pulsar_broker"),
+                topic: named("orders"),
+                subscription: nervix_models::PulsarSubscription {
+                    name: named("readers"),
+                    ownership: nervix_models::PulsarSubscriptionOwnership::Provisioned,
+                    kind: nervix_models::PulsarSubscriptionType::Exclusive,
+                },
+                instances,
+                mode: nervix_models::PulsarIngestMode::NoAck,
+                rate_limits: nervix_models::RateLimits::NONE,
+                quiesce: nervix_models::IngestQuiesceMode::Suspend,
+            }));
+        let client = Model::ClientPulsar(nervix_models::CreateClientPulsar {
+            labels: Default::default(),
+            name: named("pulsar_broker"),
+            mount: None,
+            config: Vec::new(),
+        });
+        [
+            schema("row"),
+            wire_schema("event_wire"),
+            codec("json", "row"),
+            client,
+            branch,
+            materialized_relay("events", "row"),
+            Model::Ingestor(source),
+        ]
+        .into_iter()
+        .collect()
+    }
+
+    #[test]
+    fn a_pulsar_reader_dealt_partition_topics_waits_for_its_topic_into_any_branch() {
+        let dealt = pulsar_reader(IngestorInstances::PerTransportPartition);
+        let specs = source_specs(&named("orders"), &dealt).assured("the fixture client resolves");
+        let reader: IngestorName = named("reader");
+        let spec = &specs[&reader];
+        assert!(
+            spec.branches.is_empty(),
+            "the reader builds no inherited branch"
+        );
+        assert!(spec.waits_for_observation());
+
+        let unobserved = decide(
+            &dealt,
+            &specs,
+            &PartitionTopology::default(),
+            &BTreeMap::new(),
+        );
+        assert!(unobserved.topology.suspended.contains(&reader));
+        assert!(unobserved.topology.sources.is_empty());
+
+        let observed = decide(
+            &dealt,
+            &specs,
+            &PartitionTopology::default(),
+            &observations(&specs, &[Some(4)]),
+        );
+        assert!(observed.topology.suspended.is_empty());
+        assert_eq!(
+            observed.topology.sources[&reader].partitions,
+            Some(nervix_models::ExternalPartitionSet::Partitioned(nonzero!(
+                4u32
+            )))
+        );
+        assert!(observed.topology.branches.is_empty());
+
+        let fixed = pulsar_reader(IngestorInstances::ONE);
+        let specs = source_specs(&named("orders"), &fixed).assured("the fixture client resolves");
+        assert!(
+            specs.is_empty(),
+            "a fixed count reads the whole topic, unobserved"
+        );
     }
 
     #[test]

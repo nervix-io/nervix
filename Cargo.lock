@@ -7333,7 +7333,6 @@ dependencies = [
  "nervix-recovery",
  "nervix-test-environment",
  "nonzero_ext",
- "prometheus",
  "rumqttc-core-next",
  "rumqttc-next",
  "shuttle",

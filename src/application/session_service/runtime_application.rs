@@ -325,6 +325,12 @@ pub(in crate::application) fn apply_current_cluster_runtime_state(
                 revision = state.revision,
                 "started running-domain ingestors"
             );
+            // A test build can hold this node's readiness for a revision that runs a domain, after
+            // its ingestors started, as a node slow to become ready would.
+            #[cfg(feature = "testing")]
+            runtime
+                .pause_runtime_readiness_if_armed(local_node_id, &state.domains)
+                .await;
             progress.advance(ApplicationProgressPhase::RuntimeReady, state.revision);
             drop(activation);
             let readiness = async {

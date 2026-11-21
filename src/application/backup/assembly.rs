@@ -179,10 +179,10 @@ fn plan_domain(
         let mut intake_units = std::collections::BTreeMap::new();
         for node in schedule.nodes.values() {
             let Model::Ingestor(ingestor) = node.config.as_ref() else { continue; };
-            if ingestor.input.instances() != Some(nervix_models::IngestorInstances::PerPartition) {
+            if ingestor.input.instances() != Some(nervix_models::IngestorInstances::PerTransportPartition) {
                 continue;
             }
-            let count = u16::try_from(node.units.len()).verified("PER PARTITION intake counts are u16");
+            let count = u16::try_from(node.units.len()).verified("PER TRANSPORT PARTITION intake counts are u16");
             if let Some(count) = std::num::NonZeroU16::new(count) {
                 intake_units.insert(ingestor.name.clone(), count);
             }

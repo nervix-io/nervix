@@ -117,8 +117,8 @@ contract. Refer users to those chapters for cursor edits, transaction-aware cand
 relay candidates narrowed to what the statement can accept, and completion status messages, and
 completing multi-word creation heads. For connector expression
 completion, including filters, HTTP request expressions, ALTER constructions, metadata fields and
-entity-specific header functions, follow
-the CLI's Completion section.
+entity-specific header functions, and for the collection aggregates a window route's bound admits,
+follow the CLI's Completion section.
 For live subscription, clock and notice output while editing, and terminal omission notices,
 follow the CLI's [Asynchronous Output](../../../docs/src/client-tools-cli.md#asynchronous-output)
 section.
@@ -219,8 +219,12 @@ the graph; otherwise use conspicuous placeholders and state the assumptions.
   branch's partition count when one relay owner per branch would funnel too much traffic (see
   [Relay Partitions](https://docs.nervix.io/relay.html#relay-partitions)). For external partition
   inheritance and producer eligibility, read [Inherited Partitions](../../../docs/src/partitioning.md).
-  Check `DESCRIBE BRANCH` before another recount. When one emitter would funnel a partitioned branch back into one
-  node, decide its `INSTANCES` (a count or `PER PARTITION`); read
+  Check `DESCRIBE BRANCH` before another recount. Decide an ingestor's `INSTANCES` too: a count of
+  competing readers, or, on Kafka `OFFSET BY DOMAIN` and Pulsar only, `PER TRANSPORT PARTITION`,
+  which deals the topic's partitions among one reader per branch partition. NATS, RabbitMQ, SQS,
+  MQTT and Redis have no transport partitions, so they take a count; read
+  [Ingestors → Instancing](../../../docs/src/ingestors.md#instancing). When one emitter would funnel
+  a partitioned branch back into one node, decide its `INSTANCES` (a count or `PER PARTITION`); read
   [Emitters → Emitter instances](../../../docs/src/emitters.md#emitter-instances) for the per-key
   ordering it keeps, the entities that run one instance, and placement.
 - Processing: filtering, construction, Roto UDFs, deduplication, ordering, windows, inference,
@@ -232,8 +236,10 @@ the graph; otherwise use conspicuous placeholders and state the assumptions.
   `FLUSH`, and one message at a time a refused row fails alone through `ON MESSAGE ERROR`.
 - For inference with model-carried state, read `Runtime Nodes` → `Inferencer` → `State tensors`
   and `Shutdown And Recovery` → `What Survives` before choosing port bindings, initialization,
-  branch isolation or recovery guarantees. Check the snapshot-section bound and branch retention;
-  distinguish a completed graceful stop from recovery of the last periodic snapshot.
+  branch isolation or recovery guarantees, and `Inferencer State And Recovery` → `Guarantees And
+  Limits` before promising what a restart, an owner loss or a handoff keeps. Check the
+  snapshot-section bound and branch retention; distinguish a completed graceful stop from recovery
+  of the last periodic snapshot.
   Use `DESCRIBE INFERENCER <name>;` to check the pinned model, tensor declarations, static bytes
   per branch and per-unit state progress. Read `Metrics And Observability` → `Inferencer state`
   before interpreting state bytes, initialization counters or branch-local revision summaries.
@@ -344,7 +350,7 @@ wall/logical mapping and time rate verbatim and projects downtime under a newly 
 authority. The default restore leaves the domain stopped; a normal `START` advances the generation
 and clears materialized state while preserving compatible WASM state, source offsets, branch
 lifecycle, deduplicator keys, windows and inferencer tensors. For model-carried state and either
-`WITHOUT STATE` option, read `Backup And Restore` → `Archive Sections` and `Runtime Nodes` →
+`WITHOUT STATE` option, read `Backup And Restore` → `Archive Format` and `Runtime Nodes` →
 `Inferencer` → `State tensors` before promising recovery. `RESUME` precedes the user policy and
 `DRY RUN`; the dry run reports the planned status and generation. Read
 [Backup And Restore](https://docs.nervix.io/backup-and-restore.html) for format and memory limits.

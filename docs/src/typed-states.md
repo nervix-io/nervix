@@ -232,7 +232,7 @@ Running MQTT acknowledgement state distinguishes automatic acknowledgement from 
 acknowledgement with its bounded QoS 0 capacity. Each queued QoS 0 outcome owns its permit until
 the ingestor takes it; acknowledged packets use their separate reserved capacity. Overflow is an
 ordinary admission outcome that drops and counts one publish, rather than a read failure or a
-missing connection. The queue, permits and host-supplied counter handle remain volatile.
+missing connection. The queue, permits and host-supplied overflow report remain volatile.
 
 Text is parsed into a semantic Model, registry validation resolves its references and contracts,
 and planning produces an execution plan. Each stage passes forward a value whose type expresses
@@ -379,7 +379,7 @@ complete unsigned 64-bit range. Duration settings preserve their declared range 
 precision in eight bytes. Decoding validates the same declaration before publishing a parameter
 value.
 
-Consensus's `raft_node_selector_runtime_entity_labels_inherited_topology_ratelimit_stopping_` keyspaces and current
+Consensus's `raft_node_selector_runtime_entity_labels_inherited_topology_ratelimit_stopping_transactionalstart_` keyspaces and current
 `ClusterState` metadata encoding, 42, identify its stored shapes, including the partition count of every resolved
 branch declaration in the committed schedule, the partition epoch the schedule records for each
 branch whose count changed, and the statements a transaction keeps, including per-entity
@@ -1424,13 +1424,13 @@ read-only buffers retain the native allocation through their root rather than a 
 
 ## Intake Unit And Gate Identity
 
-An instancing declaration is `Count(NonZeroU64)` or `PerPartition`; entity capabilities admit the
-forms before placement. Its native and archived representations occupy eight bytes. The archive
-encodes `PerPartition` as zero and each positive count as its exact unsigned 64-bit value; semantic
-JSON retains the tagged forms. A resolved ingestor unit uses the shared `NodeUnitRef` and
-`DomainNodeUnitRef` identities throughout plans, runtime registrations and durable state placement.
-There is no node-local index conversion. An ingestor's readiness is one scalar whose retirement ends
-that exact lifetime.
+An instancing declaration is `Count(NonZeroU64)` or `PerTransportPartition`; entity capabilities
+admit the forms before placement. Its native and archived representations occupy eight bytes. The
+archive encodes `PerTransportPartition` as zero and each positive count as its exact unsigned 64-bit
+value; semantic JSON retains the tagged forms. A resolved ingestor unit uses the shared
+`NodeUnitRef` and `DomainNodeUnitRef` identities throughout plans, runtime registrations and durable
+state placement. There is no node-local index conversion. An ingestor's readiness is one scalar
+whose retirement ends that exact lifetime.
 The shared `Unit` identity occupies eight bytes with four-byte archive alignment. Its private rank
 orders `Single`, all 32-bit partitions, and then instance indices. `UnitKind` is its semantic view;
 JSON uses that tagged view and validates an instance index through `Unit::try_instance`.

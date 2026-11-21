@@ -419,7 +419,7 @@ impl IngestorDeclaration for MqttTopicIngestor {
     const CAPABILITIES: IngestorEntityCapabilities = IngestorEntityCapabilities {
         external_partitions: crate::IngestorExternalPartitions::None,
         events: crate::DeclaredEvents::NONE,
-        instancing: crate::IngestorInstancingCapability::PerPartition,
+        instancing: crate::IngestorInstancingCapability::Instances,
         // MQTT 5 user properties: a broker keeps their order and repeats from the publisher, and
         // their names compare exactly.
         headers: Some(HeaderModel::exact(HeaderLayout::OrderedRepeats)),

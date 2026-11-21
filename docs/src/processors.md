@@ -703,6 +703,9 @@ includes the carried state, so the state counts against the relay operation limi
 [Execution](#execution) applies to every message. The state is retained once per active branch;
 use the branch's `MAX INSTANCES` to bound the number of live copies.
 
+[Inferencer State And Recovery](inferencer-state.md) describes how the carried state is owned,
+published, persisted, replicated, moved, archived and recovered.
+
 ### Inspect inference configuration and state
 
 `DESCRIBE INFERENCER <name>;` reports the pinned resource version and file, execution mode,

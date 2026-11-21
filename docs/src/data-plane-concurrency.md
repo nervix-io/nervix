@@ -1082,13 +1082,14 @@ last publication when the branch stops, even when its task is already gone. A wi
 its resident or quota-owned segmented write; the deduplicator keeps its resident key checkpoint.
 Neither a snapshot nor a replica takes the live branch state from its task.
 
-A stateful inferencer publishes the native tensor generation after each admitted batch. The
-publication retains the immutable native tensors; encoding extracts their shapes and exact float
+A stateful inferencer publishes the native tensor generation after each admitted batch that
+advanced its state. The publication retains the immutable native tensors; encoding extracts their shapes and exact float
 bits on the bounded CPU workers. It neither copies tensors per output route nor routes them
 through Arrow. Capturing a generation retains that exact value while later model invocations
 advance the branch. The final write uses the same carrier, and eviction publishes an empty
 generation before its exact replication route retires. Restoration validates the snapshot frame,
-model identity and branch incarnation before installing native tensors into a new session.
+model identity and branch incarnation before installing native tensors into a new session. See
+[Inferencer State And Recovery](./inferencer-state.md) for the carried state's contract.
 
 `StateSnapshotTasks`, `CheckpointWriter` and `SnapshotCadence` also provide the task lifetime,
 domain tracking, periodic cadence and final-write signal for Kafka domain offsets. Offsets keep
@@ -3376,16 +3377,17 @@ Receive Maximum for acknowledged packet outcomes and permits at most 64 QoS 0 ou
 them. A queued QoS 0 outcome owns a semaphore permit until the ingestor takes it; acquiring a permit
 never waits, and a refusal drops and counts that publish before reading the next. QoS 0 traffic
 therefore cannot occupy an acknowledged outcome's capacity or stop polling. The host supplies a
-pre-resolved Prometheus counter handle, so a drop reaches no shared map and is counted while the
-host waits on downstream acknowledgement. Under `NO ACK` the queue holds 64 outcomes and applies
-backpressure. A peer exceeding the advertised Receive Maximum can also exhaust the queue. A full
+read-ahead overflow report around its pre-resolved counter child, so a drop reaches no shared map
+and is counted while the host waits on downstream acknowledgement. Under `NO ACK` the queue holds
+64 outcomes and applies backpressure. A peer exceeding the advertised Receive Maximum can also
+exhaust the queue. A full
 queue holds its next outcome and stops polling until the ingestor reads one. The driver
 publishes its progress as one immutable watch value: how many acknowledgements the event loop has
 written, and whether it polls, holds a publish for room, or ended. The ingestor's acknowledgement
 waits on that publication and on nothing else, and the wait ends without its writes as soon as
 the published value says the driver stopped polling, or once one keep-alive interval has passed,
-so neither side waits on the other. The queue, capacity semaphore, counter and watch value are
-bounded synchronization scoped to one connection or its pre-resolved ingestor counter. Their
+so neither side waits on the other. The queue, capacity semaphore, overflow report and watch value
+are bounded synchronization scoped to one connection or its unit's pre-resolved counter. Their
 asynchronous operations and the metric library's internals remain outside Deloxide's
 tracked locks; the Shuttle checks below and the public keep-alive and acknowledgement scenarios
 are their evidence.

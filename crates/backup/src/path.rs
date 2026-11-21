@@ -4,11 +4,14 @@
 //! manifest.rkyv
 //! users.rkyv                                              (cluster backups)
 //! domains/<domain>/domain.rkyv
+//! domains/<domain>/partitions.rkyv                        (inherited or retained inherited partitions)
 //! domains/<domain>/models.plexus
 //! domains/<domain>/resources/<resource>/<version>/version.rkyv
 //! domains/<domain>/resources/<resource>/<version>/archive.tar   (unless WITHOUT RESOURCES)
 //! domains/<domain>/state/wasm_processor/<processor>/<unit>/<branch>/descriptor.rkyv
 //! domains/<domain>/state/wasm_processor/<processor>/<unit>/<branch>/guest.bin
+//! domains/<domain>/state/inferencer/<inferencer>/<unit>/<branch>/descriptor.rkyv
+//! domains/<domain>/state/inferencer/<inferencer>/<unit>/<branch>/state.bin
 //! domains/<domain>/state/kafka_offset/<ingestor>/<unit>/offsets.rkyv
 //! domains/<domain>/state/branch_lifecycle/<kind>/<processor>/<unit>/branches.rkyv
 //! domains/<domain>/state/materialized_relay/<relay>/<unit>/descriptor.rkyv
@@ -309,7 +312,7 @@ fn domain_directory(domain: &DomainName) -> String {
     format!("domains/{}", segment(domain.as_str()))
 }
 
-/// Where one branch of a deduplicator or window processor keeps its sections.
+/// Where one branch of a deduplicator, inferencer or window processor keeps its sections.
 fn branch_state_directory(
     domain: &DomainName,
     kind: &str,
