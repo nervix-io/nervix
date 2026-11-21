@@ -360,8 +360,8 @@ RESTORE DOMAIN payments FROM './payments.nvxb' WITHOUT SOURCE OFFSETS;
   licensing is reported stopped, and the message reports `restored domains are stopped by
   licensing: <reason>`, or names those domains when others already run.
 - `WITHOUT STATE` restores the configuration and purges state for the target domain.
-- `WITHOUT SOURCE OFFSETS` restores WASM, branch lifecycle, materialized, deduplicator and window
-  state but starts ingestors without the archived Kafka positions.
+- `WITHOUT SOURCE OFFSETS` restores WASM, branch lifecycle, materialized, deduplicator, window and
+  inferencer state but starts ingestors without the archived Kafka positions.
 - A state section whose entity is absent or whose schema fingerprint differs from the published
   schedule is skipped. The restore succeeds and reports a warning naming the skipped state in its
   command diagnostics and CLI output; that entity starts without the skipped checkpoint. A dry run
@@ -418,8 +418,8 @@ licensed installation requires an administrative transfer to the rebuilt cluster
   these labels; the target cluster's committed acceptance limits still apply to restore.
 
 A restore stages the archive's compatible branch lifecycle, WASM guest checkpoints, Kafka
-positions, materialized relay checkpoints, deduplicator keyspaces and windows on every newly
-assigned owner and replica after its models are scheduled. Each node validates the complete staged
+positions, materialized relay checkpoints, deduplicator keyspaces, windows and inferencer tensors on
+every newly assigned owner and replica after its models are scheduled. Each node validates the complete staged
 set and durably selects it at once, so its readers see either the complete previous set or the
 complete restored one; nodes without assigned checkpoints publish an empty set. A replicated
 installation gate refuses `START` until every target node has published its complete
@@ -693,7 +693,7 @@ expired reference cannot settle an earlier complete upload whose outcome was los
 `OutcomeUnknown`; keep its original reference and restore the same archive for recovery. See
 [Restoring](client-library.md#restoring) for the native-client contract.
 
-In the [web console](client-tools-web-console.md#backup-and-restore), an unrecorded request failure
+In the [web console](client-tools-web-console.md#backing-up-and-restoring), an unrecorded request failure
 on a later attempt also leaves an earlier possibly admitted restore unknown. Keep the same
 statement, archive and execution reference to recover its recorded outcome. A recovered failure
 or a restore step report remains definitive and preserves the steps already applied.
@@ -899,14 +899,15 @@ its format version, each a little-endian 16-bit integer. The rest is an
 | Users | 2 | 2 | Every user's name and typed PBKDF2-HMAC-SHA-512 credential: validated iterations, 128-bit salt and 64-byte digest |
 | Domain | 3 | 2 | Pace, lifecycle status, start count, the point the latest start began from, the committed clock mapping, the logical instant the clock had reached, and each declared resource with its next version number |
 | Resource version | 4 | 1 | The version's domain, resource and number, its upload state, and for a published version its checksums, file count, sizes, creation time and creating node |
-| WASM guest state descriptor | 5 | 4 | The scheduled unit, saved branch key, schema fingerprint, guest state generation and checkpoint revision |
+| WASM guest state descriptor | 5 | 5 | The scheduled unit, saved branch key, schema fingerprint, guest state generation and checkpoint revision |
 | Kafka domain offsets | 6 | 5 | The scheduled unit, ingestor schema fingerprint, optional applied explicit-start generation, and ordered topic and partition positions, expressed as the next offset to consume |
-| Branch lifecycle | 7 | 4 | The scheduled unit, owner kind, schema fingerprint, branch keys, last ingestion times and incarnations in LRU order |
+| Branch lifecycle | 7 | 5 | The scheduled unit, owner kind, schema fingerprint, branch keys, last ingestion times and incarnations in LRU order |
 | Materialized relay descriptor | 8 | 4 | Domain and relay names, scheduled unit, schema fingerprint, revision, ownership fence, branch generation, row count and group count |
-| Materialized record identities | 9 | 4 | The scheduled unit and ordered row identities: an unbranched identity or typed branch fields, and low/high ingestion watermarks |
-| Deduplicator keyspace descriptor | 10 | 4 | Domain and deduplicator names, scheduled unit, schema fingerprint, branch fingerprint and typed branch fields, revision, key count and group count |
-| Window state descriptor | 11 | 4 | Domain and window processor names, scheduled unit, schema fingerprint, window model digest, branch fingerprint and typed branch fields, revision, branch incarnation, first and next admission sequence, each retained row's low/high ingestion watermarks, group count, and each aggregate's structure: rebuilt from the retained rows, or a linear histogram with its delayed removals as expiry time and bucket |
-| Inferencer state descriptor | 12 | 1 | Domain and inferencer names, scheduled unit, schema and pinned model fingerprints, typed branch key and fingerprint, nonzero branch incarnation, revision, ordered shapes and the exact raw section byte length and BLAKE3 digest |
+| Materialized record identities | 9 | 5 | The scheduled unit and ordered row identities: an unbranched identity or typed branch fields, and low/high ingestion watermarks |
+| Deduplicator keyspace descriptor | 10 | 5 | Domain and deduplicator names, scheduled unit, schema fingerprint, branch fingerprint and typed branch fields, revision, key count and group count |
+| Window state descriptor | 11 | 5 | Domain and window processor names, scheduled unit, schema fingerprint, window model digest, branch fingerprint and typed branch fields, revision, branch incarnation, first and next admission sequence, each retained row's low/high ingestion watermarks, group count, and each aggregate's structure: rebuilt from the retained rows, or a linear histogram with its delayed removals as expiry time and bucket |
+| Inferencer state descriptor | 12 | 2 | Domain and inferencer names, scheduled unit, schema and pinned model fingerprints, typed branch key and fingerprint, nonzero branch incarnation, revision, ordered shapes and the exact raw section byte length and BLAKE3 digest |
+| Partition topology | 13 | 1 | The domain's captured external partition sets, each inherited branch's partition epoch and grouping, the units still holding keys of a previous count, and the installed intake count of each per-partition ingestor |
 
 The archive format major version is `9`. An archive with another major version fails before any
 state section can be skipped or installed; capture a new archive in the current instance-unit format. A reader refuses invalid record magic, an unsupported

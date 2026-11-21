@@ -9,10 +9,11 @@
 //!   their cancellation-stable confirmation; the progress it publishes to the ingestor, the count
 //!   of acknowledgements written to the connection and whether it polls; and the report of how
 //!   the connection ended.
-//! - **Depends on.** The ingestor's typed errors and positions, `rumqttc`'s event loop, requests
-//!   and events, and the boundary's task, channel, watch and timer primitives.
-//! - **Must not know.** The host, its batches or acknowledgement trees, or the graph's delivery
-//!   decisions.
+//! - **Depends on.** The ingestor's typed errors and positions, the connector contract's read-ahead
+//!   overflow report, `rumqttc`'s event loop, requests and events, and the boundary's task,
+//!   channel, watch and timer primitives.
+//! - **Must not know.** The host, its batches, acknowledgement trees or metrics, or the graph's
+//!   delivery decisions.
 //!
 //! # One connection
 //!
@@ -20,8 +21,8 @@
 //! next, then hands admitted bytes or a compact discard acknowledgement to the ingestor in packet
 //! order. In manual acknowledgement mode, queued QoS 0 outcomes own at most 64 permits alongside
 //! the complete Receive Maximum reserved for acknowledged outcomes. Refusing a QoS 0 permit drops
-//! and counts that publish without stopping polling. Automatic acknowledgement retains bounded
-//! backpressure. Every acknowledgement the
+//! that publish and records it through the host's overflow report without stopping polling.
+//! Automatic acknowledgement retains bounded backpressure. Every acknowledgement the
 //! event loop writes, a `PUBACK`, or a `PUBREC` for a publish at quality of service 2, raises the
 //! count the driver publishes; the loop yields such a write only after it flushed the requests that
 //! carried it to the connection. A failed poll ends the connection: the driver publishes that it
@@ -58,6 +59,7 @@ use std::{
 use arch_into::ArchInto as _;
 use error_stack::Report;
 use meticulous::{OptionExt as _, ResultExt as _};
+use nervix_connector::IngestorReadAheadOverflow;
 use nervix_models::MQTT_SOURCE_READ_AHEAD_HEADROOM;
 use nervix_primitives::{
     sync::{
@@ -335,8 +337,9 @@ struct ConnectionDriver<E> {
     events: E,
     read_ahead: mpsc::Sender<ReadAheadPacket>,
     acknowledgement: DriverAcknowledgement,
-    /// The host resolves this counter once; recording an overflow reaches no metrics registry.
-    read_ahead_dropped: prometheus::IntCounter,
+    /// The host resolved this report once for the ingestor's unit; recording an overflow reaches
+    /// no metrics registry, allocates nothing and never waits.
+    read_ahead_overflow: IngestorReadAheadOverflow,
     /// The largest complete publish the client's configuration admits.
     admission: NonZeroU32,
     /// How many publishes the driver has handed to the read-ahead.
@@ -358,7 +361,7 @@ impl<E: ConnectionEvents> ConnectionDriver<E> {
                     let qos_zero_capacity = match self.acknowledgement.admit(&publish) {
                         ReadAheadAdmission::Accept(capacity) => capacity,
                         ReadAheadAdmission::Overflow => {
-                            self.read_ahead_dropped.inc();
+                            self.read_ahead_overflow.record_dropped_payload();
                             continue;
                         }
                     };
@@ -457,15 +460,15 @@ pub(super) struct MqttConnection<R = AsyncClient> {
 
 impl<R: AcknowledgementRequests> MqttConnection<R> {
     /// Starts the driver of a subscribed connection, with the read-ahead and acknowledgement mode
-    /// its plan declares, the keep-alive its broker keeps, if any, and the largest complete
-    /// publish its client admits.
+    /// its plan declares, the keep-alive its broker keeps, if any, the largest complete publish its
+    /// client admits, and the host's report of the QoS 0 publishes its read-ahead has no room for.
     pub(super) fn start<E: ConnectionEvents>(
         requests: R,
         events: E,
         acknowledgement: IngestorAcknowledgement,
         keep_alive: Option<Duration>,
         admission: NonZeroU32,
-        read_ahead_dropped: prometheus::IntCounter,
+        read_ahead_overflow: IngestorReadAheadOverflow,
     ) -> Self {
         let read_ahead_capacity = acknowledgement.read_ahead();
         let (read_ahead, publishes) = mpsc::channel(read_ahead_capacity.get());
@@ -477,7 +480,7 @@ impl<R: AcknowledgementRequests> MqttConnection<R> {
             events,
             read_ahead,
             acknowledgement: acknowledgement.into(),
-            read_ahead_dropped,
+            read_ahead_overflow,
             admission,
             handed: 0,
             progress,
