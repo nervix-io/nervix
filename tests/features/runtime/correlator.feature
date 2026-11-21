@@ -46,7 +46,7 @@ Feature: Relay correlation
         FROM WIRE SCHEMA right_profile_wire
         TO SCHEMA right_profile;
         CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
-        CREATE IF NOT EXISTS BRANCH by_left_profile_ingestor SCHEMA tenant_branch TTL 5m;
+        CREATE IF NOT EXISTS PARAMETRIZER by_left_profile_ingestor SCHEMA tenant_branch TTL 5m;
         CREATE RELAY left_profiles SCHEMA left_profile BRANCHED BY by_left_profile_ingestor;
         CREATE RELAY left_profile_aliases SCHEMA left_profile BRANCHED BY by_left_profile_ingestor;
         CREATE RELAY right_profiles SCHEMA right_profile BRANCHED BY by_left_profile_ingestor;
@@ -226,7 +226,7 @@ Feature: Relay correlation
       CREATE SCHEMA settle_payment (tenant STRING, order_id STRING, amount I64);
       CREATE SCHEMA settled_order (tenant STRING, order_id STRING, item STRING, amount I64);
       CREATE SCHEMA settle_tenant (tenant STRING);
-      CREATE BRANCH settle_by_tenant SCHEMA settle_tenant TTL 5m;
+      CREATE PARAMETRIZER settle_by_tenant SCHEMA settle_tenant TTL 5m;
       CREATE JAQ JSON CODEC settle_order_codec TO SCHEMA settle_order
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE JAQ JSON CODEC settle_payment_codec TO SCHEMA settle_payment

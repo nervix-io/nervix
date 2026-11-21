@@ -57,7 +57,7 @@ Feature: Domain entity labels
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA incoming (id STRING, amount I64, tenant STRING);
       CREATE SCHEMA tenant_key (tenant STRING);
-      CREATE BRANCH tenants SCHEMA tenant_key TTL 5m;
+      CREATE PARAMETRIZER tenants SCHEMA tenant_key TTL 5m;
       CREATE RELAY orders SCHEMA incoming BRANCHED BY tenants;
       CREATE CLIENT PRODUCER INGESTOR orders_in
         FROM SCHEMA incoming
@@ -217,7 +217,7 @@ Feature: Domain entity labels
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA incoming (id STRING, amount I64, tenant STRING);
       CREATE SCHEMA tenant_key (tenant STRING);
-      CREATE BRANCH tenants SCHEMA tenant_key TTL 5m;
+      CREATE PARAMETRIZER tenants SCHEMA tenant_key TTL 5m;
       CREATE RELAY orders SCHEMA incoming BRANCHED BY tenants;
       CREATE RELAY distinct_orders SCHEMA incoming BRANCHED BY tenants;
       CREATE CLIENT PRODUCER INGESTOR orders_in

@@ -626,7 +626,7 @@ Feature: Configuration backup into a public archive
       CREATE WIRE JSON SCHEMA metric_wire MODE STRICT ( value integer, tenant string );
       CREATE WIRE JSON CODEC metric_codec FROM WIRE SCHEMA metric_wire TO SCHEMA metric;
       CREATE SCHEMA tenant_branch ( tenant STRING );
-      CREATE BRANCH by_tenant SCHEMA tenant_branch TTL 5m;
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_branch TTL 5m;
       CREATE RELAY raw_metrics SCHEMA metric BRANCHED BY by_tenant WITH MATERIALIZED STATE LAST BY TIMESTAMP;
       CREATE RELAY filtered_metrics SCHEMA metric BRANCHED BY by_tenant;
       CREATE KAFKA CLIENT kafka_ingress CONFIG {
@@ -759,7 +759,7 @@ Feature: Configuration backup into a public archive
       CREATE WIRE JSON SCHEMA metric_wire MODE STRICT ( value integer, tenant string );
       CREATE WIRE JSON CODEC metric_codec FROM WIRE SCHEMA metric_wire TO SCHEMA metric;
       CREATE SCHEMA tenant_branch ( tenant STRING );
-      CREATE BRANCH by_tenant SCHEMA tenant_branch TTL 5s;
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_branch TTL 5s;
       CREATE RELAY raw_metrics SCHEMA metric BRANCHED BY by_tenant;
       CREATE RELAY filtered_metrics SCHEMA metric BRANCHED BY by_tenant;
       CREATE KAFKA CLIENT kafka_ingress CONFIG {
@@ -822,14 +822,14 @@ Feature: Configuration backup into a public archive
     And node "{{wasm_owner}}" observability metric "nervix_branch_evictions_total" with labels eventually reaches at least 2
       """
       domain="{{domain}}"
-      branch="by_tenant"
+      parametrizer="by_tenant"
       physical_node_id="{{wasm_owner}}"
       reason="ttl"
       """
     And node "{{wasm_owner}}" observability metric "nervix_branch_instances" with labels eventually equals 0
       """
       domain="{{domain}}"
-      branch="by_tenant"
+      parametrizer="by_tenant"
       physical_node_id="{{wasm_owner}}"
       """
     When the CLI backs up "domain {{domain}} --timeout 30s" from node "{{leader}}" into "expired.nvxb" reporting JSON
@@ -862,7 +862,7 @@ Feature: Configuration backup into a public archive
       CREATE WIRE JSON SCHEMA metric_wire MODE STRICT ( value integer, tenant string );
       CREATE WIRE JSON CODEC metric_codec FROM WIRE SCHEMA metric_wire TO SCHEMA metric;
       CREATE SCHEMA tenant_branch ( tenant STRING );
-      CREATE BRANCH by_tenant SCHEMA tenant_branch TTL 5m;
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_branch TTL 5m;
       CREATE RELAY raw_metrics SCHEMA metric BRANCHED BY by_tenant;
       CREATE RELAY filtered_metrics SCHEMA metric BRANCHED BY by_tenant;
       CREATE KAFKA CLIENT kafka_ingress CONFIG {

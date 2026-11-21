@@ -19,7 +19,7 @@ Feature: Ingestor metrics
         FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
-        CREATE IF NOT EXISTS BRANCH by_ingestor_metrics_source SCHEMA user_id_branch TTL 5m;
+        CREATE IF NOT EXISTS PARAMETRIZER by_ingestor_metrics_source SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_ingestor_metrics_source;
         CREATE VHOST edge http-{{test_id}}.example.com;
         CREATE HTTP ENDPOINT ingestor_metrics_ingress ON edge PATH '/ingestor-metrics';
@@ -218,7 +218,7 @@ Feature: Ingestor metrics
         FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
-        CREATE IF NOT EXISTS BRANCH by_ingestor_metrics_source SCHEMA user_id_branch TTL 5m;
+        CREATE IF NOT EXISTS PARAMETRIZER by_ingestor_metrics_source SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification <relay_branching>;
         CREATE MQTT CLIENT mqtt_main
         CONFIG {
@@ -312,7 +312,7 @@ Feature: Ingestor metrics
         FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
-        CREATE IF NOT EXISTS BRANCH by_immediate_source SCHEMA user_id_branch TTL 5m;
+        CREATE IF NOT EXISTS PARAMETRIZER by_immediate_source SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_immediate_source;
         CREATE MQTT CLIENT mqtt_main
         CONFIG {
@@ -364,7 +364,7 @@ Feature: Ingestor metrics
         FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
-        CREATE IF NOT EXISTS BRANCH by_ingestor_metrics_source SCHEMA user_id_branch TTL 5m;
+        CREATE IF NOT EXISTS PARAMETRIZER by_ingestor_metrics_source SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_ingestor_metrics_source;
         CREATE VHOST edge http-{{test_id}}-ingestor-restart.example.com;
         CREATE HTTP ENDPOINT ingestor_metrics_restart_ingress ON edge PATH '/ingestor-metrics-restart';
@@ -434,7 +434,7 @@ Feature: Ingestor metrics
         FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
-        CREATE IF NOT EXISTS BRANCH by_remote_owner_metrics_source SCHEMA user_id_branch TTL 5m;
+        CREATE IF NOT EXISTS PARAMETRIZER by_remote_owner_metrics_source SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_remote_owner_metrics_source;
         CREATE REDIS CLIENT redis_main
         POOL SIZE MIN 1 MAX 4

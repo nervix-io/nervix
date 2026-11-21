@@ -22,8 +22,8 @@ Feature: Emitter payload assembly across Arrow carriers
       );
       CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE SCHEMA tenant_branch ( tenant STRING );
-      CREATE BRANCH by_source_a SCHEMA tenant_branch TTL 5m;
-      CREATE BRANCH by_source_b SCHEMA tenant_branch TTL 5m;
+      CREATE PARAMETRIZER by_source_a SCHEMA tenant_branch TTL 5m;
+      CREATE PARAMETRIZER by_source_b SCHEMA tenant_branch TTL 5m;
       CREATE RELAY source_a_events SCHEMA event BRANCHED BY by_source_a;
       CREATE RELAY source_b_events SCHEMA event BRANCHED BY by_source_b;
       CREATE VHOST edge assembled-{{test_id}}.example.com;

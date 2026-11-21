@@ -22,7 +22,7 @@ Feature: Domain metrics
         FROM WIRE SCHEMA transaction_wire
         TO SCHEMA transaction;
         CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
-        CREATE IF NOT EXISTS BRANCH by_domain_metrics_source SCHEMA tenant_branch TTL 5m;
+        CREATE IF NOT EXISTS PARAMETRIZER by_domain_metrics_source SCHEMA tenant_branch TTL 5m;
         CREATE RELAY domain_metrics_raw SCHEMA transaction BRANCHED BY by_domain_metrics_source;
         CREATE RELAY domain_metrics_deduped SCHEMA transaction BRANCHED BY by_domain_metrics_source;
         CREATE VHOST edge http-{{test_id}}.example.com;

@@ -17,7 +17,7 @@ Feature: Explicit emitter record keys and destination partitions
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( tenant string, value integer );
       CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE SCHEMA tenant_fields ( tenant STRING );
-      CREATE BRANCH by_tenant SCHEMA tenant_fields TTL 5m PARTITIONS 4;
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_fields TTL 5m PARTITIONS 4;
       CREATE RELAY events SCHEMA event BRANCHED BY by_tenant;
       CREATE VHOST edge explicit-keys-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT intake ON edge PATH '/events';
@@ -88,7 +88,7 @@ Feature: Explicit emitter record keys and destination partitions
       CREATE JAQ JSON CODEC ingest_codec TO SCHEMA event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE SCHEMA tenant_fields ( tenant STRING );
-      CREATE BRANCH by_tenant SCHEMA tenant_fields TTL 5m PARTITIONS 4;
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_fields TTL 5m PARTITIONS 4;
       CREATE RELAY events SCHEMA event BRANCHED BY by_tenant;
       CREATE VHOST edge keyed-batches-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT intake ON edge PATH '/events';
@@ -140,7 +140,7 @@ Feature: Explicit emitter record keys and destination partitions
       CREATE JAQ JSON CODEC ingest_codec TO SCHEMA event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE SCHEMA tenant_fields ( tenant STRING );
-      CREATE BRANCH by_tenant SCHEMA tenant_fields TTL 5m PARTITIONS 4;
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_fields TTL 5m PARTITIONS 4;
       CREATE RELAY events SCHEMA event BRANCHED BY by_tenant;
       CREATE VHOST edge explicit-partitions-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT intake ON edge PATH '/events';
@@ -245,8 +245,8 @@ Feature: Explicit emitter record keys and destination partitions
       CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE SCHEMA tenant_fields ( tenant STRING );
       CREATE SCHEMA location_fields ( zone I64, tenant STRING );
-      CREATE BRANCH tenant_source SCHEMA tenant_fields TTL 5m PARTITIONS 4;
-      CREATE BRANCH location_source SCHEMA location_fields TTL 5m;
+      CREATE PARAMETRIZER tenant_source SCHEMA tenant_fields TTL 5m PARTITIONS 4;
+      CREATE PARAMETRIZER location_source SCHEMA location_fields TTL 5m;
       CREATE RELAY first_events SCHEMA event BRANCHED BY tenant_source;
       CREATE RELAY second_events SCHEMA event BRANCHED BY location_source;
       CREATE VHOST edge source-destinations-{{test_id}}.example.com;
@@ -302,7 +302,7 @@ Feature: Explicit emitter record keys and destination partitions
       CREATE WIRE JSON SCHEMA public_wire MODE STRICT ( value integer );
       CREATE WIRE JSON CODEC public_codec FROM WIRE SCHEMA public_wire TO SCHEMA public_event;
       CREATE SCHEMA tenant_fields ( tenant STRING SENSITIVE );
-      CREATE BRANCH by_tenant SCHEMA tenant_fields TTL 5m PARTITIONS 4;
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_fields TTL 5m PARTITIONS 4;
       CREATE RELAY events SCHEMA incoming BRANCHED BY by_tenant;
       CREATE <connector> CLIENT destination CONFIG { <config> };
       """
@@ -399,8 +399,8 @@ Feature: Explicit emitter record keys and destination partitions
       CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE SCHEMA tenant_fields ( tenant STRING );
       CREATE SCHEMA location_fields ( zone I64, tenant STRING );
-      CREATE BRANCH tenant_source SCHEMA tenant_fields TTL 5m PARTITIONS 4;
-      CREATE BRANCH location_source SCHEMA location_fields TTL 5m;
+      CREATE PARAMETRIZER tenant_source SCHEMA tenant_fields TTL 5m PARTITIONS 4;
+      CREATE PARAMETRIZER location_source SCHEMA location_fields TTL 5m;
       CREATE RELAY first_events SCHEMA event BRANCHED BY tenant_source;
       CREATE RELAY second_events SCHEMA event BRANCHED BY location_source;
       CREATE VHOST edge explicit-group-{{test_id}}.example.com;

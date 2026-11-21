@@ -186,7 +186,7 @@ Feature: Statistics over one list
       );
       CREATE JAQ JSON CODEC history_codec TO SCHEMA history_reading WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE SCHEMA history_branch_schema (tenant STRING);
-      CREATE BRANCH history_branch SCHEMA history_branch_schema TTL 5m;
+      CREATE PARAMETRIZER history_branch SCHEMA history_branch_schema TTL 5m;
       CREATE RELAY history_readings SCHEMA history_reading BRANCHED BY history_branch;
       CREATE RELAY history_summaries SCHEMA history_summary BRANCHED BY history_branch;
       CREATE VHOST edge history-{{test_id}}.example.com;

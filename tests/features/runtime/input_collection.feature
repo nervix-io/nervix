@@ -21,7 +21,7 @@ Feature: Runtime node input collection
       FROM WIRE SCHEMA notification_wire
       TO SCHEMA notification;
       CREATE SCHEMA tenant_branch (tenant STRING);
-      CREATE BRANCH by_tenant SCHEMA tenant_branch TTL 5m;
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_branch TTL 5m;
       CREATE RELAY incoming SCHEMA notification BRANCHED BY by_tenant;
       CREATE RELAY collected SCHEMA notification BRANCHED BY by_tenant;
       CREATE VHOST edge http-{{test_id}}.example.com;

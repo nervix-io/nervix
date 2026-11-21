@@ -1098,7 +1098,7 @@ Feature: Web console Plexus REPL
       CREATE WIRE JSON CODEC left_profile_codec FROM WIRE SCHEMA left_profile_wire TO SCHEMA left_profile;
       CREATE WIRE JSON CODEC right_profile_codec FROM WIRE SCHEMA right_profile_wire TO SCHEMA right_profile;
       CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
-      CREATE IF NOT EXISTS BRANCH by_left_profile_ingestor SCHEMA tenant_branch TTL 5m;
+      CREATE IF NOT EXISTS PARAMETRIZER by_left_profile_ingestor SCHEMA tenant_branch TTL 5m;
       CREATE RELAY left_profiles SCHEMA left_profile BRANCHED BY by_left_profile_ingestor;
       CREATE RELAY right_profiles SCHEMA right_profile BRANCHED BY by_left_profile_ingestor;
       CREATE RELAY correlated_profiles SCHEMA correlated_profile BRANCHED BY by_left_profile_ingestor;
@@ -1276,7 +1276,7 @@ Feature: Web console Plexus REPL
       CREATE SCHEMA notification ( tenant STRING, user_id I64 );
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT ( tenant string, user_id integer );
       CREATE WIRE JSON CODEC notification_codec FROM WIRE SCHEMA notification_wire TO SCHEMA notification;
-      CREATE IF NOT EXISTS BRANCH by_http_notifications SCHEMA tenant_branch TTL 5m;
+      CREATE IF NOT EXISTS PARAMETRIZER by_http_notifications SCHEMA tenant_branch TTL 5m;
       CREATE RELAY notifications SCHEMA notification BRANCHED BY by_http_notifications;
       CREATE VHOST edge http-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT http_notifications_endpoint ON edge PATH '/ingest'; CREATE HTTP ENDPOINT INGESTOR http_notifications FROM http_notifications_endpoint MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec TO notifications INHERIT ALL BRANCHED BY by_http_notifications SET tenant = message.tenant FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
@@ -2064,7 +2064,7 @@ Feature: Web console Plexus REPL
       );
       CREATE WIRE JSON CODEC activity_codec FROM WIRE SCHEMA activity_wire TO SCHEMA activity;
       CREATE IF NOT EXISTS SCHEMA device_branch ( tenant_id STRING, device_id STRING );
-      CREATE IF NOT EXISTS BRANCH by_iot_device_activity SCHEMA device_branch TTL 30m;
+      CREATE IF NOT EXISTS PARAMETRIZER by_iot_device_activity SCHEMA device_branch TTL 30m;
       CREATE RELAY device_activity_landing SCHEMA activity BRANCHED BY by_iot_device_activity;
       CREATE RELAY edge_activity_landing SCHEMA activity BRANCHED BY by_iot_device_activity;
       CREATE RELAY auth_activity_landing SCHEMA activity BRANCHED BY by_iot_device_activity;
@@ -2229,7 +2229,7 @@ Feature: Web console Plexus REPL
       CREATE WIRE JSON SCHEMA telemetry_wire MODE STRICT ( site string, value string );
       CREATE WIRE JSON CODEC telemetry_codec FROM WIRE SCHEMA telemetry_wire TO SCHEMA telemetry;
       CREATE IF NOT EXISTS SCHEMA site_branch ( site STRING );
-      CREATE IF NOT EXISTS BRANCH by_primary_telemetry SCHEMA site_branch TTL 5m;
+      CREATE IF NOT EXISTS PARAMETRIZER by_primary_telemetry SCHEMA site_branch TTL 5m;
       CREATE RELAY telemetry_by_site SCHEMA telemetry BRANCHED BY by_primary_telemetry;
       CREATE VHOST edge api.example.com;
       CREATE HTTP ENDPOINT primary_telemetry_endpoint ON edge PATH '/primary';
@@ -2272,7 +2272,7 @@ Feature: Web console Plexus REPL
       CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE IF NOT EXISTS SCHEMA value_branch ( value STRING );
       CREATE IF NOT EXISTS SCHEMA value_branch ( value STRING );
-      CREATE IF NOT EXISTS BRANCH by_ingest_events SCHEMA value_branch TTL 5m;
+      CREATE IF NOT EXISTS PARAMETRIZER by_ingest_events SCHEMA value_branch TTL 5m;
       CREATE RELAY raw_events SCHEMA event BRANCHED BY by_ingest_events;
       CREATE RELAY deduped_events SCHEMA event BRANCHED BY by_ingest_events;
       CREATE VHOST edge api.example.com;
@@ -2339,11 +2339,11 @@ Feature: Web console Plexus REPL
       CREATE IF NOT EXISTS SCHEMA tenant_user_id_branch ( tenant STRING, user_id I64 );
       CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
       CREATE IF NOT EXISTS SCHEMA tenant_user_id_branch ( tenant STRING, user_id I64 );
-      CREATE IF NOT EXISTS BRANCH by_reingestor_metrics_source SCHEMA tenant_user_id_branch TTL 5m;
+      CREATE IF NOT EXISTS PARAMETRIZER by_reingestor_metrics_source SCHEMA tenant_user_id_branch TTL 5m;
       CREATE RELAY notifications SCHEMA notification BRANCHED BY by_reingestor_metrics_source;
       CREATE RELAY validated_notifications SCHEMA notification BRANCHED BY by_reingestor_metrics_source;
       CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
-      CREATE IF NOT EXISTS BRANCH by_reingestor_metrics_node SCHEMA tenant_branch TTL 5m;
+      CREATE IF NOT EXISTS PARAMETRIZER by_reingestor_metrics_node SCHEMA tenant_branch TTL 5m;
       CREATE RELAY tenant_notifications SCHEMA notification BRANCHED BY by_reingestor_metrics_node;
       CREATE VHOST edge http-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT reingestor_metrics_ingress ON edge PATH '/reingestor-metrics';
@@ -2408,11 +2408,11 @@ Feature: Web console Plexus REPL
       CREATE WIRE JSON CODEC telemetry_codec FROM WIRE SCHEMA telemetry_wire TO SCHEMA telemetry;
       CREATE IF NOT EXISTS SCHEMA site_branch ( site STRING );
       CREATE IF NOT EXISTS SCHEMA device_branch ( device_id STRING );
-      CREATE IF NOT EXISTS BRANCH by_http_telemetry SCHEMA site_branch TTL 5m;
+      CREATE IF NOT EXISTS PARAMETRIZER by_http_telemetry SCHEMA site_branch TTL 5m;
       CREATE RELAY telemetry_by_site SCHEMA telemetry BRANCHED BY by_http_telemetry;
       CREATE RELAY battery_alerts SCHEMA telemetry BRANCHED BY by_http_telemetry;
       CREATE RELAY telemetry_clean SCHEMA telemetry BRANCHED BY by_http_telemetry;
-      CREATE IF NOT EXISTS BRANCH by_device_repartition SCHEMA device_branch TTL 5m;
+      CREATE IF NOT EXISTS PARAMETRIZER by_device_repartition SCHEMA device_branch TTL 5m;
       CREATE RELAY telemetry_by_device SCHEMA telemetry BRANCHED BY by_device_repartition;
       CREATE RELAY maintenance_alerts SCHEMA telemetry BRANCHED BY by_device_repartition;
       CREATE RELAY normal_telemetry SCHEMA telemetry BRANCHED BY by_device_repartition;
@@ -2501,7 +2501,7 @@ Feature: Web console Plexus REPL
       );
       CREATE WIRE JSON CODEC notification_codec FROM WIRE SCHEMA notification_wire TO SCHEMA notification;
       CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
-      CREATE IF NOT EXISTS BRANCH by_relay_buffer_source SCHEMA user_id_branch TTL 5m;
+      CREATE IF NOT EXISTS PARAMETRIZER by_relay_buffer_source SCHEMA user_id_branch TTL 5m;
       CREATE RELAY notifications SCHEMA notification BRANCHED BY by_relay_buffer_source CAPACITY 3;
       CREATE RELAY forwarded_notifications SCHEMA notification BRANCHED BY by_relay_buffer_source;
       CREATE VHOST edge http-{{test_id}}-buffer.example.com;
@@ -2577,7 +2577,7 @@ Feature: Web console Plexus REPL
       CREATE WIRE JSON CODEC txn_codec FROM WIRE SCHEMA txn_wire TO SCHEMA txn;
       CREATE IF NOT EXISTS SCHEMA value_branch ( value STRING );
       CREATE IF NOT EXISTS SCHEMA value_branch ( value STRING );
-      CREATE IF NOT EXISTS BRANCH by_source_txns SCHEMA value_branch TTL 5m;
+      CREATE IF NOT EXISTS PARAMETRIZER by_source_txns SCHEMA value_branch TTL 5m;
       CREATE RELAY ss1 SCHEMA txn BRANCHED BY by_source_txns;
       CREATE RELAY ss2 SCHEMA txn BRANCHED BY by_source_txns;
       CREATE VHOST edge api.example.com;
@@ -2590,7 +2590,7 @@ Feature: Web console Plexus REPL
     When these Plexus commands are executed on the leader node
       """
       CREATE IF NOT EXISTS SCHEMA value_branch ( value STRING );
-      CREATE IF NOT EXISTS BRANCH by_state_txns_ingestor SCHEMA value_branch TTL 5m;
+      CREATE IF NOT EXISTS PARAMETRIZER by_state_txns_ingestor SCHEMA value_branch TTL 5m;
       CREATE RELAY state_txns SCHEMA txn BRANCHED BY by_state_txns_ingestor WITH MATERIALIZED STATE LAST BY TIMESTAMP;
       CREATE RELAY rr1 SCHEMA txn BRANCHED BY by_state_txns_ingestor;
       CREATE HTTP ENDPOINT state_txns_endpoint ON edge PATH '/state';

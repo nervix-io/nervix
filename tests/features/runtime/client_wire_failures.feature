@@ -950,7 +950,7 @@ Feature: Client wire failure regressions
         FROM WIRE SCHEMA relocation_wire
         TO SCHEMA relocation_record;
       CREATE SCHEMA relocation_tenant ( tenant STRING );
-      CREATE BRANCH relocation_by_tenant SCHEMA relocation_tenant TTL 5m;
+      CREATE PARAMETRIZER relocation_by_tenant SCHEMA relocation_tenant TTL 5m;
       CREATE RELAY relocation_input SCHEMA relocation_record UNBRANCHED;
       CREATE RELAY relocation_output SCHEMA relocation_record UNBRANCHED;
       CREATE RELAY relocation_offsets SCHEMA relocation_record BRANCHED BY relocation_by_tenant;
@@ -1026,7 +1026,7 @@ Feature: Client wire failure regressions
         FROM WIRE SCHEMA wire_record_json
         TO SCHEMA wire_record;
       CREATE SCHEMA tenant_key ( tenant STRING );
-      CREATE BRANCH by_tenant SCHEMA tenant_key TTL 5m;
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_key TTL 5m;
       CREATE RELAY wire_records SCHEMA wire_record BRANCHED BY by_tenant;
       CREATE VHOST edge client-wire-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT wire_ingress ON edge PATH '/records';
@@ -1096,7 +1096,7 @@ Feature: Client wire failure regressions
         FROM WIRE SCHEMA wire_record_json
         TO SCHEMA wire_record;
       CREATE SCHEMA tenant_key ( tenant STRING );
-      CREATE BRANCH by_tenant SCHEMA tenant_key TTL 5m;
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_key TTL 5m;
       CREATE RELAY wire_records SCHEMA wire_record BRANCHED BY by_tenant;
       CREATE VHOST edge client-wire-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT wire_ingress ON edge PATH '/records';

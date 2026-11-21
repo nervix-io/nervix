@@ -15,7 +15,7 @@ Feature: Entity-pause model alterations
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( tenant string, seq integer );
       CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE SCHEMA tenant_branch_schema ( tenant STRING );
-      CREATE BRANCH by_tenant SCHEMA tenant_branch_schema TTL 5m;
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_branch_schema TTL 5m;
       CREATE RELAY incoming SCHEMA event BRANCHED BY by_tenant;
       CREATE RELAY outgoing SCHEMA routed_event BRANCHED BY by_tenant;
       CREATE VHOST edge http-{{test_id}}-entity-swap.example.com;
@@ -314,7 +314,7 @@ Feature: Entity-pause model alterations
         FROM WIRE SCHEMA parked_event_wire
         TO SCHEMA parked_event;
       CREATE SCHEMA parked_tenant ( tenant STRING );
-      CREATE BRANCH by_parked_tenant SCHEMA parked_tenant TTL 5m;
+      CREATE PARAMETRIZER by_parked_tenant SCHEMA parked_tenant TTL 5m;
       CREATE RELAY parked_state
         SCHEMA parked_event
         BRANCHED BY by_parked_tenant

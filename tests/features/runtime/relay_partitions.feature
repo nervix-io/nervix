@@ -5,7 +5,7 @@ Feature: Relay partitions
   beta and gamma in 1, lambda and rho in 2, acme and delta in 3. With PARTITIONS 2: eta, theta,
   lambda and rho land in partition 0, and acme, beta, gamma and delta in 1.
 
-  Scenario Outline: A branch declares its partition count and SHOW CREATE BRANCH renders every count but the default
+  Scenario Outline: A parametrizer declares its partition count and SHOW CREATE PARAMETRIZER renders every count but the default
     Given a <cluster_size> node nervix cluster is started
     And the leader node is configured with these Plexus commands
       """
@@ -16,47 +16,47 @@ Feature: Relay partitions
       """
       CREATE SCHEMA tenant_branch ( tenant STRING );
 
-      CREATE BRANCH by_tenant
+      CREATE PARAMETRIZER by_tenant
         SCHEMA tenant_branch TTL 5m PARTITIONS 4 MAX INSTANCES 100 EVICT LRU;
 
-      CREATE BRANCH by_tenant_single
+      CREATE PARAMETRIZER by_tenant_single
         SCHEMA tenant_branch TTL 5m PARTITIONS 1;
 
-      CREATE BRANCH by_tenant_default
+      CREATE PARAMETRIZER by_tenant_default
         SCHEMA tenant_branch TTL 5m;
       """
     And these Plexus commands are executed on node "<reader>"
       """
-      SHOW CREATE BRANCH by_tenant;
+      SHOW CREATE PARAMETRIZER by_tenant;
       """
     Then the last command output contains
       """
-      CREATE BRANCH by_tenant SCHEMA tenant_branch TTL 5m PARTITIONS 4 MAX INSTANCES 100 EVICT LRU;
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_branch TTL 5m PARTITIONS 4 MAX INSTANCES 100 EVICT LRU;
       """
     When these Plexus commands are executed on node "<reader>"
       """
-      SHOW CREATE BRANCH by_tenant_single;
+      SHOW CREATE PARAMETRIZER by_tenant_single;
       """
     Then the last command output contains
       """
-      CREATE BRANCH by_tenant_single SCHEMA tenant_branch TTL 5m;
+      CREATE PARAMETRIZER by_tenant_single SCHEMA tenant_branch TTL 5m;
       """
     When these Plexus commands are executed on node "<reader>"
       """
-      SHOW CREATE BRANCH by_tenant_default;
+      SHOW CREATE PARAMETRIZER by_tenant_default;
       """
     Then the last command output contains
       """
-      CREATE BRANCH by_tenant_default SCHEMA tenant_branch TTL 5m;
+      CREATE PARAMETRIZER by_tenant_default SCHEMA tenant_branch TTL 5m;
       """
     When the cluster is restarted
     And these Plexus commands are executed on node "<reader>"
       """
-      SHOW CREATE BRANCH by_tenant;
+      SHOW CREATE PARAMETRIZER by_tenant;
       """
     Then the last command output contains
       """
-      CREATE BRANCH by_tenant SCHEMA tenant_branch TTL 5m PARTITIONS 4 MAX INSTANCES 100 EVICT LRU;
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_branch TTL 5m PARTITIONS 4 MAX INSTANCES 100 EVICT LRU;
       """
 
     Examples:
@@ -91,7 +91,7 @@ Feature: Relay partitions
 
       CREATE SCHEMA tenant_branch ( tenant STRING );
 
-      CREATE BRANCH by_tenant
+      CREATE PARAMETRIZER by_tenant
         SCHEMA tenant_branch TTL 5m PARTITIONS 4;
 
       CREATE RELAY notifications
@@ -216,7 +216,7 @@ Feature: Relay partitions
       CREATE SCHEMA notification ( tenant STRING, seq I64 );
       CREATE SCHEMA tenant_branch ( tenant STRING );
 
-      CREATE BRANCH by_tenant
+      CREATE PARAMETRIZER by_tenant
         SCHEMA tenant_branch TTL 5m PARTITIONS 4;
 
       CREATE RELAY notifications
@@ -295,7 +295,7 @@ Feature: Relay partitions
 
       CREATE SCHEMA tenant_branch ( tenant STRING );
 
-      CREATE BRANCH by_tenant
+      CREATE PARAMETRIZER by_tenant
         SCHEMA tenant_branch TTL 5m PARTITIONS 4;
 
       CREATE RELAY notifications
@@ -433,7 +433,7 @@ Feature: Relay partitions
 
       CREATE SCHEMA tenant_branch ( tenant STRING );
 
-      CREATE BRANCH by_tenant
+      CREATE PARAMETRIZER by_tenant
         SCHEMA tenant_branch TTL 5m PARTITIONS 4;
 
       CREATE RELAY notifications
@@ -530,10 +530,10 @@ Feature: Relay partitions
 
       CREATE SCHEMA tenant_branch ( tenant STRING );
 
-      CREATE BRANCH by_tenant
+      CREATE PARAMETRIZER by_tenant
         SCHEMA tenant_branch TTL 5m PARTITIONS 2 MAX INSTANCES 1 EVICT LRU;
 
-      CREATE BRANCH by_tenant_short
+      CREATE PARAMETRIZER by_tenant_short
         SCHEMA tenant_branch TTL 3s PARTITIONS 2;
 
       CREATE RELAY notifications
@@ -673,7 +673,7 @@ Feature: Relay partitions
 
       CREATE SCHEMA tenant_branch ( tenant STRING );
 
-      CREATE BRANCH by_tenant
+      CREATE PARAMETRIZER by_tenant
         SCHEMA tenant_branch TTL 5m PARTITIONS 2;
 
       CREATE RELAY notifications
@@ -766,7 +766,7 @@ Feature: Relay partitions
       | 1            |
       | 3            |
 
-  Scenario Outline: ALTER BRANCH SET PARTITIONS changes the count of a stopped domain's branch
+  Scenario Outline: ALTER PARAMETRIZER SET PARTITIONS changes the count of a stopped domain's parametrizer
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And the leader node is configured with these Plexus commands
@@ -789,7 +789,7 @@ Feature: Relay partitions
 
       CREATE SCHEMA tenant_branch ( tenant STRING );
 
-      CREATE BRANCH by_tenant
+      CREATE PARAMETRIZER by_tenant
         SCHEMA tenant_branch TTL 5m PARTITIONS 4;
 
       CREATE RELAY notifications
@@ -815,16 +815,16 @@ Feature: Relay partitions
     When these Plexus commands are executed on the leader node
       """
       STOP;
-      ALTER BRANCH by_tenant SET PARTITIONS 2;
+      ALTER PARAMETRIZER by_tenant SET PARTITIONS 2;
       START;
       """
     And these Plexus commands are executed on node "<reader>"
       """
-      SHOW CREATE BRANCH by_tenant;
+      SHOW CREATE PARAMETRIZER by_tenant;
       """
     Then the last command output contains
       """
-      CREATE BRANCH by_tenant SCHEMA tenant_branch TTL 5m PARTITIONS 2;
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_branch TTL 5m PARTITIONS 2;
       """
     When these Plexus commands are executed through the client on the leader node
       """
@@ -851,16 +851,16 @@ Feature: Relay partitions
     When these Plexus commands are executed on the leader node
       """
       STOP;
-      ALTER BRANCH by_tenant SET PARTITIONS 1;
+      ALTER PARAMETRIZER by_tenant SET PARTITIONS 1;
       START;
       """
     And these Plexus commands are executed on node "<reader>"
       """
-      SHOW CREATE BRANCH by_tenant;
+      SHOW CREATE PARAMETRIZER by_tenant;
       """
     Then the last command output contains
       """
-      CREATE BRANCH by_tenant SCHEMA tenant_branch TTL 5m;
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_branch TTL 5m;
       """
 
     Examples:
@@ -892,7 +892,7 @@ Feature: Relay partitions
 
       CREATE SCHEMA tenant_branch ( tenant STRING );
 
-      CREATE BRANCH by_tenant
+      CREATE PARAMETRIZER by_tenant
         SCHEMA tenant_branch TTL 5m PARTITIONS 4;
 
       CREATE RELAY notifications

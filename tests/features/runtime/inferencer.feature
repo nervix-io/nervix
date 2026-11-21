@@ -83,7 +83,7 @@ Feature: Inferencer resources
         FROM WIRE SCHEMA features_wire
         TO SCHEMA features;
       CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
-      CREATE IF NOT EXISTS BRANCH by_feature_source SCHEMA tenant_branch TTL 5m;
+      CREATE IF NOT EXISTS PARAMETRIZER by_feature_source SCHEMA tenant_branch TTL 5m;
       CREATE RELAY features SCHEMA features BRANCHED BY by_feature_source;
       CREATE RELAY scored SCHEMA scored BRANCHED BY by_feature_source;
       CREATE VHOST edge http-{{test_id}}.example.com;
@@ -186,7 +186,7 @@ Feature: Inferencer resources
         FROM WIRE SCHEMA features_wire
         TO SCHEMA features;
       CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
-      CREATE IF NOT EXISTS BRANCH by_feature_source SCHEMA tenant_branch TTL 5m;
+      CREATE IF NOT EXISTS PARAMETRIZER by_feature_source SCHEMA tenant_branch TTL 5m;
       CREATE RELAY features SCHEMA features BRANCHED BY by_feature_source;
       CREATE RELAY scored SCHEMA scored BRANCHED BY by_feature_source;
       CREATE VHOST edge http-{{test_id}}.example.com;
@@ -847,7 +847,7 @@ Feature: Inferencer resources
       );
       CREATE WIRE JSON CODEC features_codec FROM WIRE SCHEMA features_wire TO SCHEMA features;
       CREATE SCHEMA tenant_branch ( tenant STRING );
-      CREATE BRANCH by_tenant SCHEMA tenant_branch TTL 5m;
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_branch TTL 5m;
       CREATE RELAY features SCHEMA features BRANCHED BY by_tenant;
       CREATE RELAY scored SCHEMA scored BRANCHED BY by_tenant;
       CREATE VHOST edge infer-branch-batch-{{test_id}}.example.com;

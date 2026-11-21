@@ -367,7 +367,7 @@ Feature: Iceberg emission
         TO SCHEMA notification
         ENCODE created_at AS RFC3339;
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
-        CREATE IF NOT EXISTS BRANCH by_mqtt_notifications SCHEMA user_id_branch TTL 5m;
+        CREATE IF NOT EXISTS PARAMETRIZER by_mqtt_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_mqtt_notifications;
         CREATE MQTT CLIENT mqtt_ingress
         CONFIG {
@@ -1111,7 +1111,7 @@ Feature: Iceberg emission
         FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
-        CREATE IF NOT EXISTS BRANCH by_mqtt_notifications SCHEMA user_id_branch TTL 5m;
+        CREATE IF NOT EXISTS PARAMETRIZER by_mqtt_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_mqtt_notifications;
         CREATE MQTT CLIENT mqtt_ingress
         CONFIG {
@@ -1210,7 +1210,7 @@ Feature: Iceberg emission
         FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
-        CREATE IF NOT EXISTS BRANCH by_mqtt_notifications SCHEMA user_id_branch TTL 5m;
+        CREATE IF NOT EXISTS PARAMETRIZER by_mqtt_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_mqtt_notifications;
         CREATE MQTT CLIENT mqtt_ingress
         CONFIG {
@@ -1296,7 +1296,7 @@ Feature: Iceberg emission
         FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
-        CREATE IF NOT EXISTS BRANCH by_mqtt_notifications SCHEMA user_id_branch TTL 5m;
+        CREATE IF NOT EXISTS PARAMETRIZER by_mqtt_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_mqtt_notifications;
         CREATE MQTT CLIENT mqtt_ingress
         CONFIG {
@@ -1378,7 +1378,7 @@ Feature: Iceberg emission
         FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
-        CREATE IF NOT EXISTS BRANCH by_mqtt_notifications SCHEMA user_id_branch TTL 5m;
+        CREATE IF NOT EXISTS PARAMETRIZER by_mqtt_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_mqtt_notifications;
         CREATE MQTT CLIENT mqtt_ingress
         CONFIG {
@@ -1462,7 +1462,7 @@ Feature: Iceberg emission
         FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
-        CREATE IF NOT EXISTS BRANCH by_mqtt_notifications SCHEMA user_id_branch TTL 5m;
+        CREATE IF NOT EXISTS PARAMETRIZER by_mqtt_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_mqtt_notifications;
         CREATE MQTT CLIENT mqtt_ingress
         CONFIG {
@@ -1691,7 +1691,7 @@ Feature: Iceberg emission
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA notification (user_id I64, action STRING);
       CREATE SCHEMA user_key (user_id I64);
-      CREATE BRANCH by_user SCHEMA user_key TTL 5m;
+      CREATE PARAMETRIZER by_user SCHEMA user_key TTL 5m;
       CREATE RELAY notifications SCHEMA notification BRANCHED BY by_user;
       CREATE CLIENT PRODUCER INGESTOR notifications_in
         FROM SCHEMA notification
@@ -1857,7 +1857,7 @@ Feature: Iceberg emission
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA notification (user_id I64, action STRING);
       CREATE SCHEMA user_key (user_id I64);
-      CREATE BRANCH by_user SCHEMA user_key TTL 5m;
+      CREATE PARAMETRIZER by_user SCHEMA user_key TTL 5m;
       CREATE RELAY notifications SCHEMA notification BRANCHED BY by_user;
       CREATE CLIENT PRODUCER INGESTOR notifications_in
         FROM SCHEMA notification

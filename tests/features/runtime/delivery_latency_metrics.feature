@@ -12,8 +12,8 @@ Feature: Delivery latency metrics
       CREATE PACED DOMAIN {{domain}} WITH PERIOD 1m SKEW 1m;
       CREATE SCHEMA reading ( tenant STRING, sequence I64, occurred_at DATETIME );
       CREATE SCHEMA tenant_key ( tenant STRING );
-      CREATE BRANCH tenants SCHEMA tenant_key TTL 1h;
-      CREATE BRANCH reingested_tenants SCHEMA tenant_key TTL 1h;
+      CREATE PARAMETRIZER tenants SCHEMA tenant_key TTL 1h;
+      CREATE PARAMETRIZER reingested_tenants SCHEMA tenant_key TTL 1h;
       CREATE JAQ JSON CODEC reading_batch_codec TO SCHEMA reading
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE WIRE JSON SCHEMA reading_wire MODE STRICT ( tenant string, sequence integer, occurred_at string );

@@ -241,7 +241,7 @@ Feature: Web console visual ingestor creation
       CREATE SCHEMA visual_branch_output (tenant STRING, secret STRING);
       CREATE SCHEMA visual_branch_key (tenant STRING);
       CREATE SCHEMA visual_branch_error (reason STRING OPTIONAL);
-      CREATE BRANCH visual_branch SCHEMA visual_branch_key TTL 5m;
+      CREATE PARAMETRIZER visual_branch SCHEMA visual_branch_key TTL 5m;
       CREATE WIRE JSON SCHEMA visual_branch_wire MODE STRICT (tenant string, secret string);
       CREATE WIRE JSON CODEC visual_branch_codec FROM WIRE SCHEMA visual_branch_wire TO SCHEMA visual_branch_input;
       CREATE RELAY visual_branch_relay SCHEMA visual_branch_output BRANCHED BY visual_branch;

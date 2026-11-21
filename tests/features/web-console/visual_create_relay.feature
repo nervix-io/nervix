@@ -9,7 +9,7 @@ Feature: Web console visual relay and subscription creation
       CREATE DOMAIN {{domain}};
       CREATE SCHEMA tenant_key (tenant STRING);
       CREATE SCHEMA order_record (tenant STRING, amount I64);
-      CREATE BRANCH by_tenant SCHEMA tenant_key TTL 5m;
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_key TTL 5m;
       """
     And the web console is opened on the leader node
     Then selector ".domain-menu [data-domain='{{domain}}'].active" exists
@@ -67,7 +67,7 @@ Feature: Web console visual relay and subscription creation
       CREATE SCHEMA notification ( tenant STRING, user_id I64 );
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT ( tenant string, user_id integer );
       CREATE WIRE JSON CODEC notification_codec FROM WIRE SCHEMA notification_wire TO SCHEMA notification;
-      CREATE BRANCH by_tenant SCHEMA tenant_key TTL 5m;
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_key TTL 5m;
       CREATE RELAY notifications SCHEMA notification BRANCHED BY by_tenant;
       CREATE VHOST edge http-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT notifications_endpoint ON edge PATH '/ingest';
@@ -374,7 +374,7 @@ Feature: Web console visual relay and subscription creation
       CREATE DOMAIN {{domain}};
       CREATE DOMAIN {{domain}}_other;
       CREATE SCHEMA tenant_key (tenant STRING);
-      CREATE BRANCH by_tenant SCHEMA tenant_key TTL 5m;
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_key TTL 5m;
       """
     And the web console is opened on the leader node
     Then selector ".domain-menu [data-domain='{{domain}}'].active" exists
@@ -441,7 +441,7 @@ Feature: Web console visual relay and subscription creation
     When the web console is opened on the leader node
     Then selector ".topbar-status .pill.ok" contains "CONNECTED"
     When selector ".create-menu-button" is clicked
-    And selector ".create-menu [data-create-kind='branch']" is clicked
+    And selector ".create-menu [data-create-kind='parametrizer']" is clicked
     Then selector ".create-schema-ref .create-choice-state.create-choice-missing" contains "Select a domain before choosing a schema"
     When selector ".create-close" is clicked
     And selector ".create-menu-button" is clicked

@@ -18,7 +18,7 @@ Feature: Relocating runtime nodes onto a named cluster node
         FROM WIRE SCHEMA state_event_wire
         TO SCHEMA state_event;
       CREATE SCHEMA tenant_key ( tenant STRING );
-      CREATE BRANCH by_tenant SCHEMA tenant_key TTL 5m;
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_key TTL 5m;
       CREATE RELAY moving_state SCHEMA state_event BRANCHED BY by_tenant
         WITH MATERIALIZED STATE LAST BY TIMESTAMP;
       CREATE VHOST edge state-{{test_id}}.example.com;
@@ -69,7 +69,7 @@ Feature: Relocating runtime nodes onto a named cluster node
         FROM WIRE SCHEMA state_event_wire
         TO SCHEMA state_event;
       CREATE SCHEMA tenant_key ( tenant STRING );
-      CREATE BRANCH by_tenant SCHEMA tenant_key TTL 5m;
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_key TTL 5m;
       CREATE RELAY moving_state SCHEMA state_event BRANCHED BY by_tenant
         WITH MATERIALIZED STATE LAST BY TIMESTAMP;
       CREATE VHOST edge state-{{test_id}}.example.com;
@@ -123,7 +123,7 @@ Feature: Relocating runtime nodes onto a named cluster node
         FROM WIRE SCHEMA transaction_wire
         TO SCHEMA transaction;
       CREATE SCHEMA tenant_branch ( tenant STRING );
-      CREATE BRANCH by_tenant SCHEMA tenant_branch TTL 5m;
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_branch TTL 5m;
       CREATE RELAY inbound SCHEMA transaction BRANCHED BY by_tenant;
       CREATE RELAY deduped SCHEMA transaction BRANCHED BY by_tenant;
       CREATE VHOST edge stopped-{{test_id}}.example.com;
@@ -210,7 +210,7 @@ Feature: Relocating runtime nodes onto a named cluster node
         FROM WIRE SCHEMA transaction_wire
         TO SCHEMA transaction;
       CREATE SCHEMA tenant_branch ( tenant STRING );
-      CREATE BRANCH by_tenant SCHEMA tenant_branch TTL 5m;
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_branch TTL 5m;
       CREATE RELAY inbound SCHEMA transaction BRANCHED BY by_tenant;
       CREATE RELAY deduped SCHEMA transaction BRANCHED BY by_tenant;
       CREATE VHOST edge empty-stopped-{{test_id}}.example.com;
@@ -549,7 +549,7 @@ Feature: Relocating runtime nodes onto a named cluster node
         FROM WIRE SCHEMA state_event_wire
         TO SCHEMA state_event;
       CREATE SCHEMA tenant_key ( tenant STRING );
-      CREATE BRANCH by_tenant SCHEMA tenant_key TTL 5m;
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_key TTL 5m;
       CREATE RELAY moving_state SCHEMA state_event BRANCHED BY by_tenant
         WITH MATERIALIZED STATE LAST BY TIMESTAMP;
       CREATE VHOST edge forced-state-{{test_id}}.example.com;
@@ -600,7 +600,7 @@ Feature: Relocating runtime nodes onto a named cluster node
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA state_event ( tenant STRING, id I64 );
       CREATE SCHEMA tenant_key ( tenant STRING );
-      CREATE BRANCH by_tenant SCHEMA tenant_key TTL 5m;
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_key TTL 5m;
       CREATE RELAY moving_state SCHEMA state_event BRANCHED BY by_tenant
         WITH MATERIALIZED STATE LAST BY TIMESTAMP;
       START;
@@ -654,7 +654,7 @@ Feature: Relocating runtime nodes onto a named cluster node
         FROM WIRE SCHEMA transaction_wire
         TO SCHEMA transaction;
       CREATE SCHEMA tenant_branch ( tenant STRING );
-      CREATE BRANCH by_tenant SCHEMA tenant_branch TTL 5m;
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_branch TTL 5m;
       CREATE RELAY inbound SCHEMA transaction BRANCHED BY by_tenant;
       CREATE RELAY deduped SCHEMA transaction BRANCHED BY by_tenant;
       CREATE VHOST edge http-{{test_id}}.example.com;
@@ -1360,7 +1360,7 @@ Feature: Relocating runtime nodes onto a named cluster node
         FROM WIRE SCHEMA promote_event_wire
         TO SCHEMA promote_event;
       CREATE SCHEMA promote_tenant ( tenant STRING );
-      CREATE BRANCH promote_by_tenant SCHEMA promote_tenant TTL 5m;
+      CREATE PARAMETRIZER promote_by_tenant SCHEMA promote_tenant TTL 5m;
       CREATE RELAY promote_output SCHEMA promote_event BRANCHED BY promote_by_tenant;
       CREATE KAFKA CLIENT promote_kafka CONFIG {
         'bootstrap.servers' = '{{kafka_addr}}'
@@ -1788,7 +1788,7 @@ Feature: Relocating runtime nodes onto a named cluster node
         FROM WIRE SCHEMA state_event_wire
         TO SCHEMA state_event;
       CREATE SCHEMA state_tenant ( tenant STRING );
-      CREATE BRANCH state_by_tenant SCHEMA state_tenant TTL 5m;
+      CREATE PARAMETRIZER state_by_tenant SCHEMA state_tenant TTL 5m;
       CREATE RELAY moving_state SCHEMA state_event BRANCHED BY state_by_tenant
         WITH MATERIALIZED STATE LAST BY TIMESTAMP;
       CREATE RELAY reader_input SCHEMA state_event BRANCHED BY state_by_tenant;

@@ -186,7 +186,7 @@ Feature: Dynamically applying junction ALTER operations
       CREATE SCHEMA input_event ( tenant STRING, seq I64 );
       CREATE SCHEMA output_event ( tenant STRING, seq I64, label STRING );
       CREATE SCHEMA tenant_branch ( tenant STRING );
-      CREATE BRANCH by_event_source SCHEMA tenant_branch TTL 5m;
+      CREATE PARAMETRIZER by_event_source SCHEMA tenant_branch TTL 5m;
       CREATE WIRE JSON SCHEMA input_event_wire MODE STRICT ( tenant string, seq integer );
       CREATE WIRE JSON CODEC input_event_codec FROM WIRE SCHEMA input_event_wire TO SCHEMA input_event;
       CREATE RELAY incoming SCHEMA input_event BRANCHED BY by_event_source;

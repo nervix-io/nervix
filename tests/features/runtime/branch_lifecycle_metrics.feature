@@ -27,7 +27,7 @@ Feature: Branch lifecycle metrics
         user_id I64
       );
 
-      CREATE BRANCH by_metric_users
+      CREATE PARAMETRIZER by_metric_users
         SCHEMA user_id_branch TTL 1h MAX INSTANCES 1 EVICT LRU;
 
       CREATE RELAY notifications
@@ -66,7 +66,7 @@ Feature: Branch lifecycle metrics
     And node "node-1" observability metric "nervix_branch_instances" with labels eventually equals 1
       """
       domain="{{domain}}"
-      branch="by_metric_users"
+      parametrizer="by_metric_users"
       physical_node_id="node-1"
       """
     When http payload is posted to host "http-{{test_id}}.example.com" path "/branch-metrics"
@@ -80,14 +80,14 @@ Feature: Branch lifecycle metrics
     And node "node-1" observability metric "nervix_branch_evictions_total" with labels eventually equals 1
       """
       domain="{{domain}}"
-      branch="by_metric_users"
+      parametrizer="by_metric_users"
       physical_node_id="node-1"
       reason="lru"
       """
     And node "node-1" observability metric "nervix_branch_instances" with labels eventually equals 1
       """
       domain="{{domain}}"
-      branch="by_metric_users"
+      parametrizer="by_metric_users"
       physical_node_id="node-1"
       """
 
@@ -124,7 +124,7 @@ Feature: Branch lifecycle metrics
         user_id I64
       );
 
-      CREATE BRANCH by_metric_users
+      CREATE PARAMETRIZER by_metric_users
         SCHEMA user_id_branch TTL 5s MAX INSTANCES 1 EVICT LRU;
 
       CREATE RELAY notifications
@@ -163,14 +163,14 @@ Feature: Branch lifecycle metrics
     And node "node-1" observability metric "nervix_branch_evictions_total" with labels eventually equals 1
       """
       domain="{{domain}}"
-      branch="by_metric_users"
+      parametrizer="by_metric_users"
       physical_node_id="node-1"
       reason="ttl"
       """
     And node "node-1" observability metric "nervix_branch_instances" with labels eventually equals 0
       """
       domain="{{domain}}"
-      branch="by_metric_users"
+      parametrizer="by_metric_users"
       physical_node_id="node-1"
       """
 

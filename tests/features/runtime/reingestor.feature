@@ -7,8 +7,8 @@ Feature: Reingestor repartitioning
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA order_event (tenant STRING);
       CREATE SCHEMA tenant_key (tenant STRING);
-      CREATE BRANCH web_by_tenant SCHEMA tenant_key TTL 5m;
-      CREATE BRANCH store_by_tenant SCHEMA tenant_key TTL 5m;
+      CREATE PARAMETRIZER web_by_tenant SCHEMA tenant_key TTL 5m;
+      CREATE PARAMETRIZER store_by_tenant SCHEMA tenant_key TTL 5m;
       CREATE RELAY web_orders SCHEMA order_event BRANCHED BY web_by_tenant;
       CREATE RELAY store_orders SCHEMA order_event BRANCHED BY store_by_tenant;
       CREATE RELAY routed_web_orders SCHEMA order_event BRANCHED BY web_by_tenant;
@@ -36,8 +36,8 @@ Feature: Reingestor repartitioning
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA order_event (tenant STRING);
       CREATE SCHEMA tenant_key (tenant STRING);
-      CREATE BRANCH web_by_tenant SCHEMA tenant_key TTL 5m;
-      CREATE BRANCH store_by_tenant SCHEMA tenant_key TTL 5m;
+      CREATE PARAMETRIZER web_by_tenant SCHEMA tenant_key TTL 5m;
+      CREATE PARAMETRIZER store_by_tenant SCHEMA tenant_key TTL 5m;
       CREATE RELAY web_orders SCHEMA order_event BRANCHED BY web_by_tenant;
       CREATE RELAY store_orders SCHEMA order_event BRANCHED BY store_by_tenant;
       CREATE RELAY routed_web_orders SCHEMA order_event BRANCHED BY web_by_tenant;
@@ -88,9 +88,9 @@ Feature: Reingestor repartitioning
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA order_event (tenant STRING, marker STRING);
       CREATE SCHEMA tenant_key (tenant STRING);
-      CREATE BRANCH web_by_tenant SCHEMA tenant_key TTL 5m;
-      CREATE BRANCH store_by_tenant SCHEMA tenant_key TTL 5m;
-      CREATE BRANCH combined_by_tenant SCHEMA tenant_key TTL 5m;
+      CREATE PARAMETRIZER web_by_tenant SCHEMA tenant_key TTL 5m;
+      CREATE PARAMETRIZER store_by_tenant SCHEMA tenant_key TTL 5m;
+      CREATE PARAMETRIZER combined_by_tenant SCHEMA tenant_key TTL 5m;
       CREATE RELAY web_orders SCHEMA order_event BRANCHED BY web_by_tenant;
       CREATE RELAY store_orders SCHEMA order_event BRANCHED BY store_by_tenant;
       CREATE RELAY combined_orders SCHEMA order_event BRANCHED BY combined_by_tenant;
@@ -179,10 +179,10 @@ Feature: Reingestor repartitioning
         FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
         CREATE IF NOT EXISTS SCHEMA tenant_user_id_branch ( tenant STRING, user_id I64 );
-        CREATE IF NOT EXISTS BRANCH by_http_notifications SCHEMA tenant_user_id_branch TTL 5m;
+        CREATE IF NOT EXISTS PARAMETRIZER by_http_notifications SCHEMA tenant_user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_http_notifications;
         CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
-        CREATE IF NOT EXISTS BRANCH by_tenant_partition SCHEMA tenant_branch TTL 5m;
+        CREATE IF NOT EXISTS PARAMETRIZER by_tenant_partition SCHEMA tenant_branch TTL 5m;
         CREATE RELAY tenant_notifications SCHEMA notification BRANCHED BY by_tenant_partition;
         CREATE VHOST edge http-{{test_id}}.example.com;
         CREATE HTTP ENDPOINT http_notifications_endpoint
@@ -255,10 +255,10 @@ Feature: Reingestor repartitioning
       CREATE IF NOT EXISTS SCHEMA tenant_user_id_branch ( tenant STRING, user_id I64 );
       CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
 
-      CREATE IF NOT EXISTS BRANCH by_http_notifications SCHEMA tenant_user_id_branch TTL 5m;
+      CREATE IF NOT EXISTS PARAMETRIZER by_http_notifications SCHEMA tenant_user_id_branch TTL 5m;
       CREATE RELAY notifications SCHEMA notification BRANCHED BY by_http_notifications;
 
-      CREATE IF NOT EXISTS BRANCH by_tenant_partition SCHEMA tenant_branch TTL 5m;
+      CREATE IF NOT EXISTS PARAMETRIZER by_tenant_partition SCHEMA tenant_branch TTL 5m;
       CREATE RELAY tenant_notifications SCHEMA notification BRANCHED BY by_tenant_partition;
 
       CREATE VHOST edge http-{{test_id}}-fan-in.example.com;
@@ -426,10 +426,10 @@ Feature: Reingestor repartitioning
         FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
         CREATE IF NOT EXISTS SCHEMA tenant_user_id_branch ( tenant STRING, user_id I64 );
-        CREATE IF NOT EXISTS BRANCH by_kafka_notifications SCHEMA tenant_user_id_branch TTL 5m;
+        CREATE IF NOT EXISTS PARAMETRIZER by_kafka_notifications SCHEMA tenant_user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_kafka_notifications;
         CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
-        CREATE IF NOT EXISTS BRANCH by_tenant_partition SCHEMA tenant_branch TTL 5m;
+        CREATE IF NOT EXISTS PARAMETRIZER by_tenant_partition SCHEMA tenant_branch TTL 5m;
         CREATE RELAY tenant_notifications SCHEMA notification BRANCHED BY by_tenant_partition;
         CREATE KAFKA CLIENT kafka_main
         CONFIG {
@@ -502,10 +502,10 @@ Feature: Reingestor repartitioning
         FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
         CREATE IF NOT EXISTS SCHEMA tenant_user_id_branch ( tenant STRING, user_id I64 );
-        CREATE IF NOT EXISTS BRANCH by_kafka_notifications SCHEMA tenant_user_id_branch TTL 5m;
+        CREATE IF NOT EXISTS PARAMETRIZER by_kafka_notifications SCHEMA tenant_user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_kafka_notifications;
         CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
-        CREATE IF NOT EXISTS BRANCH by_tenant_partition SCHEMA tenant_branch TTL 5m;
+        CREATE IF NOT EXISTS PARAMETRIZER by_tenant_partition SCHEMA tenant_branch TTL 5m;
         CREATE RELAY tenant_notifications SCHEMA notification BRANCHED BY by_tenant_partition;
         CREATE KAFKA CLIENT kafka_main
         CONFIG {
@@ -583,13 +583,13 @@ Feature: Reingestor repartitioning
         FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
         CREATE IF NOT EXISTS SCHEMA tenant_user_id_branch ( tenant STRING, user_id I64 );
-        CREATE IF NOT EXISTS BRANCH by_reingest_default SCHEMA tenant_user_id_branch TTL 5m;
+        CREATE IF NOT EXISTS PARAMETRIZER by_reingest_default SCHEMA tenant_user_id_branch TTL 5m;
         CREATE RELAY default_preferences
         SCHEMA preference BRANCHED BY by_reingest_default
         WITH MATERIALIZED STATE LAST BY TIMESTAMP;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_reingest_default;
         CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
-        CREATE IF NOT EXISTS BRANCH by_reingest_default_out SCHEMA tenant_branch TTL 5m;
+        CREATE IF NOT EXISTS PARAMETRIZER by_reingest_default_out SCHEMA tenant_branch TTL 5m;
         CREATE RELAY tenant_notifications SCHEMA notification BRANCHED BY by_reingest_default_out;
         CREATE VHOST edge http-reingest-default-{{test_id}}.example.com;
         CREATE HTTP ENDPOINT http_notifications_endpoint
@@ -645,9 +645,9 @@ Feature: Reingestor repartitioning
       CREATE WIRE JSON SCHEMA reading_wire MODE STRICT ( tenant string, sensor string, value integer );
       CREATE WIRE JSON CODEC reading_codec FROM WIRE SCHEMA reading_wire TO SCHEMA reading;
       CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
-      CREATE IF NOT EXISTS BRANCH by_reading_tenant SCHEMA tenant_branch TTL 5m;
+      CREATE IF NOT EXISTS PARAMETRIZER by_reading_tenant SCHEMA tenant_branch TTL 5m;
       CREATE IF NOT EXISTS SCHEMA sensor_branch ( sensor STRING );
-      CREATE IF NOT EXISTS BRANCH by_reading_sensor SCHEMA sensor_branch TTL 5m;
+      CREATE IF NOT EXISTS PARAMETRIZER by_reading_sensor SCHEMA sensor_branch TTL 5m;
       CREATE RELAY readings SCHEMA reading BRANCHED BY by_reading_tenant;
       CREATE RELAY sensor_readings SCHEMA reading BRANCHED BY by_reading_sensor;
       CREATE VHOST edge http-{{test_id}}-reingestor-filters.example.com;

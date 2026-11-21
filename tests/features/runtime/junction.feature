@@ -27,7 +27,7 @@ Feature: Relay junction
         FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
-        CREATE IF NOT EXISTS BRANCH by_source_one SCHEMA user_id_branch TTL 5m;
+        CREATE IF NOT EXISTS PARAMETRIZER by_source_one SCHEMA user_id_branch TTL 5m;
         CREATE RELAY ss1 SCHEMA notification BRANCHED BY by_source_one;
         CREATE RELAY ss2 SCHEMA notification BRANCHED BY by_source_one;
         CREATE RELAY ss10 SCHEMA notification_projection BRANCHED BY by_source_one;
@@ -126,7 +126,7 @@ Feature: Relay junction
         FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
         CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
-        CREATE IF NOT EXISTS BRANCH by_source_one SCHEMA tenant_branch TTL 5m;
+        CREATE IF NOT EXISTS PARAMETRIZER by_source_one SCHEMA tenant_branch TTL 5m;
         CREATE RELAY ss1 SCHEMA notification BRANCHED BY by_source_one;
         CREATE RELAY ss2 SCHEMA notification BRANCHED BY by_source_one;
         CREATE RELAY ss10 SCHEMA notification BRANCHED BY by_source_one;
@@ -218,7 +218,7 @@ Feature: Relay junction
         FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
-        CREATE IF NOT EXISTS BRANCH by_state_source SCHEMA user_id_branch TTL 5m;
+        CREATE IF NOT EXISTS PARAMETRIZER by_state_source SCHEMA user_id_branch TTL 5m;
         CREATE RELAY state_notifications
         SCHEMA notification BRANCHED BY by_state_source
         WITH MATERIALIZED STATE LAST BY TIMESTAMP;
@@ -319,7 +319,7 @@ Feature: Relay junction
         extra STRING
       );
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
-        CREATE IF NOT EXISTS BRANCH by_join_streams SCHEMA user_id_branch TTL 5m;
+        CREATE IF NOT EXISTS PARAMETRIZER by_join_streams SCHEMA user_id_branch TTL 5m;
         CREATE RELAY ss1 SCHEMA notification BRANCHED BY by_join_streams;
         CREATE RELAY ss2 SCHEMA wide_notification BRANCHED BY by_join_streams;
         CREATE RELAY ss10 SCHEMA notification BRANCHED BY by_join_streams;
@@ -365,7 +365,7 @@ Feature: Relay junction
         FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
-        CREATE IF NOT EXISTS BRANCH by_default_state SCHEMA user_id_branch TTL 5m;
+        CREATE IF NOT EXISTS PARAMETRIZER by_default_state SCHEMA user_id_branch TTL 5m;
         CREATE RELAY default_preferences
         SCHEMA preference BRANCHED BY by_default_state
         WITH MATERIALIZED STATE LAST BY TIMESTAMP;
@@ -440,7 +440,7 @@ Feature: Relay junction
         FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
-        CREATE IF NOT EXISTS BRANCH by_optional_default SCHEMA user_id_branch TTL 5m;
+        CREATE IF NOT EXISTS PARAMETRIZER by_optional_default SCHEMA user_id_branch TTL 5m;
         CREATE RELAY optional_preferences
         SCHEMA preference BRANCHED BY by_optional_default
         WITH MATERIALIZED STATE LAST BY TIMESTAMP;

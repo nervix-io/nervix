@@ -19,7 +19,7 @@ Feature: Materialized state inspection respects schema sensitivity
       );
       CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE SCHEMA tenant_key ( tenant STRING SENSITIVE, zone STRING );
-      CREATE BRANCH by_tenant SCHEMA tenant_key TTL 5m PARTITIONS <partitions>;
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_key TTL 5m PARTITIONS <partitions>;
       CREATE RELAY events SCHEMA event BRANCHED BY by_tenant
         WITH MATERIALIZED STATE LAST BY TIMESTAMP;
       CREATE VHOST edge materialized-sensitive-{{test_id}}.example.com;

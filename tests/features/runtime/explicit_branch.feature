@@ -16,10 +16,10 @@ Feature: Explicit branches
         tenant STRING
       );
 
-      CREATE BRANCH by_input_tenant
+      CREATE PARAMETRIZER by_input_tenant
         SCHEMA tenant_branch TTL 5m;
 
-      CREATE BRANCH by_output_tenant
+      CREATE PARAMETRIZER by_output_tenant
         SCHEMA tenant_branch TTL 5m;
 
       CREATE RELAY input_notifications
@@ -73,7 +73,7 @@ Feature: Explicit branches
 
       CREATE SCHEMA tenant_branch ( tenant STRING );
 
-      CREATE BRANCH by_tenant
+      CREATE PARAMETRIZER by_tenant
         SCHEMA tenant_branch TTL 5m MAX INSTANCES 1 EVICT LRU;
 
       CREATE RELAY notifications

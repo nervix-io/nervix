@@ -14,7 +14,7 @@ Feature: Composed sequence values
       """
       CREATE SCHEMA reading (tenant STRING, sample_id I64, value F64);
       CREATE SCHEMA tenant_key (tenant STRING);
-      CREATE BRANCH by_tenant SCHEMA tenant_key TTL 5m;
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_key TTL 5m;
       CREATE SCHEMA history (
         values <pair_type>,
         neighborhoods <window_type>,

@@ -44,7 +44,7 @@ Feature: CLI completion offers the codecs and relays a statement can accept
       CREATE SCHEMA reading ( id I64, value STRING );
       CREATE SCHEMA label ( id I64, name STRING );
       CREATE SCHEMA reading_key ( id I64 );
-      CREATE BRANCH by_reading SCHEMA reading_key TTL 1h;
+      CREATE PARAMETRIZER by_reading SCHEMA reading_key TTL 1h;
       CREATE RELAY readings SCHEMA reading UNBRANCHED;
       CREATE RELAY more_readings SCHEMA reading UNBRANCHED;
       CREATE RELAY labels SCHEMA label UNBRANCHED;

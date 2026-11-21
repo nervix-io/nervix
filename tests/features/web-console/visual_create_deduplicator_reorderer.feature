@@ -9,7 +9,7 @@ Feature: Web console visual deduplicator and reorderer creation
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA visual_dedup_event (tenant STRING, event_id STRING, message STRING, note STRING);
       CREATE SCHEMA visual_dedup_key (tenant STRING);
-      CREATE BRANCH visual_dedup_tenant SCHEMA visual_dedup_key TTL 5m;
+      CREATE PARAMETRIZER visual_dedup_tenant SCHEMA visual_dedup_key TTL 5m;
       CREATE WIRE JSON SCHEMA visual_dedup_wire MODE STRICT (tenant string, event_id string, message string, note string);
       CREATE WIRE JSON CODEC visual_dedup_codec FROM WIRE SCHEMA visual_dedup_wire TO SCHEMA visual_dedup_event;
       CREATE RELAY visual_dedup_input SCHEMA visual_dedup_event BRANCHED BY visual_dedup_tenant;
@@ -102,7 +102,7 @@ Feature: Web console visual deduplicator and reorderer creation
       CREATE JAQ JSON CODEC visual_reorder_codec TO SCHEMA visual_reorder_event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE SCHEMA visual_reorder_key (tenant STRING);
-      CREATE BRANCH visual_reorder_tenant SCHEMA visual_reorder_key TTL 5m;
+      CREATE PARAMETRIZER visual_reorder_tenant SCHEMA visual_reorder_key TTL 5m;
       CREATE RELAY visual_reorder_input SCHEMA visual_reorder_event BRANCHED BY visual_reorder_tenant;
       CREATE RELAY visual_reorder_output SCHEMA visual_reorder_event BRANCHED BY visual_reorder_tenant;
       CREATE VHOST visual_reorder_host reorder-{{test_id}}.example.com;
@@ -178,7 +178,7 @@ Feature: Web console visual deduplicator and reorderer creation
       CREATE SCHEMA visual_check_event (tenant STRING, event_id STRING, message STRING);
       CREATE SCHEMA visual_check_other (tenant STRING, message STRING);
       CREATE SCHEMA visual_check_key (tenant STRING);
-      CREATE BRANCH visual_check_tenant SCHEMA visual_check_key TTL 5m;
+      CREATE PARAMETRIZER visual_check_tenant SCHEMA visual_check_key TTL 5m;
       CREATE RELAY visual_check_input SCHEMA visual_check_event BRANCHED BY visual_check_tenant;
       CREATE RELAY visual_check_second SCHEMA visual_check_event BRANCHED BY visual_check_tenant;
       CREATE RELAY visual_check_wrong_schema SCHEMA visual_check_other BRANCHED BY visual_check_tenant;

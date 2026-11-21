@@ -23,8 +23,8 @@ Feature: Domain-paced branch buffering
         FROM WIRE SCHEMA timed_event_wire
         TO SCHEMA timed_event;
       CREATE SCHEMA tenant_branch (tenant STRING);
-      CREATE BRANCH by_tenant SCHEMA tenant_branch TTL 5h;
-      CREATE BRANCH observed_by_tenant SCHEMA tenant_branch TTL 5h;
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_branch TTL 5h;
+      CREATE PARAMETRIZER observed_by_tenant SCHEMA tenant_branch TTL 5h;
       CREATE RELAY fast_ingested SCHEMA timed_event BRANCHED BY by_tenant;
       CREATE RELAY observed SCHEMA timed_event BRANCHED BY observed_by_tenant;
       CREATE VHOST edge fast-buffering-{{test_id}}.example.com;
@@ -112,8 +112,8 @@ Feature: Domain-paced branch buffering
         FROM WIRE SCHEMA timed_event_wire
         TO SCHEMA timed_event;
       CREATE SCHEMA tenant_branch (tenant STRING);
-      CREATE BRANCH by_tenant SCHEMA tenant_branch TTL 5h;
-      CREATE BRANCH observed_by_tenant SCHEMA tenant_branch TTL 5h;
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_branch TTL 5h;
+      CREATE PARAMETRIZER observed_by_tenant SCHEMA tenant_branch TTL 5h;
       CREATE RELAY fast_ingested SCHEMA timed_event BRANCHED BY by_tenant;
       CREATE RELAY observed SCHEMA timed_event BRANCHED BY observed_by_tenant;
       CREATE VHOST edge fast-buffering-{{test_id}}.example.com;
@@ -199,7 +199,7 @@ Feature: Domain-paced branch buffering
         FROM WIRE SCHEMA timed_event_wire
         TO SCHEMA timed_event;
       CREATE SCHEMA tenant_branch (tenant STRING);
-      CREATE BRANCH by_tenant SCHEMA tenant_branch TTL 5m;
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_branch TTL 5m;
       CREATE RELAY immediate_ingested SCHEMA timed_event BRANCHED BY by_tenant;
       CREATE RELAY observed SCHEMA timed_event BRANCHED BY by_tenant;
       CREATE VHOST edge immediate-buffering-{{test_id}}.example.com;
@@ -275,8 +275,8 @@ Feature: Domain-paced branch buffering
         FROM WIRE SCHEMA timed_event_wire
         TO SCHEMA timed_event;
       CREATE SCHEMA tenant_branch (tenant STRING);
-      CREATE BRANCH by_tenant SCHEMA tenant_branch TTL 5m;
-      CREATE BRANCH observed_by_tenant SCHEMA tenant_branch TTL 5m;
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_branch TTL 5m;
+      CREATE PARAMETRIZER observed_by_tenant SCHEMA tenant_branch TTL 5m;
       CREATE RELAY collect_ingested SCHEMA timed_event BRANCHED BY by_tenant;
       CREATE RELAY observed SCHEMA timed_event BRANCHED BY observed_by_tenant;
       CREATE VHOST edge collect-buffering-{{test_id}}.example.com;
@@ -349,7 +349,7 @@ Feature: Domain-paced branch buffering
         FROM WIRE SCHEMA timed_event_wire
         TO SCHEMA timed_event;
       CREATE SCHEMA tenant_branch (tenant STRING);
-      CREATE BRANCH by_tenant SCHEMA tenant_branch TTL 5m;
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_branch TTL 5m;
       CREATE RELAY held_ingested SCHEMA timed_event BRANCHED BY by_tenant;
       CREATE RELAY gate_ingested SCHEMA timed_event BRANCHED BY by_tenant;
       CREATE VHOST edge held-buffering-{{test_id}}.example.com;

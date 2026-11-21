@@ -21,7 +21,7 @@ Feature: Pulsar emission
         FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
-        CREATE IF NOT EXISTS BRANCH by_pulsar_ingress SCHEMA user_id_branch TTL 5m;
+        CREATE IF NOT EXISTS PARAMETRIZER by_pulsar_ingress SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_pulsar_ingress;
         CREATE PULSAR CLIENT pulsar_main
         CONFIG {
@@ -90,7 +90,7 @@ Feature: Pulsar emission
         FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
       CREATE SCHEMA user_id_branch ( user_id I64 );
-      CREATE BRANCH by_kafka_notifications SCHEMA user_id_branch TTL 5m;
+      CREATE PARAMETRIZER by_kafka_notifications SCHEMA user_id_branch TTL 5m;
       CREATE RELAY notifications SCHEMA notification BRANCHED BY by_kafka_notifications;
       CREATE KAFKA CLIENT kafka_ingress CONFIG {
         'bootstrap.servers' = '{{kafka_addr}}'

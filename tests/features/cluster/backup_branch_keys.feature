@@ -13,7 +13,7 @@ Feature: Archived branch keys checked against the restored branch declarations
       CREATE WIRE JSON SCHEMA order_wire MODE STRICT ( tenant string, shard integer, order_id string, amount integer );
       CREATE WIRE JSON CODEC order_codec FROM WIRE SCHEMA order_wire TO SCHEMA order_event;
       CREATE SCHEMA tenant_shard ( tenant STRING, shard I32 );
-      CREATE BRANCH by_tenant_shard SCHEMA tenant_shard TTL 30m;
+      CREATE PARAMETRIZER by_tenant_shard SCHEMA tenant_shard TTL 30m;
       CREATE RELAY orders SCHEMA order_event BRANCHED BY by_tenant_shard WITH MATERIALIZED STATE LAST BY TIMESTAMP;
       CREATE RELAY unique_orders SCHEMA order_event BRANCHED BY by_tenant_shard;
       CREATE VHOST edge backup-branch-keys-{{test_id}}.example.com;
@@ -75,21 +75,21 @@ Feature: Archived branch keys checked against the restored branch declarations
     Then the current leader node is saved as placeholder "leader"
     Given the restore coordinator uses remote placement in a multi-node cluster
     When the CLI restores "domain {{domain}} --dry-run" from "renamed.nvxb" on node "{{leader}}" reporting JSON
-    Then the CLI restore failed with JSON error code "RESTORE_REFUSED" and a message containing "the branch key of lifecycle entry 1 in archive section 'domains/{{domain}}/state/branch_lifecycle/deduplicator/unique_order_filter/single/branches.rkyv' does not belong to the branching of deduplicator 'unique_order_filter' in domain '{{domain}}': it is not a key of branch 'by_tenant_shard': the key has no field 'shard'"
+    Then the CLI restore failed with JSON error code "RESTORE_REFUSED" and a message containing "the branch key of lifecycle entry 1 in archive section 'domains/{{domain}}/state/branch_lifecycle/deduplicator/unique_order_filter/single/branches.rkyv' does not belong to the branching of deduplicator 'unique_order_filter' in domain '{{domain}}': it is not a key of parametrizer 'by_tenant_shard': the key has no field 'shard'"
     When the CLI restores "domain {{domain}}" from "extra.nvxb" on node "{{leader}}" reporting JSON
-    Then the CLI restore failed with JSON error code "RESTORE_REFUSED" and a message containing "it is not a key of branch 'by_tenant_shard': the key has field 'region', which its branch schema does not declare"
+    Then the CLI restore failed with JSON error code "RESTORE_REFUSED" and a message containing "it is not a key of parametrizer 'by_tenant_shard': the key has field 'region', which its branch schema does not declare"
     When the CLI restores "domain {{domain}} --resume" from "retyped.nvxb" on node "{{leader}}" reporting JSON
-    Then the CLI restore failed with JSON error code "RESTORE_REFUSED" and a message containing "it is not a key of branch 'by_tenant_shard': field 'shard' does not hold a value of its declared type: expected I32, found STRING"
+    Then the CLI restore failed with JSON error code "RESTORE_REFUSED" and a message containing "it is not a key of parametrizer 'by_tenant_shard': field 'shard' does not hold a value of its declared type: expected I32, found STRING"
     When the CLI restores "domain {{domain}} --resume" from "retyped.nvxb" on node "{{leader}}" reporting JSON
     Then the CLI restore failed with JSON error code "RESTORE_REFUSED" and a message containing "field 'shard' does not hold a value of its declared type: expected I32, found STRING"
     When the CLI restores "domain {{domain}} --resume" from "unbranched.nvxb" on node "{{leader}}" reporting JSON
-    Then the CLI restore failed with JSON error code "RESTORE_REFUSED" and a message containing "does not belong to the branching of deduplicator 'unique_order_filter' in domain '{{domain}}': it is unbranched, where the entity runs in branch 'by_tenant_shard'"
+    Then the CLI restore failed with JSON error code "RESTORE_REFUSED" and a message containing "does not belong to the branching of deduplicator 'unique_order_filter' in domain '{{domain}}': it is unbranched, where the entity runs under parametrizer 'by_tenant_shard'"
     When the CLI restores "domain {{domain}} --resume" from "ingestor.nvxb" on node "{{leader}}" reporting JSON
-    Then the CLI restore failed with JSON error code "RESTORE_REFUSED" and a message containing "the branch key of lifecycle entry 1 in archive section 'domains/{{domain}}/state/branch_lifecycle/ingestor/order_ingestor/single/branches.rkyv' does not belong to the branching of ingestor 'order_ingestor' in domain '{{domain}}': it is not a key of branch 'by_tenant_shard': the key has no field 'shard'"
+    Then the CLI restore failed with JSON error code "RESTORE_REFUSED" and a message containing "the branch key of lifecycle entry 1 in archive section 'domains/{{domain}}/state/branch_lifecycle/ingestor/order_ingestor/single/branches.rkyv' does not belong to the branching of ingestor 'order_ingestor' in domain '{{domain}}': it is not a key of parametrizer 'by_tenant_shard': the key has no field 'shard'"
     When the CLI restores "domain {{domain}} --resume --dry-run" from "descriptor.nvxb" on node "{{leader}}" reporting JSON
-    Then the CLI restore failed with JSON error code "RESTORE_REFUSED" and a message containing "/descriptor.rkyv' does not belong to the branching of deduplicator 'unique_order_filter' in domain '{{domain}}': it is not a key of branch 'by_tenant_shard': field 'shard' does not hold a value of its declared type: expected I32, found STRING"
+    Then the CLI restore failed with JSON error code "RESTORE_REFUSED" and a message containing "/descriptor.rkyv' does not belong to the branching of deduplicator 'unique_order_filter' in domain '{{domain}}': it is not a key of parametrizer 'by_tenant_shard': field 'shard' does not hold a value of its declared type: expected I32, found STRING"
     When the CLI restores "domain {{domain}} --resume" from "identities.nvxb" on node "{{leader}}" reporting JSON
-    Then the CLI restore failed with JSON error code "RESTORE_REFUSED" and a message containing "materialized state of relay 'orders' in domain '{{domain}}' could not be prepared: the branch key of record identity 1 in archive section 'domains/{{domain}}/state/materialized_relay/orders/single/groups/0000000000/identities.rkyv' does not belong to the relay's branching: it is not a key of branch 'by_tenant_shard': field 'shard' does not hold a value of its declared type: expected I32, found STRING"
+    Then the CLI restore failed with JSON error code "RESTORE_REFUSED" and a message containing "materialized state of relay 'orders' in domain '{{domain}}' could not be prepared: the branch key of record identity 1 in archive section 'domains/{{domain}}/state/materialized_relay/orders/single/groups/0000000000/identities.rkyv' does not belong to the relay's branching: it is not a key of parametrizer 'by_tenant_shard': field 'shard' does not hold a value of its declared type: expected I32, found STRING"
     When these Plexus commands are executed on the leader node
       """
       LIST DOMAINS;

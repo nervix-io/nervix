@@ -12,7 +12,7 @@ Feature: Window collection of retained values
       CREATE SCHEMA history (tenant STRING, values <vector_type>, first_value I64, last_value I64, head I64 OPTIONAL, mean_value F64 OPTIONAL);
       CREATE JAQ JSON CODEC reading_codec TO SCHEMA reading WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE SCHEMA tenant_key (tenant STRING);
-      CREATE BRANCH by_tenant SCHEMA tenant_key TTL 5m;
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_key TTL 5m;
       CREATE RELAY readings SCHEMA reading BRANCHED BY by_tenant;
       CREATE RELAY histories SCHEMA history BRANCHED BY by_tenant;
       CREATE VHOST edge collect-{{test_id}}.example.com;
@@ -63,7 +63,7 @@ Feature: Window collection of retained values
       CREATE SCHEMA history (tenant STRING, pairs <pairs_type>, secrets <secrets_type> SENSITIVE, visible <secrets_type>, first_value I64, last_value I64);
       CREATE JAQ JSON CODEC reading_codec TO SCHEMA reading WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE SCHEMA tenant_key (tenant STRING);
-      CREATE BRANCH by_tenant SCHEMA tenant_key TTL 5m;
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_key TTL 5m;
       CREATE RELAY readings SCHEMA reading BRANCHED BY by_tenant;
       CREATE RELAY histories SCHEMA history BRANCHED BY by_tenant;
       CREATE VHOST edge collect-order-{{test_id}}.example.com;
@@ -114,7 +114,7 @@ Feature: Window collection of retained values
       CREATE SCHEMA history (tenant STRING, values <vector_type>);
       CREATE JAQ JSON CODEC reading_codec TO SCHEMA reading WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE SCHEMA tenant_key (tenant STRING);
-      CREATE BRANCH by_tenant SCHEMA tenant_key TTL 5m;
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_key TTL 5m;
       CREATE RELAY readings SCHEMA reading BRANCHED BY by_tenant;
       CREATE RELAY histories SCHEMA history BRANCHED BY by_tenant;
       CREATE VHOST edge collect-duration-{{test_id}}.example.com;
@@ -158,7 +158,7 @@ Feature: Window collection of retained values
       CREATE SCHEMA history (values <vector_type>, first_value I64, last_value I64);
       CREATE JAQ JSON CODEC reading_codec TO SCHEMA reading WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE SCHEMA tenant_key (tenant STRING);
-      CREATE BRANCH by_tenant SCHEMA tenant_key TTL 5m;
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_key TTL 5m;
       CREATE RELAY readings SCHEMA reading BRANCHED BY by_tenant;
       CREATE RELAY histories SCHEMA history BRANCHED BY by_tenant;
       CREATE VHOST edge collect-inspect-{{test_id}}.example.com;
@@ -228,7 +228,7 @@ Feature: Window collection of retained values
       CREATE JAQ JSON CODEC reading_codec TO SCHEMA reading
         WITH JAQ TRANSFORMATIONS ON INGESTION '{tenant:.tenant,value:("x" * .size)}';
       CREATE SCHEMA tenant_key (tenant STRING);
-      CREATE BRANCH by_tenant SCHEMA tenant_key TTL 5m;
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_key TTL 5m;
       CREATE RELAY readings SCHEMA reading BRANCHED BY by_tenant;
       CREATE RELAY histories SCHEMA history BRANCHED BY by_tenant;
       CREATE VHOST edge collect-budget-{{test_id}}.example.com;

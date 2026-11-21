@@ -457,7 +457,7 @@ Feature: JAQ codec unfolding
         TO SCHEMA tenant_event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.events[]';
       CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
-      CREATE IF NOT EXISTS BRANCH by_tenant SCHEMA tenant_branch TTL 5m;
+      CREATE IF NOT EXISTS PARAMETRIZER by_tenant SCHEMA tenant_branch TTL 5m;
       CREATE RELAY tenant_events SCHEMA sourced_tenant_event BRANCHED BY by_tenant;
       CREATE KAFKA CLIENT kafka_main
         CONFIG {

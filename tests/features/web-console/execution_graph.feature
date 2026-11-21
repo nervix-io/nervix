@@ -150,7 +150,7 @@ Feature: Web console execution graph
       );
       CREATE WIRE JSON CODEC notification_codec FROM WIRE SCHEMA notification_wire TO SCHEMA notification;
       CREATE SCHEMA tenant_user_key ( tenant STRING, user_id I64 );
-      CREATE BRANCH by_tenant_user SCHEMA tenant_user_key TTL 5m;
+      CREATE PARAMETRIZER by_tenant_user SCHEMA tenant_user_key TTL 5m;
       CREATE RELAY notifications SCHEMA notification BRANCHED BY by_tenant_user;
       CREATE RELAY validated_notifications SCHEMA notification BRANCHED BY by_tenant_user;
       CREATE VHOST edge http-{{test_id}}.example.com;

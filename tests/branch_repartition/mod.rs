@@ -1,18 +1,18 @@
-//! Public branch repartition checks.
+//! Public parametrizer repartition checks.
 //!
 //! Outside the layer order: a scenario harness.
 //!
-//! - **Owns.** Waiting on `DESCRIBE BRANCH` until it reports a branch's partition epoch, the
+//! - **Owns.** Waiting on `DESCRIBE PARAMETRIZER` until it reports a parametrizer's partition epoch, the
 //!   transition from its previous partition count and the keys that transition still moves, while a
-//!   running domain changes the branch's partition count.
+//!   running domain changes the parametrizer's partition count.
 //! - **Depends on.** The public command path of the in-process cluster.
 //! - **Must not know.** How the runtime moves a key between partitions or decides that an epoch
 //!   retires.
 
 use super::*;
 
-/// How often a wait on `DESCRIBE BRANCH` asks again.
-const DESCRIBE_BRANCH_POLL_INTERVAL: Duration = Duration::from_millis(200);
+/// How often a wait on `DESCRIBE PARAMETRIZER` asks again.
+const DESCRIBE_PARAMETRIZER_POLL_INTERVAL: Duration = Duration::from_millis(200);
 
 /// Whether `output` holds `expected` as one of its lines, compared without surrounding spaces.
 fn output_has_line(output: &str, expected: &str) -> bool {
@@ -34,15 +34,15 @@ fn output_has_line_starting_with(output: &str, prefix: &str) -> bool {
     false
 }
 
-/// What one `DESCRIBE BRANCH` wait accepts: every expected line, or a settled epoch.
-enum DescribeBranchExpectation {
+/// What one `DESCRIBE PARAMETRIZER` wait accepts: every expected line, or a settled epoch.
+enum DescribeParametrizerExpectation {
     /// The output holds each of these lines.
     Lines(Vec<String>),
-    /// The output names the branch's partition epoch and no transition from a previous count.
+    /// The output names the parametrizer's partition epoch and no transition from a previous count.
     NoTransition,
 }
 
-impl DescribeBranchExpectation {
+impl DescribeParametrizerExpectation {
     fn accepts(&self, output: &str) -> bool {
         match self {
             Self::Lines(lines) => {
@@ -61,25 +61,25 @@ impl DescribeBranchExpectation {
     }
 }
 
-/// Asks node `node_id` to describe `branch` until its output meets `expectation`, failing with
+/// Asks node `node_id` to describe `parametrizer` until its output meets `expectation`, failing with
 /// the last output once `duration` passes.
-async fn wait_for_describe_branch(
+async fn wait_for_describe_parametrizer(
     world: &mut ScenarioWorld,
     duration: &str,
-    branch: &str,
+    parametrizer: &str,
     node_id: &str,
-    expectation: DescribeBranchExpectation,
+    expectation: DescribeParametrizerExpectation,
 ) {
     let duration = parse_duration_text(duration).expect("step duration must be a valid duration");
     let node_id = expand_placeholders(world, node_id);
-    let branch = expand_placeholders(world, branch);
-    let command = format!("DESCRIBE BRANCH {branch};");
+    let parametrizer = expand_placeholders(world, parametrizer);
+    let command = format!("DESCRIBE PARAMETRIZER {parametrizer};");
     let deadline = PhaseDeadline::after(duration);
     loop {
         nervix_primitives::task::consume_budget().await;
         assert!(
             !deadline.has_passed(),
-            "timed out waiting for DESCRIBE BRANCH {branch} on node '{node_id}'. last output: \
+            "timed out waiting for DESCRIBE PARAMETRIZER {parametrizer} on node '{node_id}'. last output: \
              {:?}, last error: {:?}",
             world.last_command_output,
             world.last_command_error
@@ -94,15 +94,15 @@ async fn wait_for_describe_branch(
             }
             Err(error) => world.last_command_error = Some(error),
         }
-        deadline.pause(DESCRIBE_BRANCH_POLL_INTERVAL).await;
+        deadline.pause(DESCRIBE_PARAMETRIZER_POLL_INTERVAL).await;
     }
 }
 
-#[then(expr = "within {string} DESCRIBE BRANCH {string} on node {string} contains")]
-async fn then_within_duration_describe_branch_contains(
+#[then(expr = "within {string} DESCRIBE PARAMETRIZER {string} on node {string} contains")]
+async fn then_within_duration_describe_parametrizer_contains(
     world: &mut ScenarioWorld,
     duration: String,
-    branch: String,
+    parametrizer: String,
     node_id: String,
     #[step] step: &Step,
 ) {
@@ -115,39 +115,39 @@ async fn then_within_duration_describe_branch_contains(
     }
     assert!(
         !lines.is_empty(),
-        "step docstring must list at least one expected DESCRIBE BRANCH line"
+        "step docstring must list at least one expected DESCRIBE PARAMETRIZER line"
     );
-    wait_for_describe_branch(
+    wait_for_describe_parametrizer(
         world,
         &duration,
-        &branch,
+        &parametrizer,
         &node_id,
-        DescribeBranchExpectation::Lines(lines),
+        DescribeParametrizerExpectation::Lines(lines),
     )
     .await;
 }
 
 #[then(
-    expr = "within {string} DESCRIBE BRANCH {string} on node {string} reports no partition \
+    expr = "within {string} DESCRIBE PARAMETRIZER {string} on node {string} reports no partition \
             transition"
 )]
-async fn then_within_duration_describe_branch_reports_no_transition(
+async fn then_within_duration_describe_parametrizer_reports_no_transition(
     world: &mut ScenarioWorld,
     duration: String,
-    branch: String,
+    parametrizer: String,
     node_id: String,
 ) {
-    wait_for_describe_branch(
+    wait_for_describe_parametrizer(
         world,
         &duration,
-        &branch,
+        &parametrizer,
         &node_id,
-        DescribeBranchExpectation::NoTransition,
+        DescribeParametrizerExpectation::NoTransition,
     )
     .await;
 }
 
-/// The partitions `SHOW CLUSTER STATUS` schedules for one processor or relay: while a branch's keys
+/// The partitions `SHOW CLUSTER STATUS` schedules for one processor or relay: while a parametrizer's keys
 /// move, an entity that keeps state per key keeps the units of the previous count as holding units.
 #[then(expr = "the last cluster status schedules {int} partitions of {word} {string}")]
 async fn then_last_cluster_status_schedules_partitions(

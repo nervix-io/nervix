@@ -16,11 +16,11 @@ Feature: Generator node
         tenant STRING
       );
 
-      CREATE BRANCH input_branch
+      CREATE PARAMETRIZER input_branch
         SCHEMA tenant_branch
         TTL 5m;
 
-      CREATE BRANCH output_branch
+      CREATE PARAMETRIZER output_branch
         SCHEMA tenant_branch
         TTL 5m;
 
@@ -82,7 +82,7 @@ Feature: Generator node
         tenant STRING
       );
 
-      CREATE BRANCH tenant_branch
+      CREATE PARAMETRIZER tenant_branch
         SCHEMA tenant_branch_schema
         TTL 5m;
 
@@ -162,7 +162,7 @@ Feature: Generator node
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (tenant string, amount integer);
       CREATE WIRE JSON CODEC notification_codec FROM WIRE SCHEMA notification_wire TO SCHEMA notification;
       CREATE SCHEMA tenant_branch_schema (tenant STRING);
-      CREATE BRANCH tenant_branch SCHEMA tenant_branch_schema TTL 5m MAX INSTANCES 1 EVICT LRU;
+      CREATE PARAMETRIZER tenant_branch SCHEMA tenant_branch_schema TTL 5m MAX INSTANCES 1 EVICT LRU;
       CREATE RELAY notifications SCHEMA notification BRANCHED BY tenant_branch
         WITH MATERIALIZED STATE LAST BY TIMESTAMP;
       CREATE RELAY generated_notifications SCHEMA generated_notification BRANCHED BY tenant_branch;
@@ -251,7 +251,7 @@ Feature: Generator node
         tenant STRING
       );
 
-      CREATE BRANCH generator_tenant_branch
+      CREATE PARAMETRIZER generator_tenant_branch
         SCHEMA generator_tenant_branch_schema
         TTL 5m;
 
@@ -501,7 +501,7 @@ Feature: Generator node
         tenant STRING
       );
 
-      CREATE BRANCH tenant_branch
+      CREATE PARAMETRIZER tenant_branch
         SCHEMA tenant_branch_schema
         TTL 2d;
 

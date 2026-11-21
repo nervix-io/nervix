@@ -10,7 +10,7 @@ Feature: Web console visual window processor and correlator creation
       CREATE SCHEMA visual_window_event (tenant STRING, latency I64);
       CREATE SCHEMA visual_window_summary (tenant STRING, samples I64, total I64, spread I64);
       CREATE SCHEMA visual_window_key (tenant STRING);
-      CREATE BRANCH visual_window_tenant SCHEMA visual_window_key TTL 5m;
+      CREATE PARAMETRIZER visual_window_tenant SCHEMA visual_window_key TTL 5m;
       CREATE JAQ JSON CODEC visual_window_codec TO SCHEMA visual_window_event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE RELAY visual_window_input SCHEMA visual_window_event BRANCHED BY visual_window_tenant;
@@ -121,7 +121,7 @@ Feature: Web console visual window processor and correlator creation
       CREATE SCHEMA visual_payment_event (tenant STRING, order_id STRING, amount I64);
       CREATE SCHEMA visual_paid_order (tenant STRING, order_id STRING, item STRING, amount I64);
       CREATE SCHEMA visual_correlate_key (tenant STRING);
-      CREATE BRANCH visual_correlate_tenant SCHEMA visual_correlate_key TTL 5m;
+      CREATE PARAMETRIZER visual_correlate_tenant SCHEMA visual_correlate_key TTL 5m;
       CREATE JAQ JSON CODEC visual_order_codec TO SCHEMA visual_order_event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE JAQ JSON CODEC visual_payment_codec TO SCHEMA visual_payment_event

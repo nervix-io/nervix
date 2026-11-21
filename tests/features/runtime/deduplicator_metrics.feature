@@ -23,7 +23,7 @@ Feature: Deduplicator metrics
         FROM WIRE SCHEMA transaction_wire
         TO SCHEMA transaction;
         CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
-        CREATE IF NOT EXISTS BRANCH by_dedup_metrics_source SCHEMA tenant_branch TTL 5m;
+        CREATE IF NOT EXISTS PARAMETRIZER by_dedup_metrics_source SCHEMA tenant_branch TTL 5m;
         CREATE RELAY raw_txns SCHEMA transaction BRANCHED BY by_dedup_metrics_source;
         CREATE RELAY deduped_txns SCHEMA transaction BRANCHED BY by_dedup_metrics_source;
         CREATE VHOST edge http-{{test_id}}.example.com;

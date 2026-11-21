@@ -10,7 +10,7 @@ Feature: Web console visual generator, inferencer and WASM processor creation
       CREATE SCHEMA visual_generator_event (tenant STRING, amount I64);
       CREATE SCHEMA visual_generator_total (tenant STRING, total I64);
       CREATE SCHEMA visual_generator_key (tenant STRING);
-      CREATE BRANCH visual_generator_tenant SCHEMA visual_generator_key TTL 5m;
+      CREATE PARAMETRIZER visual_generator_tenant SCHEMA visual_generator_key TTL 5m;
       CREATE JAQ JSON CODEC visual_generator_codec TO SCHEMA visual_generator_event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE RELAY visual_generator_state SCHEMA visual_generator_event BRANCHED BY visual_generator_tenant
@@ -124,7 +124,7 @@ Feature: Web console visual generator, inferencer and WASM processor creation
       CREATE SCHEMA visual_infer_feature (tenant STRING, vector <vector_type>);
       CREATE SCHEMA visual_infer_score (tenant STRING, score <score_type>);
       CREATE SCHEMA visual_infer_key (tenant STRING);
-      CREATE BRANCH visual_infer_tenant SCHEMA visual_infer_key TTL 5m;
+      CREATE PARAMETRIZER visual_infer_tenant SCHEMA visual_infer_key TTL 5m;
       CREATE WIRE JSON SCHEMA visual_infer_wire MODE STRICT (tenant string, vector array);
       CREATE WIRE JSON CODEC visual_infer_codec FROM WIRE SCHEMA visual_infer_wire TO SCHEMA visual_infer_feature;
       CREATE RELAY visual_infer_features SCHEMA visual_infer_feature BRANCHED BY visual_infer_tenant;
@@ -246,7 +246,7 @@ Feature: Web console visual generator, inferencer and WASM processor creation
       CREATE SCHEMA visual_wasm_event (value I32, tenant STRING);
       CREATE SCHEMA visual_wasm_tagged (value I32, tenant STRING, bucket STRING);
       CREATE SCHEMA visual_wasm_key (tenant STRING);
-      CREATE BRANCH visual_wasm_tenant SCHEMA visual_wasm_key TTL 5m;
+      CREATE PARAMETRIZER visual_wasm_tenant SCHEMA visual_wasm_key TTL 5m;
       CREATE WIRE JSON SCHEMA visual_wasm_wire MODE STRICT (value integer, tenant string);
       CREATE WIRE JSON CODEC visual_wasm_codec FROM WIRE SCHEMA visual_wasm_wire TO SCHEMA visual_wasm_event;
       CREATE RELAY visual_wasm_events SCHEMA visual_wasm_event BRANCHED BY visual_wasm_tenant;
@@ -441,7 +441,7 @@ Feature: Web console visual generator, inferencer and WASM processor creation
       CREATE SCHEMA visual_tx_event (tenant STRING, amount I64);
       CREATE SCHEMA visual_tx_total (total I64);
       CREATE SCHEMA visual_tx_key (tenant STRING);
-      CREATE BRANCH visual_tx_tenant SCHEMA visual_tx_key TTL 5m;
+      CREATE PARAMETRIZER visual_tx_tenant SCHEMA visual_tx_key TTL 5m;
       CREATE RELAY visual_tx_plain SCHEMA visual_tx_event UNBRANCHED;
       CREATE RELAY visual_tx_branched_state SCHEMA visual_tx_event BRANCHED BY visual_tx_tenant
         WITH MATERIALIZED STATE LAST BY TIMESTAMP;

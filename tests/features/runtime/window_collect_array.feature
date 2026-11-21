@@ -12,7 +12,7 @@ Feature: Fixed arrays of retained window values
       CREATE SCHEMA history (tenant STRING, values <vector_type>, first_value I64, last_value I64, head I64 OPTIONAL, mean_value F64 OPTIONAL);
       CREATE JAQ JSON CODEC reading_codec TO SCHEMA reading WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE SCHEMA tenant_key (tenant STRING);
-      CREATE BRANCH by_tenant SCHEMA tenant_key TTL 5m;
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_key TTL 5m;
       CREATE RELAY readings SCHEMA reading BRANCHED BY by_tenant;
       CREATE RELAY histories SCHEMA history BRANCHED BY by_tenant;
       CREATE VHOST edge collect-{{test_id}}.example.com;
@@ -64,7 +64,7 @@ Feature: Fixed arrays of retained window values
       CREATE SCHEMA history (tenant STRING, pairs <pairs_type>, secrets <secrets_type> SENSITIVE, visible <secrets_type>, first_value I64, last_value I64);
       CREATE JAQ JSON CODEC reading_codec TO SCHEMA reading WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE SCHEMA tenant_key (tenant STRING);
-      CREATE BRANCH by_tenant SCHEMA tenant_key TTL 5m;
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_key TTL 5m;
       CREATE RELAY readings SCHEMA reading BRANCHED BY by_tenant;
       CREATE RELAY histories SCHEMA history BRANCHED BY by_tenant;
       CREATE VHOST edge collect-order-{{test_id}}.example.com;
@@ -160,7 +160,7 @@ Feature: Fixed arrays of retained window values
         FROM WIRE SCHEMA metric_wire
         TO SCHEMA metric;
         CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
-        CREATE IF NOT EXISTS BRANCH by_metric_ingestor SCHEMA tenant_branch TTL 5m;
+        CREATE IF NOT EXISTS PARAMETRIZER by_metric_ingestor SCHEMA tenant_branch TTL 5m;
         CREATE RELAY metrics SCHEMA metric BRANCHED BY by_metric_ingestor;
         CREATE RELAY metric_summaries SCHEMA metric_summary BRANCHED BY by_metric_ingestor;
         CREATE VHOST edge http-{{test_id}}.example.com;
@@ -249,7 +249,7 @@ Feature: Fixed arrays of retained window values
       CREATE SCHEMA scored (score <score_type>);
       CREATE JAQ JSON CODEC reading_codec TO SCHEMA reading WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE SCHEMA tenant_key (tenant STRING);
-      CREATE BRANCH by_tenant SCHEMA tenant_key TTL 5m;
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_key TTL 5m;
       CREATE RELAY readings SCHEMA reading BRANCHED BY by_tenant WITH MATERIALIZED STATE LAST BY TIMESTAMP;
       CREATE RELAY samples SCHEMA sample BRANCHED BY by_tenant;
       CREATE RELAY histories SCHEMA history BRANCHED BY by_tenant;
@@ -318,7 +318,7 @@ Feature: Fixed arrays of retained window values
       CREATE WIRE JSON SCHEMA window_wire MODE STRICT (tenant string, value integer);
       CREATE WIRE JSON CODEC window_codec FROM WIRE SCHEMA window_wire TO SCHEMA window_input;
       CREATE SCHEMA tenant_key (tenant STRING);
-      CREATE BRANCH by_tenant SCHEMA tenant_key TTL 5m MAX INSTANCES 2 EVICT LRU;
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_key TTL 5m MAX INSTANCES 2 EVICT LRU;
       CREATE RELAY window_inputs SCHEMA window_input BRANCHED BY by_tenant;
       CREATE RELAY window_outputs SCHEMA window_output BRANCHED BY by_tenant;
       CREATE VHOST edge window-move-{{test_id}}.example.com;

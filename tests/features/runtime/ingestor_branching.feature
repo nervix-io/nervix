@@ -74,7 +74,7 @@ Feature: Ingestor branching
         TO SCHEMA reading
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE SCHEMA bucket_branch (bucket I64);
-      CREATE BRANCH by_bucket SCHEMA bucket_branch TTL 5m;
+      CREATE PARAMETRIZER by_bucket SCHEMA bucket_branch TTL 5m;
       CREATE RELAY readings SCHEMA reading BRANCHED BY by_bucket;
       CREATE RELAY branch_failures SCHEMA branch_failure UNBRANCHED;
       CREATE VHOST edge ingestor-branch-error-{{test_id}}.example.com;
