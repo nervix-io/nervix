@@ -803,6 +803,53 @@ fn a_run_that_changes_labels_and_configuration_asks_placement() {
     assert_eq!(asked, 1);
 }
 
+/// A run that relabels one Model and drops another changes the graph, so placement decides its
+/// schedule: keeping the current placement would keep the dropped Model scheduled.
+#[test]
+fn a_run_that_changes_labels_and_drops_a_model_asks_placement() {
+    let mut asked = 0_usize;
+    let statements = [
+        set_model_labels(
+            ModelKind::Relay,
+            "events",
+            serde_json::json!({ "owner": "Platform" }),
+        ),
+        Statement::Drop(DropModel {
+            kind: ModelKind::Relay,
+            name: named("audit"),
+        }),
+    ];
+    let plan = Registry::plan_transaction(
+        scheduled_snapshot(
+            DomainStatus::Stopped,
+            [
+                schema("event_schema"),
+                relay("events", "event_schema"),
+                relay("audit", "event_schema"),
+            ],
+        ),
+        &statements,
+        0,
+        false,
+        |graph, current, attribution| {
+            asked = asked
+                .checked_add(1)
+                .assured("a two-statement run asks placement a bounded number of times");
+            preserve_schedule(graph, current, attribution)
+        },
+    )
+    .assured("the label edit and the relay drop are valid");
+    let report = plan
+        .report()
+        .assured("the complete plan has a valid report");
+    assert_eq!(
+        report.execution_steps().len(),
+        1,
+        "the label edit and the drop share one model run"
+    );
+    assert_eq!(asked, 1);
+}
+
 #[test]
 fn entity_pause_report_and_execution_share_the_exact_affected_graph() {
     let domain = named("default");
