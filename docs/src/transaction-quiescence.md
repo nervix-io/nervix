@@ -29,7 +29,7 @@ The planner and executor partition that ordered sequence the same way:
 
 | Content | Execution boundary |
 | --- | --- |
-| Consecutive model `CREATE`, supported `ALTER`, `DROP`, `SET LABELS`, `DROP LABELS`, and `REBIND RESOURCE` operations | One atomic model run, evaluated in written order against one candidate graph. |
+| Consecutive model `CREATE`, supported `ALTER`, `DROP`, `SET LABELS`, and `REBIND RESOURCE` operations | One atomic model run, evaluated in written order against one candidate graph. |
 | `START`, `STOP`, `CREATE RESOURCE`, or `RESET WASM PROCESSOR ... STATE` | One step each; each ends a preceding model run. |
 
 A model run's configuration and schedule are published in one authoritative step. Its *base-to-final*

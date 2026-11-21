@@ -193,8 +193,8 @@ fn replaying_a_user_label_edit_preserves_later_labels_and_the_credential() {
         let reference =
             CommandExecutionReference::parse(format!("018bcfe5-6800-7000-8000-{ordinal:012x}"))
                 .assured("the fixture reference is a valid UUIDv7");
-        let labels = serde_json::from_value(serde_json::json!({ "owner": value }))
-            .assured("the fixture label is valid");
+        let mutation = serde_json::from_value(serde_json::json!({ "owner": { "set": value } }))
+            .assured("the fixture edit is valid");
         state.command_executions.insert_admitted(
             CommandExecution::applying(
                 reference.clone(),
@@ -204,7 +204,7 @@ fn replaying_a_user_label_edit_preserves_later_labels_and_the_credential() {
                 admitted_at,
                 CommandExecutionEffect::EditAdministrativeLabels {
                     target: AdministrativeLabelTarget::User(user.clone()),
-                    mutation: EntityLabelMutation::Set(labels),
+                    mutation,
                     outcome: None,
                 },
             ),

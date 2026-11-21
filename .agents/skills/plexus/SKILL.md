@@ -200,6 +200,9 @@ same clauses and envelope. Read the CLI chapter for one-shot JSON output; progra
 
 For Model, domain, logical resource and user metadata, read [Entity Labels](../../../docs/src/entity-labels.md)
 for supported targets, limits, staged resource and Model reads, and administrative admission.
+One `SET LABELS` sets keys and removes them with `'key' DROP` entries in a single atomic edit;
+there is no separate removal statement. For labels in the console's forms and its label editor,
+read [Web Console → Entity Labels](../../../docs/src/client-tools-web-console.md#entity-labels).
 Physical node tags and authorization have their own contracts.
 
 ## Gather the configuration contract

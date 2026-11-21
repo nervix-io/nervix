@@ -28,6 +28,9 @@ pub(crate) enum CreateKind {
     Subscription,
     /// The quiesce settings of an existing endpoint ingestor, opened from the graph.
     EndpointPause,
+    /// The labels of an existing entity, opened from where the console shows the entity or from
+    /// the top bar.
+    EntityLabels,
     Model(ModelKind),
 }
 
@@ -89,6 +92,7 @@ impl CreateKind {
             Self::Resource => "resource".to_string(),
             Self::Subscription => "subscription".to_string(),
             Self::EndpointPause => "endpoint-pause".to_string(),
+            Self::EntityLabels => "entity-labels".to_string(),
             Self::Model(kind) => kind.keyword_phrase().to_ascii_lowercase().replace(' ', "-"),
         }
     }
@@ -100,6 +104,7 @@ impl CreateKind {
             Self::Resource => "resource",
             Self::Subscription => "subscription",
             Self::EndpointPause => "pause settings",
+            Self::EntityLabels => "labels",
             Self::Model(kind) => Self::model_label(kind),
         }
     }
@@ -158,6 +163,10 @@ impl CreateKind {
                 name: "Change pause settings",
                 summary: "Response timing during a pause",
             },
+            Self::EntityLabels => MenuEntry {
+                name: "Edit labels",
+                summary: "Set, change and remove an entity's labels",
+            },
             Self::Model(kind) => Self::model_menu_entry(kind),
         }
     }
@@ -206,7 +215,25 @@ impl CreateKind {
     /// Whether the created statement takes `IF NOT EXISTS`. A session subscription is not a stored
     /// entity, so its statement has no such modifier.
     pub(super) fn takes_if_not_exists(self) -> bool {
-        !matches!(self, Self::Subscription | Self::EndpointPause)
+        !matches!(
+            self,
+            Self::Subscription | Self::EndpointPause | Self::EntityLabels
+        )
+    }
+
+    /// Whether the form creates a stored entity, whose creation carries the labels the form adds.
+    /// A session subscription has no labels, and the forms that change an existing entity create
+    /// nothing.
+    pub(super) fn takes_labels(self) -> bool {
+        !matches!(
+            self,
+            Self::Subscription | Self::EndpointPause | Self::EntityLabels
+        )
+    }
+
+    /// Whether the form changes an entity that exists instead of creating one.
+    pub(super) fn changes_existing(self) -> bool {
+        matches!(self, Self::EndpointPause | Self::EntityLabels)
     }
 
     pub(super) fn wire_format(self) -> Option<WireFormat> {
@@ -218,7 +245,8 @@ impl CreateKind {
             | Self::User
             | Self::Resource
             | Self::Subscription
-            | Self::EndpointPause => None,
+            | Self::EndpointPause
+            | Self::EntityLabels => None,
             Self::Model(
                 ModelKind::Placement
                 | ModelKind::Schema
@@ -262,7 +290,8 @@ impl CreateKind {
             | Self::User
             | Self::Resource
             | Self::Subscription
-            | Self::EndpointPause => None,
+            | Self::EndpointPause
+            | Self::EntityLabels => None,
             Self::Model(
                 ModelKind::Placement
                 | ModelKind::Schema

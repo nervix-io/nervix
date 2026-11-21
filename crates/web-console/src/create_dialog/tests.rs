@@ -81,7 +81,7 @@ fn typed_drafts_render_the_canonical_statements_the_dispatcher_sends() {
         ..DomainDraft::default()
     };
     let submission = domain_draft
-        .submission()
+        .submission(nervix_models::EntityLabels::default())
         .assured("the domain draft is valid");
     assert_eq!(
         command_query(&submission),
@@ -94,7 +94,7 @@ fn typed_drafts_render_the_canonical_statements_the_dispatcher_sends() {
     };
     let scope = domain("orders");
     let submission = resource
-        .submission(Some(scope.clone()))
+        .submission(Some(scope.clone()), nervix_models::EntityLabels::default())
         .assured("the resource draft and scope are valid");
     assert_eq!(command_query(&submission), "CREATE RESOURCE bundle;");
     assert_eq!(command_domain(&submission), Some(&scope));
@@ -151,7 +151,9 @@ fn credential_presentation_is_masked_while_the_submitted_statement_keeps_the_sec
         password: "it's-secret".to_string(),
         if_not_exists: false,
     };
-    let submission = user.submission().assured("the user draft is valid");
+    let submission = user
+        .submission(nervix_models::EntityLabels::default())
+        .assured("the user draft is valid");
     assert!(command_query(&submission).contains("it's-secret"));
     assert!(!submission.presentation.contains("it's-secret"));
     assert_eq!(
@@ -167,7 +169,7 @@ fn a_resource_requires_the_scope_captured_when_the_dialog_opened() {
         if_not_exists: false,
     };
     let error = resource
-        .submission(None)
+        .submission(None, nervix_models::EntityLabels::default())
         .expect_err("resource creation needs a selected domain");
     assert_eq!(
         error.current_context(),
@@ -703,7 +705,7 @@ fn paced_domain_and_password_validation_report_the_owning_field() {
         ..DomainDraft::default()
     };
     let submission = draft
-        .submission()
+        .submission(nervix_models::EntityLabels::default())
         .assured("the paced domain draft is valid");
     assert!(command_query(&submission).contains("PACED"));
     assert!(command_query(&submission).contains("PERIOD 2s"));
@@ -711,7 +713,7 @@ fn paced_domain_and_password_validation_report_the_owning_field() {
     draft.period = "soon".to_string();
     assert_eq!(
         draft
-            .submission()
+            .submission(nervix_models::EntityLabels::default())
             .expect_err("an invalid period is rejected")
             .current_context(),
         &CreateDraftError::Period
@@ -720,7 +722,7 @@ fn paced_domain_and_password_validation_report_the_owning_field() {
     draft.skew = "later".to_string();
     assert_eq!(
         draft
-            .submission()
+            .submission(nervix_models::EntityLabels::default())
             .expect_err("an invalid skew is rejected")
             .current_context(),
         &CreateDraftError::Skew
@@ -732,7 +734,7 @@ fn paced_domain_and_password_validation_report_the_owning_field() {
         if_not_exists: false,
     };
     assert_eq!(
-        user.submission()
+        user.submission(nervix_models::EntityLabels::default())
             .expect_err("an empty password is rejected")
             .current_context(),
         &CreateDraftError::PasswordRequired
@@ -1401,6 +1403,8 @@ fn creation_components_render_each_typed_draft_and_accessible_status() {
                     .session_generation(generation)
                     .request_tx(request_tx)
                     .submit(super::ignore_test_submission)
+                    .read_labels(super::ignore_test_label_read())
+                    .known_label_targets(leptos::prelude::Signal::derive(Vec::new))
                     .build(),
             );
             any_spawner::Executor::poll_local();

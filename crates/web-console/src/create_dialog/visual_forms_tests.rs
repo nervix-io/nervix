@@ -53,6 +53,8 @@ fn hash_map_and_roto_udf_forms_render_current_model_controls() {
                     .session_generation(generation)
                     .request_tx(request_tx)
                     .submit(super::ignore_test_submission)
+                    .read_labels(super::ignore_test_label_read())
+                    .known_label_targets(leptos::prelude::Signal::derive(Vec::new))
                     .build(),
             );
             any_spawner::Executor::poll_local();
@@ -161,6 +163,8 @@ fn junction_and_reingestor_render_ordered_route_and_state_controls() {
                     .session_generation(RwSignal::new(1))
                     .request_tx(RwSignal::new(None))
                     .submit(super::ignore_test_submission)
+                    .read_labels(super::ignore_test_label_read())
+                    .known_label_targets(leptos::prelude::Signal::derive(Vec::new))
                     .build(),
             );
             any_spawner::Executor::poll_local();
@@ -590,6 +594,8 @@ fn ingestor_form_renders_every_source_and_keeps_its_typed_references_in_scope() 
                 .session_generation(RwSignal::new(1))
                 .request_tx(RwSignal::new(None))
                 .submit(super::ignore_test_submission)
+                .read_labels(super::ignore_test_label_read())
+                .known_label_targets(leptos::prelude::Signal::derive(Vec::new))
                 .build(),
         );
         any_spawner::Executor::poll_local();
@@ -797,6 +803,8 @@ fn ingestor_editor_shows_source_specific_fields_and_route_construction_sections(
                     .session_generation(generation)
                     .request_tx(request_tx)
                     .submit(super::ignore_test_submission)
+                    .read_labels(super::ignore_test_label_read())
+                    .known_label_targets(leptos::prelude::Signal::derive(Vec::new))
                     .build(),
             );
             any_spawner::Executor::poll_local();
@@ -936,6 +944,8 @@ fn client_vhost_and_endpoint_forms_render_every_transport_and_typed_reference_co
                     .session_generation(generation)
                     .request_tx(request_tx)
                     .submit(super::ignore_test_submission)
+                    .read_labels(super::ignore_test_label_read())
+                    .known_label_targets(leptos::prelude::Signal::derive(Vec::new))
                     .build(),
             );
             any_spawner::Executor::poll_local();
@@ -1305,6 +1315,8 @@ fn codec_and_signaling_forms_render_every_current_editor_family() {
                     .session_generation(generation)
                     .request_tx(request_tx)
                     .submit(super::ignore_test_submission)
+                    .read_labels(super::ignore_test_label_read())
+                    .known_label_targets(leptos::prelude::Signal::derive(Vec::new))
                     .build(),
             );
             any_spawner::Executor::poll_local();
@@ -1679,6 +1691,8 @@ fn deduplicator_and_reorderer_forms_edit_ordered_keys_after_their_node_branch() 
                     .session_generation(RwSignal::new(1))
                     .request_tx(RwSignal::new(None))
                     .submit(super::ignore_test_submission)
+                    .read_labels(super::ignore_test_label_read())
+                    .known_label_targets(leptos::prelude::Signal::derive(Vec::new))
                     .build(),
             );
             any_spawner::Executor::poll_local();
@@ -1938,6 +1952,8 @@ fn a_corridor_placement_asks_for_members_and_renders_their_ordered_rows() {
                 .session_generation(RwSignal::new(1))
                 .request_tx(RwSignal::new(None))
                 .submit(super::ignore_test_submission)
+                .read_labels(super::ignore_test_label_read())
+                .known_label_targets(leptos::prelude::Signal::derive(Vec::new))
                 .build(),
         );
         any_spawner::Executor::poll_local();
