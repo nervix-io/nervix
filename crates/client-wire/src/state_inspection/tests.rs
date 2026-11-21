@@ -325,6 +325,7 @@ fn license_capabilities_render_one_line_each_and_refuse_a_contradictory_row() {
     let deadline = Timestamp::from_unix_nanos(1_700_000_000_000_000_000);
     let text = license_capabilities(&[
         ("licensing.dummy", "enabled", None),
+        ("other.capability", "disabled", None),
         ("future.capability", "permitted", Some(deadline)),
     ])
     .display_text()
@@ -332,8 +333,8 @@ fn license_capabilities_render_one_line_each_and_refuse_a_contradictory_row() {
     assert_eq!(
         text,
         format!(
-            "capability licensing.dummy: enabled\ncapability future.capability: permitted until \
-             {deadline}\n"
+            "capability licensing.dummy: enabled\ncapability other.capability: \
+             disabled\ncapability future.capability: permitted until {deadline}\n"
         )
     );
     for contradictory in [

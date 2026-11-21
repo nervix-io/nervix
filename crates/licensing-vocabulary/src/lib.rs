@@ -248,6 +248,15 @@ mod tests {
     use super::*;
 
     #[test]
+    fn every_capability_name_is_its_catalog_spelling() {
+        let spellings: Vec<&str> = CapabilityName::ALL
+            .into_iter()
+            .map(CapabilityName::as_str)
+            .collect();
+        assert_eq!(spellings, ["licensing.dummy"]);
+    }
+
+    #[test]
     fn grace_admits_only_replacement_within_the_original_allowance() {
         let target = QuotaConstraint {
             name: QuotaName::ClusterDomains,
