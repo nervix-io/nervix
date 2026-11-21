@@ -69,7 +69,7 @@ pub(super) fn scheduled_snapshot(
             std::slice::from_ref(&node),
             0,
             None,
-            &crate::registry::uniform_capabilities(std::slice::from_ref(&node)),
+            &crate::registry::uniform_records(std::slice::from_ref(&node)),
         )
         .assured("the fixture topology resolves");
     TransactionPlanningSnapshot {
@@ -631,9 +631,7 @@ fn stopped_schedule_move_keeps_the_execution_gate_without_reporting_a_pause() {
                             std::slice::from_ref(&destination),
                             0,
                             None,
-                            &crate::registry::uniform_capabilities(std::slice::from_ref(
-                                &destination,
-                            )),
+                            &crate::registry::uniform_records(std::slice::from_ref(&destination)),
                         )
                         .assured("the fixture topology resolves")
                 }),
@@ -740,9 +738,7 @@ fn entity_pause_report_and_execution_share_the_exact_affected_graph() {
                             std::slice::from_ref(&cluster_node),
                             0,
                             None,
-                            &crate::registry::uniform_capabilities(std::slice::from_ref(
-                                &cluster_node,
-                            )),
+                            &crate::registry::uniform_records(std::slice::from_ref(&cluster_node)),
                         )
                         .assured("the fixture topology resolves")
                 }),
@@ -876,9 +872,7 @@ fn schedule_reassignment_raises_a_dynamic_change_to_an_entity_pause() {
                             std::slice::from_ref(&destination),
                             0,
                             None,
-                            &crate::registry::uniform_capabilities(std::slice::from_ref(
-                                &destination,
-                            )),
+                            &crate::registry::uniform_records(std::slice::from_ref(&destination)),
                         )
                         .assured("the fixture topology resolves")
                 }),
@@ -939,9 +933,7 @@ fn schedule_rebuild_raises_entity_creation_to_a_domain_pause() {
                             std::slice::from_ref(&cluster_node),
                             0,
                             None,
-                            &crate::registry::uniform_capabilities(std::slice::from_ref(
-                                &cluster_node,
-                            )),
+                            &crate::registry::uniform_records(std::slice::from_ref(&cluster_node)),
                         )
                         .assured("the fixture topology resolves")
                 }),
@@ -1010,9 +1002,7 @@ fn drop_recreate_retains_both_sides_of_a_rewired_graph() {
                             std::slice::from_ref(&cluster_node),
                             0,
                             None,
-                            &crate::registry::uniform_capabilities(std::slice::from_ref(
-                                &cluster_node,
-                            )),
+                            &crate::registry::uniform_records(std::slice::from_ref(&cluster_node)),
                         )
                         .assured("the fixture topology resolves")
                 }),

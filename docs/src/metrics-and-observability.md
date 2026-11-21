@@ -108,6 +108,11 @@ families for ingestors and emitters. Nervix also records these raw metric famili
   physical node
 - `nervix_branch_evictions_total`: total concrete branches evicted on the physical node, split by
   `reason="lru"` or `reason="ttl"`
+- `nervix_placement_violating_units{domain}`: units of the domain whose live owner a winning
+  `REQUIRE NODES` rule does not admit, as the physical node observes the committed schedule and
+  node records
+- `nervix_placement_waiting_units{domain}`: units of the domain with no live owner their node rules
+  admit and no cluster node that satisfies them, as the physical node observes them
 - `nervix_branch_partition_epoch`: the partition epoch a parametrizer executes in on the physical
   node
 - `nervix_branch_partition_keys_pending`: concrete keys the physical node's units still have to move
@@ -1030,6 +1035,13 @@ phase log records and by `terminating: true` in its status, as described in
 [Shutdown And Recovery](shutdown.md#observability). A timed-out precommit handoff leaves the schedule and metric authority unchanged.
 Unexpected owner loss continues through failover immediately and starts fresh relay metrics on the
 new owner.
+
+The two placement gauges carry only the domain: no label names a node, a rule or a tag value. A
+domain's series is removed once it has no node rule or no longer exists. Every node exports them
+from its own view of the committed schedule and records, and the leader logs at `info` each unit
+that starts or stops breaking a node rule, naming the domain, the unit and the rules. The schedule
+line of such a unit in `SHOW CLUSTER STATUS` adds `violates=<rule>` or `waiting_for=<rule>`, the
+rules comma-separated; see [Node Rules](placement.md#observing-node-rules).
 
 The schedule line `SHOW CLUSTER STATUS` prints for a unit whose owner changed names that
 transition as `transition_from=<former owner> state_recovery=<outcome>`. A planned handoff reports

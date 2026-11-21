@@ -207,6 +207,7 @@ mod listener_io;
 mod listener_settings;
 mod partition_topology;
 pub use listener_settings::{ListenerOverrides, ListenerSettings, ListenerSettingsError};
+mod node_rule_observation;
 mod public_listener;
 mod relocation;
 mod resource;
@@ -217,6 +218,7 @@ mod schedule_planning;
 mod scheduling;
 mod service_tasks;
 mod session;
+mod start_placement;
 #[cfg(test)]
 pub(crate) use session::{ClockDeliveryOrder, NextClockFrame};
 mod session_service;
@@ -1329,6 +1331,8 @@ impl Application {
             let mut startup_voter_observations = StartupVoterObservations::new(voter_observation_grace);
             let mut default_user_resolved = false;
             let mut missing_init_default_user_password_warned = false;
+            let mut node_rule_observation =
+                crate::application::node_rule_observation::NodeRuleObservation::default();
             loop {
                 nervix_primitives::task::consume_budget().await;
                 // A pass waits on consensus writes and on requests to peers, and neither completes
@@ -1448,6 +1452,9 @@ impl Application {
                             }
                         }
                     }
+                    service_for_reconcile
+                        .observe_node_rule_units(&mut node_rule_observation)
+                        .await;
                     loop {
                         nervix_primitives::task::consume_budget().await;
                         let Ok(automatic_schedule_input) =
@@ -1529,7 +1536,7 @@ impl Application {
                                     && topology.records().get(node).is_some_and(|committed| live_node_incarnations.get(node) == Some(&committed.record.identity().incarnation()))
                             })
                             .collect::<Vec<_>>();
-                        let scheduling_capabilities = topology.records().iter().filter(|(node, committed)| live_node_incarnations.get(*node) == Some(&committed.record.identity().incarnation())).map(|(node, committed)| (node.clone(), *committed.record.capabilities())).collect::<BTreeMap<_, _>>();
+                        let scheduling_records = topology.records().iter().filter(|(node, committed)| live_node_incarnations.get(*node) == Some(&committed.record.identity().incarnation())).map(|(node, committed)| (node.clone(), committed.clone())).collect::<BTreeMap<_, _>>();
                         let current_schedule = &automatic_schedule_input.runtime_state().schedule;
                         let live_voter_set = live_voters.iter().cloned().collect::<BTreeSet<_>>();
                         let schedulable_node_set = schedulable_node_ids
@@ -1557,7 +1564,7 @@ impl Application {
                                 &mut failover_schedule,
                                 None,
                                 &live_voter_set,
-                                &schedulable_node_set,
+                                &crate::application::scheduling::UnitTargets::unconstrained(schedulable_node_set.clone()),
                             );
                             if failover_moves.is_empty() {
                                 continue;
@@ -1611,18 +1618,27 @@ impl Application {
                                     usize::try_from(automatic_schedule_input.runtime_state().parameters.verified("scheduling starts after parameter seeding").values.replica_count()).assured("the committed replica count fits a supported target"),
                                     current_domain,
                                     scheduler_mode,
-                                 &scheduling_capabilities,);
+                                 &scheduling_records,);
                                 #[cfg(not(feature = "testing"))]
                                 let schedule = graph.schedule_for_domain(
                                     &domain,
                                     &schedulable_node_ids,
                                     usize::try_from(automatic_schedule_input.runtime_state().parameters.verified("scheduling starts after parameter seeding").values.replica_count()).assured("the committed replica count fits a supported target"),
                                     current_domain,
-                                    &scheduling_capabilities,
+                                    &scheduling_records,
                                 );
                                 let mut schedule = match schedule {
                                     Ok(schedule) => schedule,
                                     Err(error) => { warn!(domain = domain.as_str(), error = %format_args!("{error:#}"), "failed to resolve partition topology"); continue; }
+                                };
+                                let targets = match crate::application::scheduling::UnitTargets::of_graph(
+                                    &graph,
+                                    &domain,
+                                    &scheduling_records,
+                                    schedulable_node_set.clone(),
+                                ) {
+                                    Ok(targets) => targets,
+                                    Err(error) => { warn!(domain = domain.as_str(), error = %format_args!("{error:#}"), "failed to judge the domain's node rules"); continue; }
                                 };
                                 let mut failover_existing = current_domain.cloned();
                                 if let Some(existing) = &mut failover_existing {
@@ -1631,7 +1647,7 @@ impl Application {
                                             existing,
                                             Some(&schedule),
                                             &live_voter_set,
-                                            &schedulable_node_set,
+                                            &targets,
                                         );
                                     for failover_move in &failover_moves {
                                         if let Some(replica) = failover_move.promoted_replica.as_ref() {

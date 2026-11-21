@@ -27,7 +27,7 @@ use super::{
     ownership_handoff::{planned_relocation_count, prefer_former_owners_as_replicas},
     session_service::SessionServiceImpl,
 };
-use crate::registry::{ActiveGraph, RegistryError};
+use crate::registry::{ActiveGraph, NodeRuleBreaches, RegistryError};
 
 /// A domain schedule computed from a candidate graph, with how many runtime nodes it moves off
 /// the node that owns them today.
@@ -94,9 +94,17 @@ pub(in crate::application) struct DomainSchedulePlanningSnapshot {
     placement_candidate_identities: BTreeSet<ClusterNodeIdentity>,
     live_voters: SortedSet<ClusterNodeName>,
     cluster_nodes: SortedSet<ClusterNodeName>,
-    capabilities: std::collections::BTreeMap<ClusterNodeName, nervix_models::NodeCapabilities>,
+    /// The committed record of every live voter's current incarnation: its capacity claim and
+    /// the facts node rules select by.
+    records: std::collections::BTreeMap<ClusterNodeName, nervix_models::CommittedNodeRecord>,
     replica_count: usize,
     mode: SchedulePlanningMode,
+    /// Whether the domain executes, so that a change its running units would break is refused
+    /// rather than planned.
+    executing: bool,
+    /// The units already breaking a node rule under the committed graph and schedule, which a
+    /// change neither causes nor is refused for.
+    standing_breaches: NodeRuleBreaches,
 }
 
 impl DomainSchedulePlanningSnapshot {
@@ -196,7 +204,7 @@ impl DomainSchedulePlanningSnapshot {
                         cluster_nodes: &self.cluster_nodes,
                         replica_count: self.replica_count,
                         existing: current,
-                        capabilities: &self.capabilities,
+                        records: &self.records,
                     },
                     #[cfg(feature = "testing")]
                     self.mode.scheduler_mode(),
@@ -209,6 +217,19 @@ impl DomainSchedulePlanningSnapshot {
                     &self.live_voters,
                 );
                 prefer_former_owners_as_replicas(current, &mut schedule, &self.live_voters);
+                if self.executing {
+                    let candidates = self.cluster_nodes.iter().cloned().collect();
+                    let judgement = graph.judge_node_rules(
+                        domain,
+                        &schedule,
+                        &self.records,
+                        &candidates,
+                        crate::registry::ScheduleActivity::Executing,
+                    )?;
+                    if let Some(refusal) = judgement.new_breach(domain, &self.standing_breaches) {
+                        return Err(refusal);
+                    }
+                }
                 Some(schedule)
             }
             None => None,
@@ -230,10 +251,10 @@ impl DomainSchedulePlanningSnapshot {
         &self.cluster_nodes
     }
 
-    pub(in crate::application) fn capabilities(
+    pub(in crate::application) fn records(
         &self,
-    ) -> &std::collections::BTreeMap<ClusterNodeName, nervix_models::NodeCapabilities> {
-        &self.capabilities
+    ) -> &std::collections::BTreeMap<ClusterNodeName, nervix_models::CommittedNodeRecord> {
+        &self.records
     }
 
     pub(in crate::application) fn live_node_ids(&self) -> BTreeSet<ClusterNodeName> {
@@ -378,12 +399,12 @@ impl SessionServiceImpl {
         let cordoned = inputs.topology().cordoned();
         let (live_identities, placement_candidate_identities) =
             DomainSchedulePlanningSnapshot::eligibility_inputs(&availability, &voters, cordoned);
-        let capabilities = inputs
+        let records = inputs
             .topology()
             .records()
             .iter()
             .filter(|(_, committed)| live_identities.contains(committed.record.identity()))
-            .map(|(node, committed)| (node.clone(), *committed.record.capabilities()))
+            .map(|(node, committed)| (node.clone(), committed.clone()))
             .collect::<std::collections::BTreeMap<_, _>>();
         let live_node_ids = availability.live_node_ids();
         let placement_candidate_node_ids = availability.placement_candidate_node_ids();
@@ -400,7 +421,7 @@ impl SessionServiceImpl {
         let cluster_nodes: SortedSet<ClusterNodeName> = placement_candidate_node_ids
             .into_iter()
             .filter(|node| {
-                voters.contains(node) && !cordoned.contains(node) && capabilities.contains_key(node)
+                voters.contains(node) && !cordoned.contains(node) && records.contains_key(node)
             })
             .collect();
         #[cfg(feature = "testing")]
@@ -410,6 +431,14 @@ impl SessionServiceImpl {
         };
         #[cfg(not(feature = "testing"))]
         let mode = SchedulePlanningMode::Sticky;
+        let executing = inputs
+            .state()
+            .is_some_and(|state| !matches!(state.status, nervix_models::DomainStatus::Stopped));
+        let standing_breaches = self.standing_node_rule_breaches(
+            inputs,
+            &records,
+            &cluster_nodes.iter().cloned().collect(),
+        );
         DomainSchedulePlanningSnapshot {
             domain: inputs.domain().clone(),
             voters,
@@ -419,10 +448,47 @@ impl SessionServiceImpl {
             placement_candidate_identities,
             live_voters,
             cluster_nodes,
-            capabilities,
+            records,
             replica_count: usize::try_from(self.cluster_parameters().replica_count())
                 .assured("the committed count fits a supported target"),
             mode,
+            executing,
+            standing_breaches,
+        }
+    }
+
+    /// The units the committed schedule already places against a node rule of the committed
+    /// graph. A domain without a schedule, or whose rules cannot be evaluated, has none, so any
+    /// breach a change would bring is refused.
+    fn standing_node_rule_breaches(
+        &self,
+        inputs: &DomainPlanningInputs,
+        records: &std::collections::BTreeMap<ClusterNodeName, nervix_models::CommittedNodeRecord>,
+        candidates: &BTreeSet<ClusterNodeName>,
+    ) -> NodeRuleBreaches {
+        let (Some(graph), Some(schedule)) = (
+            self.inner.registry.active_graph(inputs.domain()),
+            inputs.schedule(),
+        ) else {
+            return NodeRuleBreaches::default();
+        };
+        // Only an executing domain's change is judged against them.
+        match graph.judge_node_rules(
+            inputs.domain(),
+            schedule,
+            records,
+            candidates,
+            crate::registry::ScheduleActivity::Executing,
+        ) {
+            Ok(judgement) => judgement.breaches(),
+            Err(error) => {
+                tracing::warn!(
+                    domain = inputs.domain().as_str(),
+                    error = %format_args!("{error:#}"),
+                    "could not judge the committed schedule against its node rules"
+                );
+                NodeRuleBreaches::default()
+            }
         }
     }
 }

@@ -764,7 +764,7 @@ mod tests {
         )
         .topology;
         let nodes = [named("node-1"), named("node-2"), named("node-3")];
-        let capabilities = crate::registry::uniform_capabilities(&nodes);
+        let capabilities = crate::registry::uniform_records(&nodes);
         let schedule = graph
             .schedule_for_domain_with_topology(
                 crate::registry::DomainSchedulingInputs {
@@ -772,7 +772,7 @@ mod tests {
                     cluster_nodes: &nodes,
                     replica_count: 0,
                     existing: None,
-                    capabilities: &capabilities,
+                    records: &capabilities,
                 },
                 #[cfg(feature = "testing")]
                 SchedulerMode::Sticky,
@@ -823,7 +823,7 @@ mod tests {
                     cluster_nodes: &nodes,
                     replica_count: 0,
                     existing: Some(&schedule),
-                    capabilities: &capabilities,
+                    records: &capabilities,
                 },
                 #[cfg(feature = "testing")]
                 SchedulerMode::Sticky,
