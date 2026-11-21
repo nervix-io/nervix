@@ -595,7 +595,7 @@ Feature: Bounded execution and transient memory
     # The serving node's data workers carry the forwarded consumer's heartbeats and deliveries.
     # While they are full, those frames wait for a place instead of being refused, so the stream
     # stays open as long as the serving node is released within its heartbeat silence limit.
-    And data execution is saturated on node "{{serving}}"
+    And data execution on node "{{serving}}" is saturated
     And producer "input" submits batch "held" with rows
       | id  | amount |
       | o-5 | 7      |
@@ -603,7 +603,7 @@ Feature: Bounded execution and transient memory
       """
       forwarded retained batches: 1
       """
-    When execution is released on node "{{serving}}"
+    When data execution is released on every node
     And consumer "remote" reads output batch "held output"
     Then output batch "held output" contains id "o-5" and cents 700
     When output batch "held output" is acknowledged
