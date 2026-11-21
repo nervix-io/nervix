@@ -91,11 +91,19 @@ impl PlannedTransactionStepKind {
             Self::StopDomain => TransactionCommitStepKind::StopDomain,
             Self::CreateResource {
                 resource,
+                labels,
                 already_existed,
             } => TransactionCommitStepKind::CreateResource {
                 resource: resource.clone(),
+                labels: labels.clone(),
                 already_existed: *already_existed,
             },
+            Self::EditResourceLabels { resource, labels } => {
+                TransactionCommitStepKind::EditResourceLabels {
+                    resource: resource.clone(),
+                    labels: labels.clone(),
+                }
+            }
             Self::ResetWasmState {
                 reset,
                 request,

@@ -26,7 +26,7 @@ use hyper::{
     header::{AUTHORIZATION, WWW_AUTHENTICATE},
 };
 use meticulous::{OptionExt as _, ResultExt as _};
-use nervix_consensus::UserCredentials;
+use nervix_consensus::UserRecord;
 use nervix_execution::{AdmissionError, CpuClass, ExecutionError, Executor, MemoryClass};
 use nervix_models::{CreateStatement, CreateUser, PasswordCost, PasswordCredential, UserName};
 use thiserror::Error;
@@ -273,9 +273,8 @@ impl PasswordVerification {
             )),
             Self::Authentication(input) => {
                 let work = input.work();
-                let (matched, cost) = match input.into_user() {
-                    Some(user) => {
-                        let credential = user.password_credential;
+                let (matched, cost) = match input.into_credential() {
+                    Some(credential) => {
                         let matched = nervix_crypto::password::verify(
                             credential.cost().get(),
                             credential.salt(),
@@ -359,16 +358,18 @@ pub(in crate::application) async fn verify_password_credential(
     .await
 }
 
-pub(in crate::application) async fn user_credentials(
+pub(in crate::application) async fn prepare_user_record(
     executor: &Executor,
     name: UserName,
     password: String,
+    labels: nervix_models::EntityLabels,
     cost: PasswordCost,
-) -> error_stack::Result<UserCredentials, PasswordHashError> {
+) -> error_stack::Result<UserRecord, PasswordHashError> {
     let password_credential = hash_password(executor, password, cost).await?;
-    Ok(UserCredentials {
+    Ok(UserRecord {
         name,
         password_credential,
+        labels,
     })
 }
 
@@ -496,10 +497,11 @@ impl SessionServiceImpl {
             }
             return command_error(format!("user '{}' already exists", create.name.as_str()));
         }
-        let user = match user_credentials(
+        let user = match prepare_user_record(
             self.inner.runtime.executor(),
             create.name.clone(),
             create.password,
+            create.labels,
             self.password_creation_cost(),
         )
         .await
@@ -533,10 +535,10 @@ impl SessionServiceImpl {
     pub(in crate::application) async fn apply_persistent_user_creation(
         &self,
         if_not_exists: bool,
-        user: UserCredentials,
+        user: UserRecord,
     ) -> CommandResult {
         if let Some(existing) = self.inner.consensus.current_user(&user.name).await {
-            if existing == user {
+            if existing.password_credential == user.password_credential {
                 return match self.wait_for_authoritative_visibility().await {
                     Ok(()) => command_ok(format!("created user '{}'", existing.name.as_str())),
                     Err(error) => command_error(format!(
@@ -619,6 +621,7 @@ mod tests {
         let result = service
             .create_user(CreateStatement::new(
                 CreateUser {
+                    labels: nervix_models::EntityLabels::default(),
                     name: user.clone(),
                     password: "secret-password".to_string(),
                 },
@@ -647,6 +650,7 @@ mod tests {
         let created = service
             .create_user(CreateStatement::new(
                 CreateUser {
+                    labels: nervix_models::EntityLabels::default(),
                     name: direct_name.clone(),
                     password: "direct-secret".to_string(),
                 },
@@ -660,6 +664,7 @@ mod tests {
         let duplicate = service
             .create_user(CreateStatement::new(
                 CreateUser {
+                    labels: nervix_models::EntityLabels::default(),
                     name: direct_name,
                     password: "ignored-secret".to_string(),
                 },
@@ -674,10 +679,11 @@ mod tests {
 
         let retained_name = UserName::parse("retained_user")
             .assured("the test user name is an identifier-shaped literal");
-        let retained = user_credentials(
+        let retained = prepare_user_record(
             service.inner.runtime.executor(),
             retained_name.clone(),
             "retained-secret".to_string(),
+            nervix_models::EntityLabels::default(),
             service.password_creation_cost(),
         )
         .await
@@ -695,10 +701,11 @@ mod tests {
             .await;
         assert_eq!(resumed, applied);
 
-        let conflicting = user_credentials(
+        let conflicting = prepare_user_record(
             service.inner.runtime.executor(),
             retained_name,
             "different-secret".to_string(),
+            nervix_models::EntityLabels::default(),
             service.password_creation_cost(),
         )
         .await
@@ -784,6 +791,7 @@ mod tests {
         let created = service
             .create_user(CreateStatement::new(
                 CreateUser {
+                    labels: nervix_models::EntityLabels::default(),
                     name: UserName::parse("busy_user")
                         .assured("the test user name is an identifier-shaped literal"),
                     password: "busy-secret".to_string(),
@@ -875,6 +883,7 @@ mod tests {
         let created = service
             .create_user(CreateStatement::new(
                 CreateUser {
+                    labels: nervix_models::EntityLabels::default(),
                     name: UserName::parse("known_user")
                         .assured("the test user name is an identifier-shaped literal"),
                     password: "known-secret".to_string(),

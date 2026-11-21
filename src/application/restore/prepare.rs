@@ -461,6 +461,7 @@ impl SessionServiceImpl {
         let data = archive.data.clone();
         let restore = restore.clone();
         let recorded = recorded.clone();
+        let label_limits = nervix_models::EntityLabelLimits::from(&self.cluster_parameters());
         let executor = self.inner.runtime.executor();
         let charge = executor
             .reserve(MemoryClass::Bulk, 1)
@@ -479,6 +480,7 @@ impl SessionServiceImpl {
                         users: &users,
                         domains: &domains,
                         recorded: &recorded,
+                        label_limits,
                     },
                 )
                 .change_context(RestoreRefusal::Plan)
@@ -511,8 +513,8 @@ impl SessionServiceImpl {
             let resources = domain
                 .resources
                 .iter()
-                .map(|declared| declared.resource.clone())
-                .collect::<BTreeSet<_>>();
+                .map(|declared| (declared.resource.clone(), declared.labels.clone()))
+                .collect::<BTreeMap<_, _>>();
             let completed = completed_uploads(owner, domain).change_context_lazy(refusal)?;
             let planned = self
                 .plan_restored_model_run(

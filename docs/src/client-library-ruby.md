@@ -105,7 +105,7 @@ different one.
 `outcome.entity_labels` retains a typed, bounded metadata snapshot independently of the outcome.
 The exact string map is available for either presentation format. `EntityLabelViewKind` separates
 a committed revision from a staged transaction preview; the captured policy revision and limits
-describe the acceptance policy used by the read.
+describe the acceptance policy used by the read. `domain` is `nil` for a cluster user.
 
 ```ruby
 {{#include ../../tests/client_conformance/ruby/suite/cluster/entity_labels_test.rb:entity_labels}}

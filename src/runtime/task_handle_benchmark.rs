@@ -93,6 +93,7 @@ impl TaskHandleBenchmark {
         let domains = BTreeMap::from([(
             domain.clone(),
             DomainState {
+                labels: nervix_models::EntityLabels::default(),
                 id: domain.clone(),
                 config: nervix_models::DomainConfig {
                     pace: DomainPace::Unpaced,

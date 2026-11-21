@@ -1510,9 +1510,13 @@ func stateInspectionLines(state *session.StateInspection) ([]string, error) {
 	switch state.EntityType() {
 	case session.StateInspectionEntityDomainNodeInspectionEntity:
 		scope := new(session.DomainNodeInspectionEntity)
-		if err := union(state.Entity, scope); err != nil { return nil, err }
+		if err := union(state.Entity, scope); err != nil {
+			return nil, err
+		}
 		entity := scope.Node(nil)
-		if entity == nil || entity.Kind() == nil { return nil, errors.New("inspection lacks node identity") }
+		if entity == nil || entity.Kind() == nil {
+			return nil, errors.New("inspection lacks node identity")
+		}
 		lines = []string{fmt.Sprintf("STATE domain=%s kind=%s name=%s", scope.Domain(), session.EnumNamesModelKind[*entity.Kind()], entity.Name())}
 	case session.StateInspectionEntityClusterLicenseInspectionEntity:
 		lines = []string{"STATE scope=cluster_license kind=LICENSE"}
@@ -1632,18 +1636,57 @@ func stateInspectionLines(state *session.StateInspection) ([]string, error) {
 	return lines, nil
 }
 
+func entityLabelOwner(value *session.EntityLabelsInspection) (domain, kind, name string, err error) {
+	switch value.OwnerType() {
+	case session.EntityLabelOwnerModelLabelOwner:
+		owner := new(session.ModelLabelOwner)
+		if err := union(value.Owner, owner); err != nil {
+			return "", "", "", err
+		}
+		model := owner.Model(nil)
+		if model == nil || model.Kind() == nil {
+			return "", "", "", errors.New("labels lack the model identity")
+		}
+		return string(owner.Domain()), strings.ToLower(session.EnumNamesModelKind[*model.Kind()]), string(model.Name()), nil
+	case session.EntityLabelOwnerDomainLabelOwner:
+		owner := new(session.DomainLabelOwner)
+		if err := union(value.Owner, owner); err != nil {
+			return "", "", "", err
+		}
+		name := string(owner.Name())
+		return name, "domain", name, nil
+	case session.EntityLabelOwnerResourceLabelOwner:
+		owner := new(session.ResourceLabelOwner)
+		if err := union(value.Owner, owner); err != nil {
+			return "", "", "", err
+		}
+		return string(owner.Domain()), "resource", string(owner.Name()), nil
+	case session.EntityLabelOwnerUserLabelOwner:
+		owner := new(session.UserLabelOwner)
+		if err := union(value.Owner, owner); err != nil {
+			return "", "", "", err
+		}
+		return "none", "user", string(owner.Name()), nil
+	default:
+		return "", "", "", errors.New("labels have an undeclared owner")
+	}
+}
+
 func entityLabelLines(value *session.EntityLabelsInspection) ([]string, error) {
-	entity := value.Entity(nil)
+	domain, kind, name, err := entityLabelOwner(value)
+	if err != nil {
+		return nil, err
+	}
 	policy := value.Policy(nil)
-	if entity == nil || entity.Kind() == nil || policy == nil {
-		return nil, errors.New("labels lack identity or policy")
+	if policy == nil {
+		return nil, errors.New("labels lack captured policy")
 	}
 	limits := policy.Limits(nil)
 	if limits == nil {
 		return nil, errors.New("labels lack captured limits")
 	}
 	lines := []string{fmt.Sprintf("ENTITY_LABELS domain=%s kind=%s name=%s policy=%d limits=%d/%d/%d/%d",
-		value.Domain(), strings.ToLower(session.EnumNamesModelKind[*entity.Kind()]), entity.Name(), policy.Revision(),
+		domain, kind, name, policy.Revision(),
 		limits.Count(), limits.KeyBytes(), limits.ValueBytes(), limits.Bytes())}
 	switch value.ViewType() {
 	case session.EntityLabelViewCommittedEntityLabels:
@@ -1653,6 +1696,9 @@ func entityLabelLines(value *session.EntityLabelsInspection) ([]string, error) {
 		}
 		lines = append(lines, fmt.Sprintf("LABEL_VIEW committed revision=%d", view.Revision()))
 	case session.EntityLabelViewStagedEntityLabels:
+		if kind == "domain" || kind == "user" {
+			return nil, errors.New("administrative labels have no staged view")
+		}
 		view := new(session.StagedEntityLabels)
 		if err := union(value.View, view); err != nil {
 			return nil, err

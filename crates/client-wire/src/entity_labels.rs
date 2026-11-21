@@ -14,9 +14,101 @@ use error_stack::{Report, ResultExt as _};
 use flatbuffers::WIPOffset;
 use meticulous::OptionExt as _;
 use nervix_models::{
-    DomainNodeRef, EntityLabelLimits, EntityLabelPolicy, EntityLabelView, EntityLabels,
-    EntityLabelsInspection, LabelAssignment, LabelKey,
+    DomainNodeRef, EntityLabelLimits, EntityLabelOwner, EntityLabelPolicy, EntityLabelView,
+    EntityLabels, EntityLabelsInspection, LabelAssignment, LabelKey, ResourceCatalogKey,
 };
+
+fn encode_owner(
+    owner: &EntityLabelOwner,
+    encoder: &mut Encoder<'_>,
+) -> Result<EncodedUnion<wire::EntityLabelOwner>, Report<WireEncodeError>> {
+    let encoded = match owner {
+        EntityLabelOwner::Model(model) => {
+            let domain = encoder.text("ModelLabelOwner.domain", model.domain.as_str())?;
+            let model = encode_node_ref(encoder, &model.node)?;
+            let owner = wire::ModelLabelOwner::create(
+                encoder.fbb(),
+                &wire::ModelLabelOwnerArgs {
+                    domain: Some(domain),
+                    model: Some(model),
+                },
+            );
+            EncodedUnion::new(wire::EntityLabelOwner::ModelLabelOwner, owner)
+        }
+        EntityLabelOwner::Domain { name } => {
+            let name = encoder.text("DomainLabelOwner.name", name.as_str())?;
+            let owner = wire::DomainLabelOwner::create(
+                encoder.fbb(),
+                &wire::DomainLabelOwnerArgs { name: Some(name) },
+            );
+            EncodedUnion::new(wire::EntityLabelOwner::DomainLabelOwner, owner)
+        }
+        EntityLabelOwner::Resource(resource) => {
+            let domain = encoder.text("ResourceLabelOwner.domain", resource.domain.as_str())?;
+            let name = encoder.text("ResourceLabelOwner.name", resource.identifier.as_str())?;
+            let owner = wire::ResourceLabelOwner::create(
+                encoder.fbb(),
+                &wire::ResourceLabelOwnerArgs {
+                    domain: Some(domain),
+                    name: Some(name),
+                },
+            );
+            EncodedUnion::new(wire::EntityLabelOwner::ResourceLabelOwner, owner)
+        }
+        EntityLabelOwner::User { name } => {
+            let name = encoder.text("UserLabelOwner.name", name.as_str())?;
+            let owner = wire::UserLabelOwner::create(
+                encoder.fbb(),
+                &wire::UserLabelOwnerArgs { name: Some(name) },
+            );
+            EncodedUnion::new(wire::EntityLabelOwner::UserLabelOwner, owner)
+        }
+    };
+    Ok(encoded)
+}
+
+fn decode_owner(
+    decoder: Decoder<'_>,
+    value: wire::EntityLabelsInspection<'_>,
+) -> Result<EntityLabelOwner, Report<WireDecodeError>> {
+    let owner = match value.owner_type() {
+        wire::EntityLabelOwner::ModelLabelOwner => {
+            let owner = value
+                .owner_as_model_label_owner()
+                .assured("the verified union discriminant names the model owner");
+            let domain = decoder.name("ModelLabelOwner.domain", owner.domain())?;
+            let model = decode_node_ref(decoder, owner.model())?;
+            EntityLabelOwner::Model(DomainNodeRef::new(domain, model))
+        }
+        wire::EntityLabelOwner::DomainLabelOwner => {
+            let owner = value
+                .owner_as_domain_label_owner()
+                .assured("the verified union discriminant names the domain owner");
+            EntityLabelOwner::Domain {
+                name: decoder.name("DomainLabelOwner.name", owner.name())?,
+            }
+        }
+        wire::EntityLabelOwner::ResourceLabelOwner => {
+            let owner = value
+                .owner_as_resource_label_owner()
+                .assured("the verified union discriminant names the resource owner");
+            EntityLabelOwner::Resource(ResourceCatalogKey {
+                domain: decoder.name("ResourceLabelOwner.domain", owner.domain())?,
+                identifier: decoder.name("ResourceLabelOwner.name", owner.name())?,
+            })
+        }
+        wire::EntityLabelOwner::UserLabelOwner => {
+            let owner = value
+                .owner_as_user_label_owner()
+                .assured("the verified union discriminant names the user owner");
+            EntityLabelOwner::User {
+                name: decoder.name("UserLabelOwner.name", owner.name())?,
+            }
+        }
+        unknown => return Err(decoder.unknown_union("EntityLabelsInspection.owner", unknown.0)),
+    };
+    Ok(owner)
+}
 
 use crate::{
     codec::{Decoder, EncodedUnion, Encoder, WireDecodeError, WireEncodeError},
@@ -30,11 +122,7 @@ pub(crate) fn encode_entity_labels<'fbb>(
     encoder: &mut Encoder<'fbb>,
 ) -> Result<WIPOffset<wire::EntityLabelsInspection<'fbb>>, Report<WireEncodeError>> {
     encoder.entries("EntityLabelsInspection.labels", value.labels().len())?;
-    let domain = encoder.text(
-        "EntityLabelsInspection.domain",
-        value.entity().domain.as_str(),
-    )?;
-    let entity = encode_node_ref(encoder, &value.entity().node)?;
+    let owner = encode_owner(value.entity(), encoder)?;
     let mut entries = Vec::with_capacity(value.labels().len());
     for (key, value) in value.labels().iter() {
         let key = encoder.text("LabelEntry.key", key.as_str())?;
@@ -91,8 +179,8 @@ pub(crate) fn encode_entity_labels<'fbb>(
     Ok(wire::EntityLabelsInspection::create(
         encoder.fbb(),
         &wire::EntityLabelsInspectionArgs {
-            domain: Some(domain),
-            entity: Some(entity),
+            owner_type: owner.discriminant,
+            owner: Some(owner.value),
             labels: Some(labels),
             policy: Some(policy),
             view_type: view.discriminant,
@@ -105,8 +193,7 @@ pub(crate) fn decode_entity_labels(
     decoder: Decoder<'_>,
     value: wire::EntityLabelsInspection<'_>,
 ) -> Result<EntityLabelsInspection, Report<WireDecodeError>> {
-    let domain = decoder.name("EntityLabelsInspection.domain", value.domain())?;
-    let node = decode_node_ref(decoder, value.entity())?;
+    let owner = decode_owner(decoder, value)?;
     let captured = value.policy();
     let revision = decoder.non_zero("EntityLabelPolicy.revision", captured.revision())?;
     let limits = captured.limits();
@@ -162,11 +249,12 @@ pub(crate) fn decode_entity_labels(
         }
         unknown => return Err(decoder.unknown_union("EntityLabelsInspection.view", unknown.0)),
     };
-    EntityLabelsInspection::new(DomainNodeRef::new(domain, node), labels, view, policy)
-        .change_context(WireDecodeError::InvalidValue {
+    EntityLabelsInspection::new(owner, labels, view, policy).change_context(
+        WireDecodeError::InvalidValue {
             field: "EntityLabelsInspection.labels",
             kind: "labels within captured committed policy",
-        })
+        },
+    )
 }
 
 #[cfg(test)]

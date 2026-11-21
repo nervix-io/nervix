@@ -1059,6 +1059,7 @@ fn parses_create_resource_statement() {
         parsed,
         Statement::CreateResource(nervix_models::CreateStatement::new(
             nervix_models::CreateResource {
+                labels: nervix_models::EntityLabels::default(),
                 identifier: ResourceName::parse("fraud_model").expect("valid resource name"),
             },
             false,

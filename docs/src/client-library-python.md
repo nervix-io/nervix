@@ -129,7 +129,7 @@ for a different one.
 of the selected text or JSON presentation and of the outcome's lifetime. Keys and values keep their
 exact spelling; an empty value differs from an absent key. `EntityLabelViewKind` distinguishes a
 committed revision from a transaction's staged preview. The policy revision and byte/count limits
-describe the committed acceptance policy captured with that view.
+describe the committed acceptance policy captured with that view. `domain` is `None` for a cluster user.
 
 ```python
 {{#include ../../tests/client_conformance/python/suite/cluster/test_entity_labels.py:entity_labels}}

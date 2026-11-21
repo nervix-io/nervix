@@ -12,7 +12,7 @@
 
 use std::collections::BTreeSet;
 
-use meticulous::ResultExt as _;
+use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_arbitrary::{Arbitrary, Domain, ModelVariant};
 use nervix_models::{EntityLabels, ModelKind, Statement};
 use strum::IntoEnumIterator as _;
@@ -95,9 +95,9 @@ fn metadata_clause_has_one_position_and_duplicates_are_never_overwritten() {
         "CREATE SCHEMA event ( value U32 ) LABELS {} LABELS {};",
         "SET LABELS ON SCHEMA event { 'owner' = 'one', 'owner' = 'two' };",
         "DROP LABELS ON SCHEMA event { 'owner', 'owner' };",
-        "SHOW LABELS ON DOMAIN event;",
-        "SHOW LABELS ON RESOURCE event;",
-        "SHOW LABELS ON USER event;",
+        "SHOW LABELS ON DOMAIN;",
+        "SHOW LABELS ON RESOURCE event VERSION 1;",
+        "SHOW LABELS ON USER event LABELS {};",
     ] {
         assert!(parse_statement(source).is_err(), "{source}");
     }
@@ -108,6 +108,50 @@ fn metadata_clause_has_one_position_and_duplicates_are_never_overwritten() {
         panic!("the source is a creation statement");
     };
     assert_eq!(create.body.labels().get("team/path"), Some(" Δ "));
+}
+
+#[test]
+fn administrative_creations_and_catalog_targets_use_the_shared_grammar() {
+    for (creation, target, name_label) in [
+        ("CREATE DOMAIN sales", "DOMAIN sales", "ref:domain"),
+        (
+            "CREATE USER customer WITH PASSWORD 'test-password'",
+            "USER customer",
+            "user_name",
+        ),
+        (
+            "CREATE RESOURCE catalog",
+            "RESOURCE catalog",
+            "ref:resource",
+        ),
+    ] {
+        for source in [
+            format!("{creation} LABELS {{ 'team/path' = ' Δ ' }};"),
+            format!("SET LABELS ON {target} {{ 'team/path' = ' Δ ' }};"),
+            format!("DROP LABELS ON {target} {{ 'team/path' }};"),
+            format!("SHOW LABELS ON {target} FORMAT JSON;"),
+        ] {
+            let statement =
+                parse_statement(&source).assured("the shared metadata grammar accepts this owner");
+            assert_reads_back_canonically(&statement);
+        }
+        let creation_prefix = format!("{creation} ");
+        assert!(
+            suggest_statement(&creation_prefix, creation_prefix.len())
+                .iter()
+                .any(|item| item == "LABELS")
+        );
+        let kind = target
+            .split_once(' ')
+            .assured("every example has a typed name")
+            .0;
+        let prefix = format!("SHOW LABELS ON {kind} ");
+        let suggestions = suggest_statement(&prefix, prefix.len());
+        assert!(
+            suggestions.iter().any(|item| item == name_label),
+            "{prefix}: {suggestions:?}"
+        );
+    }
 }
 
 #[test]

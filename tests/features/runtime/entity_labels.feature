@@ -681,3 +681,389 @@ Feature: Domain entity labels
       | cluster_size |
       | 1            |
       | 3            |
+
+  @entity_labels_publication
+  Scenario Outline: Resource label edits publish with their transaction and disappear on revert
+    Given a <cluster_size> node nervix cluster is started
+    And the active domain is "{{domain}}"
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE RESOURCE orders_schema;
+      """
+    And client "editor" is connected to the leader node
+    And client "observer" is connected to the leader node
+    When client "editor" executes these Plexus commands
+      """
+      BEGIN;
+      SET LABELS ON RESOURCE orders_schema { 'status' = 'checked' };
+      CREATE RESOURCE imported_schema LABELS { 'team' = 'Orders' };
+      SET LABELS ON RESOURCE imported_schema { 'status' = 'pending' };
+      DROP LABELS ON RESOURCE imported_schema { 'team', 'absent' };
+      CREATE SCHEMA orders_event (value U32);
+      """
+    And client "editor" executes these Plexus commands
+      """
+      SHOW LABELS ON RESOURCE imported_schema FORMAT JSON;
+      """
+    Then the last command output is a JSON document where
+      """
+      /labels = {"status":"pending"}
+      /view/state = "staged"
+      """
+    When client "observer" executes these Plexus commands
+      """
+      SHOW LABELS ON RESOURCE orders_schema FORMAT JSON;
+      """
+    Then the last command output is a JSON document where
+      """
+      /labels = {}
+      /view/state = "committed"
+      """
+    When client "editor" executes these Plexus commands
+      """
+      COMMIT;
+      """
+    And client "observer" executes these Plexus commands
+      """
+      SHOW LABELS ON RESOURCE orders_schema FORMAT JSON;
+      """
+    Then the last command output is a JSON document where
+      """
+      /labels/status = "checked"
+      /view/state = "committed"
+      """
+    When client "editor" executes these Plexus commands
+      """
+      BEGIN;
+      DROP LABELS ON RESOURCE orders_schema { 'status' };
+      REVERT;
+      """
+    And client "observer" executes these Plexus commands
+      """
+      SHOW LABELS ON RESOURCE orders_schema FORMAT JSON;
+      """
+    Then the last command output is a JSON document where
+      """
+      /labels/status = "checked"
+      /view/state = "committed"
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
+  @entity_labels_publication
+  Scenario Outline: Domain, resource and user labels survive edits and a cluster restart
+    Given a <cluster_size> node nervix cluster is started
+    And the active domain is "{{domain}}"
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}} LABELS { 'team' = 'Orders' };
+      CREATE RESOURCE orders_schema LABELS { 'status' = 'draft', 'empty' = '' };
+      CREATE USER orders_reader WITH PASSWORD 'reader-password' LABELS { 'purpose' = 'Orders' };
+      CREATE SCHEMA label_event ( value U32 );
+      START;
+      """
+    When these Plexus commands are executed on the leader node
+      """
+      SHOW LABELS ON DOMAIN {{domain}} FORMAT JSON;
+      """
+    Then the last command output is a JSON document where
+      """
+      /entity/kind = "domain"
+      /labels/team = "Orders"
+      """
+    When these Plexus commands are executed on the leader node
+      """
+      SHOW LABELS ON SCHEMA label_event FORMAT JSON;
+      """
+    Then the last command output is a JSON document where
+      """
+      /labels = {}
+      """
+    When these Plexus commands are executed on the leader node
+      """
+      SHOW LABELS ON RESOURCE orders_schema FORMAT JSON;
+      """
+    Then the last command output is a JSON document where
+      """
+      /entity/kind = "resource"
+      /entity/identifier = "orders_schema"
+      /labels/status = "draft"
+      /labels/empty = ""
+      """
+    When these Plexus commands are executed on the leader node
+      """
+      SHOW LABELS ON USER orders_reader FORMAT JSON;
+      """
+    Then the last command output is a JSON document where
+      """
+      /entity = {"kind":"user","name":"orders_reader"}
+      /labels/purpose = "Orders"
+      """
+    And the last command output does not contain
+      """
+      reader-password
+      """
+    When these Plexus commands are executed on the leader node
+      """
+      SET LABELS ON DOMAIN {{domain}} { 'team' = 'Platform' };
+      SET LABELS ON RESOURCE orders_schema { 'status' = 'approved' };
+      DROP LABELS ON RESOURCE orders_schema { 'empty', 'absent' };
+      SET LABELS ON USER orders_reader { 'purpose' = 'Audit' };
+      DESCRIBE DOMAIN;
+      """
+    Then the last command output contains
+      """
+      status: running
+      """
+    And the last command output contains
+      """
+      labels: {"team":"Platform"}
+      """
+    When these Plexus commands are executed on the leader node
+      """
+      DESCRIBE RESOURCE orders_schema;
+      """
+    Then the last command output contains
+      """
+      latest: (none)
+      """
+    And the last command output contains
+      """
+      labels: {"status":"approved"}
+      """
+    When the cluster is restarted
+    When these Plexus commands are executed on the leader node
+      """
+      SHOW LABELS ON DOMAIN {{domain}} FORMAT JSON;
+      """
+    Then the last command output is a JSON document where
+      """
+      /labels/team = "Platform"
+      """
+    When these Plexus commands are executed on the leader node
+      """
+      SHOW LABELS ON RESOURCE orders_schema FORMAT JSON;
+      """
+    Then the last command output is a JSON document where
+      """
+      /labels = {"status":"approved"}
+      """
+    When these Plexus commands are executed on the leader node
+      """
+      SHOW LABELS ON USER orders_reader FORMAT JSON;
+      """
+    Then the last command output is a JSON document where
+      """
+      /labels/purpose = "Audit"
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
+  Scenario Outline: Resource labels stay in the selected domain and administrative edits are refused in a transaction
+    Given a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}} LABELS { 'team' = 'original' };
+      CREATE UNPACED DOMAIN {{domain}}_other;
+      CREATE USER labels_reader WITH PASSWORD 'reader-password' LABELS { 'team' = 'original' };
+      """
+    And client "editor" is connected to the leader node
+    And client "other" is connected to the leader node
+    When client "editor" selects domain "{{domain}}"
+    And client "other" selects domain "{{domain}}_other"
+    And client "editor" executes these Plexus commands
+      """
+      CREATE RESOURCE shared LABELS { 'team' = 'orders' };
+      BEGIN;
+      """
+    And client "other" executes these Plexus commands
+      """
+      CREATE RESOURCE shared LABELS { 'team' = 'returns' };
+      """
+    When client "editor" fails to execute these Plexus commands
+      """
+      SET LABELS ON DOMAIN {{domain}} { 'team' = 'refused' };
+      """
+    Then the last command error contains
+      """
+      cannot be queued in a transaction
+      """
+    When client "editor" fails to execute these Plexus commands
+      """
+      DROP LABELS ON USER labels_reader { 'team' };
+      """
+    Then the last command error contains
+      """
+      cannot be queued in a transaction
+      """
+    When client "editor" executes these Plexus commands
+      """
+      SET LABELS ON RESOURCE shared { 'team' = 'new-orders' };
+      COMMIT;
+      """
+    And client "other" executes these Plexus commands
+      """
+      SHOW LABELS ON RESOURCE shared FORMAT JSON;
+      """
+    Then the last command output is a JSON document where
+      """
+      /labels/team = "returns"
+      """
+    When client "editor" executes these Plexus commands
+      """
+      SHOW LABELS ON RESOURCE shared FORMAT JSON;
+      """
+    Then the last command output is a JSON document where
+      """
+      /labels/team = "new-orders"
+      """
+    When client "other" executes these Plexus commands
+      """
+      SHOW LABELS ON DOMAIN {{domain}} FORMAT JSON;
+      """
+    Then the last command output is a JSON document where
+      """
+      /labels/team = "original"
+      """
+    When client "other" executes these Plexus commands
+      """
+      SHOW LABELS ON USER labels_reader FORMAT JSON;
+      """
+    Then the last command output is a JSON document where
+      """
+      /labels/team = "original"
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
+  @entity_labels_restore
+  Scenario Outline: A domain backup retains domain and catalog labels within its original scope
+    Given a <cluster_size> node nervix cluster is started
+    And the active domain is "{{domain}}"
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}} LABELS { 'team' = 'Orders' };
+      CREATE RESOURCE pending_schema LABELS { 'status' = 'draft' };
+      CREATE USER backup_reader WITH PASSWORD 'reader-password' LABELS { 'purpose' = 'Orders' };
+      """
+    Then the current leader node is saved as placeholder "leader"
+    When the CLI backs up "domain {{domain}} --without-state --without-resources" from node "{{leader}}" into "labelled.nvxb" reporting JSON
+    Then the CLI backup succeeded with a JSON report naming domain "{{domain}}"
+    When the CLI describes backup archive "labelled.nvxb" as json
+    Then the described backup holds no users
+    When the CLI restores "domain {{domain}} --as {{domain}}_copy" from "labelled.nvxb" on node "{{leader}}" reporting JSON
+    Then the CLI restore succeeded, restoring domain "{{domain}}_copy" with 0 resource versions and 0 models
+    When these Plexus commands are executed on the leader node
+      """
+      SHOW LABELS ON DOMAIN {{domain}}_copy FORMAT JSON;
+      """
+    Then the last command output is a JSON document where
+      """
+      /labels/team = "Orders"
+      """
+    Given the active domain is "{{domain}}_copy"
+    When these Plexus commands are executed on the leader node
+      """
+      SHOW LABELS ON RESOURCE pending_schema FORMAT JSON;
+      """
+    Then the last command output is a JSON document where
+      """
+      /labels/status = "draft"
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
+  @entity_labels_restore
+  Scenario Outline: A cluster backup restores user labels with the same sign-in
+    Given a <cluster_size> node nervix cluster is started
+    And the active domain is "{{domain}}"
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE USER backup_reader WITH PASSWORD 'reader-password' LABELS { 'purpose' = 'Orders' };
+      SET LABELS ON USER backup_reader { 'purpose' = 'Audit' };
+      """
+    Then the current leader node is saved as placeholder "leader"
+    When the CLI backs up "cluster --without-state" from node "{{leader}}" into "labelled-cluster.nvxb" reporting JSON
+    Then the CLI backup succeeded with a JSON report naming domain "{{domain}}"
+    Given the cluster is replaced by a fresh <cluster_size> node cluster whose nodes are named "restored"
+    Then the current leader node is saved as placeholder "leader"
+    When the CLI restores "cluster --on-existing-user skip" from "labelled-cluster.nvxb" on node "{{leader}}" reporting JSON
+    Then the CLI restore succeeded with users 1 created, 1 skipped and 0 replaced
+    Given client "reader" is connected to the leader node as user "backup_reader" with password "reader-password"
+    When client "reader" executes these Plexus commands
+      """
+      SHOW LABELS ON USER backup_reader FORMAT JSON;
+      """
+    Then the last command output is a JSON document where
+      """
+      /labels/purpose = "Audit"
+      """
+    And the last command output does not contain
+      """
+      reader-password
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
+  Scenario Outline: A committed label limit accounts for each administrative owner
+    Given a <cluster_size> node nervix cluster is started
+    And the active domain is "{{domain}}"
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE RESOURCE orders_schema;
+      CREATE USER orders_reader WITH PASSWORD 'reader-password';
+      SET LABELS ON <target> { 'one' = '1', 'two' = '2' };
+      """
+    When these Plexus commands fail with "does not exist"
+      """
+      DROP LABELS ON <missing> { 'absent' };
+      """
+    And these Plexus commands fail
+      """
+      ALTER CLUSTER SET ENTITY_LABELS_MAX_COUNT = 1;
+      """
+    And these Plexus commands are executed on the leader node
+      """
+      DROP LABELS ON <target> { 'two', 'absent' };
+      ALTER CLUSTER SET ENTITY_LABELS_MAX_COUNT = 1;
+      """
+    When these Plexus commands fail
+      """
+      SET LABELS ON <target> { 'two' = '2' };
+      """
+    And these Plexus commands are executed on the leader node
+      """
+      SHOW LABELS ON <target> FORMAT JSON;
+      """
+    Then the last command output is a JSON document where
+      """
+      /labels = {"one":"1"}
+      /policy/limits/count = 1
+      """
+
+    Examples:
+      | cluster_size | target                 | missing                |
+      | 1            | DOMAIN {{domain}}      | DOMAIN absent_domain   |
+      | 3            | DOMAIN {{domain}}      | DOMAIN absent_domain   |
+      | 1            | RESOURCE orders_schema | RESOURCE absent_schema |
+      | 3            | RESOURCE orders_schema | RESOURCE absent_schema |
+      | 1            | USER orders_reader     | USER absent_reader     |
+      | 3            | USER orders_reader     | USER absent_reader     |

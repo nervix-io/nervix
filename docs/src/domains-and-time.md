@@ -13,7 +13,9 @@ Nervix currently supports:
 - `CREATE UNPACED DOMAIN <id>;`
 - `CREATE DOMAIN <id>;`
 
-`CREATE DOMAIN <id>` is the short spelling for `CREATE UNPACED DOMAIN <id>`.
+`CREATE DOMAIN <id>` is the short spelling for `CREATE UNPACED DOMAIN <id>`. Each creation
+form accepts trailing [entity labels](entity-labels.md). `DESCRIBE DOMAIN` exposes them on
+the selected domain.
 
 Domain creation is never transaction content. A transaction is bound to one already-existing
 domain, so `CREATE DOMAIN` runs on its own before `BEGIN`; queueing it is rejected. See

@@ -455,6 +455,26 @@ fn corpus_frames() -> Vec<(&'static str, Bytes)> {
             reply(6, ReplyBody::Command(Box::new(backup))),
         ),
         (
+            "server_command_domain_labels.nxsm",
+            reply(
+                25,
+                ReplyBody::Command(Box::new({
+                    let mut outcome = command_outcome(CommandDisposition::Completed {
+                        already_existed: false,
+                    });
+                    outcome.entity_labels =
+                        Some(Box::new(crate::entity_labels::tests::owner_inspection(
+                            nervix_models::EntityLabelOwner::Domain {
+                                name: name("sales"),
+                            },
+                            false,
+                            41,
+                        )));
+                    outcome
+                })),
+            ),
+        ),
+        (
             "server_command_failed.nxsm",
             command(1, CommandDisposition::Failed),
         ),
@@ -586,6 +606,29 @@ fn corpus_frames() -> Vec<(&'static str, Bytes)> {
             ),
         ),
         (
+            "server_command_resource_labels_staged.nxsm",
+            reply(
+                26,
+                ReplyBody::Command(Box::new({
+                    let mut outcome = command_outcome(CommandDisposition::Completed {
+                        already_existed: false,
+                    });
+                    outcome.entity_labels =
+                        Some(Box::new(crate::entity_labels::tests::owner_inspection(
+                            nervix_models::EntityLabelOwner::Resource(
+                                nervix_models::ResourceCatalogKey::new(
+                                    &name("sales"),
+                                    &name("bundle"),
+                                ),
+                            ),
+                            true,
+                            41,
+                        )));
+                    outcome
+                })),
+            ),
+        ),
+        (
             "server_command_restore.nxsm",
             reply(19, ReplyBody::Command(Box::new(restore))),
         ),
@@ -624,6 +667,26 @@ fn corpus_frames() -> Vec<(&'static str, Bytes)> {
             command(
                 4,
                 CommandDisposition::OutcomeUnknown(UnknownOutcomeCause::StillApplying),
+            ),
+        ),
+        (
+            "server_command_user_labels.nxsm",
+            reply(
+                27,
+                ReplyBody::Command(Box::new({
+                    let mut outcome = command_outcome(CommandDisposition::Completed {
+                        already_existed: false,
+                    });
+                    outcome.entity_labels =
+                        Some(Box::new(crate::entity_labels::tests::owner_inspection(
+                            nervix_models::EntityLabelOwner::User {
+                                name: name("operator"),
+                            },
+                            false,
+                            41,
+                        )));
+                    outcome
+                })),
             ),
         ),
         (
@@ -2316,9 +2379,12 @@ fn render_entity_labels(value: &nervix_models::EntityLabelsInspection, lines: &m
     let policy = value.policy();
     lines.push(format!(
         "ENTITY_LABELS domain={} kind={} name={} policy={} limits={}/{}/{}/{}",
-        entity.domain,
-        entity.node.kind.as_str().replace('_', ""),
-        entity.node.identifier,
+        entity.domain().map_or("none", |domain| domain.as_str()),
+        entity
+            .keyword_phrase()
+            .replace(' ', "")
+            .to_ascii_lowercase(),
+        entity.name(),
         policy.revision,
         policy.limits.count,
         policy.limits.key_bytes,

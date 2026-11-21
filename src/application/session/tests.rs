@@ -746,6 +746,7 @@ fn clocked_domain(start_version: u64, status: DomainStatus) -> DomainState {
         }
     };
     DomainState {
+        labels: nervix_models::EntityLabels::default(),
         id: named("clocked"),
         config: DomainConfig {
             pace: DomainPace::Paced {
