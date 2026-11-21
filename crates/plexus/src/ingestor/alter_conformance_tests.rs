@@ -193,7 +193,10 @@ fn set_mode_writes_each_declared_delivery_mode() {
                 ..Generated::of(kind)
             }
             .choosing(delivery.requires);
-            if !delivery.kind.allows_quiesce(quiesce) {
+            let Some(quiesce) = declared.declared_quiesce(quiesce) else {
+                panic!("the quiesce kind is selected from this declaration");
+            };
+            if !quiesce.allows_delivery(delivery.kind) {
                 // The grammar reads the change; the registry refuses the ingestor it makes, whose
                 // quiesce mode this delivery cannot honor.
                 parsed_alter(kind, &operations);
@@ -248,7 +251,7 @@ fn set_quiesce_writes_each_declared_quiesce_mode() {
                 ..Generated::of(kind)
             }
             .choosing(quiesce.requires);
-            if !delivery.kind.allows_quiesce(quiesce.kind) {
+            if !quiesce.allows_delivery(delivery.kind) {
                 parsed_alter(kind, &operations);
                 continue;
             }

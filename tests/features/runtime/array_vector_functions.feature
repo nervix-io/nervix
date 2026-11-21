@@ -17,7 +17,7 @@ Feature: Typed array and vector expressions
       CREATE HTTP ENDPOINT numbers_ingress ON edge PATH '/numbers';
       CREATE HTTP ENDPOINT INGESTOR numbers_ingestor
         FROM numbers_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING numbers_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING numbers_codec
         TO numbers
           INHERIT ALL
           UNBRANCHED
@@ -83,7 +83,7 @@ Feature: Typed array and vector expressions
       CREATE HTTP ENDPOINT source_ingress ON edge PATH '/vectors';
       CREATE HTTP ENDPOINT INGESTOR ingestor_node
         FROM source_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING source_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING source_codec
         TO sources
           INHERIT ALL
           UNBRANCHED
@@ -161,7 +161,7 @@ Feature: Typed array and vector expressions
       CREATE HTTP ENDPOINT source_ingress ON edge PATH '/fixed-arrays';
       CREATE HTTP ENDPOINT INGESTOR ingestor_node
         FROM source_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING source_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING source_codec
         TO sources
           INHERIT ALL
           UNBRANCHED

@@ -22,7 +22,7 @@ Feature: Typed state inspection through the native host libraries
       CREATE VHOST inspection_edge native-inspection-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT inspection_ingress ON inspection_edge PATH '/rows';
       CREATE HTTP ENDPOINT INGESTOR inspected_in FROM inspection_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING inspected_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING inspected_codec
         TO populated INHERIT ALL BRANCHED BY by_tenant SET tenant = message.tenant
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE SUBSCRIPTION inspection_evidence TO populated;

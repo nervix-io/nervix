@@ -26,7 +26,7 @@ Feature: Model alteration quiesce classification
       CREATE HTTP ENDPOINT alter_ingress ON alter_edge PATH '/alter-quiesce';
       CREATE HTTP ENDPOINT INGESTOR alter_ingestor
         FROM alter_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING alter_event_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING alter_event_codec
         TO alter_events
         INHERIT ALL
         UNBRANCHED

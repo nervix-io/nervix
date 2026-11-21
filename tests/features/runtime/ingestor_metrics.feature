@@ -25,7 +25,7 @@ Feature: Ingestor metrics
         CREATE HTTP ENDPOINT ingestor_metrics_ingress ON edge PATH '/ingestor-metrics';
         CREATE HTTP ENDPOINT INGESTOR ingestor_metrics_ingestor
         FROM ingestor_metrics_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING notification_codec
         TO notifications
         INHERIT ALL
         BRANCHED BY by_ingestor_metrics_source
@@ -171,7 +171,7 @@ Feature: Ingestor metrics
       CREATE HTTP ENDPOINT payload_size_ingress ON edge PATH '/payload-size';
       CREATE HTTP ENDPOINT INGESTOR payload_size_ingestor
         FROM payload_size_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING notification_codec
         TO notifications
         INHERIT ALL
         UNBRANCHED
@@ -370,7 +370,7 @@ Feature: Ingestor metrics
         CREATE HTTP ENDPOINT ingestor_metrics_restart_ingress ON edge PATH '/ingestor-metrics-restart';
         CREATE HTTP ENDPOINT INGESTOR ingestor_metrics_ingestor
         FROM ingestor_metrics_restart_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING notification_codec
         TO notifications
         INHERIT ALL
         BRANCHED BY by_ingestor_metrics_source
@@ -485,7 +485,7 @@ Feature: Ingestor metrics
       CREATE HTTP ENDPOINT unfolded_metrics_ingress ON edge PATH '/unfolded-metrics';
       CREATE HTTP ENDPOINT INGESTOR unfolded_metrics_ingestor
         FROM unfolded_metrics_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_batch_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING notification_batch_codec
         TO notifications
         INHERIT ALL
         UNBRANCHED

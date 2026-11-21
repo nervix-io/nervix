@@ -18,7 +18,7 @@ Feature: Web console visual window processor and correlator creation
       CREATE VHOST visual_window_host window-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT visual_window_endpoint ON visual_window_host PATH '/window';
       CREATE HTTP ENDPOINT INGESTOR visual_window_ingestor FROM visual_window_endpoint MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING visual_window_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING visual_window_codec
         TO visual_window_input INHERIT ALL BRANCHED BY visual_window_tenant SET tenant = message.tenant
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
@@ -134,12 +134,12 @@ Feature: Web console visual window processor and correlator creation
       CREATE HTTP ENDPOINT visual_orders_endpoint ON visual_correlate_host PATH '/orders';
       CREATE HTTP ENDPOINT visual_payments_endpoint ON visual_correlate_host PATH '/payments';
       CREATE HTTP ENDPOINT INGESTOR visual_orders_ingestor FROM visual_orders_endpoint MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING visual_order_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING visual_order_codec
         TO visual_orders INHERIT ALL BRANCHED BY visual_correlate_tenant SET tenant = message.tenant
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
       CREATE HTTP ENDPOINT INGESTOR visual_payments_ingestor FROM visual_payments_endpoint MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING visual_payment_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING visual_payment_codec
         TO visual_payments INHERIT ALL BRANCHED BY visual_correlate_tenant SET tenant = message.tenant
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;

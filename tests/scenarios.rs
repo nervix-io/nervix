@@ -498,7 +498,7 @@ struct ScenarioWorld {
     subscription_arrival: Option<ArrivalObservation<SubscriptionReceipt>>,
     active_session_node: Option<String>,
     active_session_has_subscription: bool,
-    endpoint_websocket: Option<endpoint_intake::EndpointWebsocket>,
+    endpoint_websockets: BTreeMap<String, endpoint_intake::EndpointWebsocket>,
     endpoint_requests: endpoint_intake::requests::EndpointRequests,
     websocket_peer: Option<websocket_lifecycle::WebsocketPeer>,
     websocket_handoff_peer: Option<websocket_lifecycle::HandoffPeer>,
@@ -6768,7 +6768,9 @@ impl IngestorLogicTransportFixture {
 
     fn quiesce_fragment(self) -> &'static str {
         match self {
-            Self::HttpEndpoint | Self::WebsocketEndpoint => "BUFFER MAX SIZE 1MiB",
+            Self::HttpEndpoint | Self::WebsocketEndpoint => {
+                "BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE"
+            }
             Self::Kafka | Self::ZeroMq => "SUSPEND",
             Self::Mqtt | Self::Nats => "DROP",
         }
@@ -9607,7 +9609,7 @@ async fn configure_wasm_state_reset_graph(world: &mut ScenarioWorld, graph: Wasm
         CREATE HTTP ENDPOINT ingress ON edge PATH '/events';
         CREATE HTTP ENDPOINT INGESTOR counted_source
           FROM ingress MODE NO ACK
-          ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING counted_input_codec
+          ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING counted_input_codec
           TO counted_input_events
           INHERIT ALL
           {ingestor_branching}

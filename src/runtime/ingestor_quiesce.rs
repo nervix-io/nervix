@@ -23,9 +23,17 @@ use std::future::Future;
 use nervix_connector::{
     IngestMetadataRow, IngestRowHeaders, RetainedIngestHeaders, RetainedIngestMetadata,
 };
-use nervix_models::parse_duration_text;
+use nervix_models::{EndpointPauseResponse, parse_duration_text};
 
-use super::*;
+use super::{
+    endpoint_acknowledgement::{EndpointAdmissionRefusal, EndpointRequestCapacity},
+    endpoint_pause::{EndpointPauseId, EndpointPauseReply, EndpointPauseWait},
+    *,
+};
+
+#[path = "ingestor_quiesce_buffer.rs"]
+mod retention;
+use retention::{DeliveryEnd, IngestorQuiesceBuffer, RetainedDelivery, RetentionOverflow};
 
 #[path = "source_readiness.rs"]
 mod readiness;
@@ -180,7 +188,10 @@ enum IngestorQuiesceHandling {
         overflow: IngestQuiesceOverflow,
     },
     /// Endpoint payloads are retained per instance within `max_size` bytes and rejected once full.
-    EndpointBuffer { max_size: usize },
+    EndpointBuffer {
+        max_size: usize,
+        response: EndpointPauseResponse,
+    },
 }
 
 impl IngestorQuiesceHandling {
@@ -223,8 +234,9 @@ impl IngestorQuiesceHandling {
                 max_size: quiesce_max_size_bytes(max_size),
                 overflow: *overflow,
             },
-            IngestQuiesceMode::EndpointBuffer { max_size } => Self::EndpointBuffer {
+            IngestQuiesceMode::EndpointBuffer { max_size, response } => Self::EndpointBuffer {
                 max_size: quiesce_max_size_bytes(max_size),
+                response: *response,
             },
         }
     }
@@ -552,202 +564,22 @@ impl BufferedIngestPayload {
     }
 }
 
-/// One instance's retained payloads, oldest first.
-///
-/// The oldest payload may be out for delivery. It is then no longer in `payloads`, but it is still
-/// retained: it stays counted in `bytes`, overflow cannot evict it, and nothing behind it is handed
-/// out until its delivery ends, so payloads drain in the order they arrived.
-#[derive(Debug, Default)]
-#[cfg_attr(
-    nervix_lint,
-    nervix::context(
-        recurring,
-        reason = "the ingestor task checks its retained quiesce state before each admitted \
-                  payload or poll"
-    )
-)]
-pub(super) struct IngestorQuiesceBuffer {
-    pub(super) payloads: VecDeque<BufferedIngestPayload>,
-    /// Every retained payload's bytes, including those of a payload out for delivery.
-    pub(super) bytes: usize,
-    /// The bytes of the oldest payload while it is out for delivery.
-    delivering: Option<usize>,
-}
-
-impl IngestorQuiesceBuffer {
-    /// The bytes this buffer may still admit before it reaches `max_size`.
-    ///
-    /// Admission is expressed as a remaining budget rather than a projected total so that a
-    /// payload is never sized against a sum that could leave `usize`. Saturation is the meaning
-    /// here: altering an ingestor may lower `max_size` under an already filled buffer, and such a
-    /// buffer has no room left until it drains.
-    pub(super) fn remaining_capacity(&self, max_size: usize) -> usize {
-        nervix_primitives::expect_lint!(
-            nervix::clamped_arithmetic,
-            "lowering the limit below retained bytes leaves zero admission capacity",
-            max_size.saturating_sub(self.bytes)
-        )
-    }
-
-    /// Whether `payload_bytes` would fit within `max_size` once overflow evicted every payload it
-    /// may evict, which is every one but a payload out for delivery.
-    fn fits_after_eviction(&self, payload_bytes: usize, max_size: usize) -> bool {
-        let needed = match self.delivering {
-            Some(delivering) => payload_bytes
-                .checked_add(delivering)
-                .assured("both operands count bytes of payloads this node holds in memory"),
-            None => payload_bytes,
-        };
-        needed <= max_size
-    }
-
-    pub(super) fn admit(&mut self, payload: BufferedIngestPayload, payload_bytes: usize) {
-        self.bytes = self
-            .bytes
-            .checked_add(payload_bytes)
-            .assured("both operands count bytes of payloads this node already holds in memory");
-        self.payloads.push_back(payload);
-    }
-
-    pub(super) fn release(&mut self, payload_bytes: usize) {
-        self.bytes = self
-            .bytes
-            .checked_sub(payload_bytes)
-            .verified("the released payload's bytes were added when it was admitted");
-    }
-
-    /// Takes the oldest payload out for delivery, unless one already is.
-    fn take_oldest(&mut self) -> Option<BufferedIngestPayload> {
-        if self.delivering.is_some() {
-            return None;
-        }
-        let payload = self.payloads.pop_front()?;
-        self.delivering = Some(payload.byte_len());
-        Some(payload)
-    }
-
-    /// Ends the delivery of the payload out for delivery with the payload leaving, and answers its
-    /// bytes, or `None` when this buffer counts no delivery because the ingestor's termination
-    /// replaced the buffer that did.
-    fn finish_delivery(&mut self) -> Option<usize> {
-        let bytes = self.delivering.take()?;
-        self.release(bytes);
-        Some(bytes)
-    }
-
-    /// Ends the delivery of the payload out for delivery by putting `payload` back at the front,
-    /// unless this buffer counts no delivery, in which case the payload is discarded with the
-    /// buffer that counted it.
-    fn return_delivery(&mut self, payload: BufferedIngestPayload) {
-        if self.delivering.take().is_some() {
-            self.payloads.push_front(payload);
-        }
-    }
-
-    /// Every payload this buffer retains, a payload out for delivery included.
-    fn retained_records(&self) -> usize {
-        match self.delivering {
-            Some(_) => self
-                .payloads
-                .len()
-                .checked_add(1)
-                .assured("the retained payloads are held in this node's memory"),
-            None => self.payloads.len(),
-        }
-    }
-}
-
-/// How the delivery of a retained payload ended.
-#[derive(Debug)]
-enum DeliveryEnd {
-    /// Its messages were accepted, or its codec rejected it: it leaves the buffer.
-    Left,
-    /// It could not be delivered now: it goes back to the front of the buffer.
-    Returned(BufferedIngestPayload),
-}
-
-/// What a buffer does with a payload that does not fit.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum RetentionOverflow {
-    /// Refuse the payload, as an endpoint buffer does: its sender was not answered yet.
-    Reject,
-    /// Apply the declared `ON OVERFLOW` side.
-    Declared(IngestQuiesceOverflow),
-}
-
-/// The oldest payload one instance retained, out for delivery.
-///
-/// The buffer keeps counting the payload, with its bytes, while it is out, and hands out nothing
-/// behind it. [`Self::finish`] ends the delivery with the payload leaving the buffer; a delivery
-/// dropped before then returns it to the front, so a delivery that was interrupted, refused, or
-/// ended with its task leaves the buffer exactly as it was.
-#[derive(Debug)]
-#[cfg_attr(
-    nervix_lint,
-    nervix::context(
-        recurring,
-        reason = "the ingestor task delivers one retained payload on each loop turn while its \
-                  buffer drains"
-    )
-)]
-pub(in crate::runtime) struct RetainedDelivery<'control> {
-    control: &'control IngestorQuiesceControl,
-    /// Present until [`Self::finish`] takes it or the drop returns it.
-    payload: Option<BufferedIngestPayload>,
-}
-
-impl RetainedDelivery<'_> {
-    pub(in crate::runtime) fn payload(&self) -> &BufferedIngestPayload {
-        self.payload
-            .as_ref()
-            .verified("only finishing or dropping the delivery takes its payload")
-    }
-
-    /// Runs `delivery`, the work that brings the payload to its ingest group, unless `shutdown`
-    /// stops the ingestor or the ingestor is quiesced before it completes. Either ends `delivery`
-    /// wherever it waits and answers `None`; the payload stays out until the caller ends its
-    /// delivery.
-    pub(in crate::runtime) async fn run_until_interrupted<T>(
-        &self,
-        shutdown: &watch::Receiver<bool>,
-        delivery: impl Future<Output = T>,
-    ) -> Option<T> {
-        // A clone watches the stop, so the receiver the caller keeps, and the acknowledgements it
-        // hands on, still see the change.
-        let mut stopping = shutdown.clone();
-        nervix_primitives::select! {
-            biased;
-            output = delivery => Some(output),
-            _ = stopping.wait_for(|stop| *stop) => None,
-            () = self.control.wait_until_quiesced() => None,
-        }
-    }
-
-    /// Ends the delivery with the payload leaving the buffer, and hands it over.
-    pub(in crate::runtime) fn finish(mut self) -> BufferedIngestPayload {
-        let payload = self
-            .payload
-            .take()
-            .verified("only finishing or dropping the delivery takes its payload");
-        self.control.end_delivery(DeliveryEnd::Left);
-        payload
-    }
-}
-
-impl Drop for RetainedDelivery<'_> {
-    fn drop(&mut self) {
-        if let Some(payload) = self.payload.take() {
-            self.control.end_delivery(DeliveryEnd::Returned(payload));
-        }
-    }
-}
-
 #[derive(Debug)]
 pub(in crate::runtime) enum IngestorQuiesceIntake {
     Dispatch(BufferedIngestPayload),
     Buffered,
     Dropped,
-    Rejected { retry_after: Option<Duration> },
+    Rejected,
+}
+
+pub(super) enum EndpointPauseIntake<'a> {
+    Live,
+    Buffered,
+    Waiting(EndpointPauseWait<'a>),
+    Refused {
+        cause: EndpointAdmissionRefusal,
+        retry_after: Option<Duration>,
+    },
 }
 
 #[derive(Debug)]
@@ -768,7 +600,7 @@ pub(in crate::runtime) struct IngestorQuiesceControl {
     published: ArcSwap<IngestorQuiescePublication>,
     /// Intake reaches the retained payloads only under a buffering decision, and replay only while
     /// `buffered_records` counts some.
-    pub(super) buffer: nervix_primitives::sync::blocking::Mutex<IngestorQuiesceBuffer>,
+    buffer: nervix_primitives::sync::blocking::Mutex<IngestorQuiesceBuffer>,
     pub(super) changed: Notify,
     /// Changes only while `buffer` is locked, so whenever that lock is free it counts exactly the
     /// payloads retained.
@@ -812,6 +644,10 @@ impl IngestorQuiesceControl {
         metrics: RuntimeMetrics,
         metric_labels: IngestorQuiesceMetrics,
     ) -> Self {
+        let endpoint = matches!(
+            mode,
+            IngestQuiesceMode::EndpointBuffer { .. } | IngestQuiesceMode::Reject { .. }
+        );
         let modes = IngestorQuiesceModes {
             active: mode,
             pending: None,
@@ -820,7 +656,9 @@ impl IngestorQuiesceControl {
         let publication = IngestorQuiescePublication::new(IngestorQuiesceReasons::default(), modes);
         Self {
             published: ArcSwap::from_pointee(publication),
-            buffer: nervix_primitives::sync::blocking::Mutex::new(IngestorQuiesceBuffer::default()),
+            buffer: nervix_primitives::sync::blocking::Mutex::new(IngestorQuiesceBuffer::new(
+                endpoint,
+            )),
             changed: Notify::new(),
             buffered_records: AtomicUsize::new(0),
             buffered_bytes: AtomicUsize::new(0),
@@ -829,6 +667,14 @@ impl IngestorQuiesceControl {
             metrics,
             metric_labels,
         }
+    }
+
+    pub(super) fn endpoint_request_policy(
+        &self,
+        plan: &EndpointRequestPlan,
+    ) -> EndpointRequestPolicy {
+        let mut buffer = self.buffer.lock();
+        EndpointRequestPolicy::new(plan, &buffer.endpoint().capacity)
     }
 
     pub(super) fn sync_buffered_metrics(&self) {
@@ -960,9 +806,7 @@ impl IngestorQuiesceControl {
             IngestorQuiesceHandling::SuspendAndShed | IngestorQuiesceHandling::Shed { .. } => {
                 if endpoint {
                     self.record_rejected(1);
-                    return IngestorQuiesceIntake::Rejected {
-                        retry_after: handling.retry_after(),
-                    };
+                    return IngestorQuiesceIntake::Rejected;
                 }
                 self.record_dropped(1);
                 IngestorQuiesceIntake::Dropped
@@ -971,11 +815,11 @@ impl IngestorQuiesceControl {
                 self.record_dropped(1);
                 IngestorQuiesceIntake::Dropped
             }
-            IngestorQuiesceHandling::Reject { retry_after } => {
+            IngestorQuiesceHandling::Reject { .. } => {
                 self.record_rejected(1);
-                IngestorQuiesceIntake::Rejected { retry_after }
+                IngestorQuiesceIntake::Rejected
             }
-            IngestorQuiesceHandling::EndpointBuffer { max_size } => {
+            IngestorQuiesceHandling::EndpointBuffer { max_size, .. } => {
                 self.retain(payload, max_size, RetentionOverflow::Reject)
             }
             IngestorQuiesceHandling::Buffer { max_size, overflow } => {
@@ -997,13 +841,14 @@ impl IngestorQuiesceControl {
     ) -> IngestorQuiesceIntake {
         let payload_bytes = payload.byte_len();
         let mut buffer = self.buffer.lock();
-        let fits = payload_bytes <= buffer.remaining_capacity(max_size);
+        let fits = buffer.charge(payload_bytes) <= buffer.remaining_capacity(max_size);
         match overflow {
             RetentionOverflow::Reject => {
                 if !fits {
                     self.record_rejected(1);
-                    return IngestorQuiesceIntake::Rejected { retry_after: None };
+                    return IngestorQuiesceIntake::Rejected;
                 }
+                buffer.endpoint().max_size = Some(max_size);
             }
             RetentionOverflow::Declared(IngestQuiesceOverflow::DropNewest) => {
                 if !fits {
@@ -1017,23 +862,143 @@ impl IngestorQuiesceControl {
                     return IngestorQuiesceIntake::Dropped;
                 }
                 while payload_bytes > buffer.remaining_capacity(max_size) {
-                    let dropped = buffer.payloads.pop_front().verified(
+                    let dropped = buffer.pop_first().verified(
                         "the capacity check above leaves room once every evictable payload is gone",
                     );
-                    buffer.release(dropped.byte_len());
+                    let bytes = dropped.payload().byte_len();
+                    buffer.release(bytes);
                     self.buffered_records.fetch_sub(1, Ordering::SeqCst);
-                    self.buffered_bytes
-                        .fetch_sub(dropped.byte_len(), Ordering::Relaxed);
+                    self.buffered_bytes.fetch_sub(bytes, Ordering::Relaxed);
                     self.record_dropped(1);
                 }
             }
         }
         buffer.admit(payload, payload_bytes);
-        self.buffered_records.fetch_add(1, Ordering::SeqCst);
-        self.buffered_bytes
-            .fetch_add(payload_bytes, Ordering::Relaxed);
-        self.sync_buffered_metrics();
+        self.count_retained(payload_bytes);
         IngestorQuiesceIntake::Buffered
+    }
+
+    fn count_retained(&self, bytes: usize) {
+        self.buffered_records.fetch_add(1, Ordering::SeqCst);
+        self.buffered_bytes.fetch_add(bytes, Ordering::Relaxed);
+        self.sync_buffered_metrics();
+    }
+
+    fn count_released(&self, bytes: usize) {
+        self.buffered_records.fetch_sub(1, Ordering::SeqCst);
+        self.buffered_bytes.fetch_sub(bytes, Ordering::Relaxed);
+        self.sync_buffered_metrics();
+    }
+
+    /// Decides admission for a complete request. The live path only reads the pause publication
+    /// and the retained count. Retention rechecks its decision under the queue lock so a request
+    /// arriving during replay cannot jump over the queue.
+    pub(super) fn pause_endpoint(
+        &self,
+        payload: &[u8],
+        metadata: IngestMetadataRow<'_>,
+        observed_at: Timestamp,
+        deadline: Option<nervix_primitives::time::Instant>,
+    ) -> EndpointPauseIntake<'_> {
+        match self.decision() {
+            IngestorQuiesceDecision::Open if self.buffered_records.load(Ordering::SeqCst) == 0 => {
+                return EndpointPauseIntake::Live;
+            }
+            IngestorQuiesceDecision::Quiesced { handling, .. }
+                if !matches!(handling, IngestorQuiesceHandling::EndpointBuffer { .. }) =>
+            {
+                self.record_rejected(1);
+                return EndpointPauseIntake::Refused {
+                    cause: EndpointAdmissionRefusal::Suspended,
+                    retry_after: handling.retry_after(),
+                };
+            }
+            _ => {}
+        }
+        let payload = BufferedIngestPayload::new(
+            payload,
+            BufferedIngestMetadata::retain(&metadata),
+            observed_at,
+        );
+        self.retain_endpoint(payload, deadline)
+    }
+
+    fn retain_endpoint(
+        &self,
+        payload: BufferedIngestPayload,
+        deadline: Option<nervix_primitives::time::Instant>,
+    ) -> EndpointPauseIntake<'_> {
+        let mut buffer = self.buffer.lock();
+        if buffer.endpoint().ended {
+            return EndpointPauseIntake::Refused {
+                cause: EndpointAdmissionRefusal::IntakeEnded,
+                retry_after: None,
+            };
+        }
+        let (max_size, response) = match self.decision() {
+            IngestorQuiesceDecision::Open => {
+                if buffer.retained_records() == 0 {
+                    return EndpointPauseIntake::Live;
+                }
+                let max_size = buffer
+                    .endpoint()
+                    .max_size
+                    .verified("an endpoint has a budget while its pause buffer drains");
+                (max_size, EndpointPauseResponse::AfterResume)
+            }
+            IngestorQuiesceDecision::Quiesced {
+                handling: IngestorQuiesceHandling::EndpointBuffer { max_size, response },
+                ..
+            } => (max_size, response),
+            IngestorQuiesceDecision::Quiesced { handling, .. } => {
+                self.record_rejected(1);
+                return EndpointPauseIntake::Refused {
+                    cause: EndpointAdmissionRefusal::Suspended,
+                    retry_after: handling.retry_after(),
+                };
+            }
+        };
+        let bytes = payload.byte_len();
+        if buffer.charge(bytes) > buffer.remaining_capacity(max_size) {
+            self.record_rejected(1);
+            if let Some(metrics) = self.metric_labels.endpoint() {
+                metrics.record_pause_refusal(crate::metrics::EndpointPauseRefusal::BufferFull);
+            }
+            return EndpointPauseIntake::Refused {
+                cause: EndpointAdmissionRefusal::PauseBufferFull,
+                retry_after: None,
+            };
+        }
+        buffer.endpoint().max_size = Some(max_size);
+        let intake = match response {
+            EndpointPauseResponse::Immediate => {
+                buffer.admit(payload, bytes);
+                EndpointPauseIntake::Buffered
+            }
+            EndpointPauseResponse::AfterResume => {
+                buffer.account(bytes);
+                let queue = buffer.endpoint();
+                let id = queue.begin_waiting();
+                let (reply, wait) = EndpointPauseReply::channel(self, id, bytes, deadline);
+                queue.push_awaited(id, payload, Some(reply));
+                EndpointPauseIntake::Waiting(wait)
+            }
+        };
+        self.count_retained(bytes);
+        self.changed.notify_waiters();
+        intake
+    }
+
+    pub(super) fn remove_waiting_endpoint(&self, id: EndpointPauseId) {
+        let mut buffer = self.buffer.lock();
+        let Some(payload) = buffer.endpoint().remove_waiting(id) else {
+            return;
+        };
+        let bytes = payload.byte_len();
+        buffer.release(bytes);
+        self.count_released(bytes);
+        self.record_dropped(1);
+        self.changed.notify_waiters();
     }
 
     /// Whether this ingestor's quiesce lets a new endpoint request in now, or the retry delay its
@@ -1056,6 +1021,18 @@ impl IngestorQuiesceControl {
             self.record_rejected(1);
         }
         availability
+    }
+
+    /// A replacement endpoint can receive requests during an existing pause or its replay.
+    /// A WebSocket then watches for a departing peer even if the new policy will use `REJECT`.
+    pub(super) fn has_endpoint_pause_replies(&self) -> bool {
+        matches!(
+            &self.published.load().modes.active,
+            IngestQuiesceMode::EndpointBuffer {
+                response: EndpointPauseResponse::AfterResume,
+                ..
+            }
+        ) || self.buffered_records.load(Ordering::SeqCst) != 0
     }
 
     /// Waits until this ingestor is quiesced, which a delivery of a retained payload must not
@@ -1139,19 +1116,28 @@ impl IngestorQuiesceControl {
     /// Ends the delivery of the payload this unit has out, as `end` says. A payload that leaves
     /// stops being counted; one returned is counted as it was. A buffer that no longer counts the
     /// delivery, because the ingestor's termination discarded it, is left as it is.
-    fn end_delivery(&self, end: DeliveryEnd) {
+    fn end_delivery(&self, end: DeliveryEnd) -> bool {
         let mut buffer = self.buffer.lock();
-        match end {
-            DeliveryEnd::Left => {
-                let Some(bytes) = buffer.finish_delivery() else {
-                    return;
-                };
-                self.buffered_records.fetch_sub(1, Ordering::SeqCst);
-                self.buffered_bytes.fetch_sub(bytes, Ordering::Relaxed);
-                self.sync_buffered_metrics();
+        let abandoned = match end {
+            DeliveryEnd::Left => false,
+            DeliveryEnd::Returned(payload)
+                if !payload.reply().is_some_and(EndpointPauseReply::abandoned) =>
+            {
+                // Client cancellation takes the same lock to remove a waiting identity.
+                // Check under it so the payload cannot return after that removal.
+                buffer.return_delivery(payload);
+                return false;
             }
-            DeliveryEnd::Returned(payload) => buffer.return_delivery(payload),
+            DeliveryEnd::Returned(_) => true,
+        };
+        let Some(bytes) = buffer.finish_delivery() else {
+            return false;
+        };
+        self.count_released(bytes);
+        if abandoned {
+            self.record_dropped(1);
         }
+        true
     }
 
     pub(super) fn counters(&self) -> IngestorQuiesceCounters {
@@ -1167,7 +1153,7 @@ impl IngestorQuiesceControl {
         let dropped = {
             let mut buffer = self.buffer.lock();
             let dropped = buffer.retained_records();
-            *buffer = IngestorQuiesceBuffer::default();
+            buffer.end();
             self.buffered_records.store(0, Ordering::SeqCst);
             self.buffered_bytes.store(0, Ordering::Relaxed);
             dropped
@@ -1682,6 +1668,17 @@ impl MemoryPressurePause {
 #[cfg(test)]
 #[cfg_attr(
     nervix_lint,
+    nervix::layer(
+        harness,
+        reason = "checks endpoint quiesce through the production control"
+    )
+)]
+#[path = "ingestor_quiesce_endpoint_tests.rs"]
+mod endpoint_tests;
+
+#[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
     nervix::layer(harness, reason = "test module remains outside product execution")
 )]
 mod tests {
@@ -1855,58 +1852,6 @@ mod tests {
     }
 
     #[test]
-    fn endpoint_quiesce_buffer_rejects_overflow_without_discarding_acknowledged_payloads() {
-        let runtime = Runtime::default();
-        let domain = domain("default");
-        let ingestor = named("paused_ingestor");
-        let control = test_ingestor_quiesce_control(
-            &runtime,
-            &domain,
-            &ingestor,
-            IngestQuiesceMode::EndpointBuffer {
-                max_size: "5B".to_string(),
-            },
-        );
-        control.engage(IngestorQuiesceCause::EntityHold);
-
-        assert!(matches!(
-            control.intake(
-                BufferedIngestPayload::new(
-                    b"kept",
-                    BufferedIngestMetadata::without_headers(),
-                    Timestamp::from_unix_nanos(1),
-                ),
-                true,
-            ),
-            IngestorQuiesceIntake::Buffered
-        ));
-        assert!(matches!(
-            control.intake(
-                BufferedIngestPayload::new(
-                    b"no",
-                    BufferedIngestMetadata::without_headers(),
-                    Timestamp::from_unix_nanos(2),
-                ),
-                true,
-            ),
-            IngestorQuiesceIntake::Rejected { retry_after: None }
-        ));
-        assert_eq!(control.counters().buffered_records, 1);
-        assert_eq!(control.counters().rejected_total, 1);
-        assert_eq!(control.counters().dropped_total, 0);
-
-        control.release(IngestorQuiesceCause::EntityHold);
-        assert_eq!(
-            control
-                .take_buffered()
-                .expect("the acknowledged payload must remain buffered")
-                .finish()
-                .payload(),
-            b"kept"
-        );
-    }
-
-    #[test]
     fn connector_replacement_waits_when_the_active_hold_mode_is_not_supported() {
         let runtime = Runtime::default();
         let domain = domain("default");
@@ -1917,6 +1862,7 @@ mod tests {
             &ingestor,
             IngestQuiesceMode::EndpointBuffer {
                 max_size: "1KiB".to_string(),
+                response: nervix_models::EndpointPauseResponse::Immediate,
             },
         );
         control.engage(IngestorQuiesceCause::EntityHold);
@@ -2118,6 +2064,7 @@ mod tests {
             &named("paused_ingestor"),
             IngestQuiesceMode::EndpointBuffer {
                 max_size: "1MiB".to_string(),
+                response: nervix_models::EndpointPauseResponse::Immediate,
             },
         );
         retain_while_quiesced(&control, &[b"one", b"two"]);
@@ -2153,6 +2100,7 @@ mod tests {
             &named("paused_ingestor"),
             IngestQuiesceMode::EndpointBuffer {
                 max_size: "1MiB".to_string(),
+                response: nervix_models::EndpointPauseResponse::Immediate,
             },
         );
         retain_while_quiesced(&control, &[b"retained"]);
@@ -2219,14 +2167,15 @@ mod tests {
         assert!(!control.should_skip_poll());
         assert_eq!(control.endpoint_admission(), Err(Some(retry_after)));
         assert!(matches!(
-            control.intake(BufferedIngestPayload::new(
+            control.intake(
+                BufferedIngestPayload::new(
                     b"paused",
                     BufferedIngestMetadata::without_headers(),
                     Timestamp::from_unix_nanos(1),
                 ),
                 true,
             ),
-            IngestorQuiesceIntake::Rejected { retry_after: Some(delay) } if delay == retry_after
+            IngestorQuiesceIntake::Rejected
         ));
 
         control.engage(IngestorQuiesceCause::MemoryPressure);
@@ -2234,14 +2183,15 @@ mod tests {
         assert!(control.should_skip_poll());
         assert_eq!(control.endpoint_admission(), Err(Some(retry_after)));
         assert!(matches!(
-            control.intake(BufferedIngestPayload::new(
+            control.intake(
+                BufferedIngestPayload::new(
                     b"pressured",
                     BufferedIngestMetadata::without_headers(),
                     Timestamp::from_unix_nanos(2),
                 ),
                 true,
             ),
-            IngestorQuiesceIntake::Rejected { retry_after: Some(delay) } if delay == retry_after
+            IngestorQuiesceIntake::Rejected
         ));
         assert_eq!(control.counters().rejected_total, 4);
         assert_eq!(control.counters().dropped_total, 0);
@@ -2633,6 +2583,7 @@ mod tests {
                 let control = Arc::new(IngestorQuiesceControl::new(
                     IngestQuiesceMode::EndpointBuffer {
                         max_size: "1MiB".to_string(),
+                        response: nervix_models::EndpointPauseResponse::Immediate,
                     },
                     metrics,
                     metric_labels,

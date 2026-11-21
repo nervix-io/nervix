@@ -28,7 +28,7 @@ Feature: Bounded window sketches
       CREATE HTTP ENDPOINT ingress ON edge PATH '/sketches';
       CREATE HTTP ENDPOINT INGESTOR sketch_ingestor
         FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING sketch_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING sketch_codec
         TO sketch_inputs
         INHERIT ALL
         BRANCHED BY sketch_branch
@@ -98,7 +98,7 @@ Feature: Bounded window sketches
       CREATE HTTP ENDPOINT ingress ON edge PATH '/sketches';
       CREATE HTTP ENDPOINT INGESTOR sketch_ingestor
         FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING sketch_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING sketch_codec
         TO sketch_inputs INHERIT ALL BRANCHED BY sketch_branch
         SET tenant = message.tenant
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
@@ -175,7 +175,7 @@ Feature: Bounded window sketches
       CREATE HTTP ENDPOINT ingress ON edge PATH '/sketches';
       CREATE HTTP ENDPOINT INGESTOR sketch_ingestor
         FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING sketch_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING sketch_codec
         TO sketch_inputs INHERIT ALL BRANCHED BY sketch_branch
         SET tenant = message.tenant
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
