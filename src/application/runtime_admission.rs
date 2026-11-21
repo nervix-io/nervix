@@ -3,7 +3,8 @@
 //! Layer: control plane.
 //!
 //! - **Owns.** The process-local linearizable catch-up proof and ordering of coherent runtime-state
-//!   installation and activation after that proof and this run's committed capacity claim.
+//!   installation and activation after that proof and this run's committed capacity claim: the
+//!   one installation turn, and the task each installation or activation runs to its end in.
 //! - **Depends on.** Consensus observation, execution primitive synchronization and shutdown.
 //! - **Must not know.** Runtime graph internals, connector implementations, or scheduling policy.
 
@@ -21,7 +22,9 @@ use error_stack::ResultExt as _;
 use meticulous::ResultExt as _;
 use nervix_consensus::{ConsensusRuntimeState, Observer};
 use nervix_models::{ClusterNodeName, ClusterSchedule};
-use nervix_primitives::sync::{CancellationToken, Mutex, MutexGuard, blocking::OnceLock};
+use nervix_primitives::sync::{
+    CancellationToken, Mutex, OwnedMutexGuard, StdArc, blocking::OnceLock,
+};
 use tracing::{info, warn};
 
 use crate::{
@@ -35,7 +38,13 @@ pub(in crate::application) struct RuntimeAdmission {
     identity: nervix_models::ClusterNodeIdentity,
     committed_log_index: OnceLock<u64>,
     attempt: Mutex<()>,
-    installation: Mutex<()>,
+    /// The turn of every local installation and activation. A section keeps it in the task it runs
+    /// in until it ends, so the turn is shared with that task through Tokio's owned guard, which
+    /// takes the standard `Arc`.
+    installation: StdArc<Mutex<()>>,
+    /// The installation turn terminal teardown took for good, so that no installation begins once
+    /// the runtime stops.
+    finished: OnceLock<OwnedMutexGuard<()>>,
     /// The last schedule this node applied successfully. A failed revision compares against the
     /// same predecessor when it is retried, including after a local WASM reset application.
     applied_schedule: Mutex<Option<(u64, ClusterSchedule)>>,
@@ -51,7 +60,8 @@ impl RuntimeAdmission {
             identity,
             committed_log_index: OnceLock::new(),
             attempt: Mutex::new(()),
-            installation: Mutex::new(()),
+            installation: StdArc::new(Mutex::new(())),
+            finished: OnceLock::new(),
             applied_schedule: Mutex::new(None),
         }
     }
@@ -98,18 +108,36 @@ impl RuntimeAdmission {
         Ok(())
     }
 
-    /// Serialize each local runtime installation or activation decision.
+    /// Waits for this node's installation turn, which serializes each local runtime installation
+    /// or activation. `shutdown` ends the wait; once terminal teardown took the turn for good, only
+    /// `shutdown` ends it.
     pub(in crate::application) async fn begin_installation(
         &self,
         shutdown: &CancellationToken,
-    ) -> Option<MutexGuard<'_, ()>> {
-        let installation = self.installation.lock();
+    ) -> Option<InstallationTurn> {
+        let installation = StdArc::clone(&self.installation).lock_owned();
         tokio::pin!(installation);
         nervix_primitives::select! {
             biased;
             _ = shutdown.cancelled() => None,
-            installation = &mut installation => Some(installation),
+            turn = &mut installation => Some(InstallationTurn { turn }),
         }
+    }
+
+    /// Waits for the installation or activation still under way, and keeps the turn, so that none
+    /// begins any more.
+    ///
+    /// Terminal teardown calls this once drain support has ended, before it stops the runtime. A
+    /// section keeps its turn until it ends, so taking the turn waits for the last one under way.
+    /// The turn is kept for good: an application that checked the shutdown before drain support
+    /// ended, and asks for the turn only now, waits for it until that shutdown ends its wait,
+    /// instead of beginning a section while the runtime stops.
+    pub(in crate::application) async fn finish_installations(&self) {
+        let turn = StdArc::clone(&self.installation).lock_owned().await;
+        self.finished.set(turn).assured(
+            "the turn is taken above, and once `finished` holds it the turn is never free again, \
+             so no second call reaches this point",
+        );
     }
 
     /// Return state captured after admission, retrying independently of replicated value changes.
@@ -190,6 +218,48 @@ impl RuntimeAdmission {
         }
     }
 }
+
+/// This node's turn to install or activate the committed runtime state. One section runs at a
+/// time, in the order the turns were taken.
+pub(in crate::application) struct InstallationTurn {
+    turn: OwnedMutexGuard<()>,
+}
+
+impl InstallationTurn {
+    /// Runs `section` to its end in a task that holds this turn, and returns what it returned.
+    ///
+    /// The section is the installation or activation this turn began. A caller that goes away only
+    /// stops waiting: the section still ends, and both the next turn and
+    /// [`RuntimeAdmission::finish_installations`] wait for it. `None` means the section's task
+    /// ended without an outcome, which only the async runtime's own shutdown does. A section that
+    /// panics panics the caller that waits for it, as a section run inline would.
+    pub(in crate::application) async fn run<Section>(
+        self,
+        section: Section,
+    ) -> Option<Section::Output>
+    where
+        Section: Future + Send + 'static,
+        Section::Output: Send + 'static,
+    {
+        let Self { turn } = self;
+        let task = nervix_primitives::task::spawn(async move {
+            let outcome = section.await;
+            drop(turn);
+            outcome
+        });
+        match task.await {
+            Ok(outcome) => Some(outcome),
+            Err(ended) => match ended.try_into_panic() {
+                Ok(panic) => std::panic::resume_unwind(panic),
+                Err(_cancelled) => None,
+            },
+        }
+    }
+}
+
+#[cfg(all(test, feature = "shuttle"))]
+#[path = "runtime_admission_shuttle_tests.rs"]
+mod shuttle_tests;
 
 #[cfg(test)]
 mod tests {

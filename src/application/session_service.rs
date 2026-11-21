@@ -82,9 +82,7 @@ use crate::{
 
 mod runtime_application;
 
-pub(in crate::application) use runtime_application::{
-    ApplicationBound, RuntimeStateApplication, apply_current_cluster_runtime_state,
-};
+pub(in crate::application) use runtime_application::ApplicationBound;
 
 /// The session event bus, and the one way a control-plane failure or a cluster transition reaches
 /// the sessions attached to this node.
@@ -1237,18 +1235,7 @@ impl SessionServiceImpl {
         &self,
         bound: ApplicationBound,
     ) -> error_stack::Result<(), crate::runtime::RuntimeError> {
-        let application = RuntimeStateApplication {
-            runtime: &self.inner.runtime,
-            https_certificates: &self.inner.https_certificates,
-            cluster: &self.inner.cluster,
-            interconnect: &self.inner.interconnect,
-            registry: &self.inner.registry,
-            consensus: &self.inner.consensus,
-            progress: &self.inner.application_progress,
-            admission: &self.inner.runtime_admission,
-            shutdown: &self.inner.drain_support_shutdown,
-        };
-        apply_current_cluster_runtime_state(application, bound).await
+        self.apply_admitted_runtime_state(bound).await
     }
 
     /// Report a control-plane failure this node recovered from to the sessions attached to it.
@@ -1919,6 +1906,8 @@ pub(in crate::application) fn conflicting_reference(
     nervix::layer(harness, reason = "test module remains outside product execution")
 )]
 mod tests {
+    #[cfg(feature = "testing")]
+    mod abandoned_installation;
     mod application_deadline;
     mod completion_context;
     mod page_continuation;

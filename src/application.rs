@@ -123,10 +123,7 @@ use public_listener::{PublicListener, PublicListenerKind};
 use scheduling::StartupVoterObservations;
 use session::grpc::SessionGrpcService;
 pub use session_service::SessionServiceImpl;
-use session_service::{
-    ApplicationBound, RuntimeStateApplication, SessionEvents, SessionServiceInner,
-    apply_current_cluster_runtime_state,
-};
+use session_service::{ApplicationBound, SessionEvents, SessionServiceInner};
 use startup::ApplicationStartup;
 use subscription::{SubscriptionInterests, SubscriptionSampler};
 use tls::{
@@ -1235,7 +1232,6 @@ impl Application {
             _ = shutdown_coordinator.requested() => Ok(()),
             result = Box::pin(async {
         let registry = service.inner.registry.clone();
-        let certificates = service.inner.https_certificates.clone();
         #[cfg(feature = "testing")]
         fault_injection.pause_initial_cluster_parameters_if_armed(&node_id).await;
         let record = loop {
@@ -1843,45 +1839,32 @@ impl Application {
         ));
 
         let parameter_events = events.clone();
-        let certificates_for_schedule = certificates.clone();
-        let runtime_for_schedule = runtime.clone();
-        let registry_for_schedule = registry.clone();
         let schedule_rx = consensus.observer().subscribe_schedule();
         let domains_rx = consensus.observer().subscribe_domains();
         let consensus_for_schedule = consensus.observer();
         let cluster_for_schedule = cluster.clone();
-        let interconnect_for_schedule = interconnect.clone();
-        let progress_for_schedule = application_progress.clone();
         let schedule_shutdown = shutdown.clone();
-        let schedule_runtime_admission = runtime_admission.clone();
+        // The service holds this node's runtime, registry, certificates, transport, progress,
+        // admission and drain-support token, the handles every application installs with.
+        let schedule_service = service.clone();
         background_tasks.push(nervix_primitives::task::spawn(async move {
-            let application = RuntimeStateApplication {
-                runtime: &runtime_for_schedule,
-                https_certificates: &certificates_for_schedule,
-                cluster: &cluster_for_schedule,
-                interconnect: &interconnect_for_schedule,
-                registry: &registry_for_schedule,
-                consensus: &consensus_for_schedule,
-                progress: &progress_for_schedule,
-                admission: &schedule_runtime_admission,
-                shutdown: &schedule_shutdown,
-            };
             runtime_reconciliation::RuntimeReconciliation::new(
                 schedule_rx,
                 domains_rx,
-                schedule_shutdown.clone(),
-                schedule_runtime_admission.retry_interval(),
+                schedule_shutdown,
+                schedule_service.inner.runtime_admission.retry_interval(),
             )
             .run(None, |mut announced_parameters| {
                 let events = &parameter_events;
                 let cluster = &cluster_for_schedule;
                 let consensus = &consensus_for_schedule;
+                let service = &schedule_service;
                 async move {
-                    let outcome = apply_current_cluster_runtime_state(
-                        application,
-                        ApplicationBound::ClusterBudget,
-                    )
-                    .await;
+                    #[cfg(feature = "testing")]
+                    service.hold_background_reconciliation_if_armed().await;
+                    let outcome = service
+                        .apply_current_cluster_state_within(ApplicationBound::ClusterBudget)
+                        .await;
                     if outcome.is_ok() {
                         cluster_parameters::announce_parameter_installation(
                             events,
@@ -2861,6 +2844,11 @@ impl Application {
         }
         let service_tasks_outcome = service.inner.service_tasks.shut_down(deadline).await;
         terminal_teardown_outcome = terminal_teardown_outcome.combine(service_tasks_outcome);
+        // An installation of the committed state that one of those tasks, or a request handler,
+        // began still runs in a task of the runtime admission, which holds the installation turn
+        // until the installation ends. Taking the turn waits for the last one, and keeping it means
+        // none begins afterwards, so the runtime never stops in the middle of an installation.
+        runtime_admission.finish_installations().await;
         // The services below own this node's remaining tasks, connections, and storage, and
         // stopping them is what releases those, so each stop runs to completion rather than being
         // abandoned at the deadline. A server process whose deadline passes meanwhile is ended by

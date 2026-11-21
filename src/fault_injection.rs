@@ -211,6 +211,9 @@ struct FaultInjectionState {
     /// so the public regression verifies that its construction failures actually happened.
     refused_runtime_installations:
         DashMap<ClusterNodeName, RuntimeInstallationRefusals, RandomState>,
+    /// The domain whose stop each held node's background reconciliation waits to see before it
+    /// holds, while a scenario holds that reconciliation.
+    background_reconciliation_holds: DashMap<ClusterNodeName, DomainName, RandomState>,
     /// One-shot, node-local refusals of the next subscription interest visibility check a node
     /// answers, each keeping whether it was delivered so a scenario proves the refusal happened.
     refused_interest_visibility: DashMap<ClusterNodeName, InterestVisibilityRefusal, RandomState>,
@@ -558,6 +561,7 @@ impl Default for FaultInjection {
                 stalled_emitter_connectors: DashMap::default(),
                 failed_schedule_publications: DashMap::default(),
                 refused_runtime_installations: DashMap::default(),
+                background_reconciliation_holds: DashMap::default(),
                 refused_interest_visibility: DashMap::default(),
                 refused_subscription_openings: DashMap::default(),
                 withheld_request_progress: DashMap::default(),

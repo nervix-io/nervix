@@ -124,9 +124,10 @@ starts after the earlier phases used part of it. The one exception is the
 release of the cordon the node's own drain set, which keeps a grace of four Raft heartbeats, one second by default, when moving the
 node's work used the whole drain timeout; see [Releasing The Drain Cordon](#releasing-the-drain-cordon).
 
-Two bounds are deliberately outside the deadline. Terminal teardown's final stops — the runtime,
-consensus, cluster membership, and the interconnect — run to completion rather than being cut short,
-because stopping them is what releases the node's tasks, connections, and storage. The interconnect
+Two bounds are deliberately outside the deadline. Terminal teardown's final stops — the
+installation of the committed state still under way, the runtime, consensus, cluster membership,
+and the interconnect — run to completion rather than being cut short, because stopping them is what
+releases the node's tasks, connections, and storage. The interconnect
 applies its own ten-second transport drain. Closing the node's databases synchronizes their journals
 and blocks until their background workers have left, so the services that own them are dropped
 last, as one job on the node's filesystem storage workers; a node that cannot take that job reports
@@ -1008,9 +1009,13 @@ Terminal teardown begins only after drain support completes or reports itself ab
 
 It stops the node's background tasks, giving each at most the configured cooperative task-stop
 grace, then waits until the shutdown deadline for work that sessions and commands started and
-cancels whatever still runs. It then
-stops the runtime, consensus, cluster membership, and the interconnect in that order, and finally
-releases the node's storage.
+cancels whatever still runs. An installation of the committed state that one of those tasks, or a
+request handler, had begun is not cut short with it: it runs in a task of the runtime admission
+that holds the node's installation turn. Terminal teardown takes that turn and keeps it before it
+stops the runtime, so it first waits for the installation still under way and no other begins
+afterwards ([Installation And Publication](./execution-plans.md#installation-and-publication)). It
+then stops the runtime, consensus, cluster membership, and the interconnect in that order, and
+finally releases the node's storage.
 
 Runtime teardown stops one domain at a time. Before it publishes the domain's stop, it gives every
 emitter the deadline by which the emitter finishes its emitter once the stop ends its task: the domain
@@ -1051,7 +1056,10 @@ emitter's retry, a reorderer or correlator until its time or its partner, or a w
 input fills it, never holds it open. During a stop, an emitter that a generation finds waiting for
 a retry completes the generation at once, and one whose publish fails during a generation hands the
 records to its retry schedule rather than retrying inline. Only then does the owner commit the
-domain stopped, and each node tears the domain down.
+domain stopped, and each node tears the domain down. The teardown is part of the node's installation
+of the stopped domain, whichever application installs it: the node's own reconciliation, or the
+handler of another node's request, such as a drain-status request. Once begun, it runs to its end
+even when that handler is dropped because its requester's deadline passed.
 
 A completed stop's teardown first lets a publish already on the wire run to its outcome, records
 what it is about to cut, and then ends the domain's tasks with the final snapshot writes described
