@@ -1085,10 +1085,10 @@ not disable verification or silently fall back when unavailable.
 The server composition root extends the existing changed-model binding boundary before standalone
 mutation or transaction commit. It renders mount templates using the resource resolver and checks
 the rendered schema and Nervix-owned file paths on an admitted filesystem worker, charged to command memory.
-Request preflight refuses inspection when command memory or the filesystem wait queue is full.
-Applying a model step under an accepted transaction or restore instead waits for those existing
-capacities with `QueueAdmission::WaitForPlace`; lack of room has not judged the configuration.
-The service task's existing shutdown cancellation ends the wait. A charge larger than the whole
+A full command memory class or filesystem wait queue holds the inspection back, during request
+preflight exactly as when a model step applies under an accepted transaction or restore; lack of
+room has not judged the configuration. The service task's existing shutdown cancellation ends the
+wait. A charge larger than the whole
 class or a closed executor still fails inspection, and no uncharged config copy is made while waiting.
 Rendered values also pass the WebSockets configuration owner, which holds a schema-valid
 WebSockets client to an endpoint without a fragment or user information, counts within their ranges

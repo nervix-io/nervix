@@ -3,15 +3,18 @@
 //!
 //! Layer: test harness, outside the product layer order.
 //!
-//! - **Owns.** Each node's registered executor and what a scenario holds in it: occupied CPU
-//!   workers, filled wait-queue places and held bulk memory.
+//! - **Owns.** Each node's registered executor and what a scenario holds in it: occupied CPU and
+//!   storage workers, filled wait-queue places and held bulk memory.
 //! - **Depends on.** The bounded executor's admission and snapshot API, typed node names, and the
 //!   primitive boundary's tasks, atomics and blocking channels.
 //! - **Must not know.** Which product work runs on the executor, how a node sizes its classes, or
 //!   connector and runtime behavior.
 
+use error_stack::Report;
 use meticulous::{OptionExt as _, ResultExt as _};
-use nervix_execution::{CpuClass, Executor, MemoryClass, Reservation};
+use nervix_execution::{
+    Cancellation, ExecutionError, Executor, MemoryClass, Reservation, WorkerClassName,
+};
 use nervix_models::ClusterNodeName;
 use nervix_primitives::sync::{
     Arc,
@@ -22,11 +25,19 @@ use nervix_recovery::Discarded as _;
 
 use super::FaultInjection;
 
+/// One worker a scenario holds. Its job runs until the sender is dropped, which is how the
+/// scenario releases it; nothing is ever sent.
+#[derive(Debug)]
+struct HeldWorker {
+    class: WorkerClassName,
+    _release: nervix_primitives::sync::blocking::mpsc::Sender<()>,
+}
+
 #[derive(Debug)]
 pub(super) struct NodeExecution {
     executor: Executor,
     /// Occupying jobs outlive the map guard while they run, so their release senders are shared.
-    holders: Arc<Mutex<Vec<nervix_primitives::sync::blocking::mpsc::Sender<()>>>>,
+    holders: Arc<Mutex<Vec<HeldWorker>>>,
     /// The bulk memory a scenario holds on the node, absent while it holds none.
     bulk_memory: Option<Reservation>,
 }
@@ -52,8 +63,14 @@ impl FaultInjection {
         );
     }
 
-    /// Fill every worker of `class` on `node_id` and return once every occupying job is running.
-    pub async fn occupy_execution(&self, node_id: &ClusterNodeName, class: CpuClass) {
+    /// Fill every worker of `class`, a CPU or storage class, on `node_id` and return once every
+    /// occupying job is running.
+    pub async fn occupy_execution(
+        &self,
+        node_id: &ClusterNodeName,
+        class: impl Into<WorkerClassName>,
+    ) {
+        let class = class.into();
         let node = match self.inner.executions.get(node_id) {
             Some(node) => node,
             None => panic!("node '{node_id}' has not registered its executor"),
@@ -61,7 +78,7 @@ impl FaultInjection {
         let executor = node.executor.clone();
         let holders = node.holders.clone();
         drop(node);
-        let workers = executor.snapshot().cpu_class(class).workers;
+        let workers = executor.snapshot().worker_class(class).workers;
         let started = Arc::new(AtomicUsize::new(0));
         for _ in 0..workers {
             let reservation = executor
@@ -70,12 +87,18 @@ impl FaultInjection {
                     panic!("bulk admission must accept a zero charge: {error}")
                 });
             let (holder, held) = nervix_primitives::sync::blocking::mpsc::channel();
-            holders.lock().push(holder);
+            holders.lock().push(HeldWorker {
+                class,
+                _release: holder,
+            });
             let executor = executor.clone();
             let started = started.clone();
             nervix_primitives::task::spawn(async move {
-                executor
-                    .run_cpu(class, reservation, move |_charge, _cancellation| {
+                Self::run_holding(
+                    &executor,
+                    class,
+                    reservation,
+                    move |_charge, _cancellation| {
                         started.fetch_add(1, Ordering::AcqRel);
                         // Park until the scenario drops the holder so occupancy consumes no
                         // CPU. Nothing is ever sent, so the disconnect is the wake-up rather
@@ -83,12 +106,13 @@ impl FaultInjection {
                         held.recv().discarded(
                             "dropping the holder is how the scenario releases this worker",
                         );
-                    })
-                    .await
-                    .discarded(
-                        "this job exists to hold a worker until the scenario releases it; its \
-                         outcome is not what the scenario reads",
-                    );
+                    },
+                )
+                .await
+                .discarded(
+                    "this job exists to hold a worker until the scenario releases it; its outcome \
+                     is not what the scenario reads",
+                );
             });
         }
         while started.load(Ordering::Acquire) < workers {
@@ -97,15 +121,21 @@ impl FaultInjection {
         }
     }
 
-    /// Fill every worker of `class` on `node_id`, then every place in its wait queue, and return
-    /// once the next job the class is handed waits for a place.
-    pub async fn saturate_execution(&self, node_id: &ClusterNodeName, class: CpuClass) {
+    /// Fill every worker of `class`, a CPU or storage class, on `node_id`, then every place in its
+    /// wait queue, and return once the next job the class is handed waits for a place, until the
+    /// scenario releases the class.
+    pub async fn saturate_execution(
+        &self,
+        node_id: &ClusterNodeName,
+        class: impl Into<WorkerClassName>,
+    ) {
+        let class = class.into();
         self.occupy_execution(node_id, class).await;
         let executor = match self.inner.executions.get(node_id) {
             Some(node) => node.executor.clone(),
             None => panic!("node '{node_id}' has not registered its executor"),
         };
-        let capacity = executor.snapshot().cpu_class(class).queue_capacity;
+        let capacity = executor.snapshot().worker_class(class).queue_capacity;
         for _ in 0..capacity {
             let reservation = executor
                 .try_reserve(MemoryClass::Bulk, 0)
@@ -114,8 +144,7 @@ impl FaultInjection {
                 });
             let waiter = executor.clone();
             nervix_primitives::task::spawn(async move {
-                waiter
-                    .run_cpu(class, reservation, |_charge, _cancellation| ())
+                Self::run_holding(&waiter, class, reservation, |_charge, _cancellation| ())
                     .await
                     .discarded(
                         "this job exists to hold a place in the wait queue; once the scenario \
@@ -123,9 +152,24 @@ impl FaultInjection {
                     );
             });
         }
-        while executor.snapshot().cpu_class(class).pending < capacity {
+        while executor.snapshot().worker_class(class).pending < capacity {
             nervix_primitives::task::consume_budget().await;
             nervix_primitives::task::yield_now().await;
+        }
+    }
+
+    /// Run `job` on `class`'s workers. A scenario submits exactly as many holding jobs as the
+    /// class has free workers and places, so they take free ones at once and never count among the
+    /// jobs waiting for a place.
+    async fn run_holding<T: Send + 'static>(
+        executor: &Executor,
+        class: WorkerClassName,
+        reservation: Reservation,
+        job: impl FnOnce(Reservation, &Cancellation) -> T + Send + 'static,
+    ) -> Result<T, Report<ExecutionError>> {
+        match class {
+            WorkerClassName::Cpu(class) => executor.run_cpu(class, reservation, job).await,
+            WorkerClassName::Storage(class) => executor.run_storage(class, reservation, job).await,
         }
     }
 
@@ -137,6 +181,30 @@ impl FaultInjection {
             None => panic!("node '{node_id}' has not registered its executor"),
         };
         node.holders.lock().clear();
+    }
+
+    /// Release the workers of `class` a scenario occupied on `node_id`, keeping its holds of every
+    /// other class. The jobs that waited behind them then run empty.
+    pub fn release_execution_class(
+        &self,
+        node_id: &ClusterNodeName,
+        class: impl Into<WorkerClassName>,
+    ) {
+        let class = class.into();
+        let node = match self.inner.executions.get(node_id) {
+            Some(node) => node,
+            None => panic!("node '{node_id}' has not registered its executor"),
+        };
+        node.holders.lock().retain(|held| held.class != class);
+    }
+
+    /// Release every worker a scenario occupied on any node, of every class. Scenario cleanup
+    /// calls this before it stops nodes, so a step that failed while a class was held never leaves
+    /// a node's workers parked behind its shutdown.
+    pub fn release_all_execution(&self) {
+        for node in self.inner.executions.iter() {
+            node.holders.lock().clear();
+        }
     }
 
     /// Hold every byte of `node_id`'s bulk memory but `room`, so that a charge needing more room

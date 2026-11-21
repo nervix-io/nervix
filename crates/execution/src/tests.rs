@@ -973,6 +973,11 @@ async fn a_full_storage_queue_holds_every_job_until_a_place_frees() {
         nervix_primitives::task::consume_budget().await;
         nervix_primitives::task::yield_now().await;
     }
+    assert_eq!(
+        executor.snapshot().filesystem_storage.waiting,
+        0,
+        "a job that found a free place in the queue never counts as waiting"
+    );
 
     let waiting_charge = executor
         .try_reserve(MemoryClass::Bulk, 1)
@@ -990,6 +995,11 @@ async fn a_full_storage_queue_holds_every_job_until_a_place_frees() {
         first_poll.is_pending(),
         "a full wait queue holds the job instead of refusing it"
     );
+    assert_eq!(
+        executor.snapshot().filesystem_storage.waiting,
+        1,
+        "a job that found the queue full counts as waiting"
+    );
     release
         .send(())
         .expect("the occupying job holds its worker until the test releases it");
@@ -1004,6 +1014,10 @@ async fn a_full_storage_queue_holds_every_job_until_a_place_frees() {
         .expect("a job that found the queue full runs once a place frees");
     assert_eq!(waited, "waited");
     let snapshot = executor.snapshot();
+    assert_eq!(
+        snapshot.filesystem_storage.waiting, 0,
+        "a job that took its place no longer counts as waiting"
+    );
     assert_eq!(snapshot.filesystem_storage.completed, 3);
     assert_eq!(snapshot.filesystem_storage.pending, 0);
     assert_eq!(snapshot.bulk_memory.reserved_bytes, 0);
@@ -1078,6 +1092,66 @@ async fn a_full_cpu_queue_holds_every_job_until_a_place_frees() {
     assert_eq!(snapshot.data_cpu.completed, 3);
     assert_eq!(snapshot.data_cpu.pending, 0);
     assert_eq!(snapshot.relay_memory.reserved_bytes, 0);
+}
+
+/// A snapshot read by class name returns that class's own counts, for every storage class and
+/// through the name a CPU or storage class widens into.
+#[nervix_primitives::test]
+async fn a_snapshot_reads_each_worker_class_by_its_name() {
+    let executor = small_executor();
+    let submitted = [
+        StorageClass::Consensus,
+        StorageClass::Filesystem,
+        StorageClass::Filesystem,
+        StorageClass::Connector,
+        StorageClass::Connector,
+        StorageClass::Connector,
+    ];
+    for class in submitted {
+        nervix_primitives::task::consume_budget().await;
+        let charge = executor
+            .try_reserve(MemoryClass::Bulk, 1)
+            .expect("the bulk class has room for one job at a time");
+        executor
+            .run_storage(class, charge, |_charge, _| ())
+            .await
+            .expect("an idle storage class runs the job");
+    }
+
+    let snapshot = executor.snapshot();
+    let admitted_by_class = [
+        (StorageClass::Consensus, 1),
+        (StorageClass::Filesystem, 2),
+        (StorageClass::Connector, 3),
+    ];
+    for (class, admitted) in admitted_by_class {
+        let read = snapshot.storage_class(class);
+        assert_eq!(
+            read.admitted, admitted,
+            "{class:?} counts only its own jobs"
+        );
+        assert_eq!(
+            snapshot.worker_class(crate::WorkerClassName::from(class)),
+            read,
+            "the widened name of {class:?} reads the same class"
+        );
+    }
+    assert_eq!(
+        snapshot.storage_class(StorageClass::Consensus),
+        snapshot.consensus_storage
+    );
+    assert_eq!(
+        snapshot.storage_class(StorageClass::Filesystem),
+        snapshot.filesystem_storage
+    );
+    assert_eq!(
+        snapshot.storage_class(StorageClass::Connector),
+        snapshot.connector_storage
+    );
+    assert_eq!(
+        snapshot.worker_class(crate::WorkerClassName::from(crate::CpuClass::Bulk)),
+        snapshot.bulk_cpu
+    );
 }
 
 async fn connector_storage_isolation() {
@@ -1190,6 +1264,10 @@ mod shuttle_checks {
                 "{class} must return every worker permit"
             );
             assert_eq!(workers.pending, 0, "{class} must return every queue permit");
+            assert_eq!(
+                workers.waiting, 0,
+                "{class} must count no job as waiting once each one took a place or gave up"
+            );
         }
         for (class, budget) in [
             ("management", snapshot.management_memory),
@@ -1831,6 +1909,11 @@ mod shuttle_checks {
                 .await
                 .assured("the second waiting job reports once the full queue holds it");
             assert_eq!(executor.snapshot().relay_memory.reserved_bytes, 4 * 1024);
+            assert_eq!(
+                executor.snapshot().data_cpu.waiting,
+                2,
+                "both jobs that found the queue full count as waiting for a place"
+            );
 
             dropped.abort();
             assert!(
@@ -1844,6 +1927,10 @@ mod shuttle_checks {
                 "a waiting job that is dropped returns its charge"
             );
             assert_eq!(abandoned.data_cpu.pending, 1);
+            assert_eq!(
+                abandoned.data_cpu.waiting, 1,
+                "a dropped wait stops counting while the job after it still waits"
+            );
 
             full.release().await;
             successor

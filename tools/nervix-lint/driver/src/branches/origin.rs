@@ -55,7 +55,7 @@ fn lifetime_field<'tcx>(tcx: TyCtxt<'tcx>, value: &Expr<'tcx>, base: &Expr<'tcx>
             | "nervix_branch_instances::registry::BranchInstanceEntry::incarnation"
             | "nervix_lint_fixtures::BranchSnapshot::incarnation"
     ) && matches!(
-        field.ty(tcx, arguments).skip_norm_wip().kind(),
+        field.ty(tcx, *arguments).skip_norm_wip().kind(),
         ty::Uint(_) | ty::Int(_)
     )
 }

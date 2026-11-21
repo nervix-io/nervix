@@ -608,7 +608,9 @@ fresh challenge and single-use signed stream ticket; credentials stay out of the
 or `trust` hint schedules a coalesced refresh through the ordinary verification and Raft path;
 duplicate and stale notification identifiers do not schedule another refresh. Hints grant no
 permission. An in-flight refresh can satisfy a sync's reported revisions before another request
-starts.
+starts. A response the cluster refuses satisfies nothing: a sync that reports a newer decision
+than the committed one still schedules a refresh, and the cluster commits the service's next
+verified decision, never the refused copy.
 Notification gaps and later changes still reconcile, and explicit refresh commands still run.
 Reconnects retain `Last-Event-ID` within the current activation and leader tenure;
 a new leader reconciles from its committed revisions. Leadership loss, shutdown or a changed

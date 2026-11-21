@@ -422,6 +422,13 @@ const SERIES: &[SeriesSpec] = &[
         labels: CLASS,
     },
     SeriesSpec {
+        name: "nervix_execution_jobs_waiting",
+        help: "Jobs waiting for a place in one execution class's full wait queue rather than \
+               being refused.",
+        kind: SeriesKind::Gauge,
+        labels: CLASS,
+    },
+    SeriesSpec {
         name: "nervix_execution_jobs_total",
         help: "Jobs one execution class has admitted.",
         kind: SeriesKind::Counter,
@@ -984,6 +991,13 @@ fn execution_families(families: &mut Families, executor: &nervix_execution::Exec
         queue_capacity.sample(
             &[("class", entry.class)],
             entry.workers.queue_capacity.approx_into(),
+        );
+    }
+    let mut waiting = families.open("nervix_execution_jobs_waiting");
+    for entry in &workers {
+        waiting.sample(
+            &[("class", entry.class)],
+            entry.workers.waiting.approx_into(),
         );
     }
     let mut admitted = families.open("nervix_execution_jobs_total");

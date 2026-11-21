@@ -38,7 +38,7 @@ use hyper_util::{
 use meticulous::{OptionExt as _, ResultExt as _};
 pub use model::{
     Fault, FaultObservation, Model, Tamper,
-    notifications::{StreamMode, StreamObservation},
+    notifications::{StreamMode, StreamObservation, SyncObservation},
 };
 use nervix_licensing_protocol::{document::DocumentLimits, documents::EmbeddedTrustBundle};
 use nervix_primitives::{

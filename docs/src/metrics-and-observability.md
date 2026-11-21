@@ -444,9 +444,12 @@ a second of flushing; see [Kafka client retirement](./connector-contract.md#kafk
   queues and memory capacities report the actual [resolved execution settings](node-settings.md#execution-capabilities).
 - `nervix_execution_workers`, `nervix_execution_jobs_running`, `nervix_execution_jobs_pending`: how
   many jobs one class may have on the blocking pool at once, how many it holds, and how many wait
+- `nervix_execution_jobs_waiting`: jobs that found their class's wait queue full and wait for a
+  place in it. Every job waits this way, requests included, so a nonzero value is backpressure,
+  never loss: the jobs take the places the class frees, in the order they asked, and a caller that
+  stops waiting gives its place up
 - `nervix_execution_jobs_total` and `nervix_execution_jobs_completed_total`: jobs admitted and jobs
-  that left a worker. A job that finds its class's wait queue full waits for a place, so no job is
-  refused for a full queue; `nervix_execution_jobs_pending` shows how many wait.
+  that left a worker. No job is refused for a full queue
 
 For `state_read_cache`, an optional retained view that finds no room is not retained, and the
 generator still returns a complete uncached read using `state_read` admission. Active decoded

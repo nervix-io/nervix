@@ -11,7 +11,7 @@ use error_stack::Report;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_primitives::{
     sync::{
-        Arc, OwnedSemaphorePermit, Semaphore, StdArc,
+        Arc, OwnedSemaphorePermit, Semaphore, StdArc, TryAcquireError,
         atomic::{AtomicU64, AtomicUsize, Ordering},
         blocking::Mutex,
         oneshot,
@@ -51,6 +51,9 @@ pub struct WorkerClassSnapshot {
     /// How many jobs the class may hold waiting for a worker. A job submitted while `pending` is
     /// at this capacity waits for a place.
     pub queue_capacity: usize,
+    /// Jobs whose callers found the wait queue full and wait for a place in it. A job stops
+    /// counting here once it takes a place or its caller stops waiting.
+    pub waiting: usize,
     /// Jobs this class has admitted since the node started. A caller that must prove it submitted
     /// one job rather than several reads the difference across its own operation.
     pub admitted: u64,
@@ -123,6 +126,7 @@ struct PoolShared {
     // the next job and relinquishing the last worker one transition with respect to submission.
     queue: Mutex<WorkQueue>,
     pending: AtomicUsize,
+    waiting: AtomicUsize,
     admitted: AtomicU64,
     completed: AtomicU64,
     queued_nanos: AtomicU64,
@@ -152,6 +156,7 @@ impl WorkerPool {
                 queue_permits: StdArc::new(Semaphore::new(pending_jobs.get())),
                 queue: Mutex::new(WorkQueue::default()),
                 pending: AtomicUsize::new(0),
+                waiting: AtomicUsize::new(0),
                 admitted: AtomicU64::new(0),
                 completed: AtomicU64::new(0),
                 queued_nanos: AtomicU64::new(0),
@@ -169,6 +174,7 @@ impl WorkerPool {
             running,
             pending: self.inner.pending.load(Ordering::Acquire),
             queue_capacity: self.inner.queue_capacity,
+            waiting: self.inner.waiting.load(Ordering::Acquire),
             admitted: self.inner.admitted.load(Ordering::Acquire),
             completed: self.inner.completed.load(Ordering::Acquire),
             queued: Duration::from_nanos(self.inner.queued_nanos.load(Ordering::Acquire)),
@@ -313,16 +319,28 @@ impl WorkerPool {
 
     /// Take a place in the class's queue, waiting for one while the queue is full. Places go to
     /// waiting jobs in the order they asked; the wait ends with a place, or with `PoolClosed` once
-    /// the class admits no more work.
+    /// the class admits no more work. A free place is taken at once; only a job that finds the
+    /// queue full counts as waiting, and it waits behind every job that asked before it.
     async fn enter_queue(&self) -> Result<QueueSlot, Report<ExecutionError>> {
-        let permit = StdArc::clone(&self.inner.queue_permits)
-            .acquire_owned()
-            .await
-            .map_err(|_| {
-                Report::new(ExecutionError::PoolClosed {
+        let permit = match StdArc::clone(&self.inner.queue_permits).try_acquire_owned() {
+            Ok(permit) => permit,
+            Err(TryAcquireError::Closed) => {
+                return Err(Report::new(ExecutionError::PoolClosed {
                     class: self.inner.class.as_str(),
-                })
-            })?;
+                }));
+            }
+            Err(TryAcquireError::NoPermits) => {
+                let _waiting = WaitingForPlace::enter(&self.inner);
+                StdArc::clone(&self.inner.queue_permits)
+                    .acquire_owned()
+                    .await
+                    .map_err(|_| {
+                        Report::new(ExecutionError::PoolClosed {
+                            class: self.inner.class.as_str(),
+                        })
+                    })?
+            }
+        };
         self.inner.pending.fetch_add(1, Ordering::AcqRel);
         Ok(QueueSlot {
             pool: Arc::clone(&self.inner),
@@ -561,6 +579,25 @@ fn elapsed_nanos(started_at: Instant) -> u64 {
         "a node would have to run for 584 years for one wait or job to overflow nanosecond \
          counting",
     )
+}
+
+/// One job counted in its class's `waiting` from the moment it found the wait queue full until it
+/// takes a place, its pool closes or its caller drops the wait.
+struct WaitingForPlace<'pool> {
+    pool: &'pool PoolShared,
+}
+
+impl<'pool> WaitingForPlace<'pool> {
+    fn enter(pool: &'pool PoolShared) -> Self {
+        pool.waiting.fetch_add(1, Ordering::AcqRel);
+        Self { pool }
+    }
+}
+
+impl Drop for WaitingForPlace<'_> {
+    fn drop(&mut self) {
+        self.pool.waiting.fetch_sub(1, Ordering::AcqRel);
+    }
 }
 
 struct QueueSlot {
