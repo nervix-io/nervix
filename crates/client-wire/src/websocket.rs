@@ -37,12 +37,36 @@ pub const CONSOLE_BACKUP_DOWNLOAD_PATH: &str = "/console/backups/download";
 pub const CONSOLE_RESTORE_PATH: &str = "/console/backups/restore";
 
 /// The close code for a message the protocol does not accept, such as a text message.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "RFC 6455 section 7.4.1 assigns close code 1003 to a type of data the endpoint \
+                  cannot accept"
+    )
+)]
 const CLOSE_UNSUPPORTED_DATA: u16 = 1003;
 
 /// The close code for a message that is not a valid frame.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "RFC 6455 section 7.4.1 assigns close code 1007 to message data that is not \
+                  consistent with the type of the message"
+    )
+)]
 const CLOSE_INVALID_PAYLOAD: u16 = 1007;
 
 /// The close code for a message larger than the frame limit.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "RFC 6455 section 7.4.1 assigns close code 1009 to a message too big for the \
+                  endpoint to process"
+    )
+)]
 const CLOSE_MESSAGE_TOO_BIG: u16 = 1009;
 
 /// A data message received on a session WebSocket.

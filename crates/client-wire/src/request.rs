@@ -359,7 +359,7 @@ impl ClientRequest {
                 )?;
                 let cursor = u32::try_from(suggest.cursor).verified(
                     "the cursor lies within the input, which passed a string limit of at most \
-                     MAX_FRAME_BYTES above",
+                     SessionFrameBytes::MAXIMUM above",
                 );
                 let request = wire::SuggestRequest::create(
                     encoder.fbb(),
