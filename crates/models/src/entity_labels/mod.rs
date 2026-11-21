@@ -218,6 +218,15 @@ pub enum EntityLabelMutation {
     Drop(EntityLabelKeys),
 }
 
+impl EntityLabelMutation {
+    pub fn statement_keyword(&self) -> &'static str {
+        match self {
+            Self::Set(_) => "SET LABELS",
+            Self::Drop(_) => "DROP LABELS",
+        }
+    }
+}
+
 /// A complete policy projection; callers obtain it from one committed parameter record.
 #[derive(
     Debug,
@@ -250,7 +259,18 @@ impl From<&ClusterParameterValues> for EntityLabelLimits {
     }
 }
 
-#[derive(Debug, Error)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    Error,
+    Serialize,
+    Deserialize,
+    Archive,
+    RkyvSerialize,
+    RkyvDeserialize,
+)]
 pub enum EntityLabelError {
     #[error("invalid label key {key:?}: expected [a-z0-9][a-z0-9._/-]*")]
     InvalidKey { key: String },
@@ -266,6 +286,8 @@ pub enum EntityLabelError {
     NonCanonicalKeys,
     #[error("label byte count exceeds the representable bound")]
     ByteCountOverflow,
+    #[error("administrative entity labels have no staged transaction view")]
+    AdministrativeStagedView,
 }
 
 fn check_limit(

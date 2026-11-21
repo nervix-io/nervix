@@ -567,7 +567,8 @@ void nx_node_inspection_json(const nx_node_inspection *inspection, const uint8_t
 void nx_node_inspection_free(nx_node_inspection *inspection);
 void nx_entity_labels_free(nx_entity_labels *labels);
 /* All returned byte spans borrow labels, and retain exact UTF-8 including empty values. */
-void nx_entity_labels_domain(const nx_entity_labels *labels, const uint8_t **data, size_t *len);
+/* Returns false for a cluster-wide user. */
+bool nx_entity_labels_domain(const nx_entity_labels *labels, const uint8_t **data, size_t *len);
 void nx_entity_labels_entity_kind(const nx_entity_labels *labels, const uint8_t **data, size_t *len);
 void nx_entity_labels_entity_name(const nx_entity_labels *labels, const uint8_t **data, size_t *len);
 nx_entity_label_view_kind nx_entity_labels_view(const nx_entity_labels *labels);

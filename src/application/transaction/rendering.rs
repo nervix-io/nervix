@@ -247,7 +247,8 @@ fn transaction_operation_text(operation: &TransactionOperation) -> String {
         | TransactionOperation::StopDomain { domain } => {
             format!("{action} domain={}", domain.as_str())
         }
-        TransactionOperation::CreateResource { resource, .. } => {
+        TransactionOperation::CreateResource { resource, .. }
+        | TransactionOperation::EditResourceLabels { resource, .. } => {
             format!("{action} resource={}", resource.as_str())
         }
         TransactionOperation::RebindResource {

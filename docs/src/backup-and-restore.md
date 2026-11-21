@@ -48,9 +48,9 @@ BACKUP CLUSTER TO './cluster-config.nvxb' WITHOUT STATE;
 - `BACKUP CLUSTER` covers every domain and every user.
 - `BACKUP DOMAIN <name>` covers one domain. Without a name it covers the session's selected domain.
   A domain backup holds no users.
-- `WITHOUT RESOURCES` records every resource version with its checksums and sizes, and leaves out
-  the version's bytes.
-- `WITHOUT STATE` omits runtime state and takes no domain mutation lease.
+- `WITHOUT RESOURCES` preserves logical resource labels and all catalog metadata, including
+  checksums and sizes. It omits the version bytes.
+- `WITHOUT STATE` omits runtime state, retains configuration and labels, and takes no domain mutation lease.
 - `WITHOUT PAUSE` includes published runtime checkpoints without pausing a running domain. Its
   state and configuration need not be from one quiesced cut.
 - `TIMEOUT <duration>` bounds each running domain's cut, from the wait for its mutation lease
@@ -399,14 +399,15 @@ prints `cluster_uid`. Archives carry no cluster private key, identity record or 
 Restoring into a fresh cluster is a clone with that cluster's own UUID and key. Recovering a
 licensed installation requires an administrative transfer to the rebuilt cluster.
 
-- **Users.** Each archived user, with its complete credential exactly as the archive holds it.
-- **Domains.** Each restored domain is initially created stopped, with its archived pace,
+- **Users.** Each archived user, with its exact labels and complete credential. `ON EXISTING USER SKIP`
+  keeps both on the destination. `ON EXISTING USER REPLACE` imports both from the archive.
+- **Domains.** Each restored domain is initially created stopped, with its archived pace, labels,
   start generation and latest start point. Named placement rules are restored with the Models.
   Complete publication releases its installation
   gate. With `RESUME`, that same consensus effect changes it to running, without a new `START`.
   `LIST DOMAINS`, `DESCRIBE DOMAIN`, restore reports and dry-run reports expose the status and start
   generation; `DESCRIBE DOMAIN` also exposes the start point and installed mapping.
-- **Resources.** Each resource the domain declared, and each completed version under its archived
+- **Resources.** Each resource the domain declared, its logical labels, and each completed version under its archived
   number, with its checksums, file count, sizes, creation time and creating node as
   `DESCRIBE RESOURCE` showed them in the source cluster. A number the source assigned to an upload
   that failed or was still installing when the backup read it stays a gap, and the next upload of
@@ -896,8 +897,8 @@ its format version, each a little-endian 16-bit integer. The rest is an
 | Kind | Tag | Format version | Holds |
 | --- | --- | --- | --- |
 | Manifest | 1 | 5 | Archive format major version, producer and Plexus releases, cluster id and source cluster UID, capture time, scope, whether resource bytes are included, each domain's revision, captured label policy, Raft log entry and cut kind, with a quiesced cut's engagement and release times and quiesce counters, and each section's path, content kind, length and BLAKE3 digest |
-| Users | 2 | 2 | Every user's name and typed PBKDF2-HMAC-SHA-512 credential: validated iterations, 128-bit salt and 64-byte digest |
-| Domain | 3 | 2 | Pace, lifecycle status, start count, the point the latest start began from, the committed clock mapping, the logical instant the clock had reached, and each declared resource with its next version number |
+| Users | 2 | 3 | Captured label policy and each user's name, exact labels and typed PBKDF2-HMAC-SHA-512 credential with validated iterations, 128-bit salt and 64-byte digest |
+| Domain | 3 | 3 | Domain labels, pace, lifecycle status, start count, the point the latest start began from, the committed clock mapping, the logical instant the clock had reached, and each declared resource with its next version number and labels |
 | Resource version | 4 | 1 | The version's domain, resource and number, its upload state, and for a published version its checksums, file count, sizes, creation time and creating node |
 | WASM guest state descriptor | 5 | 5 | The scheduled unit, saved branch key, schema fingerprint, guest state generation and checkpoint revision |
 | Kafka domain offsets | 6 | 5 | The scheduled unit, ingestor schema fingerprint, optional applied explicit-start generation, and ordered topic and partition positions, expressed as the next offset to consume |

@@ -20,13 +20,14 @@ use nervix_models::{
     AttributedGateBoundary, AttributedImpactNode, CanonicalImpactSet, CommandExecutionReference,
     ConfigurationImpact, ConfigurationTransition, DomainLifecycleAction, DomainLifecycleImpact,
     DomainName, DomainSchedule, DomainState as ControlDomainState, DomainStatus,
-    DynamicModelUpdate, ExecutionStepImpactReport, ForceFlushImpact, ImpactAttribution,
-    ImpactDiagnostic, ImpactDiagnosticKind, ImpactEffects, ImpactNodeCoverage, ImpactPlanningBasis,
+    DynamicModelUpdate, EntityLabelLimits, EntityLabelTarget, EntityLabels,
+    ExecutionStepImpactReport, ForceFlushImpact, ImpactAttribution, ImpactDiagnostic,
+    ImpactDiagnosticKind, ImpactEffects, ImpactNodeCoverage, ImpactPlanningBasis,
     ImpactReportCompleteness, ImpactReportError, ImpactTopology, ImpactTopologyEdge,
-    ModelChangeAspect, ModelIndex, NodeRef, OperationImpactReason, OperationImpactReport,
-    OwnershipMoveImpact, ParametrizerName, ParametrizerPartitions, PauseRequirement,
-    PlannedExecutionStepImpact, QuiesceLevel, QuiesceSubgraph, RebuildImpact, RebuildReason,
-    RequestedResourceVersion, ResetWasmState, ResolvedParametrizerPartitions,
+    ModelChangeAspect, ModelIndex, MutateEntityLabels, NodeRef, OperationImpactReason,
+    OperationImpactReport, OwnershipMoveImpact, ParametrizerName, ParametrizerPartitions,
+    PauseRequirement, PlannedExecutionStepImpact, QuiesceLevel, QuiesceSubgraph, RebuildImpact,
+    RebuildReason, RequestedResourceVersion, ResetWasmState, ResolvedParametrizerPartitions,
     ResourceBindingImpact, ResourceCatalogAction, ResourceCatalogImpact, ResourceName,
     ResourceUploads, ResourceVersionResolutionError, StateBranchSelectionError, StateResetImpact,
     Statement, TransactionCommitPlanStep, TransactionCommitStepKind, TransactionImpactReport,
@@ -53,7 +54,7 @@ pub(crate) struct TransactionPlanningSnapshot {
     pub(crate) parameters: nervix_models::ClusterParameterValues,
     pub(crate) domain: ControlDomainState,
     pub(crate) models: ModelIndex,
-    pub(crate) resources: BTreeSet<ResourceName>,
+    pub(crate) resources: BTreeMap<ResourceName, EntityLabels>,
     /// The upload outcomes of the planned domain. Every resource version a statement writes is
     /// resolved against these, so `LATEST` names the highest version completed when this snapshot
     /// was captured.
@@ -88,7 +89,12 @@ pub(crate) enum PlannedTransactionStepKind {
     StopDomain,
     CreateResource {
         resource: ResourceName,
+        labels: EntityLabels,
         already_existed: bool,
+    },
+    EditResourceLabels {
+        resource: ResourceName,
+        labels: EntityLabels,
     },
     ResetWasmState {
         reset: ResetWasmState,
@@ -209,6 +215,11 @@ pub(crate) enum TransactionPlanningError {
     ResourceAlreadyExists { resource: ResourceName },
     #[error("resource '{resource}' does not exist")]
     ResourceNotFound { resource: ResourceName },
+    #[error("labels for resource '{resource}' are invalid")]
+    ResourceLabels {
+        operation: TransactionOperationNumber,
+        resource: ResourceName,
+    },
     #[error(
         "{kind} '{name}' does not exist in domain '{domain}'",
         kind = node.kind.keyword_phrase(),
@@ -283,6 +294,7 @@ impl TransactionPlanningError {
         match self {
             Self::InvalidOperation { operation }
             | Self::ResourceVersion { operation, .. }
+            | Self::ResourceLabels { operation, .. }
             | Self::ModelPreflight { operation, .. }
             | Self::ExternalModelValidation { operation }
             | Self::UdfPreparation { operation }
@@ -338,7 +350,7 @@ struct ModelRunPlanningInput<'a> {
     parameters: &'a nervix_models::ClusterParameterValues,
     domain: &'a DomainName,
     domain_state: &'a ControlDomainState,
-    resources: &'a BTreeSet<ResourceName>,
+    resources: &'a BTreeMap<ResourceName, EntityLabels>,
     resource_uploads: &'a ResourceUploads,
     base_models: ModelIndex,
     current_schedule: Option<DomainSchedule>,
@@ -463,11 +475,16 @@ impl Registry {
             TransactionCommitStepKind::StopDomain => PlannedTransactionStepKind::StopDomain,
             TransactionCommitStepKind::CreateResource {
                 resource,
+                labels,
                 already_existed,
             } => PlannedTransactionStepKind::CreateResource {
                 resource,
+                labels,
                 already_existed,
             },
+            TransactionCommitStepKind::EditResourceLabels { resource, labels } => {
+                PlannedTransactionStepKind::EditResourceLabels { resource, labels }
+            }
             TransactionCommitStepKind::ResetWasmState {
                 reset,
                 request,
@@ -506,12 +523,12 @@ impl Registry {
             first_operation_index,
             allow_incomplete_final_model_run,
             schedule,
-            |_| (),
+            |_, _| (),
         )
         .map(|(plan, ())| plan)
     }
 
-    /// Project the complete final candidate before its temporary model index is released.
+    /// Project the final candidate before its temporary model index and resource catalog are released.
     pub(crate) fn plan_transaction_captured<F, T, I>(
         snapshot: TransactionPlanningSnapshot,
         statements: &[Statement],
@@ -521,7 +538,7 @@ impl Registry {
         inspect: I,
     ) -> Result<(PlannedTransaction, T), Report<TransactionPlanningError>>
     where
-        I: FnOnce(&ModelIndex) -> T,
+        I: FnOnce(&ModelIndex, &BTreeMap<ResourceName, EntityLabels>) -> T,
         F: FnMut(
             Option<ActiveGraph>,
             Option<&DomainSchedule>,
@@ -529,6 +546,7 @@ impl Registry {
         ) -> Result<TransactionScheduleDecision, Report<super::RegistryError>>,
     {
         let parameters = snapshot.parameters;
+        let label_limits = EntityLabelLimits::from(&parameters);
         let domain = snapshot.domain.id.clone();
         let mut domain_state = snapshot.domain;
         let mut models = snapshot.models;
@@ -673,7 +691,7 @@ impl Registry {
                         domain: domain.clone(),
                         resource: create.body.identifier.clone(),
                     };
-                    let already_existed = !resources.insert(create.body.identifier.clone());
+                    let already_existed = resources.contains_key(&create.identifier);
                     if already_existed && !create.if_not_exists {
                         return Err(Report::new(
                             TransactionPlanningError::ResourceAlreadyExists {
@@ -685,6 +703,14 @@ impl Registry {
                         reasons = Vec::new();
                         contribution = ImpactEffects::default();
                     } else {
+                        create
+                            .labels
+                            .validate(&label_limits)
+                            .change_context_lazy(|| TransactionPlanningError::ResourceLabels {
+                                operation: number,
+                                resource: create.identifier.clone(),
+                            })?;
+                        resources.insert(create.identifier.clone(), create.labels.clone());
                         reasons = vec![OperationImpactReason::ResourceCatalog {
                             resource: create.body.identifier.clone(),
                         }];
@@ -699,7 +725,50 @@ impl Registry {
                     }
                     kind = PlannedTransactionStepKind::CreateResource {
                         resource: create.body.identifier.clone(),
+                        labels: create.labels.clone(),
                         already_existed,
+                    };
+                    pause = PauseRequirement::NoPause;
+                }
+                Statement::MutateEntityLabels(MutateEntityLabels {
+                    entity: EntityLabelTarget::Resource(resource),
+                    mutation,
+                }) => {
+                    let current = resources.get_mut(resource).ok_or_else(|| {
+                        Report::new(TransactionPlanningError::ResourceNotFound {
+                            resource: resource.clone(),
+                        })
+                    })?;
+                    let labels = current
+                        .updated(mutation, &label_limits)
+                        .change_context_lazy(|| TransactionPlanningError::ResourceLabels {
+                            operation: number,
+                            resource: resource.clone(),
+                        })?;
+                    operation = TransactionOperation::EditResourceLabels {
+                        domain: domain.clone(),
+                        resource: resource.clone(),
+                    };
+                    if *current == labels {
+                        reasons = Vec::new();
+                        contribution = ImpactEffects::default();
+                    } else {
+                        reasons = vec![OperationImpactReason::ResourceCatalog {
+                            resource: resource.clone(),
+                        }];
+                        contribution = ImpactEffects {
+                            resource_catalog: CanonicalImpactSet::new([ResourceCatalogImpact {
+                                resource: resource.clone(),
+                                action: ResourceCatalogAction::EditLabels,
+                                attribution,
+                            }]),
+                            ..ImpactEffects::default()
+                        };
+                        *current = labels.clone();
+                    }
+                    kind = PlannedTransactionStepKind::EditResourceLabels {
+                        resource: resource.clone(),
+                        labels,
                     };
                     pause = PauseRequirement::NoPause;
                 }
@@ -766,7 +835,7 @@ impl Registry {
             .checked_add(statements.len())
             .assured("a transaction prefix is bounded by its configured statement limit");
         let completeness = combined_completeness(&steps);
-        let inspected = inspect(&models);
+        let inspected = inspect(&models, &resources);
         Ok((
             PlannedTransaction {
                 domain,

@@ -1307,6 +1307,7 @@ mod tests {
         domains.insert(
             domain("paced"),
             DomainState {
+                labels: nervix_models::EntityLabels::default(),
                 id: domain("paced"),
                 config: DomainConfig {
                     pace: DomainPace::Paced {

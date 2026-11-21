@@ -238,6 +238,7 @@ impl StepBoundary for TransactionOperation {
             Self::StartDomain { .. }
             | Self::StopDomain { .. }
             | Self::CreateResource { .. }
+            | Self::EditResourceLabels { .. }
             | Self::ResetWasmState { .. } => false,
         }
     }
@@ -638,7 +639,7 @@ impl Arbitrary<'_> {
         ForceFlushImpact { node, attribution }
     }
 
-    /// A resource entering the catalog.
+    /// A resource catalog entry created or edited by an operation.
     fn resource_catalog_impact(
         &mut self,
         operations: TransactionOperationRange,
@@ -647,7 +648,11 @@ impl Arbitrary<'_> {
         let attribution = self.impact_attribution(operations);
         ResourceCatalogImpact {
             resource,
-            action: ResourceCatalogAction::Create,
+            action: if self.entropy.flag() {
+                ResourceCatalogAction::Create
+            } else {
+                ResourceCatalogAction::EditLabels
+            },
             attribution,
         }
     }
@@ -863,7 +868,7 @@ impl Arbitrary<'_> {
     /// and a resource rebinding binds the version it names, or any version for `LATEST`.
     pub fn transaction_operation(&mut self, domain: &DomainName) -> TransactionOperation {
         let domain = domain.clone();
-        match self.entropy.byte() % 8 {
+        match self.entropy.byte() % 9 {
             0 => TransactionOperation::StopDomain { domain },
             1 => TransactionOperation::StartDomain { domain },
             2 => TransactionOperation::CreateResource {
@@ -885,6 +890,10 @@ impl Arbitrary<'_> {
             6 => TransactionOperation::DropConfiguration {
                 domain,
                 node: self.any_node_ref(),
+            },
+            7 => TransactionOperation::EditResourceLabels {
+                domain,
+                resource: self.name(),
             },
             _ => {
                 let resource = self.name();
@@ -942,7 +951,8 @@ impl Arbitrary<'_> {
             }
             TransactionOperation::StartDomain { .. } => vec![OperationImpactReason::DomainStart],
             TransactionOperation::StopDomain { .. } => vec![OperationImpactReason::DomainStop],
-            TransactionOperation::CreateResource { resource, .. } => {
+            TransactionOperation::CreateResource { resource, .. }
+            | TransactionOperation::EditResourceLabels { resource, .. } => {
                 if self.entropy.flag() {
                     vec![OperationImpactReason::ResourceCatalog {
                         resource: resource.clone(),
@@ -1349,7 +1359,14 @@ impl Arbitrary<'_> {
                 let already_existed = self.entropy.flag();
                 TransactionCommitStepKind::CreateResource {
                     resource: resource.clone(),
+                    labels: self.entity_labels(),
                     already_existed,
+                }
+            }
+            TransactionOperation::EditResourceLabels { resource, .. } => {
+                TransactionCommitStepKind::EditResourceLabels {
+                    resource: resource.clone(),
+                    labels: self.entity_labels(),
                 }
             }
             TransactionOperation::ResetWasmState { domain, processor } => {
@@ -1435,7 +1452,7 @@ mod tests {
     const BYTES: usize = 8192;
 
     /// Every variant, family and shape the generators promise to reach, as [`Walk`] names them.
-    const EXPECTED: [&str; 104] = [
+    const EXPECTED: [&str; 107] = [
         "TransactionImpactReport::empty",
         "TransactionOperationRange::single",
         "TransactionOperationRange::several",
@@ -1445,6 +1462,7 @@ mod tests {
         "TransactionOperation::StartDomain",
         "TransactionOperation::StopDomain",
         "TransactionOperation::CreateResource",
+        "TransactionOperation::EditResourceLabels",
         "TransactionOperation::RebindResource",
         "TransactionOperation::ResetWasmState",
         "OperationImpactReason::Configuration",
@@ -1510,6 +1528,7 @@ mod tests {
         "StatePurge::InferencerWarmState",
         "StatePurge::WasmGuestState",
         "ResourceCatalogAction::Create",
+        "ResourceCatalogAction::EditLabels",
         "RequestedResourceVersion::Number",
         "RequestedResourceVersion::Latest",
         "ActualExecutionStepImpact::quiescence",
@@ -1526,6 +1545,7 @@ mod tests {
         "TransactionCommitStepKind::StartDomain",
         "TransactionCommitStepKind::StopDomain",
         "TransactionCommitStepKind::CreateResource",
+        "TransactionCommitStepKind::EditResourceLabels",
         "TransactionCommitStepKind::ResetWasmState",
         "TransactionModelTransition::Create",
         "TransactionModelTransition::Replace",
@@ -1917,6 +1937,9 @@ mod tests {
                 self.see("ImpactEffects::resource_catalog");
                 match catalog.action {
                     ResourceCatalogAction::Create => self.see("ResourceCatalogAction::Create"),
+                    ResourceCatalogAction::EditLabels => {
+                        self.see("ResourceCatalogAction::EditLabels")
+                    }
                 }
                 self.attribution(&catalog.attribution, within);
             }
@@ -2018,6 +2041,9 @@ mod tests {
                 TransactionOperation::CreateResource { .. } => {
                     self.see("TransactionOperation::CreateResource");
                 }
+                TransactionOperation::EditResourceLabels { .. } => {
+                    self.see("TransactionOperation::EditResourceLabels");
+                }
                 TransactionOperation::RebindResource {
                     requested, version, ..
                 } => {
@@ -2071,6 +2097,9 @@ mod tests {
                 (
                     OperationImpactReason::ResourceCatalog { resource },
                     TransactionOperation::CreateResource {
+                        resource: named, ..
+                    }
+                    | TransactionOperation::EditResourceLabels {
                         resource: named, ..
                     },
                 ) => {
@@ -2288,6 +2317,15 @@ mod tests {
                         },
                     ) => {
                         self.see("TransactionCommitStepKind::CreateResource");
+                        assert_eq!(resource, named);
+                    }
+                    (
+                        TransactionCommitStepKind::EditResourceLabels { resource, .. },
+                        TransactionOperation::EditResourceLabels {
+                            resource: named, ..
+                        },
+                    ) => {
+                        self.see("TransactionCommitStepKind::EditResourceLabels");
                         assert_eq!(resource, named);
                     }
                     (

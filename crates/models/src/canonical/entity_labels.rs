@@ -44,11 +44,7 @@ fn assignments(labels: &EntityLabels) -> Vec<String> {
 
 impl MutateEntityLabels {
     pub fn to_canonical_plexus(&self) -> String {
-        let target = format!(
-            "{} {}",
-            self.entity.kind.keyword_phrase(),
-            self.entity.identifier
-        );
+        let target = &self.entity;
         match &self.mutation {
             EntityLabelMutation::Set(labels) => format!(
                 "SET LABELS ON {target} {{ {} }};",
@@ -69,9 +65,8 @@ impl MutateEntityLabels {
 impl ShowLabels {
     pub fn to_canonical_plexus(&self) -> String {
         format!(
-            "SHOW LABELS ON {} {} FORMAT {};",
-            self.entity.kind.keyword_phrase(),
-            self.entity.identifier,
+            "SHOW LABELS ON {} FORMAT {};",
+            self.entity,
             self.format.as_ref()
         )
     }

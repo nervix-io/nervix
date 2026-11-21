@@ -984,7 +984,8 @@ impl ImpactRole {
     fn creates_resource(&self) -> bool {
         match self {
             Self::Catalog(ResourceCatalogAction::Create) => true,
-            Self::Configuration(_)
+            Self::Catalog(ResourceCatalogAction::EditLabels)
+            | Self::Configuration(_)
             | Self::Pause { .. }
             | Self::Gate { .. }
             | Self::Move { .. }

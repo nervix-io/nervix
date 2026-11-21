@@ -762,6 +762,7 @@ impl DomainDraft {
         };
         let statement = Statement::CreateDomain(CreateStatement::new(
             CreateDomain {
+                labels: nervix_models::EntityLabels::default(),
                 id: name.clone(),
                 config: DomainConfig { pace },
             },
@@ -801,6 +802,7 @@ impl UserDraft {
         }
         let statement = Statement::CreateUser(CreateStatement::new(
             CreateUser {
+                labels: nervix_models::EntityLabels::default(),
                 name: name.clone(),
                 password: self.password.clone(),
             },
@@ -808,6 +810,7 @@ impl UserDraft {
         ));
         let presentation_statement = Statement::CreateUser(CreateStatement::new(
             CreateUser {
+                labels: nervix_models::EntityLabels::default(),
                 name,
                 password: "********".to_string(),
             },
@@ -847,6 +850,7 @@ impl ResourceDraft {
             .map_err(|cause| cause.change_context(CreateDraftError::ResourceName))?;
         let statement = Statement::CreateResource(CreateStatement::new(
             CreateResource {
+                labels: nervix_models::EntityLabels::default(),
                 identifier: name.clone(),
             },
             self.if_not_exists,

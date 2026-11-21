@@ -422,6 +422,7 @@ pub(super) fn test_ingestor_quiesce_control(
 
 pub(super) fn paced_domain_state(raw: &str) -> DomainState {
     DomainState {
+        labels: nervix_models::EntityLabels::default(),
         id: domain(raw),
         config: DomainConfig {
             pace: DomainPace::Paced {
@@ -443,6 +444,7 @@ pub(super) fn paced_domain_state(raw: &str) -> DomainState {
 
 pub(super) fn unpaced_domain_state(raw: &str) -> DomainState {
     DomainState {
+        labels: nervix_models::EntityLabels::default(),
         id: domain(raw),
         config: DomainConfig {
             pace: DomainPace::Unpaced,

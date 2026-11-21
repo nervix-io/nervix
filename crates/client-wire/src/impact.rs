@@ -54,6 +54,7 @@ wire_enum!(ALL_IMPACT_EDGE_KINDS: ImpactEdgeKind => wire::ImpactEdgeKind {
 
 wire_enum!(ALL_RESOURCE_CATALOG_ACTIONS: ResourceCatalogAction => wire::ResourceCatalogAction {
     Create,
+    EditLabels,
 });
 
 wire_enum!(ALL_DOMAIN_LIFECYCLE_ACTIONS: DomainLifecycleAction => wire::DomainLifecycleAction {
@@ -1283,6 +1284,22 @@ fn encode_transaction_operation(
                 operation,
             )
         }
+        TransactionOperation::EditResourceLabels { domain, resource } => {
+            let domain = encoder.text("EditResourceLabelsOperation.domain", domain.as_str())?;
+            let resource =
+                encoder.text("EditResourceLabelsOperation.resource", resource.as_str())?;
+            let operation = wire::EditResourceLabelsOperation::create(
+                encoder.fbb(),
+                &wire::EditResourceLabelsOperationArgs {
+                    domain: Some(domain),
+                    resource: Some(resource),
+                },
+            );
+            EncodedUnion::new(
+                wire::TransactionOperation::EditResourceLabelsOperation,
+                operation,
+            )
+        }
         TransactionOperation::RebindResource {
             domain,
             resource,
@@ -1378,6 +1395,12 @@ fn decode_transaction_operation(
         return Ok(TransactionOperation::CreateResource {
             domain: decoder.name("CreateResourceOperation.domain", operation.domain())?,
             resource: decoder.name("CreateResourceOperation.resource", operation.resource())?,
+        });
+    }
+    if let Some(operation) = report.operation_as_edit_resource_labels_operation() {
+        return Ok(TransactionOperation::EditResourceLabels {
+            domain: decoder.name("EditResourceLabelsOperation.domain", operation.domain())?,
+            resource: decoder.name("EditResourceLabelsOperation.resource", operation.resource())?,
         });
     }
     if let Some(operation) = report.operation_as_rebind_resource_operation() {

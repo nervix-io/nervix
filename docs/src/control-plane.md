@@ -130,7 +130,7 @@ Only the bound domain's replicated configuration effects may be queued:
 - model `CREATE`, supported model `ALTER`, and model `DROP` statements;
 - `REBIND RESOURCE`, as one atomic model-mutation batch;
 - `START` and `STOP`;
-- `CREATE RESOURCE` and `RESET WASM PROCESSOR ... STATE`.
+- `CREATE RESOURCE`, `SET LABELS ON RESOURCE`, `DROP LABELS ON RESOURCE`, and `RESET WASM PROCESSOR ... STATE`.
 
 Completion on the bound session resolves identifiers against the configuration the queued
 statements produce, applied in written order, so a client is offered the models and resources its
@@ -141,8 +141,9 @@ same user, are offered committed configuration alone.
 For a `REBIND RESOURCE ... FOR` list, completion further limits each kind to queued-result models
 that bind the named resource.
 
-Read-only `SHOW`, `DESCRIBE`, and `LOOKUP` statements are rejected at queue time. `CREATE DOMAIN`
-and `CREATE USER` are rejected too: neither belongs to a domain, so neither is transaction content.
+Read-only `SHOW`, `DESCRIBE`, and `LOOKUP` statements are rejected at queue time. A single
+`SHOW LABELS` request reads beside the queue. `CREATE DOMAIN`, `CREATE USER` and domain or
+user label edits are administrative commands that run outside the transaction.
 Session subscriptions, `UPLOAD RESOURCE`, `BACKUP`, `RESTORE`, and node scheduling or membership
 operations (`CORDON`, `UNCORDON`, `DRAIN`, `DROP NODE`, and `RELOCATE`) are also immediate,
 non-transaction content. Run those statements outside `BEGIN`/`COMMIT`.

@@ -474,14 +474,14 @@ impl Registry {
 
                     candidate.insert(model.as_ref().clone());
                 }
-                RegistryMutation::Labels(edit) => {
-                    let Some(mut model) = candidate.remove(&edit.entity) else {
+                RegistryMutation::Labels { entity, mutation } => {
+                    let Some(mut model) = candidate.remove(entity) else {
                         return Err(Report::new(RegistryError::NotFound {
                             domain: domain.as_str().to_owned(),
-                            identifier: edit.entity.identifier.as_str().to_owned(),
+                            identifier: entity.identifier.as_str().to_owned(),
                         }));
                     };
-                    model.labels_mut().apply(&edit.mutation);
+                    model.labels_mut().apply(mutation);
                     candidate.insert(model);
                 }
                 RegistryMutation::AlterSchema(alter) => {

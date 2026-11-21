@@ -379,9 +379,9 @@ complete unsigned 64-bit range. Duration settings preserve their declared range 
 precision in eight bytes. Decoding validates the same declaration before publishing a parameter
 value.
 
-Consensus's `raft_parametrizer_node_selector_runtime_entity_labels_inherited_topology_ratelimit_stopping_transactionalstart_endpoint_pause_` keyspaces and current
-`ClusterState` metadata encoding, 43, identify its stored shapes, including the `parametrizer` kind text, endpoint pause response choices,
-node selector statements and the partition count of every resolved
+Consensus's `raft_parametrizer_endpoint_pause_domain_resource_user_labels_` keyspaces and `ClusterState`
+metadata encoding 44 identify its stored shapes, including the `parametrizer` kind text, endpoint pause response choices,
+domain, resource and user labels, node selector statements and the partition count of every resolved
 parametrizer in the committed schedule, the partition epoch the schedule records for each
 parametrizer whose count changed, and the statements a transaction keeps, including per-entity
 `ALTER INGESTOR` and `ALTER EMITTER` operations, `SHOW INFERENCER ... STATE` and a `RESET WASM PROCESSOR ... STATE` that takes
@@ -831,9 +831,10 @@ record. Registry publication, recovered committed configuration and wire inspect
 against that captured policy and their outer representation bounds. Compiled defaults never
 replace a missing policy or normalize invalid stored metadata.
 
-An `EntityLabelsInspection` carries the existing `DomainNodeRef`, complete map and captured
-policy. Its view is explicitly committed, with its applied revision, or staged, with a
-`TransactionPreviewIdentity`. The discriminant determines which identity is present; an absent
+An `EntityLabelsInspection` carries a typed `EntityLabelOwner`, complete map and captured
+policy. The owner is a Model's `DomainNodeRef`, a domain name, a domain-scoped
+`ResourceCatalogKey` or a cluster-wide user name. Its view is explicitly committed, with its
+applied revision, or staged, with a `TransactionPreviewIdentity`. The discriminant determines which identity is present; an absent
 committed revision is never inferred to be zero or to describe a staged candidate. Labels remain
 control-plane state and are excluded from execution identities. [Entity Labels](entity-labels.md)
 owns their product semantics.

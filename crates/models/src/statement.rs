@@ -144,8 +144,10 @@ impl Statement {
 
     pub fn is_model_mutation(&self) -> bool {
         match self {
-            Self::MutateEntityLabels(_)
-            | Self::Create(_)
+            Self::MutateEntityLabels(edit) => {
+                matches!(edit.entity, crate::EntityLabelTarget::Model(_))
+            }
+            Self::Create(_)
             | Self::AlterSchema(_)
             | Self::AlterWireJsonSchema(_)
             | Self::AlterWireCborSchema(_)
@@ -521,6 +523,7 @@ pub struct StateInspectionPageRequest {
 pub struct CreateDomain {
     pub id: DomainName,
     pub config: DomainConfig,
+    pub labels: crate::EntityLabels,
 }
 
 #[derive(
@@ -529,6 +532,7 @@ pub struct CreateDomain {
 pub struct CreateUser {
     pub name: UserName,
     pub password: String,
+    pub labels: crate::EntityLabels,
 }
 
 #[derive(
@@ -536,7 +540,26 @@ pub struct CreateUser {
 )]
 pub struct CreateResource {
     pub identifier: ResourceName,
+    pub labels: crate::EntityLabels,
 }
+
+macro_rules! creation_labels {
+    ($($creation:ty),+ $(,)?) => {
+        $(
+            impl crate::EntityMetadata for $creation {
+                fn labels(&self) -> &crate::EntityLabels {
+                    &self.labels
+                }
+
+                fn labels_mut(&mut self) -> &mut crate::EntityLabels {
+                    &mut self.labels
+                }
+            }
+        )+
+    };
+}
+
+creation_labels!(CreateDomain, CreateUser, CreateResource);
 
 #[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
@@ -697,6 +720,7 @@ pub struct DomainTick {
 pub struct DomainState {
     pub id: DomainName,
     pub config: DomainConfig,
+    pub labels: crate::EntityLabels,
     pub status: DomainStatus,
     pub start_version: u64,
     pub last_start: DomainStartPoint,
