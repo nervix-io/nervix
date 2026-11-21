@@ -806,17 +806,20 @@ still receives grants and admission beside it, and cancelling the held batch ret
 reservation once the application drops the batch. Once the application has decoded a batch, it keeps
 only the batch's body and decoded columns charged while its runtime takes the batch in.
 
-A CPU class admits each job separately: one of its workers runs, a bounded number hold a place in
-its queue, and no job joins an unbounded queue. Encoding or decoding a frame waits for a place when
-that queue is full instead of being refused: a frame carries work a peer or this node already
-accepted, such as a response whose handler already ran. A typed request runs several jobs of its
-class in turn, encoding its payload and envelope and later decoding the response, so a burst that
-keeps the queue full delays each of them without failing the request, whose own deadline still
-bounds the whole exchange. Each pool class has its own connections and CPU class, so a frame that
-waits holds back only its own class's streams. A job waiting for a place keeps the memory charge it
-was admitted with, and every other class keeps admitting independently. A request whose encoding
-fails fails with `RequestError::Encode`, and one that fails at a later stage with
-`RequestError::Transport`.
+A CPU class admits each job separately: one of its workers runs, a bounded number wait, and no job
+joins an unbounded queue. A typed request runs several jobs of its class in turn, encoding its
+payload and envelope and later decoding the response. The request's own jobs are refused at once
+when the queue is full: the caller still holds the request, so it fails with
+`RequestError::Encode` and can be sent again, and the peer refuses a request it cannot decode now
+the same way. A refused job holds no memory charge, so a burst beyond the queue cannot hold the
+class's memory. The response's jobs wait for a place instead, because the response carries
+work the handler already did: the peer's encoding of the answer waits until the caller resets the
+stream, and the caller's decoding of it waits within the request's own deadline. A request that
+fails at one of its later stages fails with `RequestError::Transport`. An ack resolution, which
+carries the outcome of a delivery the peer already resolved, waits for a place on the control class
+the same way. Every other class keeps admitting independently. Handshakes, relay admission and
+grants, and the frames of byte and duplex streams keep the refusal: their opener holds its input and
+opens again.
 
 The [stalled-peer simulation](./interconnect-simulation.md#stalled-peer-isolation) checks these
 bounds with exact values: a stalled peer and a healthy peer share one hub, and every observation of

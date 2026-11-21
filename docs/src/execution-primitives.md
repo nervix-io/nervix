@@ -467,9 +467,10 @@ lock or reference count. VM execution still owns its class and charge decisions.
 preparation, retained inference setup and runs, and relay carriage use the same waiting FIFO.
 Request work, whose caller still holds its input and waits on the answer, keeps its immediate
 refusal through the refusing `run_cpu` and `run_storage`, including client batch decoding,
-statement constants, subscription predicates, state inspection and an HTTP endpoint body. Every
-other job states `QueueAdmission::WaitForPlace` and waits: the unfolding of every payload an
-ingestor handed over, acknowledged or not, relay and subscription carriage, interconnect frames,
+statement constants, subscription predicates, state inspection, an HTTP endpoint body and the
+frames of a request one node sends another. Every other job states `QueueAdmission::WaitForPlace`
+and waits: the unfolding of every payload an ingestor handed over, acknowledged or not, relay and
+subscription carriage, the answer of an interconnect request whose handler already ran,
 checkpoints and state captures, compilation for a committed change, lifecycle steps, and the
 consensus storage worker's jobs, which `submit_storage` admits in order. A wait ends in a refusal
 only once the executor admits no more work.

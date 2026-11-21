@@ -197,15 +197,20 @@ async fn nested_decode_cancellation_keeps_its_own_input_charge() {
     assert_eq!(executor.memory(MemoryClass::Bulk).reserved_bytes, 0);
 }
 
-/// A frame carries work a peer or this node already accepted, so when its CPU class has no worker
-/// and no place in its queue, its encoding and its decoding wait for a place rather than being
-/// refused, and both complete once the class frees.
+/// A request frame its caller still holds is refused at once when its CPU class has no worker and
+/// no place in its queue, and it keeps no charge, so a burst beyond the class cannot hold the
+/// class's memory. A response frame carries work a handler already did, so its encoding and its
+/// decoding wait for a place instead, and both complete once the class frees.
 #[cfg(not(feature = "shuttle"))]
 #[nervix_primitives::test]
-async fn a_frame_the_cpu_class_cannot_take_now_waits_for_a_place() {
+async fn a_full_class_refuses_a_request_frame_and_holds_a_response_frame_back() {
     use std::num::NonZeroUsize;
 
-    use nervix_execution::{ExecutionConfig, PendingJobCounts, WorkerCounts};
+    use nervix_execution::{
+        ExecutionConfig, ExecutionError, PendingJobCounts, QueueAdmission, WorkerCounts,
+    };
+
+    use crate::request::ResponseEnvelope;
 
     let executor = Executor::new(ExecutionConfig {
         workers: WorkerCounts {
@@ -243,36 +248,92 @@ async fn a_frame_the_cpu_class_cannot_take_now_waits_for_a_place() {
         nervix_primitives::task::yield_now().await;
     }
     let before = executor.snapshot().cpu_class(CpuClass::Bulk);
-
-    let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&request())
+    let reserved_before = executor.memory(MemoryClass::Bulk).reserved_bytes;
+    let charged = |bytes: Vec<u8>| {
+        let input = executor
+            .try_reserve(
+                MemoryClass::Bulk,
+                u64::try_from(bytes.len()).assured("the fixture envelope's length fits u64"),
+            )
+            .assured("the encoded envelope fits");
+        ChargedBytes::from_owned(bytes, input)
+    };
+    let request_bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&request())
         .assured("the current fixture envelope serializes")
         .to_vec();
-    let input = executor
-        .try_reserve(
-            MemoryClass::Bulk,
-            u64::try_from(bytes.len()).assured("the fixture envelope's length fits u64"),
-        )
-        .assured("the encoded envelope fits");
-    let mut decoding = std::pin::pin!(super::decode_rkyv::<RequestEnvelope>(
-        &executor,
-        MemoryClass::Bulk,
-        CpuClass::Bulk,
-        ChargedBytes::from_owned(bytes, input),
-    ));
-    let mut encoding = std::pin::pin!(super::encode_rkyv(
+
+    let refused_encoding = super::encode_rkyv(
         &executor,
         MemoryClass::Bulk,
         CpuClass::Bulk,
         1024 * 1024,
         request(),
+    )
+    .now_or_never()
+    .assured("a full class answers a request frame's encoding at once");
+    let refused_decoding = super::decode_rkyv::<RequestEnvelope>(
+        &executor,
+        MemoryClass::Bulk,
+        CpuClass::Bulk,
+        charged(request_bytes),
+    )
+    .now_or_never()
+    .assured("a full class answers a request frame's decoding at once");
+    for refused in [refused_encoding.map(drop), refused_decoding.map(drop)] {
+        let error = refused
+            .err()
+            .assured("a full class refuses a request frame");
+        assert!(
+            matches!(
+                error.downcast_ref::<ExecutionError>(),
+                Some(ExecutionError::QueueFull { .. })
+            ),
+            "{error:?}"
+        );
+    }
+    assert_eq!(
+        executor.memory(MemoryClass::Bulk).reserved_bytes,
+        reserved_before,
+        "a refused request frame keeps no charge"
+    );
+    let refused = executor
+        .snapshot()
+        .cpu_class(CpuClass::Bulk)
+        .refused
+        .checked_sub(before.refused)
+        .assured("the refusal counter only grows");
+    assert_eq!(refused, 2, "each request frame is refused once");
+
+    let response = || ResponseEnvelope {
+        class: PoolClass::Bulk,
+        request: "fetch_state_snapshot".to_owned(),
+        result: Ok(vec![7; 1024]),
+    };
+    let response_bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&response())
+        .assured("the current fixture envelope serializes")
+        .to_vec();
+    let mut decoding = std::pin::pin!(super::decode_rkyv_with::<ResponseEnvelope>(
+        &executor,
+        MemoryClass::Bulk,
+        CpuClass::Bulk,
+        QueueAdmission::WaitForPlace,
+        charged(response_bytes),
+    ));
+    let mut encoding = std::pin::pin!(super::encode_rkyv_with(
+        &executor,
+        MemoryClass::Bulk,
+        CpuClass::Bulk,
+        1024 * 1024,
+        QueueAdmission::WaitForPlace,
+        response(),
     ));
     assert!(
         decoding.as_mut().now_or_never().is_none(),
-        "a full class holds the frame's decoding back"
+        "a full class holds a response frame's decoding back"
     );
     assert!(
         encoding.as_mut().now_or_never().is_none(),
-        "a full class holds the frame's encoding back"
+        "a full class holds a response frame's encoding back"
     );
 
     drop(release);
@@ -282,8 +343,8 @@ async fn a_frame_the_cpu_class_cannot_take_now_waits_for_a_place() {
     let encoded = encoding
         .await
         .assured("the encoding runs once a place frees");
-    assert_eq!(decoded.value.request, request().request);
-    assert_eq!(decoded.value.payload, request().payload);
+    assert_eq!(decoded.value.request, response().request);
+    assert_eq!(decoded.value.result, response().result);
     assert!(!encoded.is_empty());
     occupying
         .await
@@ -293,11 +354,13 @@ async fn a_frame_the_cpu_class_cannot_take_now_waits_for_a_place() {
         .await
         .assured("the queued job's supervisor is joined")
         .assured("the queued job ran once the worker freed");
-    assert_eq!(
-        executor.snapshot().cpu_class(CpuClass::Bulk).refused,
-        before.refused,
-        "a full class refuses no frame"
-    );
+    let refused = executor
+        .snapshot()
+        .cpu_class(CpuClass::Bulk)
+        .refused
+        .checked_sub(before.refused)
+        .assured("the refusal counter only grows");
+    assert_eq!(refused, 2, "a full class refuses no response frame");
 }
 
 #[cfg(not(feature = "shuttle"))]

@@ -369,9 +369,9 @@ cannot police import paths, so it keeps only genuinely forbidden types and opera
   code the node cannot bound (UDF calls, JAQ transformations, ONNX model runs) takes the extension
   class and password hashing the credentials class. A full queue is a temporary condition and never
   costs data: work a source handed over, with or without an acknowledgement, and every other work
-  no caller waits to be answered about (relay and subscription deliveries, interconnect frames,
-  checkpoints and state captures, consensus storage, compilation for a committed change, lifecycle
-  steps) states
+  no caller waits to be answered about (relay and subscription deliveries, the answer of an
+  interconnect request whose handler already ran, checkpoints and state captures, consensus
+  storage, compilation for a committed change, lifecycle steps) states
   `QueueAdmission::WaitForPlace`, and its owner holds back whatever feeds it while it waits, lets
   shutdown and a new quiesce end the wait, and keeps or re-decides the work. Only a request whose
   caller still holds its input and waits on the answer may be refused, with a typed, retryable busy

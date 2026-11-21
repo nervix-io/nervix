@@ -89,10 +89,10 @@ its input and waits on the answer, such as an HTTP endpoint body, a statement or
 refused, and its caller answers that the node is busy. Every other job waits for a place: the
 unfolding of every payload an ingestor handed over, acknowledged or not, of a poll a paced ingestor
 handed over and of a payload a quiesce buffer retained, an Iceberg commit's read of the staged rows
-its emitter already accepted, relay and subscription deliveries, interconnect frames, checkpoints,
-consensus storage and lifecycle steps. Holding an ingestor loop pushes back into its transport, so
-a node whose extension workers stay full delays polls and reads, and lets each transport keep what
-it holds within its own bounds; see
+its emitter already accepted, relay and subscription deliveries, the answer of an interconnect
+request whose handler already ran, checkpoints, consensus storage and lifecycle steps. Holding an
+ingestor loop pushes back into its transport, so a node whose extension workers stay full delays
+polls and reads, and lets each transport keep what it holds within its own bounds; see
 [When The Extension Workers Are Full](./ingestors.md#when-the-extension-workers-are-full).
 
 Transient memory ceilings derive from the node's known memory. Management gets 1/128, commands
