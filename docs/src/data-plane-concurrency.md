@@ -1082,13 +1082,14 @@ last publication when the branch stops, even when its task is already gone. A wi
 its resident or quota-owned segmented write; the deduplicator keeps its resident key checkpoint.
 Neither a snapshot nor a replica takes the live branch state from its task.
 
-A stateful inferencer publishes the native tensor generation after each admitted batch. The
-publication retains the immutable native tensors; encoding extracts their shapes and exact float
+A stateful inferencer publishes the native tensor generation after each admitted batch that
+advanced its state. The publication retains the immutable native tensors; encoding extracts their shapes and exact float
 bits on the bounded CPU workers. It neither copies tensors per output route nor routes them
 through Arrow. Capturing a generation retains that exact value while later model invocations
 advance the branch. The final write uses the same carrier, and eviction publishes an empty
 generation before its exact replication route retires. Restoration validates the snapshot frame,
-model identity and branch incarnation before installing native tensors into a new session.
+model identity and branch incarnation before installing native tensors into a new session. See
+[Inferencer State And Recovery](./inferencer-state.md) for the carried state's contract.
 
 `StateSnapshotTasks`, `CheckpointWriter` and `SnapshotCadence` also provide the task lifetime,
 domain tracking, periodic cadence and final-write signal for Kafka domain offsets. Offsets keep

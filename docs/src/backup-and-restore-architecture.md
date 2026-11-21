@@ -21,7 +21,7 @@ every node has done so.
 This chapter describes the architecture. [Backup And Restore](./backup-and-restore.md) owns the
 statements, their options, the command-line and console surfaces, the archive's section and record
 tables, the operator limits and the reported failures. [WASM State And Recovery](./wasm-state.md),
-[Consensus Storage And Replication](./consensus-storage-and-replication.md), [Cluster
+[Inferencer State And Recovery](./inferencer-state.md), [Consensus Storage And Replication](./consensus-storage-and-replication.md), [Cluster
 Interconnect](./interconnect.md), [Data-Plane Concurrency](./data-plane-concurrency.md) and
 [Shutdown And Recovery](./shutdown.md) keep the contracts of the mechanisms backup and restore use.
 
