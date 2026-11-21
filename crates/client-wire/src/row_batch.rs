@@ -13,16 +13,24 @@
 use error_stack::Report;
 use flatbuffers::WIPOffset;
 use meticulous::OptionExt as _;
+use nervix_models::SessionFrameBytes;
 
 use crate::{
     codec::{Encoder, WireEncodeError},
-    limits::MIN_FRAME_BYTES,
     row::CellWriter,
     wire,
 };
 
 /// The depth of a row's or branch key's cell tables in a rows frame: the server message, the rows
 /// event, the batch, the row or branch key, and the cell.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "session.fbs nests a row's or branch key's cells in the server message, the rows \
+                  event, the batch and the row or branch key, so the cell tables sit at this depth"
+    )
+)]
 const ROW_CELL_DEPTH: usize = 5;
 
 /// The bytes a rows frame keeps free for what it writes once the last row is accepted: the rows
@@ -30,12 +38,27 @@ const ROW_CELL_DEPTH: usize = 5;
 /// root offset and identifier, and alignment padding, with room for the one row table a refused
 /// row writes before it is checked. The subscription handle and branch key are written first and
 /// counted as they are written. A test fills batches up to the frame limit and finishes them.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the session schema's rows frame layout encodes what follows its last row, and \
+                  the one refused row table, within 256 bytes; the full-batch test pins it"
+    )
+)]
 const ROWS_ENVELOPE_BYTES: usize = 256;
 
 /// The offset each row adds to the batch's rows vector.
-const ROW_OFFSET_BYTES: usize = 4;
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "a FlatBuffers vector of tables holds one 4-byte offset for each table"
+    )
+)]
+const ROW_OFFSET_BYTES: usize = flatbuffers::SIZE_UOFFSET;
 
-const _: () = assert!(ROWS_ENVELOPE_BYTES < MIN_FRAME_BYTES);
+const _: () = assert!(ROWS_ENVELOPE_BYTES < SessionFrameBytes::MINIMUM);
 
 pub(crate) struct RowBatchBuilder {
     encoder: Encoder<'static>,

@@ -33,7 +33,29 @@ use crate::{
     wire,
 };
 
+/// The depth of an expected field in an open request: the client message, the request, and the
+/// field.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "session.fbs nests an open emitter request's expected field in the client \
+                  message and the request, so the field table sits at this depth"
+    )
+)]
 const REQUEST_FIELD_DEPTH: usize = 3;
+
+/// The depth of a field in an opened consumer's reply: the server message, the reply, the open
+/// outcome, the opened emitter, and the field.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "session.fbs nests an opened emitter's field in the server message, the reply, \
+                  the open emitter outcome and the opened emitter, so the field table sits at \
+                  this depth"
+    )
+)]
 const OPENED_FIELD_DEPTH: usize = 5;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
