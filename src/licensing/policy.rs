@@ -14,15 +14,11 @@ use std::collections::BTreeMap;
 
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_consensus::LicensingSnapshot;
-use nervix_licensing_protocol::conditions::{FREE_POLICY, UsageConditions};
+use nervix_licensing_protocol::conditions::{Capability, FREE_POLICY, UsageConditions};
 use nervix_licensing_vocabulary::{
-    AdmissionState, LicensingRefusal, Quota, QuotaConstraint, QuotaName,
+    AdmissionState, CapabilityName, LicensingRefusal, Quota, QuotaConstraint, QuotaName,
 };
 use nervix_models::{LicensingStopReason, Timestamp};
-
-/// The current catalog contains no capabilities. A future catalog entry supplies its own name.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CapabilityName {}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LicensingPolicy {
@@ -188,7 +184,19 @@ impl LicensingPolicy {
     }
 
     pub fn capability(&self, name: CapabilityName) -> CapabilityVerdict {
-        match name {}
+        let state = self
+            .conditions
+            .capabilities
+            .get(name.as_str())
+            .and_then(|value| value.known())
+            .verified(
+                "the embedded free policy and every decision verified as complete list each \
+                 catalog capability",
+            );
+        match state {
+            Capability::Enabled => CapabilityVerdict::Enabled,
+            Capability::Disabled => CapabilityVerdict::Disabled,
+        }
     }
 
     pub fn quota(&self, name: QuotaName) -> Quota {
@@ -258,12 +266,32 @@ pub enum QuotaVerdict {
     },
 }
 
-/// The current catalog has no capability names; this is the contract for future catalog entries.
+/// A capability's state for its owner. A capability whose removal has a grace period stays
+/// permitted until that deadline; no current capability has one, so `licensing.dummy` is only ever
+/// enabled or disabled.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CapabilityVerdict {
     Enabled,
     Disabled,
     PermittedUntil { deadline: Timestamp },
+}
+
+impl CapabilityVerdict {
+    /// The state `DESCRIBE LICENSE` reports; a permitted capability also reports its deadline.
+    pub fn state_name(self) -> &'static str {
+        match self {
+            Self::Enabled => "enabled",
+            Self::Disabled => "disabled",
+            Self::PermittedUntil { .. } => "permitted",
+        }
+    }
+
+    pub fn permitted_until(self) -> Option<Timestamp> {
+        match self {
+            Self::PermittedUntil { deadline } => Some(deadline),
+            Self::Enabled | Self::Disabled => None,
+        }
+    }
 }
 
 impl LicensingPolicy {
@@ -469,6 +497,33 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn the_free_policy_disables_every_capability_and_applied_conditions_enable_one() {
+        let mut policy = evaluate_policy(LicensingSnapshot {
+            initialized: None,
+            revision: None,
+            usage: nervix_licensing_protocol::impact::UsageSnapshot {
+                cluster_nodes: 1,
+                cluster_domains: 0,
+            },
+        });
+        for name in CapabilityName::ALL {
+            let verdict = policy.capability(name);
+            assert_eq!(verdict, CapabilityVerdict::Disabled);
+            assert_eq!(verdict.state_name(), "disabled");
+            assert_eq!(verdict.permitted_until(), None);
+            policy.conditions.capabilities.insert(
+                name.as_str().to_owned(),
+                nervix_licensing_protocol::conditions::ConditionValue::Known(Capability::Enabled),
+            );
+            assert_eq!(policy.capability(name), CapabilityVerdict::Enabled);
+        }
+        let deadline = Timestamp::from_unix_nanos(1_700_000_000_000_000_000);
+        let permitted = CapabilityVerdict::PermittedUntil { deadline };
+        assert_eq!(permitted.state_name(), "permitted");
+        assert_eq!(permitted.permitted_until(), Some(deadline));
     }
 
     #[test]

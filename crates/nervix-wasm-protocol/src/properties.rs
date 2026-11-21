@@ -18,6 +18,7 @@ fn assert_protocol_failure(bytes: &[u8]) {
     assert!(BranchInit::decode(bytes).is_err());
     assert!(Envelope::decode(bytes).is_err());
     assert!(GuestSnapshot::decode(bytes).is_err());
+    assert!(StateDescription::decode(bytes).is_err());
 }
 
 #[test]
@@ -32,6 +33,7 @@ fn bolero_corrupt_messages_validate_sizes_offsets_and_counts() {
                 values.envelope(false).encode(),
                 values.envelope(true).encode(),
                 values.snapshot().encode(),
+                values.state_description().encode(),
             ] {
                 let length = original.len();
                 let cut = values.entropy().count(length - 1);
@@ -56,11 +58,13 @@ fn bolero_corrupt_messages_validate_sizes_offsets_and_counts() {
                     input.arrow_ipc_batch().bytes()
                 } else if let Some(output) = message.payload_as_output_envelope() {
                     output.generated_arrow_ipc_batch().bytes()
+                } else if let Some(snapshot) = message.payload_as_guest_snapshot() {
+                    snapshot.application_state().bytes()
                 } else {
                     message
-                        .payload_as_guest_snapshot()
-                        .assured("the fourth family is a snapshot")
-                        .application_state()
+                        .payload_as_state_description()
+                        .assured("the fifth family is a state description")
+                        .sections()
                         .bytes()
                 };
                 let count_offset = vector
@@ -199,8 +203,8 @@ fn bolero_message_tags_and_column_descriptors_fail_typed() {
                 }
             }
         }
-        for tag in [0,5,255,tag] {
-            let tag = match tag { 1..=4 => tag+4,other => other };
+        for tag in [0,6,255,tag] {
+            let tag = match tag { 1..=5 => tag+5,other => other };
             let mut builder = FlatBufferBuilder::new();
             let init = build_branch_init(&mut builder,&BranchInit {
                 domain_name:"domain".into(),domain_type:"runtime".into(),branch_key:None,
@@ -251,6 +255,27 @@ fn bolero_malformed_messages_fail_typed_within_bounds() {
                             .assured("accepted snapshot reencodes"),
                         value
                     ),
+                    Err(error) => assert!(matches!(
+                        error.current_context(),
+                        ProtocolError::LengthMismatch { .. }
+                            | ProtocolError::InvalidIdentifier
+                            | ProtocolError::InvalidFlatbuffer(_)
+                            | ProtocolError::UnexpectedPayload { .. }
+                    )),
+                }
+                match StateDescriptionRef::decode(input) {
+                    Ok(view) => match view.to_owned() {
+                        Ok(value) => assert_eq!(
+                            StateDescription::decode(&value.encode())
+                                .assured("an accepted state description reencodes"),
+                            value
+                        ),
+                        Err(error) => assert!(matches!(
+                            error.current_context(),
+                            ProtocolError::UnknownEnum { .. }
+                                | ProtocolError::MissingElementType { .. }
+                        )),
+                    },
                     Err(error) => assert!(matches!(
                         error.current_context(),
                         ProtocolError::LengthMismatch { .. }

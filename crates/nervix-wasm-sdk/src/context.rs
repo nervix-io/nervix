@@ -292,6 +292,15 @@ mod tests {
     }
 
     #[test]
+    fn a_processor_that_keeps_no_state_describes_none_by_default() {
+        let description = Stateless
+            .describe_state()
+            .expect("the default description must succeed");
+
+        assert_eq!(description.encode(), None);
+    }
+
+    #[test]
     fn branch_context_round_trips_init_metadata() {
         let init = init(b"tenant=alpha");
 

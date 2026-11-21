@@ -294,6 +294,8 @@ fn branch_counter_wat() -> String {
     i32.const 0 global.set $pending
     i32.const 0 global.set $next
     i32.const 0)
+  (func (export "nervix_describe_state") (result i32)
+    i32.const 0)
 )
 "#
     )

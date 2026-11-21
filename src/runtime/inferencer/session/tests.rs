@@ -626,6 +626,93 @@ async fn a_batch_whose_working_set_fits_the_limit_runs_as_one_job() {
     assert!(run.failed.is_empty());
 }
 
+/// An executor whose relay operation limit is `limit` bytes, so a batch whose messages together
+/// exceed it runs as several admitted jobs.
+fn executor_with_relay_limit(limit: u64) -> Executor {
+    Executor::new(ExecutionConfig {
+        limits: nervix_execution::OperationLimits {
+            relay_decoded_bytes: ubyte::ByteUnit::Byte(limit),
+            ..nervix_execution::OperationLimits::default()
+        },
+        ..ExecutionConfig::default()
+    })
+    .expect("a smaller relay operation limit keeps the default budgets valid")
+}
+
+/// One output batch that the checked running sum's declared `score` column cannot be joined with:
+/// its column holds plain `F32` values instead of one-element tensors.
+fn unjoinable_output() -> RecordBatch {
+    let schema = StdArc::new(arrow_schema::Schema::new(vec![arrow_schema::Field::new(
+        "score",
+        arrow_schema::DataType::Float32,
+        false,
+    )]));
+    let column: arrow_array::ArrayRef = StdArc::new(Float32Array::from(vec![0.0_f32]));
+    RecordBatch::try_new(schema, vec![column]).expect("the column matches its own schema")
+}
+
+#[nervix_primitives::test]
+async fn messages_that_fail_because_their_jobs_outputs_cannot_be_joined_leave_the_carried_state() {
+    let executor = Executor::default();
+    let (prepared, mut session) = checked_running(&executor).await;
+    let first = session
+        .run(&executor, &prepared, &features(&[[1.0, 10.0]]))
+        .await;
+    assert!(first.advanced);
+    assert_eq!(carried_values(&session), vec![1.0, 10.0]);
+
+    // The relay operation limit holds one message's working set and not two, so each message of
+    // the batch runs as its own admitted job. A first feature of 1 keeps the fixture's one-element
+    // score.
+    let batch = features(&[[1.0, 20.0], [1.0, 30.0], [1.0, 40.0]]);
+    let row_bytes = prepared
+        .message_bytes(&batch, 0)
+        .expect("the message's tensors are readable");
+    let one_message = prepared
+        .message_working_bytes(row_bytes)
+        .expect("one message's working set fits in u64");
+    let mut planned = InferenceRun::default();
+    let chunks = InferenceSession::plan_chunks(&prepared, &batch, one_message, &mut planned);
+    assert_eq!(chunks.len(), 3);
+    let narrow = executor_with_relay_limit(one_message);
+    let mut jobs = session.run_jobs(&narrow, &prepared, &batch).await;
+    assert_eq!(
+        jobs.run.accepted,
+        vec![0, 1, 2],
+        "refused {:?}, failed {:?}",
+        jobs.run.refused,
+        jobs.run.failed
+    );
+    assert_eq!(jobs.outputs.len(), 3);
+
+    // Joining several jobs' outputs fails only when the joined columns would overflow their
+    // offsets, which takes more tensor values than a test can allocate. An output the declared
+    // schema cannot join with makes the same join fail.
+    jobs.outputs.push(unjoinable_output());
+    let run = session.join_outputs(&prepared, jobs);
+    assert!(run.outputs.is_none());
+    assert!(run.accepted.is_empty());
+    assert_eq!(run.failed.len(), 1);
+    assert_eq!(run.failed[0].rows, vec![0, 1, 2]);
+    assert!(matches!(
+        run.failed[0].error.current_context(),
+        InferencerError::OutputBatch
+    ));
+    // Admission publishes a generation only for a run that advanced the carried state.
+    assert!(!run.advanced);
+    assert_eq!(carried_values(&session), vec![1.0, 10.0]);
+
+    // The failed messages come again, and each counts once.
+    let again = session.run(&narrow, &prepared, &batch).await;
+    assert!(again.advanced);
+    assert_eq!(again.accepted, vec![0, 1, 2]);
+    let outputs = again.outputs.expect("three accepted messages");
+    assert_eq!(output_values(&outputs, 0, 0), vec![32.0]);
+    assert_eq!(output_values(&outputs, 0, 1), vec![63.0]);
+    assert_eq!(output_values(&outputs, 0, 2), vec![104.0]);
+    assert_eq!(carried_values(&session), vec![4.0, 100.0]);
+}
+
 #[nervix_primitives::test]
 async fn abandoning_a_full_queue_wait_keeps_the_branch_session_and_its_state() {
     let mut config = ExecutionConfig::default();

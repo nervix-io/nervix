@@ -176,6 +176,22 @@ enum InputSlot {
     State(usize),
 }
 
+/// The threads ONNX Runtime may use inside one session, for operators and for independent graph
+/// nodes alike.
+///
+/// Each model run occupies exactly one of the node's extension workers, so a session never starts
+/// threads of its own: parallelism across branches comes from the extension class's bounded
+/// admission, which sizes the node's model CPU use.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "each model run occupies one extension worker; parallelism across branches comes \
+                  from the extension class's bounded admission, not ONNX Runtime's pools"
+    )
+)]
+const SESSION_THREADS: usize = 1;
+
 /// The branch's native session, with each model port resolved to the declaration it serves.
 struct BoundSession {
     session: Session,
@@ -251,7 +267,8 @@ pub(in crate::runtime) struct InferenceRun {
     pub(in crate::runtime) accepted: Vec<usize>,
     pub(in crate::runtime) refused: Vec<RefusedMessage>,
     pub(in crate::runtime) failed: Vec<FailedMessages>,
-    /// Whether a message advanced the carried state.
+    /// Whether the run installed the state its accepted messages left, which it does only once
+    /// their outputs are joined.
     pub(in crate::runtime) advanced: bool,
 }
 
@@ -259,6 +276,15 @@ pub(in crate::runtime) struct InferenceRun {
 struct RunChunk {
     rows: Vec<usize>,
     charge: u64,
+}
+
+/// What the admitted jobs of one run left before their public outputs are joined: the run's
+/// outcome so far, each job's outputs in arrival order, and the carried state after the last
+/// accepted message, which the join installs only once every job's outputs are joined.
+struct RunJobs {
+    run: InferenceRun,
+    outputs: Vec<RecordBatch>,
+    successor: Option<Arc<NativeGeneration>>,
 }
 
 /// What one admitted job returns: the outcome of its rows and the successor of the carried state.
@@ -316,33 +342,47 @@ impl InferenceSession {
 
     /// Run the model over every row of `mapped`, the admitted batch's `INPUTS` in arrival order,
     /// on the node's extension workers. Rows run one at a time unless the tensors declare `BATCH`,
-    /// and a batch too large for one charge runs as several admitted jobs. The carried state
-    /// advances with each accepted message and stays installed when the run fails.
+    /// and a batch too large for one charge runs as several admitted jobs, each starting from the
+    /// state the previous jobs' accepted messages left. The carried state takes that state only
+    /// once every job's outputs are joined, so a message that fails, alone or because the outputs
+    /// cannot be joined, leaves it where the preceding accepted message left it.
     pub(in crate::runtime) async fn run(
         &mut self,
         executor: &Executor,
         prepared: &Arc<PreparedInference>,
         mapped: &RuntimeRecordBatch,
     ) -> InferenceRun {
+        let jobs = self.run_jobs(executor, prepared, mapped).await;
+        self.join_outputs(prepared, jobs)
+    }
+
+    /// Runs every admitted job of `mapped`, in arrival order, and keeps each job's public outputs
+    /// for the join.
+    async fn run_jobs(
+        &mut self,
+        executor: &Executor,
+        prepared: &Arc<PreparedInference>,
+        mapped: &RuntimeRecordBatch,
+    ) -> RunJobs {
         let limit = executor.limits().relay_decoded_bytes.as_u64();
         let mut run = InferenceRun::default();
         let chunks = Self::plan_chunks(prepared, mapped, limit, &mut run);
         let mut outputs = Vec::new();
+        let mut successor = None::<Arc<NativeGeneration>>;
         let mut chunks = chunks.into_iter();
         while let Some(chunk) = chunks.next() {
             nervix_primitives::task::consume_budget().await;
+            let start = match &successor {
+                Some(successor) => Some(successor.clone()),
+                None => self.carried.as_ref().map(CarriedState::generation),
+            };
             match self
-                .run_chunk(executor, prepared, mapped, &chunk, limit)
+                .run_chunk(executor, prepared, mapped, &chunk, start, limit)
                 .await
             {
                 Ok(outcome) => {
-                    if let Some(successor) = outcome.successor {
-                        let carried = self
-                            .carried
-                            .as_mut()
-                            .verified("only a run that carries state returns a successor");
-                        carried.install(successor);
-                        run.advanced = true;
+                    if let Some(next) = outcome.successor {
+                        successor = Some(Arc::new(next));
                     }
                     if let Some(batch) = outcome.outputs {
                         outputs.push(batch);
@@ -361,8 +401,34 @@ impl InferenceSession {
                 }
             }
         }
+        RunJobs {
+            run,
+            outputs,
+            successor,
+        }
+    }
+
+    /// Joins the jobs' public outputs into the run's one output batch and only then installs the
+    /// state the accepted messages left. A join that fails fails every accepted message, and the
+    /// state they left is dropped with them.
+    fn join_outputs(&mut self, prepared: &PreparedInference, jobs: RunJobs) -> InferenceRun {
+        let RunJobs {
+            mut run,
+            outputs,
+            successor,
+        } = jobs;
         match self.output_batch(prepared, outputs) {
-            Ok(batch) => run.outputs = batch,
+            Ok(batch) => {
+                run.outputs = batch;
+                if let Some(successor) = successor {
+                    let carried = self
+                        .carried
+                        .as_mut()
+                        .verified("only a run that carries state returns a successor");
+                    carried.install(successor);
+                    run.advanced = true;
+                }
+            }
             Err(error) => {
                 run.failed.push(FailedMessages {
                     rows: std::mem::take(&mut run.accepted),
@@ -454,15 +520,17 @@ impl InferenceSession {
         chunks
     }
 
-    /// One admitted job over `chunk`. The branch keeps its session while the job waits for a
-    /// place; once admitted, the session moves into the job and returns with its outcome. A job
-    /// that panicked loses the session, and the next batch loads it again.
+    /// One admitted job over `chunk`, starting from the carried state `carried`. The branch keeps
+    /// its session while the job waits for a place; once admitted, the session moves into the job
+    /// and returns with its outcome. A job that panicked loses the session, and the next batch
+    /// loads it again.
     async fn run_chunk(
         &mut self,
         executor: &Executor,
         prepared: &Arc<PreparedInference>,
         mapped: &RuntimeRecordBatch,
         chunk: &RunChunk,
+        carried: Option<Arc<NativeGeneration>>,
         limit: u64,
     ) -> error_stack::Result<ChunkOutcome, InferencerError> {
         let charge = executor
@@ -478,7 +546,6 @@ impl InferenceSession {
             .bound
             .take()
             .ok_or_else(|| Report::new(InferencerError::SessionUnavailable))?;
-        let carried = self.carried.as_ref().map(CarriedState::generation);
         let definition = prepared.clone();
         let mapped = mapped.clone();
         let rows = chunk.rows.clone();
@@ -527,7 +594,7 @@ impl InferenceSession {
 
 impl BoundSession {
     /// Load the model and resolve every one of its ports, which validation has already matched to
-    /// the declaration. ONNX Runtime keeps operator concurrency at one thread per session.
+    /// the declaration. ONNX Runtime keeps both of its thread pools at [`SESSION_THREADS`].
     fn load(
         path: &Path,
         definition: &PreparedInference,
@@ -539,10 +606,10 @@ impl BoundSession {
         let environment = onnx_environment().change_context(InferencerError::InitializeSession)?;
         let session = Session::builder(environment)
             .change_context(InferencerError::InitializeSession)?
-            .with_intra_threads(1)
+            .with_intra_threads(SESSION_THREADS)
             .map_err(ort::Error::<()>::from)
             .change_context(InferencerError::InitializeSession)?
-            .with_inter_threads(1)
+            .with_inter_threads(SESSION_THREADS)
             .map_err(ort::Error::<()>::from)
             .change_context(InferencerError::InitializeSession)?
             .commit_from_file(path)

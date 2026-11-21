@@ -102,11 +102,24 @@ table GuestSnapshot {
   application_state:[ubyte] (required);
 }
 
+// One section of a guest's state description: the schema names the section and its columns, and
+// the Arrow IPC stream holds exactly one batch of rows in exactly those types.
+table StateSection {
+  schema:ProcessorSchema (required);
+  arrow_ipc_batch:[ubyte] (required);
+}
+
+// What a guest describes of its state for a state inspection, in the guest's order of sections.
+table StateDescription {
+  sections:[StateSection] (required);
+}
+
 union MessagePayload {
   BranchInit,
   InputEnvelope,
   OutputEnvelope,
-  GuestSnapshot
+  GuestSnapshot,
+  StateDescription
 }
 
 table Message {
