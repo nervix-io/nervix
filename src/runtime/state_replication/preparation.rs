@@ -154,8 +154,9 @@ impl Runtime {
             .change_context(RuntimePersistenceError::StorageAdmission)
             .change_context(OwnershipHandoffError::Persistence)?;
         executor
-            .run_storage(
+            .run_storage_with(
                 nervix_execution::StorageClass::Filesystem,
+                nervix_execution::QueueAdmission::WaitForPlace,
                 charge,
                 move |_charge, cancellation| {
                     cancellation

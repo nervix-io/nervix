@@ -63,6 +63,23 @@ async fn closes(world: &mut ScenarioWorld) {
     assert_eq!(u16::from(frame.code), 1013);
 }
 
+/// Proves the endpoint holds what it was sent rather than refusing it: the connection stays open
+/// and the endpoint sends nothing, not even a close, for the whole window.
+#[then(expr = "the endpoint websocket stays open and silent for {string}")]
+async fn stays_open_and_silent(world: &mut ScenarioWorld, window: String) {
+    let window = nervix_models::parse_duration_text(&window).assured("the step names a duration");
+    let websocket = world
+        .endpoint_websocket
+        .as_mut()
+        .assured("the scenario opened its endpoint websocket");
+    if let Ok(message) = timeout(window, websocket.next()).await {
+        panic!(
+            "the endpoint must keep its connection open and send nothing for {window:?}, received \
+             {message:?}"
+        );
+    }
+}
+
 #[then(expr = "the endpoint websocket acknowledges with {string} cause {string}")]
 async fn acknowledges(world: &mut ScenarioWorld, outcome: String, cause: String) {
     assert_eq!(

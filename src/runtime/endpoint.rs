@@ -71,6 +71,10 @@ pub(crate) struct EndpointIngestBinding {
     pub(super) unfolding_refused: prometheus::IntCounter,
     /// Counts every request and WebSocket frame this ingestor answers once, under its outcome.
     pub(super) requests: IngestorEndpointMetrics,
+    /// The work the ingestor's execution unit admitted, which a payload its quiesce let dispatch
+    /// joins until it reached its graph, so a drain, an ownership handoff and a graceful stop wait
+    /// for it.
+    pub(super) work: Arc<NodeQuiesceCounters>,
 }
 
 impl EndpointIngestBinding {
@@ -410,15 +414,26 @@ impl EndpointIntakeRoute<EndpointIngestBinding> {
         metadata: IngestMetadataRow<'_>,
         shutdown: &CancellationToken,
     ) -> EndpointDispatchOutcome {
-        let protocol = match self.endpoint_type() {
-            EndpointType::Http => "http",
-            EndpointType::Websockets => "websocket",
+        let (protocol, unacknowledged_admission) = match self.endpoint_type() {
+            // An HTTP sender still holds its body and waits on the answer, so a full queue refuses
+            // the body for its sender to send again.
+            EndpointType::Http => ("http", QueueAdmission::RefuseWhenFull),
+            // A WebSocket frame in `MODE NO ACK` has no answer its sender waits for, so it waits
+            // for a place, and its connection reads nothing further meanwhile.
+            EndpointType::Websockets => ("websocket", QueueAdmission::WaitForPlace),
         };
         let mut dispatches = Vec::with_capacity(self.bindings().len());
         for lifetime in self.bindings() {
-            dispatches.push(
-                runtime.dispatch_endpoint_intake(lifetime, payload, metadata, shutdown, protocol),
-            );
+            dispatches.push(runtime.dispatch_endpoint_intake(
+                lifetime,
+                payload,
+                metadata,
+                shutdown,
+                EndpointIntakeProtocol {
+                    label: protocol,
+                    unacknowledged_admission,
+                },
+            ));
         }
         dispatch_endpoint_bindings(dispatches).await
     }
@@ -506,6 +521,14 @@ where
     }
 }
 
+/// How a route's transport takes in what its sender hands over: the label its diagnostics name, and
+/// what an unacknowledged message does when the node's extension workers have no room for it.
+#[derive(Debug, Clone, Copy)]
+struct EndpointIntakeProtocol {
+    label: &'static str,
+    unacknowledged_admission: QueueAdmission,
+}
+
 impl Runtime {
     async fn dispatch_endpoint_intake(
         &self,
@@ -513,8 +536,9 @@ impl Runtime {
         payload: &[u8],
         metadata: IngestMetadataRow<'_>,
         shutdown: &CancellationToken,
-        protocol: &str,
+        intake_protocol: EndpointIntakeProtocol,
     ) -> EndpointDispatchOutcome {
+        let protocol = intake_protocol.label;
         let lease = lifetime.intake();
         // An intake that ended after the route was resolved leaves nothing to count the request.
         let Some(binding) = lease.as_deref() else {
@@ -558,7 +582,7 @@ impl Runtime {
         );
         let intake = match binding.quiesce.intake(payload, true) {
             IngestorQuiesceIntake::Dispatch(payload) => {
-                self.dispatch_endpoint_binding(binding, payload, protocol)
+                self.dispatch_endpoint_binding(lifetime, binding, payload, intake_protocol)
                     .await
             }
             IngestorQuiesceIntake::Buffered => EndpointNoAckIntake::Buffered,
@@ -683,10 +707,13 @@ impl Runtime {
 
     async fn dispatch_endpoint_binding(
         &self,
+        lifetime: &endpoint_route_table::EndpointBinding<EndpointIngestBinding>,
         binding: &EndpointIngestBinding,
         payload: BufferedIngestPayload,
-        protocol: &str,
+        intake_protocol: EndpointIntakeProtocol,
     ) -> EndpointNoAckIntake {
+        let protocol = intake_protocol.label;
+        let _admitted = NodeQuiesceWorkGuard::begin(binding.work.clone());
         // One request is one group, so its builders are sized for the single payload this binding
         // decodes; a payload that unfolds into several messages grows them.
         let mut collector = IngestRouteCollector::new(
@@ -695,18 +722,31 @@ impl Runtime {
             binding.metrics.clone(),
             self.inner.data_plane.ingest_group_idle_flush(),
         );
-        // The sender is answered, so a body the extension workers have no room for is refused
-        // rather than held.
-        let decoded = collector
-            .decode_payload(
-                self.executor(),
-                QueueAdmission::RefuseWhenFull,
-                &binding.codec,
-                payload.payload(),
-                usize::try_from(self.cluster_parameters().payload_unfold_limit())
-                    .assured("the validated payload bound fits usize"),
-            )
-            .await;
+        // An HTTP body the extension workers have no room for is refused for its sender to send
+        // again, while a WebSocket frame waits for a place, as its transport says. A later quiesce
+        // decision does not take back a frame its quiesce let dispatch; the frame ends unprocessed
+        // only when its ingestor's intake ends, which a graceful stop does only after the frame.
+        let decode = collector.decode_payload(
+            self.executor(),
+            intake_protocol.unacknowledged_admission,
+            &binding.codec,
+            payload.payload(),
+            usize::try_from(self.cluster_parameters().payload_unfold_limit())
+                .assured("the validated payload bound fits usize"),
+        );
+        let decoded = nervix_primitives::select! {
+            decoded = decode => decoded,
+            () = lifetime.ended() => {
+                debug!(
+                    domain = binding.domain.as_str(),
+                    ingestor = binding.ingestor.as_str(),
+                    protocol,
+                    "the ingestor's intake ended while an endpoint message waited for the node's \
+                     extension workers"
+                );
+                return EndpointNoAckIntake::Refused { retry_after: None };
+            }
+        };
         match decoded {
             Ok(()) => {
                 let metadata = [payload.first_metadata_row()];

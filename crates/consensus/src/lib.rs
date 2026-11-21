@@ -3045,8 +3045,9 @@ impl Consensus {
             .await
             .map_err(io::Error::other)?;
         executor
-            .run_storage(
+            .run_storage_with(
                 nervix_execution::StorageClass::Consensus,
+                nervix_execution::QueueAdmission::WaitForPlace,
                 reservation,
                 move |_, _| {
                     Database::builder(path)

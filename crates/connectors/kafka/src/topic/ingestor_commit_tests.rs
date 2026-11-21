@@ -71,7 +71,6 @@ pub(super) fn plan(
         })
         .collect();
     KafkaTopicIngestorPlan {
-        maintain_rate_limit_holds: false,
         settings: crate::KafkaTopicIngestorSettings::default(),
         executor: nervix_execution::Executor::default(),
         config,

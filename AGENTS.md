@@ -367,14 +367,18 @@ cannot police import paths, so it keeps only genuinely forbidden types and opera
 - **The bounded executor.** Work off the async workers goes through `nervix-execution` with its CPU
   or storage class, a charged memory class and `Cancellation` checks between bounded units; operator
   code the node cannot bound (UDF calls, JAQ transformations, ONNX model runs) takes the extension
-  class and password hashing the credentials class. A refusal is a typed error the caller maps to its own outcome, and
-  one that judged nothing stays retryable, never a decode, encode or authentication failure. A full
-  queue refuses work that answers a request; accepted work nothing can present again (a payload a
-  quiesce buffer retained, a poll a paced ingestor moved past) states
-  `QueueAdmission::WaitForPlace`, and its owner lets shutdown and a new quiesce end the wait and
-  keeps or re-decides the work. A payload handed over without an acknowledgement waits only when
-  holding the ingestor's loop keeps its transport connected with bounded memory; otherwise its refusal
-  is reported and counted. `task::spawn_cpu` belongs to the executor's worker pools,
+  class and password hashing the credentials class. A full queue is a temporary condition and never
+  costs data: work a source handed over, with or without an acknowledgement, and every other work
+  no caller waits to be answered about (relay and subscription deliveries, the answer of an
+  interconnect request whose handler already ran, checkpoints and state captures, consensus
+  storage, compilation for a committed change, lifecycle steps) states
+  `QueueAdmission::WaitForPlace`, and its owner holds back whatever feeds it while it waits, lets
+  shutdown and a new quiesce end the wait, and keeps or re-decides the work. Only a request whose
+  caller still holds its input and waits on the answer may be refused, with a typed, retryable busy
+  answer the caller maps to its own outcome, never a decode, encode or authentication failure; the
+  executor's refusing `run_cpu` and `run_storage` serve only such requests. A wait ends in a refusal
+  only once the executor admits no more work, which its owner treats as its own stop. Loss is reserved
+  for cluster disruption. `task::spawn_cpu` belongs to the executor's worker pools,
   `spawn_blocking` to its storage workers, and `block_in_place` to no file by default.
 - **Exact permissions.** Any other file naming `spawn_blocking` or `block_in_place`, or creating a
   thread through `thread::{spawn, Builder, scope, spawn_detached}` or `unmodeled::thread::Builder`,
@@ -759,6 +763,10 @@ No justification makes an inversion acceptable: not that it is temporary, smalle
   policy, with no unsafe synchronous or reactor-blocking alternative publicly callable beside it.
   Callers never choose blocking, yielding, batching, throttling or similar safety behavior unless it
   is an explicit typed part of the operation's contract.
+- Planned operations cost backpressure, never data. A stop, a shutdown, an ownership move or an
+  alteration waits for the work in motion, a payload an ingestor holds while it waits for a place on
+  the bounded executor included, rather than cutting it, and a full queue holds back what feeds it
+  rather than dropping what it was handed.
 - In async code, a loop whose body performs async work calls
   `nervix_primitives::task::consume_budget().await` once per iteration, near the top of the body.
 - State that changes for every record, row, batch, remote frame or acknowledgement has exactly one

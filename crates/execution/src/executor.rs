@@ -368,8 +368,10 @@ impl Executor {
 
     /// Submit one storage job and return once it is running off the async workers.
     ///
-    /// Unlike [`Self::run_storage`], dropping the async caller after this returns does not cancel
-    /// the job. The job owns its reservation until it exits.
+    /// The job waits for a place in the class's queue rather than being refused: it carries work
+    /// no caller is waiting to be answered about, such as a consensus log append. Unlike
+    /// [`Self::run_storage`], dropping the async caller after this returns does not cancel the job.
+    /// The job owns its reservation until it exits.
     pub async fn submit_storage(
         &self,
         class: StorageClass,

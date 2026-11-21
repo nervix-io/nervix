@@ -22432,6 +22432,7 @@ enum UnacknowledgedSourceFixture {
     Mqtt,
     Nats,
     Pulsar,
+    RabbitMq,
     RedisPubSub,
     Syslog,
     WebsocketClient,
@@ -22445,6 +22446,7 @@ impl UnacknowledgedSourceFixture {
             "mqtt" => Self::Mqtt,
             "nats" => Self::Nats,
             "pulsar" => Self::Pulsar,
+            "rabbitmq" => Self::RabbitMq,
             "redis" => Self::RedisPubSub,
             "syslog" => Self::Syslog,
             "websocket client" => Self::WebsocketClient,
@@ -22459,6 +22461,7 @@ impl UnacknowledgedSourceFixture {
             Self::Mqtt => world.dependencies.start_mqtt(&world.test_id).await,
             Self::Nats => world.dependencies.start_nats(&world.test_id).await,
             Self::Pulsar => world.dependencies.start_pulsar(&world.test_id).await,
+            Self::RabbitMq => world.dependencies.start_rabbitmq(&world.test_id).await,
             Self::RedisPubSub => world.dependencies.start_redis(&world.test_id).await,
             Self::WebsocketClient => world.dependencies.start_mock_server(&world.test_id).await,
             // The ingestor binds the address the scenario sends to, so nothing else runs.
@@ -22471,13 +22474,25 @@ impl UnacknowledgedSourceFixture {
 
     /// Provisions what the transport needs before the ingestor reads it.
     async fn prepare(self, world: &mut ScenarioWorld) {
-        if let Self::Kafka = self {
-            let topic = expand_placeholders(world, "unacknowledged_{{test_id}}");
-            world
+        let destination = expand_placeholders(world, "unacknowledged_{{test_id}}");
+        match self {
+            Self::Kafka => world
                 .cluster()
-                .ensure_kafka_topic_partitions(&topic, 1)
+                .ensure_kafka_topic_partitions(&destination, 1)
                 .await
-                .expect("failed to provision the unacknowledged source's Kafka topic");
+                .expect("failed to provision the unacknowledged source's Kafka topic"),
+            Self::RabbitMq => world
+                .cluster()
+                .ensure_rabbitmq_queue(&destination)
+                .await
+                .expect("failed to provision the unacknowledged source's RabbitMQ queue"),
+            Self::Mqtt
+            | Self::Nats
+            | Self::Pulsar
+            | Self::RedisPubSub
+            | Self::Syslog
+            | Self::WebsocketClient
+            | Self::ZeroMq => {}
         }
     }
 
@@ -22507,6 +22522,12 @@ impl UnacknowledgedSourceFixture {
                 r#"
       CREATE PULSAR CLIENT unacknowledged_client CONFIG {
         'addr' = '{{pulsar_addr}}'
+      };"#
+            }
+            Self::RabbitMq => {
+                r#"
+      CREATE RABBITMQ CLIENT unacknowledged_client CONFIG {
+        'addr' = '{{rabbitmq_addr}}'
       };"#
             }
             Self::RedisPubSub => {
@@ -22547,6 +22568,7 @@ impl UnacknowledgedSourceFixture {
             Self::Mqtt => "MQTT TOPIC",
             Self::Nats => "NATS SUBJECT",
             Self::Pulsar => "PULSAR TOPIC",
+            Self::RabbitMq => "RABBITMQ QUEUE",
             Self::RedisPubSub => "REDIS PUBSUB",
             Self::Syslog => "SYSLOG LISTENER",
             Self::WebsocketClient => "WEBSOCKETS CONNECTION",
@@ -22577,6 +22599,10 @@ impl UnacknowledgedSourceFixture {
                 "FROM unacknowledged_client TOPIC 'unacknowledged_{{test_id}}'
           SUBSCRIPTION 'unacknowledged_{{test_id}}' OWNED BY INGESTOR START AT EARLIEST TYPE \
                  SHARED INSTANCES 1 MODE NO ACK
+        ON QUIESCE SUSPEND"
+            }
+            Self::RabbitMq => {
+                "FROM unacknowledged_client QUEUE 'unacknowledged_{{test_id}}' MODE NO ACK
         ON QUIESCE SUSPEND"
             }
             Self::RedisPubSub => {
@@ -22646,6 +22672,11 @@ impl UnacknowledgedSourceFixture {
                 .publish_pulsar(&destination, &payload)
                 .await
                 .expect("failed to publish the unacknowledged Pulsar payload"),
+            Self::RabbitMq => world
+                .cluster()
+                .publish_rabbitmq(&destination, &payload)
+                .await
+                .expect("failed to publish the unacknowledged RabbitMQ payload"),
             Self::RedisPubSub => world
                 .cluster()
                 .publish_redis(&destination, &payload)
@@ -22715,55 +22746,6 @@ async fn when_the_unacknowledged_source_delivers_the_payload_of_user(
         return;
     }
     source.deliver(world, user_id).await;
-}
-
-/// Waits until the node that executes the fixture's ingestor counts `refused` of its payloads as
-/// refused for want of room on that node's extension workers.
-#[then(expr = "the unacknowledged source ingestor eventually counts {int} refused payload(s)")]
-async fn then_the_unacknowledged_source_ingestor_eventually_counts_refused_payloads(
-    world: &mut ScenarioWorld,
-    refused: i64,
-) {
-    let leader = current_leader_node(world).await;
-    let placement = PhaseDeadline::after(Duration::from_secs(30));
-    let owner = loop {
-        nervix_primitives::task::consume_budget().await;
-        assert!(
-            !placement.has_passed(),
-            "timed out waiting for the unacknowledged source ingestor's placement"
-        );
-        let output = world
-            .cluster()
-            .status_text(&leader, placement)
-            .await
-            .unwrap_or_else(|error| panic!("failed to read the cluster status: {error:#}"));
-        if let Some((owner, _)) = scheduled_node_placement_from_status(
-            &output,
-            &world.domain,
-            "ingestor",
-            UNACKNOWLEDGED_SOURCE_INGESTOR,
-        ) {
-            break owner.to_string();
-        }
-        placement.pause(Duration::from_millis(50)).await;
-    };
-    let labels = [
-        format!(r#"domain="{}""#, world.domain),
-        format!(r#"ingestor="{UNACKNOWLEDGED_SOURCE_INGESTOR}""#),
-    ];
-    world
-        .cluster()
-        .wait_for_observability_metric_value(
-            &owner,
-            "nervix_ingestor_unfolding_refused_total",
-            &labels,
-            refused,
-            Some(Duration::from_secs(60)),
-        )
-        .await
-        .unwrap_or_else(|error| {
-            panic!("node '{owner}' never counted {refused} refused payloads: {error}")
-        });
 }
 
 #[when(expr = "bulk execution on node {string} is released")]
@@ -27834,6 +27816,40 @@ async fn then_within_duration_describe_emitter_on_leader_contains(
             "timed out waiting for DESCRIBE EMITTER {emitter} to contain {}. last output: {output}",
             expected.trim()
         );
+        nervix_primitives::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+/// Watches DESCRIBE EMITTER on the leader for the whole `window` and fails as soon as it reports a
+/// transient error: an emitter whose work only waits for a place never reports one.
+#[then(
+    expr = "DESCRIBE EMITTER {string} on the leader node reports no transient error for {string}"
+)]
+async fn then_describe_emitter_on_leader_reports_no_transient_error_for(
+    world: &mut ScenarioWorld,
+    emitter: String,
+    window: String,
+) {
+    let window = parse_duration_text(&window).expect("step duration must be a valid duration");
+    let emitter = expand_placeholders(world, &emitter);
+    let deadline = Instant::now() + window;
+    loop {
+        nervix_primitives::task::consume_budget().await;
+        let leader = current_leader_node(world).await;
+        let output =
+            run_plexus_commands_on_node(world, &leader, &format!("DESCRIBE EMITTER {emitter};"))
+                .await
+                .expect("describe emitter command must succeed");
+        world.last_command_output = Some(output.clone());
+        if let Some(error) = DescribedEmitterRetry::from_describe_output(&output).transient_error {
+            panic!(
+                "DESCRIBE EMITTER {emitter} reported a transient error while its work waited for \
+                 a place: {error}"
+            );
+        }
+        if Instant::now() >= deadline {
+            return;
+        }
         nervix_primitives::time::sleep(Duration::from_millis(100)).await;
     }
 }

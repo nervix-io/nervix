@@ -1066,6 +1066,7 @@ mod tests {
     ) -> ArchivedRows {
         let batch = RuntimeRecordBatch::decode_arrow_snapshot_section(
             executor,
+            nervix_execution::QueueAdmission::RefuseWhenFull,
             StdArc::clone(schema),
             bytes.clone(),
         )
