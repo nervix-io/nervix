@@ -25,7 +25,7 @@ Feature: Database emitter batches
       CREATE HTTP ENDPOINT events_endpoint ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR http_events
         FROM events_endpoint MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING ingest_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING ingest_codec
         TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       <client>
@@ -107,7 +107,7 @@ Feature: Database emitter batches
       CREATE HTTP ENDPOINT events_endpoint ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR http_events
         FROM events_endpoint MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING ingest_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING ingest_codec
         TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       <client>
@@ -211,7 +211,7 @@ Feature: Database emitter batches
       CREATE HTTP ENDPOINT events_endpoint ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR http_events
         FROM events_endpoint MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING ingest_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING ingest_codec
         TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       <client>
@@ -304,7 +304,7 @@ Feature: Database emitter batches
       CREATE HTTP ENDPOINT events_endpoint ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR http_events
         FROM events_endpoint MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING ingest_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING ingest_codec
         TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       <client>
@@ -373,7 +373,7 @@ Feature: Database emitter batches
       CREATE HTTP ENDPOINT events_endpoint ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR http_events
         FROM events_endpoint MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING ingest_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING ingest_codec
         TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       <client>
@@ -441,7 +441,7 @@ Feature: Database emitter batches
       CREATE HTTP ENDPOINT events_endpoint ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR http_events
         FROM events_endpoint MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING ingest_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING ingest_codec
         TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE MYSQL CLIENT db POOL SIZE MIN 1 MAX 4 CONFIG { 'addr' = '{{mysql_addr}}' };
@@ -496,7 +496,7 @@ Feature: Database emitter batches
       CREATE HTTP ENDPOINT events_endpoint ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR http_events
         FROM events_endpoint MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING ingest_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING ingest_codec
         TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE MONGODB CLIENT db POOL SIZE MIN 1 MAX 4 CONFIG {

@@ -52,7 +52,7 @@ Feature: Datetime functions
       CREATE HTTP ENDPOINT reading_ingress ON edge PATH '/readings';
       CREATE HTTP ENDPOINT INGESTOR reading_ingestor
         FROM reading_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING reading_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING reading_codec
         TIMESTAMP NOW
         TO readings
           INHERIT ALL
@@ -159,7 +159,7 @@ Feature: Datetime functions
       CREATE HTTP ENDPOINT boundary_ingress ON edge PATH '/boundaries';
       CREATE HTTP ENDPOINT INGESTOR boundary_ingestor
         FROM boundary_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING boundary_event_batch_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING boundary_event_batch_codec
         TO boundary_events
           INHERIT ALL
           UNBRANCHED

@@ -1627,6 +1627,7 @@ mod tests {
                     mode: EndpointIngestMode::NoAck,
                     quiesce: crate::IngestQuiesceMode::EndpointBuffer {
                         max_size: "1MiB".to_string(),
+                        response: crate::EndpointPauseResponse::Immediate,
                     },
                 })),
                 codec: named("event_codec"),
@@ -2087,6 +2088,7 @@ mod tests {
                             mode: EndpointIngestMode::NoAck,
                             quiesce: crate::IngestQuiesceMode::EndpointBuffer {
                                 max_size: "1MiB".to_string(),
+                                response: crate::EndpointPauseResponse::Immediate,
                             },
                         }));
                     candidate

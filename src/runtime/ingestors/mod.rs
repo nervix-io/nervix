@@ -181,6 +181,14 @@ impl Runtime {
                 }
                 Ok(())
             }
+            IngestorConnectorPlan::Http(HttpIngestorStartPlan::Endpoint(_))
+            | IngestorConnectorPlan::Websockets(WebsocketsIngestorStartPlan::Endpoint(_)) => {
+                let ingestor = &retirement.previous.ingestor;
+                for unit in retirement.units {
+                    self.remove_ingestor_quiescence(&ingestor.domain, &ingestor.name, unit);
+                }
+                Ok(())
+            }
             IngestorConnectorPlan::Http(HttpIngestorStartPlan::Request(_))
             | IngestorConnectorPlan::Kafka(KafkaIngestorStartPlan::Topic(_))
             | IngestorConnectorPlan::Nats(NatsIngestorStartPlan::Subject(_))
@@ -190,8 +198,6 @@ impl Runtime {
             | IngestorConnectorPlan::Prometheus(PrometheusIngestorStartPlan::Query(_))
             | IngestorConnectorPlan::ZeroMq(ZeroMqIngestorStartPlan::Pull(_))
             | IngestorConnectorPlan::Sqs(SqsIngestorStartPlan::Queue(_))
-            | IngestorConnectorPlan::Http(HttpIngestorStartPlan::Endpoint(_))
-            | IngestorConnectorPlan::Websockets(WebsocketsIngestorStartPlan::Endpoint(_))
             | IngestorConnectorPlan::Websockets(WebsocketsIngestorStartPlan::Connection(_))
             | IngestorConnectorPlan::Syslog(SyslogIngestorStartPlan::Listener(_)) => Ok(()),
         }

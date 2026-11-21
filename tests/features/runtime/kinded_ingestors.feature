@@ -36,7 +36,7 @@ Feature: Ingestors name their connector and entity in the statement head
         TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
       CREATE HTTP ENDPOINT INGESTOR http_endpoint_ingestor
-        FROM http_ingress MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
+        FROM http_ingress MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING event_codec
         TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
       CREATE WEBSOCKETS ENDPOINT INGESTOR ws_endpoint_ingestor
@@ -122,7 +122,7 @@ Feature: Ingestors name their connector and entity in the statement head
     Then the last command output contains
       """
       CREATE HTTP ENDPOINT INGESTOR http_endpoint_ingestor
-        FROM http_ingress MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB
+        FROM http_ingress MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE
         DECODE USING event_codec
       """
     When these Plexus commands are executed on the leader node
@@ -341,7 +341,7 @@ Feature: Ingestors name their connector and entity in the statement head
       CREATE HTTP ENDPOINT ingress_a ON edge PATH '/a';
       CREATE HTTP ENDPOINT ingress_b ON edge PATH '/b';
       CREATE HTTP ENDPOINT INGESTOR web_ingestor
-        FROM ingress_a MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
+        FROM ingress_a MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING event_codec
         TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
       """
@@ -392,14 +392,14 @@ Feature: Ingestors name their connector and entity in the statement head
     When these Plexus commands fail with "HTTP ENDPOINT ingestor 'web_ingestor' in domain '{{domain}}' requires a HTTP ENDPOINT, but endpoint 'ws_ingress' is WEBSOCKETS ENDPOINT"
       """
       CREATE HTTP ENDPOINT INGESTOR web_ingestor
-        FROM ws_ingress MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
+        FROM ws_ingress MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING event_codec
         TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
       """
     When these Plexus commands fail with "WEBSOCKETS ENDPOINT ingestor 'stream_ingestor' in domain '{{domain}}' requires a WEBSOCKETS ENDPOINT, but endpoint 'http_ingress' is HTTP ENDPOINT"
       """
       CREATE WEBSOCKETS ENDPOINT INGESTOR stream_ingestor
-        FROM http_ingress MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
+        FROM http_ingress MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING event_codec
         TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
       """

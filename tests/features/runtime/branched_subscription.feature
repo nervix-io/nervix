@@ -45,7 +45,7 @@ Feature: Branched session subscriptions
 
       CREATE HTTP ENDPOINT INGESTOR sensitive_branch_ingestor
         FROM sensitive_branch_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING incoming_notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING incoming_notification_codec
         TO public_notifications
           SET tenant = message.tenant,
               user_id = message.user_id

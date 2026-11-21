@@ -20,7 +20,9 @@ use crate::{RowSchema, StateRowFrame};
 mod codec;
 mod presentation;
 mod wasm;
-pub use wasm::{MAX_ENCODED_WASM_BRANCH_ENTRY_BYTES, wasm_unit_summary_lines};
+pub use wasm::{
+    MAX_ENCODED_WASM_BRANCH_ENTRY_BYTES, encoded_wasm_branch_entry_bytes, wasm_unit_summary_lines,
+};
 
 /// One read, with either a page from its captured generations or a typed refusal.
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -76,8 +76,7 @@ macro_rules! endpoint_entity {
                 host: RuntimeIngestorHost,
                 shutdown: watch::Receiver<bool>,
             ) -> BoxFuture<'static, ()> {
-                let request = EndpointRequestPolicy::from(&self.0.mode);
-                self.0.bind(host.request_intake(request));
+                self.0.bind(host.request_intake(&self.0.mode));
                 host.mark_ready();
                 Box::pin(run_request_ingestor(
                     *self,
@@ -375,6 +374,7 @@ pub(super) mod tests {
                 mode: EndpointIngestMode::NoAck,
                 quiesce: IngestQuiesceMode::EndpointBuffer {
                     max_size: "1MiB".to_string(),
+                    response: nervix_models::EndpointPauseResponse::Immediate,
                 },
             }],
             wire_format,
@@ -787,6 +787,7 @@ pub(super) mod tests {
                 accepted: 0,
                 rejected: 1,
                 retry_after: None,
+                pause_buffer_full: false,
             })),
             "a retained route refuses a request its only intake can no longer take"
         );
@@ -855,6 +856,7 @@ pub(super) mod tests {
                 accepted: 0,
                 rejected: 1,
                 retry_after: None,
+                pause_buffer_full: false,
             })
         );
         let requests = endpoint_requests(&runtime, &domain, &ingestor);
@@ -900,6 +902,7 @@ pub(super) mod tests {
                 accepted: 1,
                 rejected: 0,
                 retry_after: None,
+                pause_buffer_full: false,
             })
         );
         assert_eq!(
@@ -1082,6 +1085,7 @@ pub(super) mod tests {
                 accepted: 1,
                 rejected: 1,
                 retry_after: None,
+                pause_buffer_full: false,
             })
         );
         assert_eq!(
@@ -1107,6 +1111,7 @@ pub(super) mod tests {
                 accepted: 0,
                 rejected: 2,
                 retry_after: Some(Duration::from_secs(1)),
+                pause_buffer_full: false,
             }))
         );
         assert_eq!(
@@ -1183,7 +1188,7 @@ pub(super) mod tests {
                     outcome: EndpointRequestOutcome::NotAdmitted(
                         EndpointAdmissionRefusal::WindowFull
                     ),
-                    retry_after: Duration::from_secs(1),
+                    retry_after: Some(Duration::from_secs(1)),
                 }))
             );
             // A request that passed the pre-read check while a slot was free finds the window full

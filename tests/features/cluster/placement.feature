@@ -550,7 +550,7 @@ Feature: Placement policies
       CREATE HTTP ENDPOINT placement_ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR endpoint_ingestor
         FROM placement_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING placement_event_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING placement_event_codec
         TO placement_input INHERIT ALL UNBRANCHED
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE JUNCTION corridor_source FROM placement_input UNBRANCHED
@@ -804,7 +804,7 @@ Feature: Placement policies
       CREATE HTTP ENDPOINT placement_timeout_ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR placement_timeout_ingestor
         FROM placement_timeout_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING placement_timeout_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING placement_timeout_codec
         TO placement_timeout_input INHERIT ALL UNBRANCHED
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE JUNCTION placement_timeout_junction FROM placement_timeout_input UNBRANCHED

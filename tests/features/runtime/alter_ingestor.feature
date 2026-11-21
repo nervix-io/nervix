@@ -20,14 +20,14 @@ Feature: Altering ingestors
       CREATE HTTP ENDPOINT ingress_b ON edge PATH '/b';
       CREATE HTTP ENDPOINT INGESTOR event_ingestor
         FROM ingress_a MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING event_codec
         TO outgoing INHERIT ALL UNBRANCHED
         FLUSH EACH 30s MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
 
       ALTER HTTP ENDPOINT INGESTOR event_ingestor
-        SET FROM ingress_b MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB,
+        SET FROM ingress_b MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE,
         SET DECODE USING event_codec_v2,
         SET TIMESTAMP NOW,
         SET FILTER WHERE input.seq > 0,
@@ -41,7 +41,7 @@ Feature: Altering ingestors
     Then the last command output contains
       """
       CREATE HTTP ENDPOINT INGESTOR event_ingestor
-        FROM ingress_b MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB
+        FROM ingress_b MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE
         DECODE USING event_codec_v2
         TIMESTAMP NOW
         FILTER WHERE input.seq > 0
@@ -83,7 +83,7 @@ Feature: Altering ingestors
       CREATE HTTP ENDPOINT ingress_b ON edge PATH '/b';
       CREATE HTTP ENDPOINT INGESTOR event_ingestor
         FROM ingress_a MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING event_codec
         TO outgoing INHERIT ALL UNBRANCHED
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
@@ -101,7 +101,7 @@ Feature: Altering ingestors
     When these Plexus commands are executed on the leader node
       """
       ALTER HTTP ENDPOINT INGESTOR event_ingestor
-        SET FROM ingress_b MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB;
+        SET FROM ingress_b MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE;
       """
     Then the last command output contains
       """
@@ -149,7 +149,7 @@ Feature: Altering ingestors
       };
       CREATE HTTP ENDPOINT INGESTOR buffered_ingestor
         FROM buffered_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING buffered_event_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING buffered_event_codec
         TO buffered_events INHERIT ALL UNBRANCHED
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE ZEROMQ PUSH EMITTER buffered_out FROM buffered_events
@@ -211,7 +211,7 @@ Feature: Altering ingestors
       CREATE HTTP ENDPOINT quiesce_ingress ON quiesce_edge PATH '/set-quiesce';
       CREATE HTTP ENDPOINT INGESTOR quiesce_ingestor
         FROM quiesce_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING quiesce_event_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING quiesce_event_codec
         TO quiesce_events INHERIT ALL UNBRANCHED
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       START;
@@ -239,7 +239,7 @@ Feature: Altering ingestors
       """
     And these Plexus commands fail with "HTTP ENDPOINT ingestors do not support ON QUIESCE BUFFER"
       """
-      ALTER HTTP ENDPOINT INGESTOR quiesce_ingestor SET QUIESCE BUFFER MAX SIZE 1MiB;
+      ALTER HTTP ENDPOINT INGESTOR quiesce_ingestor SET QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE;
       """
     And these Plexus commands are executed on the leader node
       """
@@ -290,7 +290,7 @@ Feature: Altering ingestors
 
       CREATE HTTP ENDPOINT INGESTOR paced_ingestor
         FROM paced_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING paced_event_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING paced_event_codec
         TIMESTAMP NOW
         TO paced_events INHERIT ALL UNBRANCHED
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG

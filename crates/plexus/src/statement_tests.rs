@@ -134,7 +134,7 @@ fn route_construction_offers_its_head_then_names_the_body() {
 #[test]
 fn set_only_route_contexts_offer_only_set() {
     let input = "CREATE HTTP ENDPOINT INGESTOR i FROM e MODE NO ACK ON QUIESCE BUFFER MAX SIZE \
-                 1MiB DECODE USING c TO s BRANCHED BY b ";
+                 1MiB RESPOND IMMEDIATE DECODE USING c TO s BRANCHED BY b ";
     let suggestions = suggest_statement(input, input.len());
     assert!(suggestions.contains(&"SET".to_string()));
     for rejected in ["INHERIT", "INVOKE", "WHERE"] {
@@ -274,7 +274,7 @@ fn ingestor_mode_context_suggestions_do_not_leak_schema_keywords() {
 #[test]
 fn ingestor_branch_context_suggests_only_branch_selection_keywords() {
     let input = "CREATE HTTP ENDPOINT INGESTOR i FROM ep MODE NO ACK ON QUIESCE BUFFER MAX SIZE \
-                 1MiB DECODE USING sch TO s ";
+                 1MiB RESPOND IMMEDIATE DECODE USING sch TO s ";
     let suggestions = suggest_statement(input, input.len());
     assert!(suggestions.contains(&"UNBRANCHED".to_string()));
     assert!(suggestions.contains(&"BRANCHED BY".to_string()));
@@ -284,8 +284,8 @@ fn ingestor_branch_context_suggests_only_branch_selection_keywords() {
 #[test]
 fn ingestor_bare_by_is_rejected() {
     let input = "CREATE HTTP ENDPOINT INGESTOR i FROM ep MODE NO ACK ON QUIESCE BUFFER MAX SIZE \
-                 1MiB DECODE USING sch TO s BY u_branch FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON \
-                 MESSAGE ERROR LOG ON GENERAL ERROR LOG;";
+                 1MiB RESPOND IMMEDIATE DECODE USING sch TO s BY u_branch FLUSH EACH 100ms MAX \
+                 BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;";
 
     let error = parse_statement(input).expect_err("bare BY is not a branch selection mode");
     assert!(!error.current_context().diagnostics().is_empty());
@@ -1275,9 +1275,9 @@ fn runtime_nodes_require_supported_error_policy_blocks() {
         (
             "ingestor",
             "CREATE HTTP ENDPOINT INGESTOR http_notifications FROM http_notifications_endpoint \
-             MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec TO \
-             notifications BRANCHED BY user_id_branch SET user_id = message.user_id FLUSH EACH \
-             100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG",
+             MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING \
+             notification_codec TO notifications BRANCHED BY user_id_branch SET user_id = \
+             message.user_id FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG",
             " ON GENERAL ERROR LOG;",
         ),
         (
@@ -1539,7 +1539,7 @@ fn create_client_name_completion_is_not_semantic_reference_lookup() {
     )]
 #[case::alter_ingestor(
         "ALTER HTTP ENDPOINT INGESTOR event_source SET FROM ingress_b MODE NO ACK ON \
-             QUIESCE BUFFER MAX SIZE 1MiB, SET DECODE USING event_codec_v2, SET TIMESTAMP AT \
+             QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE, SET DECODE USING event_codec_v2, SET TIMESTAMP AT \
              occurred_at, SET FILTER WHERE input.active, REPLACE ROUTE TO events INHERIT ALL \
              UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG, SET GENERAL ERROR IGNORE;",
         None,

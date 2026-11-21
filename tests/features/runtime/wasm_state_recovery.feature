@@ -31,7 +31,7 @@ Feature: Recovery from a rejected WASM guest snapshot
       CREATE HTTP ENDPOINT ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR limited_ingestor
         FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING limited_input_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING limited_input_codec
         TO limited_input_events
         INHERIT ALL
         BRANCHED BY by_limited_tenant
@@ -130,7 +130,7 @@ Feature: Recovery from a rejected WASM guest snapshot
       CREATE HTTP ENDPOINT ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR limited_ingestor
         FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING limited_input_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING limited_input_codec
         TO limited_input_events
         INHERIT ALL
         BRANCHED BY by_limited_tenant
@@ -228,7 +228,7 @@ Feature: Recovery from a rejected WASM guest snapshot
       CREATE HTTP ENDPOINT ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR limited_ingestor
         FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING limited_input_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING limited_input_codec
         TO limited_input_events
         INHERIT ALL
         BRANCHED BY by_limited_tenant

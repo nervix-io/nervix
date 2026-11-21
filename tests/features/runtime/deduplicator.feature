@@ -29,7 +29,7 @@ Feature: Relay deduplication
         PATH '/dedup';
         CREATE HTTP ENDPOINT INGESTOR ingestor_txns
         FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING transaction_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING transaction_codec
         TO ss1
         INHERIT ALL
         BRANCHED BY by_source_txns
@@ -99,7 +99,7 @@ Feature: Relay deduplication
         CREATE HTTP ENDPOINT ingress ON edge PATH '/dedup-expire';
         CREATE HTTP ENDPOINT INGESTOR ingestor_txns
         FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING transaction_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING transaction_codec
         TO ss1
         INHERIT ALL
         BRANCHED BY by_source_txns
@@ -184,7 +184,7 @@ Feature: Relay deduplication
         PATH '/dedup-functions';
         CREATE HTTP ENDPOINT INGESTOR ingestor_txns
         FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING transaction_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING transaction_codec
         TO ss1
         INHERIT ALL
         BRANCHED BY by_source_txns
@@ -262,7 +262,7 @@ Feature: Relay deduplication
         CREATE HTTP ENDPOINT ingress ON edge PATH '/dedup-describe';
         CREATE HTTP ENDPOINT INGESTOR ingestor_txns
         FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING transaction_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING transaction_codec
         TO ss1
         INHERIT ALL
         BRANCHED BY by_source_txns
@@ -353,7 +353,7 @@ Feature: Relay deduplication
         PATH '/dedup';
         CREATE HTTP ENDPOINT INGESTOR state_txns_ingestor
         FROM state_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING transaction_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING transaction_codec
         TO state_txns
         INHERIT ALL
         BRANCHED BY by_source_txns
@@ -363,7 +363,7 @@ Feature: Relay deduplication
         ON GENERAL ERROR LOG;
         CREATE HTTP ENDPOINT INGESTOR ingestor_txns
         FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING transaction_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING transaction_codec
         TO ss1
         INHERIT ALL
         BRANCHED BY by_source_txns
@@ -482,7 +482,7 @@ Feature: Relay deduplication
         PATH '/dedup-default';
         CREATE HTTP ENDPOINT INGESTOR ingestor_txns
         FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING transaction_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING transaction_codec
         TO ss1
         INHERIT ALL
         BRANCHED BY by_dedup_default

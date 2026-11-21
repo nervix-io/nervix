@@ -547,7 +547,7 @@ impl Arbitrary<'_> {
     /// Any quiesce mode a statement can write.
     pub fn quiesce_mode(&mut self) -> IngestQuiesceMode {
         let candidates = self.quiesce_candidates();
-        let count = NonZeroUsize::new(candidates.len()).assured("five quiesce modes exist");
+        let count = NonZeroUsize::new(candidates.len()).assured("ingestors declare quiesce modes");
         let chosen = self.entropy.index(count);
         candidates[chosen].clone()
     }
@@ -585,31 +585,27 @@ impl Arbitrary<'_> {
             IngestQuiesceKind::Reject => IngestQuiesceMode::Reject {
                 retry_after: self.duration(),
             },
-            IngestQuiesceKind::EndpointBuffer => IngestQuiesceMode::EndpointBuffer {
+            IngestQuiesceKind::EndpointBufferImmediate
+            | IngestQuiesceKind::EndpointBufferAfterResume => IngestQuiesceMode::EndpointBuffer {
                 max_size: self.positive_byte_size(),
+                response: kind
+                    .endpoint_response()
+                    .assured("this is an endpoint buffer"),
             },
         }
     }
 
     /// Every quiesce mode, each with its own sizes and durations.
-    fn quiesce_candidates(&mut self) -> [IngestQuiesceMode; 5] {
+    fn quiesce_candidates(&mut self) -> [IngestQuiesceMode; 6] {
         [
-            IngestQuiesceMode::Suspend,
-            IngestQuiesceMode::Buffer {
-                max_size: self.positive_byte_size(),
-                overflow: self.entropy.pick([
-                    IngestQuiesceOverflow::DropOldest,
-                    IngestQuiesceOverflow::DropNewest,
-                ]),
-            },
-            IngestQuiesceMode::Drop,
-            IngestQuiesceMode::Reject {
-                retry_after: self.duration(),
-            },
-            IngestQuiesceMode::EndpointBuffer {
-                max_size: self.positive_byte_size(),
-            },
+            IngestQuiesceKind::Suspend,
+            IngestQuiesceKind::Buffer,
+            IngestQuiesceKind::Drop,
+            IngestQuiesceKind::Reject,
+            IngestQuiesceKind::EndpointBufferImmediate,
+            IngestQuiesceKind::EndpointBufferAfterResume,
         ]
+        .map(|kind| self.quiesce_mode_of(kind))
     }
 
     fn endpoint_mode(&mut self) -> EndpointIngestMode {
