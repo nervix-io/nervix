@@ -1056,8 +1056,8 @@ mod tests {
             let domain = DomainName::parse("partition_bonds").assured("valid domain");
             let mut models = full_graph_batch();
             for model in &mut models {
-                if let Model::Parametrizer(branch) = model {
-                    branch.partitions = ParametrizerPartitions::Direct(nonzero!(2u16));
+                if let Model::Parametrizer(parametrizer) = model {
+                    parametrizer.partitions = ParametrizerPartitions::Direct(nonzero!(2u16));
                 }
             }
             models.push(placement(

@@ -181,7 +181,7 @@ throughout, and missing analysis never reads as zero findings.
 
 Product code and the `nervix-ratchet` orchestration binary build with the stable toolchain
 `rust-toolchain.toml` declares. The analysis driver links rustc's internal crates and builds on one
-pinned nightly, `nightly-2026-09-17`, which the isolated tooling workspace declares with `rustc-dev`,
+pinned nightly, `nightly-2026-11-21`, which the isolated tooling workspace declares with `rustc-dev`,
 `rust-src`, `rustfmt` and `llvm-tools`. `just toolchains-install` installs both toolchains. The
 driver refuses any other analysis compiler: it locates the pinned compiler through rustup and checks
 the commit that `rustc -vV` reports. Bolero's sanitizer campaigns use the same nightly, which the

@@ -4,6 +4,7 @@
 //! Must not know: product filenames, identifier spelling or inferred write-once lifetimes.
 
 use ahash::{HashMap, HashSet, HashSetExt};
+use rustc_attr_ir::AttrItem;
 use rustc_hir::{
     Expr, ExprKind, HirId, MatchSource, Node,
     def::{DefKind, Res},
@@ -15,14 +16,14 @@ use rustc_middle::ty::{self, Ty, TyCtxt};
 use rustc_span::{Span, Symbol, def_id::DefId};
 use rustc_trait_selection::traits::type_known_to_meet_bound_modulo_regions;
 
-use crate::contracts::{Flow, INVALID_CONTRACT, contract_attribute};
+use crate::contracts::{Flow, INVALID_CONTRACT, contract_attribute, meta_items, tool_attributes};
 
-declare_tool_lint! { pub nervix::MODEL_IN_DATA_PLANE, Deny, "execution consumes plans rather than configuration models", report_in_external_macro: true }
-declare_tool_lint! { pub nervix::PARSER_DEPENDENCY, Deny, "language definitions belong only to language and edge consumers", report_in_external_macro: true }
-declare_tool_lint! { pub nervix::CLUSTER_AWAIT, Deny, "recurring execution retains published cluster observations", report_in_external_macro: true }
-declare_tool_lint! { pub nervix::NODE_IDENTITY, Deny, "declared node identities use the shared typed vocabulary", report_in_external_macro: true }
-declare_tool_lint! { pub nervix::INSTALLED_STATE, Deny, "installation-only fields cannot use replaceable read-write locks", report_in_external_macro: true }
-declare_tool_lint! { pub nervix::STATE_CONTRACT, Deny, "optional names and shared handles behind read-write locks need an explicit lifetime contract", report_in_external_macro: true }
+declare_tool_lint! { pub nervix::MODEL_IN_DATA_PLANE, Deny, "execution consumes plans rather than configuration models", @report_in_external_macro = true }
+declare_tool_lint! { pub nervix::PARSER_DEPENDENCY, Deny, "language definitions belong only to language and edge consumers", @report_in_external_macro = true }
+declare_tool_lint! { pub nervix::CLUSTER_AWAIT, Deny, "recurring execution retains published cluster observations", @report_in_external_macro = true }
+declare_tool_lint! { pub nervix::NODE_IDENTITY, Deny, "declared node identities use the shared typed vocabulary", @report_in_external_macro = true }
+declare_tool_lint! { pub nervix::INSTALLED_STATE, Deny, "installation-only fields cannot use replaceable read-write locks", @report_in_external_macro = true }
+declare_tool_lint! { pub nervix::STATE_CONTRACT, Deny, "optional names and shared handles behind read-write locks need an explicit lifetime contract", @report_in_external_macro = true }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub enum Layer {
@@ -62,8 +63,8 @@ impl Layer {
     }
 }
 
-fn kind(attribute: &rustc_hir::Attribute) -> Option<Symbol> {
-    let arguments = attribute.meta_item_list()?;
+fn kind(attribute: &AttrItem) -> Option<Symbol> {
+    let arguments = meta_items(attribute)?;
     if arguments.len() != 2 {
         return None;
     }
@@ -171,8 +172,8 @@ fn consumes_plans(tcx: TyCtxt<'_>, mut definition: DefId) -> bool {
     }
 }
 
-pub fn validate(cx: &LateContext<'_>, node: HirId, attribute: &rustc_hir::Attribute) {
-    let path = attribute.path();
+pub fn validate(cx: &LateContext<'_>, node: HirId, attribute: &AttrItem) {
+    let path = &attribute.path.segments;
     let Some(name) = path.get(1) else {
         return;
     };
@@ -281,17 +282,12 @@ pub fn validate(cx: &LateContext<'_>, node: HirId, attribute: &rustc_hir::Attrib
         }
         _ => return,
     };
-    let count = cx
-        .tcx
-        .hir_attrs(node)
-        .iter()
-        .filter(|other| other.path() == path)
-        .count();
+    let count = tool_attributes(cx.tcx, node, path).len();
     if !valid || count != 1 {
         cx.tcx.emit_node_span_lint(
             INVALID_CONTRACT,
             node,
-            attribute.span(),
+            attribute.span,
             crate::contracts::Message {
                 message: format!(
                     "{name} requires its supported kind and a meaningful reason on its exact \
@@ -654,9 +650,8 @@ impl ArchitectureRules {
         flow: &mut Flow,
     ) {
         for parameter in body.params {
-            if cx.tcx.hir_attrs(parameter.hir_id).iter().any(|attribute| {
-                attribute.path_matches(&[Symbol::intern("nervix"), Symbol::intern("identity")])
-            }) {
+            let identity = [Symbol::intern("nervix"), Symbol::intern("identity")];
+            if !tool_attributes(cx.tcx, parameter.hir_id, &identity).is_empty() {
                 let value = cx.typeck_results().pat_ty(parameter.pat);
                 if !self.typed_identity(cx, value) {
                     self.diagnostic(
@@ -789,14 +784,9 @@ impl ArchitectureRules {
             }
             _ => return None,
         };
-        let selected = match ty::Instance::try_resolve(
-            cx.tcx,
-            cx.typing_env().with_post_analysis_normalized(cx.tcx),
-            definition,
-            arguments,
-        ) {
-            Ok(Some(instance)) => instance.def_id(),
-            _ => definition,
+        let selected = match crate::resolve_after_analysis(cx, definition, arguments) {
+            Some(instance) => instance.def_id(),
+            None => definition,
         };
         if (self.has_role(cx, receiver, "cluster_access")
             || value_role(cx.tcx, definition, "cluster_access")

@@ -932,13 +932,14 @@ mod backup_state_warning_tests {
             ResolvedBranching, SchemaName,
         };
 
-        let branch = ParametrizerName::parse("by_tenant").assured("the test branch name is valid");
+        let parametrizer =
+            ParametrizerName::parse("by_tenant").assured("the test branch name is valid");
         let relay = CreateRelay {
             labels: Default::default(),
             name: RelayName::parse("events").assured("the test relay name is valid"),
             schema: SchemaName::parse("event").assured("the test schema name is valid"),
             buffer: NonZeroUsize::MIN,
-            branching: RelayBranching::branched_by(branch.clone()),
+            branching: RelayBranching::branched_by(parametrizer.clone()),
             materialized_state: None,
         };
         let node = ScheduledNode::new(Model::Relay(relay), SchemaFingerprint::from_digest([3; 32]));
@@ -953,7 +954,11 @@ mod backup_state_warning_tests {
         let count = nervix_models::ResolvedParametrizerPartitions::Direct(
             NonZeroU16::new(count).assured("the test partition count is positive"),
         );
-        node.with_resolved_branching(Some(ResolvedBranching::branched(branch, key_schema, count)))
+        node.with_resolved_branching(Some(ResolvedBranching::branched(
+            parametrizer,
+            key_schema,
+            count,
+        )))
     }
 
     #[test]

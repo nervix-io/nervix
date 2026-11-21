@@ -11,8 +11,8 @@ use rustc_span::{Span, Symbol, def_id::DefId};
 
 use crate::contracts::Flow;
 
-declare_tool_lint! { pub nervix::CLAMPED_ARITHMETIC, Deny, "clamping and wrapping require their actual arithmetic meaning", report_in_external_macro: true }
-declare_tool_lint! { pub nervix::COMBINATOR_CONTROL_FLOW, Deny, "Option and Result decisions belong in explicit statements", report_in_external_macro: true }
+declare_tool_lint! { pub nervix::CLAMPED_ARITHMETIC, Deny, "clamping and wrapping require their actual arithmetic meaning", @report_in_external_macro = true }
+declare_tool_lint! { pub nervix::COMBINATOR_CONTROL_FLOW, Deny, "Option and Result decisions belong in explicit statements", @report_in_external_macro = true }
 
 pub(crate) struct Call<'tcx> {
     pub(crate) definition: DefId,

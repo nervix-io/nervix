@@ -5,7 +5,7 @@ Feature: Generator node
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these Plexus commands fail with "generator 'synth_notifications' branch name 'output_branch' does not match relay 'notifications' branch name 'input_branch'"
+    When these Plexus commands fail with "generator 'synth_notifications' parametrizer 'output_branch' does not match relay 'notifications' parametrizer 'input_branch'"
       """
       CREATE SCHEMA notification (
         tenant STRING,

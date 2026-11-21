@@ -1252,7 +1252,7 @@ impl<Version: Display> Model<Version> {
             Self::ClientAzureBlob(client) => client.to_canonical_plexus(),
             Self::ClientIcebergRest(client) => client.to_canonical_plexus(),
             Self::Vhost(vhost) => vhost.to_canonical_plexus(),
-            Self::Parametrizer(branch) => branch.to_canonical_plexus(),
+            Self::Parametrizer(parametrizer) => parametrizer.to_canonical_plexus(),
             Self::Endpoint(endpoint) => endpoint.to_canonical_plexus(),
             Self::SignalingProtocol(protocol) => protocol.to_canonical_plexus(),
             Self::Generator(generator) => generator.to_canonical_plexus(),
