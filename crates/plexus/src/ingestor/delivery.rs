@@ -30,7 +30,8 @@ use crate::{
     lexer::{Identifier, Token, Word},
     parser_support::{
         ParseError, ack_timeout, byte_size_lit, duration_lit, embedded_expression, kw, kw_phrase2,
-        nonzero_u64_value, parallel_ack_window, retry_policy, sequential_ack_window, unknown_word,
+        kw_phrase3, nonzero_u64_value, parallel_ack_window, retry_policy, sequential_ack_window,
+        unknown_word,
     },
 };
 
@@ -103,8 +104,13 @@ pub(super) fn instances<'src, S: IngestorEntityModel>()
         .map(IngestorInstances::Count);
     let capability = S::KIND.capabilities().instancing;
     let grammar = match capability {
-        nervix_models::IngestorInstancingCapability::PerPartition => choice((
-            kw_phrase2(Identifier::Per, Identifier::Partition).to(IngestorInstances::PerPartition),
+        nervix_models::IngestorInstancingCapability::PerTransportPartition => choice((
+            kw_phrase3(
+                Identifier::Per,
+                Identifier::Transport,
+                Identifier::Partition,
+            )
+            .to(IngestorInstances::PerTransportPartition),
             count,
         ))
         .boxed(),

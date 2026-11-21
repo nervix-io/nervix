@@ -75,13 +75,22 @@ impl<'a> ExpressionCompletion<'a> {
                 )),
             ];
         }
-        let scope = match self.ingestor {
-            Some(kind) => BuiltinFunctionScope::IngestorEntity(kind),
-            None => BuiltinFunctionScope::Ordinary,
-        };
         vec![CompletionExpectation::Semantic(
-            SemanticReference::BuiltinFunction(scope),
+            SemanticReference::BuiltinFunction(self.function_scope()),
         )]
+    }
+
+    /// Which builtins the statement lets a function position call: the header reads of its ingestor
+    /// entity, the aggregates of the window whose route value is being written, or the ordinary
+    /// functions alone.
+    fn function_scope(&self) -> BuiltinFunctionScope {
+        if let Some(kind) = self.ingestor {
+            return BuiltinFunctionScope::IngestorEntity(kind);
+        }
+        if let Some(value) = crate::window_processor::route_value(self.tokens) {
+            return BuiltinFunctionScope::WindowRoute(value);
+        }
+        BuiltinFunctionScope::Ordinary
     }
 
     fn invocations(&self) -> Vec<CompletionExpectation> {

@@ -23,7 +23,9 @@ use super::{
     event_target_textarea_value, event_target_value,
     ingestor_draft::TimestampDraft,
     ingestor_route_editor::IngestorRouteEditor,
-    ingestor_source_draft::{IngestorEntityDraft, RateLimitDraft, RequestHeaderDraft},
+    ingestor_source_draft::{
+        IngestorEntityDraft, RateLimitDraft, RequestHeaderDraft, TRANSPORT_PARTITION_INSTANCES,
+    },
 };
 
 #[derive(Clone, Copy)]
@@ -393,7 +395,7 @@ fn EntityOptionEditor(signals: CreateSignals, option: OptionDeclaration) -> impl
         _ => "create-ingestor-option",
     };
     view! {
-        <Show when=move || keywords != "INSTANCES" || signals.ingestor.get().source.chosen_option("INSTANCES") != Some("PER PARTITION") fallback=|| ()>
+        <Show when=move || keywords != "INSTANCES" || signals.ingestor.get().source.chosen_option("INSTANCES") != Some(TRANSPORT_PARTITION_INSTANCES) fallback=|| ()>
             <EntityValueEditor signals=signals keywords=keywords default=default />
         </Show>
         <Show when=move || !choices.is_empty() fallback=|| ()>

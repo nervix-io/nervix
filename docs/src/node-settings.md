@@ -828,8 +828,8 @@ they preserve ordered cursor progress without materializing the entire catalog. 
 receives one fifteenth of the domain drain budget, two seconds at the default. Internal drain,
 freeze and replication rechecks derive from their owning deadline or replication cadence, with a
 one-nanosecond floor. ONNX sessions use one intra-operation and one inter-operation thread because
-the Data executor already owns parallel admission. State admission spins only with parallel Data
-workers; its bounded spin is followed by the selected thread yield.
+the Extension executor already owns the parallel admission of model runs. State admission spins
+only with parallel Data workers; its bounded spin is followed by the selected thread yield.
 
 Framing, packed identity bits, sequential single-slot handoffs, accounting granules and persisted
 segment sizes remain fixed contracts, with their owning code and format chapters declaring why.
@@ -1396,7 +1396,7 @@ percentile windows, the unit and precision of the HDR histograms that metric sna
 published histogram buckets and the published connector-interaction duration buckets are fixed
 observation contracts. Their declarations carry the fixed reasons in the metric owners; they are
 not node settings. The current resolution is documented in
-[Metrics And Observability](metrics-and-observability.md#connector-interactions).
+[Metrics And Observability](metrics-and-observability.md#connector-interaction-metrics).
 
 The per-session bounds of the [client session protocol](client-session-protocol.md) (requests in
 flight, producers, consumers and batch credit), the chunk bounds both peers of a stream check, the

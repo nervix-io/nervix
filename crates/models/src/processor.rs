@@ -1252,6 +1252,7 @@ pub struct CreateWindowProcessor {
     Copy,
     PartialEq,
     Eq,
+    Hash,
     Serialize,
     Deserialize,
     Archive,
@@ -1264,7 +1265,16 @@ pub enum WindowStateLimit {
 }
 
 #[derive(
-    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    Hash,
+    Serialize,
+    Deserialize,
+    Archive,
+    RkyvSerialize,
+    RkyvDeserialize,
 )]
 pub struct WindowBound {
     #[serde(default, skip_serializing_if = "Option::is_none")]

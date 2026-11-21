@@ -15,7 +15,9 @@ use std::num::NonZeroU64;
 use chumsky::prelude::*;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::{
-    CreateStatement, CreateWindowProcessor, WindowBound, WindowStateLimit, parse_duration_text,
+    AckMode, BranchSelection, CreateStatement, CreateWindowProcessor, Expression,
+    MaterializedStateDependency, ProcessorInputs, WindowBound, WindowProcessorName,
+    WindowRouteValue, WindowStateLimit, parse_duration_text,
 };
 
 use crate::{
@@ -24,8 +26,10 @@ use crate::{
         LexedInput, ParseError, ParseFromSourceError, ack_mode, boxed_choice, branch_selection,
         byte_size_lit, duration_lit, explicit_processor_outputs, filter_where_clause,
         from_relay_clauses, if_not_exists_clause, into_parse_error, kw, kw_phrase2, kw_phrase3,
-        lex_input, materialized_state_dependencies, suggest_from, window_processor_name,
+        lex_input, materialized_state_dependencies, output_route_head, suggest_from,
+        window_processor_name,
     },
+    semantic_program::{open_assignment, open_builtin_calls},
 };
 
 /// The count in a `<n> MESSAGES` window bound. Narrower than the shared integer parser: a window
@@ -205,50 +209,121 @@ fn state_limit<'src>()
         .boxed()
 }
 
+/// What a window processor statement declares before its output routes.
+struct WindowDeclaration {
+    if_not_exists: bool,
+    name: WindowProcessorName,
+    from: ProcessorInputs,
+    mode: Option<AckMode>,
+    filter_where: Option<Expression>,
+    width: WindowBound,
+    step: WindowBound,
+    state_limit: WindowStateLimit,
+    branched_by: BranchSelection,
+    materialized_state: Vec<MaterializedStateDependency>,
+}
+
+/// The clauses of a window processor statement before its output routes: its name and inputs,
+/// acknowledgement, filter, bounds, state limit, branch and materialized state.
+fn declaration<'src>()
+-> impl Parser<'src, &'src [Token], WindowDeclaration, extra::Err<ParseError<'src>>> + Clone {
+    kw(Identifier::Create)
+        .ignore_then(if_not_exists_clause())
+        .then_ignore(kw_phrase2(Identifier::Window, Identifier::Processor))
+        .then(window_processor_name())
+        .then_ignore(kw(Identifier::From))
+        .then(from_relay_clauses())
+        .then(ack_mode().or_not())
+        .then(filter_where_clause().or_not())
+        .boxed()
+        .then(width_and_step())
+        .map(|(head, (width, step))| ((head, width), step))
+        .boxed()
+        .then(state_limit())
+        .then(branch_selection())
+        .then(materialized_state_dependencies())
+        .map(|parsed| {
+            let (parsed, materialized_state) = parsed;
+            let (parsed, branched_by) = parsed;
+            let (parsed, state_limit) = parsed;
+            let ((head, width), step) = parsed;
+            let ((((if_not_exists, name), from), mode), filter_where) = head;
+            WindowDeclaration {
+                if_not_exists,
+                name,
+                from,
+                mode,
+                filter_where,
+                width,
+                step,
+                state_limit,
+                branched_by,
+                materialized_state,
+            }
+        })
+        .boxed()
+}
+
 pub fn create_window_processor_parser<'src>()
 -> impl Parser<'src, &'src [Token], CreateStatement<CreateWindowProcessor>, extra::Err<ParseError<'src>>>
 + Clone {
     crate::labels::finish_creation({
-        kw(Identifier::Create)
-            .ignore_then(if_not_exists_clause())
-            .then_ignore(kw_phrase2(Identifier::Window, Identifier::Processor))
-            .then(window_processor_name())
-            .then_ignore(kw(Identifier::From))
-            .then(from_relay_clauses())
-            .then(ack_mode().or_not())
-            .then(filter_where_clause().or_not())
-            .boxed()
-            .then(width_and_step())
-            .map(|(head, (width, step))| ((head, width), step))
-            .boxed()
-            .then(state_limit())
-            .then(branch_selection())
-            .then(materialized_state_dependencies())
+        declaration()
             .then(explicit_processor_outputs())
-            .try_map(|(parsed, outputs), _span| {
-                let (parsed, materialized_state) = parsed;
-                let (parsed, branched_by) = parsed;
-                let (parsed, state_limit) = parsed;
-                let ((head, width), step) = parsed;
-                let ((((if_not_exists, name), from_input), mode), filter_where) = head;
-                Ok(CreateStatement::new(
+            .map(|(declaration, output_routes)| {
+                CreateStatement::new(
                     CreateWindowProcessor {
                         labels: Default::default(),
-                        name,
-                        from: from_input,
-                        output_routes: outputs,
-                        branched_by,
-                        width,
-                        step,
-                        state_limit,
-                        mode: mode.unwrap_or_default(),
-                        filter_where,
-                        materialized_state,
+                        name: declaration.name,
+                        from: declaration.from,
+                        output_routes,
+                        branched_by: declaration.branched_by,
+                        width: declaration.width,
+                        step: declaration.step,
+                        state_limit: declaration.state_limit,
+                        mode: declaration.mode.unwrap_or_default(),
+                        filter_where: declaration.filter_where,
+                        materialized_state: declaration.materialized_state,
                     },
-                    if_not_exists,
-                ))
+                    declaration.if_not_exists,
+                )
             })
             .boxed()
+    })
+}
+
+/// What the value a route's `SET` assigns may call where `tokens` end, when they begin a window
+/// processor statement and end inside the assignments of one of its routes: the bound the window
+/// declares, which decides its aggregates, and the builtin calls the position is written inside.
+///
+/// The statement is read with its own clauses up to the `SET` of the route being written, after
+/// every route it already completed. A position in the route's `WHERE` or message-error policy, or
+/// before the routes, is not inside those assignments.
+pub(crate) fn route_value(tokens: &[Token]) -> Option<WindowRouteValue> {
+    /// Where the assignments of the route being written begin, with its window's bound.
+    struct RouteAssignments {
+        width: WindowBound,
+        state_limit: WindowStateLimit,
+        start: usize,
+    }
+
+    let route = declaration()
+        .then_ignore(explicit_processor_outputs().or_not())
+        .then_ignore(output_route_head())
+        .then_ignore(kw(Identifier::Set))
+        .map_with(|declaration, extra| RouteAssignments {
+            width: declaration.width,
+            state_limit: declaration.state_limit,
+            start: extra.span().end,
+        })
+        .lazy()
+        .parse(tokens)
+        .into_output()?;
+    let assignment = open_assignment(tokens.get(route.start..)?)?;
+    Some(WindowRouteValue {
+        width: route.width,
+        state_limit: route.state_limit,
+        enclosing_calls: open_builtin_calls(assignment),
     })
 }
 

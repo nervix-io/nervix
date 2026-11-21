@@ -419,6 +419,11 @@ test-window-collection-arrays *args: build-deps build-plexus-format build-test-c
 test-reference-completion *args: build-deps build-plexus-format build-test-cli build-deadlock-report
     ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)" cargo test --package nervix-scenarios --test scenarios -- --input {{ quote(justfile_directory() / "tests/features/tools/cli_reference_completion{,}.feature") }} {{ quote(args) }}
 
+# Complete the collection aggregates of window routes through the public CLI, against each window
+# bound and expression position.
+test-window-collection-completion *args: build-deps build-plexus-format build-test-cli build-deadlock-report
+    ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)" cargo test --package nervix-scenarios --test scenarios -- --input {{ quote(justfile_directory() / "tests/features/tools/cli_window_collection_completion{,}.feature") }} {{ quote(args) }}
+
 # Observe released and installed processor keys through bounded public inspection pages.
 test-partition-state-inspection *args: build-deps build-plexus-format build-test-cli build-deadlock-report
     ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)" cargo test --package nervix-scenarios --test scenarios -- --input {{ quote(justfile_directory() / "tests/features/runtime/partition_state_inspection{,}.feature") }} {{ quote(args) }}

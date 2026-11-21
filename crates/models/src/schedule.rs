@@ -530,7 +530,7 @@ impl ScheduledNode {
     /// The complete branch declaration the registry resolved for this node, and the units it
     /// decides: a relay of a branch with several partitions is scheduled as one `Partition` unit
     /// per partition. Fixed-count ingestors declare `Instance` units; the registry supplies a
-    /// per-partition ingestor's resolved units with [`Self::with_units`]. Units are unplaced until
+    /// transport-partition ingestor's resolved units with [`Self::with_units`]. Units are unplaced until
     /// [`Self::placed_on`] or [`Self::place_unit`] places them.
     #[must_use]
     pub fn with_resolved_branching(mut self, branching: Option<ResolvedBranching>) -> Self {

@@ -234,7 +234,7 @@ fn window_state_schemas(
             },
             output,
             &aggregate.inner,
-            &window.width,
+            window,
             output_schema,
             input_schema,
             branch_schema,

@@ -153,10 +153,11 @@ pub struct PulsarTopicIngestor {
 
 impl PulsarTopicIngestor {
     /// Whether this ingestor's instances fit the type of its subscription. A type that reads through
-    /// one consumer requires one fixed instance or explicit partition-topic assignment, whose
-    /// inherited branch requirement the registry validates.
+    /// one consumer requires one fixed instance or `INSTANCES PER TRANSPORT PARTITION`, which deals
+    /// the topic's partition topics among the instances so that each partition topic keeps one
+    /// consumer.
     pub fn instances_fit_subscription(&self) -> bool {
-        self.instances == crate::IngestorInstances::PerPartition
+        self.instances == crate::IngestorInstances::PerTransportPartition
             || matches!(self.instances, crate::IngestorInstances::Count(count) if count.get() == 1)
             || !self.subscription.kind.reads_through_one_consumer()
     }
@@ -510,7 +511,7 @@ impl IngestorDeclaration for PulsarTopicIngestor {
     const CAPABILITIES: IngestorEntityCapabilities = IngestorEntityCapabilities {
         external_partitions: crate::IngestorExternalPartitions::Enumerated(PARTITION_METADATA),
         events: crate::DeclaredEvents::NONE,
-        instancing: crate::IngestorInstancingCapability::PerPartition,
+        instancing: crate::IngestorInstancingCapability::PerTransportPartition,
         // A Pulsar message carries its properties as a list, in the order the producer wrote them.
         headers: Some(HeaderModel::exact(HeaderLayout::OrderedRepeats)),
         metadata: PULSAR_TOPIC_METADATA,
@@ -583,7 +584,7 @@ impl IngestorDeclaration for PulsarTopicIngestor {
                     },
                 ]),
             },
-            OptionDeclaration::INSTANCES,
+            OptionDeclaration::TRANSPORT_PARTITION_INSTANCES,
         ],
         bounds: PULSAR_INGESTOR_BOUNDS,
     };

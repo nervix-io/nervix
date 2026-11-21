@@ -36,7 +36,7 @@ use rumqttc::{
 use super::{AcknowledgementRequests, ConnectionEvents, IngestorPacket, MqttConnection};
 use crate::topic::ingestor::{
     IngestorAcknowledgement, MqttTopicIngestor, MqttTopicIngestorError, MqttTopicIngestorPosition,
-    PublishRead as _, metrics_fixture::IngestorMetricsFixture,
+    PublishRead as _, overflow_fixture::ReadAheadOverflowFixture,
 };
 
 /// The largest complete publish a client that leaves `max_packet_size` out admits.
@@ -80,7 +80,7 @@ async fn an_acknowledgement_its_connection_cannot_write_fails_after_one_keep_ali
         },
         Some(keep_alive),
         default_admission(),
-        IngestorMetricsFixture::new().counter(),
+        ReadAheadOverflowFixture::new().report(),
     );
     let mut publish = Publish::new("events", QoS::AtLeastOnce, vec![1], None);
     publish.pkid = 1;
@@ -249,7 +249,7 @@ async fn a_cancelled_discard_keeps_its_acknowledgement_progress_and_original_dea
             },
             Some(keep_alive),
             default_admission(),
-            IngestorMetricsFixture::new().counter(),
+            ReadAheadOverflowFixture::new().report(),
         );
         let cancellation = IngestorReadCancellation::new();
         let request = IngestorBatchRequest {
@@ -327,7 +327,7 @@ async fn a_discard_whose_connection_ends_preserves_the_acknowledgement_failure_c
         },
         None,
         default_admission(),
-        IngestorMetricsFixture::new().counter(),
+        ReadAheadOverflowFixture::new().report(),
     );
     let request = IngestorBatchRequest {
         max_messages: NonZeroUsize::MIN,
@@ -393,7 +393,7 @@ async fn a_discard_deadline_starts_after_the_host_settles_its_ordinary_prefix() 
         },
         Some(keep_alive),
         default_admission(),
-        IngestorMetricsFixture::new().counter(),
+        ReadAheadOverflowFixture::new().report(),
     );
     let request = IngestorBatchRequest {
         max_messages: NonZeroUsize::new(3).assured("three is nonzero"),
@@ -453,7 +453,7 @@ impl ConnectionEvents for OverflowEventLoop {
 
 #[nervix_primitives::test(start_paused = true)]
 async fn qos_zero_overflow_keeps_polling_and_preserves_acknowledged_publishes() {
-    let metrics = IngestorMetricsFixture::new();
+    let overflow = ReadAheadOverflowFixture::new();
     let (packets, incoming) = mpsc::unbounded_channel();
     let (requests, queued) = mpsc::channel(65);
     let (pinged, mut pings) = mpsc::channel(1);
@@ -470,7 +470,7 @@ async fn qos_zero_overflow_keeps_polling_and_preserves_acknowledged_publishes() 
         },
         Some(Duration::from_secs(10)),
         default_admission(),
-        metrics.counter(),
+        overflow.report(),
     );
     let mut first = Publish::new("events", QoS::AtLeastOnce, vec![1], None);
     first.pkid = 1;
@@ -506,7 +506,7 @@ async fn qos_zero_overflow_keeps_polling_and_preserves_acknowledged_publishes() 
         .assured("QoS 0 overflow must not stop the connection's keep-alive polling")
         .assured("the driver sends its progress witness");
     assert_eq!(
-        metrics.dropped(),
+        overflow.dropped(),
         64,
         "every overflow is counted while the host still waits"
     );
@@ -543,5 +543,5 @@ async fn qos_zero_overflow_keeps_polling_and_preserves_acknowledged_publishes() 
         .await
         .assured("QoS 0 admission resumes after draining");
     assert!(matches!(next, super::PublishReadOutcome::Message(publish) if *publish == resumed));
-    assert_eq!(metrics.dropped(), 64);
+    assert_eq!(overflow.dropped(), 64);
 }
