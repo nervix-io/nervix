@@ -225,24 +225,13 @@ impl BranchInstanceTemplate {
             .snapshot()
             .change_context_lazy(fresh)?
             .now();
-        let init = WasmBranchInit {
-            domain_name: domain.as_str().to_string(),
-            domain_type: "runtime".to_string(),
-            branch_key: key
-                .as_ref()
-                .map(|branch| branch.as_str().as_bytes().to_vec()),
-            input_schema: input_schema.wasm_processor_schema(input_relay.as_str().to_string()),
-            output_schemas: output_schemas
-                .iter()
-                .map(|(relay, schema)| schema.wasm_processor_schema(relay.as_str().to_string()))
-                .collect(),
-        };
         let module = WasmBranchModule {
             processor: processor.clone(),
             branch: key,
             resource: ResourceId::new(domain.clone(), resource.clone(), *resource_version),
             file: file.clone(),
         };
+        let init = module.branch_init(input_relay, &input_schema, &output_schemas);
         let mut live = compiled
             .instantiate_branch(module, *limits, init, execution_now, None)
             .await

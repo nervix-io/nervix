@@ -7,8 +7,10 @@
 //!
 //! The processed row count is the guest's durable computation state and the
 //! only state it saves: a recreated instance numbers the rows that follow from
-//! it. The batch the guest still buffers belongs to the live instance together
-//! with its ACK tokens, so a quiesce flush releases it and it is never saved.
+//! it, and a state inspection sees it described as the one-row `progress`
+//! section. The batch the guest still buffers belongs to the live instance
+//! together with its ACK tokens, so a quiesce flush releases it and it is never
+//! saved or described.
 //!
 //! Sentinel first values exercise the error paths: `-100` routes a message
 //! error, `-200` reports a global error, `-300` latches guest error state,
@@ -17,13 +19,13 @@
 
 use std::{sync::Arc, time::Duration};
 
-use arrow_array::{Array, ArrayRef, Int32Array, StringArray};
+use arrow_array::{Array, ArrayRef, Int32Array, StringArray, UInt64Array};
 use arrow_schema::ArrowError;
 use error_stack::{Report, Result};
 use nervix_wasm_sdk::{
     AckSidecar, AckTokenSet, BranchContext, GuestContext, GuestError, InputBatch, MessageErrorSet,
     OutputColumnRef, OutputEnvelope, Processor, ProcessorField, ProcessorSchema, ProcessorType,
-    StateResetRequestAnswer, TimeoutHandle,
+    StateDescription, StateResetRequestAnswer, TimeoutHandle,
 };
 
 const FLUSH_TIMEOUT: Duration = Duration::from_secs(1);
@@ -170,6 +172,20 @@ impl Processor for EvenRowFilter {
             pending: None,
             unserializable_by: None,
         })
+    }
+
+    fn describe_state(&self) -> Result<StateDescription, GuestError> {
+        let mut description = StateDescription::new();
+        description.add_section(
+            "progress",
+            vec![ProcessorField {
+                name: "processed_rows".to_string(),
+                ty: ProcessorType::U64,
+                optional: false,
+            }],
+            vec![Arc::new(UInt64Array::from(vec![self.processed_rows]))],
+        )?;
+        Ok(description)
     }
 }
 
