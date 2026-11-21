@@ -26,14 +26,14 @@ Feature: Window processor metrics
         FROM WIRE SCHEMA metric_wire
         TO SCHEMA metric;
         CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
-        CREATE IF NOT EXISTS BRANCH by_window_metrics_source SCHEMA tenant_branch TTL 5m;
+        CREATE IF NOT EXISTS PARAMETRIZER by_window_metrics_source SCHEMA tenant_branch TTL 5m;
         CREATE RELAY metrics_input SCHEMA metric BRANCHED BY by_window_metrics_source;
         CREATE RELAY metrics_summary SCHEMA metric_summary BRANCHED BY by_window_metrics_source;
         CREATE VHOST edge http-{{test_id}}.example.com;
         CREATE HTTP ENDPOINT window_metrics_ingress ON edge PATH '/window-metrics';
         CREATE HTTP ENDPOINT INGESTOR window_metrics_ingestor
         FROM window_metrics_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING metric_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING metric_codec
         TO metrics_input
         INHERIT ALL
         BRANCHED BY by_window_metrics_source

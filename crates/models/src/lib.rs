@@ -59,11 +59,11 @@ mod name_spelling;
 mod names;
 mod node_capabilities;
 pub use database_settings::*;
-mod branch_partitions;
 mod node_endpoint;
 mod node_operations;
 mod node_record;
 mod node_selector;
+mod parametrizer_partitions;
 pub use node_selector::{NODE_SCOPE, NODE_TAG_FUNCTION, NodeSelectorField};
 mod node_ref;
 mod partition_epoch;
@@ -108,7 +108,6 @@ pub use backup::{
     ArchiveDigest, Backup, BackupArchiveSummary, BackupCapture, BackupCut, BackupCutKind,
     BackupDomainSummary, BackupQuiesceCounters, BackupResources, BackupScope, DescribeBackup,
 };
-pub use branch_partitions::{BranchPartitions, ResolvedBranchPartitions};
 pub use canonical::{
     CanonicalPlexusError, EmitterPayloadContainer, EmitterPayloadPresentation, EntityPresentation,
     PLEXUS_LANGUAGE_VERSION, alter_avro_wire_schema_to_canonical_plexus,
@@ -164,18 +163,18 @@ pub use connector::{
     EmitterEntityBody, EmitterEntityCapabilities, EmitterEntityChange, EmitterEntityKind,
     EmitterEntityMetadata, EmitterEntityModel, EmitterModeChange, EmitterPayloadFormat,
     EmitterPublication, EmitterReference, EmitterReferenceKind, EmitterValueMapping,
-    EmitterValueMappings, EndpointIngestMode, EnvelopeClauseForm, EnvelopeClauseKind,
-    EnvelopeValueType, ExternalName, ExternalNameDeclaration, ExternalNameError, GcsConfigEntry,
-    HTTP_CLIENT_SECRET_KEY_PREFIX, HTTP_DEFAULT_MAX_BODY_SIZE, HeaderLayout, HeaderModel,
-    HeaderNames, HeaderPair, HeaderPairsError, HeaderValueType, HeaderValues, HostPort,
-    HostPortError, HttpConfigEntry, HttpEmitter, HttpEmitterChange, HttpEmitterEntity,
-    HttpEndpointIngestor, HttpEndpointIngestorChange, HttpIngestor, HttpIngestorEntity,
-    HttpRequestEmitter, HttpRequestEmitterChange, HttpRequestEmitterMode, HttpRequestHeader,
-    HttpRequestHeaderValue, HttpRequestHeadersError, HttpRequestIngestMode, HttpRequestIngestor,
-    HttpRequestIngestorAlteration, HttpRequestIngestorChange, HttpRequestPublishingMode,
-    IcebergCatalog, IcebergCatalogProperties, IcebergEmitter, IcebergEmitterChange,
-    IcebergEmitterEntity, IcebergFileIoEntry, IcebergLocationError, IcebergNamespace,
-    IcebergPropertyCollision, IcebergRestConfigEntry, IcebergStorageBackend,
+    EmitterValueMappings, EndpointIngestMode, EndpointPauseResponse, EnvelopeClauseForm,
+    EnvelopeClauseKind, EnvelopeValueType, ExternalName, ExternalNameDeclaration,
+    ExternalNameError, GcsConfigEntry, HTTP_CLIENT_SECRET_KEY_PREFIX, HTTP_DEFAULT_MAX_BODY_SIZE,
+    HeaderLayout, HeaderModel, HeaderNames, HeaderPair, HeaderPairsError, HeaderValueType,
+    HeaderValues, HostPort, HostPortError, HttpConfigEntry, HttpEmitter, HttpEmitterChange,
+    HttpEmitterEntity, HttpEndpointIngestor, HttpEndpointIngestorChange, HttpIngestor,
+    HttpIngestorEntity, HttpRequestEmitter, HttpRequestEmitterChange, HttpRequestEmitterMode,
+    HttpRequestHeader, HttpRequestHeaderValue, HttpRequestHeadersError, HttpRequestIngestMode,
+    HttpRequestIngestor, HttpRequestIngestorAlteration, HttpRequestIngestorChange,
+    HttpRequestPublishingMode, IcebergCatalog, IcebergCatalogProperties, IcebergEmitter,
+    IcebergEmitterChange, IcebergEmitterEntity, IcebergFileIoEntry, IcebergLocationError,
+    IcebergNamespace, IcebergPropertyCollision, IcebergRestConfigEntry, IcebergStorageBackend,
     IcebergStorageBackendError, IcebergTableEmitter, IcebergTableEmitterChange,
     IcebergTableEmitterMode, IcebergTableName, IcebergTablePublishingMode, IcebergValueMapping,
     IngestAcknowledgement, IngestDeliveryKind, IngestQuiesceKind, IngestQuiesceMode,
@@ -328,9 +327,9 @@ pub use message_error::{
 pub use model_index::ModelIndex;
 pub use name_spelling::NamePosition;
 pub use names::{
-    BranchName, BuiltinFunctionName, ClientName, ClusterNodeName, CodecName, CorrelatorName,
-    DeduplicatorName, DomainName, DotPolicy, EmitterName, EndpointName, FieldName, GeneratorName,
-    InferencerName, IngestorName, JunctionName, LookupName, ModelName, NameError, PlacementName,
+    BuiltinFunctionName, ClientName, ClusterNodeName, CodecName, CorrelatorName, DeduplicatorName,
+    DomainName, DotPolicy, EmitterName, EndpointName, FieldName, GeneratorName, InferencerName,
+    IngestorName, JunctionName, LookupName, ModelName, NameError, ParametrizerName, PlacementName,
     ReingestorName, RelayName, ReordererName, ResourceName, SchemaName, SignalingProtocolName,
     SubscriptionName, UdfName, UserName, VhostName, WasmProcessorName, WindowProcessorName,
     WireSchemaName,
@@ -352,7 +351,8 @@ pub use node_record::{
     OnnxRuntimeDetection, PropertyText, PropertyValueError, TagKey, TagValue, UndetectedReason,
 };
 pub use node_ref::{DomainNodeRef, NodeRef};
-pub use partition_epoch::{BranchPartitionEpoch, PartitionEpochNumber, PartitionTransition};
+pub use parametrizer_partitions::{ParametrizerPartitions, ResolvedParametrizerPartitions};
+pub use partition_epoch::{ParametrizerPartitionEpoch, PartitionEpochNumber, PartitionTransition};
 pub use partition_topology::{
     ExternalPartition, ExternalPartitionAssignment, ExternalPartitionRead, ExternalPartitionSet,
     InheritedPartitionLayout, InheritedPartitionOrigin, PartitionSourceFingerprint,
@@ -413,8 +413,8 @@ pub use remote_branch_key::{
 };
 pub use reset_wasm_state::ResetWasmState;
 pub use resource::{
-    RequestedResourceVersion, ResourceDescription, ResourceEntryContent, ResourceId,
-    ResourceManifestEntry, ResourceNodeState, ResourceNodeStatus, ResourceReplicaKey,
+    RequestedResourceVersion, ResourceCatalogKey, ResourceDescription, ResourceEntryContent,
+    ResourceId, ResourceManifestEntry, ResourceNodeState, ResourceNodeStatus, ResourceReplicaKey,
     ResourceUpload, ResourceUploadIdentity, ResourceUploadIdentityError, ResourceUploadKey,
     ResourceUploadState, ResourceUploads, ResourceUploadsError, ResourceUsage, ResourceVersion,
     ResourceVersionCounter, ResourceVersionDescription, ResourceVersionEntries, ResourceVersionKey,
@@ -456,31 +456,31 @@ pub use state_inspection_settings::{
     StateInspectionSettings, StateInspectionSettingsError,
 };
 pub use statement::{
-    AckWindow, AlterBranch, AlterBranchError, AlterBranchOperation, AlterGenerator,
-    AlterGeneratorError, AlterGeneratorOperation, AlterIngestor, AlterIngestorError,
-    AlterIngestorOperation, AlterRelay, AlterRelayError, AlterRelayOperation,
-    AlterTransportIngestorOperation, BranchEviction, BranchSelection, CodecBatchContainer,
-    CodecEncoding, CodecEncodingRule, CodecJaqFormat, CodecJaqTransformations, CodecProtobufConfig,
-    CodecWireFormat, CordonNode, CreateBranch, CreateCodec, CreateDomain, CreateEndpoint,
-    CreateGenerator, CreateIngestor, CreateLookup, CreateRelay, CreateResource,
+    AckWindow, AlterGenerator, AlterGeneratorError, AlterGeneratorOperation, AlterIngestor,
+    AlterIngestorError, AlterIngestorOperation, AlterParametrizer, AlterParametrizerError,
+    AlterParametrizerOperation, AlterRelay, AlterRelayError, AlterRelayOperation,
+    AlterTransportIngestorOperation, BranchSelection, CodecBatchContainer, CodecEncoding,
+    CodecEncodingRule, CodecJaqFormat, CodecJaqTransformations, CodecProtobufConfig,
+    CodecWireFormat, CordonNode, CreateCodec, CreateDomain, CreateEndpoint, CreateGenerator,
+    CreateIngestor, CreateLookup, CreateParametrizer, CreateRelay, CreateResource,
     CreateSignalingProtocol, CreateStatement, CreateSubscription, CreateUser, CreateVhost,
-    DeleteSubscription, DescribeBranch, DescribeClient, DescribeCluster, DescribeCorrelator,
-    DescribeDeduplicator, DescribeDomain, DescribeEmitter, DescribeEndpoint, DescribeIngestor,
-    DescribeJunction, DescribeLicense, DescribeLookup, DescribePlacement, DescribeReingestor,
+    DeleteSubscription, DescribeClient, DescribeCluster, DescribeCorrelator, DescribeDeduplicator,
+    DescribeDomain, DescribeEmitter, DescribeEndpoint, DescribeIngestor, DescribeJunction,
+    DescribeLicense, DescribeLookup, DescribeParametrizer, DescribePlacement, DescribeReingestor,
     DescribeRelay, DescribeReorderer, DescribeResource, DescribeTransaction, DescribeUdf,
     DescribeWindowProcessor, DomainConfig, DomainPace, DomainStartPoint, DomainState, DomainStatus,
     DomainTick, DrainNode, DropModel, DropNode, EndpointKind, EndpointType, ErrorPolicies,
     GeneralErrorPolicy, IngestTimestampSource, InspectionFormat, LookupQuery,
-    MaterializedRelayState, MessageErrorPolicy, Model, ModelKind, PartitionSeed, RelayBranching,
-    Relocation, RelocationMember, RelocationPreferenceOverride, RelocationPreferenceStrategy,
-    RelocationSelection, RelocationUnitSelection, ResolvedBranching, ResolvedCodecWireFormat,
-    RetryPolicy, ShowClusterStatus, ShowCreate, ShowEmitters, ShowIngestors, ShowNodes,
-    ShowPlacements, ShowProcessorState, ShowRelayMaterializedState, ShowTransactions, ShowUdfs,
-    SignalingProtobufConfig, SignalingProtocolOnConnect, SignalingStep, SignalingWaitStep,
-    SignalingWireFormat, StartDomain, StateInspectedProcessor, StateInspectionPageRequest,
-    Statement, StopDomain, SubscriptionBinding, SubscriptionDeliveryBehavior, SubscriptionLiteral,
-    UncordonNode, UniquelyKindedModel, UploadResource, VhostTlsResource, WireSchemaLookup,
-    default_relay_buffer,
+    MaterializedRelayState, MessageErrorPolicy, Model, ModelKind, ParametrizerEviction,
+    PartitionSeed, RelayBranching, Relocation, RelocationMember, RelocationPreferenceOverride,
+    RelocationPreferenceStrategy, RelocationSelection, RelocationUnitSelection, ResolvedBranching,
+    ResolvedCodecWireFormat, RetryPolicy, ShowClusterStatus, ShowCreate, ShowEmitters,
+    ShowIngestors, ShowNodes, ShowPlacements, ShowProcessorState, ShowRelayMaterializedState,
+    ShowTransactions, ShowUdfs, SignalingProtobufConfig, SignalingProtocolOnConnect, SignalingStep,
+    SignalingWaitStep, SignalingWireFormat, StartDomain, StateInspectedProcessor,
+    StateInspectionPageRequest, Statement, StopDomain, SubscriptionBinding,
+    SubscriptionDeliveryBehavior, SubscriptionLiteral, UncordonNode, UniquelyKindedModel,
+    UploadResource, VhostTlsResource, WireSchemaLookup, default_relay_buffer,
 };
 pub use timestamp::{AtomicTimestamp, Timestamp, TimestampError};
 pub use udf::{CreateUdf, UdfArgument, UdfLanguage, UdfReturn};
@@ -491,9 +491,10 @@ pub use wasm_state_generation::{
 };
 pub use wasm_state_inspection::{
     WasmBranchStateInspection, WasmCheckpointCounts, WasmCheckpointInspection, WasmCheckpointStage,
-    WasmCheckpointState, WasmRecoveryCounts, WasmRecoveryInspection, WasmStateBinding,
-    WasmStateEntryKey, WasmStateInspectionError, WasmStateResetInspection, WasmStateResetReadiness,
-    WasmUnitStateInspection, WasmUnitStatePage, WasmUnitStateSelection,
+    WasmCheckpointState, WasmGuestStateDescription, WasmGuestStateField, WasmGuestStateRender,
+    WasmGuestStateRenderStage, WasmGuestStateSection, WasmRecoveryCounts, WasmRecoveryInspection,
+    WasmStateBinding, WasmStateEntryKey, WasmStateInspectionError, WasmStateResetInspection,
+    WasmStateResetReadiness, WasmUnitStateInspection, WasmUnitStatePage, WasmUnitStateSelection,
 };
 pub use window_model_digest::WindowModelDigest;
 pub use wire_schema_definition::{WireSchemaDefinition, WireSchemaRef};

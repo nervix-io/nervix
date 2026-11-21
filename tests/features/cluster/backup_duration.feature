@@ -12,7 +12,7 @@ Feature: Backup and restore of DURATION values
       CREATE WIRE JSON SCHEMA policy_wire MODE STRICT ( tenant string, level integer );
       CREATE WIRE JSON CODEC policy_codec FROM WIRE SCHEMA policy_wire TO SCHEMA policy_update;
       CREATE SCHEMA policy_key ( tenant STRING, timeout DURATION );
-      CREATE BRANCH by_policy SCHEMA policy_key TTL 30m;
+      CREATE PARAMETRIZER by_policy SCHEMA policy_key TTL 30m;
       CREATE RELAY state SCHEMA policy BRANCHED BY by_policy WITH MATERIALIZED STATE LAST BY TIMESTAMP;
       CREATE VHOST edge backup-duration-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT ingress ON edge PATH '/state';

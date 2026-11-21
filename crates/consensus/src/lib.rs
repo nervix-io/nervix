@@ -201,7 +201,9 @@ use domain_mutation::DomainMutationAdmission;
 pub use storage_fault::{StorageBoundary, StorageFault, StoragePause};
 use transaction_report::TransactionReportRecords;
 mod entity_labels;
-pub use entity_labels::{EntityLabelReadError, EntityLabelTransactionSnapshot};
+pub use entity_labels::{
+    EntityLabelReadError, EntityLabelTransactionSnapshot, EntityLabelWriteError,
+};
 mod wire;
 
 pub use transaction::{
@@ -310,13 +312,13 @@ where
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
 pub struct DomainResourcePlanningInputs {
-    resources: PlanningInputSet<ResourceName>,
+    catalog: BTreeMap<ResourceName, nervix_models::EntityLabels>,
     completed_versions: PlanningInputSet<ResourceId>,
 }
 
 impl DomainResourcePlanningInputs {
-    pub fn resources(&self) -> &[ResourceName] {
-        self.resources.as_slice()
+    pub fn catalog(&self) -> &BTreeMap<ResourceName, nervix_models::EntityLabels> {
+        &self.catalog
     }
 
     pub fn completed_versions(&self) -> &[ResourceId] {
@@ -419,9 +421,13 @@ impl DomainPlanningInputs {
         self
     }
 
-    /// Derive the authoritative inputs expected after this plan creates a resource catalog entry.
-    pub fn after_resource_catalog(mut self, resource: ResourceName) -> Self {
-        self.resources.resources.0.find_or_insert(resource);
+    /// Derive the catalog expected after creating a resource or editing its labels.
+    pub fn after_resource_catalog(
+        mut self,
+        resource: ResourceName,
+        labels: nervix_models::EntityLabels,
+    ) -> Self {
+        self.resources.catalog.insert(resource, labels);
         self
     }
 }
@@ -603,11 +609,15 @@ pub enum ConsensusCommand {
         owner: Option<ClusterNodeIdentity>,
     },
     CreateUser {
-        user: Box<UserCredentials>,
+        user: Box<UserRecord>,
+    },
+    EditAdministrativeLabels {
+        reference: nervix_models::CommandExecutionReference,
     },
     CreateResourceCatalog {
         domain: DomainName,
         identifier: ResourceName,
+        labels: nervix_models::EntityLabels,
     },
     BeginResourceUpload {
         key: Box<ResourceUploadKey>,
@@ -753,6 +763,8 @@ pub enum ConsensusResponse {
     Error,
 )]
 pub enum ConsensusConflict {
+    #[error("{}", .issue.rejection_reason())]
+    EntityLabels { issue: Box<EntityLabelWriteError> },
     #[error("cluster key rotation was refused")]
     ClusterKeyRotation {
         #[source]
@@ -817,23 +829,24 @@ impl From<String> for ConsensusConflict {
 #[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
-pub struct UserCredentials {
+pub struct UserRecord {
     pub name: UserName,
     pub password_credential: nervix_models::PasswordCredential,
+    pub labels: nervix_models::EntityLabels,
 }
 
 /// The credential and uniform work admitted by one state publication.
 #[derive(Debug, Clone)]
 pub struct AuthenticationInput {
-    user: Option<UserCredentials>,
+    credential: Option<nervix_models::PasswordCredential>,
     work: nervix_models::PasswordCost,
 }
 impl AuthenticationInput {
     pub fn work(&self) -> nervix_models::PasswordCost {
         self.work
     }
-    pub fn into_user(self) -> Option<UserCredentials> {
-        self.user
+    pub fn into_credential(self) -> Option<nervix_models::PasswordCredential> {
+        self.credential
     }
 }
 
@@ -846,8 +859,9 @@ pub struct ConfigurationCapture {
     pub domains: BTreeMap<DomainName, DomainState>,
     /// Every domain's Models, as its schedule places them.
     pub schedule: ClusterSchedule,
-    pub users: BTreeMap<UserName, UserCredentials>,
+    pub users: BTreeMap<UserName, UserRecord>,
     pub resources: ResourceVersionStatus,
+    pub resource_labels: BTreeMap<nervix_models::ResourceCatalogKey, nervix_models::EntityLabels>,
 }
 
 /// An applied Raft log entry: the term of the leader that wrote it and its index, which is also
@@ -965,7 +979,12 @@ impl std::fmt::Display for ConsensusCommand {
                 write!(f, "reconcile-domain-clock-authority:{}", domain_id.as_str())
             }
             Self::CreateUser { user } => write!(f, "create-user:{}", user.name.as_str()),
-            Self::CreateResourceCatalog { domain, identifier } => {
+            Self::EditAdministrativeLabels { reference } => {
+                write!(f, "edit-administrative-labels:{reference}")
+            }
+            Self::CreateResourceCatalog {
+                domain, identifier, ..
+            } => {
                 write!(
                     f,
                     "create-resource-catalog:{}.{}",
@@ -1803,7 +1822,7 @@ struct StateMachineData {
     schedule: ScheduleRecords,
     domains: Records<DomainName, DomainState>,
     domain_clock_authorities: Records<DomainName, DomainClockAuthority>,
-    users: Records<UserName, UserCredentials>,
+    users: Records<UserName, UserRecord>,
     resources: ResourceRecords,
     cordoned_node_ids: Records<ClusterNodeName, ()>,
     node_admission_fences: Records<ClusterNodeName, ClusterNodeIncarnation>,
@@ -1828,11 +1847,12 @@ impl StateMachineData {
 
     fn domain_resource_planning_inputs(&self, domain: &DomainName) -> DomainResourcePlanningInputs {
         let status = ResourceVersionStatus::from(&self.resources);
-        let resources = status
-            .next_version_by_resource
+        let catalog = self
+            .resources
+            .catalog
             .iter()
-            .filter(|counter| counter.domain == *domain)
-            .map(|counter| counter.identifier.clone())
+            .filter(|(key, _)| key.domain == *domain)
+            .map(|(key, record)| (key.identifier.clone(), record.labels.clone()))
             .collect();
         let completed_versions = status
             .uploads
@@ -1841,7 +1861,7 @@ impl StateMachineData {
             .cloned()
             .collect();
         DomainResourcePlanningInputs {
-            resources,
+            catalog,
             completed_versions,
         }
     }
@@ -1880,6 +1900,7 @@ impl StateMachineData {
             Some(state) => {
                 let mut planned = state.clone();
                 planned.stop = None;
+                planned.labels = nervix_models::EntityLabels::default();
                 Some(Box::new(planned))
             }
             None => None,
@@ -2833,6 +2854,25 @@ impl ConsensusTestProbe {
             .await
     }
 
+    /// Refuse this node's next proposal that ends `domain`'s stop the way a leader whose lease
+    /// lapsed refuses a write; the proposal after it goes ahead.
+    pub async fn refuse_next_domain_stop_ending_as_lapsed_lease(&self, domain: DomainName) {
+        self.inner
+            .lease_refusal
+            .arm(RefusalTarget::DomainStopEnding { domain })
+            .await;
+    }
+
+    /// Whether this node's proposal that ends `domain`'s stop reached the armed refusal.
+    pub async fn domain_stop_ending_refused_as_lapsed_lease(&self, domain: &DomainName) -> bool {
+        self.inner
+            .lease_refusal
+            .delivered(&RefusalTarget::DomainStopEnding {
+                domain: domain.clone(),
+            })
+            .await
+    }
+
     fn record_append_stream_open(&self, target: &ClusterNodeName) {
         let mut counts = self.inner.append_stream_counts.lock();
         let count = counts.entry(target.clone()).or_default();
@@ -3045,8 +3085,9 @@ impl Consensus {
             .await
             .map_err(io::Error::other)?;
         executor
-            .run_storage(
+            .run_storage_with(
                 nervix_execution::StorageClass::Consensus,
+                nervix_execution::QueueAdmission::WaitForPlace,
                 reservation,
                 move |_, _| {
                     Database::builder(path)
@@ -3870,23 +3911,32 @@ impl Observer {
             schedule: (&state.schedule).into(),
             users: (&state.users).into(),
             resources: (&state.resources).into(),
+            resource_labels: state
+                .resources
+                .catalog
+                .iter()
+                .map(|(key, record)| (key.clone(), record.labels.clone()))
+                .collect(),
         })
     }
 
-    pub async fn current_users(&self) -> BTreeMap<UserName, UserCredentials> {
+    pub async fn current_users(&self) -> BTreeMap<UserName, UserRecord> {
         (&self.inner.store.inner.state().users).into()
     }
     /// Capture the user and common work count from the same immutable publication.
     pub fn authentication_input(&self, user: Option<&UserName>) -> Option<AuthenticationInput> {
         let state = self.inner.store.inner.state();
         let work = state.password_work?;
-        let user = match user {
-            Some(name) => state.users.get(name).cloned(),
+        let credential = match user {
+            Some(name) => state
+                .users
+                .get(name)
+                .map(|record| record.password_credential.clone()),
             None => None,
         };
-        Some(AuthenticationInput { user, work })
+        Some(AuthenticationInput { credential, work })
     }
-    pub async fn current_user(&self, user: &UserName) -> Option<UserCredentials> {
+    pub async fn current_user(&self, user: &UserName) -> Option<UserRecord> {
         self.inner.store.inner.state().users.get(user).cloned()
     }
     pub async fn current_resources(&self) -> ResourceVersionStatus {
@@ -4546,10 +4596,7 @@ impl Proposer {
         Self::applied_response(response.data)
     }
 
-    pub async fn create_user(
-        &self,
-        user: UserCredentials,
-    ) -> error_stack::Result<(), ConsensusError> {
+    pub async fn create_user(&self, user: UserRecord) -> error_stack::Result<(), ConsensusError> {
         self.inner
             .client_write(ConsensusCommand::CreateUser {
                 user: Box::new(user),
@@ -4678,14 +4725,17 @@ impl Proposer {
         &self,
         domain: &DomainName,
         identifier: &ResourceName,
+        labels: nervix_models::EntityLabels,
     ) -> Result<(), Report<ConsensusError>> {
-        self.inner
+        let response = self
+            .inner
             .client_write(ConsensusCommand::CreateResourceCatalog {
                 domain: domain.clone(),
                 identifier: identifier.clone(),
+                labels,
             })
             .await?;
-        Ok(())
+        Self::applied_response(response.data)
     }
 
     pub async fn publish_resource_upload(
@@ -6793,6 +6843,11 @@ fn apply_consensus_command_at(
                     refusal: *refusal.current_context(),
                 });
             }
+            if let Err(issue) = state.validate_label_set(&domain.labels) {
+                return AppliedConsensusCommand::conflict(ConsensusConflict::EntityLabels {
+                    issue: Box::new(issue.current_context().clone()),
+                });
+            }
             state.domains.insert(domain.id.clone(), (**domain).clone());
             changes.domains_changed = true;
         }
@@ -6889,12 +6944,31 @@ fn apply_consensus_command_at(
         }
         ConsensusCommand::CreateUser { user } => {
             if !state.users.contains_key(&user.name) {
+                if let Err(issue) = state.validate_label_set(&user.labels) {
+                    return AppliedConsensusCommand::conflict(ConsensusConflict::EntityLabels {
+                        issue: Box::new(issue.current_context().clone()),
+                    });
+                }
                 state.raise_password_work(user.password_credential.cost());
                 state.users.insert(user.name.clone(), user.as_ref().clone());
             }
         }
-        ConsensusCommand::CreateResourceCatalog { domain, identifier } => {
-            state.resources.ensure_catalog(domain, identifier);
+        ConsensusCommand::EditAdministrativeLabels { reference } => {
+            return entity_labels::apply_administrative_labels(state, reference);
+        }
+        ConsensusCommand::CreateResourceCatalog {
+            domain,
+            identifier,
+            labels,
+        } => {
+            if !state.resources.declares(domain, identifier)
+                && let Err(issue) = state.validate_label_set(labels)
+            {
+                return AppliedConsensusCommand::conflict(ConsensusConflict::EntityLabels {
+                    issue: Box::new(issue.current_context().clone()),
+                });
+            }
+            state.resources.ensure_catalog(domain, identifier, labels);
             changes.resources_changed = true;
         }
         ConsensusCommand::BeginResourceUpload { key, root_checksum } => {
@@ -7985,11 +8059,28 @@ fn validate_transaction_step_effect(
                         Statement::StopDomain(stop) if stop.wait_limit == request.limit
                     )
             }
-            TransactionStepEffect::CreateResourceCatalog { identifier, .. } => {
+            TransactionStepEffect::CreateResourceCatalog {
+                identifier, labels, ..
+            } => {
                 statements.len() == 1
                     && matches!(
                         &statements[0].statement,
-                        Statement::CreateResource(create) if &create.identifier == identifier
+                        Statement::CreateResource(create)
+                            if &create.identifier == identifier && &create.labels == labels
+                    )
+                    && state.validate_label_set(labels).is_ok()
+            }
+            TransactionStepEffect::EditResourceLabels {
+                inputs,
+                identifier,
+                labels,
+            } => {
+                statements.len() == 1
+                    && entity_labels::matches_resource_edit(
+                        &statements[0].statement,
+                        inputs,
+                        identifier,
+                        labels,
                     )
             }
             TransactionStepEffect::ResetWasmState { reset, request, .. } => {
@@ -8128,9 +8219,20 @@ fn apply_transaction_step_effect(
                 );
             }
         }
-        TransactionStepEffect::CreateResourceCatalog { identifier, .. } => {
-            state.resources.ensure_catalog(domain, identifier);
+        TransactionStepEffect::CreateResourceCatalog {
+            identifier, labels, ..
+        } => {
+            state.resources.ensure_catalog(domain, identifier, labels);
             changes.resources_changed = true;
+        }
+        TransactionStepEffect::EditResourceLabels {
+            identifier, labels, ..
+        } => {
+            let key = nervix_models::ResourceCatalogKey::new(domain, identifier);
+            let entry = state.resources.catalog.get_mut(&key).verified(
+                "the validated transaction step edits a resource in its committed planning inputs",
+            );
+            entry.labels.clone_from(labels);
         }
         TransactionStepEffect::ResetWasmState { .. } => {}
     }
@@ -8213,12 +8315,12 @@ mod tests {
     use nervix_models::{
         AdmissionVerdict, ClusterNodeIdentity, ClusterNodeIncarnation, ConsensusFloors,
         DomainClockAuthority, DomainClockState, DomainConfig, DomainName, DomainPace,
-        DomainSchedule, DomainStartPoint, DomainState, DomainStatus, DomainTimeRate, NodeEndpoint,
-        NodePrerequisites, PrerequisiteMismatch, PrerequisiteTimings, RaftLogDurability,
-        ResourceId, ResourceName, ResourceNodeState, ResourceNodeStatus, ResourceReplicaKey,
-        ResourceUploadIdentity, ResourceUploadKey, ResourceUploadState, ResourceVersion,
-        ResourceVersionCounter, ResourceVersionStatus, Statement, Timestamp, TimingPrerequisite,
-        TransactionPosition, TrustRootFingerprint, WireContractFingerprint,
+        DomainSchedule, DomainStartPoint, DomainState, DomainStatus, DomainTimeRate, EntityLabels,
+        NodeEndpoint, NodePrerequisites, PrerequisiteMismatch, PrerequisiteTimings,
+        RaftLogDurability, ResourceId, ResourceName, ResourceNodeState, ResourceNodeStatus,
+        ResourceReplicaKey, ResourceUploadIdentity, ResourceUploadKey, ResourceUploadState,
+        ResourceVersion, ResourceVersionCounter, ResourceVersionStatus, Statement, Timestamp,
+        TimingPrerequisite, TransactionPosition, TrustRootFingerprint, WireContractFingerprint,
     };
     use nervix_primitives::sync::{Arc, atomic::AtomicU64};
     use openraft::{
@@ -8241,7 +8343,7 @@ mod tests {
         StateMachineChanges, StateMachineData, StoredMembership, TransactionApplicationOutcome,
         TransactionCommandResult, TransactionCommitAdmissionFailure, TransactionMutationError,
         TransactionOutcome, TransactionStatement, TransactionStatementRequest,
-        TransactionStepEffect, TransactionStepResult, TypeConfig, UserCredentials,
+        TransactionStepEffect, TransactionStepResult, TypeConfig, UserRecord,
         apply_consensus_command, apply_consensus_command_at, apply_transaction_step_effect,
         io_error, storage_decode, validate_protocol_origin,
     };
@@ -8925,6 +9027,7 @@ mod tests {
 
     pub(super) fn running_domain_state(raw: &str) -> DomainState {
         DomainState {
+            labels: nervix_models::EntityLabels::default(),
             id: domain(raw),
             config: DomainConfig {
                 pace: DomainPace::Unpaced,
@@ -10771,7 +10874,8 @@ mod tests {
         apply_consensus_command(
             &mut state,
             &ConsensusCommand::CreateUser {
-                user: Box::new(UserCredentials {
+                user: Box::new(UserRecord {
+                    labels: nervix_models::EntityLabels::default(),
                     name: UserName::parse("unrelated_user").assured("the test user name is valid"),
                     password_credential: nervix_models::PasswordCredential::from_parts(
                         210000, [171; 16], [171; 64],
@@ -10851,7 +10955,8 @@ mod tests {
         let user_change = apply_consensus_command(
             &mut state,
             &ConsensusCommand::CreateUser {
-                user: Box::new(UserCredentials {
+                user: Box::new(UserRecord {
+                    labels: nervix_models::EntityLabels::default(),
                     name: UserName::parse("app_user").expect("valid user name"),
                     password_credential: nervix_models::PasswordCredential::from_parts(
                         210000, [51; 16], [51; 64],
@@ -10893,6 +10998,7 @@ mod tests {
                 request_digest,
                 Timestamp::from_unix_nanos(1_700_000_010_000_000_000),
                 CommandExecutionEffect::CreateUser {
+                    labels: nervix_models::EntityLabels::default(),
                     if_not_exists: false,
                     name: UserName::parse("created_user")
                         .assured("the created test user is an identifier-shaped literal"),
@@ -11127,6 +11233,7 @@ mod tests {
                 request_digest,
                 Timestamp::from_unix_nanos(1),
                 CommandExecutionEffect::CreateUser {
+                    labels: nervix_models::EntityLabels::default(),
                     if_not_exists: false,
                     name: UserName::parse("created_user")
                         .assured("the created test user is an accepted literal"),
@@ -11264,6 +11371,7 @@ mod tests {
         let resource_write = apply_consensus_command(
             &mut state,
             &ConsensusCommand::CreateResourceCatalog {
+                labels: EntityLabels::default(),
                 domain: tenant.clone(),
                 identifier: ResourceName::parse("bundle")
                     .assured("the resource name is an accepted literal"),
@@ -11336,6 +11444,7 @@ mod tests {
             [9; 32],
             Timestamp::from_unix_nanos(1),
             CommandExecutionEffect::CreateUser {
+                labels: nervix_models::EntityLabels::default(),
                 if_not_exists: false,
                 name: UserName::parse("created_user")
                     .assured("the created user is an accepted literal"),
@@ -12079,6 +12188,7 @@ mod tests {
             &domain_id,
             &ResourceName::parse("changed_input")
                 .assured("the test resource is an identifier-shaped literal"),
+            &EntityLabels::default(),
         );
         let rejected = apply_consensus_command(
             &mut state,
@@ -12171,6 +12281,7 @@ mod tests {
             &domain_id,
             &ResourceName::parse("after_admission")
                 .assured("the test resource is an identifier-shaped literal"),
+            &EntityLabels::default(),
         );
         let retained_after_start = state.clone();
         let retried = apply_consensus_command(&mut state, &start);
@@ -12325,6 +12436,7 @@ mod tests {
             &domain_id,
             &ResourceName::parse("after_failure")
                 .assured("the test resource is an identifier-shaped literal"),
+            &EntityLabels::default(),
         );
         let retained_after_failure = state.clone();
         let retried = apply_consensus_command(&mut state, &failure);
@@ -12704,6 +12816,7 @@ mod tests {
         apply_consensus_command(
             &mut state,
             &ConsensusCommand::CreateResourceCatalog {
+                labels: EntityLabels::default(),
                 domain: domain("tenant"),
                 identifier: ResourceName::parse("fraud_model").expect("valid resource name"),
             },
@@ -12862,7 +12975,8 @@ mod tests {
         apply_consensus_command(
             &mut state,
             &ConsensusCommand::CreateUser {
-                user: Box::new(UserCredentials {
+                user: Box::new(UserRecord {
+                    labels: nervix_models::EntityLabels::default(),
                     name: name.clone(),
                     password_credential: nervix_models::PasswordCredential::from_parts(
                         210000, [13; 16], [13; 64],
@@ -12874,7 +12988,8 @@ mod tests {
         apply_consensus_command(
             &mut state,
             &ConsensusCommand::CreateUser {
-                user: Box::new(UserCredentials {
+                user: Box::new(UserRecord {
+                    labels: nervix_models::EntityLabels::default(),
                     name: name.clone(),
                     password_credential: nervix_models::PasswordCredential::from_parts(
                         210000, [14; 16], [14; 64],
@@ -13046,7 +13161,11 @@ mod durability_tests {
         let mut notifications = store.inner.resource_tx.subscribe();
         let domain = DomainName::try_from("durability")?;
         let identifier = ResourceName::parse("artifact")?;
-        let command = ConsensusCommand::CreateResourceCatalog { domain, identifier };
+        let command = ConsensusCommand::CreateResourceCatalog {
+            domain,
+            identifier,
+            labels: nervix_models::EntityLabels::default(),
+        };
         store
             .inner
             .faults

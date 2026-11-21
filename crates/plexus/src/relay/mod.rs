@@ -10,8 +10,8 @@ use nervix_models::{
 use crate::{
     lexer::{Identifier, Token},
     parser_support::{
-        LexedInput, ParseError, ParseFromSourceError, alter_op_separator, branch_ref,
-        if_not_exists_clause, into_parse_error, kw, kw_phrase2, lex_input, relay_name, relay_ref,
+        LexedInput, ParseError, ParseFromSourceError, alter_op_separator, if_not_exists_clause,
+        into_parse_error, kw, kw_phrase2, lex_input, parametrizer_ref, relay_name, relay_ref,
         schema_ref, suggest_from, tok, word_raw,
     },
 };
@@ -47,7 +47,7 @@ pub fn create_relay_parser<'src>()
         let capacity = kw(Identifier::Capacity).ignore_then(relay_capacity());
 
         let branched_tail = kw_phrase2(Identifier::Branched, Identifier::By)
-            .ignore_then(branch_ref())
+            .ignore_then(parametrizer_ref())
             .then(capacity.clone().or_not())
             .map(|(branch, buffer)| (RelayBranching::branched_by(branch), buffer));
 
@@ -96,7 +96,7 @@ pub fn alter_relay_parser<'src>()
             .map(|schema| AlterRelayOperation::SetSchema { schema }),
         kw(Identifier::Set)
             .ignore_then(kw_phrase2(Identifier::Branched, Identifier::By))
-            .ignore_then(branch_ref())
+            .ignore_then(parametrizer_ref())
             .map(|branch| AlterRelayOperation::SetBranching {
                 branching: RelayBranching::branched_by(branch),
             }),
@@ -222,7 +222,7 @@ mod tests {
         assert_eq!(
             parsed.branching,
             RelayBranching::branched_by(
-                nervix_models::BranchName::parse("by_tenant").expect("valid branch name"),
+                nervix_models::ParametrizerName::parse("by_tenant").expect("valid branch name"),
             )
         );
     }
@@ -294,7 +294,7 @@ mod tests {
                 },
                 AlterRelayOperation::SetBranching {
                     branching: RelayBranching::branched_by(
-                        nervix_models::BranchName::try_from("by_tenant")
+                        nervix_models::ParametrizerName::try_from("by_tenant")
                             .expect("valid branch name"),
                     ),
                 },

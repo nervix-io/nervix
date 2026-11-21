@@ -235,12 +235,14 @@ pub(crate) enum SectionContentWire {
 #[derive(Debug, Clone, PartialEq, Archive, Serialize, Deserialize)]
 pub(crate) struct UsersWire {
     pub(crate) users: Vec<UserWire>,
+    pub(crate) label_policy: nervix_models::EntityLabelPolicy,
 }
 
 #[derive(Debug, Clone, PartialEq, Archive, Serialize, Deserialize)]
 pub(crate) struct UserWire {
     pub(crate) name: String,
     pub(crate) password_credential: nervix_models::PasswordCredential,
+    pub(crate) labels: nervix_models::EntityLabels,
 }
 
 #[derive(Debug, Clone, PartialEq, Archive, Serialize, Deserialize)]
@@ -253,6 +255,7 @@ pub(crate) struct DomainWire {
     pub(crate) clock: Option<ClockMappingWire>,
     pub(crate) logical_frontier_unix_nanos: Option<i64>,
     pub(crate) resources: Vec<DeclaredResourceWire>,
+    pub(crate) labels: nervix_models::EntityLabels,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Archive, Serialize, Deserialize)]
@@ -291,6 +294,7 @@ pub(crate) struct ClockMappingWire {
 pub(crate) struct DeclaredResourceWire {
     pub(crate) resource: String,
     pub(crate) next_version: u64,
+    pub(crate) labels: nervix_models::EntityLabels,
 }
 
 #[derive(Debug, Clone, PartialEq, Archive, Serialize, Deserialize)]

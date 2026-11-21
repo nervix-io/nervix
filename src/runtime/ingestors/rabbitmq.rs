@@ -73,9 +73,6 @@ impl RabbitMqQueueIngestorStartPlan {
             acknowledgement: mode.acknowledgement(),
             buffered_intake: false,
             flush_each_intake: false,
-            // Auto-ack deliveries cannot be presented again. Refuse and count a payload when
-            // the extension workers are full rather than holding the transport's read loop.
-            unacknowledged_admission: QueueAdmission::RefuseWhenFull,
             client_mounts: resolved.mounts.into_iter().collect(),
         }
         .open::<RabbitMqQueueIngestor>(runtime, ingestor)

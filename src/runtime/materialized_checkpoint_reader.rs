@@ -22,7 +22,9 @@
 
 use error_stack::{Report, ResultExt as _};
 use meticulous::ResultExt as _;
-use nervix_execution::{ChargedBytes, CpuClass, Executor, MemoryClass, Reservation};
+use nervix_execution::{
+    ChargedBytes, CpuClass, Executor, MemoryClass, QueueAdmission, Reservation,
+};
 use nervix_models::RemoteRuntimeRecordMetadata;
 
 use super::{
@@ -70,7 +72,11 @@ impl CapturedMaterializedCheckpoint {
             .await
             .change_context(MaterializedSnapshotError::Admission)?;
         let mut source = self.source;
-        let header = source.take_header(executor).await?;
+        // A checkpoint is read here for a backup, a request whose caller is answered at once, so
+        // a full bulk queue refuses the read as the reader's own decoding does.
+        let header = source
+            .take_header(executor, QueueAdmission::RefuseWhenFull)
+            .await?;
         let _layout = header.metadata_layout(
             super::RestoredRows::Relay,
             executor.memory(MemoryClass::Relay).capacity_bytes,
@@ -122,8 +128,13 @@ impl MaterializedCheckpointReader {
         let metadata = executor
             .try_reserve(MemoryClass::Bulk, metadata_bytes.max(1))
             .change_context(MaterializedSnapshotError::Admission)?;
-        let identities =
-            decode_rkyv::<SealedRecordIdentities>(executor, bytes, identity_limit).await?;
+        let identities = decode_rkyv::<SealedRecordIdentities>(
+            executor,
+            QueueAdmission::RefuseWhenFull,
+            bytes,
+            identity_limit,
+        )
+        .await?;
         if identities.identities.is_empty() {
             return Err(MaterializedSnapshotError::decoding(
                 "materialized group has no identities",

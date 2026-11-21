@@ -354,6 +354,19 @@ func nervixResetState() int32 {
 	return success
 }
 
+// nervix_describe_state describes this guest's state for an operator's state inspection. The
+// sketch describes no state, which the ABI reports as a zero size with nothing written; a guest
+// that describes its state writes a StateDescription message into the buffer and returns its
+// size, as the Rust SDK's Processor::describe_state does.
+//
+//export nervix_describe_state
+func nervixDescribeState() int32 {
+	if !initialized {
+		return errNotInitialized
+	}
+	return 0
+}
+
 func setGlobalError(reason string) {
 	globalError = append(globalError[:0], []byte(reason)...)
 }

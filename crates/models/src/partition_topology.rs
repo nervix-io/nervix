@@ -19,7 +19,8 @@ use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    BranchName, IngestorName, PartitionEpochNumber, PartitionSeed, ResolvedBranchPartitions, Unit,
+    IngestorName, ParametrizerName, PartitionEpochNumber, PartitionSeed,
+    ResolvedParametrizerPartitions, Unit,
 };
 
 /// A non-security digest identifying the exact source configuration an observation inspected.
@@ -172,8 +173,8 @@ impl InheritedPartitionLayout {
         }
     }
 
-    pub const fn partitions(self) -> ResolvedBranchPartitions {
-        ResolvedBranchPartitions::Inherited(match self {
+    pub const fn partitions(self) -> ResolvedParametrizerPartitions {
+        ResolvedParametrizerPartitions::Inherited(match self {
             Self::Identity(count) => count,
             Self::Grouped { groups, .. } => groups,
         })
@@ -207,7 +208,7 @@ impl InheritedPartitionLayout {
 )]
 pub struct PartitionTopology {
     pub sources: BTreeMap<IngestorName, SourcePartitionObservation>,
-    pub branches: BTreeMap<BranchName, InheritedPartitionLayout>,
+    pub parametrizers: BTreeMap<ParametrizerName, InheritedPartitionLayout>,
     pub suspended: BTreeSet<IngestorName>,
 }
 
@@ -216,8 +217,8 @@ pub struct PartitionTopology {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PartitionTopologySnapshot {
     pub topology: PartitionTopology,
-    pub epochs: BTreeMap<BranchName, crate::BranchPartitionEpoch>,
-    pub holding_units: BTreeMap<BranchName, BTreeSet<Unit>>,
+    pub epochs: BTreeMap<ParametrizerName, crate::ParametrizerPartitionEpoch>,
+    pub holding_units: BTreeMap<ParametrizerName, BTreeSet<Unit>>,
     /// Installed PER TRANSPORT PARTITION intakes retain their native positions while discovery is
     /// pending.
     pub intake_units: BTreeMap<IngestorName, NonZeroU16>,

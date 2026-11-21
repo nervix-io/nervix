@@ -29,7 +29,7 @@ Feature: Config entity quiesce classification
 
       CREATE HTTP ENDPOINT INGESTOR config_ingestor
         FROM config_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING config_event_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING config_event_codec
         TO config_events
         INHERIT ALL
         UNBRANCHED

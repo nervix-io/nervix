@@ -105,7 +105,7 @@ Feature: Configuration backup into a public archive
       CREATE VHOST edge backup-other-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT event_ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR event_ingestor FROM event_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING event_codec
         TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
@@ -219,7 +219,7 @@ Feature: Configuration backup into a public archive
       CREATE HTTP ENDPOINT wait_state_ingress ON edge PATH '/state';
       CREATE HTTP ENDPOINT INGESTOR wait_state_ingestor
         FROM wait_state_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING wait_event_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING wait_event_codec
         TO wait_state INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
@@ -299,7 +299,7 @@ Feature: Configuration backup into a public archive
       CREATE HTTP ENDPOINT wait_state_ingress ON edge PATH '/state';
       CREATE HTTP ENDPOINT INGESTOR wait_state_ingestor
         FROM wait_state_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING wait_event_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING wait_event_codec
         TO wait_state INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
@@ -356,7 +356,7 @@ Feature: Configuration backup into a public archive
       CREATE HTTP ENDPOINT held_ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR held_ingestor
         FROM held_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING held_event_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING held_event_codec
         TO held_input INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
@@ -411,7 +411,7 @@ Feature: Configuration backup into a public archive
       CREATE VHOST edge backup-stalled-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR ingestor FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING event_codec
         TO outgoing INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE HTTP CLIENT api_client CONFIG {
@@ -472,7 +472,7 @@ Feature: Configuration backup into a public archive
       CREATE VHOST edge backup-slow-pause-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR ingestor FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING event_codec
         TO outgoing INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE HTTP CLIENT api_client CONFIG {
@@ -626,7 +626,7 @@ Feature: Configuration backup into a public archive
       CREATE WIRE JSON SCHEMA metric_wire MODE STRICT ( value integer, tenant string );
       CREATE WIRE JSON CODEC metric_codec FROM WIRE SCHEMA metric_wire TO SCHEMA metric;
       CREATE SCHEMA tenant_branch ( tenant STRING );
-      CREATE BRANCH by_tenant SCHEMA tenant_branch TTL 5m;
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_branch TTL 5m;
       CREATE RELAY raw_metrics SCHEMA metric BRANCHED BY by_tenant WITH MATERIALIZED STATE LAST BY TIMESTAMP;
       CREATE RELAY filtered_metrics SCHEMA metric BRANCHED BY by_tenant;
       CREATE KAFKA CLIENT kafka_ingress CONFIG {
@@ -759,7 +759,7 @@ Feature: Configuration backup into a public archive
       CREATE WIRE JSON SCHEMA metric_wire MODE STRICT ( value integer, tenant string );
       CREATE WIRE JSON CODEC metric_codec FROM WIRE SCHEMA metric_wire TO SCHEMA metric;
       CREATE SCHEMA tenant_branch ( tenant STRING );
-      CREATE BRANCH by_tenant SCHEMA tenant_branch TTL 5s;
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_branch TTL 5s;
       CREATE RELAY raw_metrics SCHEMA metric BRANCHED BY by_tenant;
       CREATE RELAY filtered_metrics SCHEMA metric BRANCHED BY by_tenant;
       CREATE KAFKA CLIENT kafka_ingress CONFIG {
@@ -822,14 +822,14 @@ Feature: Configuration backup into a public archive
     And node "{{wasm_owner}}" observability metric "nervix_branch_evictions_total" with labels eventually reaches at least 2
       """
       domain="{{domain}}"
-      branch="by_tenant"
+      parametrizer="by_tenant"
       physical_node_id="{{wasm_owner}}"
       reason="ttl"
       """
     And node "{{wasm_owner}}" observability metric "nervix_branch_instances" with labels eventually equals 0
       """
       domain="{{domain}}"
-      branch="by_tenant"
+      parametrizer="by_tenant"
       physical_node_id="{{wasm_owner}}"
       """
     When the CLI backs up "domain {{domain}} --timeout 30s" from node "{{leader}}" into "expired.nvxb" reporting JSON
@@ -862,7 +862,7 @@ Feature: Configuration backup into a public archive
       CREATE WIRE JSON SCHEMA metric_wire MODE STRICT ( value integer, tenant string );
       CREATE WIRE JSON CODEC metric_codec FROM WIRE SCHEMA metric_wire TO SCHEMA metric;
       CREATE SCHEMA tenant_branch ( tenant STRING );
-      CREATE BRANCH by_tenant SCHEMA tenant_branch TTL 5m;
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_branch TTL 5m;
       CREATE RELAY raw_metrics SCHEMA metric BRANCHED BY by_tenant;
       CREATE RELAY filtered_metrics SCHEMA metric BRANCHED BY by_tenant;
       CREATE KAFKA CLIENT kafka_ingress CONFIG {

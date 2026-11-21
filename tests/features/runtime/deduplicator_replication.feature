@@ -27,7 +27,7 @@ Feature: Deduplicator state replication
         FROM WIRE SCHEMA transaction_wire
         TO SCHEMA transaction;
         CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
-        CREATE IF NOT EXISTS BRANCH by_source_txns SCHEMA tenant_branch TTL 5m;
+        CREATE IF NOT EXISTS PARAMETRIZER by_source_txns SCHEMA tenant_branch TTL 5m;
         CREATE RELAY ss1 SCHEMA transaction BRANCHED BY by_source_txns;
         CREATE RELAY ss2 SCHEMA transaction BRANCHED BY by_source_txns;
         CREATE VHOST edge http-{{test_id}}.example.com;
@@ -36,7 +36,7 @@ Feature: Deduplicator state replication
         PATH '/dedup';
         CREATE HTTP ENDPOINT INGESTOR ingestor_txns
         FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING transaction_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING transaction_codec
         TO ss1
         INHERIT ALL
         BRANCHED BY by_source_txns

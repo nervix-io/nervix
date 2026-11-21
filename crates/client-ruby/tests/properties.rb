@@ -43,7 +43,7 @@ module RubyProperties
       [field.name, field.type, field.nullable, field.sensitive, field.levels.map { |level| [level.type, level.length] }]
     end
     check(actual == expected, 'a complete field description changed')
-    check(schema.key_fields.empty? && schema.branch.nil?, 'row fields acquired a branch')
+    check(schema.key_fields.empty? && schema.parametrizer.nil?, 'row fields acquired a parametrizer')
     fields.add('additional', NX::FieldType::U8)
     check(schema.fields.size == expected.size, 'a field snapshot changed after a draft edit')
   end

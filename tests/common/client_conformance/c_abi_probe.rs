@@ -27,8 +27,8 @@ use nervix_client_ffi::{
     nx_event_subscription, nx_execution_free, nx_execution_reference, nx_outcome_diagnostic,
     nx_outcome_diagnostic_count, nx_outcome_disposition, nx_outcome_entity_labels,
     nx_outcome_execution_reference, nx_outcome_free, nx_outcome_message, nx_outcome_schema,
-    nx_outcome_subscription, nx_schema_branch, nx_schema_field, nx_schema_field_count,
-    nx_schema_free, nx_session_connect, nx_session_domain_clock, nx_session_execute,
+    nx_outcome_subscription, nx_schema_field, nx_schema_field_count, nx_schema_free,
+    nx_schema_parametrizer, nx_session_connect, nx_session_domain_clock, nx_session_execute,
     nx_session_free, nx_session_next_clock_event, nx_session_next_event, nx_session_prepare,
 };
 use nervix_primitives::thread;
@@ -891,12 +891,12 @@ impl OwnedSchema {
         Ok(fields)
     }
 
-    fn branch(&self) -> Option<String> {
+    fn parametrizer(&self) -> Option<String> {
         let mut name = ptr::null();
         let mut name_len = 0;
         // SAFETY: the schema is live and the out-parameters are writable.
         unsafe {
-            if !nx_schema_branch(self.0, &mut name, &mut name_len) {
+            if !nx_schema_parametrizer(self.0, &mut name, &mut name_len) {
                 return None;
             }
             Some(String::from_utf8_lossy(&copied(name, name_len)).into_owned())
@@ -1339,8 +1339,8 @@ fn run_subscription(
         emit(&field.line("FIELD"))?;
     }
     let key_fields = schema.fields(Part::BranchKey)?;
-    if let Some(branch) = schema.branch() {
-        emit(&format!("BRANCH {branch}"))?;
+    if let Some(parametrizer) = schema.parametrizer() {
+        emit(&format!("PARAMETRIZER {parametrizer}"))?;
     }
     for field in &key_fields {
         emit(&field.line("KEY"))?;

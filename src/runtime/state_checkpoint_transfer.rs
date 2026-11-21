@@ -119,23 +119,28 @@ impl Runtime {
             .arch_into();
         self.inner
             .executor
-            .run_cpu(CpuClass::Bulk, reservation, move |charge, cancellation| {
-                let mut hasher = blake3::Hasher::new();
-                for chunk in snapshot.payload.chunks(chunk_bytes) {
-                    cancellation.check()?;
-                    hasher.update(chunk);
-                }
-                let descriptor = StateSnapshotEnvelope {
-                    lsm: snapshot.lsm,
-                    length,
-                    digest: *hasher.finalize().as_bytes(),
-                };
-                Ok::<_, nervix_execution::Cancelled>(DescribedStateCheckpoint {
-                    snapshot,
-                    descriptor,
-                    reservation: charge,
-                })
-            })
+            .run_cpu_with(
+                CpuClass::Bulk,
+                nervix_execution::QueueAdmission::WaitForPlace,
+                reservation,
+                move |charge, cancellation| {
+                    let mut hasher = blake3::Hasher::new();
+                    for chunk in snapshot.payload.chunks(chunk_bytes) {
+                        cancellation.check()?;
+                        hasher.update(chunk);
+                    }
+                    let descriptor = StateSnapshotEnvelope {
+                        lsm: snapshot.lsm,
+                        length,
+                        digest: *hasher.finalize().as_bytes(),
+                    };
+                    Ok::<_, nervix_execution::Cancelled>(DescribedStateCheckpoint {
+                        snapshot,
+                        descriptor,
+                        reservation: charge,
+                    })
+                },
+            )
             .await
             .change_context_lazy(capture)?
             .change_context_lazy(capture)

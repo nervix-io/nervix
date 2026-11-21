@@ -142,15 +142,28 @@ pub(in crate::registry) fn validate_ingestor_source(
     validate_ingestor_rate_limit_clauses(domain, identifier, &ingestor.input)?;
     let quiesce = ingestor.input.quiesce();
     if !ingestor.input.supports_quiesce(quiesce) {
-        return Err(invalid(format!(
+        let mut message = format!(
             "{} ingestors do not support ON QUIESCE {}",
             ingestor.input.source_phrase(),
             quiesce.kind_label()
-        )));
+        );
+        if let Some(acknowledgement) = ingestor.input.transport_acknowledgement()
+            && ingestor
+                .input
+                .entity_kind()
+                .capabilities()
+                .reference
+                .endpoint_type()
+                .is_some()
+        {
+            message.push_str(" with MODE ");
+            message.push_str(acknowledgement.kind().phrase());
+        }
+        return Err(invalid(message));
     }
     match quiesce {
         nervix_models::IngestQuiesceMode::Buffer { max_size, .. }
-        | nervix_models::IngestQuiesceMode::EndpointBuffer { max_size } => {
+        | nervix_models::IngestQuiesceMode::EndpointBuffer { max_size, .. } => {
             let parsed = max_size.parse::<ubyte::ByteUnit>().map_err(|error| {
                 invalid(format!(
                     "invalid quiesce BUFFER MAX SIZE '{max_size}': {error}"

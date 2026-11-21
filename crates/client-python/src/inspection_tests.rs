@@ -91,7 +91,7 @@ assert section.omitted_rows == 1
 assert (section.watermark_low, section.watermark_high) == (3, 4)
 assert len(section.frames) == 1
 schema = section.schema
-assert schema.branch == 'by_tenant'
+assert schema.parametrizer == 'by_tenant'
 assert [(field.name, field.sensitive) for field in schema.key_fields] == [('tenant', True)]
 assert [field.name for field in schema.fields] == ['sequence', 'secret', 'sample', 'low', 'high', 'note', 'raw', 'text']
 assert schema.fields[0].type == nx.FieldType.U64

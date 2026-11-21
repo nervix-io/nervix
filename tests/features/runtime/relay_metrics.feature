@@ -22,13 +22,13 @@ Feature: Relay metrics
         TO SCHEMA notification
         ENCODE occurred_at AS RFC3339;
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
-        CREATE IF NOT EXISTS BRANCH by_relay_metrics_source SCHEMA user_id_branch TTL 5m;
+        CREATE IF NOT EXISTS PARAMETRIZER by_relay_metrics_source SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_relay_metrics_source;
         CREATE VHOST edge http-{{test_id}}.example.com;
         CREATE HTTP ENDPOINT relay_metrics_ingress ON edge PATH '/relay-metrics';
         CREATE HTTP ENDPOINT INGESTOR relay_metrics_ingestor
         FROM relay_metrics_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING notification_codec
         TIMESTAMP AT occurred_at
         TO notifications
         INHERIT ALL
@@ -153,14 +153,14 @@ Feature: Relay metrics
 
       CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
 
-      CREATE IF NOT EXISTS BRANCH by_relay_buffer_source SCHEMA user_id_branch TTL 5m;
+      CREATE IF NOT EXISTS PARAMETRIZER by_relay_buffer_source SCHEMA user_id_branch TTL 5m;
       CREATE RELAY notifications SCHEMA notification BRANCHED BY by_relay_buffer_source CAPACITY 3;
       CREATE RELAY forwarded_notifications SCHEMA notification BRANCHED BY by_relay_buffer_source;
 
       CREATE VHOST edge http-{{test_id}}-buffer.example.com;
       CREATE HTTP ENDPOINT relay_buffer_ingress ON edge PATH '/relay-buffer'; CREATE HTTP ENDPOINT INGESTOR relay_buffer_ingestor
         FROM relay_buffer_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING notification_codec
         TO notifications
         INHERIT ALL
         BRANCHED BY by_relay_buffer_source
@@ -225,13 +225,13 @@ Feature: Relay metrics
         TO SCHEMA notification
         ENCODE occurred_at AS RFC3339;
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
-        CREATE IF NOT EXISTS BRANCH by_relay_metrics_drain_source SCHEMA user_id_branch TTL 5m;
+        CREATE IF NOT EXISTS PARAMETRIZER by_relay_metrics_drain_source SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_relay_metrics_drain_source;
         CREATE VHOST edge http-{{test_id}}-drain.example.com;
         CREATE HTTP ENDPOINT relay_metrics_drain_ingress ON edge PATH '/relay-metrics-drain';
         CREATE HTTP ENDPOINT INGESTOR relay_metrics_drain_ingestor
         FROM relay_metrics_drain_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING notification_codec
         TIMESTAMP AT occurred_at
         TO notifications
         INHERIT ALL
@@ -299,13 +299,13 @@ Feature: Relay metrics
         TO SCHEMA notification
         ENCODE occurred_at AS RFC3339;
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
-        CREATE IF NOT EXISTS BRANCH by_relay_metrics_restart_source SCHEMA user_id_branch TTL 5m;
+        CREATE IF NOT EXISTS PARAMETRIZER by_relay_metrics_restart_source SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_relay_metrics_restart_source;
         CREATE VHOST edge http-{{test_id}}-restart.example.com;
         CREATE HTTP ENDPOINT relay_metrics_restart_ingress ON edge PATH '/relay-metrics-restart';
         CREATE HTTP ENDPOINT INGESTOR relay_metrics_restart_ingestor
         FROM relay_metrics_restart_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING notification_codec
         TIMESTAMP AT occurred_at
         TO notifications
         INHERIT ALL

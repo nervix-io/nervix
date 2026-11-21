@@ -27,7 +27,7 @@ Feature: Relay junction
         FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
-        CREATE IF NOT EXISTS BRANCH by_source_one SCHEMA user_id_branch TTL 5m;
+        CREATE IF NOT EXISTS PARAMETRIZER by_source_one SCHEMA user_id_branch TTL 5m;
         CREATE RELAY ss1 SCHEMA notification BRANCHED BY by_source_one;
         CREATE RELAY ss2 SCHEMA notification BRANCHED BY by_source_one;
         CREATE RELAY ss10 SCHEMA notification_projection BRANCHED BY by_source_one;
@@ -41,7 +41,7 @@ Feature: Relay junction
         PATH '/ingest-b';
       CREATE HTTP ENDPOINT INGESTOR ingestor_one
         FROM ingress_one MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING notification_codec
         TO ss1
           INHERIT ALL
           BRANCHED BY by_source_one
@@ -51,7 +51,7 @@ Feature: Relay junction
         ON GENERAL ERROR LOG;
       CREATE HTTP ENDPOINT INGESTOR ingestor_two
         FROM ingress_two MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING notification_codec
         TO ss2
           INHERIT ALL
           BRANCHED BY by_source_one
@@ -126,7 +126,7 @@ Feature: Relay junction
         FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
         CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
-        CREATE IF NOT EXISTS BRANCH by_source_one SCHEMA tenant_branch TTL 5m;
+        CREATE IF NOT EXISTS PARAMETRIZER by_source_one SCHEMA tenant_branch TTL 5m;
         CREATE RELAY ss1 SCHEMA notification BRANCHED BY by_source_one;
         CREATE RELAY ss2 SCHEMA notification BRANCHED BY by_source_one;
         CREATE RELAY ss10 SCHEMA notification BRANCHED BY by_source_one;
@@ -139,7 +139,7 @@ Feature: Relay junction
         PATH '/branch-b';
         CREATE HTTP ENDPOINT INGESTOR ingestor_one
         FROM ingress_one MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING notification_codec
         TO ss1
         INHERIT ALL
         BRANCHED BY by_source_one
@@ -149,7 +149,7 @@ Feature: Relay junction
         ON GENERAL ERROR LOG;
         CREATE HTTP ENDPOINT INGESTOR ingestor_two
         FROM ingress_two MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING notification_codec
         TO ss2
         INHERIT ALL
         BRANCHED BY by_source_one
@@ -218,7 +218,7 @@ Feature: Relay junction
         FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
-        CREATE IF NOT EXISTS BRANCH by_state_source SCHEMA user_id_branch TTL 5m;
+        CREATE IF NOT EXISTS PARAMETRIZER by_state_source SCHEMA user_id_branch TTL 5m;
         CREATE RELAY state_notifications
         SCHEMA notification BRANCHED BY by_state_source
         WITH MATERIALIZED STATE LAST BY TIMESTAMP;
@@ -237,7 +237,7 @@ Feature: Relay junction
         PATH '/ingest-b';
         CREATE HTTP ENDPOINT INGESTOR state_ingestor
         FROM state_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING notification_codec
         TO state_notifications
         INHERIT ALL
         BRANCHED BY by_state_source
@@ -247,7 +247,7 @@ Feature: Relay junction
         ON GENERAL ERROR LOG;
         CREATE HTTP ENDPOINT INGESTOR ingestor_one
         FROM ingress_one MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING notification_codec
         TO ss1
         INHERIT ALL
         BRANCHED BY by_state_source
@@ -257,7 +257,7 @@ Feature: Relay junction
         ON GENERAL ERROR LOG;
         CREATE HTTP ENDPOINT INGESTOR ingestor_two
         FROM ingress_two MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING notification_codec
         TO ss2
         INHERIT ALL
         BRANCHED BY by_state_source
@@ -319,7 +319,7 @@ Feature: Relay junction
         extra STRING
       );
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
-        CREATE IF NOT EXISTS BRANCH by_join_streams SCHEMA user_id_branch TTL 5m;
+        CREATE IF NOT EXISTS PARAMETRIZER by_join_streams SCHEMA user_id_branch TTL 5m;
         CREATE RELAY ss1 SCHEMA notification BRANCHED BY by_join_streams;
         CREATE RELAY ss2 SCHEMA wide_notification BRANCHED BY by_join_streams;
         CREATE RELAY ss10 SCHEMA notification BRANCHED BY by_join_streams;
@@ -365,7 +365,7 @@ Feature: Relay junction
         FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
-        CREATE IF NOT EXISTS BRANCH by_default_state SCHEMA user_id_branch TTL 5m;
+        CREATE IF NOT EXISTS PARAMETRIZER by_default_state SCHEMA user_id_branch TTL 5m;
         CREATE RELAY default_preferences
         SCHEMA preference BRANCHED BY by_default_state
         WITH MATERIALIZED STATE LAST BY TIMESTAMP;
@@ -377,7 +377,7 @@ Feature: Relay junction
         PATH '/junction-default';
         CREATE HTTP ENDPOINT INGESTOR ingestor_one
         FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING notification_codec
         TO ss1
         INHERIT ALL
         BRANCHED BY by_default_state
@@ -440,7 +440,7 @@ Feature: Relay junction
         FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
-        CREATE IF NOT EXISTS BRANCH by_optional_default SCHEMA user_id_branch TTL 5m;
+        CREATE IF NOT EXISTS PARAMETRIZER by_optional_default SCHEMA user_id_branch TTL 5m;
         CREATE RELAY optional_preferences
         SCHEMA preference BRANCHED BY by_optional_default
         WITH MATERIALIZED STATE LAST BY TIMESTAMP;
@@ -452,7 +452,7 @@ Feature: Relay junction
         PATH '/junction-optional';
         CREATE HTTP ENDPOINT INGESTOR ingestor_one
         FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING notification_codec
         TO ss1
         INHERIT ALL
         BRANCHED BY by_optional_default

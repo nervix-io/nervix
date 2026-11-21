@@ -143,11 +143,15 @@ fn bolero_arrow_bodies_restore_every_column_value_and_null() {
                 assert_same_batch(any.batch(), &case.rows);
 
                 let section = batch
-                    .encode_arrow_snapshot_section(&executor)
+                    .encode_arrow_snapshot_section(
+                        &executor,
+                        nervix_execution::QueueAdmission::RefuseWhenFull,
+                    )
                     .await
                     .assured("a bounded batch encodes as a section");
                 let restored = RuntimeRecordBatch::decode_arrow_snapshot_section(
                     &executor,
+                    nervix_execution::QueueAdmission::RefuseWhenFull,
                     case.arrow_schema(),
                     section,
                 )
@@ -176,6 +180,7 @@ fn bolero_arrow_bodies_restore_every_column_value_and_null() {
                 );
                 let section_refused = RuntimeRecordBatch::decode_arrow_snapshot_section(
                     &executor,
+                    nervix_execution::QueueAdmission::RefuseWhenFull,
                     case.arrow_schema(),
                     several.clone(),
                 )
@@ -232,6 +237,7 @@ fn bolero_damaged_arrow_bodies_are_refused_typed_or_decode_canonically() {
                 check_damaged_outcome(&executor, exact, Some(&case.arrow_schema())).await;
                 let section = RuntimeRecordBatch::decode_arrow_snapshot_section(
                     &executor,
+                    nervix_execution::QueueAdmission::RefuseWhenFull,
                     case.arrow_schema(),
                     charged(&executor, damaged.clone()),
                 )
@@ -429,6 +435,7 @@ async fn a_stream_without_a_section_is_refused_where_one_is_required() {
     ));
     let section_refused = RuntimeRecordBatch::decode_arrow_snapshot_section(
         &executor,
+        nervix_execution::QueueAdmission::RefuseWhenFull,
         case.arrow_schema(),
         charged(&executor, empty.clone()),
     )

@@ -11,7 +11,7 @@ module RubySuite
       fields.element(NX::FieldType::I16)
       schema = fields.schema
       assert_instance_of NX::Schema, schema
-      assert_nil schema.branch
+      assert_nil schema.parametrizer
       assert_empty schema.key_fields
       field = schema.fields.last
       assert_instance_of NX::Field, field

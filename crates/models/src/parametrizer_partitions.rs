@@ -32,13 +32,13 @@ use crate::{PartitionSeed, Unit};
     RkyvSerialize,
     RkyvDeserialize,
 )]
-pub enum BranchPartitions {
+pub enum ParametrizerPartitions {
     Direct(NonZeroU16),
     Inherited,
     InheritedGrouped(NonZeroU16),
 }
 
-impl BranchPartitions {
+impl ParametrizerPartitions {
     pub const ONE: Self = Self::Direct(NonZeroU16::MIN);
 
     pub const fn declared_count(self) -> Option<NonZeroU16> {
@@ -53,15 +53,15 @@ impl BranchPartitions {
     }
 
     /// Direct declarations need no external observation to resolve their layout.
-    pub const fn direct_layout(self) -> Option<ResolvedBranchPartitions> {
+    pub const fn direct_layout(self) -> Option<ResolvedParametrizerPartitions> {
         match self {
-            Self::Direct(count) => Some(ResolvedBranchPartitions::Direct(count)),
+            Self::Direct(count) => Some(ResolvedParametrizerPartitions::Direct(count)),
             Self::Inherited | Self::InheritedGrouped(_) => None,
         }
     }
 }
 
-impl std::fmt::Display for BranchPartitions {
+impl std::fmt::Display for ParametrizerPartitions {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Direct(count) => write!(formatter, "{count}"),
@@ -86,12 +86,12 @@ impl std::fmt::Display for BranchPartitions {
     RkyvSerialize,
     RkyvDeserialize,
 )]
-pub enum ResolvedBranchPartitions {
+pub enum ResolvedParametrizerPartitions {
     Direct(NonZeroU16),
     Inherited(NonZeroU16),
 }
 
-impl ResolvedBranchPartitions {
+impl ResolvedParametrizerPartitions {
     pub const ONE: Self = Self::Direct(NonZeroU16::MIN);
 
     pub const fn is_inherited(self) -> bool {

@@ -62,7 +62,7 @@ struct InspectionPlan {
     sections: usize,
     cursor: Option<StateInspectionCursor>,
     limits: SessionLimits,
-    moving_partitions: Option<nervix_models::ResolvedBranchPartitions>,
+    moving_partitions: Option<nervix_models::ResolvedParametrizerPartitions>,
 }
 
 struct NativeMaterializedCapture {
@@ -247,9 +247,16 @@ impl SessionServiceImpl {
         };
         let branch = match branching {
             ResolvedBranching::Unbranched => None,
-            ResolvedBranching::Branched { branch, schema, .. }
-            | ResolvedBranching::AwaitingTopology { branch, schema } => Some(
-                RowBranch::new(branch.clone(), schema.fields.clone()).map_err(|error| {
+            ResolvedBranching::Branched {
+                parametrizer,
+                schema,
+                ..
+            }
+            | ResolvedBranching::AwaitingTopology {
+                parametrizer,
+                schema,
+            } => Some(
+                RowBranch::new(parametrizer.clone(), schema.fields.clone()).map_err(|error| {
                     inspection_refusal(error, StateInspectionRejection::NotReady)
                 })?,
             ),
@@ -295,7 +302,7 @@ impl SessionServiceImpl {
         }) {
             return Err(StateInspectionRejection::StaleContinuation);
         }
-        let moving_partitions = if let Some(branch) = relay.node.partition_branch()
+        let moving_partitions = if let Some(branch) = relay.node.partition_parametrizer()
             && let Some(epoch) = domain_schedule.partition_epochs.get(branch)
             && epoch.transition.is_some()
         {

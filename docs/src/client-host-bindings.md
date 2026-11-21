@@ -191,8 +191,9 @@ introduces row-map payloads, implicit numeric conversions or per-cell callbacks 
 ## Typed Inspection
 
 `Outcome::entity_labels()` supplies an independently retained `EntityLabelsInspection` for a
-domain metadata read. Every native binding preserves the exact map, existing domain/node identity,
-captured policy revision and limits, and explicit committed/staged view. A committed view has its
+metadata read. Every native binding preserves the exact map, owner kind and name, captured
+policy revision and limits, and explicit committed or staged view. The domain accessor returns
+the domain for Models, domains and logical resources. It is absent for cluster users. A committed view has its
 applied revision; a staged view has transaction id, accepted position and planning-basis bytes.
 Absent variant fields remain absent, and zero-valued revisions or positions remain present.
 Pointer/length accessors preserve empty values and embedded NUL bytes. No binding derives this
@@ -213,8 +214,9 @@ No host adds an inferencer-specific inspection object or parses a tensor from di
 
 An inspection entity is a domain node or the cluster license. Domain and entity-name accessors
 are optional: they retain their values for a domain node and are absent for the cluster license.
-The cluster license's entity kind is `LICENSE`. Its summary and quota sections use the same
-retained schemas and Row frames, and its JSON preserves that typed entity scope.
+The cluster license's entity kind is `LICENSE`. Its summary, quota, capability and transition
+sections use the same retained schemas and Row frames, and its JSON preserves that typed entity
+scope.
 
 Python and Ruby metadata objects share one inspection owner. JVM unit and section handles lease
 the same inspection with immutable checked indices, so closing a parent does not invalidate a

@@ -2656,7 +2656,8 @@ mod tests {
             panic!("the frame contains typed subscription rows");
         };
         let branch = RowBranch::new(
-            nervix_models::BranchName::parse("by_tenant").assured("the test branch name is valid"),
+            nervix_models::ParametrizerName::parse("by_tenant")
+                .assured("the test branch name is valid"),
             vec![field("tenant", ParseAsType::String, false, false)],
         )
         .assured("the branch has a key field");

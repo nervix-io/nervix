@@ -32,8 +32,8 @@ use nervix_interconnect::{
     RemoteOperationFailure, RemoteOperationSubject, UnitPartitionHoldings,
 };
 use nervix_models::{
-    BranchKeyFingerprint, BranchName, DomainName, DomainNodeRef, DomainNodeUnitRef, ModelKind,
-    NodeUnitRef, PartitionEpochNumber, RelayName, Unit,
+    BranchKeyFingerprint, DomainName, DomainNodeRef, DomainNodeUnitRef, ModelKind, NodeUnitRef,
+    ParametrizerName, PartitionEpochNumber, RelayName, Unit,
 };
 use nervix_primitives::{
     collections::DashMap,
@@ -67,7 +67,7 @@ pub(super) struct MisplacedKey {
 /// What one unit of a branch-keyed entity holds in its branch's current epoch.
 #[derive(Debug, Clone)]
 pub(super) struct UnitHoldings {
-    pub(super) branch: BranchName,
+    pub(super) parametrizer: ParametrizerName,
     pub(super) epoch: PartitionEpochNumber,
     /// Every key the unit holds, live or released and not yet forgotten, that the current count
     /// places in another unit.
@@ -133,7 +133,7 @@ impl PartitionHoldingsRegistry {
     fn holdings_in(
         &self,
         domain: &DomainName,
-        branch: &BranchName,
+        parametrizer: &ParametrizerName,
         epoch: PartitionEpochNumber,
     ) -> Vec<UnitPartitionHoldings> {
         let mut answered = Vec::new();
@@ -143,7 +143,7 @@ impl PartitionHoldingsRegistry {
                 continue;
             }
             let holdings = entry.value().load();
-            if &holdings.branch != branch || holdings.epoch != epoch {
+            if &holdings.parametrizer != parametrizer || holdings.epoch != epoch {
                 continue;
             }
             answered.push(UnitPartitionHoldings {
@@ -176,7 +176,7 @@ impl UnitHoldingsPublication {
     ) -> Self {
         runtime.observe_partition_keys_pending(
             &unit.entity.domain,
-            &holdings.branch,
+            &holdings.parametrizer,
             0,
             holdings.pending(),
         );
@@ -196,7 +196,7 @@ impl UnitHoldingsPublication {
         let before = self.published.load().pending();
         self.runtime.observe_partition_keys_pending(
             &self.unit.entity.domain,
-            &holdings.branch,
+            &holdings.parametrizer,
             before,
             holdings.pending(),
         );
@@ -204,14 +204,14 @@ impl UnitHoldingsPublication {
     }
 
     /// Counts one key claimed into the unit in the node's claimed counter of its branch.
-    fn observe_claimed(&self, branch: &BranchName) {
+    fn observe_claimed(&self, parametrizer: &ParametrizerName) {
         let dispatcher = self.runtime.inner.remote_dispatcher.load();
         self.runtime
             .inner
             .metrics
             .observe_branch_partition_key_claimed(
                 &self.unit.entity.domain,
-                branch,
+                parametrizer,
                 dispatcher
                     .as_deref()
                     .map(super::RemoteDispatcher::local_node_id),
@@ -231,7 +231,7 @@ impl Drop for UnitHoldingsPublication {
         let withdrawn = published.load();
         self.runtime.observe_partition_keys_pending(
             &self.unit.entity.domain,
-            &withdrawn.branch,
+            &withdrawn.parametrizer,
             withdrawn.pending(),
             0,
         );
@@ -243,7 +243,7 @@ impl Runtime {
     fn observe_partition_keys_pending(
         &self,
         domain: &DomainName,
-        branch: &BranchName,
+        parametrizer: &ParametrizerName,
         before: u64,
         after: u64,
     ) {
@@ -258,7 +258,7 @@ impl Runtime {
         let dispatcher = self.inner.remote_dispatcher.load();
         self.inner.metrics.add_branch_partition_keys_pending(
             domain,
-            branch,
+            parametrizer,
             dispatcher
                 .as_deref()
                 .map(super::RemoteDispatcher::local_node_id),
@@ -278,7 +278,7 @@ impl Runtime {
             .map(super::RemoteDispatcher::local_node_id);
         let mut branches = std::collections::BTreeSet::new();
         for relay in revision.activation.relays.values() {
-            if let Some(branch) = relay.branching.branch() {
+            if let Some(branch) = relay.branching.parametrizer() {
                 branches.insert(branch);
             }
         }
@@ -297,7 +297,7 @@ impl Runtime {
 /// The holdings one unit keeps and publishes while its branch moves keys between units: the keys
 /// it holds outside their partition and the keys it claimed in the epoch.
 pub(super) struct HoldingsTracker {
-    branch: BranchName,
+    parametrizer: ParametrizerName,
     epoch: PartitionEpochNumber,
     #[cfg_attr(
         nervix_lint,
@@ -345,7 +345,7 @@ impl HoldingsTracker {
             runtime,
             unit,
             UnitHoldings {
-                branch: transition.branch.clone(),
+                parametrizer: transition.parametrizer.clone(),
                 epoch: transition.epoch,
                 misplaced: misplaced.clone(),
                 claimed: 0,
@@ -353,7 +353,7 @@ impl HoldingsTracker {
             },
         );
         Self {
-            branch: transition.branch.clone(),
+            parametrizer: transition.parametrizer.clone(),
             epoch: transition.epoch,
             misplaced,
             claimed: 0,
@@ -380,7 +380,7 @@ impl HoldingsTracker {
             .claimed
             .checked_add(1)
             .assured("a unit claims fewer than 2^64 keys in one epoch");
-        self.publication.observe_claimed(&self.branch);
+        self.publication.observe_claimed(&self.parametrizer);
     }
 
     /// Drops every key `holds` says this unit no longer holds, and reports whether any was.
@@ -414,7 +414,7 @@ impl HoldingsTracker {
         let claiming =
             u64::try_from(claiming).assured("a unit claims fewer keys at once than it can address");
         self.publication.publish(UnitHoldings {
-            branch: self.branch.clone(),
+            parametrizer: self.parametrizer.clone(),
             epoch: self.epoch,
             misplaced: self.misplaced.clone(),
             claimed: self.claimed,
@@ -428,12 +428,12 @@ impl Runtime {
     pub(crate) fn partition_transition_holdings(
         &self,
         domain: &DomainName,
-        branch: &BranchName,
+        parametrizer: &ParametrizerName,
         epoch: PartitionEpochNumber,
     ) -> Vec<UnitPartitionHoldings> {
         self.inner
             .partition_holdings
-            .holdings_in(domain, branch, epoch)
+            .holdings_in(domain, parametrizer, epoch)
     }
 
     /// One page of the keys `holder` holds in `epoch` that the current count places in
@@ -528,10 +528,10 @@ impl Runtime {
             }
             PartitionTransitionRequest::Holdings {
                 domain,
-                branch,
+                parametrizer,
                 epoch,
             } => Ok(PartitionTransitionAnswer::Holdings(
-                self.partition_transition_holdings(&domain, &branch, epoch),
+                self.partition_transition_holdings(&domain, &parametrizer, epoch),
             )),
             PartitionTransitionRequest::CatalogShard { subject, after } => {
                 let holder = DomainNodeUnitRef::new(

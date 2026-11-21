@@ -139,6 +139,67 @@ async fn a_configured_ping_is_written_while_the_ingestor_waits_for_data() {
     assert!(!ingestor.needs_resume());
 }
 
+/// While the host holds the loop, such as while a payload waits for the node's extension workers,
+/// the hold hook keeps reading: it answers the server's ping, parks the first data frame and reads
+/// nothing after it. The next read hands the parked frame over before it reads on.
+#[nervix_primitives::test]
+async fn a_held_connection_answers_pings_and_hands_over_the_frame_it_parked_first() {
+    let (mut ingestor, mut peer) =
+        tests::connected_pair_with(Vec::new(), WebsocketsUpgradeHeaders::default()).await;
+    for frame in [
+        Message::Ping(b"before".to_vec()),
+        Message::Text("parked".to_string()),
+        Message::Ping(b"after".to_vec()),
+        Message::Text("behind".to_string()),
+    ] {
+        peer.send(frame).await.assured("the peer writes its frames");
+    }
+    let held = ingestor
+        .hold_maintenance()
+        .assured("a WebSocket client services its connection while the host holds it");
+    let maintained = timeout(Duration::from_millis(500), held.maintain(None)).await;
+    assert!(
+        maintained.is_err(),
+        "the hook keeps servicing the connection until the host ends the hold"
+    );
+    let answered = timeout(Duration::from_secs(60), peer.next())
+        .await
+        .assured("the held client answers the ping within the fixture budget")
+        .assured("the client keeps the connection open")
+        .assured("the frame is valid");
+    assert_eq!(answered, Message::Pong(b"before".to_vec()));
+    assert!(
+        timeout(Duration::from_millis(200), peer.next())
+            .await
+            .is_err(),
+        "once a frame is parked the client reads nothing further, so the later ping waits"
+    );
+    assert!(!ingestor.needs_resume());
+
+    let request = IngestorBatchRequest {
+        max_messages: std::num::NonZeroUsize::MIN,
+        batch_timeout: None,
+    };
+    let cancellation = IngestorReadCancellation::new();
+    for expected in [b"parked".as_slice(), b"behind".as_slice()] {
+        let batch = ingestor
+            .next_batch(request, &cancellation)
+            .await
+            .assured("the connection stays open");
+        let IngestorBatch::Messages(messages) = batch else {
+            panic!("the client hands over its data frames in order");
+        };
+        let payloads: Vec<&[u8]> = messages.iter().map(|message| message.payload()).collect();
+        assert_eq!(payloads, [expected]);
+    }
+    let answered = timeout(Duration::from_secs(60), peer.next())
+        .await
+        .assured("reading on answers the later ping")
+        .assured("the client keeps the connection open")
+        .assured("the frame is valid");
+    assert_eq!(answered, Message::Pong(b"after".to_vec()));
+}
+
 #[nervix_primitives::test]
 async fn a_silent_peer_expires_with_the_explicit_or_ping_derived_idle_bound() {
     for explicit in [false, true] {

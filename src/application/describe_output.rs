@@ -635,7 +635,7 @@ fn format_client_producer_lines(summary: &RuntimeIngestorDescribe) -> Vec<String
 }
 
 fn format_branch_selection(branched_by: &BranchSelection) -> &str {
-    match branched_by.branch() {
+    match branched_by.parametrizer() {
         Some(name) => name.as_str(),
         None => "UNBRANCHED",
     }
@@ -643,7 +643,7 @@ fn format_branch_selection(branched_by: &BranchSelection) -> &str {
 
 fn format_output_branch(branch: Option<&nervix_models::OutputBranch>) -> &str {
     match branch {
-        Some(nervix_models::OutputBranch::BranchedBy { branch, .. }) => branch.as_str(),
+        Some(nervix_models::OutputBranch::BranchedBy { parametrizer, .. }) => parametrizer.as_str(),
         Some(nervix_models::OutputBranch::Unbranched) => "UNBRANCHED",
         None => "NODE-WIDE",
     }
@@ -674,7 +674,7 @@ pub(in crate::application) fn format_relay_describe_output(
     lines.extend([
         format!("schema: {}", relay.schema.as_str()),
         format!("branched by: {}", {
-            if let Some(branch) = relay.branching.branch() {
+            if let Some(branch) = relay.branching.parametrizer() {
                 branch.as_str()
             } else if relay.branching.is_unbranched() {
                 "UNBRANCHED"
@@ -1916,6 +1916,7 @@ mod tests {
                 mode: EndpointIngestMode::NoAck,
                 quiesce: IngestQuiesceMode::EndpointBuffer {
                     max_size: "1MiB".to_owned(),
+                    response: nervix_models::EndpointPauseResponse::Immediate,
                 },
             }
             .into(),

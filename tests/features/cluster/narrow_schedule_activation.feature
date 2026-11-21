@@ -38,7 +38,7 @@ Feature: Narrow schedule activation on ownership change
 
       CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
 
-      CREATE IF NOT EXISTS BRANCH by_tenant SCHEMA tenant_branch TTL 5m;
+      CREATE IF NOT EXISTS PARAMETRIZER by_tenant SCHEMA tenant_branch TTL 5m;
 
       CREATE RELAY inbound SCHEMA transaction BRANCHED BY by_tenant;
 
@@ -56,7 +56,7 @@ Feature: Narrow schedule activation on ownership change
 
       CREATE HTTP ENDPOINT INGESTOR ingestor_txns
         FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING transaction_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING transaction_codec
         TO inbound
         INHERIT ALL
         BRANCHED BY by_tenant
@@ -218,7 +218,7 @@ Feature: Narrow schedule activation on ownership change
 
       CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
 
-      CREATE IF NOT EXISTS BRANCH by_gauge_tenant SCHEMA tenant_branch TTL 30m;
+      CREATE IF NOT EXISTS PARAMETRIZER by_gauge_tenant SCHEMA tenant_branch TTL 30m;
 
       CREATE RELAY inbound SCHEMA transaction BRANCHED BY by_gauge_tenant;
 
@@ -236,7 +236,7 @@ Feature: Narrow schedule activation on ownership change
 
       CREATE HTTP ENDPOINT INGESTOR ingestor_txns
         FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING transaction_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING transaction_codec
         TO inbound
         INHERIT ALL
         BRANCHED BY by_gauge_tenant
@@ -300,7 +300,7 @@ Feature: Narrow schedule activation on ownership change
     And node "node-1" observability metric "nervix_branch_instances" with labels eventually equals 1
       """
       domain="{{domain}}"
-      branch="by_gauge_tenant"
+      parametrizer="by_gauge_tenant"
       physical_node_id="node-1"
       """
     When these Plexus commands are executed through the client on node "node-1"
@@ -315,7 +315,7 @@ Feature: Narrow schedule activation on ownership change
     And node "node-1" observability metric "nervix_branch_instances" with labels eventually equals 1
       """
       domain="{{domain}}"
-      branch="by_gauge_tenant"
+      parametrizer="by_gauge_tenant"
       physical_node_id="node-1"
       """
 
@@ -356,7 +356,7 @@ Feature: Narrow schedule activation on ownership change
 
       CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
 
-      CREATE IF NOT EXISTS BRANCH by_wait_tenant SCHEMA tenant_branch TTL 30m;
+      CREATE IF NOT EXISTS PARAMETRIZER by_wait_tenant SCHEMA tenant_branch TTL 30m;
 
       CREATE RELAY tenant_state SCHEMA notification
         BRANCHED BY by_wait_tenant
@@ -382,7 +382,7 @@ Feature: Narrow schedule activation on ownership change
 
       CREATE HTTP ENDPOINT INGESTOR state_ingestor
         FROM state_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING notification_codec
         TO tenant_state
         INHERIT ALL
         BRANCHED BY by_wait_tenant
@@ -393,7 +393,7 @@ Feature: Narrow schedule activation on ownership change
 
       CREATE HTTP ENDPOINT INGESTOR event_ingestor
         FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING notification_codec
         TO incoming
         INHERIT ALL
         BRANCHED BY by_wait_tenant
@@ -538,7 +538,7 @@ Feature: Narrow schedule activation on ownership change
 
       CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
 
-      CREATE IF NOT EXISTS BRANCH by_window_tenant SCHEMA tenant_branch TTL 30m;
+      CREATE IF NOT EXISTS PARAMETRIZER by_window_tenant SCHEMA tenant_branch TTL 30m;
 
       CREATE RELAY metrics SCHEMA metric BRANCHED BY by_window_tenant;
 
@@ -556,7 +556,7 @@ Feature: Narrow schedule activation on ownership change
 
       CREATE HTTP ENDPOINT INGESTOR metric_ingestor
         FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING metric_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING metric_codec
         TO metrics
         INHERIT ALL
         BRANCHED BY by_window_tenant
@@ -674,7 +674,7 @@ Feature: Narrow schedule activation on ownership change
 
       CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
 
-      CREATE IF NOT EXISTS BRANCH by_group_tenant SCHEMA tenant_branch TTL 30m;
+      CREATE IF NOT EXISTS PARAMETRIZER by_group_tenant SCHEMA tenant_branch TTL 30m;
 
       CREATE RELAY inbound SCHEMA transaction BRANCHED BY by_group_tenant;
 
@@ -694,7 +694,7 @@ Feature: Narrow schedule activation on ownership change
 
       CREATE HTTP ENDPOINT INGESTOR ingestor_txns
         FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING transaction_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING transaction_codec
         TO inbound
         INHERIT ALL
         BRANCHED BY by_group_tenant
@@ -869,7 +869,7 @@ Feature: Narrow schedule activation on ownership change
 
       CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
 
-      CREATE IF NOT EXISTS BRANCH by_move_tenant SCHEMA tenant_branch TTL 30m;
+      CREATE IF NOT EXISTS PARAMETRIZER by_move_tenant SCHEMA tenant_branch TTL 30m;
 
       CREATE RELAY tenant_state SCHEMA notification
         BRANCHED BY by_move_tenant
@@ -891,7 +891,7 @@ Feature: Narrow schedule activation on ownership change
 
       CREATE HTTP ENDPOINT INGESTOR state_ingestor
         FROM state_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING notification_codec
         TO tenant_state
         INHERIT ALL
         BRANCHED BY by_move_tenant
@@ -902,7 +902,7 @@ Feature: Narrow schedule activation on ownership change
 
       CREATE HTTP ENDPOINT INGESTOR event_ingestor
         FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING notification_codec
         TO incoming
         INHERIT ALL
         BRANCHED BY by_move_tenant

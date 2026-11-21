@@ -2030,10 +2030,10 @@ void run(const std::string &mode) {
     for (const Field &field : fields) {
         std::cout << field.line("FIELD") << std::endl;
     }
-    const uint8_t *branch = nullptr;
-    size_t branch_len = 0;
-    if (nx_schema_branch(schema.get(), &branch, &branch_len)) {
-        std::cout << "BRANCH " << borrowed(branch, branch_len) << std::endl;
+    const uint8_t *parametrizer = nullptr;
+    size_t parametrizer_len = 0;
+    if (nx_schema_parametrizer(schema.get(), &parametrizer, &parametrizer_len)) {
+        std::cout << "PARAMETRIZER " << borrowed(parametrizer, parametrizer_len) << std::endl;
     }
     for (const Field &field : key_fields) {
         std::cout << field.line("KEY") << std::endl;

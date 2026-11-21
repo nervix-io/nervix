@@ -815,7 +815,7 @@ fn schema_reply(
         wire::RowBranch::create(
             &mut builder,
             &wire::RowBranchArgs {
-                branch: Some(branch_name),
+                parametrizer: Some(branch_name),
                 fields: Some(key_fields),
             },
         )

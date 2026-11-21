@@ -38,7 +38,7 @@ Feature: Duration values
       CREATE SCHEMA quick_plan (tenant STRING, id STRING, quick_wait DURATION);
       CREATE JAQ JSON CODEC job_codec TO SCHEMA job WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE SCHEMA tenant_branch (tenant STRING);
-      CREATE BRANCH by_tenant SCHEMA tenant_branch TTL 5m;
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_branch TTL 5m;
       CREATE RELAY jobs SCHEMA job BRANCHED BY by_tenant;
       CREATE RELAY job_plans SCHEMA job_plan BRANCHED BY by_tenant;
       CREATE RELAY quick_plans SCHEMA quick_plan BRANCHED BY by_tenant;
@@ -123,7 +123,7 @@ Feature: Duration values
       CREATE SCHEMA window_count (window DURATION, samples I64, first_id STRING);
       CREATE JAQ JSON CODEC sample_codec TO SCHEMA sample WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE SCHEMA window_branch (window DURATION);
-      CREATE BRANCH by_window SCHEMA window_branch TTL 5m;
+      CREATE PARAMETRIZER by_window SCHEMA window_branch TTL 5m;
       CREATE RELAY timed_samples SCHEMA timed_sample BRANCHED BY by_window;
       CREATE RELAY window_counts SCHEMA window_count BRANCHED BY by_window;
       CREATE VHOST edge duration-branches-{{test_id}}.example.com;
@@ -184,7 +184,7 @@ Feature: Duration values
       CREATE SCHEMA first_wait (tenant STRING, id STRING, wait DURATION);
       CREATE JAQ JSON CODEC request_codec TO SCHEMA request WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE SCHEMA tenant_branch (tenant STRING);
-      CREATE BRANCH by_tenant SCHEMA tenant_branch TTL 5m;
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_branch TTL 5m;
       CREATE RELAY timed_requests SCHEMA timed_request BRANCHED BY by_tenant;
       CREATE RELAY first_waits SCHEMA first_wait BRANCHED BY by_tenant;
       CREATE RELAY ordered_waits SCHEMA first_wait BRANCHED BY by_tenant;
@@ -262,7 +262,7 @@ Feature: Duration values
       );
       CREATE JAQ JSON CODEC attempt_codec TO SCHEMA attempt WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE SCHEMA tenant_branch (tenant STRING);
-      CREATE BRANCH by_tenant SCHEMA tenant_branch TTL 5m;
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_branch TTL 5m;
       CREATE RELAY timed_attempts SCHEMA timed_attempt BRANCHED BY by_tenant;
       CREATE RELAY wait_summaries SCHEMA wait_summary BRANCHED BY by_tenant;
       CREATE VHOST edge duration-windows-{{test_id}}.example.com;
@@ -325,7 +325,7 @@ Feature: Duration values
       CREATE JAQ JSON CODEC policy_codec TO SCHEMA policy_update WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE JAQ JSON CODEC call_codec TO SCHEMA call WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE SCHEMA tenant_branch (tenant STRING);
-      CREATE BRANCH by_tenant SCHEMA tenant_branch TTL 5m;
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_branch TTL 5m;
       CREATE RELAY policies SCHEMA policy BRANCHED BY by_tenant WITH MATERIALIZED STATE LAST BY TIMESTAMP;
       CREATE RELAY calls SCHEMA call BRANCHED BY by_tenant;
       CREATE RELAY judged_calls SCHEMA judged_call BRANCHED BY by_tenant;

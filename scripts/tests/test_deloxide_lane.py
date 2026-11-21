@@ -418,7 +418,7 @@ class InventoryTests(unittest.TestCase):
     def test_stressed_lifecycle_phases_are_complete_disjoint_and_bounded(self) -> None:
         inventory = deloxide_lane.load_inventory(REPOSITORY)
         endpoint = inventory.invocations.get("stress-endpoint-acknowledgement")
-        self.assertIsNotNone(endpoint, "the ten ACK examples need their own bounded phase")
+        self.assertIsNotNone(endpoint, "the endpoint ACK examples need their own bounded phase")
         assert endpoint is not None
         retention = inventory.invocations.get("stress-transaction-retention")
         self.assertIsNotNone(retention, "the six retention examples need their own bounded phase")
@@ -438,7 +438,7 @@ class InventoryTests(unittest.TestCase):
         for index, group in enumerate(identities):
             for other in identities[index + 1:]:
                 self.assertTrue(group.isdisjoint(other))
-        self.assertEqual([sum(scenario.runs for scenario in group) for group in groups], [386, 10, 6])
+        self.assertEqual([sum(scenario.runs for scenario in group) for group in groups], [386, 12, 6])
         for invocation, group in zip(phases, groups, strict=True):
             registered = inventory.workloads_of(invocation.id, "deloxide-stress")
             self.assertEqual(deloxide_lane.scenario_problems(invocation, registered, group), [])
@@ -592,7 +592,7 @@ class InventoryTests(unittest.TestCase):
         self.assertEqual(set(stressed), expected)
         self.assertEqual(sum(workload.examples or 0 for workload in inventory.workloads_of("stress-scenarios", "deloxide-stress")), 386)
         self.assertEqual(sum(workload.examples or 0 for workload in inventory.workloads_of("stress-transaction-retention", "deloxide-stress")), 6)
-        self.assertEqual(sum(workload.examples or 0 for workload in inventory.workloads_of("stress-endpoint-acknowledgement", "deloxide-stress")), 10)
+        self.assertEqual(sum(workload.examples or 0 for workload in inventory.workloads_of("stress-endpoint-acknowledgement", "deloxide-stress")), 12)
         self.assertEqual(sum(workload.examples or 0 for workload in inventory.workloads_of("stress-paced-simulation", "deloxide-stress")), 36)
         self.assertEqual(sum(workload.examples or 0 for workload in inventory.workloads_of("stress-restore-scenarios", "deloxide-stress-restore")), 145)
         stress_ids = {workload.id for workload in inventory.workloads.values() if workload.id.startswith("stress.")}

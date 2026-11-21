@@ -25,9 +25,9 @@ use nervix_dataflow_graph::{
 #[cfg(test)]
 use nervix_models::ScheduledNode;
 use nervix_models::{
-    BranchName, ConcreteBranchCoverage, CreateSchema, DomainName, DomainSchedule, ImpactEdgeKind,
+    ConcreteBranchCoverage, CreateSchema, DomainName, DomainSchedule, ImpactEdgeKind,
     ImpactNodeCoverage, IngestorInput, Model, ModelIndex, ModelKind, ModelName, NodeRef,
-    ParseAsType, RelayName, ResolvedBranching, SchemaField, SchemaFingerprint,
+    ParametrizerName, ParseAsType, RelayName, ResolvedBranching, SchemaField, SchemaFingerprint,
 };
 use nervix_primitives::sync::Arc;
 use petgraph::{
@@ -98,13 +98,13 @@ impl ActiveGraph {
     /// partition count changes.
     pub(in crate::registry) fn branches_with_keyed_state(
         &self,
-    ) -> std::collections::BTreeSet<BranchName> {
+    ) -> std::collections::BTreeSet<ParametrizerName> {
         let mut branches = std::collections::BTreeSet::new();
         for node in self.graph.node_weights() {
             if !node.config.keeps_state_per_key() {
                 continue;
             }
-            if let Some(branch) = node.partition_branch() {
+            if let Some(branch) = node.partition_parametrizer() {
                 branches.insert(branch.clone());
             }
         }
@@ -127,9 +127,9 @@ impl ActiveGraph {
         for node in resolved.graph.node_weights_mut() {
             let identity = node.node_ref();
             if let Some(branching) = &node.resolved_branching
-                && let Some(branch) = branching.branch()
+                && let Some(branch) = branching.parametrizer()
             {
-                if let Some(layout) = topology.branches.get(branch) {
+                if let Some(layout) = topology.parametrizers.get(branch) {
                     node.resolved_branching =
                         Some(branching.clone().with_partitions(layout.partitions()));
                 } else if branching.is_awaiting_topology()
@@ -177,21 +177,22 @@ impl ActiveGraph {
         &self,
         topology: &nervix_models::PartitionTopology,
         existing: Option<&DomainSchedule>,
-    ) -> std::collections::BTreeMap<BranchName, nervix_models::ResolvedBranchPartitions> {
+    ) -> std::collections::BTreeMap<ParametrizerName, nervix_models::ResolvedParametrizerPartitions>
+    {
         let mut partitions = std::collections::BTreeMap::new();
         for node in self.graph.node_weights() {
-            let Model::Branch(declaration) = node.config.as_ref() else {
+            let Model::Parametrizer(declaration) = node.config.as_ref() else {
                 continue;
             };
             let layout = if let Some(layout) = declaration.partitions.direct_layout() {
                 Some(layout)
-            } else if let Some(layout) = topology.branches.get(&declaration.name) {
+            } else if let Some(layout) = topology.parametrizers.get(&declaration.name) {
                 Some(layout.partitions())
             } else if let Some(existing) = existing
                 && let Some(prior) = existing.nodes.get(&node.node_ref())
-                && let Model::Branch(branch) = prior.config.as_ref()
+                && let Model::Parametrizer(parametrizer) = prior.config.as_ref()
             {
-                branch.partitions.direct_layout()
+                parametrizer.partitions.direct_layout()
             } else {
                 None
             };
@@ -201,9 +202,10 @@ impl ActiveGraph {
         }
         for node in self.graph.node_weights() {
             if let Some(branching) = &node.resolved_branching
-                && let (Some(branch), Some(layout)) = (branching.branch(), branching.partitions())
+                && let (Some(parametrizer), Some(layout)) =
+                    (branching.parametrizer(), branching.partitions())
             {
-                partitions.entry(branch.clone()).or_insert(layout);
+                partitions.entry(parametrizer.clone()).or_insert(layout);
             }
         }
         partitions
@@ -687,11 +689,11 @@ impl ActiveNode {
 
     /// The branch whose partition count divides this node into units: none for a node whose kind
     /// a branch's partitions do not divide, or that is unbranched.
-    pub(in crate::registry) fn partition_branch(&self) -> Option<&BranchName> {
+    pub(in crate::registry) fn partition_parametrizer(&self) -> Option<&ParametrizerName> {
         if !super::unit_placement::UnitLayout::divides_by_partitions(self.kind) {
             return None;
         }
-        self.resolved_branching.as_ref()?.branch()
+        self.resolved_branching.as_ref()?.parametrizer()
     }
 
     /// How this node is addressed: the kind it is and the name it carries, together.
@@ -705,13 +707,15 @@ impl ActiveNode {
             return ImpactNodeCoverage::configuration(node);
         }
 
-        let declared_branch = match self.config.as_ref() {
-            Model::Relay(relay) => relay.branching.branch(),
-            model => model_branch_selection(model).and_then(|selection| selection.branch_ref()),
+        let declared_parametrizer = match self.config.as_ref() {
+            Model::Relay(relay) => relay.branching.parametrizer(),
+            model => {
+                model_branch_selection(model).and_then(|selection| selection.parametrizer_ref())
+            }
         };
-        let branches = match declared_branch {
-            Some(branch) => ConcreteBranchCoverage::AllOfBranch {
-                branch: branch.clone(),
+        let branches = match declared_parametrizer {
+            Some(parametrizer) => ConcreteBranchCoverage::AllOfParametrizer {
+                parametrizer: parametrizer.clone(),
             },
             None if self.resolved_branching.is_some()
                 && matches!(self.kind, ModelKind::Emitter | ModelKind::Reingestor) =>
@@ -946,7 +950,7 @@ impl ActiveNode {
     /// branch, resolve to no branch at all.
     fn dataflow_branch(&self) -> Option<DataflowBranch> {
         let branching = self.resolved_branching.as_ref()?;
-        let name = branching.branch()?;
+        let name = branching.parametrizer()?;
         let schema = branching
             .schema()
             .verified("a resolved branch name always carries its resolved schema");

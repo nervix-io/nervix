@@ -37,15 +37,19 @@ use meticulous::ResultExt as _;
 use nervix_connector::{
     BrokerIngestorConnector, ConfiguredDeadline, IngestMessageHeaders, IngestMessageMetadata,
     IngestMetadataRow, IngestMetadataValues, IngestRowHeaders, IngestorBatch, IngestorBatchRequest,
-    IngestorConnector, IngestorError, IngestorMessage, IngestorReadCancellation, IngestorResult,
-    IngestorResume, RetainedIngestHeaders, RustlsClientConfigProvider,
+    IngestorConnector, IngestorError, IngestorMessage, IngestorReadCancellation, IngestorReadHold,
+    IngestorResult, IngestorResume, RetainedIngestHeaders, RustlsClientConfigProvider,
 };
 use nervix_dns::{DnsResolver, LookupShare, OperationBudget};
 use nervix_models::{
     ClientConfigEntry, ConnectorKind, WEBSOCKETS_CONTROL_FRAME_BUDGET, WebsocketsClientConfig,
     WebsocketsUpgradeHeaders,
 };
-use nervix_primitives::{net::TcpStream, sync::Arc, time::timeout};
+use nervix_primitives::{
+    net::TcpStream,
+    sync::Arc,
+    time::{Instant, timeout},
+};
 use thiserror::Error;
 use tokio_tungstenite::{
     Connector, client_async_tls_with_config,
@@ -53,7 +57,7 @@ use tokio_tungstenite::{
         Message,
         client::IntoClientRequest as _,
         error::{ProtocolError, SubProtocolError},
-        protocol::WebSocketConfig,
+        protocol::{CloseFrame, WebSocketConfig},
     },
 };
 
@@ -246,6 +250,9 @@ pub struct WebsocketsConnectionIngestor {
     signaling_protocol: Option<Arc<CompiledSignalingProtocol>>,
     connection: Option<WebsocketConnection>,
     pending: handshake::HandshakeFrames,
+    /// One data frame read while the host held the loop, which the next read hands over before it
+    /// reads the connection again. While it waits nothing further is read.
+    read_ahead: Option<WebsocketsConnectionIngestorMessage>,
     headers: WebsocketsUpgradeHeaders,
     ping_interval: Option<Duration>,
     idle_deadline: connection::WebsocketIdleDeadline,
@@ -366,6 +373,106 @@ impl WebsocketsConnectionIngestor {
                 )
             })?
     }
+
+    /// The read failure of a connection whose peer sent Close, after the reply the transport
+    /// queued has had its bounded chance to reach the peer.
+    async fn peer_closed(&mut self, frame: Option<CloseFrame<'_>>) -> Report<IngestorError> {
+        let failure = match frame {
+            Some(frame) => WebsocketsConnectionIngestorFailure::PeerClosed {
+                code: u16::from(frame.code),
+                reason: frame.reason.into_owned(),
+            },
+            None => WebsocketsConnectionIngestorFailure::PeerClosedWithoutStatus,
+        };
+        let mut connection = self
+            .connection
+            .take()
+            .verified("the installed transport yielded the Close");
+        let answered = timeout(WEBSOCKETS_CONTROL_FRAME_BUDGET, connection.relay.flush()).await;
+        let report = Report::new(failure);
+        let report = match answered {
+            Ok(Ok(())) => report,
+            Ok(Err(error)) => report.attach_printable(error),
+            Err(error) => report.attach_printable(error),
+        };
+        report.change_context(IngestorError::Read {
+            connector: WEBSOCKETS.keyword(),
+        })
+    }
+
+    /// The read failure of a connection whose stream ended without a Close.
+    fn ended() -> Report<IngestorError> {
+        Report::new(WebsocketsConnectionIngestorFailure::Ended).change_context(
+            IngestorError::Read {
+                connector: WEBSOCKETS.keyword(),
+            },
+        )
+    }
+
+    /// The data frame `frame` carried, with the upgrade headers of the connection that read it.
+    fn data_message(&self, frame: WebsocketDataFrame) -> WebsocketsConnectionIngestorMessage {
+        let headers = self
+            .connection
+            .as_ref()
+            .verified("the installed connection delivered this frame")
+            .headers
+            .clone();
+        WebsocketsConnectionIngestorMessage::new(frame, headers)
+    }
+}
+
+/// While the host holds the loop, such as while a payload it took waits for the node's extension
+/// workers, the connection keeps reading, so the client answers the server's pings and writes its
+/// own on their cadence. The first data frame it reads is parked for the next read to hand over,
+/// and once one is parked nothing further is read, which leaves what the server sends with the
+/// transport.
+#[async_trait]
+impl IngestorReadHold for WebsocketsConnectionIngestor {
+    async fn maintain(&mut self, _until: Option<Instant>) -> Report<IngestorError> {
+        // A parked frame or a missing connection leaves nothing to service until the hold ends.
+        let never_cancelled = IngestorReadCancellation::new();
+        loop {
+            nervix_primitives::task::consume_budget().await;
+            if self.read_ahead.is_some() {
+                return std::future::pending().await;
+            }
+            let Some(connection) = self.connection.as_mut() else {
+                return std::future::pending().await;
+            };
+            let read = match connection.next().await {
+                Ok(read) => read,
+                Err(report) => {
+                    self.connection = None;
+                    return report;
+                }
+            };
+            match read {
+                WebsocketRead::Ping => {
+                    if let Err(report) = self.send_ping(&never_cancelled).await {
+                        return report;
+                    }
+                }
+                // Parking a frame takes no await after the read, so dropping the hold never loses
+                // one.
+                WebsocketRead::Frame(Some(Message::Text(text))) => {
+                    self.read_ahead = Some(self.data_message(WebsocketDataFrame::Text(text)));
+                }
+                WebsocketRead::Frame(Some(Message::Binary(bytes))) => {
+                    self.read_ahead = Some(self.data_message(WebsocketDataFrame::Binary(bytes)));
+                }
+                WebsocketRead::Frame(Some(Message::Close(frame))) => {
+                    return self.peer_closed(frame).await;
+                }
+                WebsocketRead::Frame(None) => {
+                    self.connection = None;
+                    return Self::ended();
+                }
+                WebsocketRead::Frame(Some(
+                    Message::Ping(_) | Message::Pong(_) | Message::Frame(_),
+                )) => {}
+            }
+        }
+    }
 }
 
 #[async_trait]
@@ -395,6 +502,7 @@ impl IngestorConnector for WebsocketsConnectionIngestor {
             signaling_protocol: plan.signaling_protocol.clone(),
             connection: None,
             pending: handshake::HandshakeFrames::new(plan.handshake_capacity),
+            read_ahead: None,
             headers: plan.headers.clone(),
             ping_interval: plan.ping_interval,
             idle_deadline: plan.idle_deadline,
@@ -403,7 +511,7 @@ impl IngestorConnector for WebsocketsConnectionIngestor {
     }
 
     fn needs_resume(&mut self) -> bool {
-        self.connection.is_none() && self.pending.is_empty()
+        self.connection.is_none() && self.pending.is_empty() && self.read_ahead.is_none()
     }
 
     async fn suspend(&mut self) -> IngestorResult<()> {
@@ -415,7 +523,7 @@ impl IngestorConnector for WebsocketsConnectionIngestor {
     }
 
     async fn resume(&mut self) -> IngestorResult<IngestorResume> {
-        if self.connection.is_some() || !self.pending.is_empty() {
+        if self.connection.is_some() || !self.pending.is_empty() || self.read_ahead.is_some() {
             return Ok(IngestorResume::Ready);
         }
         let budget = OperationBudget::start(self.connect_timeout.bound(), LookupShare::Whole);
@@ -528,6 +636,7 @@ impl IngestorConnector for WebsocketsConnectionIngestor {
 
     async fn close(&mut self) -> IngestorResult<()> {
         self.pending.clear();
+        self.read_ahead = None;
         self.close_transport()
             .await
             .change_context(IngestorError::Close {
@@ -541,12 +650,24 @@ impl BrokerIngestorConnector for WebsocketsConnectionIngestor {
     type Message = WebsocketsConnectionIngestorMessage;
     type Position = ();
 
+    fn hold_maintenance(&mut self) -> Option<&mut dyn IngestorReadHold> {
+        Some(self)
+    }
+
     async fn next_batch(
         &mut self,
         _request: IngestorBatchRequest,
         cancellation: &IngestorReadCancellation,
     ) -> IngestorResult<IngestorBatch<Self::Message>> {
         if let Some(message) = self.pending.pop_front() {
+            return Ok(IngestorBatch::Messages(vec![message]));
+        }
+        if let Some(message) = self.read_ahead.take() {
+            // The host held the loop with this frame parked, and the time it read nothing is not
+            // the peer's silence.
+            if let Some(connection) = self.connection.as_mut() {
+                connection.resume_reading();
+            }
             return Ok(IngestorBatch::Messages(vec![message]));
         }
         loop {
@@ -604,35 +725,11 @@ impl BrokerIngestorConnector for WebsocketsConnectionIngestor {
                     ]));
                 }
                 WebsocketRead::Frame(Some(Message::Close(frame))) => {
-                    let failure = match frame {
-                        Some(frame) => WebsocketsConnectionIngestorFailure::PeerClosed {
-                            code: u16::from(frame.code),
-                            reason: frame.reason.into_owned(),
-                        },
-                        None => WebsocketsConnectionIngestorFailure::PeerClosedWithoutStatus,
-                    };
-                    let mut connection = self
-                        .connection
-                        .take()
-                        .verified("the installed transport yielded the Close above");
-                    let answered =
-                        timeout(WEBSOCKETS_CONTROL_FRAME_BUDGET, connection.relay.flush()).await;
-                    let report = Report::new(failure);
-                    let report = match answered {
-                        Ok(Ok(())) => report,
-                        Ok(Err(error)) => report.attach_printable(error),
-                        Err(error) => report.attach_printable(error),
-                    };
-                    return Err(report.change_context(IngestorError::Read {
-                        connector: WEBSOCKETS.keyword(),
-                    }));
+                    return Err(self.peer_closed(frame).await);
                 }
                 WebsocketRead::Frame(None) => {
                     self.connection = None;
-                    return Err(Report::new(WebsocketsConnectionIngestorFailure::Ended)
-                        .change_context(IngestorError::Read {
-                            connector: WEBSOCKETS.keyword(),
-                        }));
+                    return Err(Self::ended());
                 }
                 WebsocketRead::Frame(Some(
                     Message::Ping(_) | Message::Pong(_) | Message::Frame(_),

@@ -15,7 +15,7 @@
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_model_harness::shuttle::check_interleavings;
 use nervix_models::{
-    BranchName, DomainName, DomainNodeRef, DomainNodeUnitRef, ModelKind, ModelName,
+    DomainName, DomainNodeRef, DomainNodeUnitRef, ModelKind, ModelName, ParametrizerName,
     PartitionEpochNumber, Unit,
 };
 use nervix_primitives::sync::StdArc;
@@ -38,7 +38,8 @@ fn unit() -> DomainNodeUnitRef {
 
 fn holdings(claimed: u64) -> UnitHoldings {
     UnitHoldings {
-        branch: BranchName::parse("by_tenant").assured("the model branch name is valid"),
+        parametrizer: ParametrizerName::parse("by_tenant")
+            .assured("the model branch name is valid"),
         epoch: PartitionEpochNumber::FIRST.next(),
         misplaced: MisplacedKeys::new(),
         claimed,

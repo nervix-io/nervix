@@ -259,6 +259,32 @@ pub struct GuestSnapshot {
     pub application_state: Vec<u8>,
 }
 
+/// One section of a guest's state description.
+///
+/// The schema's name is the section's name and its fields are the section's columns. The Arrow IPC
+/// stream holds exactly one batch of rows in exactly those types, which the host checks before it
+/// reports anything of the section.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StateSection {
+    pub schema: ProcessorSchema,
+    pub arrow_ipc_batch: Vec<u8>,
+}
+
+/// What a guest describes of its state for a state inspection: named sections of typed rows, in
+/// the guest's order. A guest that describes no state writes no message at all.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StateDescription {
+    pub sections: Vec<StateSection>,
+}
+
+/// A verified state description whose Arrow IPC streams stay borrowed from the message.
+#[derive(Clone, Copy, Debug)]
+pub struct StateDescriptionRef<'a>(wire::StateDescription<'a>);
+
+/// One section of a verified state description, borrowed from the message.
+#[derive(Clone, Copy, Debug)]
+pub struct StateSectionRef<'a>(wire::StateSection<'a>);
+
 #[derive(Clone, Copy, Debug)]
 pub enum EnvelopeRef<'a> {
     Input(InputEnvelopeRef<'a>),
@@ -415,6 +441,78 @@ impl GuestSnapshot {
     }
 }
 
+impl StateDescription {
+    pub fn encode(&self) -> Vec<u8> {
+        let mut builder = FlatBufferBuilder::new();
+        self.encode_in(&mut builder);
+        builder.finished_data().to_vec()
+    }
+
+    /// Encodes and finishes this message in the supplied FlatBuffer builder.
+    pub fn encode_in<'a, A: Allocator + 'a>(&self, builder: &mut FlatBufferBuilder<'a, A>) {
+        let sections = self
+            .sections
+            .iter()
+            .map(|section| build_state_section(builder, section))
+            .collect::<Vec<_>>();
+        let sections = builder.create_vector(&sections);
+        let payload = wire::StateDescription::create(
+            builder,
+            &wire::StateDescriptionArgs {
+                sections: Some(sections),
+            },
+        );
+        finish_message(
+            builder,
+            wire::MessagePayload::StateDescription,
+            payload.as_union_value(),
+        );
+    }
+
+    pub fn decode(bytes: &[u8]) -> Result<Self, ProtocolError> {
+        StateDescriptionRef::decode(bytes)?.to_owned()
+    }
+}
+
+impl<'a> StateDescriptionRef<'a> {
+    pub fn decode(bytes: &'a [u8]) -> Result<Self, ProtocolError> {
+        let message = verified_message(bytes)?;
+        let description = message.payload_as_state_description().ok_or_else(|| {
+            Report::new(ProtocolError::UnexpectedPayload {
+                expected: "state description",
+                actual: payload_name(message.payload_type()),
+            })
+        })?;
+        Ok(Self(description))
+    }
+
+    /// The sections in the guest's order.
+    pub fn sections(self) -> impl ExactSizeIterator<Item = StateSectionRef<'a>> {
+        self.0.sections().iter().map(StateSectionRef)
+    }
+
+    pub fn to_owned(self) -> Result<StateDescription, ProtocolError> {
+        let mut sections = Vec::with_capacity(self.0.sections().len());
+        for section in self.sections() {
+            sections.push(StateSection {
+                schema: section.schema()?,
+                arrow_ipc_batch: section.arrow_ipc_batch().to_vec(),
+            });
+        }
+        Ok(StateDescription { sections })
+    }
+}
+
+impl<'a> StateSectionRef<'a> {
+    pub fn schema(self) -> Result<ProcessorSchema, ProtocolError> {
+        decode_processor_schema(self.0.schema())
+    }
+
+    pub fn arrow_ipc_batch(self) -> &'a [u8] {
+        self.0.arrow_ipc_batch().bytes()
+    }
+}
+
 fn verified_message(bytes: &[u8]) -> Result<wire::Message<'_>, ProtocolError> {
     let Some(prefix) = bytes.get(..4) else {
         return Err(Report::new(ProtocolError::LengthMismatch {
@@ -539,6 +637,21 @@ fn build_branch_init<'a, A: Allocator + 'a>(
             branch_key,
             input_schema: Some(input_schema),
             output_schemas: Some(output_schemas),
+        },
+    )
+}
+
+fn build_state_section<'a, A: Allocator + 'a>(
+    builder: &mut FlatBufferBuilder<'a, A>,
+    section: &StateSection,
+) -> WIPOffset<wire::StateSection<'a>> {
+    let schema = build_processor_schema(builder, &section.schema);
+    let arrow_ipc_batch = builder.create_vector(&section.arrow_ipc_batch);
+    wire::StateSection::create(
+        builder,
+        &wire::StateSectionArgs {
+            schema: Some(schema),
+            arrow_ipc_batch: Some(arrow_ipc_batch),
         },
     )
 }

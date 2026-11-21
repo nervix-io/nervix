@@ -52,7 +52,8 @@ async fn password_work_and_complete_credentials_survive_recovery() -> TestResult
         .await?;
     let mut expected = BTreeMap::new();
     for (index, name, iterations, seed) in [(2, "first", 10, 1), (3, "second", 20, 2)] {
-        let user = crate::UserCredentials {
+        let user = crate::UserRecord {
+            labels: nervix_models::EntityLabels::default(),
             name: nervix_models::UserName::parse(name)?,
             password_credential: nervix_models::PasswordCredential::from_parts(
                 iterations, [seed; 16], [seed; 64],
@@ -68,7 +69,8 @@ async fn password_work_and_complete_credentials_survive_recovery() -> TestResult
             )
             .await?;
     }
-    let unchanged = crate::UserCredentials {
+    let unchanged = crate::UserRecord {
+        labels: nervix_models::EntityLabels::default(),
         name: nervix_models::UserName::parse("first")?,
         password_credential: nervix_models::PasswordCredential::from_parts(30, [3; 16], [3; 64])?,
     };
@@ -374,6 +376,7 @@ impl Harness {
     fn domain(name: &str) -> DomainState {
         use meticulous::ResultExt as _;
         DomainState {
+            labels: nervix_models::EntityLabels::default(),
             id: DomainName::try_from(name).assured("the fixture generates identifier-shaped names"),
             config: DomainConfig {
                 pace: DomainPace::Unpaced,
@@ -575,6 +578,7 @@ async fn wasm_state_generation_transitions_survive_restart_and_require_the_mutat
                     [7; 32],
                     nervix_models::Timestamp::from_unix_nanos(1_700_000_010_000_000_000),
                     crate::CommandExecutionEffect::CreateUser {
+                        labels: nervix_models::EntityLabels::default(),
                         if_not_exists: false,
                         name: owner,
                         password_credential: nervix_models::PasswordCredential::from_parts(
@@ -1192,6 +1196,95 @@ fn the_store_has_as_many_commands_turns_as_leave_room_beside_its_working_sets()
     Ok(())
 }
 
+/// The consensus storage worker and every place in its wait queue held by jobs that have not run
+/// yet. Releasing the fill lets the holding job end, so the queue drains in order.
+struct FilledConsensusStorage {
+    release: nervix_primitives::sync::blocking::mpsc::Sender<()>,
+}
+
+impl FilledConsensusStorage {
+    /// Fills an executor whose consensus class has one worker and one waiting place: one job holds
+    /// the worker until the fill is released, and a second waits behind it.
+    async fn fill(executor: &Executor) -> Self {
+        let (release, held) = nervix_primitives::sync::blocking::mpsc::channel::<()>();
+        let (started, is_started) = nervix_primitives::sync::oneshot::channel();
+        let holder = executor.clone();
+        nervix_primitives::task::spawn(async move {
+            let reservation = holder
+                .try_reserve(MemoryClass::Commands, 0)
+                .assured("an empty charge always fits");
+            holder
+                .run_storage(StorageClass::Consensus, reservation, move |_, _| {
+                    started
+                        .send(())
+                        .assured("the fixture waits for its occupied worker");
+                    // Releasing the fill disconnects the channel, which is the release.
+                    match held.recv() {
+                        Ok(()) | Err(nervix_primitives::sync::blocking::mpsc::RecvError) => {}
+                    }
+                })
+                .await
+                .assured("the holding job runs on the idle worker");
+        });
+        is_started
+            .await
+            .assured("the fixture's only worker is occupied");
+        let (queued, is_queued) = nervix_primitives::sync::oneshot::channel();
+        let waiter = executor.clone();
+        nervix_primitives::task::spawn(async move {
+            let reservation = waiter
+                .try_reserve(MemoryClass::Commands, 0)
+                .assured("an empty charge always fits");
+            let mut run =
+                std::pin::pin!(waiter.run_storage(StorageClass::Consensus, reservation, |_, _| ()));
+            assert!(run.as_mut().now_or_never().is_none());
+            queued
+                .send(())
+                .assured("the fixture waits for its occupied queue place");
+            run.await
+                .assured("the waiting job runs once the holder leaves");
+        });
+        is_queued
+            .await
+            .assured("the fixture's only waiting place is occupied");
+        Self { release }
+    }
+
+    fn release(self) {
+        drop(self.release);
+    }
+}
+
+/// A full consensus storage queue is a temporary condition: a log append waits for a place rather
+/// than being refused, so it never marks the store failed, and the store appends again once the
+/// worker frees.
+#[nervix_primitives::test]
+async fn a_full_consensus_storage_queue_holds_an_append_back_instead_of_failing_the_store()
+-> TestResult {
+    let mut workers = ExecutionConfig::default().workers;
+    workers.pending_jobs.consensus_storage = std::num::NonZeroUsize::MIN;
+    let executor = Executor::new(ExecutionConfig {
+        workers,
+        ..ExecutionConfig::default()
+    })?;
+    let mut harness = Harness::with_executor(executor.clone()).await?;
+    let filled = FilledConsensusStorage::fill(&executor).await;
+
+    {
+        let mut append = std::pin::pin!(harness.append(1));
+        assert!(
+            append.as_mut().now_or_never().is_none(),
+            "the append waits for a place in the full consensus queue"
+        );
+        filled.release();
+        nervix_primitives::time::timeout(Duration::from_secs(10), append)
+            .await
+            .map_err(|_| "the append did not complete once the consensus worker freed")??;
+    }
+    harness.append(2).await?;
+    Ok(())
+}
+
 #[nervix_primitives::test]
 async fn commands_progress_independently_of_a_waiting_bulk_working_set() -> TestResult {
     let executor = Executor::default();
@@ -1548,18 +1641,44 @@ async fn retained_log_bytes_follow_purge_truncation_and_reopen_without_flushing(
 #[nervix_primitives::test]
 async fn snapshots_recover_state_and_snapshot_metadata_atomically() -> TestResult {
     let mut source = Harness::new().await?;
-    source
-        .apply(
-            1,
-            ConsensusCommand::PutDomain {
-                domain_quota: nervix_licensing_vocabulary::Quota::Unlimited,
-                domain: Box::new(Harness::domain("source")),
-                mutation: None,
-            },
-        )
-        .await?;
+    let mut domain = Harness::domain("source");
+    let labels: nervix_models::EntityLabels = serde_json::from_value(serde_json::json!({
+        "owner": " Operations Δ ",
+        "empty": ""
+    }))?;
+    domain.labels = labels.clone();
+    let user = crate::UserRecord {
+        name: nervix_models::UserName::parse("operator")?,
+        password_credential: nervix_models::PasswordCredential::from_parts(10, [11; 16], [17; 64])?,
+        labels: labels.clone(),
+    };
+    let commands = [
+        ConsensusCommand::SeedClusterParameters {
+            values: Box::new(nervix_models::ClusterParameterValues::default()),
+        },
+        ConsensusCommand::CreateResourceCatalog {
+            domain: domain.id.clone(),
+            identifier: ResourceName::parse("orders")?,
+            labels: labels.clone(),
+        },
+        ConsensusCommand::PutDomain {
+            domain_quota: nervix_licensing_vocabulary::Quota::Unlimited,
+            domain: Box::new(domain),
+            mutation: None,
+        },
+        ConsensusCommand::CreateUser {
+            user: Box::new(user),
+        },
+    ];
+    for (index, command) in (1_u64..).zip(commands) {
+        source.apply(index, command).await?;
+    }
     let built = source.store.build_snapshot().await?;
     let expected = source.store.inner.state();
+    assert_eq!(
+        expected.entity_label_sets().collect::<Vec<_>>(),
+        [&labels; 3]
+    );
     for boundary in [StorageBoundary::BeforeCommit, StorageBoundary::AfterSync] {
         nervix_primitives::task::consume_budget().await;
         let mut target = Harness::new().await?;

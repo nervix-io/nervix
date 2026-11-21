@@ -10,7 +10,7 @@ CREATE SCHEMA output_schema (
 CREATE SCHEMA tenant_schema (
   tenant STRING
 );
-CREATE BRANCH tenant SCHEMA tenant_schema TTL 5m;
+CREATE PARAMETRIZER tenant SCHEMA tenant_schema TTL 5m;
 CREATE RELAY input SCHEMA input_schema BRANCHED BY tenant CAPACITY 1;
 CREATE RELAY output SCHEMA output_schema BRANCHED BY tenant CAPACITY 1;
 

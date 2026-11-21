@@ -90,7 +90,7 @@ pub(crate) enum RelayPartitioning {
     Whole,
     AwaitingTopology,
     /// A relay whose branch declares several partitions: `Partition(seed mod n)` owns a key.
-    Partitioned(ResolvedBranchPartitions),
+    Partitioned(ResolvedParametrizerPartitions),
 }
 
 /// Why a batch names no unit of its relay.
@@ -118,7 +118,7 @@ impl RelayPartitioning {
 
     /// The partitioning a relay of a branch declaring `partitions` has: one owner for a single
     /// partition, and one unit per partition otherwise.
-    pub(crate) fn of_partitions(partitions: ResolvedBranchPartitions) -> Self {
+    pub(crate) fn of_partitions(partitions: ResolvedParametrizerPartitions) -> Self {
         if partitions.is_partitioned() || partitions.is_inherited() {
             Self::Partitioned(partitions)
         } else {

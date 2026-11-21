@@ -30,7 +30,7 @@ impl EntityLabelsInspection {
 #[pymethods]
 impl EntityLabelsInspection {
     #[getter]
-    fn domain(&self) -> &str {
+    fn domain(&self) -> Option<&str> {
         self.owner.domain()
     }
     #[getter]

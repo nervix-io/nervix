@@ -28,8 +28,8 @@ use meticulous::OptionExt;
 #[cfg(test)]
 use nervix_models::{AlterRelay, DropModel};
 use nervix_models::{
-    ClusterSchedule, CreateAvroWireSchema, CreateBranch, CreateCodec, CreateDeduplicator,
-    CreateEmitter, CreateGenerator, CreateIngestor, CreateJunction, CreatePlacement,
+    ClusterSchedule, CreateAvroWireSchema, CreateCodec, CreateDeduplicator, CreateEmitter,
+    CreateGenerator, CreateIngestor, CreateJunction, CreateParametrizer, CreatePlacement,
     CreateReingestor, CreateRelay, CreateReorderer, CreateSchema, DomainName,
     EmitterPayloadPresentation, Model, ModelIndex, ModelKind, ModelName, NodeRef,
     RequestedResourceVersion, TransactionModelTransition, UniquelyKindedModel,
@@ -474,14 +474,14 @@ impl Registry {
 
                     candidate.insert(model.as_ref().clone());
                 }
-                RegistryMutation::Labels(edit) => {
-                    let Some(mut model) = candidate.remove(&edit.entity) else {
+                RegistryMutation::Labels { entity, mutation } => {
+                    let Some(mut model) = candidate.remove(entity) else {
                         return Err(Report::new(RegistryError::NotFound {
                             domain: domain.as_str().to_owned(),
-                            identifier: edit.entity.identifier.as_str().to_owned(),
+                            identifier: entity.identifier.as_str().to_owned(),
                         }));
                     };
-                    model.labels_mut().apply(&edit.mutation);
+                    model.labels_mut().apply(mutation);
                     candidate.insert(model);
                 }
                 RegistryMutation::AlterSchema(alter) => {
@@ -585,24 +585,24 @@ impl Registry {
                         RegistryError::invalid_model(domain, alter.relay.as_str(), rejection)
                     })?;
                 }
-                RegistryMutation::AlterBranch(alter) => {
+                RegistryMutation::AlterParametrizer(alter) => {
                     info!(
                         domain = domain.as_str(),
-                        model = alter.branch.as_str(),
-                        kind = ModelKind::Branch.as_str(),
+                        model = alter.parametrizer.as_str(),
+                        kind = ModelKind::Parametrizer.as_str(),
                         "staging branch alter from batch"
                     );
 
                     let Some(branch) =
-                        candidate.configured_mut::<CreateBranch>(alter.branch.clone())
+                        candidate.configured_mut::<CreateParametrizer>(alter.parametrizer.clone())
                     else {
                         return Err(Report::new(RegistryError::NotFound {
                             domain: domain.as_str().to_string(),
-                            identifier: alter.branch.as_str().to_string(),
+                            identifier: alter.parametrizer.as_str().to_string(),
                         }));
                     };
                     branch.apply_alter(alter).map_err(|rejection| {
-                        RegistryError::invalid_model(domain, alter.branch.as_str(), rejection)
+                        RegistryError::invalid_model(domain, alter.parametrizer.as_str(), rejection)
                     })?;
                 }
                 RegistryMutation::AlterJunction(alter) => {

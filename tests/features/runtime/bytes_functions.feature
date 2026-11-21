@@ -19,7 +19,7 @@ Feature: Typed bytes and native encoding functions
       CREATE HTTP ENDPOINT ingress ON edge PATH '/bytes';
       CREATE HTTP ENDPOINT INGESTOR binary_ingestor
         FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING binary_event_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING binary_event_codec
         TO binary_events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE HTTP CLIENT binary_api CONFIG {
@@ -95,7 +95,7 @@ Feature: Typed bytes and native encoding functions
       CREATE HTTP ENDPOINT ingress ON edge PATH '/bytes';
       CREATE HTTP ENDPOINT INGESTOR text_ingestor
         FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING text_input_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING text_input_codec
         TO text_inputs
           INHERIT ALL
           UNBRANCHED
@@ -153,7 +153,7 @@ Feature: Typed bytes and native encoding functions
       CREATE HTTP ENDPOINT ingress ON edge PATH '/bytes';
       CREATE HTTP ENDPOINT INGESTOR encoded_ingestor
         FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING encoded_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING encoded_codec
         TO encoded_inputs
           INHERIT ALL
           UNBRANCHED
@@ -209,7 +209,7 @@ Feature: Typed bytes and native encoding functions
       CREATE HTTP ENDPOINT ingress ON edge PATH '/bytes';
       CREATE HTTP ENDPOINT INGESTOR binary_ingestor
         FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING binary_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING binary_codec
         TO binary_inputs
           INHERIT ALL
           UNBRANCHED
@@ -260,7 +260,7 @@ Feature: Typed bytes and native encoding functions
       CREATE HTTP ENDPOINT ingress ON edge PATH '/bytes';
       CREATE HTTP ENDPOINT INGESTOR binary_ingestor
         FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING binary_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING binary_codec
         TO binary_inputs
           INHERIT ALL
           UNBRANCHED

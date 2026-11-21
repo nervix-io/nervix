@@ -19,7 +19,9 @@ use arrow_schema::DataType as ArrowDataType;
 use error_stack::Report;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_client_wire::{CellWriter, RowSchema, WireEncodeError};
-use nervix_models::{BranchName, DurationValue, FieldName, ParseAsType, SchemaField, Timestamp};
+use nervix_models::{
+    DurationValue, FieldName, ParametrizerName, ParseAsType, SchemaField, Timestamp,
+};
 use thiserror::Error;
 
 use crate::runtime_schema::{RuntimeValue, RuntimeValueKind, parse_as_type_from_arrow};
@@ -359,13 +361,13 @@ pub enum SubscriptionRowEncodingError {
     DuplicateBranchSchemaField { field: FieldName },
     #[error("branch declaration repeats field `{field}`")]
     DuplicateBranchField { field: FieldName },
-    #[error("branch `{branch}` references missing schema field `{field}`")]
+    #[error("parametrizer `{parametrizer}` references missing schema field `{field}`")]
     MissingBranchSchemaField {
-        branch: BranchName,
+        parametrizer: ParametrizerName,
         field: FieldName,
     },
-    #[error("branch `{branch}` has no key fields")]
-    EmptyBranchFields { branch: BranchName },
+    #[error("parametrizer `{parametrizer}` has no key fields")]
+    EmptyBranchFields { parametrizer: ParametrizerName },
     #[error("row limit {rows_per_frame} exceeds the session collection limit {collection_entries}")]
     RowsPerFrameAboveCollectionLimit {
         rows_per_frame: usize,

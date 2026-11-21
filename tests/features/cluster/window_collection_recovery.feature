@@ -19,13 +19,13 @@ Feature: Collected window sequences survive state lifecycle changes
       CREATE WIRE JSON SCHEMA reading_wire MODE STRICT (tenant string, value integer, pair array);
       CREATE WIRE JSON CODEC reading_codec FROM WIRE SCHEMA reading_wire TO SCHEMA reading;
       CREATE SCHEMA tenant_key (tenant STRING);
-      CREATE BRANCH by_tenant SCHEMA tenant_key TTL 30m;
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_key TTL 30m;
       CREATE RELAY readings SCHEMA reading BRANCHED BY by_tenant;
       CREATE RELAY histories SCHEMA history BRANCHED BY by_tenant;
       CREATE VHOST edge collection-recovery-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT ingress ON edge PATH '/readings';
       CREATE HTTP ENDPOINT INGESTOR reading_ingestor FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING reading_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING reading_codec
         TO readings INHERIT ALL BRANCHED BY by_tenant SET tenant = message.tenant
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE WINDOW PROCESSOR collection_window FROM readings

@@ -1484,6 +1484,16 @@ abort of that future with nothing left to join them. A node that has not stopped
 passes is therefore left to end by its own shutdown, keeps what it holds until it has, and is
 recorded as still stopping, not as something the harness ended.
 
+A command a step bounds, `within <duration> these Plexus commands complete on node <node>` or `on
+the leader node`, fails at that bound with every node's `DESCRIBE DOMAIN` of the scenario's domain.
+Like the status diagnostics, the step asks every node at once within one status request timeout, so
+a node that holds the command up, and may hold its description too, delays the failure by at most
+that long. A stalled `STOP` therefore names the wait behind it: the work in motion a node still
+holds, or a stopped domain whose teardown cut is not reported yet. The graceful-stop outline whose
+destination stays unavailable bounds its `STOP` and its `START` this way at a minute each, well
+beyond the seconds both take, so a stop that never answers fails its own step instead of holding the
+run until the suite budget ends it.
+
 The cluster health scenario can fail application-health responses for one ordered probing-node and
 responding-node pair while other probes remain healthy. It can also hold one node immediately before
 that node reports a runtime revision prepared, wait until the hold is reached, and release it after

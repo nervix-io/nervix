@@ -836,6 +836,7 @@ async fn logical_deadline_cannot_cross_domain_capabilities() {
     let first = DomainClockLifecycle::new(domain("first"));
     first.synchronize(
         &DomainState {
+            labels: nervix_models::EntityLabels::default(),
             id: domain("first"),
             config: DomainConfig {
                 pace: DomainPace::Unpaced,
@@ -851,6 +852,7 @@ async fn logical_deadline_cannot_cross_domain_capabilities() {
     let second = DomainClockLifecycle::new(domain("second"));
     second.synchronize(
         &DomainState {
+            labels: nervix_models::EntityLabels::default(),
             id: domain("second"),
             config: DomainConfig {
                 pace: DomainPace::Unpaced,
@@ -951,6 +953,7 @@ async fn due_logical_wait_returns_due_time_and_a_fresh_snapshot() {
     let lifecycle = DomainClockLifecycle::new(clock_domain.clone());
     lifecycle.synchronize(
         &DomainState {
+            labels: nervix_models::EntityLabels::default(),
             id: clock_domain,
             config: DomainConfig {
                 pace: DomainPace::Unpaced,

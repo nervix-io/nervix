@@ -16,9 +16,9 @@ use std::fmt;
 
 use error_stack::{Context, Report};
 use nervix_models::{
-    BranchName, BranchSelection, ClientName, ConnectorKind, DomainName, EmitterEntityKind,
-    EndpointName, EndpointType, FieldName, IngestorEntityKind, IngestorMetadataType, ModelKind,
-    ModelName, ReingestorName, RelayName,
+    BranchSelection, ClientName, ConnectorKind, DomainName, EmitterEntityKind, EndpointName,
+    EndpointType, FieldName, IngestorEntityKind, IngestorMetadataType, ModelKind, ModelName,
+    ParametrizerName, ReingestorName, RelayName,
 };
 use nervix_vm::program::WindowAggregateFunction;
 use thiserror::Error;
@@ -348,7 +348,7 @@ pub(crate) enum RegistryError {
         reingestor: ReingestorName,
         input: RelayName,
         output: RelayName,
-        parametrization: BranchName,
+        parametrization: ParametrizerName,
     },
     #[error(
         "output relay '{relay}' requires SET assignments for parametrization '{parametrization}' \
@@ -358,7 +358,7 @@ pub(crate) enum RegistryError {
         domain: DomainName,
         identifier: ModelName,
         relay: RelayName,
-        parametrization: BranchName,
+        parametrization: ParametrizerName,
     },
     #[error("external partition topology is invalid in domain '{domain}'")]
     PartitionTopology { domain: DomainName },
@@ -581,10 +581,10 @@ pub(crate) enum RegistryError {
     /// No column bridge writes a `DURATION` result, so the UDF is refused before it compiles.
     #[error("UDF '{udf}' in domain '{domain}' cannot return a DURATION: a UDF does not write one")]
     UdfDurationReturn { domain: DomainName, udf: ModelName },
-    #[error("branch '{branch}' in domain '{domain}' uses BYTES in field '{field}'")]
+    #[error("parametrizer '{parametrizer}' in domain '{domain}' uses BYTES in field '{field}'")]
     BranchFieldContainsBytes {
         domain: DomainName,
-        branch: ModelName,
+        parametrizer: ModelName,
         field: FieldName,
     },
     #[error("lookup '{lookup}' in domain '{domain}' cannot read BYTES field '{field}'")]

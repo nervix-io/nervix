@@ -161,12 +161,12 @@ pub(super) fn selected_choice(
             .get()
             .selects_member(CorridorSide::To, node),
         (ChoiceControl::BranchSchema, ChoiceValue::Model(node)) => {
-            signals.structured.get().branch.selects_schema(node)
+            signals.structured.get().parametrizer.selects_schema(node)
         }
         (ChoiceControl::RelaySchema, ChoiceValue::Model(node)) => {
             signals.relay.get().selects_schema(node)
         }
-        (ChoiceControl::RelayBranch, ChoiceValue::Model(node)) => {
+        (ChoiceControl::RelayParametrizer, ChoiceValue::Model(node)) => {
             signals.relay.get().selects_branch(node)
         }
         (ChoiceControl::SubscriptionRelay, ChoiceValue::Model(node)) => {
@@ -282,12 +282,12 @@ pub(super) fn selected_choice(
             .codec
             .as_ref()
             .is_some_and(|selected| selected.selects(ModelKind::Codec, node)),
-        (ChoiceControl::IngestRouteBranch, ChoiceValue::Model(node)) => {
+        (ChoiceControl::IngestRouteParametrizer, ChoiceValue::Model(node)) => {
             signals.ingestor.get().active_route().is_some_and(|route| {
-                node.kind == ModelKind::Branch
+                node.kind == ModelKind::Parametrizer
                     && route
                         .branch
-                        .current_branch()
+                        .current_parametrizer()
                         .is_some_and(|branch| branch.as_str() == node.identifier.as_str())
             })
         }
@@ -316,14 +316,14 @@ pub(super) fn selected_choice(
                 })
             })
         }
-        (ChoiceControl::ProcessorBranch, ChoiceValue::Model(node)) => {
+        (ChoiceControl::ProcessorParametrizer, ChoiceValue::Model(node)) => {
             signals.active_processor().is_some_and(|signal| {
                 signal
                     .get()
                     .branching
-                    .current_branch()
+                    .current_parametrizer()
                     .is_some_and(|branch| {
-                        node.kind == ModelKind::Branch
+                        node.kind == ModelKind::Parametrizer
                             && branch.as_str() == node.identifier.as_str()
                     })
             })
@@ -338,11 +338,11 @@ pub(super) fn selected_choice(
                 })
             })
         }
-        (ChoiceControl::ProcessorRouteBranch, ChoiceValue::Model(node)) => {
+        (ChoiceControl::ProcessorRouteParametrizer, ChoiceValue::Model(node)) => {
             signals.active_processor().is_some_and(|signal| {
                 signal.get().active_route().is_some_and(|route| {
-                    route.branch.current_branch().is_some_and(|branch| {
-                        node.kind == ModelKind::Branch
+                    route.branch.current_parametrizer().is_some_and(|branch| {
+                        node.kind == ModelKind::Parametrizer
                             && branch.as_str() == node.identifier.as_str()
                     })
                 })
@@ -412,12 +412,12 @@ pub(super) fn select_choice(signals: CreateSignals, control: ChoiceControl, valu
         (ChoiceControl::BranchSchema, ChoiceValue::Model(node)) => {
             signals
                 .structured
-                .update(|drafts| drafts.branch.select_schema(&node));
+                .update(|drafts| drafts.parametrizer.select_schema(&node));
         }
         (ChoiceControl::RelaySchema, ChoiceValue::Model(node)) => {
             signals.relay.update(|draft| draft.select_schema(&node));
         }
-        (ChoiceControl::RelayBranch, ChoiceValue::Model(node)) => {
+        (ChoiceControl::RelayParametrizer, ChoiceValue::Model(node)) => {
             signals.relay.update(|draft| draft.select_branch(&node));
         }
         (ChoiceControl::SubscriptionRelay, ChoiceValue::Model(node)) => {
@@ -533,7 +533,7 @@ pub(super) fn select_choice(signals: CreateSignals, control: ChoiceControl, valu
                 }
             });
         }
-        (ChoiceControl::IngestRouteBranch, ChoiceValue::Model(node)) => {
+        (ChoiceControl::IngestRouteParametrizer, ChoiceValue::Model(node)) => {
             signals.ingestor.update(|draft| draft.select_branch(&node));
         }
         (ChoiceControl::IngestRouteRelay, ChoiceValue::Model(node)) => {
@@ -578,7 +578,7 @@ pub(super) fn select_choice(signals: CreateSignals, control: ChoiceControl, valu
                 signal.update(|draft| draft.select_input(&node));
             }
         }
-        (ChoiceControl::ProcessorBranch, ChoiceValue::Model(node)) => {
+        (ChoiceControl::ProcessorParametrizer, ChoiceValue::Model(node)) => {
             if let Some(signal) = signals.active_processor() {
                 signal.update(|draft| draft.select_branch(&node));
             }
@@ -603,13 +603,13 @@ pub(super) fn select_choice(signals: CreateSignals, control: ChoiceControl, valu
                 });
             }
         }
-        (ChoiceControl::ProcessorRouteBranch, ChoiceValue::Model(node)) => {
+        (ChoiceControl::ProcessorRouteParametrizer, ChoiceValue::Model(node)) => {
             if let Some(signal) = signals.active_processor() {
                 signal.update(|draft| {
                     if let Some(route) = draft.active_route_mut() {
-                        let previous = route.branch.current_branch().cloned();
+                        let previous = route.branch.current_parametrizer().cloned();
                         route.branch.select_branch(&node);
-                        if route.branch.current_branch() != previous.as_ref()
+                        if route.branch.current_parametrizer() != previous.as_ref()
                             && let Some(relay) = &mut route.relay
                         {
                             relay.invalidate();

@@ -52,8 +52,8 @@ fn unbranched(kind: ModelKind, name: &str) -> ImpactNodeCoverage {
 fn branched(kind: ModelKind, name: &str, branch: &str) -> ImpactNodeCoverage {
     ImpactNodeCoverage::execution(
         node(kind, name),
-        ConcreteBranchCoverage::AllOfBranch {
-            branch: named(branch),
+        ConcreteBranchCoverage::AllOfParametrizer {
+            parametrizer: named(branch),
         },
     )
 }
@@ -425,13 +425,20 @@ fn configuration_nodes_stand_beside_the_runtime_nodes_that_require_them() {
     let codec = configuration(ModelKind::Codec, "order_codec");
     let client = configuration(ModelKind::Client, "broker");
     let schema = configuration(ModelKind::Schema, "order");
-    let branch = configuration(ModelKind::Branch, "by_tenant");
+    let parametrizer = configuration(ModelKind::Parametrizer, "by_tenant");
     let ingestor = unbranched(ModelKind::Ingestor, "orders_in");
     let relay = branched(ModelKind::Relay, "orders", "by_tenant");
     let placement = configuration(ModelKind::Placement, "pinned");
     let side = topology(
         [
-            &wire, &codec, &client, &schema, &branch, &ingestor, &relay, &placement,
+            &wire,
+            &codec,
+            &client,
+            &schema,
+            &parametrizer,
+            &ingestor,
+            &relay,
+            &placement,
         ]
         .map(|coverage| held(coverage, &[1])),
         [
@@ -440,7 +447,7 @@ fn configuration_nodes_stand_beside_the_runtime_nodes_that_require_them() {
             requires(&codec, &ingestor, &[1]),
             requires(&client, &ingestor, &[1]),
             requires(&schema, &relay, &[1]),
-            requires(&branch, &relay, &[1]),
+            requires(&parametrizer, &relay, &[1]),
             flows(&ingestor, &relay, &[1]),
             requires(&ingestor, &placement, &[1]),
         ],
@@ -466,7 +473,9 @@ fn configuration_nodes_stand_beside_the_runtime_nodes_that_require_them() {
     assert!(
         place(ModelKind::Client, "broker").right() <= place(ModelKind::Ingestor, "orders_in").x
     );
-    assert!(place(ModelKind::Branch, "by_tenant").right() <= place(ModelKind::Relay, "orders").x);
+    assert!(
+        place(ModelKind::Parametrizer, "by_tenant").right() <= place(ModelKind::Relay, "orders").x
+    );
     assert!(
         place(ModelKind::Ingestor, "orders_in").right() <= place(ModelKind::Placement, "pinned").x,
         "a placement requires the node it pins, so it stands after it"
@@ -476,15 +485,15 @@ fn configuration_nodes_stand_beside_the_runtime_nodes_that_require_them() {
     }
     for id in [
         item(ModelKind::Codec, "order_codec"),
-        item(ModelKind::Branch, "by_tenant"),
+        item(ModelKind::Parametrizer, "by_tenant"),
     ] {
         assert_eq!(graph.items[&id].branches_before, None);
         assert_eq!(graph.items[&id].branches_after, None);
     }
     assert_eq!(
         graph.items[&item(ModelKind::Relay, "orders")].branches_after,
-        Some(ConcreteBranchCoverage::AllOfBranch {
-            branch: named("by_tenant")
+        Some(ConcreteBranchCoverage::AllOfParametrizer {
+            parametrizer: named("by_tenant")
         })
     );
     assert_drawable(&graph);
@@ -707,7 +716,10 @@ fn a_domain_pause_frames_the_whole_drawing_apart_from_branch_groups() {
         1,
         "the domain frame is not a branch group"
     );
-    assert_eq!(graph.groups[0].branch, named::<BranchName>("by_tenant"));
+    assert_eq!(
+        graph.groups[0].branch,
+        named::<ParametrizerName>("by_tenant")
+    );
     for band in &graph.groups[0].bands {
         assert!(inside(band));
         assert!(!outline.label.intersects(band));
@@ -728,7 +740,7 @@ fn interleaved_branch_groups_hold_exactly_their_members() {
     let ingestor = unbranched(ModelKind::Ingestor, "source");
     let mut nodes = vec![held(&ingestor, &[1])];
     let mut edges = Vec::new();
-    let mut members = BTreeMap::<BranchName, Vec<ImpactItemId>>::new();
+    let mut members = BTreeMap::<ParametrizerName, Vec<ImpactItemId>>::new();
     // Name order alternates the two branches in every column they share.
     for (index, branch) in [
         (1, "by_tenant"),
@@ -1084,9 +1096,9 @@ fn every_role_is_attached_to_the_item_it_names() {
 
 #[test]
 fn explicit_branch_coverage_is_kept_on_every_role() {
-    let branch: BranchName = named("by_tenant");
+    let parametrizer: ParametrizerName = named("by_tenant");
     let keys = ConcreteBranchCoverage::selected(
-        branch.clone(),
+        parametrizer.clone(),
         [
             BranchKeyFingerprint::new([1; 32]),
             BranchKeyFingerprint::new([2; 32]),
@@ -1118,7 +1130,7 @@ fn explicit_branch_coverage_is_kept_on_every_role() {
         }]
     );
     assert_eq!(graph.groups.len(), 1);
-    assert_eq!(graph.groups[0].branch, branch);
+    assert_eq!(graph.groups[0].branch, parametrizer);
 }
 
 #[test]

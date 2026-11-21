@@ -2234,10 +2234,10 @@ int main(int argc, char **argv) {
     for (size_t index = 0; index < row_fields.count; index++) {
         print_field("FIELD", &row_fields.items[index]);
     }
-    const uint8_t *branch = NULL;
-    size_t branch_len = 0;
-    if (nx_schema_branch(schema, &branch, &branch_len)) {
-        printf("BRANCH %.*s\n", (int)branch_len, (const char *)branch);
+    const uint8_t *parametrizer = NULL;
+    size_t parametrizer_len = 0;
+    if (nx_schema_parametrizer(schema, &parametrizer, &parametrizer_len)) {
+        printf("PARAMETRIZER %.*s\n", (int)parametrizer_len, (const char *)parametrizer);
     }
     for (size_t index = 0; index < key_fields.count; index++) {
         print_field("KEY", &key_fields.items[index]);

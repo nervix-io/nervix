@@ -90,9 +90,10 @@ nervix_read_emit() -> i32
 nervix_dump_state() -> i32
 nervix_load_state(ptr: i32, size: i32) -> i32
 nervix_reset_state() -> i32
+nervix_describe_state() -> i32
 ```
 
-Return `0` from fallible functions on success. Return a negative code on guest rejection. Nervix treats negative codes as runtime errors and applies the processor error policy. `nervix_dump_state` returns the size of the snapshot it wrote, or a negative code when it cannot serialize its state; Nervix then keeps the state saved last.
+Return `0` from fallible functions on success. Return a negative code on guest rejection. Nervix treats negative codes as runtime errors and applies the processor error policy. `nervix_dump_state` returns the size of the snapshot it wrote, or a negative code when it cannot serialize its state; Nervix then keeps the state saved last. `nervix_describe_state` returns the size of the [state description](#state-description) it wrote, `0` when it describes no state, or a negative code when it cannot describe its state; Nervix calls it only to answer a state inspection, on a scratch instance it discards afterwards.
 
 Nervix resolves `nervix_reset_state` when it instantiates a branch but never calls it: every new
 state lifetime starts in a newly instantiated guest that is initialized without a restore. A guest
@@ -126,7 +127,7 @@ The guest owns one reusable byte buffer in linear memory.
 4. Because FlatBuffers builds backwards, the completed message may occupy a suffix of the
    allocation. Host calls `nervix_process_batch(ptr, size)` with that exact range.
 5. Guest writes pending output or state back into the same buffer.
-6. Host calls `nervix_read_emit()` or `nervix_dump_state()` and reads the returned byte length from `nervix_buffer_ptr()`.
+6. Host calls `nervix_read_emit()`, `nervix_dump_state()` or `nervix_describe_state()` and reads the returned byte length from `nervix_buffer_ptr()`.
 
 If the capacity estimate is too small, the host finishes the message in temporary spill storage,
 releases its linear-memory borrow, calls `nervix_alloc` again with a larger capacity, and copies the
@@ -344,7 +345,7 @@ nervix_global_error_len() -> i32
 nervix_clear_global_error() -> i32
 ```
 
-If any of these exports exists, all three must exist. After host calls into the guest (`nervix_init`, `nervix_process_batch`, `nervix_on_timeout`, `nervix_flush`, and emit reads), and after a negative result from `nervix_dump_state`, `nervix_load_state`, or an emit read, it checks `nervix_global_error_len()`. A positive length means `nervix_global_error_ptr()` points at UTF-8 error bytes. The host reads the bytes, calls `nervix_clear_global_error()`, and reports them as the reason for the failure. Failures of initialization, restore, input processing, timeout callbacks, quiesce flush, and output validation apply `ON GLOBAL ERROR`; a failure to save, persist, or replicate guest state is always reported. Wasmtime call failures and traps are also handled as global processor errors.
+If any of these exports exists, all three must exist. After host calls into the guest (`nervix_init`, `nervix_process_batch`, `nervix_on_timeout`, `nervix_flush`, and emit reads), and after a negative result from `nervix_dump_state`, `nervix_load_state`, `nervix_describe_state`, or an emit read, it checks `nervix_global_error_len()`. A positive length means `nervix_global_error_ptr()` points at UTF-8 error bytes. The host reads the bytes, calls `nervix_clear_global_error()`, and reports them as the reason for the failure. Failures of initialization, restore, input processing, timeout callbacks, quiesce flush, and output validation apply `ON GLOBAL ERROR`; a failure to save, persist, or replicate guest state is always reported. Wasmtime call failures and traps are also handled as global processor errors.
 
 The guest decides lineage; the host performs the actual ACK/NACK operation. Tokens are host-local hot-path capabilities. They are valid only while the current host instance is alive, and they are never persisted.
 
@@ -730,6 +731,49 @@ A branch holds back the acknowledgements of one callback at a time, for no longe
 checkpoint deadline. Stopping a node ends a branch still waiting for its checkpoint after the
 branch's stop grace, and whatever it held is negatively acknowledged when the node's drain ends.
 
+## State Description
+
+The bytes a guest saves are opaque to Nervix, so only the guest can say what its state holds.
+`nervix_describe_state` lets it: the guest writes a `StateDescription` message into its buffer and
+returns its size, or returns `0` to describe no state. A `StateDescription` lists named sections in
+order; each section is a `ProcessorSchema`, whose name is the section's name and whose fields are
+the section's columns, and one Arrow IPC stream holding exactly one batch of rows in exactly those
+types. A column must carry the Arrow type its field declares, as in [Batch Envelope](#batch-envelope),
+and a field that is not optional holds no null. Section and field names follow the Plexus name rules:
+at most 128 ASCII letters, digits, `-`, `_`, `~` and `.`, reported in lower case.
+
+Nervix calls the export only to answer `SHOW WASM PROCESSOR <processor> STATE`, never on the
+instance that processes input. For each branch entry the read returns, the owner of the branch
+creates a scratch instance from the pinned module, initializes it with the branch's `BranchInit`,
+restores the branch's committed checkpoint with `nervix_load_state`, calls `nervix_describe_state`,
+and discards the instance. The scratch instance runs under the processor's `MAX FUEL` and
+`MAX MEMORY`, the host's guest buffer limit and the read's deadline, on the node's extension workers.
+It requests no timeouts that are ever delivered, and `nervix_request_state_reset` is refused there.
+The description reflects the committed checkpoint, which lags the live instance by at most the
+callback in progress.
+
+Guest state is always sensitive: Nervix cannot tell which part of a guest's state derives from
+sensitive data, and a guest may hold anything, such as private keys it derived itself. An inspection
+therefore reports each section's name, its fields and their types, and its row count, and never a
+value. A separate permission to read guest-state values will come later.
+
+A render that fails reports the `state description` stage, or the stage of the operation that failed
+before it, in the branch's entry of the inspection, in the [diagnostic shape](#failure-diagnostics).
+It never latches the live instance, fails a checkpoint, applies `ON GLOBAL ERROR` or reaches a
+session as a runtime error. A failure before the guest's initialization, such as the node's
+extension workers or state-read memory refusing the render, is the `instantiation` stage. These
+are `state description` failures:
+
+- a payload that is not a valid `StateDescription`;
+- a section or field name outside the name rules, two sections of one name, two fields of one name
+  in a section, or a section without a field;
+- a type that names no Nervix type, such as an `ARRAY` of zero elements;
+- rows that are not exactly one Arrow IPC batch whose columns carry exactly the declared types and
+  optionality, or a null in a field that is not optional;
+- a description that does not fit one read, because it carries more sections than the node's
+  `inspection-max-sections` or more bytes than one reply holds;
+- a render that the read's deadline ended.
+
 ## Timeouts
 
 A guest can call `nervix_timeout_after_nanos(delay)` while processing. The request is anchored at
@@ -836,6 +880,13 @@ func nervixReadEmit() int32 {
     buffer = append(buffer[:0], next...)
     return int32(len(buffer))
 }
+
+//export nervix_describe_state
+func nervixDescribeState() int32 {
+    // This sketch describes no state: it writes nothing and returns zero. A guest that describes
+    // its state writes a StateDescription message into buffer and returns its size.
+    return 0
+}
 ```
 
 The Go guest uses bindings generated from `nervix_wasm.fbs`. FlatBuffers byte
@@ -931,7 +982,7 @@ another node reaches the session unchanged.
 | Stage | What failed |
 | --- | --- |
 | `module compilation` | Resolving, reading, or compiling the pinned module file. |
-| `instantiation` | Creating the branch store, instantiating the module, or resolving its exports. |
+| `instantiation` | Creating the branch store, instantiating the module, or resolving its exports; for a state inspection's scratch instance, also preparing it, such as the extension workers or state-read memory refusing the render. |
 | `initialization` | `nervix_init`. The saved state revision appears when the instance was about to restore state. |
 | `snapshot envelope decoding` | `nervix_load_state` rejected the saved bytes with `-7`. |
 | `application state restoration` | `nervix_load_state` rejected the saved application state with `-8`. |
@@ -941,6 +992,7 @@ another node reaches the session unchanged.
 | `quiesce flush` | `nervix_flush` and the emit reads that follow it. |
 | `output emission` | An emitted envelope the host cannot decode, or output that fails validation. |
 | `state snapshot` | `nervix_dump_state`. Nervix keeps the state saved last. |
+| `state description` | `nervix_describe_state` on the scratch instance a state inspection renders, or a description the host cannot read. Reported in the branch's entry of the inspection only. |
 | `local state persistence` | Writing the checkpoint to the node's stable storage and synchronizing it. |
 | `state replication` | Waiting for every assigned replica to hold the checkpoint on its stable storage, or the schedule assigning fewer replicas than the checkpoint was captured for. |
 | `state authority check` | The state's authority refused it: a replica or peer that is not the state's authority, or this node after the branch's state generation or ownership moved on. |

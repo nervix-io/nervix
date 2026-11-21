@@ -45,6 +45,18 @@ module RubySuite
       refute_empty staged.transaction_id
       assert_equal 1, staged.position
       # ANCHOR_END: entity_labels
+
+      completed("CREATE USER #{name} WITH PASSWORD 'probe-password' LABELS { 'owner' = ' Δ ' };")
+      user = execute("SHOW LABELS ON USER #{name} FORMAT JSON;").entity_labels
+      assert_instance_of NX::EntityLabelsInspection, user
+      assert_equal [nil, 'USER', name], [user.domain, user.entity_kind, user.entity_name]
+      assert_equal({ 'owner' => ' Δ ' }, user.labels)
+
+      completed("CREATE RESOURCE #{name} LABELS { 'empty' = '' };")
+      resource = execute("DESCRIBE RESOURCE #{name};").entity_labels
+      assert_instance_of NX::EntityLabelsInspection, resource
+      assert_equal [cluster.domain, 'RESOURCE', name], [resource.domain, resource.entity_kind, resource.entity_name]
+      assert_equal({ 'empty' => '' }, resource.labels)
     end
   end
 end

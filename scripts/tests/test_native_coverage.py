@@ -1587,7 +1587,7 @@ class CollectTests(unittest.TestCase):
 
     def test_preparation_installs_the_selected_compiler_and_llvm_tools_before_resolution(self) -> None:
         producer = Producer(
-            "check", "ordinary", ("prepare",), "instrumented", ("finish",), "nightly-2026-09-17"
+            "check", "ordinary", ("prepare",), "instrumented", ("finish",), "nightly-2026-11-21"
         )
         sysroot = self.root / "installed-toolchain"
         tools = sysroot / "lib" / "rustlib" / HOST / "bin"
@@ -1617,7 +1617,7 @@ class CollectTests(unittest.TestCase):
             collected = self.collect(commands, producer=producer)
         self.assertEqual(collected.status, 0, self.record(collected).get("failure"))
         self.assertEqual(self.record(collected)["toolchain"], toolchain(tools).describe())
-        self.assertEqual(collected.attempt.parent.name, "rust-nightly-2026-09-17")
+        self.assertEqual(collected.attempt.parent.name, "rust-nightly-2026-11-21")
         prepare, instrumented, finish = (streamed.environment for streamed in commands.streamed)
         self.assertEqual(prepare, {"RUSTC_WRAPPER": "kache"})
         self.assertEqual(instrumented["RUSTUP_TOOLCHAIN"], producer.toolchain)
@@ -1625,7 +1625,7 @@ class CollectTests(unittest.TestCase):
 
     def test_failed_or_interrupted_toolchain_preparation_keeps_its_completion_record(self) -> None:
         producer = Producer(
-            "check", "ordinary", ("prepare",), "instrumented", (), "nightly-2026-09-17"
+            "check", "ordinary", ("prepare",), "instrumented", (), "nightly-2026-11-21"
         )
         cases = ((2, 2, "failed"), (Interrupted(signal.SIGTERM), 143, "interrupted"))
         for outcome, status, verdict in cases:
@@ -1644,7 +1644,7 @@ class CollectTests(unittest.TestCase):
 
     def test_unavailable_selected_compiler_fails_preparation_without_instrumentation(self) -> None:
         producer = Producer(
-            "check", "ordinary", (), "instrumented", (), "nightly-2026-09-17"
+            "check", "ordinary", (), "instrumented", (), "nightly-2026-11-21"
         )
         commands = FakeCommands(self.root)
         with mock.patch.object(

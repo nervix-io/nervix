@@ -17,7 +17,7 @@
 use std::collections::BTreeSet;
 
 use nervix_client_wire::{ChoiceLookupRequest, ChoiceSelection, ChoiceTarget, ChoiceValue};
-use nervix_models::{BranchName, DomainName, ModelKind, NodeRef, RelayName};
+use nervix_models::{DomainName, ModelKind, NodeRef, ParametrizerName, RelayName};
 use nervix_recovery::Discarded as _;
 
 use super::super::{
@@ -30,8 +30,8 @@ use super::super::{
     SessionServiceImpl,
 };
 
-const INGESTOR: &str =
-    "CREATE HTTP ENDPOINT INGESTOR source FROM ingress MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB";
+const INGESTOR: &str = "CREATE HTTP ENDPOINT INGESTOR source FROM ingress MODE NO ACK ON QUIESCE \
+                        BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE";
 const EMITTER: &str = "CREATE KAFKA TOPIC EMITTER sink FROM readings TO broker TOPIC 'events' \
                        MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s";
 const CORRELATOR: &str = "CREATE CORRELATOR pairs LEFT FROM readings RIGHT FROM labels CORRELATE \
@@ -50,7 +50,7 @@ async fn queue_configuration(
         "CREATE SCHEMA reading ( id I64, value STRING );",
         "CREATE SCHEMA label ( id I64, name STRING );",
         "CREATE SCHEMA reading_key ( id I64 );",
-        "CREATE BRANCH by_reading SCHEMA reading_key TTL 1h;",
+        "CREATE PARAMETRIZER by_reading SCHEMA reading_key TTL 1h;",
         "CREATE RELAY readings SCHEMA reading UNBRANCHED;",
         "CREATE RELAY more_readings SCHEMA reading UNBRANCHED;",
         "CREATE RELAY labels SCHEMA label UNBRANCHED;",
@@ -85,7 +85,10 @@ fn relay(name: &str) -> ChoiceSelection {
 
 fn branch(name: &str) -> ChoiceSelection {
     ChoiceSelection {
-        value: ChoiceValue::Model(NodeRef::new(ModelKind::Branch, named::<BranchName>(name))),
+        value: ChoiceValue::Model(NodeRef::new(
+            ModelKind::Parametrizer,
+            named::<ParametrizerName>(name),
+        )),
     }
 }
 

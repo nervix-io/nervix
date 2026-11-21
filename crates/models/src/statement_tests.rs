@@ -29,6 +29,7 @@ fn http_endpoint(endpoint: &str) -> HttpEndpointIngestor {
         mode: EndpointIngestMode::NoAck,
         quiesce: IngestQuiesceMode::EndpointBuffer {
             max_size: "1MiB".to_string(),
+            response: crate::EndpointPauseResponse::Immediate,
         },
     }
 }
@@ -42,8 +43,8 @@ fn http_endpoint_alteration(
 
 #[test]
 fn branch_selection_displays_its_named_or_unbranched_declaration() {
-    let name =
-        crate::BranchName::parse("by_tenant").assured("by_tenant is a valid branch identifier");
+    let name = crate::ParametrizerName::parse("by_tenant")
+        .assured("by_tenant is a valid branch identifier");
     assert_eq!(BranchSelection::branched_by(name).to_string(), "by_tenant");
     assert_eq!(BranchSelection::unbranched().to_string(), "UNBRANCHED");
 }
@@ -825,9 +826,12 @@ fn inherited_topology_retains_the_key_contract_without_inventing_execution_units
     assert_eq!(waiting.fields(), schema.fields.as_slice());
     assert_eq!(waiting.partitions(), None);
     assert!(waiting.units().is_empty());
-    let resolved = waiting
-        .clone()
-        .with_partitions(crate::ResolvedBranchPartitions::Inherited(nonzero!(12u16)));
+    let resolved =
+        waiting
+            .clone()
+            .with_partitions(crate::ResolvedParametrizerPartitions::Inherited(nonzero!(
+                12u16
+            )));
     assert!(waiting.same_key_as(&resolved));
     assert_eq!(
         resolved.units(),
@@ -837,12 +841,15 @@ fn inherited_topology_retains_the_key_contract_without_inventing_execution_units
 
 #[test]
 fn inherited_declarations_keep_discovered_and_declared_counts_distinct() {
-    assert_eq!(crate::BranchPartitions::Inherited.declared_count(), None);
-    let grouped = crate::BranchPartitions::InheritedGrouped(nonzero!(16u16));
+    assert_eq!(
+        crate::ParametrizerPartitions::Inherited.declared_count(),
+        None
+    );
+    let grouped = crate::ParametrizerPartitions::InheritedGrouped(nonzero!(16u16));
     assert_eq!(grouped.declared_count(), Some(nonzero!(16u16)));
     assert_eq!(grouped.direct_layout(), None);
     assert_eq!(
-        crate::BranchPartitions::ONE.direct_layout(),
-        Some(crate::ResolvedBranchPartitions::ONE)
+        crate::ParametrizerPartitions::ONE.direct_layout(),
+        Some(crate::ResolvedParametrizerPartitions::ONE)
     );
 }

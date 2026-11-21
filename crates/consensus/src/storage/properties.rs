@@ -114,7 +114,8 @@ fn password_credential_work_refuses_inconsistent_recovered_policy_and_users() {
             let name: nervix_models::UserName = fixture_name("operator");
             state.users.insert(
                 name.clone(),
-                crate::UserCredentials {
+                crate::UserRecord {
+                    labels: nervix_models::EntityLabels::default(),
                     name,
                     password_credential: nervix_models::PasswordCredential::from_parts(
                         cost, [1; 16], [2; 64],
@@ -426,6 +427,7 @@ fn fixture_name<N: std::str::FromStr<Err: std::fmt::Debug>>(text: &str) -> N {
 
 fn fixture_domain(id: DomainName) -> nervix_models::DomainState {
     nervix_models::DomainState {
+        labels: nervix_models::EntityLabels::default(),
         id,
         config: nervix_models::DomainConfig {
             pace: nervix_models::DomainPace::Unpaced,
@@ -551,6 +553,7 @@ fn recovery_refuses_an_expired_execution_without_an_issue_time() {
         [1; 32],
         nervix_models::Timestamp::from_unix_nanos(1),
         crate::CommandExecutionEffect::CreateUser {
+            labels: nervix_models::EntityLabels::default(),
             if_not_exists: false,
             name: fixture_name("operator"),
             password_credential: nervix_models::PasswordCredential::from_parts(

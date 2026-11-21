@@ -1249,10 +1249,10 @@ request without the label still checks the book's structure and its tooling.
 
 ### Credential Storage Release Note
 
-This revision requires the current `raft_node_selector_runtime_entity_labels_inherited_topology_ratelimit_stopping_transactionalstart_duration_*` consensus namespace and `ClusterState`
-encoding 42. A stored state with a different namespace or encoding fails with
+This revision requires the `raft_parametrizer_endpoint_pause_domain_resource_user_labels_duration_*` consensus namespace
+and `ClusterState` encoding 44. A stored state with a different namespace or encoding fails with
 `invalid consensus record storage; recreate the node's stored state` before user records or log
 entries are decoded. Recreate the node's stored state; no credential conversion is performed.
-User backup records require version 2 and contain the complete typed credential. A users record
-with another version is refused by its record header before decoding. Backups without a users
-section retain their existing contract. Protect archives as secrets.
+User backup records require version 3 and contain the complete typed credential and the user's
+labels. Nervix checks that version in the record header before decoding the payload. Protect
+archives as secrets.

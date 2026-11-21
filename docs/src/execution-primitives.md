@@ -396,13 +396,14 @@ A node runs its variable-size encoding, decoding, validation, hashing, compilati
 execution and synchronous filesystem or database work through the bounded executor, which admits
 each job into a CPU or storage class, charges its memory, and gives it the cancellation it checks
 between its bounded units. Operator-supplied code the node cannot bound, a Roto UDF call, a JAQ
-transformation or an inferencer's model run, takes the extension class, so a program that never returns holds only that class's
-workers. Password hashing takes the credentials class and its own budget, so anyone who can reach a
-listener spends only those, and saturated data, extension or bulk work never delays a login. A
-PBKDF2-HMAC-SHA-512 password operation charges its 64-byte verifier buffer; the Credentials memory
-class also carries mounted NATS credentials files and has a separate 19 MiB capacity. The
-executor's storage workers are the one built-in owner of the runtime's blocking pool, and no file
-owns `task::block_in_place`, which blocks the runtime worker thread that calls it.
+transformation, an inferencer's model run or the scratch WASM guest a state inspection renders a
+committed checkpoint on, takes the extension class, so a program that never returns holds only that
+class's workers. Password hashing takes the credentials class and its own budget, so anyone who can
+reach a listener spends only those, and saturated data, extension or bulk work never delays a login.
+A PBKDF2-HMAC-SHA-512 password operation charges its 64-byte verifier buffer; the Credentials memory
+class also carries mounted NATS credentials files and has a separate 19 MiB capacity. The executor's
+storage workers are the one built-in owner of the runtime's blocking pool, and no file owns
+`task::block_in_place`, which blocks the runtime worker thread that calls it.
 
 Connector network control calls use a storage class of their own, with two admitted workers by
 default and the same bounded queue policy as other classes. Kafka ingestor metadata, watermarks,
@@ -465,9 +466,15 @@ hands a freed place to an existing `WaitForPlace` waiter before a later requeste
 data. `AcceptedWork` is a borrowed capability: ordinary admission adds no allocation, thread,
 lock or reference count. VM execution still owns its class and charge decisions. Branch input
 preparation, retained inference setup and runs, and relay carriage use the same waiting FIFO.
-Request work keeps its immediate refusal, including client batch decoding, statement constants,
-subscription predicates and state inspection; ingestion-boundary admission follows its source's
-own contract.
+Request work, whose caller still holds its input and waits on the answer, keeps its immediate
+refusal through the refusing `run_cpu` and `run_storage`, including client batch decoding,
+statement constants, subscription predicates, state inspection, an HTTP endpoint body and the
+frames of a request one node sends another. Every other job states `QueueAdmission::WaitForPlace`
+and waits: the unfolding of every payload an ingestor handed over, acknowledged or not, relay and
+subscription carriage, the answer of an interconnect request whose handler already ran,
+checkpoints and state captures, compilation for a committed change, lifecycle steps, and the
+consensus storage worker's jobs, which `submit_storage` admits in order. A wait ends in a refusal
+only once the executor admits no more work.
 
 An accepted owner can acquire a charged CPU queue place before transferring mutable state into a
 job. Every inferencer does this before moving its branch's native session into the job that runs

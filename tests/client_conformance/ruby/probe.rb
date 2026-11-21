@@ -985,10 +985,10 @@ module Probe
     raise 'typed cluster node preview' unless nodes.is_a?(NX::NodeInspection) && nodes.names == ['node-1'] && nodes.json.include?('"architecture":')
     report('INSPECTION nodes names=node-1')
     license = session.native.execute(session.native.prepare('DESCRIBE LICENSE;')).state_inspection
-    unless license.domain.nil? && license.entity_name.nil? && license.entity_kind == 'LICENSE' && license.counts.rows == 3 && license.counts.branches.zero?
+    unless license.domain.nil? && license.entity_name.nil? && license.entity_kind == 'LICENSE' && license.counts.rows == 4 && license.counts.branches.zero?
       raise 'typed cluster licensing observation'
     end
-    report('INSPECTION license rows=3')
+    report('INSPECTION license rows=4')
     execution = session.native.prepare('SHOW RELAY events MATERIALIZED STATE FOR UNBRANCHED LIMIT 1 FORMAT JSON;')
     outcome = session.native.execute(execution)
     inspection = outcome.state_inspection
@@ -1010,12 +1010,12 @@ module Probe
     raise 'read origin' unless unit.owner == unit.origin_node && unit.origin_incarnation.positive? && unit.origin_fingerprint.bytesize == 32 && unit.origin_stage == NX::InspectionStage::LIVE
     section = unit.sections.fetch(0)
     schema = section.schema
-    raise 'branch sensitivity' unless schema.branch == 'by_tenant' && schema.key_fields.fetch(0).sensitive
+    raise 'branch sensitivity' unless schema.parametrizer == 'by_tenant' && schema.key_fields.fetch(0).sensitive
     raise 'schema order' unless schema.fields.first(3).map(&:name) == %w[tenant secret sequence]
     raise 'field metadata' unless schema.fields.fetch(0).sensitive && schema.fields.fetch(1).sensitive && schema.fields.fetch(2).type == NX::FieldType::I64
     raise 'section metadata' unless section.omitted_rows == 1 && section.watermark_low != section.watermark_high
     frame = section.frames.fetch(0)
-    raise 'frame schema' unless frame.row_count == 1 && frame.schema.branch == schema.branch
+    raise 'frame schema' unless frame.row_count == 1 && frame.schema.parametrizer == schema.parametrizer
     buffer = frame.frame
     expected = buffer.get_string
     raise 'verified read-only bytes' unless buffer.readonly? && !expected.empty?
@@ -1070,9 +1070,9 @@ module Probe
     schema = opened.schema
     fields = fields(schema, PART_ROWS)
     key_fields = fields(schema, PART_BRANCH_KEY)
-    branch_name = schema.branch
+    parametrizer_name = schema.parametrizer
     fields.each { |field| report(field.line('FIELD')) }
-    report("BRANCH #{branch_name}") unless branch_name.nil?
+    report("PARAMETRIZER #{parametrizer_name}") unless parametrizer_name.nil?
     key_fields.each { |field| report(field.line('KEY')) }
     report('SUBSCRIBED')
 

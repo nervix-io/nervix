@@ -543,7 +543,7 @@ async function main(): Promise<void> {
   const keyFields: Field[] = [];
   const branch = schema.branch();
   if (branch !== null) {
-    report(`BRANCH ${member(branch.branch())}`);
+    report(`PARAMETRIZER ${member(branch.parametrizer())}`);
     for (let index = 0; index < branch.fieldsLength(); index += 1) {
       const field = readField(member(branch.fields(index)));
       keyFields.push(field);
@@ -761,7 +761,7 @@ function rowSchema(schema: wire.RowSchema): RowSchemaLines {
   }
   const branch = schema.branch();
   if (branch !== null) {
-    lines.push(`BRANCH ${member(branch.branch())}`);
+    lines.push(`PARAMETRIZER ${member(branch.parametrizer())}`);
     for (let index = 0; index < branch.fieldsLength(); index += 1) {
       const field = readField(member(branch.fields(index)));
       keys.push(field);
@@ -1613,8 +1613,46 @@ function wasmUnitLines(state: wire.WasmUnitStateFacts): string[] {
     if (recovery !== null) {
       lines.push(`STATE_WASM_RECOVERY branch=${branch} generation=${recovery.generation()} rejection=${wire.WasmSavedStateRejection[member(recovery.rejection())]} request=${recovery.request()} outcome=${wire.WasmRecoveryOutcome[member(recovery.outcome())]}`);
     }
+    const description = entry.description();
+    if (description !== null) {
+      if (checkpoint === null) throw new Error('a WASM guest-state description has no checkpoint beside it');
+      lines.push(...wasmDescriptionLines(branch, description));
+    }
   }
   return lines;
+}
+
+/**
+ * A guest-state description: its restored generation and revision, then its sections with their
+ * fields, which are always sensitive, or its failed render's stage and diagnostic.
+ */
+function wasmDescriptionLines(branch: string, description: wire.WasmGuestStateDescription): string[] {
+  const restored = `STATE_WASM_DESCRIPTION branch=${branch} generation=${description.generation()} revision=${optionalNumber(description.revision())}`;
+  switch (description.renderType()) {
+    case wire.WasmGuestStateRender.WasmGuestStateSections: {
+      const described = member(description.render(new wire.WasmGuestStateSections()) as wire.WasmGuestStateSections | null);
+      const lines = [`${restored} outcome=described sections=${described.sectionsLength()}`];
+      for (let i = 0; i < described.sectionsLength(); i += 1) {
+        const section = member(described.sections(i));
+        lines.push(`STATE_WASM_SECTION branch=${branch} name=${section.name()} rows=${section.rows()} fields=${section.fieldsLength()}`);
+        for (let j = 0; j < section.fieldsLength(); j += 1) {
+          const field = readField(member(section.fields(j)));
+          if (!field.sensitive) throw new Error(`guest section ${section.name()} field ${field.name} is not sensitive`);
+          lines.push(fieldLine('STATE_WASM_FIELD', field));
+        }
+      }
+      return lines;
+    }
+    case wire.WasmGuestStateRender.WasmGuestStateRenderFailure: {
+      const failure = member(description.render(new wire.WasmGuestStateRenderFailure()) as wire.WasmGuestStateRenderFailure | null);
+      const stage = member(failure.stage());
+      const name = wire.WasmGuestStateRenderStage[stage];
+      if (name === undefined) throw new Error(`undeclared WASM render stage ${stage}`);
+      return [`${restored} outcome=failed stage=${name} diagnostic=${text(failure.diagnostic())}`];
+    }
+    default:
+      throw new Error(`unknown WASM guest-state render ${description.renderType()}`);
+  }
 }
 
 function stateInspectionLines(state: wire.StateInspection): string[] {
@@ -1682,11 +1720,35 @@ function stateInspectionLines(state: wire.StateInspection): string[] {
   return lines;
 }
 
+function entityLabelOwner(value: wire.EntityLabelsInspection): { domain: string, kind: string, name: string } {
+  switch (value.ownerType()) {
+    case wire.EntityLabelOwner.ModelLabelOwner: {
+      const owner = member(value.owner(new wire.ModelLabelOwner()) as wire.ModelLabelOwner | null);
+      const model = member(owner.model());
+      return { domain: member(owner.domain()), kind: wire.ModelKind[member(model.kind())].toLowerCase(), name: member(model.name()) };
+    }
+    case wire.EntityLabelOwner.DomainLabelOwner: {
+      const owner = member(value.owner(new wire.DomainLabelOwner()) as wire.DomainLabelOwner | null);
+      const name = member(owner.name());
+      return { domain: name, kind: 'domain', name };
+    }
+    case wire.EntityLabelOwner.ResourceLabelOwner: {
+      const owner = member(value.owner(new wire.ResourceLabelOwner()) as wire.ResourceLabelOwner | null);
+      return { domain: member(owner.domain()), kind: 'resource', name: member(owner.name()) };
+    }
+    case wire.EntityLabelOwner.UserLabelOwner: {
+      const owner = member(value.owner(new wire.UserLabelOwner()) as wire.UserLabelOwner | null);
+      return { domain: 'none', kind: 'user', name: member(owner.name()) };
+    }
+    default: throw new Error('labels have an undeclared owner');
+  }
+}
+
 function entityLabelLines(value: wire.EntityLabelsInspection): string[] {
-  const entity = member(value.entity());
+  const { domain, kind, name } = entityLabelOwner(value);
   const policy = member(value.policy());
   const limits = member(policy.limits());
-  const lines = [`ENTITY_LABELS domain=${value.domain()} kind=${wire.ModelKind[member(entity.kind())].toLowerCase()} name=${entity.name()} policy=${policy.revision()} limits=${limits.count()}/${limits.keyBytes()}/${limits.valueBytes()}/${limits.bytes()}`];
+  const lines = [`ENTITY_LABELS domain=${domain} kind=${kind} name=${name} policy=${policy.revision()} limits=${limits.count()}/${limits.keyBytes()}/${limits.valueBytes()}/${limits.bytes()}`];
   switch (value.viewType()) {
     case wire.EntityLabelView.CommittedEntityLabels: {
       const view = member(value.view(new wire.CommittedEntityLabels()) as wire.CommittedEntityLabels | null);
@@ -1694,6 +1756,7 @@ function entityLabelLines(value: wire.EntityLabelsInspection): string[] {
       break;
     }
     case wire.EntityLabelView.StagedEntityLabels: {
+      if (kind === 'domain' || kind === 'user') throw new Error('administrative labels have no staged view');
       const view = member(value.view(new wire.StagedEntityLabels()) as wire.StagedEntityLabels | null);
       const preview = member(view.preview());
       const basis = member(member(preview.planningBasis()).bytesArray());

@@ -111,7 +111,11 @@ Feature: Verification of licensing decisions
       """
       ACTIVATE LICENSE PERSISTENT WITH KEY 'NVXK-TESTABCD-fixture-secret';
       """
-    Then the committed license decision is saved as placeholder "accepted_license"
+    # The stream's first sync goes out before the tampered refresh, so it reports the saved
+    # decision. A sync sent after that refresh reports the decision the service issued for it,
+    # and the cluster then rightly moves to the service's next decision (see the next outline).
+    Then the licensing service holds exactly one authenticated notification stream
+    And the committed license decision is saved as placeholder "accepted_license"
     Given the next licensing response has "<tamper>" tampering
     When an explicit license refresh is refused by decision verification
     Then the committed license decision matches placeholder "accepted_license"
@@ -139,6 +143,31 @@ Feature: Verification of licensing decisions
       | 3            | service          |
       | 1            | request          |
       | 3            | request          |
+
+  Scenario Outline: A sync after a refused <tamper> response moves the cluster to the service's next decision on <cluster_size> nodes
+    Given an HTTPS licensing test service is available
+    And the licensing notification stream is "blocked"
+    And a <cluster_size> node nervix cluster is started
+    When these Plexus commands are executed on the leader node
+      """
+      ACTIVATE LICENSE PERSISTENT WITH KEY 'NVXK-TESTABCD-fixture-secret';
+      """
+    Then the licensing service holds exactly one authenticated notification stream
+    And the committed license decision is saved as placeholder "accepted_license"
+    Given the next licensing response has "<tamper>" tampering
+    When an explicit license refresh is refused by decision verification
+    And the licensing notification stream is "normal"
+    Then the committed license decision is newer than placeholder "accepted_license"
+    And the committed license decision is the licensing service's current decision
+    And the licensing stream's first sync reported a newer decision than placeholder "accepted_license"
+    And the licensing request outcome "rejected_by_cluster" was reported
+
+    Examples:
+      | cluster_size | tamper    |
+      | 1            | signature |
+      | 3            | signature |
+      | 1            | revision  |
+      | 3            | revision  |
 
   Scenario Outline: A revoked-key response retains the decision and marks its signing key on <cluster_size> nodes
     Given an HTTPS licensing test service is available

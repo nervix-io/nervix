@@ -1280,9 +1280,12 @@ impl UdfExecutor {
             Err(error) => return Err(error.change_context(UdfError::CompileExecution)),
         };
         let compiled = executor
-            .run_cpu(CpuClass::Bulk, reservation, move |_charge, cancellation| {
-                Self::compile_sync(models, Some(cancellation))
-            })
+            .run_cpu_with(
+                CpuClass::Bulk,
+                nervix_execution::QueueAdmission::WaitForPlace,
+                reservation,
+                move |_charge, cancellation| Self::compile_sync(models, Some(cancellation)),
+            )
             .await;
         match compiled {
             Ok(compiled) => compiled,

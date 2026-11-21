@@ -122,15 +122,16 @@ impl Registry {
             (ResolvedBranching::Unbranched, WasmStateResetScope::Unbranched) => {
                 ConcreteBranchCoverage::Unbranched
             }
-            (ResolvedBranching::Branched { branch, .. }, WasmStateResetScope::AllBranches) => {
-                ConcreteBranchCoverage::AllOfBranch {
-                    branch: branch.clone(),
-                }
-            }
             (
-                ResolvedBranching::Branched { branch, .. },
+                ResolvedBranching::Branched { parametrizer, .. },
+                WasmStateResetScope::AllBranches,
+            ) => ConcreteBranchCoverage::AllOfParametrizer {
+                parametrizer: parametrizer.clone(),
+            },
+            (
+                ResolvedBranching::Branched { parametrizer, .. },
                 WasmStateResetScope::Branch(fingerprint),
-            ) => ConcreteBranchCoverage::selected(branch.clone(), [fingerprint]).map_err(
+            ) => ConcreteBranchCoverage::selected(parametrizer.clone(), [fingerprint]).map_err(
                 |error| Report::new(TransactionPlanningError::InvalidImpactReport { error }),
             )?,
             _ => {

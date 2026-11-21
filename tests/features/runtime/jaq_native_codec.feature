@@ -34,7 +34,7 @@ Feature: JAQ native codec
         TO SCHEMA notification
         WITH JAQ TRANSFORMATIONS ON INGESTION '<transformation>';
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
-        CREATE IF NOT EXISTS BRANCH by_http_notifications SCHEMA user_id_branch TTL 5m;
+        CREATE IF NOT EXISTS PARAMETRIZER by_http_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_http_notifications;
         CREATE VHOST edge http-{{test_id}}.example.com;
         CREATE HTTP ENDPOINT http_notifications_endpoint
@@ -42,7 +42,7 @@ Feature: JAQ native codec
         PATH '/ingest';
         CREATE HTTP ENDPOINT INGESTOR http_notifications
         FROM http_notifications_endpoint MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING notification_codec
         TO notifications
         INHERIT ALL
         BRANCHED BY by_http_notifications
@@ -100,7 +100,7 @@ Feature: JAQ native codec
         WITH JAQ TRANSFORMATIONS
           ON EMITTING '{t: "notification", c: [{t: "user_id", c: [(.user_id | tostring)]}, {t: "payload", c: [.payload]}]}';
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
-        CREATE IF NOT EXISTS BRANCH by_http_notifications SCHEMA user_id_branch TTL 5m;
+        CREATE IF NOT EXISTS PARAMETRIZER by_http_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_http_notifications;
         CREATE VHOST edge http-{{test_id}}.example.com;
         CREATE HTTP ENDPOINT http_notifications_endpoint
@@ -108,7 +108,7 @@ Feature: JAQ native codec
         PATH '/ingest';
         CREATE HTTP ENDPOINT INGESTOR http_notifications
         FROM http_notifications_endpoint MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING json_notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING json_notification_codec
         TO notifications
         INHERIT ALL
         BRANCHED BY by_http_notifications
@@ -178,7 +178,7 @@ Feature: JAQ native codec
 
       CREATE HTTP ENDPOINT INGESTOR http_notifications
         FROM http_notifications_endpoint MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING xml_notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING xml_notification_codec
         TO notifications
         INHERIT ALL
         UNBRANCHED
@@ -252,7 +252,7 @@ Feature: JAQ native codec
       CREATE HTTP ENDPOINT readings_endpoint ON edge PATH '/readings';
       CREATE HTTP ENDPOINT INGESTOR http_readings
         FROM readings_endpoint MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING exact_reading_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING exact_reading_codec
         TO readings
         INHERIT ALL
         UNBRANCHED

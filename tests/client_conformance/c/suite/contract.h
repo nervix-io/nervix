@@ -1020,10 +1020,10 @@ static void test_b6_columns_use_size_queries_and_pointer_lengths(void) {
     uint32_t width = 1;
     suite_check(nx_schema_field_level(schema, NX_PART_ROWS, 8, 1, &type, &width));
     REQUIRE(type == NX_TYPE_STRING && width == 0);
-    const uint8_t *branch = NULL;
-    size_t branch_len = 0;
-    REQUIRE(nx_schema_branch(schema, &branch, &branch_len));
-    REQUIRE(suite_equal(branch, branch_len, "by_tenant"));
+    const uint8_t *parametrizer = NULL;
+    size_t parametrizer_len = 0;
+    REQUIRE(nx_schema_parametrizer(schema, &parametrizer, &parametrizer_len));
+    REQUIRE(suite_equal(parametrizer, parametrizer_len, "by_tenant"));
     bool nullable = false, sensitive = false;
     const uint8_t *name = NULL;
     size_t name_len = 0;
@@ -1143,7 +1143,7 @@ static void test_entity_labels_retain_exact_values_and_revision_views(void) {
     suite_drop(outcome); /* Retained metadata is independent of its outcome. */
     const uint8_t *text = NULL;
     size_t length = 0;
-    nx_entity_labels_domain(labels, &text, &length);
+    REQUIRE(nx_entity_labels_domain(labels, &text, &length));
     REQUIRE(suite_equal(text, length, suite_env("NERVIX_PROBE_DOMAIN")));
     nx_entity_labels_entity_kind(labels, &text, &length);
     REQUIRE(suite_equal(text, length, "SCHEMA"));
@@ -1189,6 +1189,35 @@ static void test_entity_labels_retain_exact_values_and_revision_views(void) {
     nx_entity_labels *absent = NULL;
     suite_kind(nx_outcome_entity_labels(created, &absent), NX_ERROR_INVALID_ARGUMENT);
     REQUIRE(absent == NULL);
+
+    suite_completed(session, "CREATE USER c_label_user WITH PASSWORD 'probe-password' LABELS { 'owner' = ' Δ ' };");
+    nx_outcome *account_outcome = suite_completed(session, "SHOW LABELS ON USER c_label_user FORMAT JSON;");
+    nx_entity_labels *account = NULL;
+    suite_check(nx_outcome_entity_labels(account_outcome, &account));
+    HOLD(nx_entity_labels, account);
+    suite_drop(account_outcome);
+    REQUIRE(!nx_entity_labels_domain(account, &text, &length));
+    nx_entity_labels_entity_kind(account, &text, &length);
+    REQUIRE(suite_equal(text, length, "USER"));
+    nx_entity_labels_entity_name(account, &text, &length);
+    REQUIRE(suite_equal(text, length, "c_label_user"));
+    suite_check(nx_entity_labels_entry(account, 0, &key, &key_length, &label_value, &value_length));
+    REQUIRE(suite_equal(key, key_length, "owner") && suite_equal(label_value, value_length, " Δ "));
+
+    suite_completed(session, "CREATE RESOURCE c_label_resource LABELS { 'empty' = '' };");
+    nx_outcome *resource_outcome = suite_completed(session, "DESCRIBE RESOURCE c_label_resource;");
+    nx_entity_labels *resource = NULL;
+    suite_check(nx_outcome_entity_labels(resource_outcome, &resource));
+    HOLD(nx_entity_labels, resource);
+    suite_drop(resource_outcome);
+    REQUIRE(nx_entity_labels_domain(resource, &text, &length));
+    REQUIRE(suite_equal(text, length, suite_env("NERVIX_PROBE_DOMAIN")));
+    nx_entity_labels_entity_kind(resource, &text, &length);
+    REQUIRE(suite_equal(text, length, "RESOURCE"));
+    nx_entity_labels_entity_name(resource, &text, &length);
+    REQUIRE(suite_equal(text, length, "c_label_resource"));
+    suite_check(nx_entity_labels_entry(resource, 0, &key, &key_length, &label_value, &value_length));
+    REQUIRE(suite_equal(key, key_length, "empty") && value_length == 0);
 }
 
 static void test_node_preview_retains_committed_facts(void) {
@@ -1239,7 +1268,7 @@ static void test_inspection_retains_typed_state_after_its_outcome_is_released(vo
         suite_drop(license_outcome);
         uint64_t license_branches = 0, license_rows = 0, license_bytes = 0;
         REQUIRE(nx_inspection_counts(license_inspection, &license_branches, &license_rows, &license_bytes));
-        REQUIRE(license_branches == 0 && license_rows == 3 && license_bytes > 0);
+        REQUIRE(license_branches == 0 && license_rows == 4 && license_bytes > 0);
         const uint8_t *license_json = NULL;
         size_t license_json_len = 0;
         nx_inspection_json(license_inspection, &license_json, &license_json_len);

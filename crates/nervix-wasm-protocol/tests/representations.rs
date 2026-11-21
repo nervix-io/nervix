@@ -207,6 +207,51 @@ fn bolero_snapshots_preserve_opaque_state_and_init_bytes() {
 }
 
 #[test]
+fn bolero_state_descriptions_preserve_sections_schemas_and_rows() {
+    bolero::check!()
+        .with_iterations(256)
+        .with_max_len(2048)
+        .for_each(|bytes| {
+            let mut values = WasmValues::new(bytes);
+            let description = values.state_description();
+            for original in [description, StateDescription { sections: vec![] }] {
+                let encoded = original.encode();
+                assert_eq!(
+                    StateDescription::decode(&encoded).assured("a valid state description decodes"),
+                    original
+                );
+                let view = StateDescriptionRef::decode(&encoded)
+                    .assured("a valid state description verifies");
+                assert_eq!(view.sections().len(), original.sections.len());
+                let frame_start = encoded.as_ptr().addr();
+                let frame_end = frame_start
+                    .checked_add(encoded.len())
+                    .assured("a frame held in memory ends within the address space");
+                for (section, expected) in view.sections().zip(&original.sections) {
+                    assert_eq!(
+                        section.schema().assured("a valid section schema decodes"),
+                        expected.schema
+                    );
+                    let rows = section.arrow_ipc_batch();
+                    assert_eq!(rows, expected.arrow_ipc_batch.as_slice());
+                    // The view lends the section's rows from the message instead of copying them.
+                    let rows_start = rows.as_ptr().addr();
+                    assert!(frame_start <= rows_start);
+                    assert!(
+                        rows_start
+                            .checked_add(rows.len())
+                            .assured("a borrowed vector ends within its frame")
+                            <= frame_end
+                    );
+                }
+                let mut builder = FlatBufferBuilder::with_capacity(1);
+                original.encode_in(&mut builder);
+                assert_eq!(builder.finished_data(), encoded);
+            }
+        });
+}
+
+#[test]
 fn bolero_reset_and_rejection_codes_preserve_typed_distinctions() {
     bolero::check!()
         .with_iterations(256)

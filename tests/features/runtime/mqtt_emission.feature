@@ -20,7 +20,7 @@ Feature: MQTT emission
         FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
-        CREATE IF NOT EXISTS BRANCH by_mqtt_notifications SCHEMA user_id_branch TTL 5m;
+        CREATE IF NOT EXISTS PARAMETRIZER by_mqtt_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_mqtt_notifications;
         CREATE MQTT CLIENT mqtt_ingress
         CONFIG {
@@ -102,7 +102,7 @@ Feature: MQTT emission
         source_user_id I64
       );
       CREATE SCHEMA user_id_branch ( user_id I64 );
-      CREATE BRANCH by_kafka_notifications SCHEMA user_id_branch TTL 5m;
+      CREATE PARAMETRIZER by_kafka_notifications SCHEMA user_id_branch TTL 5m;
       CREATE RELAY notifications SCHEMA notification BRANCHED BY by_kafka_notifications;
       CREATE RELAY emitter_errors SCHEMA emitter_error BRANCHED BY by_kafka_notifications;
       CREATE KAFKA CLIENT kafka_ingress CONFIG {
@@ -433,7 +433,7 @@ Feature: MQTT emission
       CREATE HTTP ENDPOINT held_ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR held_ingestor
         FROM held_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING held_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING held_codec
         TIMESTAMP NOW
         TO held_events
           INHERIT ALL

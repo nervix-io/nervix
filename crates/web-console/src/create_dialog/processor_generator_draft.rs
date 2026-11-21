@@ -145,7 +145,7 @@ mod tests {
         assert!(draft.select_relay(&relay("notifications")));
         // A selection of another kind leaves the relay as it is.
         assert!(!draft.select_relay(&NodeRef::new(
-            ModelKind::Branch,
+            ModelKind::Parametrizer,
             ModelName::parse("by_tenant").assured("test name is valid"),
         )));
         assert_eq!(

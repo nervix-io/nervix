@@ -26,9 +26,9 @@ use serde::{Deserialize, Serialize};
 use strum::AsRefStr;
 
 use crate::{
-    BranchKeyFingerprint, BranchName, BranchPartitionEpoch, ClusterNodeName,
-    CommandExecutionReference, CreateWasmProcessor, DomainName, DomainNodeRef, IngestorEntity,
-    KafkaIngestor, KafkaOffsetMode, Model, ModelKind, ModelName, NodeRef, PartitionEpochNumber,
+    BranchKeyFingerprint, ClusterNodeName, CommandExecutionReference, CreateWasmProcessor,
+    DomainName, DomainNodeRef, IngestorEntity, KafkaIngestor, KafkaOffsetMode, Model, ModelKind,
+    ModelName, NodeRef, ParametrizerName, ParametrizerPartitionEpoch, PartitionEpochNumber,
     PartitionTransition, ResolvedBranching, SchemaFingerprint, UniquelyKindedModel, Unit,
     WasmSavedStateRejection, WasmStateGeneration, WasmStateGenerations, WasmStateRecoveries,
     WasmStateRecoveryAdmission, WasmStateRecoveryOutcome, WasmStateReset, WasmStateResetPhase,
@@ -171,7 +171,7 @@ pub struct DomainSchedule {
     pub placement_groups: Vec<PlacementGroupSchedule>,
     /// The partition epoch of every branch whose partition count changed since it was created. A
     /// branch without an entry keeps the count it was created with, in epoch one.
-    pub partition_epochs: BTreeMap<BranchName, BranchPartitionEpoch>,
+    pub partition_epochs: BTreeMap<ParametrizerName, ParametrizerPartitionEpoch>,
     pub partition_topology: crate::PartitionTopology,
 }
 
@@ -199,7 +199,7 @@ impl DomainSchedule {
     #[must_use]
     pub fn with_partition_epochs(
         mut self,
-        epochs: BTreeMap<BranchName, BranchPartitionEpoch>,
+        epochs: BTreeMap<ParametrizerName, ParametrizerPartitionEpoch>,
     ) -> Self {
         self.partition_epochs = epochs;
         self
@@ -213,8 +213,8 @@ impl DomainSchedule {
     }
 
     /// The partition epoch `branch` executes in: one until its count first changes.
-    pub fn partition_epoch_of(&self, branch: &BranchName) -> PartitionEpochNumber {
-        match self.partition_epochs.get(branch) {
+    pub fn partition_epoch_of(&self, parametrizer: &ParametrizerName) -> PartitionEpochNumber {
+        match self.partition_epochs.get(parametrizer) {
             Some(epoch) => epoch.number,
             None => PartitionEpochNumber::FIRST,
         }
@@ -222,23 +222,26 @@ impl DomainSchedule {
 
     /// The transition `branch` is in while keys placed under its previous count may still lie
     /// outside their partition.
-    pub fn partition_transition_of(&self, branch: &BranchName) -> Option<&PartitionTransition> {
-        self.partition_epochs.get(branch)?.transition.as_ref()
+    pub fn partition_transition_of(
+        &self,
+        parametrizer: &ParametrizerName,
+    ) -> Option<&PartitionTransition> {
+        self.partition_epochs.get(parametrizer)?.transition.as_ref()
     }
 
     /// This schedule once `branch`'s partition transition retired: no unit holds a key outside its
     /// partition any more, so the epoch keeps its count without a transition and every node that
     /// keeps state per key for the branch loses the units it kept for the previous count.
     #[must_use]
-    pub fn with_partition_transition_retired(&self, branch: &BranchName) -> Self {
+    pub fn with_partition_transition_retired(&self, parametrizer: &ParametrizerName) -> Self {
         let mut retired = self.clone();
-        let Some(epoch) = retired.partition_epochs.get_mut(branch) else {
+        let Some(epoch) = retired.partition_epochs.get_mut(parametrizer) else {
             return retired;
         };
         let partitions = epoch.partitions;
         *epoch = epoch.retired();
         for node in retired.nodes.values_mut() {
-            if node.partition_branch() != Some(branch) || !node.keeps_state_per_key() {
+            if node.partition_parametrizer() != Some(parametrizer) || !node.keeps_state_per_key() {
                 continue;
             }
             node.units.retain(|unit, _| partitions.schedules(*unit));
@@ -252,7 +255,7 @@ impl DomainSchedule {
         if !node.keeps_state_per_key() {
             return Vec::new();
         }
-        let Some(branch) = node.partition_branch() else {
+        let Some(branch) = node.partition_parametrizer() else {
             return Vec::new();
         };
         match self.partition_epochs.get(branch) {
@@ -662,11 +665,11 @@ impl ScheduledNode {
 
     /// The branch whose partition count decides this node's units: none for a node a branch's
     /// partitions do not divide.
-    pub fn partition_branch(&self) -> Option<&BranchName> {
+    pub fn partition_parametrizer(&self) -> Option<&ParametrizerName> {
         if !Self::uses_branch_units(self.config.as_ref()) {
             return None;
         }
-        self.resolved_branching.as_ref()?.branch()
+        self.resolved_branching.as_ref()?.parametrizer()
     }
 
     /// Adds `holding`, the units a partition transition keeps scheduled beyond the current count,
@@ -830,7 +833,10 @@ impl ScheduledNode {
     }
 
     /// Whether current execution or a retained transition needs the actual external unit.
-    pub fn has_inherited_partition_state(&self, epoch: Option<&BranchPartitionEpoch>) -> bool {
+    pub fn has_inherited_partition_state(
+        &self,
+        epoch: Option<&ParametrizerPartitionEpoch>,
+    ) -> bool {
         if let Some(branching) = &self.resolved_branching
             && let Some(partitions) = branching.partitions()
             && partitions.is_inherited()

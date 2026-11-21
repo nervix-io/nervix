@@ -248,7 +248,7 @@ public final class ClusterTests {
             assertEquals(Nervix.Disposition.COMPLETED, opened.disposition(), opened.message());
             subscription = opened.subscription();
             assertEquals(name, subscription.name());
-            assertEquals("by_tenant", schema.branch());
+            assertEquals("by_tenant", schema.parametrizer());
             assertEquals("tenant", schema.fields(Nervix.Part.BRANCH).getFirst().name());
             var fields = schema.fields(Nervix.Part.ROWS);
             assertEquals(11, fields.size());

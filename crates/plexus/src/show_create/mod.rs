@@ -79,16 +79,16 @@ mod tests {
     }
 
     #[test]
-    fn parses_and_completes_show_create_branch() {
-        let parsed = parse_show_create("SHOW CREATE BRANCH by_tenant;")
+    fn parses_and_completes_show_create_parametrizer() {
+        let parsed = parse_show_create("SHOW CREATE PARAMETRIZER by_tenant;")
             .expect("a named branch has a SHOW CREATE form");
-        assert_eq!(parsed.kind, ModelKind::Branch);
+        assert_eq!(parsed.kind, ModelKind::Parametrizer);
         assert_eq!(parsed.name.as_str(), "by_tenant");
-        assert!(parse_show_create("SHOW CREATE BRANCH;").is_err());
-        let input = "SHOW CREATE BRANCH ";
+        assert!(parse_show_create("SHOW CREATE PARAMETRIZER;").is_err());
+        let input = "SHOW CREATE PARAMETRIZER ";
         assert_eq!(
             suggest_show_create(input, input.len()),
-            vec!["ref:branch".to_string()]
+            vec!["ref:parametrizer".to_string()]
         );
     }
 
@@ -224,7 +224,7 @@ mod tests {
         let input = "SHOW CREATE ";
         let suggestions = suggest_show_create(input, input.len());
         assert!(suggestions.contains(&"SCHEMA".to_string()));
-        assert!(suggestions.contains(&"BRANCH".to_string()));
+        assert!(suggestions.contains(&"PARAMETRIZER".to_string()));
         for phrase in ["WIRE JSON SCHEMA", "WIRE CBOR SCHEMA", "WIRE AVRO SCHEMA"] {
             assert!(suggestions.contains(&phrase.to_string()), "{suggestions:?}");
         }

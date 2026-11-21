@@ -352,7 +352,7 @@ Feature: Altering an ingestor or an emitter in place
       };
       CREATE HTTP ENDPOINT INGESTOR altered_ingestor
         FROM altered_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING altered_event_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING altered_event_codec
         TO altered_events INHERIT ALL UNBRANCHED
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE ZEROMQ PUSH EMITTER altered_out FROM altered_events

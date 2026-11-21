@@ -18,7 +18,7 @@ rebinding is validated, classified, and applied.
 
 ## Domain Ownership
 
-A resource belongs to the domain it was created in, like every other entity. `CREATE RESOURCE`, `UPLOAD RESOURCE`, and `DESCRIBE RESOURCE` all act on the session's selected domain, and a model resolves a resource name only against versions completed in its own domain.
+A resource belongs to the domain it was created in. `CREATE RESOURCE`, `UPLOAD RESOURCE`, and `DESCRIBE RESOURCE` all act on the session's selected domain, and a model resolves a resource name only against versions completed in its own domain.
 
 The same resource name in two domains is two independent resources: they have separate version sequences, separate stored content, and separate replica state. Referring to a name that was never created in the selected domain fails with `resource '<name>' does not exist`, even when another domain has it.
 
@@ -27,7 +27,7 @@ The same resource name in two domains is two independent resources: they have se
 Resources are managed in two phases:
 
 ```plexus,ignore
-CREATE [IF NOT EXISTS] RESOURCE <name>;
+CREATE [IF NOT EXISTS] RESOURCE <name> [LABELS { '<key>' = '<value>', ... }];
 UPLOAD RESOURCE <name> VERSION '<local_directory>';
 DESCRIBE RESOURCE <name>;
 DESCRIBE RESOURCE <name> VERSION <n>;
@@ -35,7 +35,8 @@ REBIND RESOURCE <name> TO VERSION <n>|LATEST
   [FOR <kind> <name> [, <kind> <name> ...]];
 ```
 
-`CREATE RESOURCE` registers the logical resource name.
+`CREATE RESOURCE` registers the logical resource name and its optional [labels](entity-labels.md).
+The label map belongs to the resource catalog entry across every upload and version.
 
 With `IF NOT EXISTS`, creating an already-registered resource becomes a successful no-op instead of an error.
 
@@ -61,6 +62,7 @@ upload has completed. Its `versions` list and version details include every vers
 has been published, including a version whose upload is still applying or finished with failure.
 This keeps incomplete upload diagnostics visible without making that version eligible for use.
 Its `usages` section lists every model currently bound to the resource and its pinned version.
+It also displays the logical resource's labels. A version-specific description contains no label map.
 A session client also receives the same description typed, so it never reads these facts back out
 of the printed text.
 

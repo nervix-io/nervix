@@ -73,7 +73,7 @@ raise 'watermark positions' unless [section.watermark_low, section.watermark_hig
 raise 'section frames' unless section.frames.length == 1
 schema = section.schema
 raise 'schema order' unless schema.fields.map(&:name) == %w[sequence secret sample low high note raw text]
-raise 'branch identity' unless schema.branch == 'by_tenant' && schema.key_fields.fetch(0).sensitive
+raise 'branch identity' unless schema.parametrizer == 'by_tenant' && schema.key_fields.fetch(0).sensitive
 raise 'field metadata' unless schema.fields.fetch(1).sensitive && schema.fields.fetch(5).nullable
 frame = section.frames.fetch(0)
 raise 'frame schema' unless frame.schema.fields.map(&:name) == schema.fields.map(&:name)

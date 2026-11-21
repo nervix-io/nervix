@@ -173,12 +173,13 @@ mod tests {
 
     use super::*;
     use crate::{
-        BranchName, CreateSchema, Float64Literal, SchemaField, SchemaName, WasmStateResetScope,
+        CreateSchema, Float64Literal, ParametrizerName, SchemaField, SchemaName,
+        WasmStateResetScope,
     };
 
     fn tenant_branch() -> ResolvedBranching {
         ResolvedBranching::branched(
-            BranchName::parse("by_tenant")
+            ParametrizerName::parse("by_tenant")
                 .assured("the test name satisfies the branch name grammar"),
             CreateSchema {
                 labels: Default::default(),
@@ -192,7 +193,7 @@ mod tests {
                     sensitive: false,
                 }],
             },
-            crate::ResolvedBranchPartitions::ONE,
+            crate::ResolvedParametrizerPartitions::ONE,
         )
     }
 

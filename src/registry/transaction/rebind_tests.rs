@@ -42,7 +42,9 @@ fn rebind_latest_replaces_every_usage_in_one_model_plan() {
         DomainStatus::Stopped,
         [stored_tls_vhost("api", 1), stored_tls_vhost("admin", 1)],
     );
-    snapshot.resources.insert(named("tls_bundle"));
+    snapshot
+        .resources
+        .insert(named("tls_bundle"), nervix_models::EntityLabels::default());
     snapshot.resource_uploads = tls_bundle_uploads(&[
         (1, FixtureUploadOutcome::Completed),
         (2, FixtureUploadOutcome::Completed),
@@ -101,7 +103,9 @@ fn rebind_for_selects_exact_usages_and_reports_unchanged_members() {
         DomainStatus::Stopped,
         [stored_tls_vhost("api", 1), stored_tls_vhost("admin", 2)],
     );
-    snapshot.resources.insert(named("tls_bundle"));
+    snapshot
+        .resources
+        .insert(named("tls_bundle"), nervix_models::EntityLabels::default());
     snapshot.resource_uploads = tls_bundle_uploads(&[(2, FixtureUploadOutcome::Completed)]);
     let members = vec![node_ref(ModelKind::Vhost, "admin")];
 
@@ -148,7 +152,9 @@ fn rebind_for_selects_exact_usages_and_reports_unchanged_members() {
 #[test]
 fn rebind_for_rejects_a_member_that_does_not_bind_the_resource() {
     let mut snapshot = snapshot(DomainStatus::Stopped, [schema("events")]);
-    snapshot.resources.insert(named("tls_bundle"));
+    snapshot
+        .resources
+        .insert(named("tls_bundle"), nervix_models::EntityLabels::default());
     snapshot.resource_uploads = tls_bundle_uploads(&[(1, FixtureUploadOutcome::Completed)]);
 
     let error = Registry::plan_transaction(
@@ -195,7 +201,9 @@ fn rebind_rejects_a_resource_that_does_not_exist() {
 #[test]
 fn rebind_for_rejects_a_member_that_does_not_exist() {
     let mut snapshot = snapshot(DomainStatus::Stopped, []);
-    snapshot.resources.insert(named("tls_bundle"));
+    snapshot
+        .resources
+        .insert(named("tls_bundle"), nervix_models::EntityLabels::default());
     snapshot.resource_uploads = tls_bundle_uploads(&[(1, FixtureUploadOutcome::Completed)]);
 
     let error = Registry::plan_transaction(
@@ -225,7 +233,9 @@ fn rebind_for_rejects_a_member_that_does_not_exist() {
 #[test]
 fn rebind_without_usages_is_a_successful_no_op() {
     let mut snapshot = snapshot(DomainStatus::Stopped, []);
-    snapshot.resources.insert(named("tls_bundle"));
+    snapshot
+        .resources
+        .insert(named("tls_bundle"), nervix_models::EntityLabels::default());
     snapshot.resource_uploads = tls_bundle_uploads(&[(1, FixtureUploadOutcome::Completed)]);
 
     let plan = Registry::plan_transaction(
@@ -259,7 +269,9 @@ fn rebind_without_usages_is_a_successful_no_op() {
 #[test]
 fn rebind_rejects_a_version_that_has_not_completed() {
     let mut snapshot = snapshot(DomainStatus::Stopped, [stored_tls_vhost("api", 1)]);
-    snapshot.resources.insert(named("tls_bundle"));
+    snapshot
+        .resources
+        .insert(named("tls_bundle"), nervix_models::EntityLabels::default());
     snapshot.resource_uploads = tls_bundle_uploads(&[
         (1, FixtureUploadOutcome::Completed),
         (2, FixtureUploadOutcome::Applying),
@@ -295,7 +307,9 @@ fn a_tls_rebinding_refreshes_the_https_listener_without_pausing_a_running_domain
     let node = ClusterNodeName::parse("node-a")
         .assured("the scheduler fixture node is an identifier-shaped literal");
     let mut snapshot = scheduled_snapshot(DomainStatus::Running, [stored_tls_vhost("api", 1)]);
-    snapshot.resources.insert(named("tls_bundle"));
+    snapshot
+        .resources
+        .insert(named("tls_bundle"), nervix_models::EntityLabels::default());
     snapshot.resource_uploads = tls_bundle_uploads(&[
         (1, FixtureUploadOutcome::Completed),
         (2, FixtureUploadOutcome::Completed),
@@ -371,7 +385,9 @@ fn a_wasm_rebinding_reports_a_guest_state_reset_over_every_concrete_branch() {
             ),
         ],
     );
-    snapshot.resources.insert(named("wasm_filter"));
+    snapshot
+        .resources
+        .insert(named("wasm_filter"), nervix_models::EntityLabels::default());
     snapshot.resource_uploads = fixture_uploads(
         "wasm_filter",
         &[
@@ -416,8 +432,8 @@ fn a_wasm_rebinding_reports_a_guest_state_reset_over_every_concrete_branch() {
         &[StateResetImpact {
             node: ImpactNodeCoverage::execution(
                 node_ref(ModelKind::WasmProcessor, "filter_events"),
-                ConcreteBranchCoverage::AllOfBranch {
-                    branch: named("by_tenant"),
+                ConcreteBranchCoverage::AllOfParametrizer {
+                    parametrizer: named("by_tenant"),
                 },
             ),
             state: StatePurge::WasmGuestState,
@@ -449,7 +465,9 @@ fn a_wasm_rebinding_to_the_bound_version_reports_no_guest_state_reset() {
             ),
         ],
     );
-    snapshot.resources.insert(named("wasm_filter"));
+    snapshot
+        .resources
+        .insert(named("wasm_filter"), nervix_models::EntityLabels::default());
     snapshot.resource_uploads = fixture_uploads(
         "wasm_filter",
         &[

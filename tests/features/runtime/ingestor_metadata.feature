@@ -43,7 +43,7 @@ Feature: Typed ingestor metadata
     When these Plexus statements fail with "ingestor 'http_endpoint_ingestor' in domain '{{domain}}' reads metadata.missing in its route to 'events', but HTTP ENDPOINT ingestors declare only metadata.method, metadata.path, metadata.query, metadata.remote_addr, metadata.host and metadata.remote_ip"
       """
       CREATE HTTP ENDPOINT INGESTOR http_endpoint_ingestor
-        FROM http_ingress MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
+        FROM http_ingress MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING event_codec
         TO events INHERIT ALL SET tag = metadata.missing UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       """

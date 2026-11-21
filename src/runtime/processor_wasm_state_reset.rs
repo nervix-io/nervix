@@ -58,7 +58,7 @@ pub(super) fn processor_reset_target_keys(
             processor: processor.clone(),
         }));
     }
-    match (template.branch.as_ref(), scope, branch_key) {
+    match (template.parametrizer.as_ref(), scope, branch_key) {
         (None, WasmStateResetScope::Unbranched, None) => Ok(vec![None]),
         (Some(_), WasmStateResetScope::Branch(selected), Some(branch))
             if branch.fingerprint() == selected
@@ -128,7 +128,7 @@ async fn restore_processor_wasm_state_reset_branches(
         nervix_primitives::expect_lint!(
             nervix::lifecycle_call,
             "the concrete branch creation transition registers its one metric identity",
-            runtime.observe_branch_instance_created(domain, template.branch.as_ref(), &key)
+            runtime.observe_branch_instance_created(domain, template.parametrizer.as_ref(), &key)
         );
         instances.insert_changed(key, restored_at, ProcessorBranchSlot::Live(task));
     }
@@ -181,7 +181,7 @@ impl ProcessorWasmStateResetContext<'_> {
                      identity",
                     runtime.observe_branch_instance_removed(
                         domain,
-                        template.branch.as_ref(),
+                        template.parametrizer.as_ref(),
                         &key,
                         None,
                     )
@@ -373,7 +373,11 @@ impl ProcessorWasmStateResetContext<'_> {
             nervix_primitives::expect_lint!(
                 nervix::lifecycle_call,
                 "the concrete branch creation transition registers its one metric identity",
-                runtime.observe_branch_instance_created(domain, template.branch.as_ref(), &key)
+                runtime.observe_branch_instance_created(
+                    domain,
+                    template.parametrizer.as_ref(),
+                    &key
+                )
             );
             instances.insert_changed(key, execution_now, ProcessorBranchSlot::Live(task));
             branch.activated = true;

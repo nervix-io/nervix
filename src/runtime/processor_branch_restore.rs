@@ -259,7 +259,7 @@ impl RestoredBranches {
             let task = restored.branch.start(restored.pending_materialized);
             runtime.observe_branch_instance_created(
                 &context.domain,
-                template.branch.as_ref(),
+                template.parametrizer.as_ref(),
                 &restored.key,
             );
             instances.insert_restored(

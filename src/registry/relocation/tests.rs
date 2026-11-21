@@ -13,7 +13,7 @@
 use std::collections::BTreeSet;
 
 use meticulous::ResultExt as _;
-use nervix_models::{BranchPartitions, Model, ModelIndex, ModelKind, ModelName};
+use nervix_models::{Model, ModelIndex, ModelKind, ModelName, ParametrizerPartitions};
 use nonzero_ext::nonzero;
 
 use super::*;
@@ -25,8 +25,8 @@ use crate::registry::{
 fn partition_graph(policy: PlacementPolicy) -> ActiveGraph {
     let mut models = full_graph_batch();
     for model in &mut models {
-        if let Model::Branch(branch) = model {
-            branch.partitions = BranchPartitions::Direct(nonzero!(2u16));
+        if let Model::Parametrizer(parametrizer) = model {
+            parametrizer.partitions = ParametrizerPartitions::Direct(nonzero!(2u16));
         }
     }
     models.push(placement(

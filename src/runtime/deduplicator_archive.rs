@@ -227,6 +227,7 @@ impl PublishedKeyspace {
         let schema = StdArc::clone(schema);
         RuntimeRecordBatch::encode_arrow_snapshot_projection(
             executor,
+            nervix_execution::QueueAdmission::RefuseWhenFull,
             projection_bytes,
             encoded_estimate,
             move || {
@@ -766,6 +767,7 @@ mod tests {
                 .assured("a bounded key group encodes");
             let decoded = RuntimeRecordBatch::decode_arrow_snapshot_section(
                 executor,
+                nervix_execution::QueueAdmission::RefuseWhenFull,
                 StdArc::clone(schema),
                 bytes,
             )
