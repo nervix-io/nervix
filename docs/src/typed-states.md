@@ -232,7 +232,7 @@ Running MQTT acknowledgement state distinguishes automatic acknowledgement from 
 acknowledgement with its bounded QoS 0 capacity. Each queued QoS 0 outcome owns its permit until
 the ingestor takes it; acknowledged packets use their separate reserved capacity. Overflow is an
 ordinary admission outcome that drops and counts one publish, rather than a read failure or a
-missing connection. The queue, permits and host-supplied counter handle remain volatile.
+missing connection. The queue, permits and host-supplied overflow report remain volatile.
 
 Text is parsed into a semantic Model, registry validation resolves its references and contracts,
 and planning produces an execution plan. Each stage passes forward a value whose type expresses
