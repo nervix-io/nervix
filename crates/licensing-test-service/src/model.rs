@@ -259,6 +259,13 @@ impl Model {
     pub fn fault_observations(&self) -> Vec<FaultObservation> {
         self.fault_observations.clone()
     }
+    /// The genuine decision the service holds for an activation, which a scripted fault only
+    /// alters on the copy it sends.
+    pub fn held_decision(&self, activation_id: Uuid) -> Option<Decision> {
+        self.activations
+            .get(&activation_id)
+            .map(|held| held.decision.clone())
+    }
     pub fn refuse(&mut self, refusal: Option<ProblemKind>) {
         self.refusal = refusal;
     }
