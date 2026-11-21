@@ -708,17 +708,8 @@ mod tests {
             configured.succeeded(),
             "the fixture graph is created: {configured:?}"
         );
-        let started = service
-            .test_command(
-                test_command_request("START;", "default"),
-                &mut subscriptions,
-            )
-            .await;
-        assert!(
-            started.succeeded(),
-            "the fixture domain starts: {started:?}"
-        );
         subscriptions.stop_all().await;
+        service.test_start_domain("default").await;
 
         // The stop is requested and its intake stop applied, as a `STOP` does before it waits.
         service
@@ -823,12 +814,8 @@ mod tests {
         use nervix_models::{DomainStatus, StopRequest};
         use nervix_recovery::Discarded as _;
 
-        use crate::application::{
-            subscription::SessionSubscriptions,
-            test_fixtures::{
-                TestService, build_test_service_with_probe, test_command_request,
-                test_execution_reference,
-            },
+        use crate::application::test_fixtures::{
+            TestService, build_test_service_with_probe, test_execution_reference,
         };
 
         let probe = ConsensusTestProbe::default();
@@ -839,18 +826,7 @@ mod tests {
         } = build_test_service_with_probe(true, probe.clone()).await;
         let domain =
             DomainName::parse("default").assured("the fixture domain name is a valid literal");
-        let mut subscriptions = SessionSubscriptions::new();
-        let started = service
-            .test_command(
-                test_command_request("START;", "default"),
-                &mut subscriptions,
-            )
-            .await;
-        assert!(
-            started.succeeded(),
-            "the fixture domain starts: {started:?}"
-        );
-        subscriptions.stop_all().await;
+        service.test_start_domain("default").await;
         service
             .inner
             .consensus
