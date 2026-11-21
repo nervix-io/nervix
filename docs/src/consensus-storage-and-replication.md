@@ -530,10 +530,10 @@ status, keeping the start version, start mode, clock, schedule and incremental s
 
 The current emitter Models carry explicit key expressions, source-partition routing and
 expression-only SQS FIFO groups. The dedicated database owns exactly four current keyspaces:
-`raft_endpoint_pause_domain_resource_user_labels_logs`,
-`raft_endpoint_pause_domain_resource_user_labels_meta`,
-`raft_endpoint_pause_domain_resource_user_labels_state`, and
-`raft_endpoint_pause_domain_resource_user_labels_snapshots`. Opening it validates the complete
+`raft_parametrizer_endpoint_pause_domain_resource_user_labels_logs`,
+`raft_parametrizer_endpoint_pause_domain_resource_user_labels_meta`,
+`raft_parametrizer_endpoint_pause_domain_resource_user_labels_state`, and
+`raft_parametrizer_endpoint_pause_domain_resource_user_labels_snapshots`. Opening it validates the complete
 keyspace namespace before reading any records. The committed cluster-parameter record
 stores ordered typed TLS cipher suites and key-exchange groups. Recovery validates their complete
 pair before returning the record. The parameters also carry the coherent remote acknowledgement
@@ -558,7 +558,7 @@ whose signaling data exists only on its WebSockets variant, the branch partition
 resolved branch declaration of the committed schedule carries, and the partition epoch the
 committed schedule records for every branch whose count changed. It identifies
 the current statement shape as well, which the statements a transaction keeps are stored in:
-`ALTER BRANCH` and `DESCRIBE INFERENCER` among those statements, an `ALTER INGESTOR` or `ALTER EMITTER` operation that
+`ALTER PARAMETRIZER` and `DESCRIBE INFERENCER` among those statements, an `ALTER INGESTOR` or `ALTER EMITTER` operation that
 changes one part of its entity's body (`SET RATE LIMIT` and `DROP RATE LIMIT` among them), an envelope clause or the properties, or one part of a
 construction where it stands, including the typed `payload` expression scope and a
 `RESET WASM PROCESSOR ... STATE` that names its processor and scope and takes its domain from

@@ -1000,7 +1000,7 @@ mod tests {
             panic!("the fixture is a junction");
         };
         model.branched_by = BranchSelection::BranchedBy {
-            branch: "tenants".try_into().assured("valid name"),
+            parametrizer: "tenants".try_into().assured("valid name"),
         };
         node = node.with_resolved_branching(Some(ResolvedBranching::branched(
             "tenants".try_into().assured("valid name"),
@@ -1014,7 +1014,7 @@ mod tests {
                     sensitive: false,
                 }],
             },
-            nervix_models::ResolvedBranchPartitions::Direct(nonzero_ext::nonzero!(2u16)),
+            nervix_models::ResolvedParametrizerPartitions::Direct(nonzero_ext::nonzero!(2u16)),
         )));
         assert!(node.place_unit(
             Unit::partition(0),

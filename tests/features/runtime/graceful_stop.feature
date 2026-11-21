@@ -24,7 +24,7 @@ Feature: A domain STOP lets the work already inside the domain finish
       CREATE JAQ JSON CODEC ingest_codec TO SCHEMA event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE SCHEMA tenant_key ( tenant STRING );
-      CREATE BRANCH by_tenant SCHEMA tenant_key TTL 1h;
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_key TTL 1h;
       CREATE RELAY outgoing SCHEMA event BRANCHED BY by_tenant;
       CREATE KAFKA CLIENT kafka_main CONFIG { 'bootstrap.servers' = '{{kafka_addr}}' };
       CREATE KAFKA TOPIC INGESTOR ingestor
@@ -117,7 +117,7 @@ Feature: A domain STOP lets the work already inside the domain finish
       CREATE JAQ JSON CODEC ingest_codec TO SCHEMA event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE SCHEMA tenant_key ( tenant STRING );
-      CREATE BRANCH by_tenant SCHEMA tenant_key TTL 1h;
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_key TTL 1h;
       CREATE RELAY outgoing SCHEMA event BRANCHED BY by_tenant;
       CREATE KAFKA CLIENT kafka_main CONFIG { 'bootstrap.servers' = '{{kafka_addr}}' };
       CREATE KAFKA TOPIC INGESTOR unacked
@@ -183,7 +183,7 @@ Feature: A domain STOP lets the work already inside the domain finish
       CREATE WIRE JSON SCHEMA reading_wire MODE STRICT ( tenant string, id string, value integer );
       CREATE WIRE JSON CODEC reading_codec FROM WIRE SCHEMA reading_wire TO SCHEMA reading;
       CREATE SCHEMA tenant_key ( tenant STRING );
-      CREATE BRANCH by_tenant SCHEMA tenant_key TTL 1h;
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_key TTL 1h;
       CREATE RELAY readings SCHEMA reading BRANCHED BY by_tenant;
       CREATE RELAY unique_readings SCHEMA reading BRANCHED BY by_tenant;
       CREATE RELAY histories SCHEMA history BRANCHED BY by_tenant;
@@ -293,7 +293,7 @@ Feature: A domain STOP lets the work already inside the domain finish
       CREATE JAQ JSON CODEC ingest_codec TO SCHEMA event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE SCHEMA tenant_key ( tenant STRING );
-      CREATE BRANCH by_tenant SCHEMA tenant_key TTL 1h;
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_key TTL 1h;
       CREATE RELAY incoming SCHEMA event BRANCHED BY by_tenant;
       CREATE RELAY outgoing SCHEMA event BRANCHED BY by_tenant;
       CREATE KAFKA CLIENT kafka_main CONFIG { 'bootstrap.servers' = '{{kafka_addr}}' };
@@ -388,7 +388,7 @@ Feature: A domain STOP lets the work already inside the domain finish
       CREATE JAQ JSON CODEC ingest_codec TO SCHEMA event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE SCHEMA tenant_key ( tenant STRING );
-      CREATE BRANCH by_tenant SCHEMA tenant_key TTL 1h;
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_key TTL 1h;
       CREATE RELAY outgoing SCHEMA event BRANCHED BY by_tenant;
       CREATE KAFKA CLIENT kafka_main CONFIG { 'bootstrap.servers' = '{{kafka_addr}}' };
       CREATE KAFKA TOPIC INGESTOR ingestor
@@ -817,7 +817,7 @@ Feature: A domain STOP lets the work already inside the domain finish
       CREATE JAQ JSON CODEC ingest_codec TO SCHEMA event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE SCHEMA tenant_key ( tenant STRING );
-      CREATE BRANCH by_tenant SCHEMA tenant_key TTL 1h;
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_key TTL 1h;
       CREATE RELAY incoming SCHEMA event BRANCHED BY by_tenant;
       CREATE RELAY ordered SCHEMA event BRANCHED BY by_tenant;
       CREATE KAFKA CLIENT kafka_main CONFIG { 'bootstrap.servers' = '{{kafka_addr}}' };
@@ -891,7 +891,7 @@ Feature: A domain STOP lets the work already inside the domain finish
       CREATE JAQ JSON CODEC ingest_codec TO SCHEMA event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE SCHEMA tenant_key ( tenant STRING );
-      CREATE BRANCH by_tenant SCHEMA tenant_key TTL 1h;
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_key TTL 1h;
       CREATE RELAY left_events SCHEMA event BRANCHED BY by_tenant;
       CREATE RELAY right_events SCHEMA event BRANCHED BY by_tenant;
       CREATE RELAY pairs SCHEMA pair BRANCHED BY by_tenant;
@@ -966,7 +966,7 @@ Feature: A domain STOP lets the work already inside the domain finish
       CREATE JAQ JSON CODEC ingest_codec TO SCHEMA event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE SCHEMA tenant_key ( tenant STRING );
-      CREATE BRANCH by_tenant SCHEMA tenant_key TTL 1h;
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_key TTL 1h;
       CREATE RELAY incoming SCHEMA event BRANCHED BY by_tenant;
       CREATE RELAY settings SCHEMA tenant_setting BRANCHED BY by_tenant
         WITH MATERIALIZED STATE LAST BY TIMESTAMP;

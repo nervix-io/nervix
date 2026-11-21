@@ -223,7 +223,8 @@ fn shuttle_partition_observation_and_instance_assignment_publish_one_epoch() {
 
     use nervix_models::{
         ExternalPartitionSet, InheritedPartitionLayout, PartitionEpochNumber,
-        PartitionSourceFingerprint, ResolvedBranchPartitions, SourcePartitionObservation, Unit,
+        PartitionSourceFingerprint, ResolvedParametrizerPartitions, SourcePartitionObservation,
+        Unit,
     };
     use nervix_primitives::{
         sync::{Arc, blocking::Mutex},
@@ -232,7 +233,8 @@ fn shuttle_partition_observation_and_instance_assignment_publish_one_epoch() {
 
     fn assignment(count: u16) -> DomainSchedule {
         let domain = DomainName::parse("orders").assured("valid fixture domain");
-        let branch = nervix_models::BranchName::parse("by_tenant").assured("valid fixture branch");
+        let branch =
+            nervix_models::ParametrizerName::parse("by_tenant").assured("valid fixture branch");
         let source = nervix_models::IngestorName::parse("input").assured("valid fixture ingestor");
         let mut values =
             nervix_arbitrary::Arbitrary::new(&[], nervix_arbitrary::Domain::Vocabulary);
@@ -276,15 +278,15 @@ fn shuttle_partition_observation_and_instance_assignment_publish_one_epoch() {
         );
         schedule
             .partition_topology
-            .branches
+            .parametrizers
             .insert(branch.clone(), InheritedPartitionLayout::Identity(count));
         schedule.partition_epochs.insert(
             branch,
-            nervix_models::BranchPartitionEpoch {
+            nervix_models::ParametrizerPartitionEpoch {
                 number: PartitionEpochNumber::new(
                     NonZeroU64::new(u64::from(count.get())).assured("positive fixture epoch"),
                 ),
-                partitions: ResolvedBranchPartitions::Inherited(count),
+                partitions: ResolvedParametrizerPartitions::Inherited(count),
                 transition: None,
             },
         );
@@ -299,7 +301,7 @@ fn shuttle_partition_observation_and_instance_assignment_publish_one_epoch() {
             .assured("the initial schedule stays installed");
         let count = schedule
             .partition_topology
-            .branches
+            .parametrizers
             .values()
             .next()
             .assured("the fixture declares a layout")

@@ -23,9 +23,9 @@ use nervix_models::{
     AckMode, Assignment, AssignmentTarget, CodecName, CreateEmitter, EmitterInstances, EmitterName,
     EnvelopeClauseForm, EnvelopeClauseKind, EnvelopeValueType, ErrorPolicies, Expression,
     FieldName, FlushPolicy, HeaderValues, InputCollectPolicy, MaterializedStateDependency, Model,
-    ModelKind, ModelName, NodeRef, PropertyDeclaration, RelayName, ResolvedBranchPartitions,
-    ResolvedBranching, RouteConstruction, ScheduledNodes, SchemaDefinition, SchemaField,
-    SchemaName, Unit, UnitKind, parse_duration_text,
+    ModelKind, ModelName, NodeRef, PropertyDeclaration, RelayName, ResolvedBranching,
+    ResolvedParametrizerPartitions, RouteConstruction, ScheduledNodes, SchemaDefinition,
+    SchemaField, SchemaName, Unit, UnitKind, parse_duration_text,
 };
 use nervix_primitives::sync::{Arc, StdArc};
 use nervix_vm::{
@@ -102,7 +102,7 @@ pub(crate) struct EmitterInputPlan {
     pub(crate) relay: RelayName,
     pub(crate) from_where: Option<LoweredFilter>,
     pub(crate) retention: PlannedRelayRetention,
-    pub(crate) partitions: Option<ResolvedBranchPartitions>,
+    pub(crate) partitions: Option<ResolvedParametrizerPartitions>,
 }
 
 /// The route's frontend program and the boundary between inherited and declared SET operations.
@@ -207,7 +207,7 @@ impl EmitterUnitPlan {
     pub(crate) fn input_units(
         self,
         unit: Unit,
-        partitions: Option<ResolvedBranchPartitions>,
+        partitions: Option<ResolvedParametrizerPartitions>,
     ) -> EmitterInputUnits {
         let count = match self.count {
             None => return EmitterInputUnits::Units(Vec::new()),
@@ -217,7 +217,7 @@ impl EmitterUnitPlan {
         let UnitKind::Instance(instance) = unit.kind() else {
             return EmitterInputUnits::Units(Vec::new());
         };
-        let partitions = partitions.unwrap_or(ResolvedBranchPartitions::ONE);
+        let partitions = partitions.unwrap_or(ResolvedParametrizerPartitions::ONE);
         EmitterInputUnits::Units(partitions.units_served_by(instance, count))
     }
 
@@ -952,8 +952,8 @@ mod tests {
         Unit::partition(index)
     }
 
-    fn partitions(count: u16) -> ResolvedBranchPartitions {
-        ResolvedBranchPartitions::Direct(
+    fn partitions(count: u16) -> ResolvedParametrizerPartitions {
+        ResolvedParametrizerPartitions::Direct(
             std::num::NonZeroU16::new(count).assured("the fixture counts are nonzero"),
         )
     }
@@ -970,11 +970,11 @@ mod tests {
         }
     }
 
-    fn branching(partitions: ResolvedBranchPartitions) -> ResolvedBranching {
+    fn branching(partitions: ResolvedParametrizerPartitions) -> ResolvedBranching {
         ResolvedBranching::branched(named("by_tenant"), key_schema(), partitions)
     }
 
-    fn input(relay: &str, partitions: Option<ResolvedBranchPartitions>) -> EmitterInputPlan {
+    fn input(relay: &str, partitions: Option<ResolvedParametrizerPartitions>) -> EmitterInputPlan {
         EmitterInputPlan {
             relay: named(relay),
             from_where: None,
@@ -1037,7 +1037,7 @@ mod tests {
             EmitterExecutionPlan::decide_units(
                 &instanced(EmitterInstances::PerPartition),
                 [Unit::SINGLE].iter(),
-                &branching(ResolvedBranchPartitions::ONE),
+                &branching(ResolvedParametrizerPartitions::ONE),
             )
             .expect("one partition runs as the single unit"),
             EmitterUnitPlan::SINGLE

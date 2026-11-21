@@ -608,7 +608,7 @@ keeps the chapter current in the same change. Where areas meet, each chapter kee
   value requires explicit leakage, including codec payloads, direct `VALUES`, inherited fields and
   written headers.
 - Multiple ordinary inputs to one processor reference the same declared schema Model, and they share
-  the exact named branch or are all unbranched. Correlators apply the same rule independently to the
+  the exact parametrizer or are all unbranched. Correlators apply the same rule independently to the
   left and right sides.
 
 ### Wire schemas
@@ -660,8 +660,8 @@ keeps the chapter current in the same change. Where areas meet, each chapter kee
   named parametrization distinct from every input relay's. Equal key schemas or values still
   require the route to evaluate the destination's key assignments.
 - Junctions, deduplicators, reorderers, window processors, inferencers, WASM processors, correlators
-  and generators preserve branch identity. Their branch declaration is node-wide, and every input
-  and output uses that exact named branch.
+  and generators preserve branch identity. Their parametrizer is declared node-wide, and every input
+  and output uses that exact parametrizer.
 - Emitters collapse branch identity only at the successful external boundary. Their envelope and
   ordering-group expressions may read each source branch's typed fields before that boundary;
   every input retains its own branch schema and partition count through evaluation and publication.
@@ -669,7 +669,7 @@ keeps the chapter current in the same change. Where areas meet, each chapter kee
   processing state across branches, or publish through a fallback that bypasses concrete branch
   routing.
 - Error routes preserve the branch in which the failed operation executed, and their target relay
-  has the same exact branch declaration; ingestor errors are unbranched.
+  has the same exact parametrizer; ingestor errors are unbranched.
 
 ### A branch owns its runtime
 
@@ -693,7 +693,7 @@ No justification makes an inversion acceptable: not that it is temporary, smalle
 ### Materialized state
 
 - Materialized dependencies are explicit, node-wide, same-domain and compatible with the node's
-  exact branch; state is never scanned across branches.
+  exact parametrizer; state is never scanned across branches.
 - Dependency declarations execute strictly in written order. Available state binds immediately;
   defaults bind typed constant records; `REQUIRED SKIP` skips the message; `REQUIRED WAIT` retains
   it in memory and applies backpressure, and resolution restarts from the first declaration after

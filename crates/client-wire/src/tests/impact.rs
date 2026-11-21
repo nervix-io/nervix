@@ -79,7 +79,7 @@ impl RawReport {
                 let selected = wire::SelectedBranchCoverage::create(
                     builder,
                     &wire::SelectedBranchCoverageArgs {
-                        branch: Some(branch),
+                        parametrizer: Some(branch),
                         keys: Some(keys),
                     },
                 );

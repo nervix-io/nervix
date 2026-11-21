@@ -49,7 +49,7 @@ CREATE JAQ JSON CODEC binance_ws_event_codec
     ask_count: (if .e == "depthUpdate" then (.a | length) else null end)
   }$s$;
 
-CREATE BRANCH by_symbol SCHEMA symbol_branch TTL 5m;
+CREATE PARAMETRIZER by_symbol SCHEMA symbol_branch TTL 5m;
 
 CREATE RELAY binance_ws_events SCHEMA binance_ws_event BRANCHED BY by_symbol CAPACITY 1;
 

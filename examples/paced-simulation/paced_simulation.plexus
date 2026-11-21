@@ -48,7 +48,7 @@ CREATE SCHEMA sensor_branch (
   sensor STRING
 );
 
-CREATE BRANCH by_sensor SCHEMA sensor_branch TTL 10m;
+CREATE PARAMETRIZER by_sensor SCHEMA sensor_branch TTL 10m;
 
 CREATE RELAY readings SCHEMA observed_reading BRANCHED BY by_sensor CAPACITY 1;
 

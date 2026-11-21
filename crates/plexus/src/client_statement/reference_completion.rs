@@ -261,7 +261,7 @@ fn input_list<'src>()
 #[cfg(test)]
 mod tests {
     use meticulous::ResultExt as _;
-    use nervix_models::{BranchName, CodecDirection, ModelKind, RelayName, RelayQuestion};
+    use nervix_models::{CodecDirection, ModelKind, ParametrizerName, RelayName, RelayQuestion};
 
     use super::{
         super::{CompletionExpectation, SemanticReference, suggest_client_expectations},
@@ -490,7 +490,7 @@ mod tests {
 
     #[test]
     fn an_ingestor_error_relay_has_no_branch() {
-        let unbranched = RelayQuestion::OnBranch(None::<BranchName>);
+        let unbranched = RelayQuestion::OnBranch(None::<ParametrizerName>);
         assert_relay_question(
             &format!(
                 "{INGESTOR} DECODE USING codec TO readings INHERIT ALL UNBRANCHED FLUSH IMMEDIATE \

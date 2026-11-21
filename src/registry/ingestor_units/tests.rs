@@ -8,7 +8,9 @@
 use std::collections::BTreeSet;
 
 use meticulous::ResultExt as _;
-use nervix_models::{BranchPartitions, IngestorInput, Model, ModelKind, NodeRef, NodeUnitRef};
+use nervix_models::{
+    IngestorInput, Model, ModelKind, NodeRef, NodeUnitRef, ParametrizerPartitions,
+};
 use nonzero_ext::nonzero;
 
 use super::*;
@@ -68,10 +70,10 @@ fn graph(instances: IngestorInstances, branched: bool) -> super::super::graph::A
     ];
     if branched {
         let mut branch = branch_for_relay("events", "row");
-        let Model::Branch(declaration) = &mut branch else {
+        let Model::Parametrizer(declaration) = &mut branch else {
             unreachable!("the fixture declares a branch")
         };
-        declaration.partitions = BranchPartitions::Direct(nonzero!(4u16));
+        declaration.partitions = ParametrizerPartitions::Direct(nonzero!(4u16));
         models.extend([branch, relay_branched_by_relay_branch("events", "row")]);
     } else {
         models.push(relay("events", "row"));

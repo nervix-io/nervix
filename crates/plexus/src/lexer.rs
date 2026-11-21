@@ -222,6 +222,7 @@ pub enum Identifier {
     Input,
     Branch,
     Branches,
+    Parametrizer,
     General,
     Global,
     Error,

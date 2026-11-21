@@ -342,7 +342,7 @@ Feature: Graceful shutdown
         FROM WIRE SCHEMA transaction_wire
         TO SCHEMA transaction;
       CREATE SCHEMA tenant_branch ( tenant STRING );
-      CREATE BRANCH by_tenant SCHEMA tenant_branch TTL 5m;
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_branch TTL 5m;
       CREATE RELAY inbound SCHEMA transaction BRANCHED BY by_tenant;
       CREATE RELAY deduped SCHEMA transaction BRANCHED BY by_tenant;
       CREATE VHOST edge follower-drain-{{test_id}}.example.com;
@@ -694,7 +694,7 @@ Feature: Graceful shutdown
         FROM WIRE SCHEMA shutdown_order_wire
         TO SCHEMA shutdown_order;
       CREATE SCHEMA shutdown_tenant ( tenant STRING );
-      CREATE BRANCH by_shutdown_tenant SCHEMA shutdown_tenant TTL 5m;
+      CREATE PARAMETRIZER by_shutdown_tenant SCHEMA shutdown_tenant TTL 5m;
       CREATE RELAY shutdown_orders SCHEMA shutdown_order BRANCHED BY by_shutdown_tenant;
       CREATE RELAY shutdown_unique_orders SCHEMA shutdown_order BRANCHED BY by_shutdown_tenant;
       CREATE KAFKA CLIENT shutdown_kafka CONFIG {
@@ -1294,7 +1294,7 @@ Feature: Graceful shutdown
         FROM WIRE SCHEMA tenant_total_wire
         TO SCHEMA tenant_total;
       CREATE SCHEMA generated_tenant ( tenant STRING );
-      CREATE BRANCH by_generated_tenant SCHEMA generated_tenant TTL 5m;
+      CREATE PARAMETRIZER by_generated_tenant SCHEMA generated_tenant TTL 5m;
       CREATE RELAY tenant_amounts SCHEMA tenant_amount BRANCHED BY by_generated_tenant
         WITH MATERIALIZED STATE LAST BY TIMESTAMP;
       CREATE RELAY generated_totals SCHEMA tenant_total BRANCHED BY by_generated_tenant;
@@ -1535,7 +1535,7 @@ Feature: Graceful shutdown
 
       CREATE IF NOT EXISTS SCHEMA transaction_id_branch ( transaction_id STRING );
 
-      CREATE IF NOT EXISTS BRANCH by_source_txns SCHEMA transaction_id_branch TTL 5m;
+      CREATE IF NOT EXISTS PARAMETRIZER by_source_txns SCHEMA transaction_id_branch TTL 5m;
 
       CREATE RELAY inbound SCHEMA transaction BRANCHED BY by_source_txns;
 

@@ -19,7 +19,7 @@ Feature: Collected window sequences survive state lifecycle changes
       CREATE WIRE JSON SCHEMA reading_wire MODE STRICT (tenant string, value integer, pair array);
       CREATE WIRE JSON CODEC reading_codec FROM WIRE SCHEMA reading_wire TO SCHEMA reading;
       CREATE SCHEMA tenant_key (tenant STRING);
-      CREATE BRANCH by_tenant SCHEMA tenant_key TTL 30m;
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_key TTL 30m;
       CREATE RELAY readings SCHEMA reading BRANCHED BY by_tenant;
       CREATE RELAY histories SCHEMA history BRANCHED BY by_tenant;
       CREATE VHOST edge collection-recovery-{{test_id}}.example.com;

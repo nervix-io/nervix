@@ -22,7 +22,7 @@ Feature: Web console visual schema and branch creation
     Then selector ".create-status" contains "Completed"
     When selector ".create-close" is clicked
     And selector ".create-menu-button" is clicked
-    And selector ".create-menu [data-create-kind='branch']" is clicked
+    And selector ".create-menu [data-create-kind='parametrizer']" is clicked
     And selector ".create-name" is filled with "visual_by_tenant"
     And selector ".create-schema-ref .create-choice-search" is filled with "visual_branch_key"
     Then selector ".create-schema-ref [data-value='visual_branch_key']" exists
@@ -31,9 +31,9 @@ Feature: Web console visual schema and branch creation
     And selector ".create-submit" is clicked
     Then selector ".create-status" contains "Completed"
     When selector ".create-close" is clicked
-    And selector ".prompt-row input" is filled with "SHOW CREATE BRANCH visual_by_tenant;"
+    And selector ".prompt-row input" is filled with "SHOW CREATE PARAMETRIZER visual_by_tenant;"
     And selector ".prompt-row input" is pressed with "Enter"
-    Then selector ".terminal" contains "CREATE BRANCH visual_by_tenant SCHEMA visual_branch_key TTL 5m;" exactly 2 times
+    Then selector ".terminal" contains "CREATE PARAMETRIZER visual_by_tenant SCHEMA visual_branch_key TTL 5m;" exactly 2 times
     When selector ".prompt-row input" is filled with "CREATE RELAY visual_relay SCHEMA visual_branch_key BRANCHED BY visual_by_tenant;"
     And selector ".prompt-row input" is pressed with "Enter"
     Then selector ".terminal" contains "CREATE RELAY visual_relay SCHEMA visual_branch_key BRANCHED BY visual_by_tenant;"
@@ -184,7 +184,7 @@ Feature: Web console visual schema and branch creation
     Then selector ".create-status" contains "Queued in transaction"
     When selector ".create-close" is clicked
     And selector ".create-menu-button" is clicked
-    And selector ".create-menu [data-create-kind='branch']" is clicked
+    And selector ".create-menu [data-create-kind='parametrizer']" is clicked
     And selector ".create-name" is filled with "staged_branch"
     And selector ".create-schema-ref .create-choice-search" is filled with "staged_key"
     Then selector ".create-schema-ref [data-value='staged_key']" exists
@@ -201,9 +201,9 @@ Feature: Web console visual schema and branch creation
     And selector ".prompt-row input" is filled with "COMMIT;"
     And selector ".prompt-row input" is pressed with "Enter"
     Then selector ".transaction-indicator" eventually disappears
-    When selector ".prompt-row input" is filled with "SHOW CREATE BRANCH staged_branch;"
+    When selector ".prompt-row input" is filled with "SHOW CREATE PARAMETRIZER staged_branch;"
     And selector ".prompt-row input" is pressed with "Enter"
-    Then selector ".terminal" contains "CREATE BRANCH staged_branch SCHEMA staged_key TTL 5m;" exactly 2 times
+    Then selector ".terminal" contains "CREATE PARAMETRIZER staged_branch SCHEMA staged_key TTL 5m;" exactly 2 times
 
   Scenario: Duplicate fields remain editable and invalid branch keys report the registry reason
     Given a 1 node nervix cluster is started
@@ -230,7 +230,7 @@ Feature: Web console visual schema and branch creation
     And selector ".create-field-entry:nth-child(2) .create-field-name" has value "same"
     When selector ".create-close" is clicked
     And selector ".create-menu-button" is clicked
-    And selector ".create-menu [data-create-kind='branch']" is clicked
+    And selector ".create-menu [data-create-kind='parametrizer']" is clicked
     And selector ".create-name" is filled with "invalid_branch"
     And selector ".create-schema-ref .create-choice-search" is filled with "byte_key"
     Then selector ".create-schema-ref [data-value='byte_key']" exists
@@ -271,14 +271,14 @@ Feature: Web console visual schema and branch creation
     And selector ".prompt-row input" is pressed with "Enter"
     Then selector ".terminal" contains "samples VEC<ARRAY<F32, 6>> OPTIONAL SENSITIVE" exactly 2 times
     When selector ".create-menu-button" is clicked
-    And selector ".create-menu [data-create-kind='branch']" is clicked
+    And selector ".create-menu [data-create-kind='parametrizer']" is clicked
     And selector ".create-name" is filled with "bounded_tenants"
     And selector ".create-schema-ref .create-choice-search" is filled with "tenant_key"
     Then selector ".create-schema-ref [data-value='tenant_key']" exists
     When selector ".create-schema-ref [data-value='tenant_key']" is clicked
     And selector ".create-ttl" is filled with "5m"
     Then selector ".create-partitions" has value "1"
-    And selector ".create-preview" contains "CREATE BRANCH bounded_tenants SCHEMA tenant_key TTL 5m;"
+    And selector ".create-preview" contains "CREATE PARAMETRIZER bounded_tenants SCHEMA tenant_key TTL 5m;"
     When selector ".create-partitions" is filled with "4"
     And selector ".create-limit-instances" is clicked
     And selector ".create-max-instances" is filled with "3"
@@ -286,9 +286,9 @@ Feature: Web console visual schema and branch creation
     When selector ".create-submit" is clicked
     Then selector ".create-status" contains "Completed"
     When selector ".create-close" is clicked
-    And selector ".prompt-row input" is filled with "SHOW CREATE BRANCH bounded_tenants;"
+    And selector ".prompt-row input" is filled with "SHOW CREATE PARAMETRIZER bounded_tenants;"
     And selector ".prompt-row input" is pressed with "Enter"
-    Then selector ".terminal" contains "CREATE BRANCH bounded_tenants SCHEMA tenant_key TTL 5m PARTITIONS 4 MAX INSTANCES 3 EVICT LRU;" exactly 2 times
+    Then selector ".terminal" contains "CREATE PARAMETRIZER bounded_tenants SCHEMA tenant_key TTL 5m PARTITIONS 4 MAX INSTANCES 3 EVICT LRU;" exactly 2 times
 
   Scenario: Changing a branch draft's domain retains and invalidates its selected schema
     Given a 1 node nervix cluster is started
@@ -303,7 +303,7 @@ Feature: Web console visual schema and branch creation
     Then selector ".domain-menu [data-domain='{{domain}}'].active" exists
     Then selector ".topbar-status .pill.ok" contains "CONNECTED"
     When selector ".create-menu-button" is clicked
-    And selector ".create-menu [data-create-kind='branch']" is clicked
+    And selector ".create-menu [data-create-kind='parametrizer']" is clicked
     And selector ".create-name" is filled with "retained_branch"
     And selector ".create-schema-ref .create-choice-search" is filled with "tenant_key"
     Then selector ".create-schema-ref [data-value='tenant_key']" exists
@@ -313,7 +313,7 @@ Feature: Web console visual schema and branch creation
     And selector ".domain-select" is clicked
     And selector ".domain-menu [data-domain='{{domain}}_other']" is clicked
     And selector ".create-menu-button" is clicked
-    And selector ".create-menu [data-create-kind='branch']" is clicked
+    And selector ".create-menu [data-create-kind='parametrizer']" is clicked
     Then selector ".create-scope" contains "{{domain}}"
     And selector ".create-scope-change" exists
     When selector ".create-scope-change" is clicked
@@ -338,7 +338,7 @@ Feature: Web console visual schema and branch creation
     Then selector ".domain-menu [data-domain='{{domain}}'].active" exists
     Then selector ".topbar-status .pill.ok" contains "CONNECTED"
     When selector ".create-menu-button" is clicked
-    And selector ".create-menu [data-create-kind='branch']" is clicked
+    And selector ".create-menu [data-create-kind='parametrizer']" is clicked
     And selector ".create-name" is filled with "reconnected_branch"
     And selector ".create-schema-ref .create-choice-search" is filled with "reconnect_key"
     Then selector ".create-schema-ref [data-value='reconnect_key']" exists
@@ -351,6 +351,6 @@ Feature: Web console visual schema and branch creation
     When selector ".create-submit" is clicked
     Then selector ".create-status" contains "Completed"
     When selector ".create-close" is clicked
-    And selector ".prompt-row input" is filled with "SHOW CREATE BRANCH reconnected_branch;"
+    And selector ".prompt-row input" is filled with "SHOW CREATE PARAMETRIZER reconnected_branch;"
     And selector ".prompt-row input" is pressed with "Enter"
-    Then selector ".terminal" contains "CREATE BRANCH reconnected_branch SCHEMA reconnect_key TTL 5m;" exactly 2 times
+    Then selector ".terminal" contains "CREATE PARAMETRIZER reconnected_branch SCHEMA reconnect_key TTL 5m;" exactly 2 times

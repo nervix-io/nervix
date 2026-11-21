@@ -574,7 +574,7 @@ impl SessionServiceImpl {
                     // which validation of the regrouped conversion covers.
                     if node.schema_fingerprint != descriptor.schema
                         || !node.units.contains_key(&descriptor.unit)
-                        || node.partition_branch().is_some()
+                        || node.partition_parametrizer().is_some()
                     {
                         continue;
                     }
@@ -709,7 +709,7 @@ impl SessionServiceImpl {
                     // gives it, whichever unit archived it.
                     if node.schema_fingerprint != descriptor.schema
                         || (!node.units.contains_key(&descriptor.unit)
-                            && node.partition_branch().is_none())
+                            && node.partition_parametrizer().is_none())
                     {
                         continue;
                     }

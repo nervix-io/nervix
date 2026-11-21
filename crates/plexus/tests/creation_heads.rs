@@ -39,7 +39,9 @@ fn creation_heads_are_composed(
 }
 
 #[rstest]
-#[case::paced("PA", &["PACED DOMAIN"])]
+#[case::paced_or_parametrizer("PA", &["PACED DOMAIN", "PARAMETRIZER"])]
+#[case::paced("PAC", &["PACED DOMAIN"])]
+#[case::parametrizer("PAR", &["PARAMETRIZER"])]
 #[case::unpaced("UNP", &["UNPACED DOMAIN"])]
 #[case::wire("WIR", &["WIRE AVRO CODEC", "WIRE AVRO SCHEMA", "WIRE CBOR CODEC", "WIRE CBOR SCHEMA", "WIRE JSON CODEC", "WIRE JSON SCHEMA"])]
 #[case::signaling("SIGN", &["SIGNALING PROTOCOL"])]

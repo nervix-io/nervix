@@ -26,7 +26,7 @@ use nervix_interconnect::{
 };
 use nervix_models::{
     ClusterNodeName, CreateEmitter, DomainName, DomainSchedule, EmitterName, ModelKind, ModelName,
-    NodeRef, ResolvedBranchPartitions, ScheduledNode, Unit, UnitKind,
+    NodeRef, ResolvedParametrizerPartitions, ScheduledNode, Unit, UnitKind,
 };
 
 use super::super::{
@@ -85,18 +85,18 @@ impl SessionServiceImpl {
     fn emitter_input_partitions(
         emitter: &CreateEmitter,
         scheduled_domain: &DomainSchedule,
-    ) -> Option<ResolvedBranchPartitions> {
+    ) -> Option<ResolvedParametrizerPartitions> {
         let Some(relay) = emitter.from.relays().first() else {
-            return Some(ResolvedBranchPartitions::ONE);
+            return Some(ResolvedParametrizerPartitions::ONE);
         };
         let Some(relay) = scheduled_domain
             .nodes
             .get(&NodeRef::new(ModelKind::Relay, relay))
         else {
-            return Some(ResolvedBranchPartitions::ONE);
+            return Some(ResolvedParametrizerPartitions::ONE);
         };
         let Some(branching) = &relay.resolved_branching else {
-            return Some(ResolvedBranchPartitions::ONE);
+            return Some(ResolvedParametrizerPartitions::ONE);
         };
         if branching.is_awaiting_topology() {
             None
@@ -104,7 +104,7 @@ impl SessionServiceImpl {
             Some(
                 branching
                     .partitions()
-                    .unwrap_or(ResolvedBranchPartitions::ONE),
+                    .unwrap_or(ResolvedParametrizerPartitions::ONE),
             )
         }
     }

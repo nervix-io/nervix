@@ -173,7 +173,7 @@ func rowSchemaLines(schema *session.RowSchema) ([]field, []field, []string, erro
 		lines = append(lines, parsed.line("FIELD"))
 	}
 	if branch := schema.Branch(nil); branch != nil {
-		lines = append(lines, "BRANCH "+string(branch.Branch()))
+		lines = append(lines, "PARAMETRIZER "+string(branch.Parametrizer()))
 		for index := 0; index < branch.FieldsLength(); index++ {
 			row := new(session.RowField)
 			branch.Fields(row, index)

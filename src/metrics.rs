@@ -36,9 +36,9 @@ use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_approx_into::{ApproxInto as _, CheckedApproxInto as _};
 use nervix_dataflow_graph::{DataflowBranchStatistics, DataflowMetricRef, DataflowStatistics};
 use nervix_models::{
-    BranchKeyFingerprint, BranchName, ClusterNodeName, DomainName, DomainNodeRef, EmitterName,
-    IngestorName, ModelKind, ModelName, NodeUnitRef, PartitionEpochNumber, RelayName, Timestamp,
-    Unit,
+    BranchKeyFingerprint, ClusterNodeName, DomainName, DomainNodeRef, EmitterName, IngestorName,
+    ModelKind, ModelName, NodeUnitRef, ParametrizerName, PartitionEpochNumber, RelayName,
+    Timestamp, Unit,
 };
 use nervix_primitives::{
     collections::{DashMap, dash_map::Entry},
@@ -190,9 +190,9 @@ const PROMETHEUS_LABELS: &[&str] = &[
     "partition",
     "instance",
 ];
-const BRANCH_PROMETHEUS_LABELS: &[&str] = &["domain", "branch", "physical_node_id"];
+const BRANCH_PROMETHEUS_LABELS: &[&str] = &["domain", "parametrizer", "physical_node_id"];
 const BRANCH_EVICTION_PROMETHEUS_LABELS: &[&str] =
-    &["domain", "branch", "physical_node_id", "reason"];
+    &["domain", "parametrizer", "physical_node_id", "reason"];
 const INGESTOR_QUIESCE_PROMETHEUS_LABELS: &[&str] = &[
     "domain",
     "ingestor",
@@ -4257,13 +4257,13 @@ impl RuntimeMetrics {
     pub(crate) fn register_branch(
         &self,
         domain: &DomainName,
-        branch: &BranchName,
+        parametrizer: &ParametrizerName,
         physical_node_id: Option<&ClusterNodeName>,
     ) {
         let physical_node = physical_node_label(physical_node_id);
         self.series.prometheus.branch_instances.with_label_values(&[
             domain.as_str(),
-            branch.as_str(),
+            parametrizer.as_str(),
             physical_node,
         ]);
         for reason in BranchEvictionReason::iter() {
@@ -4272,7 +4272,7 @@ impl RuntimeMetrics {
                 .branch_evictions_total
                 .with_label_values(&[
                     domain.as_str(),
-                    branch.as_str(),
+                    parametrizer.as_str(),
                     physical_node,
                     reason.as_ref(),
                 ]);
@@ -4283,7 +4283,7 @@ impl RuntimeMetrics {
     pub(crate) fn set_branch_partition_epoch(
         &self,
         domain: &DomainName,
-        branch: &BranchName,
+        parametrizer: &ParametrizerName,
         physical_node_id: Option<&ClusterNodeName>,
         number: PartitionEpochNumber,
     ) {
@@ -4294,7 +4294,7 @@ impl RuntimeMetrics {
             .branch_partition_epoch
             .with_label_values(&[
                 domain.as_str(),
-                branch.as_str(),
+                parametrizer.as_str(),
                 physical_node_label(physical_node_id),
             ])
             .set(number);
@@ -4304,7 +4304,7 @@ impl RuntimeMetrics {
     pub(crate) fn add_branch_partition_keys_pending(
         &self,
         domain: &DomainName,
-        branch: &BranchName,
+        parametrizer: &ParametrizerName,
         physical_node_id: Option<&ClusterNodeName>,
         delta: i64,
     ) {
@@ -4313,7 +4313,7 @@ impl RuntimeMetrics {
             .branch_partition_keys_pending
             .with_label_values(&[
                 domain.as_str(),
-                branch.as_str(),
+                parametrizer.as_str(),
                 physical_node_label(physical_node_id),
             ])
             .add(delta);
@@ -4323,7 +4323,7 @@ impl RuntimeMetrics {
     pub(crate) fn observe_branch_partition_key_claimed(
         &self,
         domain: &DomainName,
-        branch: &BranchName,
+        parametrizer: &ParametrizerName,
         physical_node_id: Option<&ClusterNodeName>,
     ) {
         self.series
@@ -4331,7 +4331,7 @@ impl RuntimeMetrics {
             .branch_partition_keys_claimed_total
             .with_label_values(&[
                 domain.as_str(),
-                branch.as_str(),
+                parametrizer.as_str(),
                 physical_node_label(physical_node_id),
             ])
             .inc();
@@ -4348,14 +4348,14 @@ impl RuntimeMetrics {
     pub(crate) fn observe_branch_instance_created(
         &self,
         domain: &DomainName,
-        branch: &BranchName,
+        parametrizer: &ParametrizerName,
         physical_node_id: Option<&ClusterNodeName>,
         concrete_branch: Option<BranchKeyFingerprint>,
     ) {
         let physical_node = physical_node_label(physical_node_id);
         let metric_key = BranchInstanceMetricKey {
             domain: domain.as_str().to_string(),
-            branch: branch.as_str().to_string(),
+            branch: parametrizer.as_str().to_string(),
             physical_node_id: physical_node_id.cloned(),
             concrete_branch,
         };
@@ -4376,7 +4376,7 @@ impl RuntimeMetrics {
                 self.series
                     .prometheus
                     .branch_instances
-                    .with_label_values(&[domain.as_str(), branch.as_str(), physical_node])
+                    .with_label_values(&[domain.as_str(), parametrizer.as_str(), physical_node])
                     .inc();
             }
         }
@@ -4393,7 +4393,7 @@ impl RuntimeMetrics {
     pub(crate) fn observe_branch_instance_removed(
         &self,
         domain: &DomainName,
-        branch: &BranchName,
+        parametrizer: &ParametrizerName,
         physical_node_id: Option<&ClusterNodeName>,
         concrete_branch: Option<BranchKeyFingerprint>,
         reason: BranchEvictionReason,
@@ -4401,7 +4401,7 @@ impl RuntimeMetrics {
         let physical_node = physical_node_label(physical_node_id);
         let metric_key = BranchInstanceMetricKey {
             domain: domain.as_str().to_string(),
-            branch: branch.as_str().to_string(),
+            branch: parametrizer.as_str().to_string(),
             physical_node_id: physical_node_id.cloned(),
             concrete_branch,
         };
@@ -4426,7 +4426,7 @@ impl RuntimeMetrics {
             self.series
                 .prometheus
                 .branch_instances
-                .with_label_values(&[domain.as_str(), branch.as_str(), physical_node])
+                .with_label_values(&[domain.as_str(), parametrizer.as_str(), physical_node])
                 .dec();
         }
         if record_eviction {
@@ -4435,7 +4435,7 @@ impl RuntimeMetrics {
                 .branch_evictions_total
                 .with_label_values(&[
                     domain.as_str(),
-                    branch.as_str(),
+                    parametrizer.as_str(),
                     physical_node,
                     reason.as_ref(),
                 ])
@@ -4454,14 +4454,14 @@ impl RuntimeMetrics {
     pub(crate) fn observe_branch_instance_detached(
         &self,
         domain: &DomainName,
-        branch: &BranchName,
+        parametrizer: &ParametrizerName,
         physical_node_id: Option<&ClusterNodeName>,
         concrete_branch: Option<BranchKeyFingerprint>,
     ) {
         let physical_node = physical_node_label(physical_node_id);
         let metric_key = BranchInstanceMetricKey {
             domain: domain.as_str().to_string(),
-            branch: branch.as_str().to_string(),
+            branch: parametrizer.as_str().to_string(),
             physical_node_id: physical_node_id.cloned(),
             concrete_branch,
         };
@@ -4480,7 +4480,7 @@ impl RuntimeMetrics {
             self.series
                 .prometheus
                 .branch_instances
-                .with_label_values(&[domain.as_str(), branch.as_str(), physical_node])
+                .with_label_values(&[domain.as_str(), parametrizer.as_str(), physical_node])
                 .dec();
         }
     }
@@ -7382,7 +7382,7 @@ mod tests {
     fn branch_lifecycle_metrics_count_concrete_keys_once_per_node() {
         let metrics = RuntimeMetrics::default();
         let domain = DomainName::parse("main").expect("valid domain");
-        let branch = BranchName::parse("by_tenant").expect("valid identifier");
+        let branch = ParametrizerName::parse("by_tenant").expect("valid identifier");
         let concrete_branch = tenant_branch("acme");
         let has_sample = |rendered: &str, metric: &str, label_fragments: &[&str], value: u64| {
             let expected_suffix = format!(" {value}");
@@ -7418,7 +7418,7 @@ mod tests {
             &rendered,
             "nervix_branch_instances",
             &[
-                "branch=\"by_tenant\"",
+                "parametrizer=\"by_tenant\"",
                 "domain=\"main\"",
                 "physical_node_id=\"node-1\"",
             ],
@@ -7438,7 +7438,7 @@ mod tests {
             &rendered,
             "nervix_branch_instances",
             &[
-                "branch=\"by_tenant\"",
+                "parametrizer=\"by_tenant\"",
                 "domain=\"main\"",
                 "physical_node_id=\"node-1\"",
             ],
@@ -7448,7 +7448,7 @@ mod tests {
             &rendered,
             "nervix_branch_evictions_total",
             &[
-                "branch=\"by_tenant\"",
+                "parametrizer=\"by_tenant\"",
                 "domain=\"main\"",
                 "physical_node_id=\"node-1\"",
                 "reason=\"lru\"",
@@ -7469,7 +7469,7 @@ mod tests {
             &rendered,
             "nervix_branch_instances",
             &[
-                "branch=\"by_tenant\"",
+                "parametrizer=\"by_tenant\"",
                 "domain=\"main\"",
                 "physical_node_id=\"node-1\"",
             ],
@@ -7479,7 +7479,7 @@ mod tests {
             &rendered,
             "nervix_branch_evictions_total",
             &[
-                "branch=\"by_tenant\"",
+                "parametrizer=\"by_tenant\"",
                 "domain=\"main\"",
                 "physical_node_id=\"node-1\"",
                 "reason=\"lru\"",
@@ -7490,7 +7490,7 @@ mod tests {
             &rendered,
             "nervix_branch_evictions_total",
             &[
-                "branch=\"by_tenant\"",
+                "parametrizer=\"by_tenant\"",
                 "domain=\"main\"",
                 "physical_node_id=\"node-1\"",
                 "reason=\"ttl\"",

@@ -310,7 +310,10 @@ mod tests {
         );
         assert_eq!(parsed.global_error_policy, GeneralErrorPolicy::Ignore);
         assert_eq!(
-            parsed.branched_by.branch().map(|branch| branch.as_str()),
+            parsed
+                .branched_by
+                .parametrizer()
+                .map(|branch| branch.as_str()),
             Some("tenant_branch")
         );
     }

@@ -280,14 +280,14 @@ declare_model_change_aspects! {
     EndpointDefinition => DomainPause, None, false;
     SignalingProtocolDefinition => DomainPause, None, false;
     LookupDefinition => DomainPause, None, false;
-    BranchSchema => DomainPause, None, false;
-    BranchLifecycle => DomainPause, None, false;
+    ParametrizerSchema => DomainPause, None, false;
+    ParametrizerLifecycle => DomainPause, None, false;
     UdfDefinition => DomainPause, None, false;
     PlacementDefinition => Dynamic, None, true;
     EntityReplaced => Dynamic, None, false;
     EntityCreated => Dynamic, None, false;
     EntityDropped => Dynamic, None, false;
-    BranchPartitions => EntityPause, None, false;
+    ParametrizerPartitions => EntityPause, None, false;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -456,7 +456,9 @@ impl Model {
                 wasm_processor_change_aspects(base, candidate)
             }
             (Self::Vhost(base), Self::Vhost(candidate)) => vhost_change_aspects(base, candidate),
-            (Self::Branch(base), Self::Branch(candidate)) => branch_change_aspects(base, candidate),
+            (Self::Parametrizer(base), Self::Parametrizer(candidate)) => {
+                branch_change_aspects(base, candidate)
+            }
             (Self::Codec(base), Self::Codec(candidate)) => {
                 if base.name == candidate.name {
                     definition_change_aspect(ModelChangeAspect::CodecDefinition)
@@ -1142,8 +1144,8 @@ fn vhost_change_aspects(
 }
 
 fn branch_change_aspects(
-    base: &crate::CreateBranch,
-    candidate: &crate::CreateBranch,
+    base: &crate::CreateParametrizer,
+    candidate: &crate::CreateParametrizer,
 ) -> ModelChangeAspects {
     if base.name != candidate.name {
         return ModelChangeAspects::replaced();
@@ -1152,19 +1154,19 @@ fn branch_change_aspects(
     let mut changes = ModelChangeAspects::default();
     if base.schema != candidate.schema {
         // The branch schema types every branch key in the domain, exactly like a relay schema.
-        changes.push(ModelChangeAspect::BranchSchema);
+        changes.push(ModelChangeAspect::ParametrizerSchema);
     }
     if base.ttl != candidate.ttl || base.eviction != candidate.eviction {
         // TTL and eviction are baked into branch node specs when a branch task spawns, so they
         // only take effect once the domain rebuilds around the new models.
-        changes.push(ModelChangeAspect::BranchLifecycle);
+        changes.push(ModelChangeAspect::ParametrizerLifecycle);
     }
     if base.partitions != candidate.partitions {
         // The count decides which unit of every node the branch branches owns each key. A change
         // begins the branch's next partition epoch: its nodes and the nodes writing to its relays
         // pause while they take the new units, and every key the previous count placed elsewhere
         // moves when its next record reaches its new partition.
-        changes.push(ModelChangeAspect::BranchPartitions);
+        changes.push(ModelChangeAspect::ParametrizerPartitions);
     }
     changes
 }
@@ -2289,8 +2291,8 @@ mod catch_all_kind_tests {
 
     use crate::{
         AckMode, ActivationAction, BranchSelection, CodecWireFormat, CorrelationTimeoutAction,
-        CorrelationTimeoutPolicy, CorrelatorMatchPolicy, CreateBranch, CreateCodec,
-        CreateCorrelator, CreateInferencer, CreateVhost, CreateWasmProcessor,
+        CorrelationTimeoutPolicy, CorrelatorMatchPolicy, CreateCodec, CreateCorrelator,
+        CreateInferencer, CreateParametrizer, CreateVhost, CreateWasmProcessor,
         CreateWindowProcessor, DynamicModelUpdate, FlushPolicy, GeneralErrorPolicy, Literal, Model,
         ModelChangeAspect, ModelKind, ModelName, NodeRef, ProcessorInputs, ProcessorOutput,
         ProcessorOutputs, QuiesceLevel, VhostTlsResource, WasmProcessorLimits, WindowBound,
@@ -2558,29 +2560,29 @@ mod catch_all_kind_tests {
             QuiesceLevel::DomainPause,
         );
 
-        let base_branch = CreateBranch {
+        let base_branch = CreateParametrizer {
             labels: Default::default(),
             name: named("by_tenant"),
             schema: named("tenant_branch"),
             ttl: "5m".to_string(),
-            partitions: crate::BranchPartitions::ONE,
+            partitions: crate::ParametrizerPartitions::ONE,
             eviction: None,
         };
         let mut retimed = base_branch.clone();
         retimed.ttl = "10m".to_string();
         assert_single_aspect(
-            Model::Branch(base_branch.clone()),
-            Model::Branch(retimed),
-            ModelChangeAspect::BranchLifecycle,
+            Model::Parametrizer(base_branch.clone()),
+            Model::Parametrizer(retimed),
+            ModelChangeAspect::ParametrizerLifecycle,
             QuiesceLevel::DomainPause,
         );
 
         let mut reschemad = base_branch.clone();
         reschemad.schema = named("tenant_branch_v2");
         assert_single_aspect(
-            Model::Branch(base_branch),
-            Model::Branch(reschemad),
-            ModelChangeAspect::BranchSchema,
+            Model::Parametrizer(base_branch),
+            Model::Parametrizer(reschemad),
+            ModelChangeAspect::ParametrizerSchema,
             QuiesceLevel::DomainPause,
         );
     }

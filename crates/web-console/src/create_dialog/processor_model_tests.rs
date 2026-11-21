@@ -100,8 +100,8 @@ fn branching(value: Option<&BranchSelection>) -> NodeBranchDraft {
     match value {
         None => NodeBranchDraft::Unselected,
         Some(BranchSelection::Unbranched) => NodeBranchDraft::Unbranched,
-        Some(BranchSelection::BranchedBy { branch }) => {
-            NodeBranchDraft::Branched(Some(SelectedReference::chosen(branch.clone())))
+        Some(BranchSelection::BranchedBy { parametrizer }) => {
+            NodeBranchDraft::Branched(Some(SelectedReference::chosen(parametrizer.clone())))
         }
     }
 }
@@ -152,10 +152,10 @@ fn route_branch(value: Option<&OutputBranch>) -> RouteBranchDraft {
         None => RouteBranchDraft::Unselected,
         Some(OutputBranch::Unbranched) => RouteBranchDraft::Unbranched,
         Some(OutputBranch::BranchedBy {
-            branch,
+            parametrizer,
             assignments: values,
         }) => RouteBranchDraft::Branched {
-            branch: Some(SelectedReference::chosen(branch.clone())),
+            branch: Some(SelectedReference::chosen(parametrizer.clone())),
             assignments: assignments(values),
         },
     }

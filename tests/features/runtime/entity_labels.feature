@@ -57,7 +57,7 @@ Feature: Domain entity labels
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA incoming (id STRING, amount I64, tenant STRING);
       CREATE SCHEMA tenant_key (tenant STRING);
-      CREATE BRANCH tenants SCHEMA tenant_key TTL 5m;
+      CREATE PARAMETRIZER tenants SCHEMA tenant_key TTL 5m;
       CREATE RELAY orders SCHEMA incoming BRANCHED BY tenants;
       CREATE CLIENT PRODUCER INGESTOR orders_in
         FROM SCHEMA incoming
@@ -217,7 +217,7 @@ Feature: Domain entity labels
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA incoming (id STRING, amount I64, tenant STRING);
       CREATE SCHEMA tenant_key (tenant STRING);
-      CREATE BRANCH tenants SCHEMA tenant_key TTL 5m;
+      CREATE PARAMETRIZER tenants SCHEMA tenant_key TTL 5m;
       CREATE RELAY orders SCHEMA incoming BRANCHED BY tenants;
       CREATE RELAY distinct_orders SCHEMA incoming BRANCHED BY tenants;
       CREATE CLIENT PRODUCER INGESTOR orders_in
@@ -253,7 +253,7 @@ Feature: Domain entity labels
       """
       BEGIN;
       SET LABELS ON SCHEMA incoming { 'owner' = 'Platform' };
-      SET LABELS ON BRANCH tenants { 'owner' = 'Platform' };
+      SET LABELS ON PARAMETRIZER tenants { 'owner' = 'Platform' };
       SET LABELS ON SCHEMA tenant_key { 'owner' = 'Platform' };
       SET LABELS ON RELAY orders { 'owner' = 'Platform' };
       SET LABELS ON INGESTOR orders_in { 'owner' = 'Platform' };

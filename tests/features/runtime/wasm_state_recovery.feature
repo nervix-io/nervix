@@ -24,7 +24,7 @@ Feature: Recovery from a rejected WASM guest snapshot
       CREATE WIRE JSON SCHEMA limited_input_wire MODE STRICT ( tenant string, message string );
       CREATE WIRE JSON CODEC limited_input_codec FROM WIRE SCHEMA limited_input_wire TO SCHEMA limited_input_event;
       CREATE SCHEMA limited_branch_key ( tenant STRING );
-      CREATE BRANCH by_limited_tenant SCHEMA limited_branch_key TTL 5m;
+      CREATE PARAMETRIZER by_limited_tenant SCHEMA limited_branch_key TTL 5m;
       CREATE RELAY limited_input_events SCHEMA limited_input_event BRANCHED BY by_limited_tenant;
       CREATE RELAY limited_events SCHEMA limited_output_event BRANCHED BY by_limited_tenant;
       CREATE VHOST edge wasm-recovery-{{test_id}}.example.com;
@@ -123,7 +123,7 @@ Feature: Recovery from a rejected WASM guest snapshot
       CREATE WIRE JSON SCHEMA limited_input_wire MODE STRICT ( tenant string, message string );
       CREATE WIRE JSON CODEC limited_input_codec FROM WIRE SCHEMA limited_input_wire TO SCHEMA limited_input_event;
       CREATE SCHEMA limited_branch_key ( tenant STRING );
-      CREATE BRANCH by_limited_tenant SCHEMA limited_branch_key TTL 5m;
+      CREATE PARAMETRIZER by_limited_tenant SCHEMA limited_branch_key TTL 5m;
       CREATE RELAY limited_input_events SCHEMA limited_input_event BRANCHED BY by_limited_tenant;
       CREATE RELAY limited_events SCHEMA limited_output_event BRANCHED BY by_limited_tenant;
       CREATE VHOST edge wasm-recovery-{{test_id}}.example.com;
@@ -221,7 +221,7 @@ Feature: Recovery from a rejected WASM guest snapshot
       CREATE WIRE JSON SCHEMA limited_input_wire MODE STRICT ( tenant string, message string );
       CREATE WIRE JSON CODEC limited_input_codec FROM WIRE SCHEMA limited_input_wire TO SCHEMA limited_input_event;
       CREATE SCHEMA limited_branch_key ( tenant STRING );
-      CREATE BRANCH by_limited_tenant SCHEMA limited_branch_key TTL 5m;
+      CREATE PARAMETRIZER by_limited_tenant SCHEMA limited_branch_key TTL 5m;
       CREATE RELAY limited_input_events SCHEMA limited_input_event BRANCHED BY by_limited_tenant;
       CREATE RELAY limited_events SCHEMA limited_output_event BRANCHED BY by_limited_tenant;
       CREATE VHOST edge wasm-recovery-{{test_id}}.example.com;

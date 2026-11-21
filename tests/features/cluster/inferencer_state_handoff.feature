@@ -30,7 +30,7 @@ Feature: Stateful inferencer state follows its branches across owners
       CREATE WIRE JSON SCHEMA features_wire MODE STRICT ( tenant string, vector array );
       CREATE WIRE JSON CODEC features_codec FROM WIRE SCHEMA features_wire TO SCHEMA features;
       CREATE SCHEMA tenant_branch ( tenant STRING );
-      CREATE BRANCH by_tenant SCHEMA tenant_branch TTL 5m;
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_branch TTL 5m;
       CREATE RELAY features SCHEMA features BRANCHED BY by_tenant;
       CREATE RELAY scored SCHEMA scored BRANCHED BY by_tenant;
       CREATE VHOST edge infer-relocate-{{test_id}}.example.com;
@@ -152,7 +152,7 @@ Feature: Stateful inferencer state follows its branches across owners
       CREATE WIRE JSON SCHEMA features_wire MODE STRICT ( tenant string, vector array );
       CREATE WIRE JSON CODEC features_codec FROM WIRE SCHEMA features_wire TO SCHEMA features;
       CREATE SCHEMA tenant_branch ( tenant STRING );
-      CREATE BRANCH by_tenant SCHEMA tenant_branch TTL 5m;
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_branch TTL 5m;
       CREATE RELAY features SCHEMA features BRANCHED BY by_tenant;
       CREATE RELAY scored SCHEMA scored BRANCHED BY by_tenant;
       CREATE VHOST edge infer-drain-{{test_id}}.example.com;
@@ -249,7 +249,7 @@ Feature: Stateful inferencer state follows its branches across owners
       CREATE WIRE JSON SCHEMA features_wire MODE STRICT ( tenant string, vector array );
       CREATE WIRE JSON CODEC features_codec FROM WIRE SCHEMA features_wire TO SCHEMA features;
       CREATE SCHEMA tenant_branch ( tenant STRING );
-      CREATE BRANCH by_tenant SCHEMA tenant_branch TTL 5m;
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_branch TTL 5m;
       CREATE RELAY features SCHEMA features BRANCHED BY by_tenant;
       CREATE RELAY scored SCHEMA scored BRANCHED BY by_tenant;
       CREATE VHOST edge infer-quiesce-{{test_id}}.example.com;
@@ -338,7 +338,7 @@ Feature: Stateful inferencer state follows its branches across owners
       CREATE WIRE JSON SCHEMA features_wire MODE STRICT ( tenant string, vector array );
       CREATE WIRE JSON CODEC features_codec FROM WIRE SCHEMA features_wire TO SCHEMA features;
       CREATE SCHEMA tenant_branch ( tenant STRING );
-      CREATE BRANCH by_tenant SCHEMA tenant_branch TTL 5m;
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_branch TTL 5m;
       CREATE RELAY features SCHEMA features BRANCHED BY by_tenant;
       CREATE RELAY scored SCHEMA scored BRANCHED BY by_tenant;
       CREATE VHOST edge infer-lost-{{test_id}}.example.com;
@@ -444,7 +444,7 @@ Feature: Stateful inferencer state follows its branches across owners
       CREATE WIRE JSON SCHEMA features_wire MODE STRICT ( tenant string, vector array );
       CREATE WIRE JSON CODEC features_codec FROM WIRE SCHEMA features_wire TO SCHEMA features;
       CREATE SCHEMA tenant_branch ( tenant STRING );
-      CREATE BRANCH by_tenant SCHEMA tenant_branch TTL 5m;
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_branch TTL 5m;
       CREATE RELAY features SCHEMA features BRANCHED BY by_tenant;
       CREATE RELAY scored SCHEMA scored BRANCHED BY by_tenant;
       CREATE VHOST edge infer-fence-{{test_id}}.example.com;
@@ -587,7 +587,7 @@ Feature: Stateful inferencer state follows its branches across owners
       CREATE WIRE JSON SCHEMA features_wire MODE STRICT ( tenant string, vector array );
       CREATE WIRE JSON CODEC features_codec FROM WIRE SCHEMA features_wire TO SCHEMA features;
       CREATE SCHEMA tenant_branch ( tenant STRING );
-      CREATE BRANCH by_tenant SCHEMA tenant_branch TTL 5m;
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_branch TTL 5m;
       CREATE RELAY features SCHEMA features BRANCHED BY by_tenant;
       CREATE RELAY scored SCHEMA scored BRANCHED BY by_tenant;
       CREATE VHOST edge infer-stop-{{test_id}}.example.com;

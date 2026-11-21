@@ -1825,7 +1825,7 @@ and a materialized relay's holding unit has a state task but no owner task.
 Each unit's owner publishes its holdings as one immutable value, replaced when the set changes,
 never per record: every key it holds that the current count places in another unit, keyed by
 fingerprint in a persistent ordered map, with that unit; the keys it claimed in the epoch; and the
-claims it has in flight. Claimants read catalog pages from that publication and DESCRIBE BRANCH
+claims it has in flight. Claimants read catalog pages from that publication and DESCRIBE PARAMETRIZER
 and the leader's retirement read the counts; neither reaches the owner's registry.
 
 A claim moves one key's durable state from its holding unit to the unit the current count places

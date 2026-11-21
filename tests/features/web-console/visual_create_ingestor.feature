@@ -262,7 +262,7 @@ Feature: Web console visual ingestor creation
       CREATE SCHEMA visual_branch_output (tenant STRING, secret STRING);
       CREATE SCHEMA visual_branch_key (tenant STRING);
       CREATE SCHEMA visual_branch_error (reason STRING OPTIONAL);
-      CREATE BRANCH visual_branch SCHEMA visual_branch_key TTL 5m;
+      CREATE PARAMETRIZER visual_branch SCHEMA visual_branch_key TTL 5m;
       CREATE WIRE JSON SCHEMA visual_branch_wire MODE STRICT (tenant string, secret string);
       CREATE WIRE JSON CODEC visual_branch_codec FROM WIRE SCHEMA visual_branch_wire TO SCHEMA visual_branch_input;
       CREATE RELAY visual_branch_relay SCHEMA visual_branch_output BRANCHED BY visual_branch;
@@ -286,9 +286,9 @@ Feature: Web console visual ingestor creation
     When selector ".create-ingestor-codec [data-value='visual_branch_codec']" is clicked
     And selector ".create-ingestor-timestamp [data-timestamp='now']" is clicked
     And selector ".create-ingestor-route .create-ingestor-branching [data-branch='named']" is clicked
-    And selector ".create-ingestor-route .create-ingestor-branch .create-choice-search" is filled with "visual_branch"
-    Then selector ".create-ingestor-route .create-ingestor-branch [data-value='visual_branch']" exists
-    When selector ".create-ingestor-route .create-ingestor-branch [data-value='visual_branch']" is clicked
+    And selector ".create-ingestor-route .create-ingestor-parametrizer .create-choice-search" is filled with "visual_branch"
+    Then selector ".create-ingestor-route .create-ingestor-parametrizer [data-value='visual_branch']" exists
+    When selector ".create-ingestor-route .create-ingestor-parametrizer [data-value='visual_branch']" is clicked
     Then selector ".create-ingestor-branch-fields [data-value='tenant']" exists
     When selector ".create-ingestor-branch-fields [data-value='tenant']" is clicked
     And selector ".create-ingestor-branch-assignments .create-ingestor-assignment-expression" is filled with "message.tenant"

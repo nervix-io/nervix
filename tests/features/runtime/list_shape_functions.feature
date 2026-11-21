@@ -17,7 +17,7 @@ Feature: List shape functions
       CREATE WIRE JSON SCHEMA samples_wire MODE STRICT (tenant string, sequence array);
       CREATE WIRE JSON CODEC samples_codec FROM WIRE SCHEMA samples_wire TO SCHEMA samples;
       CREATE SCHEMA tenant_key (tenant STRING);
-      CREATE BRANCH by_tenant SCHEMA tenant_key TTL 5m;
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_key TTL 5m;
       CREATE RELAY samples SCHEMA samples BRANCHED BY by_tenant;
       CREATE RELAY retained SCHEMA samples BRANCHED BY by_tenant;
       CREATE RELAY scored SCHEMA scored BRANCHED BY by_tenant;

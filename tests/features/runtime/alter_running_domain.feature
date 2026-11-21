@@ -208,7 +208,7 @@ Feature: Altering schemas on a running domain
         TO SCHEMA stable_event;
 
       CREATE SCHEMA tenant_branch_schema ( tenant STRING );
-      CREATE BRANCH tenant_branch SCHEMA tenant_branch_schema TTL 5m;
+      CREATE PARAMETRIZER tenant_branch SCHEMA tenant_branch_schema TTL 5m;
 
       CREATE RELAY mutable_state
         SCHEMA mutable_event

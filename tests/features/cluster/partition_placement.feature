@@ -11,7 +11,7 @@ Feature: Placement policies apply to corresponding execution units
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT (tenant string, id integer);
       CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE SCHEMA tenant_key (tenant STRING);
-      CREATE BRANCH tenants SCHEMA tenant_key TTL 5m PARTITIONS 2;
+      CREATE PARAMETRIZER tenants SCHEMA tenant_key TTL 5m PARTITIONS 2;
       CREATE RELAY incoming SCHEMA event BRANCHED BY tenants;
       CREATE RELAY outgoing SCHEMA event BRANCHED BY tenants;
       CREATE VHOST edge placement-{{test_id}}.example.com;
@@ -198,7 +198,7 @@ Feature: Placement policies apply to corresponding execution units
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT (tenant string, id integer);
       CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE SCHEMA tenant_key (tenant STRING);
-      CREATE BRANCH tenants SCHEMA tenant_key TTL 5m PARTITIONS 2;
+      CREATE PARAMETRIZER tenants SCHEMA tenant_key TTL 5m PARTITIONS 2;
       CREATE RELAY incoming SCHEMA event BRANCHED BY tenants;
       CREATE KAFKA CLIENT broker CONFIG { 'bootstrap.servers' = '127.0.0.1:9092' };
       CREATE KAFKA TOPIC INGESTOR reader FROM broker TOPIC 'events'
@@ -263,7 +263,7 @@ Feature: Placement policies apply to corresponding execution units
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA event (tenant STRING, id I64);
       CREATE SCHEMA tenant_key (tenant STRING);
-      CREATE BRANCH tenants SCHEMA tenant_key TTL 5m PARTITIONS 2;
+      CREATE PARAMETRIZER tenants SCHEMA tenant_key TTL 5m PARTITIONS 2;
       CREATE RELAY incoming SCHEMA event BRANCHED BY tenants;
       CREATE RELAY collapsed SCHEMA event UNBRANCHED;
       CREATE REINGESTOR collapse FROM incoming

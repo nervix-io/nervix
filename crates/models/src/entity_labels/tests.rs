@@ -47,13 +47,16 @@ fn resolved_branch_schemas_preserve_configuration_across_label_edits() {
     let before = crate::ResolvedBranching::branched(
         branch,
         schema.clone(),
-        crate::ResolvedBranchPartitions::ONE,
+        crate::ResolvedParametrizerPartitions::ONE,
     );
     schema.labels = labels(&[("owner", "Second")]);
     let after = crate::ResolvedBranching::branched(
-        before.branch().assured("the fixture is branched").clone(),
+        before
+            .parametrizer()
+            .assured("the fixture is branched")
+            .clone(),
         schema.clone(),
-        crate::ResolvedBranchPartitions::ONE,
+        crate::ResolvedParametrizerPartitions::ONE,
     );
     assert_eq!(before, after);
     assert!(before.same_key_as(&after));
@@ -74,9 +77,12 @@ fn resolved_branch_schemas_preserve_configuration_across_label_edits() {
     );
     schema.fields[0].sensitive = false;
     let changed = crate::ResolvedBranching::branched(
-        before.branch().assured("the fixture is branched").clone(),
+        before
+            .parametrizer()
+            .assured("the fixture is branched")
+            .clone(),
         schema,
-        crate::ResolvedBranchPartitions::ONE,
+        crate::ResolvedParametrizerPartitions::ONE,
     );
     assert!(!before.same_key_as(&changed));
 }

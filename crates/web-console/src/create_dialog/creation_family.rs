@@ -57,7 +57,7 @@ impl CreateKind {
         Self::Model(ModelKind::WireJsonSchema),
         Self::Model(ModelKind::WireCborSchema),
         Self::Model(ModelKind::WireAvroSchema),
-        Self::Model(ModelKind::Branch),
+        Self::Model(ModelKind::Parametrizer),
         Self::Model(ModelKind::Relay),
         Self::Subscription,
         Self::Model(ModelKind::Codec),
@@ -112,7 +112,7 @@ impl CreateKind {
             ModelKind::WireJsonSchema => "wire JSON schema",
             ModelKind::WireCborSchema => "wire CBOR schema",
             ModelKind::WireAvroSchema => "wire AVRO schema",
-            ModelKind::Branch => "branch",
+            ModelKind::Parametrizer => "parametrizer",
             ModelKind::Relay => "relay",
             ModelKind::Codec => "codec",
             ModelKind::SignalingProtocol => "signaling protocol",
@@ -170,7 +170,7 @@ impl CreateKind {
             ModelKind::WireJsonSchema => ("Wire JSON schema", "JSON payload fields"),
             ModelKind::WireCborSchema => ("Wire CBOR schema", "CBOR payload fields"),
             ModelKind::WireAvroSchema => ("Wire AVRO schema", "AVRO payload fields"),
-            ModelKind::Branch => ("Branch", "Key schema and lifetime"),
+            ModelKind::Parametrizer => ("Parametrizer", "Key schema and lifetime"),
             ModelKind::Relay => ("Relay", "Schema, branching and capacity"),
             ModelKind::Codec => ("Codec", "Wire format and schema mapping"),
             ModelKind::SignalingProtocol => ("Signaling protocol", "Ordered connection handshake"),
@@ -222,7 +222,7 @@ impl CreateKind {
             Self::Model(
                 ModelKind::Placement
                 | ModelKind::Schema
-                | ModelKind::Branch
+                | ModelKind::Parametrizer
                 | ModelKind::Relay
                 | ModelKind::Codec
                 | ModelKind::SignalingProtocol
@@ -269,7 +269,7 @@ impl CreateKind {
                 | ModelKind::WireJsonSchema
                 | ModelKind::WireCborSchema
                 | ModelKind::WireAvroSchema
-                | ModelKind::Branch
+                | ModelKind::Parametrizer
                 | ModelKind::Relay
                 | ModelKind::Codec
                 | ModelKind::SignalingProtocol

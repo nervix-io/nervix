@@ -127,7 +127,7 @@ Feature: Web console visual emitter creation
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE KAFKA CLIENT visual_client CONFIG {'bootstrap.servers' = '{{kafka_addr}}'};
       CREATE SCHEMA visual_key (user_id I64);
-      CREATE BRANCH visual_branch SCHEMA visual_key TTL 5m;
+      CREATE PARAMETRIZER visual_branch SCHEMA visual_key TTL 5m;
       CREATE RELAY visual_branched SCHEMA visual_event BRANCHED BY visual_branch;
       CREATE HTTP ENDPOINT visual_other_endpoint ON visual_host PATH '/other';
       CREATE HTTP ENDPOINT INGESTOR visual_other_ingest FROM visual_other_endpoint MODE NO ACK

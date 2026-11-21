@@ -312,7 +312,7 @@ Feature: Checked numeric execution
       CREATE SCHEMA operand_id_branch (
         id STRING
       );
-      CREATE BRANCH by_operand_id SCHEMA operand_id_branch TTL 5m;
+      CREATE PARAMETRIZER by_operand_id SCHEMA operand_id_branch TTL 5m;
       CREATE RELAY operands SCHEMA operand UNBRANCHED;
       CREATE RELAY partitioned_operands SCHEMA operand BRANCHED BY by_operand_id;
       CREATE RELAY numeric_errors SCHEMA numeric_error UNBRANCHED;

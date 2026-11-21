@@ -21,7 +21,7 @@ Feature: Deduplicator and window state in backup archives
         latency_p0 F64 OPTIONAL
       );
       CREATE SCHEMA tenant_key ( tenant STRING );
-      CREATE BRANCH by_tenant SCHEMA tenant_key TTL 30m;
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_key TTL 30m;
       CREATE RELAY payments SCHEMA payment BRANCHED BY by_tenant;
       CREATE RELAY unique_payments SCHEMA payment BRANCHED BY by_tenant;
       CREATE RELAY metrics SCHEMA metric BRANCHED BY by_tenant;

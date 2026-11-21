@@ -15,8 +15,8 @@
 use ahash::{HashMap, HashSet};
 use error_stack::Report;
 use nervix_models::{
-    BranchName, BranchSelection, CreateSchema, DomainName, MessageErrorPolicy, Model, ModelIndex,
-    ModelKind, ModelName, NodeRef, ProcessorOutputs, RelayName, RouteConstruction,
+    BranchSelection, CreateSchema, DomainName, MessageErrorPolicy, Model, ModelIndex, ModelKind,
+    ModelName, NodeRef, ParametrizerName, ProcessorOutputs, RelayName, RouteConstruction,
 };
 use nervix_vm::{
     CompileBinding, CompileOptions, OutputMode, SemanticScopePolicy,
@@ -86,25 +86,27 @@ pub(in crate::registry) fn validate_model_message_error_policies(
         identifier,
         node_kind: model.kind(),
     };
-    let validate_outputs = |outputs: &ProcessorOutputs,
-                            schemas: MessageErrorSchemas<'_>,
-                            expected_branch: Option<&BranchName>| {
-        for output in outputs.outputs() {
-            let partial_output = schema_for_ack_model(domain, identifier, models, &output.relay)?;
-            validate_message_error_policy(
-                site,
-                &output.relay,
-                models,
-                &output.message_error_policy,
-                MessageErrorSchemas {
-                    partial_output: Some(partial_output),
-                    ..schemas
-                },
-                expected_branch,
-            )?;
-        }
-        Ok::<(), Report<RegistryError>>(())
-    };
+    let validate_outputs =
+        |outputs: &ProcessorOutputs,
+         schemas: MessageErrorSchemas<'_>,
+         expected_parametrizer: Option<&ParametrizerName>| {
+            for output in outputs.outputs() {
+                let partial_output =
+                    schema_for_ack_model(domain, identifier, models, &output.relay)?;
+                validate_message_error_policy(
+                    site,
+                    &output.relay,
+                    models,
+                    &output.message_error_policy,
+                    MessageErrorSchemas {
+                        partial_output: Some(partial_output),
+                        ..schemas
+                    },
+                    expected_parametrizer,
+                )?;
+            }
+            Ok::<(), Report<RegistryError>>(())
+        };
 
     match model {
         Model::Ingestor(node) => {
@@ -140,7 +142,7 @@ pub(in crate::registry) fn validate_model_message_error_policies(
         Model::Generator(node) => validate_outputs(
             &node.output_routes,
             MessageErrorSchemas::default(),
-            node.branched_by.branch(),
+            node.branched_by.parametrizer(),
         ),
         Model::Inferencer(node) => {
             let relay = processor_first_input_relay(
@@ -156,7 +158,7 @@ pub(in crate::registry) fn validate_model_message_error_policies(
                     input: Some(input),
                     ..MessageErrorSchemas::default()
                 },
-                node.branched_by.branch(),
+                node.branched_by.parametrizer(),
             )
         }
         Model::WasmProcessor(node) => {
@@ -173,7 +175,7 @@ pub(in crate::registry) fn validate_model_message_error_policies(
                     input: Some(input),
                     ..MessageErrorSchemas::default()
                 },
-                node.branched_by.branch(),
+                node.branched_by.parametrizer(),
             )
         }
         Model::Junction(node) => validate_transforming_processor_message_errors(
@@ -203,7 +205,7 @@ pub(in crate::registry) fn validate_model_message_error_policies(
         Model::WindowProcessor(node) => validate_outputs(
             &node.output_routes,
             MessageErrorSchemas::default(),
-            node.branched_by.branch(),
+            node.branched_by.parametrizer(),
         ),
         Model::Correlator(node) => {
             let left_relay = processor_first_input_relay(
@@ -232,7 +234,7 @@ pub(in crate::registry) fn validate_model_message_error_policies(
                     )?),
                     ..MessageErrorSchemas::default()
                 },
-                node.branched_by.branch(),
+                node.branched_by.parametrizer(),
             )
         }
         Model::Emitter(node) => {
@@ -292,7 +294,7 @@ fn validate_transforming_processor_message_errors(
                 )?),
                 ..MessageErrorSchemas::default()
             },
-            branch.branch(),
+            branch.parametrizer(),
         )?;
     }
     Ok(())
@@ -304,7 +306,7 @@ fn validate_message_error_policy(
     models: &ModelIndex,
     policy: &MessageErrorPolicy,
     schemas: MessageErrorSchemas<'_>,
-    expected_branch: Option<&BranchName>,
+    expected_parametrizer: Option<&ParametrizerName>,
 ) -> Result<(), Report<RegistryError>> {
     let MessageErrorValidationSite {
         domain,
@@ -315,12 +317,12 @@ fn validate_message_error_policy(
         return Ok(());
     };
     let actual_branch = relay_declared_branch(domain, identifier, models, relay)?;
-    if actual_branch != expected_branch {
+    if actual_branch != expected_parametrizer {
         let actual_branch = match actual_branch {
             Some(branch) => BranchSelection::branched_by(branch.clone()),
             None => BranchSelection::unbranched(),
         };
-        let expected_branch = match expected_branch {
+        let expected_branch = match expected_parametrizer {
             Some(branch) => BranchSelection::branched_by(branch.clone()),
             None => BranchSelection::unbranched(),
         };

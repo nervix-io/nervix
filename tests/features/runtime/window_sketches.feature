@@ -21,7 +21,7 @@ Feature: Bounded window sketches
       );
       CREATE WIRE JSON CODEC sketch_codec FROM WIRE SCHEMA sketch_wire TO SCHEMA sketch_input;
       CREATE SCHEMA sketch_branch_schema (tenant STRING);
-      CREATE BRANCH sketch_branch SCHEMA sketch_branch_schema TTL 5m MAX INSTANCES 4 EVICT LRU;
+      CREATE PARAMETRIZER sketch_branch SCHEMA sketch_branch_schema TTL 5m MAX INSTANCES 4 EVICT LRU;
       CREATE RELAY sketch_inputs SCHEMA sketch_input BRANCHED BY sketch_branch;
       CREATE RELAY sketch_outputs SCHEMA sketch_output BRANCHED BY sketch_branch;
       CREATE VHOST edge sketches-{{test_id}}.example.com;
@@ -91,7 +91,7 @@ Feature: Bounded window sketches
       CREATE WIRE JSON SCHEMA sketch_wire MODE STRICT (tenant string, value integer);
       CREATE WIRE JSON CODEC sketch_codec FROM WIRE SCHEMA sketch_wire TO SCHEMA sketch_input;
       CREATE SCHEMA sketch_branch_schema (tenant STRING);
-      CREATE BRANCH sketch_branch SCHEMA sketch_branch_schema TTL 5m MAX INSTANCES 1 EVICT LRU;
+      CREATE PARAMETRIZER sketch_branch SCHEMA sketch_branch_schema TTL 5m MAX INSTANCES 1 EVICT LRU;
       CREATE RELAY sketch_inputs SCHEMA sketch_input BRANCHED BY sketch_branch;
       CREATE RELAY sketch_outputs SCHEMA sketch_output BRANCHED BY sketch_branch;
       CREATE VHOST edge sketches-{{test_id}}.example.com;
@@ -168,7 +168,7 @@ Feature: Bounded window sketches
       CREATE WIRE JSON SCHEMA sketch_wire MODE STRICT (tenant string, value integer);
       CREATE WIRE JSON CODEC sketch_codec FROM WIRE SCHEMA sketch_wire TO SCHEMA sketch_input;
       CREATE SCHEMA sketch_branch_schema (tenant STRING);
-      CREATE BRANCH sketch_branch SCHEMA sketch_branch_schema TTL 5m MAX INSTANCES 1 EVICT LRU;
+      CREATE PARAMETRIZER sketch_branch SCHEMA sketch_branch_schema TTL 5m MAX INSTANCES 1 EVICT LRU;
       CREATE RELAY sketch_inputs SCHEMA sketch_input BRANCHED BY sketch_branch;
       CREATE RELAY sketch_outputs SCHEMA sketch_output BRANCHED BY sketch_branch;
       CREATE VHOST edge sketch-failover-{{test_id}}.example.com;

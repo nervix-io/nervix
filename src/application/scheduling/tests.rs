@@ -1055,12 +1055,12 @@ fn forced_recovery_preserves_the_complete_healthy_partition_inside_and_outside_a
                 sensitive: false,
             }],
         },
-        nervix_models::ResolvedBranchPartitions::Direct(nonzero!(2u16)),
+        nervix_models::ResolvedParametrizerPartitions::Direct(nonzero!(2u16)),
     );
     let partitioned = |name, kind| {
         let mut node = scheduled_node(name, kind);
         let selection = BranchSelection::BranchedBy {
-            branch: named("tenants"),
+            parametrizer: named("tenants"),
         };
         match node.config.as_mut() {
             Model::WasmProcessor(processor) => processor.branched_by = selection,

@@ -82,7 +82,7 @@ Feature: SQS message metadata
       CREATE SCHEMA timed_event (tenant STRING, value I64, sent_at DATETIME OPTIONAL);
       CREATE SCHEMA summary (tenant STRING, samples I64, total I64, sent_at DATETIME OPTIONAL);
       CREATE SCHEMA tenant_key (tenant STRING);
-      CREATE BRANCH tenants SCHEMA tenant_key TTL 5m;
+      CREATE PARAMETRIZER tenants SCHEMA tenant_key TTL 5m;
       CREATE JAQ JSON CODEC event_codec TO SCHEMA event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE RELAY events SCHEMA timed_event BRANCHED BY tenants;

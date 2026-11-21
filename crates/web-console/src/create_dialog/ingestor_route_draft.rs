@@ -15,9 +15,9 @@
 
 use error_stack::{Report, ResultExt as _};
 use nervix_models::{
-    Assignment, AssignmentTarget, AssignmentTargetScope, BranchName, BuiltinFunctionName,
-    FieldName, FlushPolicy, Inheritance, InheritedField, Invocation, MessageErrorPolicy, ModelKind,
-    NodeRef, OutputBranch, ProcessorOutput, RelayName, RouteConstruction,
+    Assignment, AssignmentTarget, AssignmentTargetScope, BuiltinFunctionName, FieldName,
+    FlushPolicy, Inheritance, InheritedField, Invocation, MessageErrorPolicy, ModelKind, NodeRef,
+    OutputBranch, ParametrizerName, ProcessorOutput, RelayName, RouteConstruction,
 };
 use nervix_plexus::parse_expression;
 use thiserror::Error;
@@ -277,7 +277,7 @@ pub(super) enum RouteBranchDraft {
     Unselected,
     Unbranched,
     Branched {
-        branch: Option<SelectedReference<BranchName>>,
+        branch: Option<SelectedReference<ParametrizerName>>,
         assignments: Vec<AssignmentDraft>,
     },
 }
@@ -297,7 +297,7 @@ impl RouteBranchDraft {
     }
 
     pub(super) fn select_branch(&mut self, node: &NodeRef) {
-        if node.kind != ModelKind::Branch {
+        if node.kind != ModelKind::Parametrizer {
             return;
         }
         if let Self::Branched {
@@ -305,7 +305,7 @@ impl RouteBranchDraft {
             assignments,
         } = self
         {
-            let selected = BranchName::from(&node.identifier);
+            let selected = ParametrizerName::from(&node.identifier);
             if branch.as_ref().and_then(SelectedReference::current_name) != Some(&selected) {
                 for assignment in assignments {
                     assignment.invalidate();
@@ -315,7 +315,7 @@ impl RouteBranchDraft {
         }
     }
 
-    pub(super) fn current_branch(&self) -> Option<&BranchName> {
+    pub(super) fn current_parametrizer(&self) -> Option<&ParametrizerName> {
         let Self::Branched {
             branch: Some(branch),
             ..
@@ -369,7 +369,7 @@ impl RouteBranchDraft {
                     built.push(assignment.build()?);
                 }
                 Ok(OutputBranch::BranchedBy {
-                    branch: branch.clone(),
+                    parametrizer: branch.clone(),
                     assignments: built,
                 })
             }
@@ -666,9 +666,9 @@ pub(super) enum IngestRouteDraftError {
     InvocationFunction,
     #[error("Enter a valid invocation argument expression")]
     InvocationArgument,
-    #[error("Choose UNBRANCHED or a named branch")]
+    #[error("Choose UNBRANCHED or a parametrizer")]
     Branching,
-    #[error("Choose a branch")]
+    #[error("Choose a parametrizer")]
     Branch,
     #[error("The selected branch belongs to a changed context; select it again")]
     BranchChanged,
@@ -698,8 +698,8 @@ pub(super) enum IngestRouteDraftError {
 mod tests {
     use meticulous::{OptionExt as _, ResultExt as _};
     use nervix_models::{
-        BinaryOperator, BranchName, Expression, FieldName, FieldReference, FieldScope, FlushPolicy,
-        Literal, MessageErrorPolicy, ModelKind, ModelName, NodeRef, OutputBranch,
+        BinaryOperator, Expression, FieldName, FieldReference, FieldScope, FlushPolicy, Literal,
+        MessageErrorPolicy, ModelKind, ModelName, NodeRef, OutputBranch, ParametrizerName,
     };
 
     use super::{
@@ -729,7 +729,7 @@ mod tests {
         route.branch.choose_branched();
         route
             .branch
-            .select_branch(&node(ModelKind::Branch, "by_user"));
+            .select_branch(&node(ModelKind::Parametrizer, "by_user"));
         route
             .branch
             .add_assignment(FieldName::parse("user").assured("valid field"));
@@ -765,8 +765,8 @@ mod tests {
             })
         );
         assert!(
-            matches!(output.branch, Some(OutputBranch::BranchedBy { ref branch, ref assignments })
-            if branch == &BranchName::parse("by_user").assured("valid branch") && assignments.len() == 1)
+            matches!(output.branch, Some(OutputBranch::BranchedBy { ref parametrizer, ref assignments })
+            if parametrizer == &ParametrizerName::parse("by_user").assured("valid branch") && assignments.len() == 1)
         );
         assert!(
             matches!(output.message_error_policy, MessageErrorPolicy::Dlq { ref assignments, .. }

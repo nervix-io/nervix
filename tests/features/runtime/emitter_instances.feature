@@ -23,7 +23,7 @@ Feature: Emitter instances follow the partitions they serve
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT (tenant string, seq integer);
       CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE SCHEMA tenant_key (tenant STRING);
-      CREATE BRANCH tenants SCHEMA tenant_key TTL 5m PARTITIONS 4;
+      CREATE PARAMETRIZER tenants SCHEMA tenant_key TTL 5m PARTITIONS 4;
       CREATE RELAY events SCHEMA event BRANCHED BY tenants;
       CREATE VHOST edge instances-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT ingress ON edge PATH '/events';
@@ -132,7 +132,7 @@ Feature: Emitter instances follow the partitions they serve
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT (tenant string, seq integer);
       CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE SCHEMA tenant_key (tenant STRING);
-      CREATE BRANCH tenants SCHEMA tenant_key TTL 5m PARTITIONS 4;
+      CREATE PARAMETRIZER tenants SCHEMA tenant_key TTL 5m PARTITIONS 4;
       CREATE RELAY events SCHEMA event BRANCHED BY tenants;
       CREATE VHOST edge instances-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT ingress ON edge PATH '/events';
@@ -263,7 +263,7 @@ Feature: Emitter instances follow the partitions they serve
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT (tenant string, seq integer);
       CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE SCHEMA tenant_key (tenant STRING);
-      CREATE BRANCH tenants SCHEMA tenant_key TTL 5m PARTITIONS 4;
+      CREATE PARAMETRIZER tenants SCHEMA tenant_key TTL 5m PARTITIONS 4;
       CREATE RELAY events SCHEMA event BRANCHED BY tenants;
       CREATE VHOST edge instances-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT ingress ON edge PATH '/events';
@@ -343,7 +343,7 @@ Feature: Emitter instances follow the partitions they serve
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT (tenant string, seq integer);
       CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE SCHEMA tenant_key (tenant STRING);
-      CREATE BRANCH tenants SCHEMA tenant_key TTL 5m PARTITIONS 4;
+      CREATE PARAMETRIZER tenants SCHEMA tenant_key TTL 5m PARTITIONS 4;
       CREATE RELAY events SCHEMA event BRANCHED BY tenants;
       CREATE VHOST edge instances-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT ingress ON edge PATH '/events';
@@ -405,7 +405,7 @@ Feature: Emitter instances follow the partitions they serve
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT (tenant string, seq integer);
       CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE SCHEMA tenant_key (tenant STRING);
-      CREATE BRANCH tenants SCHEMA tenant_key TTL 5m PARTITIONS 4;
+      CREATE PARAMETRIZER tenants SCHEMA tenant_key TTL 5m PARTITIONS 4;
       CREATE RELAY events SCHEMA event BRANCHED BY tenants;
       CREATE KAFKA CLIENT broker CONFIG { 'bootstrap.servers' = '{{kafka_addr}}' };
       CREATE KAFKA TOPIC EMITTER events_out FROM events INSTANCES 2
@@ -443,7 +443,7 @@ Feature: Emitter instances follow the partitions they serve
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT (tenant string, seq integer);
       CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE SCHEMA tenant_key (tenant STRING);
-      CREATE BRANCH tenants SCHEMA tenant_key TTL 5m PARTITIONS 4;
+      CREATE PARAMETRIZER tenants SCHEMA tenant_key TTL 5m PARTITIONS 4;
       CREATE RELAY events SCHEMA event BRANCHED BY tenants;
       """
     When these Plexus statements fail with "<reason>"
@@ -476,7 +476,7 @@ Feature: Emitter instances follow the partitions they serve
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT (tenant string, seq integer);
       CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE SCHEMA tenant_key (tenant STRING);
-      CREATE BRANCH tenants SCHEMA tenant_key TTL 5m PARTITIONS 4;
+      CREATE PARAMETRIZER tenants SCHEMA tenant_key TTL 5m PARTITIONS 4;
       CREATE RELAY events SCHEMA event BRANCHED BY tenants;
       CREATE VHOST edge instances-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT ingress ON edge PATH '/events';
@@ -524,7 +524,7 @@ Feature: Emitter instances follow the partitions they serve
       """
     When these Plexus commands are executed on the leader node
       """
-      ALTER BRANCH tenants SET PARTITIONS 6;
+      ALTER PARAMETRIZER tenants SET PARTITIONS 6;
       """
     And these Plexus commands are executed through the client on the leader node
       """

@@ -5,7 +5,7 @@
 //! - **Depends on.** Typed branch declarations, schema definitions and vocabulary names.
 //! - **Must not know.** Registry validation, scheduling decisions or runtime tasks.
 
-use super::{BranchName, FieldName, ResolvedBranchPartitions, ResolvedBranching, Unit};
+use super::{FieldName, ParametrizerName, ResolvedBranching, ResolvedParametrizerPartitions, Unit};
 
 impl ResolvedBranching {
     pub fn unbranched() -> Self {
@@ -13,11 +13,11 @@ impl ResolvedBranching {
     }
 
     pub fn awaiting_topology(
-        branch: BranchName,
+        parametrizer: ParametrizerName,
         schema: impl Into<crate::SchemaDefinition>,
     ) -> Self {
         Self::AwaitingTopology {
-            branch,
+            parametrizer,
             schema: schema.into(),
         }
     }
@@ -26,46 +26,54 @@ impl ResolvedBranching {
         matches!(self, Self::AwaitingTopology { .. })
     }
 
-    pub fn with_partitions(self, partitions: ResolvedBranchPartitions) -> Self {
+    pub fn with_partitions(self, partitions: ResolvedParametrizerPartitions) -> Self {
         match self {
             Self::Unbranched => Self::Unbranched,
-            Self::AwaitingTopology { branch, schema } | Self::Branched { branch, schema, .. } => {
-                Self::Branched {
-                    branch,
-                    schema,
-                    partitions,
-                }
+            Self::AwaitingTopology {
+                parametrizer,
+                schema,
             }
+            | Self::Branched {
+                parametrizer,
+                schema,
+                ..
+            } => Self::Branched {
+                parametrizer,
+                schema,
+                partitions,
+            },
         }
     }
 
     pub fn branched(
-        branch: BranchName,
+        parametrizer: ParametrizerName,
         schema: impl Into<crate::SchemaDefinition>,
-        partitions: ResolvedBranchPartitions,
+        partitions: ResolvedParametrizerPartitions,
     ) -> Self {
         Self::Branched {
-            branch,
+            parametrizer,
             schema: schema.into(),
             partitions,
         }
     }
 
-    pub fn branch(&self) -> Option<&BranchName> {
+    pub fn parametrizer(&self) -> Option<&ParametrizerName> {
         match self {
             Self::Unbranched => None,
-            Self::Branched { branch, .. } | Self::AwaitingTopology { branch, .. } => Some(branch),
+            Self::Branched { parametrizer, .. } | Self::AwaitingTopology { parametrizer, .. } => {
+                Some(parametrizer)
+            }
         }
     }
 
     /// Whether `other` names the same branch with the same key schema, whatever partition count
     /// each places keys by: the keys and their values are the same under either count.
     pub fn same_key_as(&self, other: &Self) -> bool {
-        self.branch() == other.branch() && self.schema() == other.schema()
+        self.parametrizer() == other.parametrizer() && self.schema() == other.schema()
     }
 
     /// The partitions of the branch, when the declaration is branched.
-    pub fn partitions(&self) -> Option<ResolvedBranchPartitions> {
+    pub fn partitions(&self) -> Option<ResolvedParametrizerPartitions> {
         match self {
             Self::Unbranched | Self::AwaitingTopology { .. } => None,
             Self::Branched { partitions, .. } => Some(*partitions),

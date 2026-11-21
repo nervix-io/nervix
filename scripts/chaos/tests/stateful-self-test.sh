@@ -791,7 +791,7 @@ source "${chaos_dir}/stateful-scenario.sh"
 # shellcheck source=materialized-profile-controls.sh
 source "${chaos_dir}/tests/materialized-profile-controls.sh"
 check_materialized_profile_reader stateful
-[[ "${recovery_graph_models[branch-chaos_state_branch]}" == 'SHOW CREATE BRANCH chaos_state_branch;' ]] \
+[[ "${recovery_graph_models[branch-chaos_state_branch]}" == 'SHOW CREATE PARAMETRIZER chaos_state_branch;' ]] \
     || fail 'the stateful branch is absent from the before/after graph comparison'
 printf 'owner: node-1\nreplicas: node-2\n' >"${tmp_dir}/single-description.txt"
 stateful_entity_placement "${tmp_dir}/single-description.txt" \

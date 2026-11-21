@@ -2150,7 +2150,7 @@ just chaos run lifetimes --image nervix:debian --nodes 1 --fault cluster-restart
 **The graph.** `fixtures/lifetimes.plexus` runs in the baseline domain beside the baseline path,
 which keeps its own traffic and exact ledger. A separate kcat container produces records to
 `chaos_life_input`, one every 500 ms. Four branches, red, blue, gold and green, interleave strictly,
-and every record carries its index within its branch. Three branch declarations govern lifetimes:
+and every record carries its index within its branch. Three parametrizers govern lifetimes:
 one with a ten-minute TTL and a ceiling of 16 instances, which a branched window that computes
 sketches requires and four branches never reach, one that expires after 20 seconds without
 activity, and one bounded to two instances with `EVICT LRU`. The life ingestor's relay feeds four
@@ -2168,7 +2168,7 @@ paths, each with its own attached Kafka emitter and output topic:
   and an `APPROX_QUANTILE` median. A window that computes sketches takes duration bounds.
 - **The reingestor `chaos_life_rotate`.** It moves every record onto the LRU-bounded branches, which
   four branches keep evicting. A second attached reingestor crosses from that relay to
-  `chaos_life_rotation_delivery` under the existing sixteen-instance branch declaration before the
+  `chaos_life_rotation_delivery` under the existing sixteen-instance parametrizer before the
   external emitter. The exact delivery oracle thus tests the rotating relay while the emitter
   retains pending publication under its own stable branch lifetime. Directly sharing the two-instance
   branch with the emitter would also exercise intentional emitter-buffer retirement: its NoACK

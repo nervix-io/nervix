@@ -5,11 +5,11 @@ use std::num::{NonZeroU16, NonZeroUsize};
 
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::{
-    BranchEviction, BranchPartitions, CreateBranch, CreateEndpoint, CreateLookup, CreatePlacement,
-    CreateRelay, CreateSignalingProtocol, CreateVhost, EndpointKind, MaterializedRelayState,
-    ModelName, PlacementPolicy, RelayBranching, RequestedResourceVersion, SignalingProtobufConfig,
-    SignalingProtocolOnConnect, SignalingStep, SignalingWaitStep, SignalingWireFormat,
-    VhostTlsResource,
+    CreateEndpoint, CreateLookup, CreateParametrizer, CreatePlacement, CreateRelay,
+    CreateSignalingProtocol, CreateVhost, EndpointKind, MaterializedRelayState, ModelName,
+    ParametrizerEviction, ParametrizerPartitions, PlacementPolicy, RelayBranching,
+    RequestedResourceVersion, SignalingProtobufConfig, SignalingProtocolOnConnect, SignalingStep,
+    SignalingWaitStep, SignalingWireFormat, VhostTlsResource,
 };
 
 use crate::Arbitrary;
@@ -30,7 +30,7 @@ impl Arbitrary<'_> {
         let capacity = usize::try_from(capacity).assured("supported targets address 64 bits");
         let branching = if self.entropy.flag() {
             RelayBranching::BranchedBy {
-                branch: self.name(),
+                parametrizer: self.name(),
             }
         } else {
             RelayBranching::Unbranched
@@ -52,19 +52,19 @@ impl Arbitrary<'_> {
 
     /// A branch declaration of any partition count, with or without an LRU bound on its live
     /// instances.
-    pub fn create_branch(&mut self) -> CreateBranch {
+    pub fn create_branch(&mut self) -> CreateParametrizer {
         let name = self.name();
         let schema = self.name();
         let ttl = self.duration();
         let partitions = self.branch_partitions();
         let eviction = if self.entropy.flag() {
-            Some(BranchEviction::Lru {
+            Some(ParametrizerEviction::Lru {
                 max_instances: self.positive_u64(),
             })
         } else {
             None
         };
-        CreateBranch {
+        CreateParametrizer {
             labels: Default::default(),
             name,
             schema,
@@ -75,21 +75,21 @@ impl Arbitrary<'_> {
     }
 
     /// A current branch declaration, including discovered and grouped inheritance.
-    pub fn branch_partitions(&mut self) -> BranchPartitions {
+    pub fn branch_partitions(&mut self) -> ParametrizerPartitions {
         match self.entropy.up_to(2) {
-            0 => BranchPartitions::Direct(self.branch_partition_count()),
-            1 => BranchPartitions::Inherited,
-            _ => BranchPartitions::InheritedGrouped(self.branch_partition_count()),
+            0 => ParametrizerPartitions::Direct(self.branch_partition_count()),
+            1 => ParametrizerPartitions::Inherited,
+            _ => ParametrizerPartitions::InheritedGrouped(self.branch_partition_count()),
         }
     }
 
     /// A resolved layout across the complete 16-bit count range.
-    pub fn resolved_branch_partitions(&mut self) -> nervix_models::ResolvedBranchPartitions {
+    pub fn resolved_branch_partitions(&mut self) -> nervix_models::ResolvedParametrizerPartitions {
         let count = self.branch_partition_count();
         if self.entropy.flag() {
-            nervix_models::ResolvedBranchPartitions::Inherited(count)
+            nervix_models::ResolvedParametrizerPartitions::Inherited(count)
         } else {
-            nervix_models::ResolvedBranchPartitions::Direct(count)
+            nervix_models::ResolvedParametrizerPartitions::Direct(count)
         }
     }
 

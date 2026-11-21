@@ -36,15 +36,15 @@ pub(crate) enum DomainActivationPlanError {
     },
     #[error("relay '{relay}' has no resolved branch declaration")]
     MissingRelayBranching { relay: RelayName },
-    #[error("relay '{relay}' references missing branch '{branch}'")]
+    #[error("relay '{relay}' references missing parametrizer '{parametrizer}'")]
     MissingRelayBranch {
         relay: RelayName,
-        branch: nervix_models::BranchName,
+        parametrizer: nervix_models::ParametrizerName,
     },
-    #[error("relay '{relay}' has invalid TTL on branch '{branch}'")]
+    #[error("relay '{relay}' has invalid TTL on parametrizer '{parametrizer}'")]
     InvalidRelayBranchTtl {
         relay: RelayName,
-        branch: nervix_models::BranchName,
+        parametrizer: nervix_models::ParametrizerName,
     },
     #[error("codec '{codec}' references missing schema '{schema}'")]
     MissingCodecSchema {
@@ -201,7 +201,7 @@ impl DomainActivationPlan {
                 Model::WireAvroSchema(schema) => {
                     wire_schemas.insert_avro(schema.definition().to_owned())
                 }
-                Model::Branch(branch) => {
+                Model::Parametrizer(branch) => {
                     branches.insert(branch.name.clone(), branch);
                 }
                 Model::Vhost(vhost) => {
@@ -245,20 +245,20 @@ impl DomainActivationPlan {
                             relay: relay.name.clone(),
                         })
                     })?;
-                    let retention = match branching.branch() {
+                    let retention = match branching.parametrizer() {
                         None => PlannedRelayRetention::default(),
                         Some(branch_name) => {
                             let branch = branches.get(branch_name).ok_or_else(|| {
                                 Report::new(DomainActivationPlanError::MissingRelayBranch {
                                     relay: relay.name.clone(),
-                                    branch: branch_name.clone(),
+                                    parametrizer: branch_name.clone(),
                                 })
                             })?;
                             let branch_ttl =
                                 parse_duration_text(&branch.ttl).change_context_lazy(|| {
                                     DomainActivationPlanError::InvalidRelayBranchTtl {
                                         relay: relay.name.clone(),
-                                        branch: branch_name.clone(),
+                                        parametrizer: branch_name.clone(),
                                     }
                                 })?;
                             let branch_capacity = branch.eviction.as_ref().map(|eviction| {
@@ -414,11 +414,11 @@ impl WireSchemaLookup for WireSchemas {
 #[cfg(test)]
 mod tests {
     use nervix_models::{
-        AvroType, BranchEviction, BranchName, CborType, CodecJaqFormat, CodecJaqTransformations,
-        CodecProtobufConfig, CodecWireFormat, CreateBranch, CreateCodec, CreateEndpoint,
-        CreateVhost, CreateWireSchema, FieldName, Model, ModelKind, ModelName, NodeRef,
-        RelayBranching, ResolvedBranching, ScheduledNode, ScheduledNodes, SchemaFingerprint,
-        SignalingWireFormat, VhostTlsResource, WireSchemaField,
+        AvroType, CborType, CodecJaqFormat, CodecJaqTransformations, CodecProtobufConfig,
+        CodecWireFormat, CreateCodec, CreateEndpoint, CreateParametrizer, CreateVhost,
+        CreateWireSchema, FieldName, Model, ModelKind, ModelName, NodeRef, ParametrizerEviction,
+        ParametrizerName, RelayBranching, ResolvedBranching, ScheduledNode, ScheduledNodes,
+        SchemaFingerprint, SignalingWireFormat, VhostTlsResource, WireSchemaField,
     };
     use nonzero_ext::nonzero;
 
@@ -456,7 +456,7 @@ mod tests {
     #[test]
     fn plans_all_codec_formats_and_resolves_relay_and_endpoint_contracts() {
         let domain = named("orders");
-        let branch_name: BranchName = named("by_tenant");
+        let parametrizer_name: ParametrizerName = named("by_tenant");
         let branch_schema = match schema("branch_schema") {
             Model::Schema(schema) => schema,
             _ => unreachable!("the schema fixture constructs a schema"),
@@ -466,18 +466,18 @@ mod tests {
             _ => unreachable!("the relay fixture constructs a relay"),
         };
         branched.buffer = nonzero!(17usize);
-        branched.branching = RelayBranching::branched_by(branch_name.clone());
+        branched.branching = RelayBranching::branched_by(parametrizer_name.clone());
         branched.materialized_state = Some(nervix_models::MaterializedRelayState::LastByTimestamp);
         let mut scheduled = nodes(vec![
             schema("payload"),
             Model::Schema(branch_schema.clone()),
-            Model::Branch(CreateBranch {
+            Model::Parametrizer(CreateParametrizer {
                 labels: Default::default(),
-                name: branch_name.clone(),
+                name: parametrizer_name.clone(),
                 schema: branch_schema.name.clone(),
                 ttl: "7m".to_string(),
-                partitions: nervix_models::BranchPartitions::ONE,
-                eviction: Some(BranchEviction::Lru {
+                partitions: nervix_models::ParametrizerPartitions::ONE,
+                eviction: Some(ParametrizerEviction::Lru {
                     max_instances: nonzero!(19u64),
                 }),
             }),
@@ -579,9 +579,9 @@ mod tests {
             ))
             .expect("the fixture has a branched relay");
         branched_node.resolved_branching = Some(ResolvedBranching::branched(
-            branch_name,
+            parametrizer_name,
             branch_schema,
-            nervix_models::ResolvedBranchPartitions::ONE,
+            nervix_models::ResolvedParametrizerPartitions::ONE,
         ));
 
         let plan = DomainActivationPlan::from_scheduled_nodes(&domain, &scheduled)
@@ -665,7 +665,7 @@ mod tests {
             DomainActivationPlanError::MissingRelayBranching { .. }
         ));
 
-        let branch_name: BranchName = named("by_tenant");
+        let parametrizer_name: ParametrizerName = named("by_tenant");
         let branch_schema = match schema("branch_schema") {
             Model::Schema(schema) => schema,
             _ => unreachable!("the schema fixture constructs a schema"),
@@ -678,9 +678,9 @@ mod tests {
             ))
             .expect("the fixture has a relay")
             .resolved_branching = Some(ResolvedBranching::branched(
-            branch_name.clone(),
+            parametrizer_name.clone(),
             branch_schema.clone(),
-            nervix_models::ResolvedBranchPartitions::ONE,
+            nervix_models::ResolvedParametrizerPartitions::ONE,
         ));
         let error = DomainActivationPlan::from_scheduled_nodes(&domain, &branched_relay)
             .expect_err("the named branch must exist");
@@ -696,12 +696,12 @@ mod tests {
                 "it is longer than a duration can be",
             ),
         ] {
-            branched_relay.extend(nodes(vec![Model::Branch(CreateBranch {
+            branched_relay.extend(nodes(vec![Model::Parametrizer(CreateParametrizer {
                 labels: Default::default(),
-                name: branch_name.clone(),
+                name: parametrizer_name.clone(),
                 schema: branch_schema.name.clone(),
                 ttl: ttl.to_string(),
-                partitions: nervix_models::BranchPartitions::ONE,
+                partitions: nervix_models::ParametrizerPartitions::ONE,
                 eviction: None,
             })]));
             let error = DomainActivationPlan::from_scheduled_nodes(&domain, &branched_relay)

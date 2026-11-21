@@ -187,7 +187,7 @@ ownership move in the report: a move of one partition of a partitioned relay nam
 rendered as `unit=partition:<p>` after its node, while a node with one unit names no unit. The
 transaction report folds those identities to their logical node when attributing ownership and its
 affected subgraph, so moving one partition gates its relay. A schedule rebuild can raise a narrower
-model change to `DOMAIN_PAUSE`. `ALTER BRANCH ... SET PARTITIONS` is a `BranchPartitions` change,
+model change to `DOMAIN_PAUSE`. `ALTER PARAMETRIZER ... SET PARTITIONS` is a `ParametrizerPartitions` change,
 which pauses only the entities its branch reaches: the schedule's next partition epoch replaces the
 branch's relays, the processors and generators it divides into partitions and every producer into
 and consumer of those relays in an `ENTITY_PAUSE` swap, and a stopped domain plans it as `DYNAMIC`;
@@ -235,7 +235,7 @@ installs. A transaction view composes steps in order, so an entity created and d
 steps can be transient even if absent from the transaction's final graph.
 
 Nodes have typed model-kind and name identities. Execution nodes additionally state whether their
-coverage is all executions, the unbranched execution, every key of one declared branch, or
+coverage is all executions, the unbranched execution, every key of one parametrizer, or
 selected concrete keys. Selected key values are represented by fingerprints; the report does not
 expose raw, potentially sensitive branch fields. Configuration-only nodes have no execution
 coverage. Relations distinguish configuration dependency, dataflow, message-error, correlation-

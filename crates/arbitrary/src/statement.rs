@@ -5,35 +5,35 @@ use std::num::NonZeroUsize;
 
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::{
-    AlterBranch, AlterBranchOperation, AlterDeduplicator, AlterDeduplicatorOperation, AlterEmitter,
-    AlterEmitterOperation, AlterGenerator, AlterGeneratorOperation, AlterIngestor,
-    AlterIngestorOperation, AlterJunction, AlterPlacement, AlterPlacementOperation,
+    AlterDeduplicator, AlterDeduplicatorOperation, AlterEmitter, AlterEmitterOperation,
+    AlterGenerator, AlterGeneratorOperation, AlterIngestor, AlterIngestorOperation, AlterJunction,
+    AlterParametrizer, AlterParametrizerOperation, AlterPlacement, AlterPlacementOperation,
     AlterProcessorOperation, AlterReingestor, AlterRelay, AlterRelayOperation, AlterReorderer,
     AlterReordererOperation, AlterSchema, AlterSchemaOperation, AlterTransportIngestorOperation,
     AlterWireSchema, AlterWireSchemaOperation, Backup, BackupCapture, BackupResources, BackupScope,
     BinaryOperator, BuiltinFunctionName, ClientIngestorEntity, CordonNode, CreateDomain,
-    CreateResource, CreateStatement, CreateUser, DescribeBranch, DescribeClient, DescribeCluster,
+    CreateResource, CreateStatement, CreateUser, DescribeClient, DescribeCluster,
     DescribeCorrelator, DescribeDeduplicator, DescribeDomain, DescribeEmitter, DescribeEndpoint,
-    DescribeIngestor, DescribeJunction, DescribeLicense, DescribeLookup, DescribePlacement,
-    DescribeReingestor, DescribeRelay, DescribeReorderer, DescribeResource, DescribeTransaction,
-    DescribeUdf, DescribeWasmProcessor, DescribeWindowProcessor, DomainConfig, DomainPace,
-    DomainTimeRate, DrainNode, DropModel, DropNode, EmitterBatchLegality, EmitterBodyForm,
-    EmitterEntityKind, EmitterEnvelopeAlteration, EmitterReferenceKind, ExistingUserPolicy,
-    Expression, FieldName, FieldReference, FieldScope, HttpIngestorEntity, IngestorAlteration,
-    IngestorEntityKind, IngestorEntityModel, IngestorReferenceKind, InspectionFormat,
-    KafkaIngestorEntity, Literal, LookupQuery, ModelKind, ModelName, MqttIngestorEntity,
-    NODE_TAG_FUNCTION, NatsIngestorEntity, NodeRef, NodeSelectorField, PlacementPolicy,
-    PrometheusIngestorEntity, PulsarIngestorEntity, RabbitMqIngestorEntity, RebindResource,
-    RebindResourceMembers, RebindResourceSelection, RedisIngestorEntity, RelayBranching, RelayName,
-    Relocation, RelocationMember, RelocationPreferenceOverride, RelocationPreferenceStrategy,
-    RelocationSelection, ResetWasmState, Restore, RestoreLifecycle, RestoreMode, RestoreScope,
-    RestoreState, ShowClusterStatus, ShowCreate, ShowEmitters, ShowIngestors, ShowNodes,
-    ShowPlacements, ShowProcessorState, ShowRelayMaterializedState, ShowTransactions, ShowUdfs,
-    ShowWasmProcessorState, SqsIngestorEntity, StartDomain, StateBranchField, StateBranchSelection,
-    StateInspectedProcessor, Statement, StopDomain, SubscriptionBinding, SubscriptionLiteral,
-    SyslogIngestorEntity, TransactionInspectionRequest, TransactionInspectionTarget,
-    TransactionOperationNumber, UncordonNode, UploadResource, WebsocketsIngestorEntity,
-    ZeroMqIngestorEntity,
+    DescribeIngestor, DescribeJunction, DescribeLicense, DescribeLookup, DescribeParametrizer,
+    DescribePlacement, DescribeReingestor, DescribeRelay, DescribeReorderer, DescribeResource,
+    DescribeTransaction, DescribeUdf, DescribeWasmProcessor, DescribeWindowProcessor, DomainConfig,
+    DomainPace, DomainTimeRate, DrainNode, DropModel, DropNode, EmitterBatchLegality,
+    EmitterBodyForm, EmitterEntityKind, EmitterEnvelopeAlteration, EmitterReferenceKind,
+    ExistingUserPolicy, Expression, FieldName, FieldReference, FieldScope, HttpIngestorEntity,
+    IngestorAlteration, IngestorEntityKind, IngestorEntityModel, IngestorReferenceKind,
+    InspectionFormat, KafkaIngestorEntity, Literal, LookupQuery, ModelKind, ModelName,
+    MqttIngestorEntity, NODE_TAG_FUNCTION, NatsIngestorEntity, NodeRef, NodeSelectorField,
+    PlacementPolicy, PrometheusIngestorEntity, PulsarIngestorEntity, RabbitMqIngestorEntity,
+    RebindResource, RebindResourceMembers, RebindResourceSelection, RedisIngestorEntity,
+    RelayBranching, RelayName, Relocation, RelocationMember, RelocationPreferenceOverride,
+    RelocationPreferenceStrategy, RelocationSelection, ResetWasmState, Restore, RestoreLifecycle,
+    RestoreMode, RestoreScope, RestoreState, ShowClusterStatus, ShowCreate, ShowEmitters,
+    ShowIngestors, ShowNodes, ShowPlacements, ShowProcessorState, ShowRelayMaterializedState,
+    ShowTransactions, ShowUdfs, ShowWasmProcessorState, SqsIngestorEntity, StartDomain,
+    StateBranchField, StateBranchSelection, StateInspectedProcessor, Statement, StopDomain,
+    SubscriptionBinding, SubscriptionLiteral, SyslogIngestorEntity, TransactionInspectionRequest,
+    TransactionInspectionTarget, TransactionOperationNumber, UncordonNode, UploadResource,
+    WebsocketsIngestorEntity, ZeroMqIngestorEntity,
 };
 use strum::IntoEnumIterator as _;
 
@@ -176,8 +176,8 @@ pub enum StatementVariant {
     RefreshLicense,
     ReleaseLicense,
     RotateLicenseClusterKey,
-    AlterBranch,
-    DescribeBranch,
+    AlterParametrizer,
+    DescribeParametrizer,
     AlterCluster,
     MutateEntityLabels,
     ShowLabels,
@@ -216,8 +216,8 @@ impl StatementVariant {
             Statement::AlterReingestor(_) => Self::AlterReingestor,
             Statement::AlterGenerator(_) => Self::AlterGenerator,
             Statement::AlterPlacement(_) => Self::AlterPlacement,
-            Statement::AlterBranch(_) => Self::AlterBranch,
-            Statement::DescribeBranch(_) => Self::DescribeBranch,
+            Statement::AlterParametrizer(_) => Self::AlterParametrizer,
+            Statement::DescribeParametrizer(_) => Self::DescribeParametrizer,
             Statement::Drop(_) => Self::Drop,
             Statement::DropNode(_) => Self::DropNode,
             Statement::CordonNode(_) => Self::CordonNode,
@@ -593,12 +593,13 @@ impl Arbitrary<'_> {
                     operations,
                 })
             }
-            StatementVariant::AlterBranch => {
-                let operations = self.operations(|arbitrary| AlterBranchOperation::SetPartitions {
-                    partitions: arbitrary.branch_partitions(),
-                });
-                Statement::AlterBranch(AlterBranch {
-                    branch: self.name(),
+            StatementVariant::AlterParametrizer => {
+                let operations =
+                    self.operations(|arbitrary| AlterParametrizerOperation::SetPartitions {
+                        partitions: arbitrary.branch_partitions(),
+                    });
+                Statement::AlterParametrizer(AlterParametrizer {
+                    parametrizer: self.name(),
                     operations,
                 })
             }
@@ -740,9 +741,11 @@ impl Arbitrary<'_> {
             StatementVariant::DescribeLookup => {
                 Statement::DescribeLookup(DescribeLookup { name: self.name() })
             }
-            StatementVariant::DescribeBranch => Statement::DescribeBranch(DescribeBranch {
-                branch: self.name(),
-            }),
+            StatementVariant::DescribeParametrizer => {
+                Statement::DescribeParametrizer(DescribeParametrizer {
+                    parametrizer: self.name(),
+                })
+            }
             StatementVariant::DescribeEndpoint => {
                 Statement::DescribeEndpoint(DescribeEndpoint { name: self.name() })
             }
@@ -1270,7 +1273,7 @@ impl Arbitrary<'_> {
             2 => AlterRelayOperation::SetBranching {
                 branching: if self.entropy.flag() {
                     RelayBranching::BranchedBy {
-                        branch: self.name(),
+                        parametrizer: self.name(),
                     }
                 } else {
                     RelayBranching::Unbranched

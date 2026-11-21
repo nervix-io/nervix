@@ -758,7 +758,7 @@ mod tests {
     use meticulous::{OptionExt as _, ResultExt as _};
     use nervix_interconnect::RuntimeState;
     use nervix_models::{
-        BranchName, ModelKind, ModelName, ResolvedBranchPartitions, SchemaFingerprint,
+        ModelKind, ModelName, ParametrizerName, ResolvedParametrizerPartitions, SchemaFingerprint,
     };
 
     use super::{super::RuntimeStatePlacement, *};
@@ -767,8 +767,8 @@ mod tests {
         runtime_schema::{RuntimeValue, test_runtime_row},
     };
 
-    fn partitions(count: u16) -> ResolvedBranchPartitions {
-        ResolvedBranchPartitions::Direct(
+    fn partitions(count: u16) -> ResolvedParametrizerPartitions {
+        ResolvedParametrizerPartitions::Direct(
             std::num::NonZeroU16::new(count).assured("the test counts are positive"),
         )
     }
@@ -777,7 +777,8 @@ mod tests {
     /// partition: eight partitions place it in partition 5.
     fn transition() -> UnitPartitionTransition {
         UnitPartitionTransition {
-            branch: BranchName::parse("by_tenant").assured("the test branch name is valid"),
+            parametrizer: ParametrizerName::parse("by_tenant")
+                .assured("the test branch name is valid"),
             epoch: PartitionEpochNumber::FIRST.next(),
             current: RelayPartitioning::of_partitions(partitions(8)),
             previous: RelayPartitioning::of_partitions(partitions(4)),
@@ -892,7 +893,7 @@ mod tests {
         fn pending(&self) -> u64 {
             let holdings = self.runtime.partition_transition_holdings(
                 &DomainName::parse("payments").assured("the test domain is valid"),
-                &transition().branch,
+                &transition().parametrizer,
                 transition().epoch,
             );
             holdings.iter().map(|unit| unit.pending).sum()

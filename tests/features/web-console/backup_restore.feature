@@ -329,7 +329,7 @@ Feature: Web console backup and restore
       CREATE WIRE JSON CODEC metric_codec FROM WIRE SCHEMA metric_wire TO SCHEMA metric;
       CREATE SCHEMA metric_summary ( tenant STRING, samples I64, latency_p0 F64 OPTIONAL );
       CREATE SCHEMA tenant_key ( tenant STRING );
-      CREATE BRANCH by_tenant SCHEMA tenant_key TTL 30m;
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_key TTL 30m;
       CREATE RELAY metrics SCHEMA metric BRANCHED BY by_tenant;
       CREATE RELAY metric_summaries SCHEMA metric_summary BRANCHED BY by_tenant;
       CREATE VHOST edge console-restore-warnings-{{test_id}}.example.com;

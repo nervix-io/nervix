@@ -1007,12 +1007,12 @@ module Probe
     raise 'read origin' unless unit.owner == unit.origin_node && unit.origin_incarnation.positive? && unit.origin_fingerprint.bytesize == 32 && unit.origin_stage == NX::InspectionStage::LIVE
     section = unit.sections.fetch(0)
     schema = section.schema
-    raise 'branch sensitivity' unless schema.branch == 'by_tenant' && schema.key_fields.fetch(0).sensitive
+    raise 'branch sensitivity' unless schema.parametrizer == 'by_tenant' && schema.key_fields.fetch(0).sensitive
     raise 'schema order' unless schema.fields.first(3).map(&:name) == %w[tenant secret sequence]
     raise 'field metadata' unless schema.fields.fetch(0).sensitive && schema.fields.fetch(1).sensitive && schema.fields.fetch(2).type == NX::FieldType::I64
     raise 'section metadata' unless section.omitted_rows == 1 && section.watermark_low != section.watermark_high
     frame = section.frames.fetch(0)
-    raise 'frame schema' unless frame.row_count == 1 && frame.schema.branch == schema.branch
+    raise 'frame schema' unless frame.row_count == 1 && frame.schema.parametrizer == schema.parametrizer
     buffer = frame.frame
     expected = buffer.get_string
     raise 'verified read-only bytes' unless buffer.readonly? && !expected.empty?
@@ -1067,9 +1067,9 @@ module Probe
     schema = opened.schema
     fields = fields(schema, PART_ROWS)
     key_fields = fields(schema, PART_BRANCH_KEY)
-    branch_name = schema.branch
+    parametrizer_name = schema.parametrizer
     fields.each { |field| report(field.line('FIELD')) }
-    report("BRANCH #{branch_name}") unless branch_name.nil?
+    report("PARAMETRIZER #{parametrizer_name}") unless parametrizer_name.nil?
     key_fields.each { |field| report(field.line('KEY')) }
     report('SUBSCRIBED')
 
