@@ -607,23 +607,19 @@ impl Runtime {
             stage: WasmGuestStateRenderStage::Instantiation,
             report,
         };
-        let compiled = nervix_primitives::expect_lint!(
-            nervix::lifecycle_call,
-            "a state inspection renders with the module this node compiled for the processor it \
-             runs; a node without it compiles the same pinned binding once and keeps it",
-            self.compile_wasm_processor_module(
+        let compiled = self
+            .compile_wasm_processor_module(
                 &plan.domain,
                 &plan.processor,
                 &plan.resource,
                 plan.resource_version,
                 &plan.file,
             )
-        )
-        .await
-        .map_err(|report| WasmRenderFailure {
-            stage: WasmGuestStateRenderStage::ModuleCompilation,
-            report,
-        })?;
+            .await
+            .map_err(|report| WasmRenderFailure {
+                stage: WasmGuestStateRenderStage::ModuleCompilation,
+                report,
+            })?;
         let init = plan.branch_init(&module).map_err(|error| {
             instantiation_failure(module.render_failure(
                 error,
