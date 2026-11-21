@@ -323,8 +323,9 @@ mod tests {
             });
         }
         // However short the input, every page also carries a description of at least one section
-        // and a failed render at every stage, each on a fingerprint of its own after the drawn
-        // entries, so each shape of a description crosses the codec in every case.
+        // beside a recovery, and a failed render at every stage, each on a fingerprint of its own
+        // after the drawn entries, so each shape of a description and a recovery cross the codec
+        // in every case.
         let mut renders = Vec::with_capacity(RENDER_STAGES.len() + 1);
         let count = arbitrary.entropy().positive_count(
             std::num::NonZeroUsize::new(3).assured("three is a nonzero section bound"),
@@ -341,10 +342,16 @@ mod tests {
         for (index, render) in renders.into_iter().enumerate() {
             let mut fingerprint = [0xf0; 32];
             fingerprint[1] = u8::try_from(index).assured("eight renders index below 256");
+            let entry_checkpoint = checkpoint(arbitrary);
+            // The described entry is the one that also reports a recovery.
+            let mut recovered = None;
+            if index == 0 {
+                recovered = Some(recovery(arbitrary));
+            }
             entries.push(WasmBranchStateInspection {
                 branch: Some(BranchKeyFingerprint::new(fingerprint)),
-                checkpoint: Some(checkpoint(arbitrary)),
-                recovery: None,
+                checkpoint: Some(entry_checkpoint),
+                recovery: recovered,
                 description: Some(described(arbitrary, render)),
             });
         }
