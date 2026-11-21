@@ -24,7 +24,7 @@ async fn when_materialized_workload_is_created(world: &mut ScenarioWorld, relays
         "CREATE UNPACED DOMAIN {domain};
          CREATE SCHEMA event ( tenant STRING, value STRING, round I64, occurred_at DATETIME );
          CREATE SCHEMA tenant_key ( tenant STRING );
-         CREATE BRANCH by_tenant SCHEMA tenant_key TTL 30m;
+         CREATE PARAMETRIZER by_tenant SCHEMA tenant_key TTL 30m;
          CREATE SCHEMA summary ( tenant STRING, relay STRING, length I64, round I64 );
          CREATE RELAY summaries SCHEMA summary BRANCHED BY by_tenant;"
     );

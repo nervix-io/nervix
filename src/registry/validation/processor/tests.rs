@@ -19,11 +19,11 @@ use super::*;
 use crate::registry::{
     storage::Registry,
     test_fixtures::{
-        branch_for_relay, branch_name_for_relay, branch_schema, client_model, codec, deduplicator,
-        example_graph_models, explicitly_unbranched_relay, ingestor_with_params, junction, named,
-        processor, relay, relay_branched_by_relay_branch, relay_branched_like, schema,
-        temp_db_path, unbranched_transforming_outputs, window_processor, with_inherit_all,
-        with_output_branch,
+        branch_for_relay, branch_schema, client_model, codec, deduplicator, example_graph_models,
+        explicitly_unbranched_relay, ingestor_with_params, junction, named,
+        parametrizer_name_for_relay, processor, relay, relay_branched_by_relay_branch,
+        relay_branched_like, schema, temp_db_path, unbranched_transforming_outputs,
+        window_processor, with_inherit_all, with_output_branch,
     },
 };
 
@@ -44,7 +44,7 @@ fn apply_batch_accepts_inferencer_generated_output() {
         CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
         CREATE RELAY features SCHEMA features BRANCHED BY by_tenant_branch;
         CREATE RELAY scored SCHEMA scored BRANCHED BY by_tenant_branch;
-        CREATE BRANCH by_tenant_branch
+        CREATE PARAMETRIZER by_tenant_branch
           SCHEMA tenant_branch TTL 5m;
 
         CREATE INFERENCER score_model
@@ -155,7 +155,7 @@ fn apply_batch_accepts_window_processor_generated_output_schema() {
         CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
         CREATE RELAY metrics SCHEMA metric BRANCHED BY by_tenant_branch;
         CREATE RELAY metric_summaries SCHEMA metric_summary BRANCHED BY by_tenant_branch;
-        CREATE BRANCH by_tenant_branch
+        CREATE PARAMETRIZER by_tenant_branch
           SCHEMA tenant_branch TTL 5m;
 
         CREATE WINDOW PROCESSOR latency_window
@@ -197,7 +197,7 @@ fn apply_batch_rejects_window_processor_unassigned_output_field() {
         CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
         CREATE RELAY metrics SCHEMA metric BRANCHED BY by_tenant_branch;
         CREATE RELAY metric_summaries SCHEMA metric_summary BRANCHED BY by_tenant_branch;
-        CREATE BRANCH by_tenant_branch
+        CREATE PARAMETRIZER by_tenant_branch
           SCHEMA tenant_branch TTL 5m;
 
         CREATE WINDOW PROCESSOR latency_window
@@ -246,7 +246,7 @@ fn apply_batch_accepts_window_output_route_filter_on_generated_output() {
         CREATE RELAY metrics SCHEMA metric BRANCHED BY by_tenant_branch;
         CREATE RELAY high_summaries SCHEMA metric_summary BRANCHED BY by_tenant_branch;
         CREATE RELAY low_summaries SCHEMA metric_summary BRANCHED BY by_tenant_branch;
-        CREATE BRANCH by_tenant_branch
+        CREATE PARAMETRIZER by_tenant_branch
           SCHEMA tenant_branch TTL 5m;
 
         CREATE WINDOW PROCESSOR first_window
@@ -930,7 +930,7 @@ fn apply_batch_rejects_correlate_where_non_input_namespace() {
         CREATE RELAY left_events SCHEMA event BRANCHED BY by_tenant_branch;
         CREATE RELAY right_events SCHEMA event BRANCHED BY by_tenant_branch;
         CREATE RELAY correlated_events SCHEMA correlated_event BRANCHED BY by_tenant_branch;
-        CREATE BRANCH by_tenant_branch
+        CREATE PARAMETRIZER by_tenant_branch
           SCHEMA tenant_branch TTL 5m;
 
         CREATE CORRELATOR correlate_events
@@ -1239,7 +1239,7 @@ fn apply_batch_rejects_output_predicate_missing_from_schema() {
                             max_batch_size: "1MiB".to_string(),
                         }),
                         OutputBranch::BranchedBy {
-                            branch: branch_name_for_relay("notifications"),
+                            parametrizer: parametrizer_name_for_relay("notifications"),
                             assignments: Vec::new(),
                         },
                     ),

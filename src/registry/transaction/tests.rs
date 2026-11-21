@@ -112,10 +112,10 @@ pub(super) fn preserve_schedule(
 }
 
 fn set_partitions(count: std::num::NonZeroU16) -> Statement {
-    Statement::AlterBranch(nervix_models::AlterBranch {
-        branch: named("by_tenant"),
-        operations: vec![nervix_models::AlterBranchOperation::SetPartitions {
-            partitions: nervix_models::BranchPartitions::Direct(count),
+    Statement::AlterParametrizer(nervix_models::AlterParametrizer {
+        parametrizer: named("by_tenant"),
+        operations: vec![nervix_models::AlterParametrizerOperation::SetPartitions {
+            partitions: nervix_models::ParametrizerPartitions::Direct(count),
         }],
     })
 }
@@ -124,10 +124,10 @@ fn schedule_moving_by_tenant_from_four_to_eight() -> DomainSchedule {
     DomainSchedule::new(named("default"), Vec::new(), Vec::new()).with_partition_epochs(
         std::collections::BTreeMap::from([(
             named("by_tenant"),
-            nervix_models::BranchPartitionEpoch::changed(
+            nervix_models::ParametrizerPartitionEpoch::changed(
                 None,
-                nervix_models::ResolvedBranchPartitions::Direct(nonzero!(4u16)),
-                nervix_models::ResolvedBranchPartitions::Direct(nonzero!(8u16)),
+                nervix_models::ResolvedParametrizerPartitions::Direct(nonzero!(4u16)),
+                nervix_models::ResolvedParametrizerPartitions::Direct(nonzero!(8u16)),
             ),
         )]),
     )
@@ -177,9 +177,9 @@ fn a_partition_count_change_is_refused_while_the_previous_count_still_moves_keys
         &set_partitions(nonzero!(16u16)),
         operation,
     )
-    .expect_err("a moving branch keeps its count until its transition retires");
-    let TransactionPlanningError::BranchPartitionsStillMoving {
-        branch,
+    .expect_err("a moving parametrizer keeps its count until its transition retires");
+    let TransactionPlanningError::ParametrizerPartitionsStillMoving {
+        parametrizer,
         domain: refused_domain,
         previous,
         current,
@@ -188,12 +188,12 @@ fn a_partition_count_change_is_refused_while_the_previous_count_still_moves_keys
     else {
         panic!("the refusal names the moving transition: {error:?}");
     };
-    assert_eq!(branch.as_str(), "by_tenant");
+    assert_eq!(parametrizer.as_str(), "by_tenant");
     assert_eq!(refused_domain.as_str(), "default");
     assert_eq!((*previous, *current), (4, 8));
     assert!(
         format!("{error:#}").contains(
-            "branch 'by_tenant' in domain 'default' is still moving keys placed under its \
+            "parametrizer 'by_tenant' in domain 'default' is still moving keys placed under its \
              previous partition count 4 to its current count 8"
         ),
         "{error:#}"

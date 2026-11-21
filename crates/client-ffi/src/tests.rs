@@ -34,8 +34,8 @@ use crate::{
     nx_event_subscription, nx_execution_free, nx_outcome_backup, nx_outcome_diagnostic,
     nx_outcome_diagnostic_count, nx_outcome_disposition, nx_outcome_execution_reference,
     nx_outcome_free, nx_outcome_message, nx_outcome_restore, nx_outcome_schema,
-    nx_outcome_subscription, nx_schema_branch, nx_schema_field, nx_schema_field_count,
-    nx_schema_free, nx_session_connect, nx_session_free,
+    nx_outcome_subscription, nx_schema_field, nx_schema_field_count, nx_schema_free,
+    nx_schema_parametrizer, nx_session_connect, nx_session_free,
 };
 
 mod batches;
@@ -1075,7 +1075,7 @@ unsafe fn read_schema(schema: *mut Schema) {
     let mut count = 0;
     // SAFETY: the caller guarantees a live schema, and every out-parameter is writable.
     unsafe {
-        assert!(nx_schema_branch(schema, &mut name, &mut name_len));
+        assert!(nx_schema_parametrizer(schema, &mut name, &mut name_len));
         assert_eq!(slice::from_raw_parts(name, name_len), b"tenants");
         succeeded(nx_schema_field_count(schema, BRANCH_KEY, &mut count));
         assert_eq!(count, 1);

@@ -652,7 +652,7 @@ async fn install_claimed_branch(
     instances.touch(&branch, last_activity);
     context.runtime_handle.observe_branch_instance_created(
         &context.domain,
-        template.branch.as_ref(),
+        template.parametrizer.as_ref(),
         &branch,
     );
     Ok(())
@@ -852,7 +852,7 @@ async fn forget_key(
     let processor = ModelName::from(&template.owner.node.identifier);
     context.runtime_handle.observe_branch_instance_removed(
         &context.domain,
-        template.branch.as_ref(),
+        template.parametrizer.as_ref(),
         &key,
         None,
     );

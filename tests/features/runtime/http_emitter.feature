@@ -1542,7 +1542,7 @@ Feature: HTTP REQUEST emitter
       CREATE WIRE JSON SCHEMA event_body_wire MODE STRICT (event_id string, payload string);
       CREATE WIRE JSON CODEC event_body_codec FROM WIRE SCHEMA event_body_wire TO SCHEMA event_body;
       CREATE SCHEMA tenant_branch (tenant STRING);
-      CREATE BRANCH by_tenant SCHEMA tenant_branch TTL 5m;
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_branch TTL 5m;
       CREATE SCHEMA rejected_request (event_id STRING, operation STRING);
       CREATE RELAY outgoing SCHEMA outbound_event BRANCHED BY by_tenant;
       CREATE RELAY rejected_requests SCHEMA rejected_request BRANCHED BY by_tenant;
@@ -1641,7 +1641,7 @@ Feature: HTTP REQUEST emitter
       CREATE WIRE JSON SCHEMA event_body_wire MODE STRICT (event_id string, payload string);
       CREATE WIRE JSON CODEC event_body_codec FROM WIRE SCHEMA event_body_wire TO SCHEMA event_body;
       CREATE SCHEMA tenant_branch (tenant STRING);
-      CREATE BRANCH by_tenant SCHEMA tenant_branch TTL 5m;
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_branch TTL 5m;
       CREATE SCHEMA rejected_request (event_id STRING, source STRING, error_message STRING);
       CREATE RELAY source_a SCHEMA outbound_event BRANCHED BY by_tenant;
       CREATE RELAY source_b SCHEMA outbound_event BRANCHED BY by_tenant;

@@ -8,7 +8,7 @@ Feature: A backup cut reaches every scheduled state owner
       CREATE WIRE JSON SCHEMA payment_wire MODE STRICT ( tenant string, transaction_id string, amount integer );
       CREATE WIRE JSON CODEC payment_codec FROM WIRE SCHEMA payment_wire TO SCHEMA payment;
       CREATE SCHEMA tenant_key ( tenant STRING );
-      CREATE BRANCH by_tenant SCHEMA tenant_key TTL 30m;
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_key TTL 30m;
       CREATE RELAY payments SCHEMA payment BRANCHED BY by_tenant;
       CREATE RELAY unique_payments SCHEMA payment BRANCHED BY by_tenant;
       CREATE VHOST edge backup-owners-{{test_id}}.example.com;

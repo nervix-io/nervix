@@ -19,7 +19,7 @@ Feature: Partitioned processors and generators
         (tenant string, seq integer, amount integer);
       CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE SCHEMA tenant_key (tenant STRING);
-      CREATE BRANCH tenants SCHEMA tenant_key TTL 5m PARTITIONS 2;
+      CREATE PARAMETRIZER tenants SCHEMA tenant_key TTL 5m PARTITIONS 2;
       CREATE RELAY events SCHEMA event BRANCHED BY tenants;
       CREATE RELAY unique_events SCHEMA event BRANCHED BY tenants;
       CREATE VHOST edge partition-{{test_id}}.example.com;
@@ -147,7 +147,7 @@ Feature: Partitioned processors and generators
         (tenant string, seq integer, amount integer);
       CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE SCHEMA tenant_key (tenant STRING);
-      CREATE BRANCH tenants SCHEMA tenant_key TTL 5m PARTITIONS 2;
+      CREATE PARAMETRIZER tenants SCHEMA tenant_key TTL 5m PARTITIONS 2;
       CREATE RELAY events SCHEMA event BRANCHED BY tenants
         WITH MATERIALIZED STATE LAST BY TIMESTAMP;
       CREATE RELAY generated_events SCHEMA event BRANCHED BY tenants;
@@ -241,7 +241,7 @@ Feature: Partitioned processors and generators
         FROM WIRE SCHEMA metric_wire
         TO SCHEMA metric;
         CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
-        CREATE IF NOT EXISTS BRANCH by_metric_ingestor SCHEMA tenant_branch TTL 5m PARTITIONS 2;
+        CREATE IF NOT EXISTS PARAMETRIZER by_metric_ingestor SCHEMA tenant_branch TTL 5m PARTITIONS 2;
         CREATE RELAY metrics SCHEMA metric BRANCHED BY by_metric_ingestor;
         CREATE RELAY metric_summaries SCHEMA metric_summary BRANCHED BY by_metric_ingestor;
         CREATE VHOST edge http-{{test_id}}.example.com;
@@ -406,7 +406,7 @@ Feature: Partitioned processors and generators
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT (tenant string, seq integer, amount integer);
       CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE SCHEMA tenant_key (tenant STRING);
-      CREATE BRANCH tenants SCHEMA tenant_key TTL 5m PARTITIONS 2;
+      CREATE PARAMETRIZER tenants SCHEMA tenant_key TTL 5m PARTITIONS 2;
       CREATE RELAY left_events SCHEMA event BRANCHED BY tenants;
       CREATE RELAY right_events SCHEMA event BRANCHED BY tenants;
       CREATE RELAY joined_events SCHEMA event BRANCHED BY tenants;
@@ -477,7 +477,7 @@ Feature: Partitioned processors and generators
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT (tenant string, seq integer, amount integer);
       CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE SCHEMA tenant_key (tenant STRING);
-      CREATE BRANCH tenants SCHEMA tenant_key TTL 5m PARTITIONS 2;
+      CREATE PARAMETRIZER tenants SCHEMA tenant_key TTL 5m PARTITIONS 2;
       CREATE RELAY events SCHEMA event BRANCHED BY tenants;
       CREATE RELAY preferences SCHEMA event BRANCHED BY tenants
         WITH MATERIALIZED STATE LAST BY TIMESTAMP;
@@ -562,7 +562,7 @@ Feature: Partitioned processors and generators
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT (tenant string, seq integer, amount integer);
       CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE SCHEMA tenant_key (tenant STRING);
-      CREATE BRANCH tenants SCHEMA tenant_key TTL 5m PARTITIONS 2;
+      CREATE PARAMETRIZER tenants SCHEMA tenant_key TTL 5m PARTITIONS 2;
       CREATE RELAY events SCHEMA event BRANCHED BY tenants;
       CREATE RELAY checks SCHEMA event BRANCHED BY tenants;
       CREATE RELAY preferences SCHEMA event BRANCHED BY tenants

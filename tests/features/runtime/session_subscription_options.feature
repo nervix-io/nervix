@@ -22,7 +22,7 @@ Feature: Session subscription delivery options
         FROM WIRE SCHEMA telemetry_wire
         TO SCHEMA telemetry;
         CREATE IF NOT EXISTS SCHEMA device_branch ( device STRING );
-        CREATE IF NOT EXISTS BRANCH by_telemetry_http SCHEMA device_branch TTL 5m;
+        CREATE IF NOT EXISTS PARAMETRIZER by_telemetry_http SCHEMA device_branch TTL 5m;
         CREATE RELAY telemetry SCHEMA telemetry BRANCHED BY by_telemetry_http;
         CREATE VHOST edge http-{{test_id}}.example.com;
         CREATE HTTP ENDPOINT telemetry_endpoint
@@ -188,7 +188,7 @@ Feature: Session subscription delivery options
         FROM WIRE SCHEMA telemetry_wire
         TO SCHEMA telemetry;
         CREATE IF NOT EXISTS SCHEMA device_branch ( device STRING );
-        CREATE IF NOT EXISTS BRANCH by_telemetry_http SCHEMA device_branch TTL 5m;
+        CREATE IF NOT EXISTS PARAMETRIZER by_telemetry_http SCHEMA device_branch TTL 5m;
         CREATE RELAY telemetry SCHEMA telemetry BRANCHED BY by_telemetry_http;
         CREATE VHOST edge http-{{test_id}}.example.com;
         CREATE HTTP ENDPOINT telemetry_endpoint

@@ -16,9 +16,9 @@ use nervix_models::{ModelKind, NodeRef};
 use crate::{
     lexer::{Identifier, Token},
     parser_support::{
-        ParseError, boxed_choice, branch_ref, client_ref, codec_ref, correlator_ref,
-        deduplicator_ref, emitter_ref, endpoint_ref, generator_ref, inferencer_ref, ingestor_ref,
-        junction_ref, kw, kw_phrase2, kw_phrase3, lookup_ref, placement_ref, reingestor_ref,
+        ParseError, boxed_choice, client_ref, codec_ref, correlator_ref, deduplicator_ref,
+        emitter_ref, endpoint_ref, generator_ref, inferencer_ref, ingestor_ref, junction_ref, kw,
+        kw_phrase2, kw_phrase3, lookup_ref, parametrizer_ref, placement_ref, reingestor_ref,
         relay_ref, reorderer_ref, schema_ref, signaling_protocol_ref, udf_ref, vhost_ref,
         wasm_processor_ref, window_processor_ref, wire_avro_schema_ref, wire_cbor_schema_ref,
         wire_json_schema_ref,
@@ -34,10 +34,10 @@ pub(crate) fn model_ref<'src>()
                 kind: ModelKind::Schema,
                 identifier: name.into(),
             }),
-        kw(Identifier::Branch)
-            .ignore_then(branch_ref())
+        kw(Identifier::Parametrizer)
+            .ignore_then(parametrizer_ref())
             .map(|name| NodeRef {
-                kind: ModelKind::Branch,
+                kind: ModelKind::Parametrizer,
                 identifier: name.into(),
             }),
         kw_phrase3(Identifier::Wire, Identifier::Json, Identifier::Schema)

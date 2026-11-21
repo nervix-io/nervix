@@ -15,8 +15,8 @@
 use std::collections::BTreeSet;
 
 use nervix_models::{
-    BranchName, DomainSchedule, DynamicModelUpdate, ModelKind, NodeRef, NodeUnitRef, QuiesceLevel,
-    RelayName, ResolvedBranching, ScheduledNode, WasmStateResetPhase,
+    DomainSchedule, DynamicModelUpdate, ModelKind, NodeRef, NodeUnitRef, ParametrizerName,
+    QuiesceLevel, RelayName, ResolvedBranching, ScheduledNode, WasmStateResetPhase,
 };
 use sorted_vec::SortedSet;
 
@@ -25,9 +25,9 @@ use super::{entity_gate::entity_input_relays, graph::is_schedulable_model};
 /// How the partition epochs of two schedules differ, branch by branch.
 struct EpochChanges {
     /// Branches whose count changed: a committed change began the next epoch.
-    recounted: BTreeSet<BranchName>,
+    recounted: BTreeSet<ParametrizerName>,
     /// Branches whose epoch and count are the same and whose transition ended.
-    retired: BTreeSet<BranchName>,
+    retired: BTreeSet<ParametrizerName>,
 }
 
 impl EpochChanges {
@@ -349,17 +349,17 @@ impl ScheduleDelta {
     /// they branch.
     fn keyed_entities(
         schedule: &DomainSchedule,
-        branches: &BTreeSet<BranchName>,
+        parametrizers: &BTreeSet<ParametrizerName>,
     ) -> BTreeSet<NodeRef> {
         let mut entities = BTreeSet::new();
-        if branches.is_empty() {
+        if parametrizers.is_empty() {
             return entities;
         }
         for node in schedule.nodes.values() {
-            let Some(branch) = node.partition_branch() else {
+            let Some(branch) = node.partition_parametrizer() else {
                 continue;
             };
-            if branches.contains(branch) && node.keeps_state_per_key() {
+            if parametrizers.contains(branch) && node.keeps_state_per_key() {
                 entities.insert(node.identity());
             }
         }
@@ -371,28 +371,28 @@ impl ScheduleDelta {
     /// from or resolving materialized state in one of those relays.
     fn repartitioned_entities(
         schedule: &DomainSchedule,
-        branches: &BTreeSet<BranchName>,
+        parametrizers: &BTreeSet<ParametrizerName>,
     ) -> BTreeSet<NodeRef> {
         let mut entities = BTreeSet::new();
-        if branches.is_empty() {
+        if parametrizers.is_empty() {
             return entities;
         }
         let mut relays = BTreeSet::<RelayName>::new();
         for node in schedule.nodes.values() {
             let branch = match node.resolved_branching.as_ref() {
-                Some(branching) => branching.branch(),
+                Some(branching) => branching.parametrizer(),
                 None => None,
             };
             let Some(branch) = branch else {
                 continue;
             };
-            if !branches.contains(branch) {
+            if !parametrizers.contains(branch) {
                 continue;
             }
             if node.kind() == ModelKind::Relay {
                 relays.insert(RelayName::from(&node.identifier));
                 entities.insert(node.identity());
-            } else if node.partition_branch().is_some() {
+            } else if node.partition_parametrizer().is_some() {
                 entities.insert(node.identity());
             }
         }
@@ -1216,9 +1216,9 @@ mod tests {
     /// One branch of eight partitions with a materialized relay, which keeps state per key, and a
     /// plain relay beside it, both placed on one node, in partition epoch two.
     fn repartitioned_schedule(transition: bool) -> DomainSchedule {
-        let branch = || named::<nervix_models::BranchName>("by_tenant");
+        let branch = || named::<nervix_models::ParametrizerName>("by_tenant");
         let partitions = |count: u16| {
-            nervix_models::ResolvedBranchPartitions::Direct(
+            nervix_models::ResolvedParametrizerPartitions::Direct(
                 std::num::NonZeroU16::new(count).expect("test counts are positive"),
             )
         };
@@ -1248,7 +1248,7 @@ mod tests {
             )))
             .placed_on(Some(node()), vec![node()])
         };
-        let epoch = nervix_models::BranchPartitionEpoch {
+        let epoch = nervix_models::ParametrizerPartitionEpoch {
             number: nervix_models::PartitionEpochNumber::FIRST.next(),
             partitions: partitions(8),
             transition: transition.then_some(nervix_models::PartitionTransition {
@@ -1308,9 +1308,10 @@ mod tests {
             let mut schedule = repartitioned_schedule(transition);
             let mut epochs = schedule.partition_epochs.clone();
             for epoch in epochs.values_mut() {
-                epoch.partitions = nervix_models::ResolvedBranchPartitions::Direct(nonzero!(4u16));
+                epoch.partitions =
+                    nervix_models::ResolvedParametrizerPartitions::Direct(nonzero!(4u16));
                 epoch.transition = transition.then_some(nervix_models::PartitionTransition {
-                    previous: nervix_models::ResolvedBranchPartitions::Direct(nonzero!(8u16)),
+                    previous: nervix_models::ResolvedParametrizerPartitions::Direct(nonzero!(8u16)),
                 });
             }
             schedule = schedule.with_partition_epochs(epochs);
@@ -1333,15 +1334,15 @@ mod tests {
     fn a_new_epoch_swaps_every_entity_its_branch_reaches() {
         let settled = repartitioned_schedule(false);
         let mut changed = repartitioned_schedule(true);
-        let next = nervix_models::BranchPartitionEpoch {
+        let next = nervix_models::ParametrizerPartitionEpoch {
             number: nervix_models::PartitionEpochNumber::FIRST.next().next(),
-            partitions: nervix_models::ResolvedBranchPartitions::Direct(nonzero!(8u16)),
+            partitions: nervix_models::ResolvedParametrizerPartitions::Direct(nonzero!(8u16)),
             transition: Some(nervix_models::PartitionTransition {
-                previous: nervix_models::ResolvedBranchPartitions::Direct(nonzero!(8u16)),
+                previous: nervix_models::ResolvedParametrizerPartitions::Direct(nonzero!(8u16)),
             }),
         };
         changed = changed.with_partition_epochs(std::collections::BTreeMap::from([(
-            named::<nervix_models::BranchName>("by_tenant"),
+            named::<nervix_models::ParametrizerName>("by_tenant"),
             next,
         )]));
         assert!(ScheduleDelta::changes_a_partition_count(&settled, &changed));

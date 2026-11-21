@@ -125,7 +125,7 @@ fn check(bytes: &[u8]) {
         row_schema.fields
     );
     assert_eq!(
-        view.schema().assured("rows have a schema").branch(),
+        view.schema().assured("rows have a schema").parametrizer(),
         Some("tenants")
     );
     assert_eq!(

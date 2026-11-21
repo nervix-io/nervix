@@ -73,7 +73,7 @@ Feature: Materialized relay state
       CREATE WIRE JSON SCHEMA reading_wire MODE STRICT ( tenant string, value number );
       CREATE WIRE JSON CODEC reading_codec FROM WIRE SCHEMA reading_wire TO SCHEMA reading;
       CREATE SCHEMA reading_tenant ( tenant STRING );
-      CREATE BRANCH by_reading_tenant SCHEMA reading_tenant TTL 5m;
+      CREATE PARAMETRIZER by_reading_tenant SCHEMA reading_tenant TTL 5m;
       CREATE RELAY readings SCHEMA reading BRANCHED BY by_reading_tenant
         WITH MATERIALIZED STATE LAST BY TIMESTAMP;
       CREATE VHOST edge readings-{{test_id}}.example.com;
@@ -141,7 +141,7 @@ Feature: Materialized relay state
         FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
         CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
-        CREATE IF NOT EXISTS BRANCH by_state_notifications SCHEMA tenant_branch TTL 5m;
+        CREATE IF NOT EXISTS PARAMETRIZER by_state_notifications SCHEMA tenant_branch TTL 5m;
         CREATE RELAY tenant_state
         SCHEMA notification
         BRANCHED BY by_state_notifications
@@ -264,7 +264,7 @@ Feature: Materialized relay state
         FROM WIRE SCHEMA dependency_event_wire
         TO SCHEMA dependency_event;
       CREATE SCHEMA dependency_tenant ( tenant STRING );
-      CREATE BRANCH by_dependency_tenant SCHEMA dependency_tenant TTL 5m;
+      CREATE PARAMETRIZER by_dependency_tenant SCHEMA dependency_tenant TTL 5m;
       CREATE RELAY first_dependency_state
         SCHEMA dependency_event
         BRANCHED BY by_dependency_tenant
@@ -418,7 +418,7 @@ Feature: Materialized relay state
         FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
-        CREATE IF NOT EXISTS BRANCH by_http_notifications SCHEMA user_id_branch TTL 5m;
+        CREATE IF NOT EXISTS PARAMETRIZER by_http_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications
         SCHEMA notification BRANCHED BY by_http_notifications
         WITH MATERIALIZED STATE LAST BY TIMESTAMP;
@@ -494,7 +494,7 @@ Feature: Materialized relay state
         FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
-        CREATE IF NOT EXISTS BRANCH by_http_notifications SCHEMA user_id_branch TTL 5m;
+        CREATE IF NOT EXISTS PARAMETRIZER by_http_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications
         SCHEMA notification BRANCHED BY by_http_notifications
         WITH MATERIALIZED STATE LAST BY TIMESTAMP;
@@ -562,7 +562,7 @@ Feature: Materialized relay state
         FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
-        CREATE IF NOT EXISTS BRANCH by_http_notifications SCHEMA user_id_branch TTL 30s;
+        CREATE IF NOT EXISTS PARAMETRIZER by_http_notifications SCHEMA user_id_branch TTL 30s;
         CREATE RELAY notifications
         SCHEMA notification BRANCHED BY by_http_notifications
         WITH MATERIALIZED STATE LAST BY TIMESTAMP;
@@ -642,7 +642,7 @@ Feature: Materialized relay state
         FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
         CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
-        CREATE IF NOT EXISTS BRANCH by_tenant_notifications SCHEMA tenant_branch TTL 5m;
+        CREATE IF NOT EXISTS PARAMETRIZER by_tenant_notifications SCHEMA tenant_branch TTL 5m;
         CREATE RELAY tenant_state
         SCHEMA notification
         BRANCHED BY by_tenant_notifications

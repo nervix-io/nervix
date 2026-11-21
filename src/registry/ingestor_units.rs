@@ -18,9 +18,9 @@ use std::{
 
 use error_stack::{Report, ResultExt as _};
 use nervix_models::{
-    BranchName, BranchSelection, CreateIngestor, DomainName, IngestorEntity, IngestorEntityKind,
+    BranchSelection, CreateIngestor, DomainName, IngestorEntity, IngestorEntityKind,
     IngestorInstances, IngestorInstancingCapability, KafkaIngestor, KafkaOffsetMode, ModelIndex,
-    ModelName, RelayName, Unit,
+    ModelName, ParametrizerName, RelayName, Unit,
 };
 use thiserror::Error;
 
@@ -59,7 +59,7 @@ pub(in crate::registry) enum IngestorUnits {
     PerTransportPartition {
         count: Option<NonZeroU16>,
         relays: Vec<RelayName>,
-        branches: Vec<BranchName>,
+        parametrizers: Vec<ParametrizerName>,
     },
 }
 
@@ -109,7 +109,11 @@ impl IngestorUnits {
         let mut relays = BTreeSet::new();
         let mut branches = BTreeSet::new();
         for route in ingestor.output_routes.outputs() {
-            let Some(branch) = route.branch.as_ref().and_then(|branch| branch.branch()) else {
+            let Some(branch) = route
+                .branch
+                .as_ref()
+                .and_then(|branch| branch.parametrizer())
+            else {
                 continue;
             };
             let resolved = resolved_branch_selection(
@@ -117,7 +121,7 @@ impl IngestorUnits {
                 &identifier,
                 models,
                 &BranchSelection::BranchedBy {
-                    branch: branch.clone(),
+                    parametrizer: branch.clone(),
                 },
             )?;
             let fields = resolved.fields().to_vec();
@@ -144,7 +148,7 @@ impl IngestorUnits {
         Ok(Self::PerTransportPartition {
             count,
             relays: relays.into_iter().collect(),
-            branches: branches.into_iter().collect(),
+            parametrizers: branches.into_iter().collect(),
         })
     }
 
@@ -159,15 +163,17 @@ impl IngestorUnits {
         restored: Option<NonZeroU16>,
     ) -> Result<(), Report<RegistryError>> {
         let Self::PerTransportPartition {
-            count, branches, ..
+            count,
+            parametrizers,
+            ..
         } = self
         else {
             return Ok(());
         };
         let mut observed = None;
         let mut complete = true;
-        for branch in branches {
-            let Some(layout) = topology.branches.get(branch) else {
+        for branch in parametrizers {
+            let Some(layout) = topology.parametrizers.get(branch) else {
                 complete = false;
                 break;
             };

@@ -104,7 +104,7 @@ Feature: Interconnect relay admission
         seq I64
       );
       CREATE SCHEMA tenant_branch ( tenant STRING );
-      CREATE BRANCH by_tenant
+      CREATE PARAMETRIZER by_tenant
         SCHEMA tenant_branch TTL 5m MAX INSTANCES 8 EVICT LRU;
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT (
         tenant string,
@@ -182,7 +182,7 @@ Feature: Interconnect relay admission
         seq I64
       );
       CREATE SCHEMA tenant_branch ( tenant STRING );
-      CREATE BRANCH by_tenant
+      CREATE PARAMETRIZER by_tenant
         SCHEMA tenant_branch TTL 5m MAX INSTANCES 1 EVICT LRU;
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT (
         tenant string,
@@ -259,8 +259,8 @@ Feature: Interconnect relay admission
         seq I64
       );
       CREATE SCHEMA tenant_branch ( tenant STRING );
-      CREATE BRANCH by_active_tenant SCHEMA tenant_branch TTL 1h;
-      CREATE BRANCH by_idle_tenant SCHEMA tenant_branch TTL 500ms;
+      CREATE PARAMETRIZER by_active_tenant SCHEMA tenant_branch TTL 1h;
+      CREATE PARAMETRIZER by_idle_tenant SCHEMA tenant_branch TTL 500ms;
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT (
         tenant string,
         seq integer
@@ -321,7 +321,7 @@ Feature: Interconnect relay admission
     Then node "node-3" observability metric "nervix_branch_evictions_total" with labels eventually equals 1
       """
       domain="expiry_{{test_id}}"
-      branch="by_idle_tenant"
+      parametrizer="by_idle_tenant"
       physical_node_id="node-3"
       reason="ttl"
       """
@@ -351,7 +351,7 @@ Feature: Interconnect relay admission
         seq I64
       );
       CREATE SCHEMA tenant_branch ( tenant STRING );
-      CREATE BRANCH by_tenant SCHEMA tenant_branch TTL 10s;
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_branch TTL 10s;
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT (
         tenant string,
         seq integer
@@ -409,14 +409,14 @@ Feature: Interconnect relay admission
     And node "node-3" observability metric "nervix_branch_evictions_total" with labels eventually equals 1
       """
       domain="shared_expiry_{{test_id}}"
-      branch="by_tenant"
+      parametrizer="by_tenant"
       physical_node_id="node-3"
       reason="ttl"
       """
     And node "node-3" observability metric "nervix_branch_instances" with labels eventually equals 1
       """
       domain="shared_expiry_{{test_id}}"
-      branch="by_tenant"
+      parametrizer="by_tenant"
       physical_node_id="node-3"
       """
     When the remote relay admission pause for branch '{"tenant":"shared"}' in domain "shared_expiry_{{test_id}}" is released
@@ -452,7 +452,7 @@ Feature: Interconnect relay admission
         seq I64
       );
       CREATE SCHEMA tenant_branch ( tenant STRING );
-      CREATE BRANCH by_tenant SCHEMA tenant_branch TTL 30s;
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_branch TTL 30s;
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT (
         tenant string,
         seq integer
@@ -497,7 +497,7 @@ Feature: Interconnect relay admission
     And within "120s" node "node-3" observability metric "nervix_branch_evictions_total" with labels eventually equals 601
       """
       domain="turnover_{{test_id}}"
-      branch="by_tenant"
+      parametrizer="by_tenant"
       physical_node_id="node-3"
       reason="ttl"
       """

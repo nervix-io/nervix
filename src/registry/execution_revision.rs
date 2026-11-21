@@ -16,10 +16,11 @@ use error_stack::{Report, ResultExt as _};
 use indexmap::IndexMap;
 use meticulous::ResultExt as _;
 use nervix_models::{
-    BranchName, BranchPartitionEpoch, ClusterNodeName, ClusterSchedule, DomainName, DomainSchedule,
-    DynamicModelUpdate, FlushPolicy, ModelKind, ModelName, NodeRef, NodeUnitRef,
-    OwnershipStateComponent, OwnershipStateRecoveryOutcome, OwnershipTransition, ResolvedBranching,
-    ScheduledNode, SchemaFingerprint, StatePurge, Unit, WasmStateGenerations, WasmStateReset,
+    ClusterNodeName, ClusterSchedule, DomainName, DomainSchedule, DynamicModelUpdate, FlushPolicy,
+    ModelKind, ModelName, NodeRef, NodeUnitRef, OwnershipStateComponent,
+    OwnershipStateRecoveryOutcome, OwnershipTransition, ParametrizerName,
+    ParametrizerPartitionEpoch, ResolvedBranching, ScheduledNode, SchemaFingerprint, StatePurge,
+    Unit, WasmStateGenerations, WasmStateReset,
 };
 use nervix_primitives::sync::Arc;
 use thiserror::Error;
@@ -117,10 +118,10 @@ pub(crate) struct ExecutionNode {
 /// The partition transition one node that keeps state per key executes in.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct NodePartitionTransition {
-    pub(crate) branch: BranchName,
+    pub(crate) parametrizer: ParametrizerName,
     pub(crate) epoch: nervix_models::PartitionEpochNumber,
     /// The count the epoch's previous count placed keys by.
-    pub(crate) previous: nervix_models::ResolvedBranchPartitions,
+    pub(crate) previous: nervix_models::ResolvedParametrizerPartitions,
     /// The units beyond the current count's this node stays scheduled as for the keys the
     /// previous count placed there.
     pub(crate) holding: Vec<Unit>,
@@ -131,11 +132,11 @@ impl NodePartitionTransition {
         if !node.keeps_state_per_key() {
             return None;
         }
-        let branch = node.partition_branch()?;
+        let branch = node.partition_parametrizer()?;
         let epoch = schedule.partition_epochs.get(branch)?;
         let transition = epoch.transition.as_ref()?;
         Some(Self {
-            branch: branch.clone(),
+            parametrizer: branch.clone(),
             epoch: epoch.number,
             previous: transition.previous,
             holding: schedule.holding_units_of(node),
@@ -337,7 +338,7 @@ pub(crate) struct ExecutionRevision {
     pub(crate) ownership_handoff_fingerprint: [u8; 32],
     /// The partition epoch of every branch whose count changed since it was created; a branch
     /// absent here is in its first epoch, with every key in its partition.
-    pub(crate) partition_epochs: BTreeMap<BranchName, BranchPartitionEpoch>,
+    pub(crate) partition_epochs: BTreeMap<ParametrizerName, ParametrizerPartitionEpoch>,
     pub(crate) partition_topology: nervix_models::PartitionTopology,
 }
 
@@ -916,7 +917,7 @@ mod tests {
                 let mut arbitrary = Arbitrary::new(bytes, Domain::Vocabulary);
                 let relay = NodeRef::new(ModelKind::Relay, named::<ModelName>("events"));
                 let partition_count = u16::from(2 + arbitrary.entropy().byte() % 7);
-                let partitions = nervix_models::ResolvedBranchPartitions::Direct(
+                let partitions = nervix_models::ResolvedParametrizerPartitions::Direct(
                     std::num::NonZeroU16::new(partition_count)
                         .assured("the property declares between two and eight partitions"),
                 );
@@ -930,16 +931,17 @@ mod tests {
                     .configured::<CreateSchema>(named::<ModelName>("event"))
                     .assured("the schedule declares its key schema")
                     .clone();
-                let Model::Branch(mut branch) =
+                let Model::Parametrizer(mut branch) =
                     crate::registry::test_fixtures::branch("by_value", "event")
                 else {
                     unreachable!("the branch fixture constructs a branch");
                 };
-                branch.partitions = nervix_models::BranchPartitions::Direct(partitions.count());
+                branch.partitions =
+                    nervix_models::ParametrizerPartitions::Direct(partitions.count());
                 let branching =
                     ResolvedBranching::branched(branch.name.clone(), key_schema, partitions);
                 let branch = ScheduledNode::new(
-                    Model::Branch(branch),
+                    Model::Parametrizer(branch),
                     SchemaFingerprint::from_digest([7; 32]),
                 );
                 before.nodes.insert(branch.identity(), branch);

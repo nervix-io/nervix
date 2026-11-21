@@ -211,7 +211,7 @@ Feature: Physical infrastructure deadlines under domain pacing
       CREATE SCHEMA physical_wait_tenant (
         tenant STRING
       );
-      CREATE BRANCH physical_wait_by_tenant SCHEMA physical_wait_tenant TTL 1h;
+      CREATE PARAMETRIZER physical_wait_by_tenant SCHEMA physical_wait_tenant TTL 1h;
       CREATE RELAY physical_wait_preferences
         SCHEMA physical_wait_preference BRANCHED BY physical_wait_by_tenant
         WITH MATERIALIZED STATE LAST BY TIMESTAMP;

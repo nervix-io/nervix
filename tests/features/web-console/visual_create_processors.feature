@@ -92,7 +92,7 @@ Feature: Web console visual junction and reingestor creation
       CREATE SCHEMA visual_order_event (message STRING);
       CREATE SCHEMA visual_other_event (message STRING, extra STRING);
       CREATE SCHEMA visual_tenant_key (tenant STRING);
-      CREATE BRANCH visual_tenant SCHEMA visual_tenant_key TTL 5m;
+      CREATE PARAMETRIZER visual_tenant SCHEMA visual_tenant_key TTL 5m;
       CREATE RELAY visual_order_input SCHEMA visual_order_event UNBRANCHED;
       CREATE RELAY visual_order_output SCHEMA visual_order_event UNBRANCHED;
       CREATE RELAY visual_wrong_schema SCHEMA visual_other_event UNBRANCHED;
@@ -240,8 +240,8 @@ Feature: Web console visual junction and reingestor creation
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA visual_partition_event (tenant STRING, message STRING);
       CREATE SCHEMA visual_partition_key (tenant STRING);
-      CREATE BRANCH visual_incoming_tenant SCHEMA visual_partition_key TTL 5m;
-      CREATE BRANCH visual_by_tenant SCHEMA visual_partition_key TTL 5m;
+      CREATE PARAMETRIZER visual_incoming_tenant SCHEMA visual_partition_key TTL 5m;
+      CREATE PARAMETRIZER visual_by_tenant SCHEMA visual_partition_key TTL 5m;
       CREATE WIRE JSON SCHEMA visual_partition_wire MODE STRICT (tenant string, message string);
       CREATE WIRE JSON CODEC visual_partition_codec FROM WIRE SCHEMA visual_partition_wire TO SCHEMA visual_partition_event;
       CREATE RELAY visual_partition_input SCHEMA visual_partition_event BRANCHED BY visual_incoming_tenant;
@@ -264,9 +264,9 @@ Feature: Web console visual junction and reingestor creation
     Then selector ".create-processor-input [data-value='visual_partition_input']" exists
     When selector ".create-processor-input [data-value='visual_partition_input']" is clicked
     And selector ".create-processor-route-branching [data-branch='named']" is clicked
-    And selector ".create-processor-route-branch .create-choice-search" is filled with "visual_by_tenant"
-    Then selector ".create-processor-route-branch [data-value='visual_by_tenant']" exists
-    When selector ".create-processor-route-branch [data-value='visual_by_tenant']" is clicked
+    And selector ".create-processor-route-parametrizer .create-choice-search" is filled with "visual_by_tenant"
+    Then selector ".create-processor-route-parametrizer [data-value='visual_by_tenant']" exists
+    When selector ".create-processor-route-parametrizer [data-value='visual_by_tenant']" is clicked
     And selector ".create-processor-branch-fields .create-choice-search" is filled with "tenant"
     Then selector ".create-processor-branch-fields [data-value='tenant']" exists
     When selector ".create-processor-branch-fields [data-value='tenant']" is clicked

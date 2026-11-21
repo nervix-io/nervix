@@ -72,7 +72,7 @@ FIELD secret STRING required sensitive
 FIELD maybe_secret I64 nullable sensitive
 FIELD triple FIXED_LIST<I32,3> required public
 FIELD pairs LIST<FIXED_LIST<U8,2>> required public
-BRANCH tenants
+PARAMETRIZER tenants
 KEY tenant STRING required public
 KEY region U16 nullable public
 KEY token STRING required sensitive
@@ -276,7 +276,7 @@ FIELD secret STRING required sensitive
 FIELD sample F32 required public
 FIELD low DATETIME required public
 FIELD high DATETIME required public
-BRANCH by_tenant
+PARAMETRIZER by_tenant
 KEY tenant STRING required sensitive
 ROW [tenant=redacted] sequence=u64:18446744073709551615 secret=redacted sample=f32:80000000 low=datetime:-9223372036854775808 high=datetime:9223372036854775807
 FRAME server_command_state_refused.nxsm
@@ -422,7 +422,7 @@ FIELD secret STRING required sensitive
 FIELD maybe_secret I64 nullable sensitive
 FIELD triple FIXED_LIST<I32,3> required public
 FIELD pairs LIST<FIXED_LIST<U8,2>> required public
-BRANCH tenants
+PARAMETRIZER tenants
 KEY tenant STRING required public
 KEY region U16 nullable public
 KEY token STRING required sensitive

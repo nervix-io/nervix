@@ -35,7 +35,7 @@ Feature: Branch activity sampling
 
       CREATE SCHEMA user_id_branch ( user_id I64 );
 
-      CREATE BRANCH by_correlated_users SCHEMA user_id_branch TTL <branch_ttl>;
+      CREATE PARAMETRIZER by_correlated_users SCHEMA user_id_branch TTL <branch_ttl>;
 
       CREATE RELAY left_events SCHEMA notification BRANCHED BY by_correlated_users;
 
@@ -122,13 +122,13 @@ Feature: Branch activity sampling
     And within "30s" node "node-1" observability metric "nervix_branch_instances" with labels eventually equals 0
       """
       domain="{{domain}}"
-      branch="by_correlated_users"
+      parametrizer="by_correlated_users"
       physical_node_id="node-1"
       """
     And within "30s" node "{{correlator_owner}}" observability metric "nervix_branch_instances" with labels eventually equals 0
       """
       domain="{{domain}}"
-      branch="by_correlated_users"
+      parametrizer="by_correlated_users"
       physical_node_id="{{correlator_owner}}"
       """
     # Stagger the initial arrivals across a scan: one branch's expiration cannot establish the
@@ -156,13 +156,13 @@ Feature: Branch activity sampling
     And within "30s" node "node-1" observability metric "nervix_branch_instances" with labels eventually equals 0
       """
       domain="{{domain}}"
-      branch="by_correlated_users"
+      parametrizer="by_correlated_users"
       physical_node_id="node-1"
       """
     And within "30s" node "{{correlator_owner}}" observability metric "nervix_branch_instances" with labels eventually equals 0
       """
       domain="{{domain}}"
-      branch="by_correlated_users"
+      parametrizer="by_correlated_users"
       physical_node_id="{{correlator_owner}}"
       """
     # All initial branch owners have retired before either fresh left record is posted.
@@ -190,13 +190,13 @@ Feature: Branch activity sampling
     Then within "30s" node "node-1" observability metric "nervix_branch_instances" with labels eventually equals 0
       """
       domain="{{domain}}"
-      branch="by_correlated_users"
+      parametrizer="by_correlated_users"
       physical_node_id="node-1"
       """
     And within "30s" node "{{correlator_owner}}" observability metric "nervix_branch_instances" with labels eventually equals 0
       """
       domain="{{domain}}"
-      branch="by_correlated_users"
+      parametrizer="by_correlated_users"
       physical_node_id="{{correlator_owner}}"
       """
 

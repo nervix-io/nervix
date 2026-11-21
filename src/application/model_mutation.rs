@@ -605,19 +605,19 @@ impl SessionServiceImpl {
                     });
                     mutations.push(RegistryMutation::AlterRelay(alter));
                 }
-                Statement::AlterBranch(alter) => {
-                    let model_id = alter.branch.clone();
+                Statement::AlterParametrizer(alter) => {
+                    let model_id = alter.parametrizer.clone();
                     applied.push(AppliedModelMutation {
                         index,
                         model: ModelName::from(&model_id),
                         message: format!(
-                            "altered branch '{}' in domain '{}'",
+                            "altered parametrizer '{}' in domain '{}'",
                             model_id.as_str(),
                             domain.as_str()
                         )
                         .into(),
                     });
-                    mutations.push(RegistryMutation::AlterBranch(alter));
+                    mutations.push(RegistryMutation::AlterParametrizer(alter));
                 }
                 Statement::AlterJunction(alter) => {
                     let model_id = alter.junction.clone();
@@ -2289,7 +2289,7 @@ impl SessionServiceImpl {
             | Statement::AlterReingestor(_)
             | Statement::AlterGenerator(_)
             | Statement::AlterPlacement(_)
-            | Statement::AlterBranch(_)
+            | Statement::AlterParametrizer(_)
             | Statement::RebindResource(_)
             | Statement::ResetWasmState(_)
             | Statement::Drop(_) => {
@@ -2361,7 +2361,7 @@ impl SessionServiceImpl {
                     .verified("this statement requires a request domain, which was resolved above");
                 self.describe_deduplicator(domain, describe).await
             }
-            Statement::DescribeBranch(describe) => {
+            Statement::DescribeParametrizer(describe) => {
                 let domain = domain
                     .as_ref()
                     .verified("this statement requires a request domain, which was resolved above");

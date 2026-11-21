@@ -132,7 +132,7 @@ Feature: Logical ingestion time and admission
       CREATE SCHEMA event ( tenant STRING, value I64, occurred_at DATETIME );
       CREATE SCHEMA summary ( tenant STRING, total I64, samples I64, source_at DATETIME );
       CREATE SCHEMA tenant_key ( tenant STRING );
-      CREATE BRANCH tenants SCHEMA tenant_key TTL 1h;
+      CREATE PARAMETRIZER tenants SCHEMA tenant_key TTL 1h;
       CREATE JAQ JSON CODEC event_codec TO SCHEMA event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE RELAY events SCHEMA event BRANCHED BY tenants;

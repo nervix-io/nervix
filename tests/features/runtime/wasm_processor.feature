@@ -38,7 +38,7 @@ Feature: WASM processor runtime behavior
         TO SCHEMA event
         ENCODE occurred_at AS RFC3339;
       CREATE SCHEMA tenant_branch ( tenant STRING );
-      CREATE BRANCH by_tenant SCHEMA tenant_branch TTL 5m;
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_branch TTL 5m;
       CREATE RELAY raw_events SCHEMA event BRANCHED BY by_tenant;
       CREATE RELAY enriched_events SCHEMA enriched_event BRANCHED BY by_tenant;
       CREATE VHOST edge wasm-reference-{{test_id}}.example.com;
@@ -443,7 +443,7 @@ Feature: WASM processor runtime behavior
         FROM WIRE SCHEMA limited_input_wire
         TO SCHEMA limited_input_event;
       CREATE SCHEMA limited_branch_key ( tenant STRING );
-      CREATE BRANCH by_limited_tenant SCHEMA limited_branch_key TTL 5m;
+      CREATE PARAMETRIZER by_limited_tenant SCHEMA limited_branch_key TTL 5m;
       CREATE RELAY limited_input_events SCHEMA limited_input_event BRANCHED BY by_limited_tenant;
       CREATE RELAY limited_events SCHEMA limited_output_event BRANCHED BY by_limited_tenant;
       CREATE VHOST edge wasm-limits-{{test_id}}.example.com;
@@ -524,7 +524,7 @@ Feature: WASM processor runtime behavior
       CREATE WIRE JSON SCHEMA limited_input_wire MODE STRICT ( tenant string, message string );
       CREATE WIRE JSON CODEC limited_input_codec FROM WIRE SCHEMA limited_input_wire TO SCHEMA limited_input_event;
       CREATE SCHEMA limited_branch_key ( tenant STRING );
-      CREATE BRANCH by_limited_tenant SCHEMA limited_branch_key TTL 5m;
+      CREATE PARAMETRIZER by_limited_tenant SCHEMA limited_branch_key TTL 5m;
       CREATE RELAY limited_input_events SCHEMA limited_input_event BRANCHED BY by_limited_tenant;
       CREATE RELAY limited_events SCHEMA limited_output_event BRANCHED BY by_limited_tenant;
       CREATE VHOST edge wasm-restore-{{test_id}}.example.com;
@@ -621,7 +621,7 @@ Feature: WASM processor runtime behavior
       CREATE WIRE JSON SCHEMA limited_input_wire MODE STRICT ( tenant string, message string );
       CREATE WIRE JSON CODEC limited_input_codec FROM WIRE SCHEMA limited_input_wire TO SCHEMA limited_input_event;
       CREATE SCHEMA limited_branch_key ( tenant STRING );
-      CREATE BRANCH by_limited_tenant SCHEMA limited_branch_key TTL 5m;
+      CREATE PARAMETRIZER by_limited_tenant SCHEMA limited_branch_key TTL 5m;
       CREATE RELAY limited_input_events SCHEMA limited_input_event BRANCHED BY by_limited_tenant;
       CREATE RELAY limited_events SCHEMA limited_output_event BRANCHED BY by_limited_tenant;
       CREATE VHOST edge wasm-init-{{test_id}}.example.com;
@@ -702,7 +702,7 @@ Feature: WASM processor runtime behavior
       CREATE WIRE JSON SCHEMA secret_input_wire MODE STRICT ( tenant string, message string );
       CREATE WIRE JSON CODEC secret_input_codec FROM WIRE SCHEMA secret_input_wire TO SCHEMA secret_input_event;
       CREATE SCHEMA secret_branch_key ( tenant STRING SENSITIVE );
-      CREATE BRANCH by_secret_tenant SCHEMA secret_branch_key TTL 5m;
+      CREATE PARAMETRIZER by_secret_tenant SCHEMA secret_branch_key TTL 5m;
       CREATE RELAY secret_input_events SCHEMA secret_input_event BRANCHED BY by_secret_tenant;
       CREATE RELAY secret_events SCHEMA secret_output_event BRANCHED BY by_secret_tenant;
       CREATE VHOST edge wasm-secret-{{test_id}}.example.com;
@@ -768,7 +768,7 @@ Feature: WASM processor runtime behavior
       CREATE WIRE JSON SCHEMA limited_input_wire MODE STRICT ( tenant string, message string );
       CREATE WIRE JSON CODEC limited_input_codec FROM WIRE SCHEMA limited_input_wire TO SCHEMA limited_input_event;
       CREATE SCHEMA limited_branch_key ( tenant STRING );
-      CREATE BRANCH by_limited_tenant SCHEMA limited_branch_key TTL 5m;
+      CREATE PARAMETRIZER by_limited_tenant SCHEMA limited_branch_key TTL 5m;
       CREATE RELAY limited_input_events SCHEMA limited_input_event BRANCHED BY by_limited_tenant;
       CREATE RELAY limited_events SCHEMA limited_output_event BRANCHED BY by_limited_tenant;
       CREATE VHOST edge wasm-callback-{{test_id}}.example.com;
@@ -872,7 +872,7 @@ Feature: WASM processor runtime behavior
         TO SCHEMA metric_input;
 
       CREATE SCHEMA tenant_branch ( tenant STRING );
-      CREATE BRANCH by_tenant SCHEMA tenant_branch TTL 5m;
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_branch TTL 5m;
 
       CREATE RELAY raw_metrics SCHEMA metric_input BRANCHED BY by_tenant;
       CREATE RELAY enriched_metrics SCHEMA metric BRANCHED BY by_tenant;
@@ -1103,7 +1103,7 @@ Feature: WASM processor runtime behavior
         TO SCHEMA metric;
 
       CREATE SCHEMA tenant_branch ( tenant STRING );
-      CREATE BRANCH by_tenant SCHEMA tenant_branch TTL 5m;
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_branch TTL 5m;
       CREATE RELAY raw_metrics SCHEMA metric BRANCHED BY by_tenant;
       CREATE RELAY filtered_metrics SCHEMA metric BRANCHED BY by_tenant;
 
@@ -1204,7 +1204,7 @@ Feature: WASM processor runtime behavior
       CREATE WIRE JSON SCHEMA counted_input_wire MODE STRICT ( tenant string, sequence integer );
       CREATE WIRE JSON CODEC counted_input_codec FROM WIRE SCHEMA counted_input_wire TO SCHEMA counted_input_event;
       CREATE SCHEMA tenant_branch ( tenant STRING );
-      CREATE BRANCH by_tenant SCHEMA tenant_branch TTL 5m;
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_branch TTL 5m;
       CREATE RELAY counted_input_events SCHEMA counted_input_event BRANCHED BY by_tenant;
       CREATE RELAY counted_events SCHEMA counted_output_event BRANCHED BY by_tenant;
       CREATE VHOST edge http-{{test_id}}.example.com;
@@ -1349,7 +1349,7 @@ Feature: WASM processor runtime behavior
       CREATE WIRE JSON SCHEMA metric_wire MODE STRICT ( value integer, tenant string );
       CREATE WIRE JSON CODEC metric_codec FROM WIRE SCHEMA metric_wire TO SCHEMA metric;
       CREATE SCHEMA tenant_branch ( tenant STRING );
-      CREATE BRANCH by_tenant SCHEMA tenant_branch TTL 5m;
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_branch TTL 5m;
       CREATE RELAY raw_metrics SCHEMA metric BRANCHED BY by_tenant;
       CREATE RELAY filtered_metrics SCHEMA metric BRANCHED BY by_tenant;
       CREATE VHOST edge http-{{test_id}}.example.com;

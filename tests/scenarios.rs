@@ -7460,7 +7460,7 @@ fn build_ingestor_logic_commands(
         TO SCHEMA logic_notification_list_operations_ingest;
 
       CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
-      CREATE IF NOT EXISTS BRANCH by_logic_ingestor
+      CREATE IF NOT EXISTS PARAMETRIZER by_logic_ingestor
         SCHEMA tenant_branch
         TTL 5m;
       CREATE RELAY logic_notifications SCHEMA {} BRANCHED BY by_logic_ingestor;
@@ -9549,7 +9549,7 @@ async fn configure_wasm_state_reset_graph(world: &mut ScenarioWorld, graph: Wasm
     };
     let branch_schema = if branched {
         format!(
-            "CREATE SCHEMA tenant_branch ( tenant STRING );\nCREATE BRANCH by_tenant SCHEMA \
+            "CREATE SCHEMA tenant_branch ( tenant STRING );\nCREATE PARAMETRIZER by_tenant SCHEMA \
              tenant_branch TTL 5m PARTITIONS {partitions};"
         )
     } else {

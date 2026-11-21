@@ -24,7 +24,7 @@ Feature: Partitioned processor state in backup archives
         pairs ARRAY<I64, 2, 2>
       );
       CREATE SCHEMA tenant_key ( tenant STRING );
-      CREATE BRANCH by_tenant SCHEMA tenant_key TTL 30m PARTITIONS 2;
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_key TTL 30m PARTITIONS 2;
       CREATE RELAY payments SCHEMA payment BRANCHED BY by_tenant;
       CREATE RELAY unique_payments SCHEMA payment BRANCHED BY by_tenant;
       CREATE RELAY metrics SCHEMA metric BRANCHED BY by_tenant;

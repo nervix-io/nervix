@@ -13,7 +13,7 @@ source "${script_dir}/node-faults.sh"
 # shellcheck source=materialized-profile.sh
 source "${script_dir}/materialized-profile.sh"
 
-recovery_graph_models[branch-chaos_state_branch]='SHOW CREATE BRANCH chaos_state_branch;'
+recovery_graph_models[branch-chaos_state_branch]='SHOW CREATE PARAMETRIZER chaos_state_branch;'
 
 # The stateful entities, by the kind their DESCRIBE and RELOCATE statements spell. The ingestors run
 # apart from the state owner, so a fault on the owner leaves their Kafka consumers in place.

@@ -35,8 +35,8 @@ use nervix_interconnect::{
     PartitionTransitionRequest, RemoteOperationFailure,
 };
 use nervix_models::{
-    BranchKeyFingerprint, BranchName, ClusterNodeName, DomainName, NodeRef, PartitionEpochNumber,
-    Unit,
+    BranchKeyFingerprint, ClusterNodeName, DomainName, NodeRef, ParametrizerName,
+    PartitionEpochNumber, Unit,
 };
 use nervix_primitives::time::Instant;
 
@@ -52,7 +52,7 @@ mod shuttle_tests;
 /// partition.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct UnitPartitionTransition {
-    pub(super) branch: BranchName,
+    pub(super) parametrizer: ParametrizerName,
     pub(super) epoch: PartitionEpochNumber,
     /// How the current count places keys.
     pub(super) current: RelayPartitioning,
@@ -67,7 +67,7 @@ impl UnitPartitionTransition {
     pub(super) fn of(node: &ExecutionNode, unit: Unit) -> Option<Self> {
         let transition = node.partition_transition.as_ref()?;
         Some(Self {
-            branch: transition.branch.clone(),
+            parametrizer: transition.parametrizer.clone(),
             epoch: transition.epoch,
             current: RelayPartitioning::of(node.resolved_branching.as_ref()),
             previous: RelayPartitioning::of_partitions(transition.previous),
@@ -712,7 +712,7 @@ impl Runtime {
             if installed
                 .revision
                 .partition_epochs
-                .get(&transition.branch)
+                .get(&transition.parametrizer)
                 .is_none_or(|epoch| epoch.number != transition.epoch)
             {
                 return Err(Report::new(PartitionClaimError::TopologyChanged {
@@ -1065,12 +1065,13 @@ mod tests {
     #[test]
     fn only_a_unit_the_current_count_schedules_is_a_current_unit() {
         let partitions = |count: u16| {
-            nervix_models::ResolvedBranchPartitions::Direct(
+            nervix_models::ResolvedParametrizerPartitions::Direct(
                 std::num::NonZeroU16::new(count).assured("the test counts are positive"),
             )
         };
         let shrinking = |unit| UnitPartitionTransition {
-            branch: BranchName::parse("by_tenant").assured("the test branch name is valid"),
+            parametrizer: ParametrizerName::parse("by_tenant")
+                .assured("the test branch name is valid"),
             epoch: PartitionEpochNumber::FIRST.next(),
             current: RelayPartitioning::of_partitions(partitions(4)),
             previous: RelayPartitioning::of_partitions(partitions(8)),
@@ -1083,12 +1084,13 @@ mod tests {
     #[test]
     fn a_unit_misplaces_exactly_the_keys_the_current_count_places_elsewhere() {
         let partitions = |count: u16| {
-            nervix_models::ResolvedBranchPartitions::Direct(
+            nervix_models::ResolvedParametrizerPartitions::Direct(
                 std::num::NonZeroU16::new(count).assured("the test counts are positive"),
             )
         };
         let transition = UnitPartitionTransition {
-            branch: BranchName::parse("by_tenant").assured("the test branch name is valid"),
+            parametrizer: ParametrizerName::parse("by_tenant")
+                .assured("the test branch name is valid"),
             epoch: PartitionEpochNumber::FIRST.next(),
             current: RelayPartitioning::of_partitions(partitions(8)),
             previous: RelayPartitioning::of_partitions(partitions(4)),

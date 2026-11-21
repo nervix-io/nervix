@@ -8,9 +8,9 @@
 
 use nervix_arbitrary::{Arbitrary, Domain, Entropy};
 use nervix_models::{
-    BranchName, BuiltinFunctionName, ClientName, ClusterNodeName, CodecName, CorrelatorName,
-    DeduplicatorName, DomainName, DotPolicy, EmitterName, EndpointName, FieldName, GeneratorName,
-    InferencerName, IngestorName, JunctionName, LookupName, ModelName, NameError, PlacementName,
+    BuiltinFunctionName, ClientName, ClusterNodeName, CodecName, CorrelatorName, DeduplicatorName,
+    DomainName, DotPolicy, EmitterName, EndpointName, FieldName, GeneratorName, InferencerName,
+    IngestorName, JunctionName, LookupName, ModelName, NameError, ParametrizerName, PlacementName,
     ReingestorName, RelayName, ReordererName, ResourceName, SchemaName, SignalingProtocolName,
     SubscriptionName, UdfName, UserName, VhostName, WasmProcessorName, WindowProcessorName,
     WireSchemaName,
@@ -183,7 +183,7 @@ macro_rules! for_every_name_type {
         $assertion!(CodecName, $text);
         $assertion!(ClientName, $text);
         $assertion!(VhostName, $text);
-        $assertion!(BranchName, $text);
+        $assertion!(ParametrizerName, $text);
         $assertion!(EndpointName, $text);
         $assertion!(SignalingProtocolName, $text);
         $assertion!(GeneratorName, $text);
@@ -219,7 +219,7 @@ macro_rules! for_every_entity_name_type {
         $assertion!(CodecName, $text);
         $assertion!(ClientName, $text);
         $assertion!(VhostName, $text);
-        $assertion!(BranchName, $text);
+        $assertion!(ParametrizerName, $text);
         $assertion!(EndpointName, $text);
         $assertion!(SignalingProtocolName, $text);
         $assertion!(GeneratorName, $text);

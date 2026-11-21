@@ -13,7 +13,7 @@ Feature: Relay delivery across a node capability roll
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA incoming (id STRING, amount I64, tenant STRING);
       CREATE SCHEMA tenant_key (tenant STRING);
-      CREATE BRANCH tenants SCHEMA tenant_key TTL 5m;
+      CREATE PARAMETRIZER tenants SCHEMA tenant_key TTL 5m;
       CREATE RELAY records SCHEMA incoming BRANCHED BY tenants;
       CREATE CLIENT PRODUCER INGESTOR input
         FROM SCHEMA incoming MODE ACK SEQUENTIAL ACK TIMEOUT 1m
@@ -68,7 +68,7 @@ Feature: Relay delivery across a node capability roll
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA incoming (id STRING, amount I64, tenant STRING);
       CREATE SCHEMA tenant_key (tenant STRING);
-      CREATE BRANCH tenants SCHEMA tenant_key TTL 5m;
+      CREATE PARAMETRIZER tenants SCHEMA tenant_key TTL 5m;
       CREATE RELAY records SCHEMA incoming BRANCHED BY tenants;
       CREATE CLIENT PRODUCER INGESTOR input
         FROM SCHEMA incoming MODE ACK SEQUENTIAL ACK TIMEOUT 1m

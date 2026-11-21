@@ -7,7 +7,7 @@ Ingestors are the entry points into the runtime graph.
 A typical ingestor:
 
 ```plexus
-CREATE BRANCH by_user
+CREATE PARAMETRIZER by_user
   SCHEMA user_branch TTL 5m;
 
 CREATE IF NOT EXISTS KAFKA TOPIC INGESTOR kafka_notifications
@@ -98,7 +98,7 @@ At runtime, the ingestor:
   batch built from external input at 1,023 messages plus one payload's records
 - executes `FILTER WHERE` once against that whole group
 - executes each route's ordered construction and `WHERE` program once against the surviving group
-- resolves the concrete branch group from the referenced `CREATE BRANCH`
+- resolves the concrete branch group from the referenced parametrizer
 - accumulates decoded rows independently for every matching destination and branch group
 - writes each route's buffered rows when its configured interval or size boundary fires, when the
   documented [`FLUSH IMMEDIATE` system timeout](plexus-overview.md) expires, or when the domain is
@@ -638,16 +638,16 @@ the ones behind it stay with the transport, in order.
 ## Branch Semantics
 
 Ingestors are where external mixed flows enter branch-isolated processing. Every route independently
-constructs a concrete branch or becomes unbranched. The branch declaration owns the key schema,
-TTL, and optional LRU eviction policy:
+constructs a concrete branch or becomes unbranched. The parametrizer owns the key schema, TTL, and
+optional LRU eviction policy:
 
-- `CREATE BRANCH <branch> SCHEMA <schema> TTL <duration>` declares the branch key schema and lifetime
-- `BRANCHED BY <branch> SET field = expression, ...` constructs the route's key after output
+- `CREATE PARAMETRIZER <parametrizer> SCHEMA <schema> TTL <duration>` declares the branch key schema and lifetime
+- `BRANCHED BY <parametrizer> SET field = expression, ...` constructs the route's key after output
   finalization and route filtering
 - `MAX INSTANCES <n> EVICT LRU` may be added to cap active concrete branch instances and evict the least recently used branch when capacity is reached
 - `UNBRANCHED` produces an absent branch key; it is not encoded as an empty string or synthetic
   root identifier
-- the named branch defines both the branch identity and its key shape; downstream relays and branch-preserving processors must reference that same branch name
+- the parametrizer defines both the branch identity and its key shape; downstream relays and branch-preserving processors must reference that same parametrizer
 - decoded rows are appended to matching destination relays inside that group's branch
 - downstream normal processors keep the same group until a `REINGESTOR` or `EMITTER` boundary
 
@@ -665,7 +665,7 @@ Client-backed ingestors can use resource-mounted client config values for TLS ma
 Ingestors may declare an optional arrival filter and per-route construction clauses:
 
 ```plexus
-CREATE BRANCH by_tenant
+CREATE PARAMETRIZER by_tenant
   SCHEMA tenant_branch TTL 5m;
 
 CREATE IF NOT EXISTS HTTP ENDPOINT INGESTOR notifications_in
@@ -1000,7 +1000,7 @@ CREATE SCHEMA order_in (
   region STRING, order_id STRING, amount I64, card STRING SENSITIVE
 );
 CREATE SCHEMA region_key (region STRING);
-CREATE BRANCH by_region SCHEMA region_key TTL 5m;
+CREATE PARAMETRIZER by_region SCHEMA region_key TTL 5m;
 
 CREATE CLIENT PRODUCER INGESTOR orders_in
   FROM SCHEMA order_in

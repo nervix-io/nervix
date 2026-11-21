@@ -25,7 +25,7 @@ CREATE SCHEMA user_id_branch (
   user_id U32
 );
 
-CREATE BRANCH by_user SCHEMA user_id_branch TTL 5m;
+CREATE PARAMETRIZER by_user SCHEMA user_id_branch TTL 5m;
 
 CREATE SCHEMA notification (
   user_id U32,

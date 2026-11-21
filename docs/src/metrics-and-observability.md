@@ -29,8 +29,8 @@ curl http://127.0.0.1:<observability-port>/metrics
 Prometheus metrics are intentionally branch-aggregated. They aggregate across concrete relay
 branches and do not include a branch key label. This keeps Prometheus cardinality bounded when a
 relay is branched by high-cardinality values such as tenant, user, account, or device id. Branch
-lifecycle metrics identify the declared branch, not the concrete key. A partitioned relay or processor's series
-carry its partition, whose cardinality is bounded by the partition count its branch declares.
+lifecycle metrics identify the parametrizer, not the concrete key. A partitioned relay or processor's series
+carry its partition, whose cardinality is bounded by the partition count its parametrizer declares.
 
 ## Metric Labels
 
@@ -46,7 +46,7 @@ Graph metric series use these labels:
 - `partition`: the partition of a partitioned relay or processor recording the series, or `-`
   for a unit without partitions
 - `instance`: the global index of an ingestor instance, or `-` for a non-instance unit
-- `branch`: named branch declaration on branch lifecycle metrics
+- `parametrizer`: the parametrizer on branch lifecycle metrics
 - `reason`: branch eviction reason, either `lru` or `ttl`
 - `le`: Prometheus histogram bucket boundary
 
@@ -108,9 +108,10 @@ families for ingestors and emitters. Nervix also records these raw metric famili
   physical node
 - `nervix_branch_evictions_total`: total concrete branches evicted on the physical node, split by
   `reason="lru"` or `reason="ttl"`
-- `nervix_branch_partition_epoch`: the partition epoch a branch executes in on the physical node
+- `nervix_branch_partition_epoch`: the partition epoch a parametrizer executes in on the physical
+  node
 - `nervix_branch_partition_keys_pending`: concrete keys the physical node's units still have to move
-  while their branch changes its partition count
+  while their parametrizer changes its partition count
 - `nervix_branch_partition_keys_claimed_total`: total concrete keys the physical node's units claimed
   from the unit a previous partition count placed them in
 - `nervix_inferencer_state_bytes`: declared native tensor bytes held by active stateful branches
@@ -962,25 +963,26 @@ is read to produce the summary.
 
 Prometheus exposes branch lifecycle state without a concrete branch-key label:
 
-- `nervix_branch_instances{domain,branch,physical_node_id}` is a gauge of live concrete branch
+- `nervix_branch_instances{domain,parametrizer,physical_node_id}` is a gauge of live concrete branch
   keys on that physical node. A key is counted once even when multiple local graph nodes hold
   runtime state for it.
-- `nervix_branch_evictions_total{domain,branch,physical_node_id,reason}` counts each concrete key
+- `nervix_branch_evictions_total{domain,parametrizer,physical_node_id,reason}` counts each concrete key
   once when branch eviction begins on that physical node, even if multiple local graph nodes hold
   the key. `reason="lru"` is a `MAX INSTANCES ... EVICT LRU` capacity eviction; `reason="ttl"` is
   idle expiration.
-- `nervix_branch_partition_epoch{domain,branch,physical_node_id}` is the partition epoch the branch
-  executes in on that physical node: `1` until its first partition count change, then one more for
+- `nervix_branch_partition_epoch{domain,parametrizer,physical_node_id}` is the partition epoch the
+  parametrizer executes in on that physical node: `1` until its first partition count change, then one more for
   each committed change.
-- `nervix_branch_partition_keys_pending{domain,branch,physical_node_id}` is a gauge of the concrete
-  keys the physical node's units of the branch's deduplicators, window and WASM processors,
-  inferencers that declare state and materialized relays still have to move while the branch changes its partition count: the keys
+- `nervix_branch_partition_keys_pending{domain,parametrizer,physical_node_id}` is a gauge of the concrete
+  keys the physical node's units of the parametrizer's deduplicators, window and WASM processors,
+  inferencers that declare state and materialized relays still have to move while the parametrizer
+  changes its partition count: the keys
   each holds that the current count places in another unit, and the keys each is claiming. It is
   `0` once every key lies in its partition; the summed value across the cluster is what
-  `DESCRIBE BRANCH` reports as `keys pending`.
-- `nervix_branch_partition_keys_claimed_total{domain,branch,physical_node_id}` counts each key the
+  `DESCRIBE PARAMETRIZER` reports as `keys pending`.
+- `nervix_branch_partition_keys_claimed_total{domain,parametrizer,physical_node_id}` counts each key the
   physical node's units claimed from the unit the previous count placed it in; within one epoch,
-  the summed value across the cluster is what `DESCRIBE BRANCH` reports as `keys claimed`.
+  the summed value across the cluster is what `DESCRIBE PARAMETRIZER` reports as `keys claimed`.
 
 Normal shutdown, schedule replacement, and runtime detachment reduce the live gauge but do not
 increment the eviction counter. Relay branch presence and its TTL or LRU decisions exist only on

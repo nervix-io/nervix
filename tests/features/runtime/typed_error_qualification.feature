@@ -106,8 +106,8 @@ Feature: Typed error qualification through public streams
       CREATE SCHEMA calculation (tenant STRING, id STRING);
       CREATE SCHEMA calculation_error (source_id STRING);
       CREATE SCHEMA tenant_branch (tenant STRING);
-      CREATE BRANCH by_tenant SCHEMA tenant_branch TTL 5m;
-      CREATE BRANCH by_other_tenant SCHEMA tenant_branch TTL 5m;
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_branch TTL 5m;
+      CREATE PARAMETRIZER by_other_tenant SCHEMA tenant_branch TTL 5m;
       CREATE RELAY calculations SCHEMA calculation BRANCHED BY by_tenant;
       CREATE RELAY calculation_results SCHEMA calculation BRANCHED BY by_tenant;
       CREATE RELAY calculation_errors SCHEMA calculation_error BRANCHED BY by_other_tenant;
@@ -247,7 +247,7 @@ Feature: Typed error qualification through public streams
         FROM WIRE SCHEMA calculation_wire
         TO SCHEMA calculation;
       CREATE SCHEMA tenant_branch (tenant STRING);
-      CREATE BRANCH by_tenant SCHEMA tenant_branch TTL 5m;
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_branch TTL 5m;
       CREATE RELAY calculations SCHEMA calculation BRANCHED BY by_tenant;
       CREATE RELAY calculation_results SCHEMA calculation_result BRANCHED BY by_tenant;
       CREATE RELAY calculation_errors SCHEMA calculation_error BRANCHED BY by_tenant;

@@ -209,7 +209,7 @@ Feature: Accepted work waits for internal worker room
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA event (tenant STRING, id STRING, value I64);
       CREATE SCHEMA tenant_key (tenant STRING);
-      CREATE BRANCH tenants SCHEMA tenant_key TTL 5m;
+      CREATE PARAMETRIZER tenants SCHEMA tenant_key TTL 5m;
       CREATE JAQ JSON CODEC event_codec TO SCHEMA event WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE RELAY accepted SCHEMA event BRANCHED BY tenants;
       CREATE RELAY unique_events SCHEMA event BRANCHED BY tenants;
@@ -333,7 +333,7 @@ Feature: Accepted work waits for internal worker room
       CREATE WIRE JSON SCHEMA features_wire MODE STRICT (tenant string, vector array);
       CREATE WIRE JSON CODEC features_codec FROM WIRE SCHEMA features_wire TO SCHEMA features;
       CREATE SCHEMA tenant_key (tenant STRING);
-      CREATE BRANCH tenants SCHEMA tenant_key TTL 5m;
+      CREATE PARAMETRIZER tenants SCHEMA tenant_key TTL 5m;
       CREATE RELAY features SCHEMA features BRANCHED BY tenants;
       CREATE RELAY scored SCHEMA scored BRANCHED BY tenants;
       CREATE VHOST edge model-{{test_id}}.example.com;

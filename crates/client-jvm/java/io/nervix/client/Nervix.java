@@ -560,7 +560,7 @@ public final class Nervix {
     public static final class Schema extends Handle {
         private Schema(long pointer) { super(pointer); }
         public List<Field> fields(Part part) { return read(p -> values(Native.schemaFields(p, part.code()), Field.class)); }
-        public String branch() { return read(Native::schemaBranch); }
+        public String parametrizer() { return read(Native::schemaParametrizer); }
     }
     public static final class BatchBuilder extends Handle {
         public BatchBuilder(Schema schema, int rows) { super(schema.read(p -> Native.builderNew(p, rows))); }

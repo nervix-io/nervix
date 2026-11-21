@@ -27,7 +27,7 @@ Feature: Relay branch presence
 
       CREATE SCHEMA tenant_branch ( tenant STRING );
 
-      CREATE BRANCH by_tenant
+      CREATE PARAMETRIZER by_tenant
         SCHEMA tenant_branch TTL 5m MAX INSTANCES 2 EVICT LRU;
 
       CREATE RELAY tenant_state

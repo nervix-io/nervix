@@ -20,7 +20,7 @@ Feature: Fixed reader counts retain native partition routing
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( tenant string, seq integer );
       CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE SCHEMA tenant_key ( tenant STRING );
-      CREATE BRANCH by_tenant SCHEMA tenant_key TTL 5m PARTITIONS INHERITED;
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_key TTL 5m PARTITIONS INHERITED;
       CREATE RELAY events SCHEMA event BRANCHED BY by_tenant;
       CREATE <connector> CLIENT upstream CONFIG { '<address_key>' = '<address>' };
       CREATE KAFKA CLIENT downstream CONFIG { 'bootstrap.servers' = '{{kafka_addr}}' };

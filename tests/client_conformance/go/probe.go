@@ -621,7 +621,7 @@ func run() error {
 		report(parsed.line("FIELD"))
 	}
 	if branch := schema.Branch(nil); branch != nil {
-		report("BRANCH " + string(branch.Branch()))
+		report("PARAMETRIZER " + string(branch.Parametrizer()))
 		for index := 0; index < branch.FieldsLength(); index++ {
 			row := new(session.RowField)
 			branch.Fields(row, index)

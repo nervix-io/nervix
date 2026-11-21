@@ -1278,12 +1278,12 @@ mod tests {
         partitions: u16,
         materialized: bool,
     ) -> Vec<Model> {
-        let Model::Branch(mut by_tenant) =
+        let Model::Parametrizer(mut by_tenant) =
             crate::registry::test_fixtures::branch("by_tenant", "tenant_key")
         else {
             unreachable!("the branch fixture builds a branch model")
         };
-        by_tenant.partitions = nervix_models::BranchPartitions::Direct(
+        by_tenant.partitions = nervix_models::ParametrizerPartitions::Direct(
             std::num::NonZeroU16::new(partitions).expect("a positive partition count"),
         );
         let relay_model = if materialized {
@@ -1306,7 +1306,7 @@ mod tests {
         vec![
             schema("event_schema"),
             branch_schema("tenant_key", &["value"]),
-            Model::Branch(by_tenant),
+            Model::Parametrizer(by_tenant),
             relay_model,
         ]
     }

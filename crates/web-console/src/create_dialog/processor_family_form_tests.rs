@@ -189,8 +189,8 @@ fn correlator_choices_ask_for_each_side_and_its_timeout_by_that_side_s_first_rel
         signals.correlator.update(|draft| draft.choose_branched());
         select_choice(
             signals,
-            ChoiceControl::ProcessorBranch,
-            ChoiceValue::Model(node(ModelKind::Branch, "by_tenant")),
+            ChoiceControl::ProcessorParametrizer,
+            ChoiceValue::Model(node(ModelKind::Parametrizer, "by_tenant")),
         );
         for control in [
             ChoiceControl::ProcessorInputRelay,
@@ -200,7 +200,7 @@ fn correlator_choices_ask_for_each_side_and_its_timeout_by_that_side_s_first_rel
                 question(signals, control),
                 (
                     ChoiceTarget::IngestBranchedRelay,
-                    ChoiceValue::Model(node(ModelKind::Branch, "by_tenant"))
+                    ChoiceValue::Model(node(ModelKind::Parametrizer, "by_tenant"))
                 ),
                 "{control:?}"
             );

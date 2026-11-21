@@ -60,7 +60,7 @@ pub(super) fn validate(
             route: route.clone(),
         }));
     };
-    if let Some(branch) = processor.branched_by.branch() {
+    if let Some(branch) = processor.branched_by.parametrizer() {
         let branch = branch_model(domain, identifier, models, branch)?;
         if branch.eviction.is_none() {
             return Err(Report::new(
@@ -239,7 +239,7 @@ mod tests {
             CREATE SCHEMA sketch_input (tenant STRING, value I64);
             CREATE SCHEMA sketch_output (tenant STRING, distinct_values I64);
             CREATE SCHEMA sketch_key (tenant STRING);
-            CREATE BRANCH sketch_branch SCHEMA sketch_key TTL 5m;
+            CREATE PARAMETRIZER sketch_branch SCHEMA sketch_key TTL 5m;
             CREATE RELAY sketch_in SCHEMA sketch_input BRANCHED BY sketch_branch;
             CREATE RELAY sketch_out SCHEMA sketch_output BRANCHED BY sketch_branch;
             CREATE WINDOW PROCESSOR sketch_window FROM sketch_in

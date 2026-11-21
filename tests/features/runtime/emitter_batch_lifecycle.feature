@@ -162,7 +162,7 @@ Feature: Emitter batch lifecycle
       CREATE JAQ JSON CODEC configuration_codec TO SCHEMA tenant_configuration
         WITH JAQ TRANSFORMATIONS ON INGESTION '.';
       CREATE SCHEMA tenant_key ( tenant STRING );
-      CREATE BRANCH by_tenant SCHEMA tenant_key TTL 5m;
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_key TTL 5m;
       CREATE RELAY events SCHEMA event BRANCHED BY by_tenant;
       CREATE RELAY settings SCHEMA tenant_configuration BRANCHED BY by_tenant
         WITH MATERIALIZED STATE LAST BY TIMESTAMP;
@@ -260,7 +260,7 @@ Feature: Emitter batch lifecycle
       CREATE JAQ JSON CODEC ingest_codec TO SCHEMA event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE SCHEMA tenant_key ( tenant STRING );
-      CREATE BRANCH by_tenant SCHEMA tenant_key TTL 5m MAX INSTANCES 1 EVICT LRU;
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_key TTL 5m MAX INSTANCES 1 EVICT LRU;
       CREATE RELAY events SCHEMA event BRANCHED BY by_tenant;
       CREATE VHOST edge batch-lifecycle-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT ingress ON edge PATH '/events';
@@ -344,8 +344,8 @@ Feature: Emitter batch lifecycle
       CREATE JAQ JSON CODEC ingest_codec TO SCHEMA event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE SCHEMA tenant_key ( tenant STRING );
-      CREATE BRANCH first_tenant SCHEMA tenant_key TTL 5m PARTITIONS 2 MAX INSTANCES 1 EVICT LRU;
-      CREATE BRANCH second_tenant SCHEMA tenant_key TTL 5m MAX INSTANCES 1 EVICT LRU;
+      CREATE PARAMETRIZER first_tenant SCHEMA tenant_key TTL 5m PARTITIONS 2 MAX INSTANCES 1 EVICT LRU;
+      CREATE PARAMETRIZER second_tenant SCHEMA tenant_key TTL 5m MAX INSTANCES 1 EVICT LRU;
       CREATE RELAY plain_events SCHEMA event UNBRANCHED;
       CREATE RELAY first_events SCHEMA event BRANCHED BY first_tenant;
       CREATE RELAY second_events SCHEMA event BRANCHED BY second_tenant;
@@ -444,7 +444,7 @@ Feature: Emitter batch lifecycle
       CREATE JAQ JSON CODEC ingest_codec TO SCHEMA event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE SCHEMA tenant_key ( tenant STRING );
-      CREATE BRANCH by_tenant SCHEMA tenant_key TTL 400s;
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_key TTL 400s;
       CREATE RELAY events SCHEMA event BRANCHED BY by_tenant;
       CREATE VHOST edge batch-expiry-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT ingress ON edge PATH '/events';
@@ -518,7 +518,7 @@ Feature: Emitter batch lifecycle
       CREATE JAQ JSON CODEC configuration_codec TO SCHEMA tenant_configuration
         WITH JAQ TRANSFORMATIONS ON INGESTION '.';
       CREATE SCHEMA tenant_key ( tenant STRING );
-      CREATE BRANCH by_tenant SCHEMA tenant_key TTL 400s;
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_key TTL 400s;
       CREATE RELAY events SCHEMA event BRANCHED BY by_tenant;
       CREATE RELAY settings SCHEMA tenant_configuration BRANCHED BY by_tenant
         WITH MATERIALIZED STATE LAST BY TIMESTAMP;

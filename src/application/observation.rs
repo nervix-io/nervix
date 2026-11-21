@@ -1652,7 +1652,7 @@ impl SessionServiceImpl {
                 Some(domain) => match domain.nodes.get(&node) {
                     Some(node) => {
                         let epoch = node
-                            .partition_branch()
+                            .partition_parametrizer()
                             .and_then(|branch| domain.partition_epochs.get(branch));
                         (
                             Some(node.clone()),

@@ -24,7 +24,7 @@ Feature: Client ingestors
         region STRING, order_id STRING, amount_cents I64, card STRING SENSITIVE
       );
       CREATE SCHEMA region_key (region STRING);
-      CREATE BRANCH by_region SCHEMA region_key TTL 5m;
+      CREATE PARAMETRIZER by_region SCHEMA region_key TTL 5m;
       CREATE RELAY orders_by_region SCHEMA order_record BRANCHED BY by_region;
       CREATE RELAY orders_deduped SCHEMA order_record BRANCHED BY by_region;
       CREATE CLIENT PRODUCER INGESTOR orders_in
@@ -534,7 +534,7 @@ Feature: Client ingestors
         region STRING, order_id STRING, amount I64, card STRING SENSITIVE
       );
       CREATE SCHEMA region_key (region STRING);
-      CREATE BRANCH by_region SCHEMA region_key TTL 5m;
+      CREATE PARAMETRIZER by_region SCHEMA region_key TTL 5m;
       CREATE RELAY orders SCHEMA order_in BRANCHED BY by_region;
       CREATE CLIENT PRODUCER INGESTOR orders_in
         FROM SCHEMA order_in
@@ -671,7 +671,7 @@ Feature: Client ingestors
         region STRING, order_id STRING, amount I64, card STRING SENSITIVE
       );
       CREATE SCHEMA region_key (region STRING);
-      CREATE BRANCH by_region SCHEMA region_key TTL 5m;
+      CREATE PARAMETRIZER by_region SCHEMA region_key TTL 5m;
       CREATE RELAY orders SCHEMA order_in BRANCHED BY by_region;
       CREATE CLIENT PRODUCER INGESTOR orders_in
         FROM SCHEMA order_in

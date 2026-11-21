@@ -20,7 +20,7 @@ Feature: Prometheus ingestion
         TO SCHEMA sample
         WITH JAQ TRANSFORMATIONS ON INGESTION '{source: .metric.source, value, timestamp}';
         CREATE IF NOT EXISTS SCHEMA source_branch ( source STRING );
-        CREATE IF NOT EXISTS BRANCH by_prom_samples SCHEMA source_branch TTL 5m;
+        CREATE IF NOT EXISTS PARAMETRIZER by_prom_samples SCHEMA source_branch TTL 5m;
         CREATE RELAY samples SCHEMA sample BRANCHED BY by_prom_samples;
         CREATE PROMETHEUS CLIENT prom_main
         CONFIG {
@@ -73,7 +73,7 @@ Feature: Prometheus ingestion
         TO SCHEMA sample
         WITH JAQ TRANSFORMATIONS ON INGESTION '{source: .metric.source, value, timestamp}';
         CREATE IF NOT EXISTS SCHEMA source_branch ( source STRING );
-        CREATE IF NOT EXISTS BRANCH by_prom_samples SCHEMA source_branch TTL 5m;
+        CREATE IF NOT EXISTS PARAMETRIZER by_prom_samples SCHEMA source_branch TTL 5m;
         CREATE RELAY samples SCHEMA sample BRANCHED BY by_prom_samples;
         CREATE PROMETHEUS CLIENT prom_main
         CONFIG {
@@ -131,7 +131,7 @@ Feature: Prometheus ingestion
         TO SCHEMA sample
         WITH JAQ TRANSFORMATIONS ON INGESTION '{source: .metric.source, value, timestamp}';
         CREATE IF NOT EXISTS SCHEMA source_branch ( source STRING );
-        CREATE IF NOT EXISTS BRANCH by_prom_samples SCHEMA source_branch TTL 5m;
+        CREATE IF NOT EXISTS PARAMETRIZER by_prom_samples SCHEMA source_branch TTL 5m;
         CREATE RELAY samples SCHEMA sample BRANCHED BY by_prom_samples;
         CREATE PROMETHEUS CLIENT prom_main
         CONFIG {

@@ -96,7 +96,7 @@ pub(in crate::application) fn requires_leader(statement: &Statement) -> bool {
             | Statement::DescribeLookup(_)
             | Statement::DescribeJunction(_)
             | Statement::DescribeDeduplicator(_)
-            | Statement::DescribeBranch(_)
+            | Statement::DescribeParametrizer(_)
             | Statement::DescribeReingestor(_)
             | Statement::DescribeCorrelator(_)
             | Statement::DescribeReorderer(_)

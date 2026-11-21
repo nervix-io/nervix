@@ -30,7 +30,7 @@ Feature: Relay partition failover
 
       CREATE SCHEMA tenant_branch ( tenant STRING );
 
-      CREATE BRANCH by_tenant
+      CREATE PARAMETRIZER by_tenant
         SCHEMA tenant_branch TTL 5m PARTITIONS 4;
 
       CREATE RELAY notifications
@@ -145,7 +145,7 @@ Feature: Relay partition failover
 
       CREATE SCHEMA tenant_branch ( tenant STRING );
 
-      CREATE BRANCH by_tenant
+      CREATE PARAMETRIZER by_tenant
         SCHEMA tenant_branch TTL 5m PARTITIONS 4;
 
       CREATE RELAY notifications

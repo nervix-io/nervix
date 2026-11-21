@@ -30,7 +30,7 @@ CREATE SCHEMA chaos_stop_branch_key (
   branch_name STRING
 );
 
-CREATE BRANCH chaos_stop_branch SCHEMA chaos_stop_branch_key TTL 1h;
+CREATE PARAMETRIZER chaos_stop_branch SCHEMA chaos_stop_branch_key TTL 1h;
 
 CREATE RELAY chaos_stop_incoming SCHEMA chaos_stop_record BRANCHED BY chaos_stop_branch CAPACITY 64;
 CREATE RELAY chaos_stop_held SCHEMA chaos_stop_record BRANCHED BY chaos_stop_branch CAPACITY 64;

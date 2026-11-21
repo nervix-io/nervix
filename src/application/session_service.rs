@@ -970,7 +970,7 @@ fn choices_for(request: &ChoiceLookupRequest) -> Result<Vec<Choice>, ChoiceStatu
         ChoiceTarget::DomainPace
         | ChoiceTarget::PlacementPolicy
         | ChoiceTarget::Schema
-        | ChoiceTarget::Branch
+        | ChoiceTarget::Parametrizer
         | ChoiceTarget::Relay
         | ChoiceTarget::RelayField => {
             return Err(ChoiceStatus::MissingContext);
@@ -1271,7 +1271,7 @@ impl SessionServiceImpl {
                 choices_for(&request).map(|choices| (choices, None))
             }
             ChoiceTarget::Schema
-            | ChoiceTarget::Branch
+            | ChoiceTarget::Parametrizer
             | ChoiceTarget::Relay
             | ChoiceTarget::RelayField
             | ChoiceTarget::WireJsonSchema

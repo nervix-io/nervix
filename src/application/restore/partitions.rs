@@ -172,7 +172,7 @@ impl<'a> RestoredPartitions<'a> {
             let Some(key) = section.key else {
                 continue;
             };
-            if node.partition_branch().is_none() {
+            if node.partition_parametrizer().is_none() {
                 continue;
             }
             let identity = EntityKey {
@@ -210,7 +210,7 @@ impl<'a> RestoredPartitions<'a> {
     /// was archived in give way to the units the restored count places its keys in.
     pub(in crate::application) fn divided(&self, entity: &NodeRef) -> Option<&'a ScheduledNode> {
         let node = self.schedule.nodes.get(entity)?;
-        node.partition_branch()?;
+        node.partition_parametrizer()?;
         Some(node)
     }
 
@@ -413,15 +413,15 @@ mod tests {
     use meticulous::{OptionExt as _, ResultExt as _};
     use nervix_backup::{BranchLifecycleEntry, StateField, StateValue};
     use nervix_models::{
-        BranchName, CreateRelay, CreateSchema, DomainName, Model, ModelName, RelayBranching,
+        CreateRelay, CreateSchema, DomainName, Model, ModelName, ParametrizerName, RelayBranching,
         RelayName, ResolvedBranching, SchemaName, Timestamp,
     };
 
     use super::*;
     use crate::runtime::single_worker_executor;
 
-    fn branch() -> BranchName {
-        BranchName::parse("by_tenant").assured("the test branch name is valid")
+    fn parametrizer() -> ParametrizerName {
+        ParametrizerName::parse("by_tenant").assured("the test branch name is valid")
     }
 
     fn relay_node(count: u16) -> ScheduledNode {
@@ -430,7 +430,7 @@ mod tests {
             name: RelayName::parse("events").assured("the test relay name is valid"),
             schema: SchemaName::parse("event").assured("the test schema name is valid"),
             buffer: NonZeroUsize::MIN,
-            branching: RelayBranching::branched_by(branch()),
+            branching: RelayBranching::branched_by(parametrizer()),
             materialized_state: None,
         };
         let key_schema = CreateSchema {
@@ -438,12 +438,12 @@ mod tests {
             name: SchemaName::parse("tenant_key").assured("the test schema name is valid"),
             fields: Vec::new(),
         };
-        let partitions = nervix_models::ResolvedBranchPartitions::Direct(
+        let partitions = nervix_models::ResolvedParametrizerPartitions::Direct(
             NonZeroU16::new(count).assured("test counts are positive"),
         );
         ScheduledNode::new(Model::Relay(relay), SchemaFingerprint::from_digest([3; 32]))
             .with_resolved_branching(Some(ResolvedBranching::branched(
-                branch(),
+                parametrizer(),
                 key_schema,
                 partitions,
             )))

@@ -20,7 +20,7 @@ Feature: Relay deduplication
         FROM WIRE SCHEMA transaction_wire
         TO SCHEMA transaction;
         CREATE IF NOT EXISTS SCHEMA transaction_id_branch ( transaction_id STRING );
-        CREATE IF NOT EXISTS BRANCH by_source_txns SCHEMA transaction_id_branch TTL 5m;
+        CREATE IF NOT EXISTS PARAMETRIZER by_source_txns SCHEMA transaction_id_branch TTL 5m;
         CREATE RELAY ss1 SCHEMA transaction BRANCHED BY by_source_txns;
         CREATE RELAY ss2 SCHEMA transaction BRANCHED BY by_source_txns;
         CREATE VHOST edge http-{{test_id}}.example.com;
@@ -92,7 +92,7 @@ Feature: Relay deduplication
         FROM WIRE SCHEMA transaction_wire
         TO SCHEMA transaction;
         CREATE IF NOT EXISTS SCHEMA transaction_id_branch ( transaction_id I64 );
-        CREATE IF NOT EXISTS BRANCH by_source_txns SCHEMA transaction_id_branch TTL 5m;
+        CREATE IF NOT EXISTS PARAMETRIZER by_source_txns SCHEMA transaction_id_branch TTL 5m;
         CREATE RELAY ss1 SCHEMA transaction BRANCHED BY by_source_txns;
         CREATE RELAY ss2 SCHEMA transaction BRANCHED BY by_source_txns;
         CREATE VHOST edge http-{{test_id}}.example.com;
@@ -175,7 +175,7 @@ Feature: Relay deduplication
         FROM WIRE SCHEMA transaction_wire
         TO SCHEMA transaction;
         CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
-        CREATE IF NOT EXISTS BRANCH by_source_txns SCHEMA tenant_branch TTL 5m;
+        CREATE IF NOT EXISTS PARAMETRIZER by_source_txns SCHEMA tenant_branch TTL 5m;
         CREATE RELAY ss1 SCHEMA transaction BRANCHED BY by_source_txns;
         CREATE RELAY ss2 SCHEMA transaction BRANCHED BY by_source_txns;
         CREATE VHOST edge http-{{test_id}}.example.com;
@@ -255,7 +255,7 @@ Feature: Relay deduplication
         FROM WIRE SCHEMA transaction_wire
         TO SCHEMA transaction;
         CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
-        CREATE IF NOT EXISTS BRANCH by_source_txns SCHEMA tenant_branch TTL 5m;
+        CREATE IF NOT EXISTS PARAMETRIZER by_source_txns SCHEMA tenant_branch TTL 5m;
         CREATE RELAY ss1 SCHEMA transaction BRANCHED BY by_source_txns;
         CREATE RELAY ss2 SCHEMA transaction BRANCHED BY by_source_txns;
         CREATE VHOST edge http-{{test_id}}.example.com;
@@ -338,7 +338,7 @@ Feature: Relay deduplication
         FROM WIRE SCHEMA transaction_wire
         TO SCHEMA transaction;
         CREATE IF NOT EXISTS SCHEMA transaction_id_branch ( transaction_id STRING );
-        CREATE IF NOT EXISTS BRANCH by_source_txns SCHEMA transaction_id_branch TTL 5m;
+        CREATE IF NOT EXISTS PARAMETRIZER by_source_txns SCHEMA transaction_id_branch TTL 5m;
         CREATE RELAY state_txns
         SCHEMA transaction BRANCHED BY by_source_txns
         WITH MATERIALIZED STATE LAST BY TIMESTAMP;
@@ -421,7 +421,7 @@ Feature: Relay deduplication
         source STRING
       );
         CREATE IF NOT EXISTS SCHEMA transaction_id_branch ( transaction_id STRING );
-        CREATE IF NOT EXISTS BRANCH by_dedup_txns SCHEMA transaction_id_branch TTL 5m;
+        CREATE IF NOT EXISTS PARAMETRIZER by_dedup_txns SCHEMA transaction_id_branch TTL 5m;
         CREATE RELAY ss1 SCHEMA notification BRANCHED BY by_dedup_txns;
         CREATE RELAY ss2 SCHEMA notification BRANCHED BY by_dedup_txns;
         CREATE DEDUPLICATOR dedup_txns FROM ss1
@@ -470,7 +470,7 @@ Feature: Relay deduplication
         FROM WIRE SCHEMA transaction_wire
         TO SCHEMA transaction;
         CREATE IF NOT EXISTS SCHEMA transaction_id_branch ( transaction_id STRING );
-        CREATE IF NOT EXISTS BRANCH by_dedup_default SCHEMA transaction_id_branch TTL 5m;
+        CREATE IF NOT EXISTS PARAMETRIZER by_dedup_default SCHEMA transaction_id_branch TTL 5m;
         CREATE RELAY default_preferences
         SCHEMA preference BRANCHED BY by_dedup_default
         WITH MATERIALIZED STATE LAST BY TIMESTAMP;

@@ -819,7 +819,7 @@ impl PlacementMemberEligibility {
             | ModelKind::Codec
             | ModelKind::Client
             | ModelKind::Vhost
-            | ModelKind::Branch
+            | ModelKind::Parametrizer
             | ModelKind::Endpoint
             | ModelKind::SignalingProtocol
             | ModelKind::Placement
@@ -1048,7 +1048,7 @@ mod tests {
     fn placement_inspection_keeps_partition_bonds_aligned_and_deduplicates_a_fiber() {
         use std::collections::BTreeSet;
 
-        use nervix_models::{BranchPartitions, UnitKind};
+        use nervix_models::{ParametrizerPartitions, UnitKind};
 
         for target in ["p99", "emit"] {
             let path = temp_db_path();
@@ -1056,8 +1056,8 @@ mod tests {
             let domain = DomainName::parse("partition_bonds").assured("valid domain");
             let mut models = full_graph_batch();
             for model in &mut models {
-                if let Model::Branch(branch) = model {
-                    branch.partitions = BranchPartitions::Direct(nonzero!(2u16));
+                if let Model::Parametrizer(branch) = model {
+                    branch.partitions = ParametrizerPartitions::Direct(nonzero!(2u16));
                 }
             }
             models.push(placement(

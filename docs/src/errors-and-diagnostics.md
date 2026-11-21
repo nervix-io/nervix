@@ -1759,14 +1759,14 @@ moves its exact hard group; an unqualified member selects all its declared units
 [Control Plane](./control-plane.md) for activation and [Typed States And Validation
 Boundaries](./typed-states.md) for required state.
 
-`ALTER BRANCH <branch> SET PARTITIONS <n>` to a count other than the current one, while the branch's
-previous partition count still has keys to move, is refused before anything is committed with
-`TransactionPlanningError::BranchPartitionsStillMoving`, which names the operation, the domain, the
-branch and both counts, such as `branch 'by_tenant' in domain 'payments' is still moving keys placed
-under its previous partition count 4 to its current count 8; change its partition count again once
-DESCRIBE BRANCH reports no previous partitions`. A claim that cannot move a key, because its holder's
+`ALTER PARAMETRIZER <parametrizer> SET PARTITIONS <n>` to a count other than the current one, while the
+parametrizer's previous partition count still has keys to move, is refused before anything is
+committed with `TransactionPlanningError::ParametrizerPartitionsStillMoving`, which names the
+operation, the domain, the parametrizer and both counts, such as `parametrizer 'by_tenant' in domain
+'payments' is still moving keys placed under its previous partition count 4 to its current count 8; change its partition count again once
+DESCRIBE PARAMETRIZER reports no previous partitions`. A claim that cannot move a key, because its holder's
 owner does not answer or refuses, keeps the key's records parked and tries again; it reports a
-`PartitionClaimError` naming the entity and unit at `warn`. `DESCRIBE BRANCH` reports `keys pending:
+`PartitionClaimError` naming the entity and unit at `warn`. `DESCRIBE PARAMETRIZER` reports `keys pending:
 unavailable` with the `TransitionHoldingsError` that names the unit whose owner did not answer. A domain build whose committed schedule lacks a unit its relay
 needs reports `ExecutionBuildError::RelayUnitNotScheduled`, naming the relay and the unit.
 

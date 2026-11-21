@@ -15,11 +15,11 @@
 use ahash::{HashMap, HashSet};
 use meticulous::ResultExt as _;
 use nervix_models::{
-    AlterBranch, AlterDeduplicator, AlterEmitter, AlterGenerator, AlterIngestor, AlterJunction,
-    AlterPlacement, AlterReingestor, AlterRelay, AlterReorderer, AlterSchema, AlterWireSchema,
-    AvroType, CborType, DomainName, DropModel, JsonType, Model, ModelChangeAspect, ModelIndex,
-    ModelKind, NodeRef, QuiesceLevel, RequestedResourceVersion, ResourceName, StatePurge,
-    Statement,
+    AlterDeduplicator, AlterEmitter, AlterGenerator, AlterIngestor, AlterJunction,
+    AlterParametrizer, AlterPlacement, AlterReingestor, AlterRelay, AlterReorderer, AlterSchema,
+    AlterWireSchema, AvroType, CborType, DomainName, DropModel, JsonType, Model, ModelChangeAspect,
+    ModelIndex, ModelKind, NodeRef, QuiesceLevel, RequestedResourceVersion, ResourceName,
+    StatePurge, Statement,
 };
 use nervix_recovery::Discarded;
 use thiserror::Error;
@@ -54,7 +54,7 @@ pub(crate) enum RegistryMutation<Version = u64> {
     AlterReingestor(AlterReingestor),
     AlterGenerator(AlterGenerator),
     AlterPlacement(AlterPlacement),
-    AlterBranch(AlterBranch),
+    AlterParametrizer(AlterParametrizer),
     Drop(DropModel),
 }
 
@@ -95,7 +95,7 @@ impl TryFrom<&Statement> for RegistryMutation<RequestedResourceVersion> {
             Statement::AlterReingestor(alter) => Self::AlterReingestor(alter.clone()),
             Statement::AlterGenerator(alter) => Self::AlterGenerator(alter.clone()),
             Statement::AlterPlacement(alter) => Self::AlterPlacement(alter.clone()),
-            Statement::AlterBranch(alter) => Self::AlterBranch(alter.clone()),
+            Statement::AlterParametrizer(alter) => Self::AlterParametrizer(alter.clone()),
             Statement::Drop(drop) => Self::Drop(drop.clone()),
             _ => return Err(RegistryMutationConversionError),
         };
@@ -148,7 +148,7 @@ impl RegistryMutation<RequestedResourceVersion> {
             Self::AlterReingestor(alter) => RegistryMutation::AlterReingestor(alter),
             Self::AlterGenerator(alter) => RegistryMutation::AlterGenerator(alter),
             Self::AlterPlacement(alter) => RegistryMutation::AlterPlacement(alter),
-            Self::AlterBranch(alter) => RegistryMutation::AlterBranch(alter),
+            Self::AlterParametrizer(alter) => RegistryMutation::AlterParametrizer(alter),
             Self::Drop(drop) => RegistryMutation::Drop(drop),
         };
         Ok(pinned)
@@ -189,7 +189,9 @@ impl<Version: Clone> RegistryMutation<Version> {
             Self::AlterPlacement(alter) => {
                 NodeRef::new(ModelKind::Placement, alter.placement.clone())
             }
-            Self::AlterBranch(alter) => NodeRef::new(ModelKind::Branch, alter.branch.clone()),
+            Self::AlterParametrizer(alter) => {
+                NodeRef::new(ModelKind::Parametrizer, alter.parametrizer.clone())
+            }
             Self::Drop(drop) => NodeRef::new(drop.kind, drop.name.clone()),
         }
     }
@@ -291,7 +293,7 @@ impl<Version: Clone> RegistryMutation<Version> {
                     .apply_alter(alter)
                     .discarded(ALTERATIONS_ARE_VALIDATED_ON_THE_FINAL_MODELS);
             }
-            (Self::AlterBranch(alter), Model::Branch(branch)) => {
+            (Self::AlterParametrizer(alter), Model::Parametrizer(branch)) => {
                 branch
                     .apply_alter(alter)
                     .discarded(ALTERATIONS_ARE_VALIDATED_ON_THE_FINAL_MODELS);

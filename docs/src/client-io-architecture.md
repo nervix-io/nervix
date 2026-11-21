@@ -148,7 +148,7 @@ CREATE SCHEMA application_output (
   private_note STRING
 );
 CREATE SCHEMA tenant_key (tenant STRING);
-CREATE BRANCH by_tenant SCHEMA tenant_key TTL 10m;
+CREATE PARAMETRIZER by_tenant SCHEMA tenant_key TTL 10m;
 CREATE RELAY application_events
   SCHEMA application_event BRANCHED BY by_tenant CAPACITY 16;
 

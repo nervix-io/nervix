@@ -210,7 +210,7 @@ async fn partition_drains_count_their_own_transit_and_queues_while_the_domain_ke
     let domain = domain("default");
     let relay = named::<RelayName>("orders");
     let partitioning = RelayPartitioning::of_partitions(
-        nervix_models::ResolvedBranchPartitions::Direct(nonzero!(2u16)),
+        nervix_models::ResolvedParametrizerPartitions::Direct(nonzero!(2u16)),
     );
     let services = RelayBoundaryServices::new(
         RelayBoundaryFanout::branch_collapse_with_capacity(nonzero!(2usize)),

@@ -714,7 +714,7 @@ impl SessionServiceImpl {
             .get(&request.unit)
             .ok_or(StateInspectionRejection::StaleContinuation)?;
         let epoch = node
-            .partition_branch()
+            .partition_parametrizer()
             .and_then(|branch| domain_schedule.partition_epochs.get(branch));
         let inherited = node.has_inherited_partition_state(epoch);
         let processor = ModelName::from(&request.processor);

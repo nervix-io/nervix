@@ -82,7 +82,7 @@ fn check(input: &[u8]) {
         .branch
         .as_ref()
         .assured("the fixture is branched");
-    assert_eq!(schema.branch(), Some(branch.branch().as_str()));
+    assert_eq!(schema.parametrizer(), Some(branch.parametrizer().as_str()));
     assert_eq!(schema.fields(Part::BranchKey), branch.fields());
     let frame = inspection
         .row_frame(0, 0, 0)

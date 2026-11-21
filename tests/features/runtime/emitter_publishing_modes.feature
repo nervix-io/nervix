@@ -14,7 +14,7 @@ Feature: Emitter publishing modes
       CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY outgoing SCHEMA event UNBRANCHED;
       CREATE SCHEMA tenant_branch ( tenant STRING );
-      CREATE BRANCH by_tenant SCHEMA tenant_branch TTL 5m;
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_branch TTL 5m;
       CREATE RELAY tenant_outgoing SCHEMA event BRANCHED BY by_tenant;
 
       CREATE KAFKA CLIENT kafka_main CONFIG {
@@ -472,7 +472,7 @@ Feature: Emitter publishing modes
       CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY outgoing SCHEMA event UNBRANCHED;
       CREATE SCHEMA tenant_branch ( tenant STRING );
-      CREATE BRANCH by_tenant SCHEMA tenant_branch TTL 5m;
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_branch TTL 5m;
       CREATE RELAY tenant_outgoing SCHEMA event BRANCHED BY by_tenant;
       CREATE KAFKA CLIENT kafka_main CONFIG {
         'bootstrap.servers' = '127.0.0.1:9092'
