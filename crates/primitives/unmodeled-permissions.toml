@@ -256,6 +256,13 @@ path = "src/runtime/test_fixtures.rs"
 reason = "The compiled schema is built once per test process and shared by every test in it, including every model execution."
 
 [[permission]]
+items = ["sync::OnceLock"]
+limit = "Test-support bookkeeping that no invariant reads: it decides only which dispatchers `tracing` asks about a callsite, never what the code under test does."
+owner = "The captured logs of unit tests."
+path = "src/captured_logs.rs"
+reason = "The idle dispatcher must stay registered for the whole test process, across every test and model execution, because `tracing` keeps only a weak reference to a registered dispatcher."
+
+[[permission]]
 items = [
   "futures::AbortHandle",
   "futures::Abortable",
