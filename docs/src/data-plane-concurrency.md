@@ -2474,7 +2474,7 @@ path but cannot prove the asynchronous proposal or DashMap protocol.
 
 ### Complete analysis and qualification
 
-The isolated tooling workspace uses `nightly-2026-09-17`; product builds use stable. The twelve
+The isolated tooling workspace uses `nightly-2026-11-21`; product builds use stable. The twelve
 configurations analyze ordinary workspace libraries/binaries, the browser's wasm32 library and
 binary, the server's testing capability, server/interconnect/primitives under Shuttle,
 server/consensus/primitives under Loom, interconnect/primitives under Turmoil, and, under each of

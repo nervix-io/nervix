@@ -79,7 +79,7 @@ mod tests {
     }
 
     #[test]
-    fn parses_and_completes_show_create_branch() {
+    fn parses_and_completes_show_create_parametrizer() {
         let parsed = parse_show_create("SHOW CREATE PARAMETRIZER by_tenant;")
             .expect("a named branch has a SHOW CREATE form");
         assert_eq!(parsed.kind, ModelKind::Parametrizer);

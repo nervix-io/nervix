@@ -245,7 +245,7 @@ CI_PRODUCERS: tuple[Producer, ...] = (
         prepare=(),
         instrumented="test-typed-ratchet-ordinary",
         finish=("test-typed-ratchet-product-docs", "test-typed-ratchet-modeled"),
-        toolchain="nightly-2026-09-17",
+        toolchain="nightly-2026-11-21",
     ),
     Producer(
         name="bench-smoke",

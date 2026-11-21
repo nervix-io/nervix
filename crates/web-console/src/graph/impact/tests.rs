@@ -425,13 +425,20 @@ fn configuration_nodes_stand_beside_the_runtime_nodes_that_require_them() {
     let codec = configuration(ModelKind::Codec, "order_codec");
     let client = configuration(ModelKind::Client, "broker");
     let schema = configuration(ModelKind::Schema, "order");
-    let branch = configuration(ModelKind::Parametrizer, "by_tenant");
+    let parametrizer = configuration(ModelKind::Parametrizer, "by_tenant");
     let ingestor = unbranched(ModelKind::Ingestor, "orders_in");
     let relay = branched(ModelKind::Relay, "orders", "by_tenant");
     let placement = configuration(ModelKind::Placement, "pinned");
     let side = topology(
         [
-            &wire, &codec, &client, &schema, &branch, &ingestor, &relay, &placement,
+            &wire,
+            &codec,
+            &client,
+            &schema,
+            &parametrizer,
+            &ingestor,
+            &relay,
+            &placement,
         ]
         .map(|coverage| held(coverage, &[1])),
         [
@@ -440,7 +447,7 @@ fn configuration_nodes_stand_beside_the_runtime_nodes_that_require_them() {
             requires(&codec, &ingestor, &[1]),
             requires(&client, &ingestor, &[1]),
             requires(&schema, &relay, &[1]),
-            requires(&branch, &relay, &[1]),
+            requires(&parametrizer, &relay, &[1]),
             flows(&ingestor, &relay, &[1]),
             requires(&ingestor, &placement, &[1]),
         ],

@@ -229,15 +229,15 @@ impl RestoredBranchDeclarations {
                 parametrizers: self.parametrizer_names(),
             }));
         };
-        let mut branches = self.parametrizers.iter();
-        let Some((branch, schema)) = branches.next() else {
+        let mut parametrizers = self.parametrizers.iter();
+        let Some((parametrizer, schema)) = parametrizers.next() else {
             return Err(Report::new(ArchivedBranchKeyError::Concrete));
         };
-        if branches.next().is_none() {
+        if parametrizers.next().is_none() {
             concrete
                 .conform_to(&schema.fields)
                 .change_context_lazy(|| ArchivedBranchKeyError::NotOfParametrizer {
-                    parametrizer: branch.clone(),
+                    parametrizer: parametrizer.clone(),
                 })?;
             return Ok(key);
         }

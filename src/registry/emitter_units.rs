@@ -92,7 +92,7 @@ impl EmitterUnits {
                 Ok(Self::Instances(count))
             }
             EmitterInstances::PerPartition => {
-                let Some(branch) = branching.parametrizer() else {
+                let Some(parametrizer) = branching.parametrizer() else {
                     return Err(refusal(EmitterInstancingError::MissingPartitions));
                 };
                 let count = branching.partitions().map(|partitions| partitions.count());
@@ -102,7 +102,7 @@ impl EmitterUnits {
                 Ok(Self::PerPartition {
                     count,
                     relays: emitter.from.relays().to_vec(),
-                    parametrizer: branch.clone(),
+                    parametrizer: parametrizer.clone(),
                 })
             }
         }
