@@ -37,7 +37,7 @@ Feature: A move whose swap fails holds the moved unit until every node applied i
         FROM WIRE SCHEMA move_event_wire
         TO SCHEMA move_event;
       CREATE SCHEMA move_tenant ( tenant STRING );
-      CREATE BRANCH by_move_tenant SCHEMA move_tenant TTL 1h;
+      CREATE PARAMETRIZER by_move_tenant SCHEMA move_tenant TTL 1h;
       CREATE RELAY move_events SCHEMA move_event BRANCHED BY by_move_tenant;
       CREATE RELAY move_unique_events SCHEMA move_event BRANCHED BY by_move_tenant;
       CREATE KAFKA CLIENT move_kafka CONFIG {

@@ -35,6 +35,7 @@ The guest imports these functions from the `env` module:
 | `nervix_dump_state` | `() -> i32` | Serializes the guest's durable computation state into the reusable buffer and returns the byte size, or a negative code when it cannot serialize the state. The host keeps the state saved last when a save fails. |
 | `nervix_load_state` | `(ptr: i32, size: i32) -> i32` | Loads previously dumped guest state bytes into an instance the host initialized with `nervix_init`. Returns `-7` or `-8` when it rejects the saved state, and another negative code when restoring fails for any other reason. |
 | `nervix_reset_state` | `() -> i32` | Clears guest-owned state while keeping the reusable buffer. The host resolves this export when it instantiates a branch but never calls it: every new state lifetime starts in a newly instantiated guest. |
+| `nervix_describe_state` | `() -> i32` | Writes a `StateDescription` message, named sections of typed Arrow rows, into the reusable buffer and returns its byte size; returns `0` to describe no state and a negative code when it cannot describe its state. The host calls it only to answer a state inspection, on a scratch instance restored from the branch's committed checkpoint, and reports every value it describes as withheld, because guest state is always sensitive. |
 
 Return code `0` means success. Negative return codes are guest errors:
 

@@ -38,8 +38,8 @@ impl Schema {
         let ruby = Ruby::get().assured("a native Ruby method holds the GVL");
         self.part(&ruby, host::Part::BranchKey)
     }
-    fn branch(&self) -> Option<&str> {
-        self.schema.branch()
+    fn parametrizer(&self) -> Option<&str> {
+        self.schema.parametrizer()
     }
 
     fn part(&self, ruby: &Ruby, part: host::Part) -> RArray {
@@ -193,7 +193,7 @@ pub(crate) fn register(ruby: &Ruby, module: RModule) -> Result<(), Error> {
     let schema = crate::class(ruby, module, "Schema")?;
     schema.define_method("fields", method!(Schema::fields, 0))?;
     schema.define_method("key_fields", method!(Schema::key_fields, 0))?;
-    schema.define_method("branch", method!(Schema::branch, 0))?;
+    schema.define_method("parametrizer", method!(Schema::parametrizer, 0))?;
     let field = crate::class(ruby, module, "Field")?;
     field.define_method("name", method!(Field::name, 0))?;
     field.define_method("type", method!(Field::kind, 0))?;

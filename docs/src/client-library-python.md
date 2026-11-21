@@ -129,7 +129,7 @@ for a different one.
 of the selected text or JSON presentation and of the outcome's lifetime. Keys and values keep their
 exact spelling; an empty value differs from an absent key. `EntityLabelViewKind` distinguishes a
 committed revision from a transaction's staged preview. The policy revision and byte/count limits
-describe the committed acceptance policy captured with that view.
+describe the committed acceptance policy captured with that view. `domain` is `None` for a cluster user.
 
 ```python
 {{#include ../../tests/client_conformance/python/suite/cluster/test_entity_labels.py:entity_labels}}
@@ -198,8 +198,8 @@ A page holds at most `page_size` candidates. Its `continuation` is the token of 
 ## Subscribe And Read Rows
 
 A subscription is a statement: `CREATE SUBSCRIPTION <name> TO <relay>;` opens it, and its outcome
-holds its `Subscription` handle and the `Schema` of its rows, with the relay's fields, its branch and
-the branch key's fields.
+holds its `Subscription` handle and the `Schema` of its rows, with the relay's fields, its parametrizer
+and the branch key's fields.
 
 ```python
 {{#include ../../tests/client_conformance/python/suite/cluster/test_subscriptions.py:subscribe}}

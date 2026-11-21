@@ -551,7 +551,7 @@ fn wasm_reset_nodes(processor: &ModelName) -> Vec<ScheduledNode> {
 
 fn partitioned_wasm_reset_nodes(processor: &ModelName) -> Vec<ScheduledNode> {
     let mut nodes = wasm_reset_nodes(processor);
-    let branch = named::<BranchName>("by_value");
+    let parametrizer = named::<ParametrizerName>("by_value");
     let schema = CreateSchema {
         labels: Default::default(),
         name: named("event"),
@@ -562,21 +562,21 @@ fn partitioned_wasm_reset_nodes(processor: &ModelName) -> Vec<ScheduledNode> {
             sensitive: false,
         }],
     };
-    let partitions = nervix_models::ResolvedBranchPartitions::Direct(nonzero!(2u16));
+    let partitions = nervix_models::ResolvedParametrizerPartitions::Direct(nonzero!(2u16));
     for node in &mut nodes {
         match node.config.as_mut() {
             nervix_models::Model::Relay(relay) => {
-                relay.branching = RelayBranching::branched_by(branch.clone())
+                relay.branching = RelayBranching::branched_by(parametrizer.clone())
             }
             nervix_models::Model::WasmProcessor(processor) => {
-                processor.branched_by = BranchSelection::branched_by(branch.clone())
+                processor.branched_by = BranchSelection::branched_by(parametrizer.clone())
             }
             _ => continue,
         }
         *node = node
             .clone()
             .with_resolved_branching(Some(ResolvedBranching::branched(
-                branch.clone(),
+                parametrizer.clone(),
                 schema.clone(),
                 partitions,
             )));
@@ -585,13 +585,13 @@ fn partitioned_wasm_reset_nodes(processor: &ModelName) -> Vec<ScheduledNode> {
             assignment.assigned_nodes.clear();
         }
     }
-    nodes.push(scheduled_model(nervix_models::Model::Branch(
-        nervix_models::CreateBranch {
+    nodes.push(scheduled_model(nervix_models::Model::Parametrizer(
+        nervix_models::CreateParametrizer {
             labels: Default::default(),
-            name: branch,
+            name: parametrizer,
             schema: schema.name,
             ttl: "5m".to_string(),
-            partitions: nervix_models::BranchPartitions::Direct(partitions.count()),
+            partitions: nervix_models::ParametrizerPartitions::Direct(partitions.count()),
             eviction: None,
         },
     )));

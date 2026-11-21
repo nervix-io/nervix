@@ -557,8 +557,8 @@ descriptors, so checkpoint identity and inspection operations advance as one wir
 
 Emitter statements exchanged through the control plane use explicit `KEY` expressions and
 `PARTITION FROM BRANCH`, and SQS FIFO groups have one expression shape. The current
-`WIRE_CONTRACT` fingerprint identifies that archived Model layout, including the typed
-`payload` expression scope, typed materialized relay inspection, ingestor read interactions,
+`WIRE_CONTRACT` fingerprint identifies that archived Model layout, including the `parametrizer`
+Model kind, the typed `payload` expression scope, typed materialized relay inspection, ingestor read interactions,
 corridor/domain-wide placement coverage, pace-only domain configuration, exact partition/instance
 relocation selections, ingestor acknowledgement and connector lifecycle observations, and the current
 transaction operation and commit-step alternatives, durable licensing rotation/release effects and
@@ -809,13 +809,20 @@ still receives grants and admission beside it, and cancelling the held batch ret
 reservation once the application drops the batch. Once the application has decoded a batch, it keeps
 only the batch's body and decoded columns charged while its runtime takes the batch in.
 
-A CPU class admits each job separately: one of its workers runs, a bounded number wait, and the
-next job is refused at once instead of joining an unbounded queue. A typed request runs several
-jobs of its class in turn, encoding its payload and envelope and later decoding the response.
-While a burst keeps the queue full, a request that was admitted for one job can therefore be
-refused at its next one. A request refused at its first encode fails with `RequestError::Encode`,
-and one refused at a later stage fails with `RequestError::Transport`. Every refused job holds no
-memory charge, and every other class keeps admitting independently.
+A CPU class admits each job separately: one of its workers runs, a bounded number wait, and no job
+joins an unbounded queue. A typed request runs several jobs of its class in turn, encoding its
+payload and envelope and later decoding the response. The request's own jobs are refused at once
+when the queue is full: the caller still holds the request, so it fails with
+`RequestError::Encode` and can be sent again, and the peer refuses a request it cannot decode now
+the same way. A refused job holds no memory charge, so a burst beyond the queue cannot hold the
+class's memory. The response's jobs wait for a place instead, because the response carries
+work the handler already did: the peer's encoding of the answer waits until the caller resets the
+stream, and the caller's decoding of it waits within the request's own deadline. A request that
+fails at one of its later stages fails with `RequestError::Transport`. An ack resolution, which
+carries the outcome of a delivery the peer already resolved, waits for a place on the control class
+the same way. Every other class keeps admitting independently. Handshakes, relay admission and
+grants, and the frames of byte and duplex streams keep the refusal: their opener holds its input and
+opens again.
 
 The [stalled-peer simulation](./interconnect-simulation.md#stalled-peer-isolation) checks these
 bounds with exact values: a stalled peer and a healthy peer share one hub, and every observation of

@@ -104,14 +104,14 @@ Feature: Relay capacity
         tenant STRING
       );
 
-      CREATE IF NOT EXISTS BRANCH by_relay_capacity_source SCHEMA tenant_branch TTL 5m;
+      CREATE IF NOT EXISTS PARAMETRIZER by_relay_capacity_source SCHEMA tenant_branch TTL 5m;
 
       CREATE RELAY notifications SCHEMA notification BRANCHED BY by_relay_capacity_source CAPACITY 2;
 
       CREATE VHOST edge http-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT relay_capacity_ingress ON edge PATH '/relay-capacity'; CREATE HTTP ENDPOINT INGESTOR relay_capacity_ingestor
         FROM relay_capacity_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING notification_codec
         TIMESTAMP NOW
         TO notifications
         INHERIT ALL
@@ -212,7 +212,7 @@ Feature: Relay capacity
 
       CREATE HTTP ENDPOINT INGESTOR relay_capacity_shrink_ingestor
         FROM relay_capacity_shrink_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING notification_codec
         TO notifications
         INHERIT ALL
         UNBRANCHED

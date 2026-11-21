@@ -22,9 +22,14 @@ use nervix_connector::{
 };
 use nervix_connector_websockets::CompiledSignalingProtocol;
 use nervix_models::WebsocketsFrameType;
+use nervix_primitives::time::Instant;
 
 use super::{
-    endpoint_acknowledgement::{EndpointAdmissionRefusal, EndpointInputRefusal},
+    endpoint_acknowledgement::{
+        EndpointAdmissionRefusal, EndpointInputRefusal, EndpointRequestWindow,
+    },
+    endpoint_pause::await_acknowledgement,
+    ingestor_quiesce::EndpointPauseIntake,
     *,
 };
 use crate::metrics::{EndpointIntakeOutcome, IngestorEndpointMetrics};
@@ -71,6 +76,10 @@ pub(crate) struct EndpointIngestBinding {
     pub(super) unfolding_refused: prometheus::IntCounter,
     /// Counts every request and WebSocket frame this ingestor answers once, under its outcome.
     pub(super) requests: IngestorEndpointMetrics,
+    /// The work the ingestor's execution unit admitted, which a payload its quiesce let dispatch
+    /// joins until it reached its graph, so a drain, an ownership handoff and a graceful stop wait
+    /// for it.
+    pub(super) work: Arc<NodeQuiesceCounters>,
 }
 
 impl EndpointIngestBinding {
@@ -217,6 +226,7 @@ pub(crate) struct EndpointAdmission {
     pub(in crate::runtime) accepted: usize,
     pub(in crate::runtime) rejected: usize,
     pub(crate) retry_after: Option<Duration>,
+    pub(in crate::runtime) pause_buffer_full: bool,
 }
 
 impl EndpointAdmission {
@@ -249,7 +259,14 @@ impl EndpointDispatchOutcome {
     pub(crate) fn retry_after(self) -> Option<Duration> {
         match self {
             Self::NoAck(admission) => admission.retry_after,
-            Self::Ack(reply) => Some(reply.retry_after),
+            Self::Ack(reply) => reply.retry_after,
+        }
+    }
+
+    pub(crate) fn pause_buffer_full(self) -> bool {
+        match self {
+            Self::NoAck(admission) => admission.pause_buffer_full && !admission.is_accepted(),
+            Self::Ack(reply) => reply.outcome.pause_buffer_full(),
         }
     }
 }
@@ -265,6 +282,8 @@ enum EndpointNoAckIntake {
     DecodeRejected,
     /// Its endpoint buffer retained the payload until it resumes.
     Buffered,
+    /// The pause buffer could not take this payload.
+    PauseBufferFull,
     /// The node's bounded execution could not take the payload's unfolding now. Nothing judged
     /// the payload, so its sender is told to send it again.
     NotAdmitted,
@@ -288,6 +307,11 @@ impl EndpointNoAckIntake {
                 rejected: 1,
                 ..EndpointAdmission::default()
             },
+            Self::PauseBufferFull => EndpointAdmission {
+                rejected: 1,
+                pause_buffer_full: true,
+                ..EndpointAdmission::default()
+            },
             Self::Refused { retry_after } => EndpointAdmission {
                 rejected: 1,
                 retry_after,
@@ -303,12 +327,19 @@ impl EndpointNoAckIntake {
             Self::DispatchFailed => EndpointIntakeOutcome::ProcessingFailed,
             Self::DecodeRejected => EndpointIntakeOutcome::DecodeRejected,
             Self::NotAdmitted => EndpointIntakeOutcome::NotAdmitted,
-            Self::Refused { .. } => EndpointIntakeOutcome::Refused,
+            Self::Refused { .. } | Self::PauseBufferFull => EndpointIntakeOutcome::Refused,
         }
     }
 }
 
 pub(crate) type ResolvedEndpointRoute = Arc<EndpointIntakeRoute<EndpointIngestBinding>>;
+
+#[derive(Clone, Copy)]
+pub(crate) struct EndpointPayload<'a> {
+    pub(crate) bytes: &'a [u8],
+    pub(crate) metadata: IngestMetadataRow<'a>,
+    pub(crate) received_at: Instant,
+}
 
 pub(super) fn normalize_http_host(host: &str) -> Cow<'_, str> {
     let host = host.split(':').next().unwrap_or(host).trim();
@@ -343,6 +374,19 @@ impl Runtime {
 }
 
 impl EndpointIntakeRoute<EndpointIngestBinding> {
+    /// Only a route with acknowledged pause buffering reads for peer closure during a reply.
+    pub(crate) fn holds_frames_in_a_pause(&self) -> bool {
+        for lifetime in self.bindings() {
+            if let Some(binding) = lifetime.intake().as_deref()
+                && let EndpointRequestPolicy::Ack(window) = &binding.request
+                && (window.retry_after.is_none() || binding.quiesce.has_endpoint_pause_replies())
+            {
+                return true;
+            }
+        }
+        false
+    }
+
     /// Refuses unavailable intake before HTTP reads a body or upgrades a WebSocket. Actual
     /// dispatch still acquires its own permit, so racing requests cannot exceed the window.
     ///
@@ -383,12 +427,12 @@ impl EndpointIntakeRoute<EndpointIngestBinding> {
             binding.requests.record(refusal.counted());
             let mut delay = refusal.retry_after();
             if let EndpointRequestPolicy::Ack(window) = &binding.request {
+                delay = delay.or(window.retry_after);
                 let reply = EndpointRequestReply {
                     outcome: EndpointRequestOutcome::NotAdmitted(refusal.admission_refusal()),
-                    retry_after: window.retry_after,
+                    retry_after: delay,
                 };
                 acknowledgement.get_or_insert(reply);
-                delay = Some(window.retry_after);
             }
             retry_after.push(delay);
         }
@@ -403,6 +447,7 @@ impl EndpointIntakeRoute<EndpointIngestBinding> {
 
     /// Dispatches one request body or WebSocket frame to every ingestor bound to this route, each
     /// reading `metadata`: the values its entity declares and the request's headers.
+    #[cfg(test)]
     pub(crate) async fn dispatch(
         &self,
         runtime: &Runtime,
@@ -410,15 +455,49 @@ impl EndpointIntakeRoute<EndpointIngestBinding> {
         metadata: IngestMetadataRow<'_>,
         shutdown: &CancellationToken,
     ) -> EndpointDispatchOutcome {
-        let protocol = match self.endpoint_type() {
-            EndpointType::Http => "http",
-            EndpointType::Websockets => "websocket",
+        self.dispatch_received(
+            runtime,
+            EndpointPayload {
+                bytes: payload,
+                metadata,
+                received_at: Instant::now(),
+            },
+            shutdown,
+            None,
+        )
+        .await
+    }
+
+    pub(crate) async fn dispatch_received(
+        &self,
+        runtime: &Runtime,
+        payload: EndpointPayload<'_>,
+        shutdown: &CancellationToken,
+        pause: Option<&EndpointFramePause>,
+    ) -> EndpointDispatchOutcome {
+        let intake_protocol = match self.endpoint_type() {
+            // An HTTP sender still holds its body and waits on the answer, so a full queue refuses
+            // the body for its sender to send again.
+            EndpointType::Http => EndpointIntakeProtocol {
+                label: "http",
+                unacknowledged_admission: QueueAdmission::RefuseWhenFull,
+            },
+            // A WebSocket frame in `MODE NO ACK` has no answer its sender waits for, so it waits
+            // for a place, and its connection reads nothing further meanwhile.
+            EndpointType::Websockets => EndpointIntakeProtocol {
+                label: "websocket",
+                unacknowledged_admission: QueueAdmission::WaitForPlace,
+            },
         };
         let mut dispatches = Vec::with_capacity(self.bindings().len());
         for lifetime in self.bindings() {
-            dispatches.push(
-                runtime.dispatch_endpoint_intake(lifetime, payload, metadata, shutdown, protocol),
-            );
+            dispatches.push(runtime.dispatch_endpoint_intake(
+                lifetime,
+                payload,
+                shutdown,
+                intake_protocol,
+                pause,
+            ));
         }
         dispatch_endpoint_bindings(dispatches).await
     }
@@ -482,6 +561,7 @@ where
                 if admission.rejected > 0 {
                     retry_after.push(admission.retry_after);
                 }
+                outcome.pause_buffer_full |= admission.pause_buffer_full;
             }
         }
     }
@@ -506,15 +586,29 @@ where
     }
 }
 
+/// How a route's transport takes in what its sender hands over: the label its diagnostics name, and
+/// what an unacknowledged message does when the node's extension workers have no room for it.
+#[derive(Debug, Clone, Copy)]
+struct EndpointIntakeProtocol {
+    label: &'static str,
+    unacknowledged_admission: QueueAdmission,
+}
+
 impl Runtime {
     async fn dispatch_endpoint_intake(
         &self,
         lifetime: &endpoint_route_table::EndpointBinding<EndpointIngestBinding>,
-        payload: &[u8],
-        metadata: IngestMetadataRow<'_>,
+        payload: EndpointPayload<'_>,
         shutdown: &CancellationToken,
-        protocol: &str,
+        intake_protocol: EndpointIntakeProtocol,
+        pause: Option<&EndpointFramePause>,
     ) -> EndpointDispatchOutcome {
+        let protocol = intake_protocol.label;
+        let EndpointPayload {
+            bytes: payload,
+            metadata,
+            received_at,
+        } = payload;
         let lease = lifetime.intake();
         // An intake that ended after the route was resolved leaves nothing to count the request.
         let Some(binding) = lease.as_deref() else {
@@ -524,46 +618,107 @@ impl Runtime {
             });
         };
         if let EndpointRequestPolicy::Ack(window) = &binding.request {
-            let outcome = if binding.quiesce.endpoint_admission().is_err() {
-                EndpointRequestOutcome::NotAdmitted(EndpointAdmissionRefusal::Suspended)
+            let deadline = received_at + window.timeout;
+            let (outcome, retry_after) = if let Err(delay) = binding.quiesce.endpoint_admission() {
+                (
+                    EndpointRequestOutcome::NotAdmitted(EndpointAdmissionRefusal::Suspended),
+                    delay.or(window.retry_after),
+                )
+            } else if Instant::now() >= deadline {
+                binding
+                    .requests
+                    .record_pause_refusal(crate::metrics::EndpointPauseRefusal::Deadline);
+                (
+                    EndpointRequestOutcome::NotAdmitted(EndpointAdmissionRefusal::PauseExpired),
+                    None,
+                )
+            } else if let Some(_slot) = window.try_admit() {
+                let observed_at = actual_utc_now();
+                match binding
+                    .quiesce
+                    .pause_endpoint(payload, metadata, observed_at, Some(deadline))
+                {
+                    EndpointPauseIntake::Live => (
+                        EndpointRequestWindow::run_admitted_until(
+                            async {
+                                nervix_primitives::select! {
+                                    () = lifetime.ended() => {},
+                                    () = binding.quiesce.wait_until_intake_stops() => {},
+                                    () = shutdown.cancelled() => {},
+                                }
+                            },
+                            nervix_primitives::time::sleep_until(deadline),
+                            self.dispatch_acknowledged_endpoint_binding(
+                                binding,
+                                payload,
+                                metadata,
+                                observed_at,
+                                protocol,
+                            ),
+                        )
+                        .await,
+                        window.retry_after,
+                    ),
+                    EndpointPauseIntake::Waiting(wait) => {
+                        if let Some(pause) = pause {
+                            pause.observe(&wait);
+                        }
+                        (wait.finish(shutdown).await, None)
+                    }
+                    EndpointPauseIntake::Refused { cause, retry_after } => {
+                        (EndpointRequestOutcome::NotAdmitted(cause), retry_after)
+                    }
+                    EndpointPauseIntake::Buffered => {
+                        unreachable!(
+                            "an acknowledged endpoint's buffer keeps its response until resume"
+                        )
+                    }
+                }
             } else {
-                window
-                    .run_until(
-                        async {
-                            nervix_primitives::select! {
-                                () = lifetime.ended() => {},
-                                () = binding.quiesce.wait_until_intake_stops() => {},
-                                () = shutdown.cancelled() => {},
-                            }
-                        },
-                        nervix_primitives::time::sleep(window.timeout),
-                        self.dispatch_acknowledged_endpoint_binding(
-                            binding, payload, metadata, protocol,
-                        ),
-                    )
-                    .await
+                (
+                    EndpointRequestOutcome::NotAdmitted(EndpointAdmissionRefusal::WindowFull),
+                    window.retry_after,
+                )
             };
             binding.requests.record(outcome.counted());
             return EndpointDispatchOutcome::Ack(EndpointRequestReply {
                 outcome,
-                retry_after: window.retry_after,
+                retry_after,
             });
         }
-        // A binding may buffer this request until it resumes, so its copy of the
-        // request's metadata and headers is taken here and only here.
-        let payload = BufferedIngestPayload::new(
-            payload,
-            BufferedIngestMetadata::retain(&metadata),
-            actual_utc_now(),
-        );
-        let intake = match binding.quiesce.intake(payload, true) {
-            IngestorQuiesceIntake::Dispatch(payload) => {
-                self.dispatch_endpoint_binding(binding, payload, protocol)
+        let observed_at = actual_utc_now();
+        let intake = match binding
+            .quiesce
+            .pause_endpoint(payload, metadata, observed_at, None)
+        {
+            EndpointPauseIntake::Live => {
+                let payload = BufferedIngestPayload::new(
+                    payload,
+                    BufferedIngestMetadata::retain(&metadata),
+                    observed_at,
+                );
+                self.dispatch_endpoint_binding(lifetime, binding, payload, intake_protocol)
                     .await
             }
-            IngestorQuiesceIntake::Buffered => EndpointNoAckIntake::Buffered,
-            IngestorQuiesceIntake::Dropped => EndpointNoAckIntake::Refused { retry_after: None },
-            IngestorQuiesceIntake::Rejected { retry_after } => {
+            EndpointPauseIntake::Waiting(wait) => match wait.finish(shutdown).await {
+                EndpointRequestOutcome::Completed => EndpointNoAckIntake::Dispatched,
+                EndpointRequestOutcome::Refused(EndpointInputRefusal::Codec) => {
+                    EndpointNoAckIntake::DecodeRejected
+                }
+                EndpointRequestOutcome::Refused(EndpointInputRefusal::Route)
+                | EndpointRequestOutcome::ProcessingFailed(_) => {
+                    EndpointNoAckIntake::DispatchFailed
+                }
+                EndpointRequestOutcome::NotAdmitted(_) | EndpointRequestOutcome::Interrupted => {
+                    EndpointNoAckIntake::Refused { retry_after: None }
+                }
+            },
+            EndpointPauseIntake::Buffered => EndpointNoAckIntake::Buffered,
+            EndpointPauseIntake::Refused {
+                cause: EndpointAdmissionRefusal::PauseBufferFull,
+                ..
+            } => EndpointNoAckIntake::PauseBufferFull,
+            EndpointPauseIntake::Refused { retry_after, .. } => {
                 EndpointNoAckIntake::Refused { retry_after }
             }
         };
@@ -578,6 +733,7 @@ impl Runtime {
         binding: &EndpointIngestBinding,
         payload: &[u8],
         metadata: IngestMetadataRow<'_>,
+        observed_at: Timestamp,
         protocol: &str,
     ) -> EndpointRequestOutcome {
         let mut collector = IngestRouteCollector::new(
@@ -586,8 +742,7 @@ impl Runtime {
             binding.metrics.clone(),
             self.inner.data_plane.ingest_group_idle_flush(),
         );
-        let (root, mut completion) = binding.handles.tracked_root();
-        let observed_at = actual_utc_now();
+        let (root, completion) = binding.handles.tracked_root();
         match collector
             .decode_payload(
                 self.executor(),
@@ -667,26 +822,18 @@ impl Runtime {
         if collector.input_refused() {
             return EndpointRequestOutcome::Refused(EndpointInputRefusal::Route);
         }
-        loop {
-            nervix_primitives::task::consume_budget().await;
-            match completion.wait_for_progress().await {
-                AckProgress::Alive => {}
-                AckProgress::Complete(AckOutcome::Ack) => return EndpointRequestOutcome::Completed,
-                AckProgress::Complete(AckOutcome::NoAck(_)) => {
-                    return EndpointRequestOutcome::ProcessingFailed(
-                        nervix_models::ClientProcessingFailure::Rejected,
-                    );
-                }
-            }
-        }
+        await_acknowledgement(completion).await
     }
 
     async fn dispatch_endpoint_binding(
         &self,
+        lifetime: &endpoint_route_table::EndpointBinding<EndpointIngestBinding>,
         binding: &EndpointIngestBinding,
         payload: BufferedIngestPayload,
-        protocol: &str,
+        intake_protocol: EndpointIntakeProtocol,
     ) -> EndpointNoAckIntake {
+        let protocol = intake_protocol.label;
+        let _admitted = NodeQuiesceWorkGuard::begin(binding.work.clone());
         // One request is one group, so its builders are sized for the single payload this binding
         // decodes; a payload that unfolds into several messages grows them.
         let mut collector = IngestRouteCollector::new(
@@ -695,18 +842,31 @@ impl Runtime {
             binding.metrics.clone(),
             self.inner.data_plane.ingest_group_idle_flush(),
         );
-        // The sender is answered, so a body the extension workers have no room for is refused
-        // rather than held.
-        let decoded = collector
-            .decode_payload(
-                self.executor(),
-                QueueAdmission::RefuseWhenFull,
-                &binding.codec,
-                payload.payload(),
-                usize::try_from(self.cluster_parameters().payload_unfold_limit())
-                    .assured("the validated payload bound fits usize"),
-            )
-            .await;
+        // An HTTP body the extension workers have no room for is refused for its sender to send
+        // again, while a WebSocket frame waits for a place, as its transport says. A later quiesce
+        // decision does not take back a frame its quiesce let dispatch; the frame ends unprocessed
+        // only when its ingestor's intake ends, which a graceful stop does only after the frame.
+        let decode = collector.decode_payload(
+            self.executor(),
+            intake_protocol.unacknowledged_admission,
+            &binding.codec,
+            payload.payload(),
+            usize::try_from(self.cluster_parameters().payload_unfold_limit())
+                .assured("the validated payload bound fits usize"),
+        );
+        let decoded = nervix_primitives::select! {
+            decoded = decode => decoded,
+            () = lifetime.ended() => {
+                debug!(
+                    domain = binding.domain.as_str(),
+                    ingestor = binding.ingestor.as_str(),
+                    protocol,
+                    "the ingestor's intake ended while an endpoint message waited for the node's \
+                     extension workers"
+                );
+                return EndpointNoAckIntake::Refused { retry_after: None };
+            }
+        };
         match decoded {
             Ok(()) => {
                 let metadata = [payload.first_metadata_row()];

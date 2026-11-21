@@ -14,8 +14,8 @@ use nervix_interconnect::{
     PartitionTransitionRequest, PartitionTransitionResponse, ReleasedKey, ReleasedRow,
 };
 use nervix_models::{
-    BranchName, NodeRef, PartitionEpochNumber, RemoteRuntimeField, RemoteRuntimeRecordMetadata,
-    RemoteRuntimeValue, Timestamp, Unit,
+    NodeRef, ParametrizerName, PartitionEpochNumber, RemoteRuntimeField,
+    RemoteRuntimeRecordMetadata, RemoteRuntimeValue, Timestamp, Unit,
 };
 use nervix_primitives::time::Instant;
 
@@ -410,7 +410,7 @@ fn claim_through_hold_and_partition(run: ScenarioRun) -> Result<(), SimulationEr
                             &holder,
                             PartitionTransitionRequest::Holdings {
                                 domain: subject().domain,
-                                branch: BranchName::parse("by_tenant")
+                                parametrizer: ParametrizerName::parse("by_tenant")
                                     .assured("valid fixture branch"),
                                 epoch: subject().epoch,
                             },

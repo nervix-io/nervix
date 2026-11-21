@@ -408,6 +408,14 @@ test-node-record *args: build-deps build-test-cli
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
     cargo test --package nervix-scenarios --test scenarios -- --input tests/features/cluster/node_record.feature {{ quote(args) }}
 
+# Payloads that wait for the node's extension workers instead of being refused: every ingestor
+# family, the transports kept connected meanwhile, and the planned stop that waits for them.
+test-unfolding-backpressure *args: build-deps build-plexus-format build-test-cli build-deadlock-report
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    cargo test --package nervix-scenarios --test scenarios -- --input tests/features/cluster/bounded_execution.feature {{ quote(args) }}
+
 # Exercise fixed window collection and its sampled-sequence tensor consumer.
 test-window-collection-arrays *args: build-deps build-plexus-format build-test-cli build-deadlock-report
     #!/usr/bin/env bash
@@ -1480,6 +1488,19 @@ coverage-partitioning output *args: download-onnxruntime
     set -euo pipefail
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
     cargo llvm-cov --no-clean --package nervix-server --package nervix-models --package nervix-interconnect --package nervix-backup --package nervix-branch-instances --features nervix-server/testing --lib --no-default-ignore-filename-regex --lcov --output-path {{ quote(output) }} -- {{ quote(args) }}
+
+# Measure the WASM guest-state description owners through the configured compiler cache: the guest
+# protocol, SDK and host, the vocabulary, the page operation and the session wire with their unit
+# tests and properties, the server's render and WASM lifecycle unit tests, and the public
+# guest-state description scenarios on one and three nodes, which reach the owner page operation.
+coverage-wasm-state-description output: coverage-clean-profiles build-deps build-plexus-format build-test-cli build-deadlock-report
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    cargo llvm-cov --no-report --package nervix-wasm-protocol --package nervix-wasm-sdk --package nervix-wasm --package nervix-models --package nervix-interconnect --package nervix-client-wire --lib --tests
+    cargo llvm-cov --no-report --package nervix-server --features testing --lib -- runtime::wasm_state_description runtime::wasm_processor
+    cargo llvm-cov --no-report --package nervix-scenarios --test scenarios -- --input {{ quote(justfile_directory() / "tests/features/runtime/wasm_state_description.feature") }} --retry 0
+    cargo llvm-cov report --no-default-ignore-filename-regex --lcov --output-path {{ quote(output) }}
 
 # Measure the Rust client library's unit tests, for a patch confined to it, through the configured
 # compiler cache.

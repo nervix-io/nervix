@@ -15,7 +15,6 @@
 )]
 
 pub mod backup;
-pub mod branch;
 #[cfg(test)]
 mod canonical_round_trip_tests;
 pub mod client;
@@ -28,7 +27,6 @@ mod conformance_support;
 pub mod correlator;
 pub mod create_resource;
 pub mod deduplicator;
-pub mod describe_branch;
 pub mod describe_client;
 pub mod describe_cluster;
 pub mod describe_correlator;
@@ -41,6 +39,7 @@ pub mod describe_ingestor;
 pub mod describe_junction;
 pub mod describe_license;
 pub mod describe_lookup;
+pub mod describe_parametrizer;
 pub mod describe_reingestor;
 pub mod describe_reorderer;
 pub mod describe_resource;
@@ -62,6 +61,7 @@ pub mod licensing;
 pub mod lookup;
 pub mod lookup_query;
 pub mod node_control;
+pub mod parametrizer;
 mod parser_support;
 pub mod placement;
 mod semantic_program;

@@ -142,7 +142,7 @@ fn generator_materialized_relay_choices_round_trip_with_and_without_a_branch() {
     };
     let branch = ChoiceSelection {
         value: ChoiceValue::Model(nervix_models::NodeRef::new(
-            nervix_models::ModelKind::Branch,
+            nervix_models::ModelKind::Parametrizer,
             name::<nervix_models::ModelName>("by_tenant"),
         )),
     };

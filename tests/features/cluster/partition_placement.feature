@@ -11,13 +11,13 @@ Feature: Placement policies apply to corresponding execution units
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT (tenant string, id integer);
       CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE SCHEMA tenant_key (tenant STRING);
-      CREATE BRANCH tenants SCHEMA tenant_key TTL 5m PARTITIONS 2;
+      CREATE PARAMETRIZER tenants SCHEMA tenant_key TTL 5m PARTITIONS 2;
       CREATE RELAY incoming SCHEMA event BRANCHED BY tenants;
       CREATE RELAY outgoing SCHEMA event BRANCHED BY tenants;
       CREATE VHOST edge placement-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR reader FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING event_codec
         TO incoming INHERIT ALL BRANCHED BY tenants SET tenant = message.tenant
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE JUNCTION forward FROM incoming BRANCHED BY tenants
@@ -198,7 +198,7 @@ Feature: Placement policies apply to corresponding execution units
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT (tenant string, id integer);
       CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE SCHEMA tenant_key (tenant STRING);
-      CREATE BRANCH tenants SCHEMA tenant_key TTL 5m PARTITIONS 2;
+      CREATE PARAMETRIZER tenants SCHEMA tenant_key TTL 5m PARTITIONS 2;
       CREATE RELAY incoming SCHEMA event BRANCHED BY tenants;
       CREATE KAFKA CLIENT broker CONFIG { 'bootstrap.servers' = '127.0.0.1:9092' };
       CREATE KAFKA TOPIC INGESTOR reader FROM broker TOPIC 'events'
@@ -263,7 +263,7 @@ Feature: Placement policies apply to corresponding execution units
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA event (tenant STRING, id I64);
       CREATE SCHEMA tenant_key (tenant STRING);
-      CREATE BRANCH tenants SCHEMA tenant_key TTL 5m PARTITIONS 2;
+      CREATE PARAMETRIZER tenants SCHEMA tenant_key TTL 5m PARTITIONS 2;
       CREATE RELAY incoming SCHEMA event BRANCHED BY tenants;
       CREATE RELAY collapsed SCHEMA event UNBRANCHED;
       CREATE REINGESTOR collapse FROM incoming

@@ -72,7 +72,7 @@ const CONFIGURATION_KINDS: [ModelKind; 12] = [
     ModelKind::Codec,
     ModelKind::Client,
     ModelKind::Vhost,
-    ModelKind::Branch,
+    ModelKind::Parametrizer,
     ModelKind::Endpoint,
     ModelKind::SignalingProtocol,
     ModelKind::Placement,
@@ -170,14 +170,14 @@ const MODEL_CHANGE_ASPECTS: [ModelChangeAspect; 79] = [
     ModelChangeAspect::EndpointDefinition,
     ModelChangeAspect::SignalingProtocolDefinition,
     ModelChangeAspect::LookupDefinition,
-    ModelChangeAspect::BranchSchema,
-    ModelChangeAspect::BranchLifecycle,
+    ModelChangeAspect::ParametrizerSchema,
+    ModelChangeAspect::ParametrizerLifecycle,
     ModelChangeAspect::UdfDefinition,
     ModelChangeAspect::PlacementDefinition,
     ModelChangeAspect::EntityReplaced,
     ModelChangeAspect::EntityCreated,
     ModelChangeAspect::EntityDropped,
-    ModelChangeAspect::BranchPartitions,
+    ModelChangeAspect::ParametrizerPartitions,
 ];
 
 /// Every runtime state a Model change can make meaningless, in declaration order.
@@ -238,6 +238,7 @@ impl StepBoundary for TransactionOperation {
             Self::StartDomain { .. }
             | Self::StopDomain { .. }
             | Self::CreateResource { .. }
+            | Self::EditResourceLabels { .. }
             | Self::ResetWasmState { .. } => false,
         }
     }
@@ -357,8 +358,8 @@ impl Arbitrary<'_> {
         match self.entropy.byte() % 4 {
             0 => ConcreteBranchCoverage::Unbranched,
             1 => ConcreteBranchCoverage::All,
-            2 => ConcreteBranchCoverage::AllOfBranch {
-                branch: self.name(),
+            2 => ConcreteBranchCoverage::AllOfParametrizer {
+                parametrizer: self.name(),
             },
             _ => {
                 let branch = self.name();
@@ -636,7 +637,7 @@ impl Arbitrary<'_> {
         ForceFlushImpact { node, attribution }
     }
 
-    /// A resource entering the catalog.
+    /// A resource catalog entry created or edited by an operation.
     fn resource_catalog_impact(
         &mut self,
         operations: TransactionOperationRange,
@@ -645,7 +646,11 @@ impl Arbitrary<'_> {
         let attribution = self.impact_attribution(operations);
         ResourceCatalogImpact {
             resource,
-            action: ResourceCatalogAction::Create,
+            action: if self.entropy.flag() {
+                ResourceCatalogAction::Create
+            } else {
+                ResourceCatalogAction::EditLabels
+            },
             attribution,
         }
     }
@@ -861,7 +866,7 @@ impl Arbitrary<'_> {
     /// and a resource rebinding binds the version it names, or any version for `LATEST`.
     pub fn transaction_operation(&mut self, domain: &DomainName) -> TransactionOperation {
         let domain = domain.clone();
-        match self.entropy.byte() % 8 {
+        match self.entropy.byte() % 9 {
             0 => TransactionOperation::StopDomain { domain },
             1 => TransactionOperation::StartDomain { domain },
             2 => TransactionOperation::CreateResource {
@@ -883,6 +888,10 @@ impl Arbitrary<'_> {
             6 => TransactionOperation::DropConfiguration {
                 domain,
                 node: self.any_node_ref(),
+            },
+            7 => TransactionOperation::EditResourceLabels {
+                domain,
+                resource: self.name(),
             },
             _ => {
                 let resource = self.name();
@@ -940,7 +949,8 @@ impl Arbitrary<'_> {
             }
             TransactionOperation::StartDomain { .. } => vec![OperationImpactReason::DomainStart],
             TransactionOperation::StopDomain { .. } => vec![OperationImpactReason::DomainStop],
-            TransactionOperation::CreateResource { resource, .. } => {
+            TransactionOperation::CreateResource { resource, .. }
+            | TransactionOperation::EditResourceLabels { resource, .. } => {
                 if self.entropy.flag() {
                     vec![OperationImpactReason::ResourceCatalog {
                         resource: resource.clone(),
@@ -1347,7 +1357,14 @@ impl Arbitrary<'_> {
                 let already_existed = self.entropy.flag();
                 TransactionCommitStepKind::CreateResource {
                     resource: resource.clone(),
+                    labels: self.entity_labels(),
                     already_existed,
+                }
+            }
+            TransactionOperation::EditResourceLabels { resource, .. } => {
+                TransactionCommitStepKind::EditResourceLabels {
+                    resource: resource.clone(),
+                    labels: self.entity_labels(),
                 }
             }
             TransactionOperation::ResetWasmState { domain, processor } => {
@@ -1433,7 +1450,7 @@ mod tests {
     const BYTES: usize = 8192;
 
     /// Every variant, family and shape the generators promise to reach, as [`Walk`] names them.
-    const EXPECTED: [&str; 103] = [
+    const EXPECTED: [&str; 106] = [
         "TransactionImpactReport::empty",
         "TransactionOperationRange::single",
         "TransactionOperationRange::several",
@@ -1443,6 +1460,7 @@ mod tests {
         "TransactionOperation::StartDomain",
         "TransactionOperation::StopDomain",
         "TransactionOperation::CreateResource",
+        "TransactionOperation::EditResourceLabels",
         "TransactionOperation::RebindResource",
         "TransactionOperation::ResetWasmState",
         "OperationImpactReason::Configuration",
@@ -1468,7 +1486,7 @@ mod tests {
         "QuiesceSubgraph::gate_boundaries",
         "ConcreteBranchCoverage::All",
         "ConcreteBranchCoverage::Unbranched",
-        "ConcreteBranchCoverage::AllOfBranch",
+        "ConcreteBranchCoverage::AllOfParametrizer",
         "ConcreteBranchCoverage::Selected",
         "ImpactNodeCoverage::configuration",
         "ImpactNodeCoverage::execution",
@@ -1507,6 +1525,7 @@ mod tests {
         "StatePurge::InferencerWarmState",
         "StatePurge::WasmGuestState",
         "ResourceCatalogAction::Create",
+        "ResourceCatalogAction::EditLabels",
         "RequestedResourceVersion::Number",
         "RequestedResourceVersion::Latest",
         "ActualExecutionStepImpact::quiescence",
@@ -1523,6 +1542,7 @@ mod tests {
         "TransactionCommitStepKind::StartDomain",
         "TransactionCommitStepKind::StopDomain",
         "TransactionCommitStepKind::CreateResource",
+        "TransactionCommitStepKind::EditResourceLabels",
         "TransactionCommitStepKind::ResetWasmState",
         "TransactionModelTransition::Create",
         "TransactionModelTransition::Replace",
@@ -1641,14 +1661,16 @@ mod tests {
                 ConcreteBranchCoverage::Unbranched => {
                     self.see("ConcreteBranchCoverage::Unbranched");
                 }
-                ConcreteBranchCoverage::AllOfBranch { .. } => {
-                    self.see("ConcreteBranchCoverage::AllOfBranch");
+                ConcreteBranchCoverage::AllOfParametrizer { .. } => {
+                    self.see("ConcreteBranchCoverage::AllOfParametrizer");
                 }
-                ConcreteBranchCoverage::Selected { branch, keys } => {
+                ConcreteBranchCoverage::Selected { parametrizer, keys } => {
                     self.see("ConcreteBranchCoverage::Selected");
-                    let rebuilt =
-                        ConcreteBranchCoverage::selected(branch.clone(), keys.as_slice().to_vec())
-                            .assured("a generated selection names a key");
+                    let rebuilt = ConcreteBranchCoverage::selected(
+                        parametrizer.clone(),
+                        keys.as_slice().to_vec(),
+                    )
+                    .assured("a generated selection names a key");
                     assert_eq!(&rebuilt, branches);
                 }
             }
@@ -1911,6 +1933,9 @@ mod tests {
                 self.see("ImpactEffects::resource_catalog");
                 match catalog.action {
                     ResourceCatalogAction::Create => self.see("ResourceCatalogAction::Create"),
+                    ResourceCatalogAction::EditLabels => {
+                        self.see("ResourceCatalogAction::EditLabels")
+                    }
                 }
                 self.attribution(&catalog.attribution, within);
             }
@@ -2012,6 +2037,9 @@ mod tests {
                 TransactionOperation::CreateResource { .. } => {
                     self.see("TransactionOperation::CreateResource");
                 }
+                TransactionOperation::EditResourceLabels { .. } => {
+                    self.see("TransactionOperation::EditResourceLabels");
+                }
                 TransactionOperation::RebindResource {
                     requested, version, ..
                 } => {
@@ -2065,6 +2093,9 @@ mod tests {
                 (
                     OperationImpactReason::ResourceCatalog { resource },
                     TransactionOperation::CreateResource {
+                        resource: named, ..
+                    }
+                    | TransactionOperation::EditResourceLabels {
                         resource: named, ..
                     },
                 ) => {
@@ -2282,6 +2313,15 @@ mod tests {
                         },
                     ) => {
                         self.see("TransactionCommitStepKind::CreateResource");
+                        assert_eq!(resource, named);
+                    }
+                    (
+                        TransactionCommitStepKind::EditResourceLabels { resource, .. },
+                        TransactionOperation::EditResourceLabels {
+                            resource: named, ..
+                        },
+                    ) => {
+                        self.see("TransactionCommitStepKind::EditResourceLabels");
                         assert_eq!(resource, named);
                     }
                     (

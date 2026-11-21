@@ -251,7 +251,7 @@ fn junction_and_reingestor_render_ordered_route_and_state_controls() {
             draft.routes[0].branch.choose_branched();
             draft.routes[0]
                 .branch
-                .select_branch(&node(ModelKind::Branch, "by_tenant"));
+                .select_branch(&node(ModelKind::Parametrizer, "by_tenant"));
             draft.add_route();
             draft.routes[1].branch.choose_unbranched();
             draft.active_route = 0;
@@ -259,7 +259,7 @@ fn junction_and_reingestor_render_ordered_route_and_state_controls() {
         let reingestor = render();
         for control in [
             "create-processor-route-branching",
-            "create-processor-route-branch",
+            "create-processor-route-parametrizer",
             "create-processor-branch-fields",
             "create-processor-branch-assignments",
             "create-processor-route-list",
@@ -288,8 +288,8 @@ fn processor_choices_follow_branch_schema_and_incoming_state_context() {
         signals.junction.update(|draft| draft.choose_branched());
         select_choice(
             signals,
-            ChoiceControl::ProcessorBranch,
-            ChoiceValue::Model(node(ModelKind::Branch, "by_tenant")),
+            ChoiceControl::ProcessorParametrizer,
+            ChoiceValue::Model(node(ModelKind::Parametrizer, "by_tenant")),
         );
         let input = signals
             .choice_query(ChoiceControl::ProcessorInputRelay)
@@ -297,7 +297,7 @@ fn processor_choices_follow_branch_schema_and_incoming_state_context() {
         assert_eq!(input.target, ChoiceTarget::IngestBranchedRelay);
         assert_eq!(
             input.dependencies[1].value,
-            ChoiceValue::Model(node(ModelKind::Branch, "by_tenant"))
+            ChoiceValue::Model(node(ModelKind::Parametrizer, "by_tenant"))
         );
         select_choice(
             signals,
@@ -347,10 +347,10 @@ fn processor_choices_follow_branch_schema_and_incoming_state_context() {
         signals
             .reingestor
             .update(|draft| draft.routes[0].branch.choose_branched());
-        let destination = ChoiceValue::Model(node(ModelKind::Branch, "by_destination"));
+        let destination = ChoiceValue::Model(node(ModelKind::Parametrizer, "by_destination"));
         select_choice(
             signals,
-            ChoiceControl::ProcessorRouteBranch,
+            ChoiceControl::ProcessorRouteParametrizer,
             destination.clone(),
         );
         let output = signals
@@ -383,9 +383,9 @@ fn processor_choices_update_each_selected_ordered_section() {
         let signals = CreateSignals::new();
         signals.open(CreateKind::Model(ModelKind::Junction), Some(domain.clone()), "global-create-button");
         signals.junction.update(|draft| draft.choose_branched());
-        let junction_branch = ChoiceValue::Model(node(ModelKind::Branch, "by_tenant"));
-        select_choice(signals, ChoiceControl::ProcessorBranch, junction_branch.clone());
-        assert!(selected_choice(signals, ChoiceControl::ProcessorBranch, &junction_branch));
+        let junction_branch = ChoiceValue::Model(node(ModelKind::Parametrizer, "by_tenant"));
+        select_choice(signals, ChoiceControl::ProcessorParametrizer, junction_branch.clone());
+        assert!(selected_choice(signals, ChoiceControl::ProcessorParametrizer, &junction_branch));
 
         signals.open(CreateKind::Model(ModelKind::Reingestor), Some(domain), "global-create-button");
         assert_eq!(
@@ -421,14 +421,14 @@ fn processor_choices_update_each_selected_ordered_section() {
             ChoiceControl::ProcessorStateField,
             ChoiceValue::Field(FieldName::parse("message").assured("valid field")),
         );
-        let branch = ChoiceValue::Model(node(ModelKind::Branch, "by_tenant"));
-        select_choice(signals, ChoiceControl::ProcessorRouteBranch, branch.clone());
-        assert!(selected_choice(signals, ChoiceControl::ProcessorRouteBranch, &branch));
+        let parametrizer = ChoiceValue::Model(node(ModelKind::Parametrizer, "by_tenant"));
+        select_choice(signals, ChoiceControl::ProcessorRouteParametrizer, parametrizer.clone());
+        assert!(selected_choice(signals, ChoiceControl::ProcessorRouteParametrizer, &parametrizer));
         let branch_fields = signals
             .choice_query(ChoiceControl::ProcessorBranchField)
             .assured("route branch selected");
         assert_eq!(branch_fields.target, ChoiceTarget::BranchField);
-        assert_eq!(branch_fields.dependencies[1].value, branch);
+        assert_eq!(branch_fields.dependencies[1].value, parametrizer);
         assert_eq!(
             signals
                 .choice_query(ChoiceControl::ProcessorRouteRelay)
@@ -631,12 +631,12 @@ fn ingestor_form_renders_every_source_and_keeps_its_typed_references_in_scope() 
             draft.routes[0].branch.choose_branched();
             draft.routes[0]
                 .branch
-                .select_branch(&node(ModelKind::Branch, "by_tenant"));
+                .select_branch(&node(ModelKind::Parametrizer, "by_tenant"));
         });
         assert_eq!(
             signals
                 .choice_query(ChoiceControl::IngestRouteRelay)
-                .assured("named branch limits the output relay")
+                .assured("the parametrizer limits the output relay")
                 .target,
             ChoiceTarget::IngestBranchedRelay,
         );
@@ -715,18 +715,18 @@ fn ingestor_choices_follow_the_selected_source_codec_branch_and_relays() {
         signals.ingestor.update(|draft| draft.choose_route_branched());
         assert_eq!(
             signals.choice_query(ChoiceControl::IngestRouteRelay).err(),
-            Some("Choose the named branch before its relay")
+            Some("Choose the parametrizer before its relay")
         );
-        let branch = ChoiceValue::Model(node(ModelKind::Branch, "by_tenant"));
-        select_choice(signals, ChoiceControl::IngestRouteBranch, branch.clone());
-        assert!(selected_choice(signals, ChoiceControl::IngestRouteBranch, &branch));
+        let parametrizer = ChoiceValue::Model(node(ModelKind::Parametrizer, "by_tenant"));
+        select_choice(signals, ChoiceControl::IngestRouteParametrizer, parametrizer.clone());
+        assert!(selected_choice(signals, ChoiceControl::IngestRouteParametrizer, &parametrizer));
         assert_eq!(
             signals.choice_query(ChoiceControl::IngestBranchField).assured("branch selected").target,
             ChoiceTarget::BranchField
         );
         let route_query = signals.choice_query(ChoiceControl::IngestRouteRelay).assured("branch selected");
         assert_eq!(route_query.target, ChoiceTarget::IngestBranchedRelay);
-        assert_eq!(route_query.dependencies[1].value, branch);
+        assert_eq!(route_query.dependencies[1].value, parametrizer);
         select_choice(
             signals,
             ChoiceControl::IngestBranchField,
@@ -1691,7 +1691,9 @@ fn deduplicator_and_reorderer_forms_edit_ordered_keys_after_their_node_branch() 
                 .err(),
             Some("Open a processor form first")
         );
-        assert!(!ChoiceControl::ProcessorBranch.applies_to(CreateKind::Model(ModelKind::Emitter)));
+        assert!(
+            !ChoiceControl::ProcessorParametrizer.applies_to(CreateKind::Model(ModelKind::Emitter))
+        );
         assert_eq!(
             CreateKind::Model(ModelKind::Emitter).processor_family(),
             None
@@ -1733,7 +1735,7 @@ fn deduplicator_and_reorderer_forms_edit_ordered_keys_after_their_node_branch() 
                 .assured("the keyed kinds are processor kinds");
             let draft = signals.processor(family);
             signals.open(form.kind, Some(domain.clone()), "global-create-button");
-            assert!(ChoiceControl::ProcessorBranch.applies_to(form.kind));
+            assert!(ChoiceControl::ProcessorParametrizer.applies_to(form.kind));
             assert!(!ChoiceControl::EmitterCodec.applies_to(form.kind));
             assert_eq!(
                 signals
@@ -1751,7 +1753,8 @@ fn deduplicator_and_reorderer_forms_edit_ordered_keys_after_their_node_branch() 
                 ChoiceTarget::IngestUnbranchedRelay
             );
             assert!(
-                !open_form_controls(signals, form.kind).contains(&ChoiceControl::ProcessorBranch)
+                !open_form_controls(signals, form.kind)
+                    .contains(&ChoiceControl::ProcessorParametrizer)
             );
             draft.update(|state| state.choose_branched());
             assert_eq!(
@@ -1761,15 +1764,20 @@ fn deduplicator_and_reorderer_forms_edit_ordered_keys_after_their_node_branch() 
                 Some(form.unnamed)
             );
             assert!(
-                open_form_controls(signals, form.kind).contains(&ChoiceControl::ProcessorBranch)
+                open_form_controls(signals, form.kind)
+                    .contains(&ChoiceControl::ProcessorParametrizer)
             );
-            let branch = ChoiceValue::Model(node(ModelKind::Branch, "by_tenant"));
-            select_choice(signals, ChoiceControl::ProcessorBranch, branch.clone());
+            let parametrizer = ChoiceValue::Model(node(ModelKind::Parametrizer, "by_tenant"));
+            select_choice(
+                signals,
+                ChoiceControl::ProcessorParametrizer,
+                parametrizer.clone(),
+            );
             let input = signals
                 .choice_query(ChoiceControl::ProcessorInputRelay)
                 .assured("the node branch is selected");
             assert_eq!(input.target, ChoiceTarget::IngestBranchedRelay);
-            assert_eq!(input.dependencies[1].value, branch);
+            assert_eq!(input.dependencies[1].value, parametrizer);
             select_choice(
                 signals,
                 ChoiceControl::ProcessorInputRelay,

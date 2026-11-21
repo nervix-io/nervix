@@ -24,7 +24,7 @@ Feature: Filter selections
         TO SCHEMA reading
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE SCHEMA tenant_branch (tenant STRING);
-      CREATE BRANCH by_tenant SCHEMA tenant_branch TTL 5m;
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_branch TTL 5m;
       CREATE RELAY readings SCHEMA reading BRANCHED BY by_tenant;
       CREATE RELAY selected_readings SCHEMA reading BRANCHED BY by_tenant;
       CREATE RELAY filter_failures SCHEMA filter_failure UNBRANCHED;
@@ -32,7 +32,7 @@ Feature: Filter selections
       CREATE HTTP ENDPOINT reading_ingress ON edge PATH '/readings';
       CREATE HTTP ENDPOINT INGESTOR reading_ingestor
         FROM reading_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING reading_batch_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING reading_batch_codec
         FILTER WHERE input.amount / input.divisor > 0
         TO readings
           INHERIT ALL

@@ -31,7 +31,7 @@ use super::{ModelChangeAspect, QuiesceLevel, StatePurge};
 #[cfg(test)]
 use crate::ModelName;
 use crate::{
-    BranchName, ClusterNodeName, DomainName, ModelKind, NodeRef, RelayName,
+    ClusterNodeName, DomainName, ModelKind, NodeRef, ParametrizerName, RelayName,
     RequestedResourceVersion, ResourceName, Unit,
 };
 
@@ -711,10 +711,10 @@ pub enum ConcreteBranchCoverage {
     /// The node has no branch key and its sole unbranched execution participates.
     Unbranched,
     /// Every current and subsequently appearing concrete key of this declared branch participates.
-    AllOfBranch { branch: BranchName },
+    AllOfParametrizer { parametrizer: ParametrizerName },
     /// Only the named concrete keys participate.
     Selected {
-        branch: BranchName,
+        parametrizer: ParametrizerName,
         #[cfg_attr(
             nervix_lint,
             expect(
@@ -728,14 +728,14 @@ pub enum ConcreteBranchCoverage {
 
 impl ConcreteBranchCoverage {
     pub fn selected(
-        branch: BranchName,
+        parametrizer: ParametrizerName,
         keys: impl IntoIterator<Item = BranchKeyFingerprint>,
     ) -> Result<Self, Report<ImpactReportError>> {
         let keys = CanonicalImpactSet::new(keys);
         if keys.is_empty() {
             return Err(Report::new(ImpactReportError::EmptyConcreteBranchCoverage));
         }
-        Ok(Self::Selected { branch, keys })
+        Ok(Self::Selected { parametrizer, keys })
     }
 }
 
@@ -1052,6 +1052,10 @@ pub enum TransactionOperation {
         domain: DomainName,
         resource: ResourceName,
     },
+    EditResourceLabels {
+        domain: DomainName,
+        resource: ResourceName,
+    },
     RebindResource {
         domain: DomainName,
         resource: ResourceName,
@@ -1073,6 +1077,7 @@ impl TransactionOperation {
             | Self::StartDomain { domain }
             | Self::StopDomain { domain }
             | Self::CreateResource { domain, .. }
+            | Self::EditResourceLabels { domain, .. }
             | Self::RebindResource { domain, .. } => domain,
             Self::ResetWasmState { domain, .. } => domain,
         }
@@ -1279,6 +1284,7 @@ pub struct ConfigurationImpact {
 #[strum(serialize_all = "SCREAMING_SNAKE_CASE")]
 pub enum ResourceCatalogAction {
     Create,
+    EditLabels,
 }
 
 #[derive(
@@ -1974,12 +1980,12 @@ mod impact_report_tests {
         let fingerprint = BranchKeyFingerprint::of_canonical_text(r#"{"tenant":"acme-secret"}"#);
         let seed = fingerprint.partition_seed();
         assert_eq!(seed.get(), 0x26c2_a362_2b11_2535);
-        let four = crate::ResolvedBranchPartitions::Direct(
+        let four = crate::ResolvedParametrizerPartitions::Direct(
             std::num::NonZeroU16::new(4).assured("four is not zero"),
         );
         assert_eq!(four.unit_of(seed), Unit::partition(1));
         assert_eq!(
-            crate::ResolvedBranchPartitions::ONE.unit_of(seed),
+            crate::ResolvedParametrizerPartitions::ONE.unit_of(seed),
             Unit::SINGLE
         );
         assert_eq!(
@@ -1992,10 +1998,10 @@ mod impact_report_tests {
             ]
         );
         assert_eq!(
-            crate::ResolvedBranchPartitions::ONE.units(),
+            crate::ResolvedParametrizerPartitions::ONE.units(),
             vec![Unit::SINGLE]
         );
-        let largest = crate::ResolvedBranchPartitions::Direct(std::num::NonZeroU16::MAX);
+        let largest = crate::ResolvedParametrizerPartitions::Direct(std::num::NonZeroU16::MAX);
         let crate::UnitKind::Partition(partition) = largest.unit_of(seed).kind() else {
             panic!("a branch of many partitions places a key in one of them");
         };

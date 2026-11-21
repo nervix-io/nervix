@@ -20,7 +20,7 @@ use arch_into::ArchInto as _;
 use error_stack::Report;
 use nervix_execution::{
     AdmissionError, BudgetedBuffer, Cancellation, ChargedBytes, CpuClass, Executor, MemoryClass,
-    Reservation,
+    QueueAdmission, Reservation,
 };
 use nervix_models::{
     ClusterNodeName, NodePrerequisites, PrerequisiteMismatch, WireContractFingerprint,
@@ -60,8 +60,8 @@ const INITIAL_MESSAGE_CHARGE: u64 = 4 * 1024;
     )
 )]
 pub const WIRE_CONTRACT: WireContractFingerprint = WireContractFingerprint::from_digest([
-    0xa0, 0x07, 0x00, 0xc9, 0x76, 0x50, 0x7a, 0xbb, 0xbe, 0x81, 0xe4, 0x71, 0x6a, 0xe0, 0x7d, 0x8d,
-    0xda, 0xbf, 0x59, 0xc9, 0xf6, 0x0d, 0xab, 0xb9, 0xc8, 0x1c, 0x34, 0xc7, 0x68, 0x56, 0x3c, 0x17,
+    0x98, 0x9c, 0x05, 0xa1, 0x73, 0xa0, 0x19, 0x71, 0x1d, 0x0c, 0x39, 0x1b, 0x88, 0xda, 0xe4, 0x60,
+    0xa4, 0xa5, 0x0f, 0xce, 0x8f, 0x5f, 0xe9, 0x4a, 0xf8, 0x13, 0x46, 0x23, 0x70, 0x41, 0xfb, 0x71,
 ]);
 
 /// The first message of every connection: who dials, for which pool, and everything the dialing
@@ -279,6 +279,7 @@ async fn encode_rkyv_buffer<T>(
     class: MemoryClass,
     cpu: CpuClass,
     limit: u64,
+    admission: QueueAdmission,
     value: T,
 ) -> Result<BudgetedBuffer, Report<TransportError>>
 where
@@ -295,7 +296,7 @@ where
         _input_charge: None,
     };
     executor
-        .run_cpu(cpu, reservation, move |charge, cancellation| {
+        .run_cpu_with(cpu, admission, reservation, move |charge, cancellation| {
             encoding.encode(charge, limit, cancellation)
         })
         .await
@@ -342,16 +343,48 @@ where
         + 'static
         + for<'a> Serialize<HighSerializer<IoWriter<BudgetedBuffer>, ArenaHandle<'a>, RkyvError>>,
 {
-    let buffer = encode_rkyv_buffer(executor, class, cpu, limit, value).await?;
+    encode_rkyv_with(
+        executor,
+        class,
+        cpu,
+        limit,
+        QueueAdmission::RefuseWhenFull,
+        value,
+    )
+    .await
+}
+
+/// Serialize one typed value as [`encode_rkyv`] does, its job taking a place on the CPU class as
+/// `admission` says.
+///
+/// [`encode_rkyv`] refuses at once when the class has no place, which suits a request: its caller
+/// still holds it and is told to retry, and a burst beyond the class keeps no charge. A response
+/// carries work the handler already did, so it waits for a place instead of losing that work.
+pub(crate) async fn encode_rkyv_with<T>(
+    executor: &Executor,
+    class: MemoryClass,
+    cpu: CpuClass,
+    limit: u64,
+    admission: QueueAdmission,
+    value: T,
+) -> Result<ChargedBytes, Report<TransportError>>
+where
+    T: Send
+        + 'static
+        + for<'a> Serialize<HighSerializer<IoWriter<BudgetedBuffer>, ArenaHandle<'a>, RkyvError>>,
+{
+    let buffer = encode_rkyv_buffer(executor, class, cpu, limit, admission, value).await?;
     Ok(ChargedBytes::from_buffer(buffer))
 }
 
-/// Serialize a nested typed-request value while retaining its charge beside the resulting Vec.
+/// Serialize a nested typed-request value while retaining its charge beside the resulting Vec, its
+/// job taking a place on the CPU class as `admission` says (see [`encode_rkyv_with`]).
 pub(crate) async fn encode_rkyv_payload<T>(
     executor: &Executor,
     class: MemoryClass,
     cpu: CpuClass,
     limit: u64,
+    admission: QueueAdmission,
     value: T,
 ) -> Result<EncodedPayload, Report<TransportError>>
 where
@@ -359,7 +392,7 @@ where
         + 'static
         + for<'a> Serialize<HighSerializer<IoWriter<BudgetedBuffer>, ArenaHandle<'a>, RkyvError>>,
 {
-    let buffer = encode_rkyv_buffer(executor, class, cpu, limit, value).await?;
+    let buffer = encode_rkyv_buffer(executor, class, cpu, limit, admission, value).await?;
     let (bytes, reservation) = buffer.into_parts();
     Ok(EncodedPayload { bytes, reservation })
 }
@@ -377,10 +410,28 @@ where
     T::Archived: for<'a> rkyv::bytecheck::CheckBytes<rkyv::api::high::HighValidator<'a, RkyvError>>
         + rkyv::Deserialize<T, rkyv::api::high::HighDeserializer<RkyvError>>,
 {
+    decode_rkyv_with(executor, class, cpu, QueueAdmission::RefuseWhenFull, bytes).await
+}
+
+/// Validate and deserialize one bounded rkyv payload as [`decode_rkyv`] does, its job taking a
+/// place on the CPU class as `admission` says. The memory charges still refuse at once; only the
+/// place on the class's queue is waited for (see [`encode_rkyv_with`]).
+pub(crate) async fn decode_rkyv_with<T>(
+    executor: &Executor,
+    class: MemoryClass,
+    cpu: CpuClass,
+    admission: QueueAdmission,
+    bytes: ChargedBytes,
+) -> Result<Decoded<T>, Report<TransportError>>
+where
+    T: Archive + Send + 'static,
+    T::Archived: for<'a> rkyv::bytecheck::CheckBytes<rkyv::api::high::HighValidator<'a, RkyvError>>
+        + rkyv::Deserialize<T, rkyv::api::high::HighDeserializer<RkyvError>>,
+{
     let decoded_charge = executor
         .try_reserve(class, bytes.len().arch_into())
         .map_err(|error| TransportError::with_cause(error, TransportError::Decode))?;
-    decode_rkyv_charged(executor, cpu, bytes, decoded_charge).await
+    decode_rkyv_charged(executor, cpu, admission, bytes, decoded_charge).await
 }
 
 /// Validate and deserialize one bounded rkyv payload as [`decode_rkyv`] does, but charge the
@@ -406,7 +457,14 @@ where
             return Err(TransportError::with_cause(refusal, TransportError::Decode));
         }
     };
-    let decoded = decode_rkyv_charged(executor, cpu, bytes, decoded_charge).await?;
+    let decoded = decode_rkyv_charged(
+        executor,
+        cpu,
+        QueueAdmission::RefuseWhenFull,
+        bytes,
+        decoded_charge,
+    )
+    .await?;
     Ok(FreeRoom::Taken(decoded))
 }
 
@@ -415,6 +473,7 @@ where
 async fn decode_rkyv_charged<T>(
     executor: &Executor,
     cpu: CpuClass,
+    admission: QueueAdmission,
     bytes: impl ChargedRkyvInput,
     decoded_charge: Reservation,
 ) -> Result<Decoded<T>, Report<TransportError>>
@@ -425,19 +484,24 @@ where
 {
     let max_depth = validation_depth(executor)?;
     executor
-        .run_cpu(cpu, decoded_charge, move |charge, cancellation| {
-            cancellation.check().map_err(|error| {
-                TransportError::with_cause(Report::new(error), TransportError::Decode)
-            })?;
-            let bytes = bytes.as_bytes();
-            let mut aligned = AlignedVec::<16>::with_capacity(bytes.len());
-            aligned.extend_from_slice(bytes);
-            let value = decode_aligned::<T>(&aligned, max_depth)?;
-            Ok(Decoded {
-                value,
-                _reservation: charge,
-            })
-        })
+        .run_cpu_with(
+            cpu,
+            admission,
+            decoded_charge,
+            move |charge, cancellation| {
+                cancellation.check().map_err(|error| {
+                    TransportError::with_cause(Report::new(error), TransportError::Decode)
+                })?;
+                let bytes = bytes.as_bytes();
+                let mut aligned = AlignedVec::<16>::with_capacity(bytes.len());
+                aligned.extend_from_slice(bytes);
+                let value = decode_aligned::<T>(&aligned, max_depth)?;
+                Ok(Decoded {
+                    value,
+                    _reservation: charge,
+                })
+            },
+        )
         .await
         .map_err(|error| TransportError::with_cause(error, TransportError::Decode))?
 }
@@ -456,6 +520,23 @@ where
     T::Archived: for<'a> rkyv::bytecheck::CheckBytes<rkyv::api::high::HighValidator<'a, RkyvError>>
         + rkyv::Deserialize<T, rkyv::api::high::HighDeserializer<RkyvError>>,
 {
+    decode_rkyv_payload_with(executor, class, cpu, QueueAdmission::RefuseWhenFull, bytes).await
+}
+
+/// Validate and deserialize a nested typed-request payload as [`decode_rkyv_payload`] does, its job
+/// taking a place on the CPU class as `admission` says (see [`decode_rkyv_with`]).
+pub(crate) async fn decode_rkyv_payload_with<T>(
+    executor: &Executor,
+    class: MemoryClass,
+    cpu: CpuClass,
+    admission: QueueAdmission,
+    bytes: Vec<u8>,
+) -> Result<Decoded<T>, Report<TransportError>>
+where
+    T: Archive + Send + 'static,
+    T::Archived: for<'a> rkyv::bytecheck::CheckBytes<rkyv::api::high::HighValidator<'a, RkyvError>>
+        + rkyv::Deserialize<T, rkyv::api::high::HighDeserializer<RkyvError>>,
+{
     let reservation = executor
         .try_reserve(class, bytes.len().arch_into())
         .map_err(|error| TransportError::with_cause(error, TransportError::Decode))?;
@@ -463,7 +544,7 @@ where
     let decoded_charge = executor
         .try_reserve(class, bytes.as_bytes().len().arch_into())
         .map_err(|error| TransportError::with_cause(error, TransportError::Decode))?;
-    decode_rkyv_charged(executor, cpu, bytes, decoded_charge).await
+    decode_rkyv_charged(executor, cpu, admission, bytes, decoded_charge).await
 }
 
 fn validation_depth(executor: &Executor) -> Result<NonZeroUsize, Report<TransportError>> {

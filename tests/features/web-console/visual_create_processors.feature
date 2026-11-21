@@ -92,7 +92,7 @@ Feature: Web console visual junction and reingestor creation
       CREATE SCHEMA visual_order_event (message STRING);
       CREATE SCHEMA visual_other_event (message STRING, extra STRING);
       CREATE SCHEMA visual_tenant_key (tenant STRING);
-      CREATE BRANCH visual_tenant SCHEMA visual_tenant_key TTL 5m;
+      CREATE PARAMETRIZER visual_tenant SCHEMA visual_tenant_key TTL 5m;
       CREATE RELAY visual_order_input SCHEMA visual_order_event UNBRANCHED;
       CREATE RELAY visual_order_output SCHEMA visual_order_event UNBRANCHED;
       CREATE RELAY visual_wrong_schema SCHEMA visual_other_event UNBRANCHED;
@@ -185,7 +185,7 @@ Feature: Web console visual junction and reingestor creation
       CREATE VHOST visual_route_host route-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT visual_route_endpoint ON visual_route_host PATH '/route';
       CREATE HTTP ENDPOINT INGESTOR visual_route_ingestor FROM visual_route_endpoint MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING visual_route_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING visual_route_codec
         TO visual_route_input INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
       """
@@ -240,8 +240,8 @@ Feature: Web console visual junction and reingestor creation
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA visual_partition_event (tenant STRING, message STRING);
       CREATE SCHEMA visual_partition_key (tenant STRING);
-      CREATE BRANCH visual_incoming_tenant SCHEMA visual_partition_key TTL 5m;
-      CREATE BRANCH visual_by_tenant SCHEMA visual_partition_key TTL 5m;
+      CREATE PARAMETRIZER visual_incoming_tenant SCHEMA visual_partition_key TTL 5m;
+      CREATE PARAMETRIZER visual_by_tenant SCHEMA visual_partition_key TTL 5m;
       CREATE WIRE JSON SCHEMA visual_partition_wire MODE STRICT (tenant string, message string);
       CREATE WIRE JSON CODEC visual_partition_codec FROM WIRE SCHEMA visual_partition_wire TO SCHEMA visual_partition_event;
       CREATE RELAY visual_partition_input SCHEMA visual_partition_event BRANCHED BY visual_incoming_tenant;
@@ -249,7 +249,7 @@ Feature: Web console visual junction and reingestor creation
       CREATE VHOST visual_partition_host partition-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT visual_partition_endpoint ON visual_partition_host PATH '/partition';
       CREATE HTTP ENDPOINT INGESTOR visual_partition_ingestor FROM visual_partition_endpoint MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING visual_partition_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING visual_partition_codec
         TO visual_partition_input INHERIT ALL
         BRANCHED BY visual_incoming_tenant SET tenant = message.tenant
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG
@@ -264,9 +264,9 @@ Feature: Web console visual junction and reingestor creation
     Then selector ".create-processor-input [data-value='visual_partition_input']" exists
     When selector ".create-processor-input [data-value='visual_partition_input']" is clicked
     And selector ".create-processor-route-branching [data-branch='named']" is clicked
-    And selector ".create-processor-route-branch .create-choice-search" is filled with "visual_by_tenant"
-    Then selector ".create-processor-route-branch [data-value='visual_by_tenant']" exists
-    When selector ".create-processor-route-branch [data-value='visual_by_tenant']" is clicked
+    And selector ".create-processor-route-parametrizer .create-choice-search" is filled with "visual_by_tenant"
+    Then selector ".create-processor-route-parametrizer [data-value='visual_by_tenant']" exists
+    When selector ".create-processor-route-parametrizer [data-value='visual_by_tenant']" is clicked
     And selector ".create-processor-branch-fields .create-choice-search" is filled with "tenant"
     Then selector ".create-processor-branch-fields [data-value='tenant']" exists
     When selector ".create-processor-branch-fields [data-value='tenant']" is clicked
@@ -327,7 +327,7 @@ Feature: Web console visual junction and reingestor creation
       CREATE VHOST visual_sensitive_host sensitive-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT visual_sensitive_endpoint ON visual_sensitive_host PATH '/sensitive';
       CREATE HTTP ENDPOINT INGESTOR visual_sensitive_ingestor FROM visual_sensitive_endpoint MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING visual_sensitive_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING visual_sensitive_codec
         TO visual_sensitive_in INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
       """

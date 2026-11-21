@@ -24,7 +24,7 @@ CREATE SCHEMA chaos_alter_branch_key (
   branch_name STRING
 );
 
-CREATE BRANCH chaos_alter_branch SCHEMA chaos_alter_branch_key TTL 1h;
+CREATE PARAMETRIZER chaos_alter_branch SCHEMA chaos_alter_branch_key TTL 1h;
 
 CREATE RELAY chaos_alter_incoming SCHEMA chaos_alter_record BRANCHED BY chaos_alter_branch CAPACITY 64;
 CREATE RELAY chaos_alter_unique SCHEMA chaos_alter_record BRANCHED BY chaos_alter_branch CAPACITY 64;

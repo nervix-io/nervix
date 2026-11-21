@@ -49,7 +49,7 @@ Feature: Altering relays
       CREATE SCHEMA event_v1 ( seq I64 );
       CREATE SCHEMA event_v2 ( tenant STRING, seq I64 );
       CREATE SCHEMA tenant_branch_schema ( tenant STRING );
-      CREATE BRANCH by_tenant SCHEMA tenant_branch_schema TTL 5m;
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_branch_schema TTL 5m;
       CREATE RELAY events SCHEMA event_v1 UNBRANCHED;
       ALTER RELAY events
         SET CAPACITY 8,

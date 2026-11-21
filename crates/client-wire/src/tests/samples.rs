@@ -474,8 +474,8 @@ fn full_effects() -> ImpactEffects {
         ImpactNodeCoverage::execution(relay.clone(), ConcreteBranchCoverage::Unbranched);
     let junction_execution = ImpactNodeCoverage::execution(
         junction.clone(),
-        ConcreteBranchCoverage::AllOfBranch {
-            branch: name("tenants"),
+        ConcreteBranchCoverage::AllOfParametrizer {
+            parametrizer: name("tenants"),
         },
     );
     let schema = ImpactNodeCoverage::configuration(node(ModelKind::Schema, "orders"));

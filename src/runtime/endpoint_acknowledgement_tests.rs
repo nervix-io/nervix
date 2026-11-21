@@ -22,7 +22,7 @@ fn bolero_endpoint_bodies_preserve_the_complete_client_outcome_object() {
         .with_max_len(64)
         .for_each(|bytes: &[u8]| {
             for byte in bytes {
-                let (outcome, class, cause) = match byte % 9 {
+                let (outcome, class, cause) = match byte % 12 {
                     0 => (EndpointRequestOutcome::Completed, "completed", "none"),
                     1 => (
                         EndpointRequestOutcome::Refused(EndpointInputRefusal::Codec),
@@ -63,6 +63,23 @@ fn bolero_endpoint_bodies_preserve_the_complete_client_outcome_object() {
                         "processing_failed",
                         "rejected",
                     ),
+                    8 => (
+                        EndpointRequestOutcome::NotAdmitted(
+                            EndpointAdmissionRefusal::PauseBufferFull,
+                        ),
+                        "not_admitted",
+                        "busy",
+                    ),
+                    9 => (
+                        EndpointRequestOutcome::NotAdmitted(EndpointAdmissionRefusal::PauseExpired),
+                        "not_admitted",
+                        "suspended",
+                    ),
+                    10 => (
+                        EndpointRequestOutcome::NotAdmitted(EndpointAdmissionRefusal::IntakeEnded),
+                        "not_admitted",
+                        "suspended",
+                    ),
                     _ => (
                         EndpointRequestOutcome::Interrupted,
                         "outcome_unknown",
@@ -71,7 +88,7 @@ fn bolero_endpoint_bodies_preserve_the_complete_client_outcome_object() {
                 };
                 let reply = EndpointRequestReply {
                     outcome,
-                    retry_after: Duration::from_secs(u64::from(*byte)),
+                    retry_after: Some(Duration::from_secs(u64::from(*byte))),
                 };
                 let encoded = reply.body();
                 let decoded: serde_json::Value = serde_json::from_slice(&encoded)

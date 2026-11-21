@@ -264,8 +264,8 @@ representations and every generated location in ordinary and sanitizer execution
 ## Host Memory Admission
 
 An analysis compilation needs about the memory of rustc's own check of its target, and the server
-library's dwarfs every other. Its diagnostic analysis has peaked just over 25 GiB in CI, while other
-crates stay below the 4 GiB threshold. Its 26 GiB reservation accounts for that peak when the host
+library's dwarfs every other. Its diagnostic analysis has peaked just over 26 GiB, while other
+crates stay below the 4 GiB threshold. Its 27 GiB reservation accounts for that peak when the host
 admits compilations. Every configuration builds in a directory of its own, and up to four
 configurations analyze at once, a
 bound `--jobs` or `NERVIX_TYPED_RATCHET_JOBS` sets otherwise; the evidence keeps the declared order
@@ -386,9 +386,13 @@ the collection. The compiler reports the resolved declaration and the reason eve
 expectation is fulfilled. The gate uses the complete checked compiler matrix. It counts one
 declaration across build configurations, requires a repair task link, and compares each declaration
 with the recorded sites in `debt-baseline.json`. Replacing a recorded site with a different one
-fails even at the same total. `just ratchet --show branch_inversions` lists the current sites and
-their repair references. `just ratchet --update` drops the retired declarations from the baseline
-with their count.
+fails even at the same total. Declarations are compared without the compiler's impl
+disambiguators and counted: adding or removing an impl block earlier in a module renumbers the
+declarations after it, `{impl#14}` becoming `{impl#13}`, without changing which declaration each
+is, so a renumbered declaration keeps its pin, while one more declaration under an equal stable
+form is still new. `just ratchet --show branch_inversions` lists the current sites and their repair
+references. `just ratchet --update` drops the retired declarations from the baseline with their
+count and records a renumbered declaration under its current identity.
 
 Source counts and refusals have no semantic exception channel. A current structural occurrence
 remains counted, or refused, until its owner changes it; a compiler expectation cannot hide its

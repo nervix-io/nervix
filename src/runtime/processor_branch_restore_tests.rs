@@ -6,8 +6,8 @@ use std::{collections::VecDeque, time::Duration};
 use ahash::HashMap;
 use arrow_array::{ArrayRef, Int64Array, RecordBatch};
 use nervix_models::{
-    BranchName, CommandExecutionReference, ErrorPolicies, MessageErrorPolicy, ModelKind, ModelName,
-    ParseAsType, RelayName, WasmStateResetReason, WasmStateResetScope,
+    CommandExecutionReference, ErrorPolicies, MessageErrorPolicy, ModelKind, ModelName,
+    ParametrizerName, ParseAsType, RelayName, WasmStateResetReason, WasmStateResetScope,
 };
 use nervix_primitives::{
     publication::ArcSwap,
@@ -117,7 +117,7 @@ impl OpenWindowFixture {
                 Unit::SINGLE,
             ),
             root_relay: input_relay.clone(),
-            branch: Some(named::<BranchName>("by_tenant")),
+            parametrizer: Some(named::<ParametrizerName>("by_tenant")),
             branch_ttl: None,
             branch_max_instances: None,
             error_policies: ErrorPolicies::handled_by_log(),
@@ -510,13 +510,13 @@ async fn a_retired_transition_runs_the_input_its_processor_unit_parked() {
     let mut fixture = OpenWindowFixture::new();
     let unit = Unit::partition(5);
     let partitions = |count: u16| {
-        nervix_models::ResolvedBranchPartitions::Direct(
+        nervix_models::ResolvedParametrizerPartitions::Direct(
             std::num::NonZeroU16::new(count).expect("the test counts are positive"),
         )
     };
     // Unit 5 of a branch growing from four partitions to eight: four placed `beta` in unit 1.
     let transition = partition_claims::UnitPartitionTransition {
-        branch: named::<BranchName>("by_tenant"),
+        parametrizer: named::<ParametrizerName>("by_tenant"),
         epoch: nervix_models::PartitionEpochNumber::FIRST.next(),
         current: RelayPartitioning::of_partitions(partitions(8)),
         previous: RelayPartitioning::of_partitions(partitions(4)),
@@ -548,8 +548,9 @@ async fn a_retired_transition_runs_the_input_its_processor_unit_parked() {
     );
     let input = RelayBroadcast::with_capacity(nonzero_capacity(4));
     let processor = fixture.start_in_transition(&runtime, &domain, &input);
-    let held =
-        || runtime.partition_transition_holdings(&domain, &transition.branch, transition.epoch);
+    let held = || {
+        runtime.partition_transition_holdings(&domain, &transition.parametrizer, transition.epoch)
+    };
     timeout(WAIT, async {
         while held().is_empty() {
             sleep(Duration::from_millis(10)).await;

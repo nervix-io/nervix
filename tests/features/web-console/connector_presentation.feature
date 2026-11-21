@@ -115,15 +115,17 @@ Feature: Visual connector choices follow the entity declarations
     When selector ".create-menu-button" is clicked
     And selector ".create-menu [data-create-kind='ingestor']" is clicked
     And selector ".create-ingestor-source [data-source='<first>']" is clicked
-    And selector ".create-ingestor-source [data-source='<second>']" is clicked
+    Then selector ".create-ingestor-quiesce [data-quiesce='buffer-respond-after-resume']" does not exist
+    And selector ".create-ingestor-quiesce [data-quiesce='buffer-respond-immediate']" does not exist
+    When selector ".create-ingestor-source [data-source='<second>']" is clicked
     Then selector "<current_control>" exists
 
     Examples:
-      | cluster_size | first       | second        | current_control                                          |
-      | 1            | mqtt-topic  | http-endpoint | .create-ingestor-quiesce [data-quiesce='buffer']:enabled |
-      | 3            | mqtt-topic  | http-endpoint | .create-ingestor-quiesce [data-quiesce='buffer']:enabled |
-      | 1            | kafka-topic | nats-subject  | .create-ingestor-instances[placeholder='']               |
-      | 3            | kafka-topic | nats-subject  | .create-ingestor-instances[placeholder='']               |
+      | cluster_size | first       | second        | current_control                                                            |
+      | 1            | mqtt-topic  | http-endpoint | .create-ingestor-quiesce [data-quiesce='buffer-respond-immediate']:enabled |
+      | 3            | mqtt-topic  | http-endpoint | .create-ingestor-quiesce [data-quiesce='buffer-respond-immediate']:enabled |
+      | 1            | kafka-topic | nats-subject  | .create-ingestor-instances[placeholder='']                                 |
+      | 3            | kafka-topic | nats-subject  | .create-ingestor-instances[placeholder='']                                 |
 
   @connector_presentation_current_options
   Scenario Outline: A connection editor exposes the declared literal upgrade headers

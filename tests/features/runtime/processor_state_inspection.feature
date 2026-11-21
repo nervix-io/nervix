@@ -12,13 +12,13 @@ Feature: Bounded typed reorderer and correlator state inspection
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT ( region string, sequence integer, secret string );
       CREATE WIRE JSON CODEC notification_codec FROM WIRE SCHEMA notification_wire TO SCHEMA notification;
       CREATE SCHEMA region_key ( region STRING );
-      CREATE BRANCH by_region SCHEMA region_key TTL 5m;
+      CREATE PARAMETRIZER by_region SCHEMA region_key TTL 5m;
       CREATE RELAY incoming SCHEMA notification BRANCHED BY by_region;
       CREATE RELAY ordered SCHEMA notification BRANCHED BY by_region;
       CREATE VHOST edge reorderer-state-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT ingress ON edge PATH '/notifications';
       CREATE HTTP ENDPOINT INGESTOR notifications FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING notification_codec
         TO incoming INHERIT ALL BRANCHED BY by_region SET region = message.region
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE REORDERER held_notifications
@@ -150,7 +150,7 @@ Feature: Bounded typed reorderer and correlator state inspection
       CREATE WIRE JSON CODEC order_codec FROM WIRE SCHEMA order_wire TO SCHEMA order_event;
       CREATE WIRE JSON CODEC payment_codec FROM WIRE SCHEMA payment_wire TO SCHEMA payment_event;
       CREATE SCHEMA tenant_key ( tenant STRING SENSITIVE );
-      CREATE BRANCH by_tenant SCHEMA tenant_key TTL 5m;
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_key TTL 5m;
       CREATE RELAY orders SCHEMA order_event BRANCHED BY by_tenant;
       CREATE RELAY payments SCHEMA payment_event BRANCHED BY by_tenant;
       CREATE RELAY paid SCHEMA paid_order BRANCHED BY by_tenant;
@@ -158,11 +158,11 @@ Feature: Bounded typed reorderer and correlator state inspection
       CREATE HTTP ENDPOINT order_ingress ON edge PATH '/orders';
       CREATE HTTP ENDPOINT payment_ingress ON edge PATH '/payments';
       CREATE HTTP ENDPOINT INGESTOR order_ingestor FROM order_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING order_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING order_codec
         TO orders INHERIT ALL BRANCHED BY by_tenant SET tenant = message.tenant
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE HTTP ENDPOINT INGESTOR payment_ingestor FROM payment_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING payment_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING payment_codec
         TO payments INHERIT ALL BRANCHED BY by_tenant SET tenant = message.tenant
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE CORRELATOR settle_orders
@@ -271,13 +271,13 @@ Feature: Bounded typed reorderer and correlator state inspection
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT ( region string, sequence integer, secret string );
       CREATE WIRE JSON CODEC notification_codec FROM WIRE SCHEMA notification_wire TO SCHEMA notification;
       CREATE SCHEMA region_key ( region STRING );
-      CREATE BRANCH by_region SCHEMA region_key TTL 5m;
+      CREATE PARAMETRIZER by_region SCHEMA region_key TTL 5m;
       CREATE RELAY incoming SCHEMA notification BRANCHED BY by_region;
       CREATE RELAY ordered SCHEMA notification BRANCHED BY by_region;
       CREATE VHOST edge steady-state-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT ingress ON edge PATH '/notifications';
       CREATE HTTP ENDPOINT INGESTOR notifications FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING notification_codec
         TO incoming INHERIT ALL BRANCHED BY by_region SET region = message.region
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE REORDERER steady_notifications
@@ -342,7 +342,7 @@ Feature: Bounded typed reorderer and correlator state inspection
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT ( region string, sequence integer );
       CREATE WIRE JSON CODEC notification_codec FROM WIRE SCHEMA notification_wire TO SCHEMA notification;
       CREATE SCHEMA region_key ( region STRING );
-      CREATE BRANCH by_region SCHEMA region_key TTL 5m;
+      CREATE PARAMETRIZER by_region SCHEMA region_key TTL 5m;
       CREATE RELAY incoming SCHEMA notification BRANCHED BY by_region;
       CREATE RELAY settlements SCHEMA notification BRANCHED BY by_region;
       CREATE RELAY ordered SCHEMA notification BRANCHED BY by_region;
@@ -350,7 +350,7 @@ Feature: Bounded typed reorderer and correlator state inspection
       CREATE VHOST edge stopped-state-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT ingress ON edge PATH '/notifications';
       CREATE HTTP ENDPOINT INGESTOR notifications FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING notification_codec
         TO incoming INHERIT ALL BRANCHED BY by_region SET region = message.region
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE REORDERER held_notifications

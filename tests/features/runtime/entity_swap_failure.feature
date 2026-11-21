@@ -27,7 +27,7 @@ Feature: A failed entity swap keeps the running domain
         FROM WIRE SCHEMA swap_event_wire
         TO SCHEMA swap_event;
       CREATE SCHEMA swap_tenant ( tenant STRING );
-      CREATE BRANCH by_swap_tenant SCHEMA swap_tenant TTL 1h;
+      CREATE PARAMETRIZER by_swap_tenant SCHEMA swap_tenant TTL 1h;
       CREATE RELAY swap_events SCHEMA swap_event BRANCHED BY by_swap_tenant;
       CREATE RELAY swap_unique_events SCHEMA swap_event BRANCHED BY by_swap_tenant;
       CREATE KAFKA CLIENT swap_kafka CONFIG {

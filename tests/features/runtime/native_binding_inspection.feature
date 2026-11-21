@@ -16,13 +16,13 @@ Feature: Typed state inspection through the native host libraries
       CREATE WIRE JSON SCHEMA inspected_wire MODE STRICT ( tenant string, secret string, sequence integer );
       CREATE WIRE JSON CODEC inspected_codec FROM WIRE SCHEMA inspected_wire TO SCHEMA inspected;
       CREATE SCHEMA inspected_key ( tenant STRING SENSITIVE );
-      CREATE BRANCH by_tenant SCHEMA inspected_key TTL 5m;
+      CREATE PARAMETRIZER by_tenant SCHEMA inspected_key TTL 5m;
       CREATE RELAY populated SCHEMA inspected BRANCHED BY by_tenant
         WITH MATERIALIZED STATE LAST BY TIMESTAMP;
       CREATE VHOST inspection_edge native-inspection-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT inspection_ingress ON inspection_edge PATH '/rows';
       CREATE HTTP ENDPOINT INGESTOR inspected_in FROM inspection_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING inspected_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING inspected_codec
         TO populated INHERIT ALL BRANCHED BY by_tenant SET tenant = message.tenant
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE SUBSCRIPTION inspection_evidence TO populated;

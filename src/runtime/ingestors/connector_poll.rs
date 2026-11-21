@@ -94,7 +94,8 @@ impl RuntimeIngestorHost {
             if entered {
                 self.flush().await?;
             }
-            if self.intake_unacknowledged_payload(payload).await? {
+            // A paced ingestor's transport needs no service between polls.
+            if self.intake_unacknowledged_payload(payload, None).await? {
                 entered = true;
             }
         }

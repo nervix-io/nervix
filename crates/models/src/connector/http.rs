@@ -326,6 +326,14 @@ const HTTP_ENDPOINT_INGESTOR_BOUNDS: DeclaredBounds = DeclaredBounds {
                 overflow: BufferOverflow::RefuseRequest,
             },
         },
+        DeclaredBuffer {
+            holds: "request bodies and their metadata retained during a pause, per node and \
+                    ingestor",
+            bound: BufferBound::Bounded {
+                capacity: BufferCapacity::Setting("ON QUIESCE BUFFER MAX SIZE"),
+                overflow: BufferOverflow::RefuseRequest,
+            },
+        },
     ],
     waits: &[
         DeclaredWait {
@@ -344,7 +352,13 @@ const HTTP_ENDPOINT_INGESTOR_BOUNDS: DeclaredBounds = DeclaredBounds {
         },
         DeclaredWait {
             wait: "graph acknowledgement under MODE ACK",
-            bound: WaitBound::Clause("ACK TIMEOUT, or the exact intake lifetime ending"),
+            bound: WaitBound::Clause(
+                "ACK TIMEOUT from complete body arrival, client disconnect, or intake ending",
+            ),
+        },
+        DeclaredWait {
+            wait: "HTTP MODE NO ACK response under RESPOND AFTER RESUME",
+            bound: WaitBound::Clause("resume, client disconnect, or intake ending"),
         },
     ],
     driver_limits: &[],
@@ -503,7 +517,11 @@ impl IngestorDeclaration for HttpEndpointIngestor {
         position_class: PositionClass::None,
         acknowledgement_confirmation: AcknowledgementConfirmation::None,
         delivery: &[DeclaredDelivery::NO_ACK, DeclaredDelivery::ACK_REQUEST],
-        quiesce: &[DeclaredQuiesce::REJECT, DeclaredQuiesce::ENDPOINT_BUFFER],
+        quiesce: &[
+            DeclaredQuiesce::REJECT,
+            DeclaredQuiesce::ENDPOINT_BUFFER_IMMEDIATE,
+            DeclaredQuiesce::ENDPOINT_BUFFER_AFTER_RESUME,
+        ],
         // Clients send requests whenever they choose, and an endpoint can only answer them.
         rate_limit: crate::RateLimitDeclaration::Unheld,
         locator: None,
@@ -997,10 +1015,10 @@ mod tests {
     #[test]
     fn an_endpoint_declares_the_node_settings_that_bound_each_request() {
         let bounds = HttpEndpointIngestor::CAPABILITIES.bounds;
-        let [head, body, intake, unresolved] = bounds.buffers else {
+        let [head, body, intake, unresolved, retained] = bounds.buffers else {
             panic!(
-                "an HTTP endpoint declares a request head, body, the node's intake pool and the \
-                 requests MODE ACK leaves unresolved"
+                "an HTTP endpoint declares head, body and intake bounds, the ACK window and the \
+                 pause buffer"
             );
         };
         assert_eq!(
@@ -1031,11 +1049,15 @@ mod tests {
                 overflow: BufferOverflow::RefuseRequest,
             }
         );
-        let [head, request_body, acknowledgement] = bounds.waits else {
-            panic!(
-                "an HTTP endpoint waits for a request head, its body and, under MODE ACK, the \
-                 graph's acknowledgement"
-            );
+        assert_eq!(
+            retained.bound,
+            BufferBound::Bounded {
+                capacity: BufferCapacity::Setting("ON QUIESCE BUFFER MAX SIZE"),
+                overflow: BufferOverflow::RefuseRequest,
+            }
+        );
+        let [head, request_body, acknowledgement, unacknowledged_resume] = bounds.waits else {
+            panic!("an HTTP endpoint declares head, body, acknowledgement and resume waits");
         };
         assert_eq!(
             head.bound,
@@ -1053,7 +1075,13 @@ mod tests {
         );
         assert_eq!(
             acknowledgement.bound,
-            WaitBound::Clause("ACK TIMEOUT, or the exact intake lifetime ending")
+            WaitBound::Clause(
+                "ACK TIMEOUT from complete body arrival, client disconnect, or intake ending"
+            )
+        );
+        assert_eq!(
+            unacknowledged_resume.bound,
+            WaitBound::Clause("resume, client disconnect, or intake ending")
         );
         assert_eq!(bounds.deadline_keys(), Vec::new());
     }

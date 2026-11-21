@@ -25,11 +25,11 @@ use arrow_array::{ArrayRef, RecordBatch};
 use arrow_ipc::writer::StreamWriter;
 use arrow_schema::Schema as ArrowSchema;
 use nervix_models::{
-    Assignment, AssignmentTarget, AssignmentTargetScope, BranchName, BranchSelection,
-    ClusterNodeIncarnation, ClusterNodeName, CreateBranch, CreateSchema, DomainConfig, DomainName,
-    DomainPace, DomainState, DomainStatus, ErrorPolicies, Expression, FieldName, FieldReference,
-    FieldScope, IngestQuiesceMode, IngestorName, MessageErrorPolicy, ModelKind, ModelName,
-    OutputBranch, ParseAsType, ProcessorOutput, ProcessorOutputs, RelayName, ResolvedBranching,
+    Assignment, AssignmentTarget, AssignmentTargetScope, BranchSelection, ClusterNodeIncarnation,
+    ClusterNodeName, CreateParametrizer, CreateSchema, DomainConfig, DomainName, DomainPace,
+    DomainState, DomainStatus, ErrorPolicies, Expression, FieldName, FieldReference, FieldScope,
+    IngestQuiesceMode, IngestorName, MessageErrorPolicy, ModelKind, ModelName, OutputBranch,
+    ParametrizerName, ParseAsType, ProcessorOutput, ProcessorOutputs, RelayName, ResolvedBranching,
     ScheduledNode, SchemaField, SchemaFingerprint, SchemaName, Timestamp,
 };
 use nervix_primitives::{
@@ -306,7 +306,7 @@ pub(super) fn branched_by(relay: &str, fields: &[&str]) -> OutputBranch {
         OutputBranch::Unbranched
     } else {
         OutputBranch::BranchedBy {
-            branch: named(&format!("by_{relay}")),
+            parametrizer: named(&format!("by_{relay}")),
             assignments: branch_mappings(fields),
         }
     }
@@ -334,16 +334,16 @@ pub(super) fn branch_mappings(fields: &[&str]) -> Vec<Assignment> {
 }
 
 pub(super) fn branch_model(schema: &str, relay: &str, _fields: &[&str]) -> PlannedModel {
-    let branch = named::<BranchName>(&format!("by_{relay}"));
+    let parametrizer = named::<ParametrizerName>(&format!("by_{relay}"));
     PlannedModel {
-        kind: ModelKind::Branch,
-        identifier: ModelName::from(&branch.clone()),
-        model: nervix_models::Model::Branch(CreateBranch {
+        kind: ModelKind::Parametrizer,
+        identifier: ModelName::from(&parametrizer.clone()),
+        model: nervix_models::Model::Parametrizer(CreateParametrizer {
             labels: Default::default(),
-            name: branch,
+            name: parametrizer,
             schema: named(schema),
             ttl: "5m".to_string(),
-            partitions: nervix_models::BranchPartitions::ONE,
+            partitions: nervix_models::ParametrizerPartitions::ONE,
             eviction: None,
         }),
     }
@@ -422,6 +422,7 @@ pub(super) fn test_ingestor_quiesce_control(
 
 pub(super) fn paced_domain_state(raw: &str) -> DomainState {
     DomainState {
+        labels: nervix_models::EntityLabels::default(),
         id: domain(raw),
         config: DomainConfig {
             pace: DomainPace::Paced {
@@ -443,6 +444,7 @@ pub(super) fn paced_domain_state(raw: &str) -> DomainState {
 
 pub(super) fn unpaced_domain_state(raw: &str) -> DomainState {
     DomainState {
+        labels: nervix_models::EntityLabels::default(),
         id: domain(raw),
         config: DomainConfig {
             pace: DomainPace::Unpaced,
@@ -577,7 +579,7 @@ pub(super) fn test_named_branching(
                 })
                 .collect(),
         },
-        nervix_models::ResolvedBranchPartitions::ONE,
+        nervix_models::ResolvedParametrizerPartitions::ONE,
     )
 }
 
@@ -1036,7 +1038,7 @@ impl EntrypointTestDomain<'_> {
                 name: named("entrypoint_branch"),
                 fields: Self::schema_fields(self.branch_fields),
             },
-            nervix_models::ResolvedBranchPartitions::ONE,
+            nervix_models::ResolvedParametrizerPartitions::ONE,
         )
     }
 
@@ -1107,19 +1109,19 @@ impl EntrypointTestDomain<'_> {
             let branching = if self.branch_fields.is_empty() {
                 nervix_models::RelayBranching::unbranched()
             } else {
-                let branch = named::<BranchName>(&format!("by_{relay}"));
+                let parametrizer = named::<ParametrizerName>(&format!("by_{relay}"));
                 nodes.push(ScheduledNode::new(
-                    nervix_models::Model::Branch(CreateBranch {
+                    nervix_models::Model::Parametrizer(CreateParametrizer {
                         labels: Default::default(),
-                        name: branch.clone(),
+                        name: parametrizer.clone(),
                         schema: named("entrypoint_branch"),
                         ttl: "5m".to_string(),
-                        partitions: nervix_models::BranchPartitions::ONE,
+                        partitions: nervix_models::ParametrizerPartitions::ONE,
                         eviction: None,
                     }),
                     fingerprint,
                 ));
-                nervix_models::RelayBranching::branched_by(branch)
+                nervix_models::RelayBranching::branched_by(parametrizer)
             };
             nodes.push(
                 ScheduledNode::new(
@@ -1315,7 +1317,7 @@ pub(super) fn junction_branch_template(
             Unit::SINGLE,
         ),
         root_relay: input_relay.clone(),
-        branch: None,
+        parametrizer: None,
         branch_ttl: None,
         branch_max_instances: None,
         error_policies: ErrorPolicies::handled_by_log(),

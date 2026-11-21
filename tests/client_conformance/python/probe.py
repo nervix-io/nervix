@@ -1182,13 +1182,13 @@ def run_inspection(session, report):
     assert len(unit.origin_fingerprint) == 32 and unit.origin_stage == nx.InspectionStage.LIVE
     section = unit.sections[0]
     schema = section.schema
-    assert schema.branch == "by_tenant" and schema.key_fields[0].sensitive
+    assert schema.parametrizer == "by_tenant" and schema.key_fields[0].sensitive
     assert [field.name for field in schema.fields[:3]] == ["tenant", "secret", "sequence"]
     assert schema.fields[0].sensitive and schema.fields[1].sensitive
     assert schema.fields[2].type == nx.FieldType.I64
     assert section.omitted_rows == 1 and section.watermark_low != section.watermark_high
     frame = section.frames[0]
-    assert frame.row_count == 1 and frame.schema.branch == schema.branch
+    assert frame.row_count == 1 and frame.schema.parametrizer == schema.parametrizer
     view = frame.frame
     expected = bytes(view)
     assert view.readonly and expected
@@ -1250,8 +1250,8 @@ def main():
     fields, key_fields = described(schema.fields), described(schema.key_fields)
     for field in fields:
         report(field_line("FIELD", field))
-    if schema.branch is not None:
-        report(f"BRANCH {schema.branch}")
+    if schema.parametrizer is not None:
+        report(f"PARAMETRIZER {schema.parametrizer}")
     for field in key_fields:
         report(field_line("KEY", field))
     report("SUBSCRIBED")

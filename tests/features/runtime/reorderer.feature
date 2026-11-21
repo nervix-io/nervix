@@ -17,7 +17,7 @@ Feature: Reorderer
         TO SCHEMA notification
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
         CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
-        CREATE IF NOT EXISTS BRANCH by_http_notifications SCHEMA tenant_branch TTL 5m;
+        CREATE IF NOT EXISTS PARAMETRIZER by_http_notifications SCHEMA tenant_branch TTL 5m;
         CREATE RELAY incoming_notifications SCHEMA notification BRANCHED BY by_http_notifications;
         CREATE RELAY ordered_notifications SCHEMA notification BRANCHED BY by_http_notifications;
         CREATE RELAY filtered_notifications SCHEMA notification BRANCHED BY by_http_notifications;
@@ -27,7 +27,7 @@ Feature: Reorderer
         PATH '/ingest';
         CREATE HTTP ENDPOINT INGESTOR http_notifications
         FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING notification_codec
         TO incoming_notifications
         INHERIT ALL
         BRANCHED BY by_http_notifications
@@ -104,7 +104,7 @@ Feature: Reorderer
         TO SCHEMA notification
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
         CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
-        CREATE IF NOT EXISTS BRANCH by_http_notifications SCHEMA tenant_branch TTL 5m;
+        CREATE IF NOT EXISTS PARAMETRIZER by_http_notifications SCHEMA tenant_branch TTL 5m;
         CREATE RELAY incoming_notifications SCHEMA notification BRANCHED BY by_http_notifications;
         CREATE RELAY ordered_notifications SCHEMA notification BRANCHED BY by_http_notifications;
         CREATE VHOST edge http-{{test_id}}.example.com;
@@ -113,7 +113,7 @@ Feature: Reorderer
         PATH '/ingest';
         CREATE HTTP ENDPOINT INGESTOR http_notifications
         FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING notification_codec
         TO incoming_notifications
         INHERIT ALL
         BRANCHED BY by_http_notifications
@@ -182,7 +182,7 @@ Feature: Reorderer
         sequence I64
       );
         CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
-        CREATE IF NOT EXISTS BRANCH by_order_notifications SCHEMA tenant_branch TTL 5m;
+        CREATE IF NOT EXISTS PARAMETRIZER by_order_notifications SCHEMA tenant_branch TTL 5m;
         CREATE RELAY incoming_notifications SCHEMA notification BRANCHED BY by_order_notifications;
         CREATE RELAY ordered_notifications SCHEMA notification BRANCHED BY by_order_notifications;
         CREATE REORDERER order_notifications
@@ -228,7 +228,7 @@ Feature: Reorderer
         FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
         CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
-        CREATE IF NOT EXISTS BRANCH by_reorder_default SCHEMA tenant_branch TTL 5m;
+        CREATE IF NOT EXISTS PARAMETRIZER by_reorder_default SCHEMA tenant_branch TTL 5m;
         CREATE RELAY default_preferences
         SCHEMA preference BRANCHED BY by_reorder_default
         WITH MATERIALIZED STATE LAST BY TIMESTAMP;
@@ -240,7 +240,7 @@ Feature: Reorderer
         PATH '/reorder-default';
         CREATE HTTP ENDPOINT INGESTOR http_notifications
         FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING notification_codec
         TO incoming_notifications
         INHERIT ALL
         BRANCHED BY by_reorder_default

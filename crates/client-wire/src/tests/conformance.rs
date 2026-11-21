@@ -455,6 +455,26 @@ fn corpus_frames() -> Vec<(&'static str, Bytes)> {
             reply(6, ReplyBody::Command(Box::new(backup))),
         ),
         (
+            "server_command_domain_labels.nxsm",
+            reply(
+                25,
+                ReplyBody::Command(Box::new({
+                    let mut outcome = command_outcome(CommandDisposition::Completed {
+                        already_existed: false,
+                    });
+                    outcome.entity_labels =
+                        Some(Box::new(crate::entity_labels::tests::owner_inspection(
+                            nervix_models::EntityLabelOwner::Domain {
+                                name: name("sales"),
+                            },
+                            false,
+                            41,
+                        )));
+                    outcome
+                })),
+            ),
+        ),
+        (
             "server_command_failed.nxsm",
             command(1, CommandDisposition::Failed),
         ),
@@ -586,6 +606,29 @@ fn corpus_frames() -> Vec<(&'static str, Bytes)> {
             ),
         ),
         (
+            "server_command_resource_labels_staged.nxsm",
+            reply(
+                26,
+                ReplyBody::Command(Box::new({
+                    let mut outcome = command_outcome(CommandDisposition::Completed {
+                        already_existed: false,
+                    });
+                    outcome.entity_labels =
+                        Some(Box::new(crate::entity_labels::tests::owner_inspection(
+                            nervix_models::EntityLabelOwner::Resource(
+                                nervix_models::ResourceCatalogKey::new(
+                                    &name("sales"),
+                                    &name("bundle"),
+                                ),
+                            ),
+                            true,
+                            41,
+                        )));
+                    outcome
+                })),
+            ),
+        ),
+        (
             "server_command_restore.nxsm",
             reply(19, ReplyBody::Command(Box::new(restore))),
         ),
@@ -624,6 +667,26 @@ fn corpus_frames() -> Vec<(&'static str, Bytes)> {
             command(
                 4,
                 CommandDisposition::OutcomeUnknown(UnknownOutcomeCause::StillApplying),
+            ),
+        ),
+        (
+            "server_command_user_labels.nxsm",
+            reply(
+                27,
+                ReplyBody::Command(Box::new({
+                    let mut outcome = command_outcome(CommandDisposition::Completed {
+                        already_existed: false,
+                    });
+                    outcome.entity_labels =
+                        Some(Box::new(crate::entity_labels::tests::owner_inspection(
+                            nervix_models::EntityLabelOwner::User {
+                                name: name("operator"),
+                            },
+                            false,
+                            41,
+                        )));
+                    outcome
+                })),
             ),
         ),
         (
@@ -1334,7 +1397,7 @@ fn schema_lines(schema: &RowSchema, lines: &mut Vec<String>) {
         lines.push(field_line("FIELD", field));
     }
     if let Some(branch) = &schema.branch {
-        lines.push(format!("BRANCH {}", branch.branch().as_str()));
+        lines.push(format!("PARAMETRIZER {}", branch.parametrizer().as_str()));
         for field in branch.fields() {
             lines.push(field_line("KEY", field));
         }
@@ -2316,9 +2379,12 @@ fn render_entity_labels(value: &nervix_models::EntityLabelsInspection, lines: &m
     let policy = value.policy();
     lines.push(format!(
         "ENTITY_LABELS domain={} kind={} name={} policy={} limits={}/{}/{}/{}",
-        entity.domain,
-        entity.node.kind.as_str().replace('_', ""),
-        entity.node.identifier,
+        entity.domain().map_or("none", |domain| domain.as_str()),
+        entity
+            .keyword_phrase()
+            .replace(' ', "")
+            .to_ascii_lowercase(),
+        entity.name(),
         policy.revision,
         policy.limits.count,
         policy.limits.key_bytes,
@@ -2405,6 +2471,54 @@ fn render_wasm_unit_state(state: &nervix_models::WasmUnitStateInspection, lines:
                 recovery.rejection,
                 recovery.request.as_str(),
                 recovery.outcome
+            ));
+        }
+        if let Some(description) = &entry.description {
+            render_wasm_description(&branch, description, lines);
+        }
+    }
+}
+
+/// A guest-state description: its restored generation and revision, then either its sections,
+/// each with its fields, or the stage and diagnostic of its failed render.
+fn render_wasm_description(
+    branch: &str,
+    description: &nervix_models::WasmGuestStateDescription,
+    lines: &mut Vec<String>,
+) {
+    let restored = format!(
+        "STATE_WASM_DESCRIPTION branch={branch} generation={} revision={}",
+        description.generation,
+        optional_text(description.revision)
+    );
+    match &description.render {
+        nervix_models::WasmGuestStateRender::Described { sections } => {
+            lines.push(format!(
+                "{restored} outcome=described sections={}",
+                sections.len()
+            ));
+            for section in sections {
+                lines.push(format!(
+                    "STATE_WASM_SECTION branch={branch} name={} rows={} fields={}",
+                    section.name.as_str(),
+                    section.rows,
+                    section.fields.len()
+                ));
+                for field in &section.fields {
+                    let row_field = SchemaField {
+                        name: field.name.clone(),
+                        ty: field.ty.clone(),
+                        optional: field.optional,
+                        sensitive: true,
+                    };
+                    lines.push(field_line("STATE_WASM_FIELD", &row_field));
+                }
+            }
+        }
+        nervix_models::WasmGuestStateRender::Failed { stage, diagnostic } => {
+            lines.push(format!(
+                "{restored} outcome=failed stage={stage:?} diagnostic={}",
+                text(diagnostic)
             ));
         }
     }

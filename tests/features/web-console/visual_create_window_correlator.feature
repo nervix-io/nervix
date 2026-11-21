@@ -10,7 +10,7 @@ Feature: Web console visual window processor and correlator creation
       CREATE SCHEMA visual_window_event (tenant STRING, latency I64);
       CREATE SCHEMA visual_window_summary (tenant STRING, samples I64, total I64, spread I64);
       CREATE SCHEMA visual_window_key (tenant STRING);
-      CREATE BRANCH visual_window_tenant SCHEMA visual_window_key TTL 5m;
+      CREATE PARAMETRIZER visual_window_tenant SCHEMA visual_window_key TTL 5m;
       CREATE JAQ JSON CODEC visual_window_codec TO SCHEMA visual_window_event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE RELAY visual_window_input SCHEMA visual_window_event BRANCHED BY visual_window_tenant;
@@ -18,7 +18,7 @@ Feature: Web console visual window processor and correlator creation
       CREATE VHOST visual_window_host window-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT visual_window_endpoint ON visual_window_host PATH '/window';
       CREATE HTTP ENDPOINT INGESTOR visual_window_ingestor FROM visual_window_endpoint MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING visual_window_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING visual_window_codec
         TO visual_window_input INHERIT ALL BRANCHED BY visual_window_tenant SET tenant = message.tenant
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
@@ -29,9 +29,9 @@ Feature: Web console visual window processor and correlator creation
     And selector ".create-menu [data-create-kind='window-processor']" is clicked
     And selector ".create-name" is filled with "visual_window_stage"
     And selector ".create-processor-branching [data-branch='named']" is clicked
-    And selector ".create-processor-branch .create-choice-search" is filled with "visual_window_tenant"
-    Then selector ".create-processor-branch [data-value='visual_window_tenant']" exists
-    When selector ".create-processor-branch [data-value='visual_window_tenant']" is clicked
+    And selector ".create-processor-parametrizer .create-choice-search" is filled with "visual_window_tenant"
+    Then selector ".create-processor-parametrizer [data-value='visual_window_tenant']" exists
+    When selector ".create-processor-parametrizer [data-value='visual_window_tenant']" is clicked
     And selector ".create-processor-input .create-choice-search" is filled with "visual_window_input"
     Then selector ".create-processor-input [data-value='visual_window_input']" exists
     When selector ".create-processor-input [data-value='visual_window_input']" is clicked
@@ -121,7 +121,7 @@ Feature: Web console visual window processor and correlator creation
       CREATE SCHEMA visual_payment_event (tenant STRING, order_id STRING, amount I64);
       CREATE SCHEMA visual_paid_order (tenant STRING, order_id STRING, item STRING, amount I64);
       CREATE SCHEMA visual_correlate_key (tenant STRING);
-      CREATE BRANCH visual_correlate_tenant SCHEMA visual_correlate_key TTL 5m;
+      CREATE PARAMETRIZER visual_correlate_tenant SCHEMA visual_correlate_key TTL 5m;
       CREATE JAQ JSON CODEC visual_order_codec TO SCHEMA visual_order_event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE JAQ JSON CODEC visual_payment_codec TO SCHEMA visual_payment_event
@@ -134,12 +134,12 @@ Feature: Web console visual window processor and correlator creation
       CREATE HTTP ENDPOINT visual_orders_endpoint ON visual_correlate_host PATH '/orders';
       CREATE HTTP ENDPOINT visual_payments_endpoint ON visual_correlate_host PATH '/payments';
       CREATE HTTP ENDPOINT INGESTOR visual_orders_ingestor FROM visual_orders_endpoint MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING visual_order_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING visual_order_codec
         TO visual_orders INHERIT ALL BRANCHED BY visual_correlate_tenant SET tenant = message.tenant
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
       CREATE HTTP ENDPOINT INGESTOR visual_payments_ingestor FROM visual_payments_endpoint MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING visual_payment_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING visual_payment_codec
         TO visual_payments INHERIT ALL BRANCHED BY visual_correlate_tenant SET tenant = message.tenant
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
@@ -152,9 +152,9 @@ Feature: Web console visual window processor and correlator creation
     # A correlator filters each side on its own and has no node-wide filter.
     Then selector ".create-processor-filter" does not exist
     When selector ".create-processor-branching [data-branch='named']" is clicked
-    And selector ".create-processor-branch .create-choice-search" is filled with "visual_correlate_tenant"
-    Then selector ".create-processor-branch [data-value='visual_correlate_tenant']" exists
-    When selector ".create-processor-branch [data-value='visual_correlate_tenant']" is clicked
+    And selector ".create-processor-parametrizer .create-choice-search" is filled with "visual_correlate_tenant"
+    Then selector ".create-processor-parametrizer [data-value='visual_correlate_tenant']" exists
+    When selector ".create-processor-parametrizer [data-value='visual_correlate_tenant']" is clicked
     And selector ".create-processor-input .create-choice-search" is filled with "visual_orders"
     Then selector ".create-processor-input [data-value='visual_orders']" exists
     When selector ".create-processor-input [data-value='visual_orders']" is clicked

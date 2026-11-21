@@ -44,7 +44,11 @@ impl SessionServiceImpl {
             None
         } else {
             match &applying.effect {
-                Some(TransactionStepEffect::CreateResourceCatalog { .. }) | None => {
+                Some(
+                    TransactionStepEffect::CreateResourceCatalog { .. }
+                    | TransactionStepEffect::EditResourceLabels { .. },
+                )
+                | None => {
                     if self
                         .wait_for_authoritative_visibility()
                         .await

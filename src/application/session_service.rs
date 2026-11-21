@@ -970,7 +970,7 @@ fn choices_for(request: &ChoiceLookupRequest) -> Result<Vec<Choice>, ChoiceStatu
         ChoiceTarget::DomainPace
         | ChoiceTarget::PlacementPolicy
         | ChoiceTarget::Schema
-        | ChoiceTarget::Branch
+        | ChoiceTarget::Parametrizer
         | ChoiceTarget::Relay
         | ChoiceTarget::RelayField => {
             return Err(ChoiceStatus::MissingContext);
@@ -1271,7 +1271,7 @@ impl SessionServiceImpl {
                 choices_for(&request).map(|choices| (choices, None))
             }
             ChoiceTarget::Schema
-            | ChoiceTarget::Branch
+            | ChoiceTarget::Parametrizer
             | ChoiceTarget::Relay
             | ChoiceTarget::RelayField
             | ChoiceTarget::WireJsonSchema
@@ -2199,8 +2199,8 @@ mod tests {
         assert_eq!(response.diagnostics[0].span, Some(42..47));
 
         let query = "CREATE HTTP ENDPOINT INGESTOR logs FROM socket MODE NO ACK ON QUIESCE BUFFER \
-                     MAX SIZE 1MiB DECODE USING lines TO events INHERIT ALL UNBRANCHED FLUSH \
-                     IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;";
+                     MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING lines TO events INHERIT ALL \
+                     UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;";
         let err = error_stack::Report::new(RegistryError::IngestorEndpointTypeMismatch {
             domain: domain.clone(),
             ingestor: ingestor.clone(),
@@ -2451,7 +2451,7 @@ mod tests {
             &service,
             &subscriptions,
             "CREATE HTTP ENDPOINT INGESTOR source FROM ingress MODE NO ACK ON QUIESCE BUFFER MAX \
-             SIZE 1MiB DECODE USING codec TO outgoing SET value = read_",
+             SIZE 1MiB RESPOND IMMEDIATE DECODE USING codec TO outgoing SET value = read_",
         )
         .await;
         assert_eq!(endpoint, vec!["read_header", "read_headers"]);

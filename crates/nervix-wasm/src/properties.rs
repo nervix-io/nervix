@@ -1,7 +1,8 @@
 //! The native host's complete guest-message conversions.
 //!
 //! Layer: test harness.
-//! - **Owns.** Exact envelope equality and the explicitly projected ABI schema contract.
+//! - **Owns.** Exact envelope equality, the explicitly projected ABI schema contract and the
+//!   state descriptions a guest sends back.
 //! - **Depends on.** Production host conversions, vocabulary and guest message generators.
 //! - **Must not know.** Guest callbacks, runtime scheduling or durable checkpoint publication.
 
@@ -85,9 +86,78 @@ fn bolero_host_schema_preserves_the_complete_abi_projection() {
                 field.sensitive = true;
             }
             assert_eq!(WasmProcessorSchema::from(&promoted), host);
+            // A schema a guest sends back, as a state description section does, is the host schema
+            // it was projected from, and every declared type names the exact Nervix type again.
+            assert_eq!(
+                WasmProcessorSchema::from_protocol(decoded.input_schema.clone()),
+                host
+            );
+            for (original, projected) in schema.fields.iter().zip(&host.fields) {
+                assert_eq!(
+                    ParseAsType::try_from(&projected.ty)
+                        .assured("a projected type names a Nervix type"),
+                    original.ty
+                );
+            }
             let mut builder = FlatBufferBuilder::with_capacity(1);
             protocol.encode_in(&mut builder);
             assert_eq!(builder.finished_data(), protocol.encode());
+        });
+}
+
+/// Whether `ty` declares, at any depth, an ARRAY of zero elements, which no Nervix type is.
+fn declares_an_empty_array(ty: &WasmProcessorType) -> bool {
+    match ty {
+        WasmProcessorType::Array { element, len } => *len == 0 || declares_an_empty_array(element),
+        WasmProcessorType::Vec { element } => declares_an_empty_array(element),
+        WasmProcessorType::U8
+        | WasmProcessorType::I8
+        | WasmProcessorType::U16
+        | WasmProcessorType::I16
+        | WasmProcessorType::U32
+        | WasmProcessorType::I32
+        | WasmProcessorType::U64
+        | WasmProcessorType::I64
+        | WasmProcessorType::Bool
+        | WasmProcessorType::String
+        | WasmProcessorType::Bytes
+        | WasmProcessorType::Datetime
+        | WasmProcessorType::F32
+        | WasmProcessorType::F64 => false,
+    }
+}
+
+#[test]
+fn bolero_host_state_descriptions_preserve_sections_and_refuse_empty_arrays() {
+    bolero::check!()
+        .with_iterations(256)
+        .with_max_len(2048)
+        .for_each(|bytes| {
+            let mut values = WasmValues::new(bytes);
+            let original = values.state_description();
+            let decoded = protocol::StateDescription::decode(&original.encode())
+                .assured("a valid state description verifies");
+            let host = WasmStateDescription::from_protocol(decoded);
+            assert_eq!(host.sections.len(), original.sections.len());
+            for (section, expected) in host.sections.iter().zip(&original.sections) {
+                assert_eq!(section.schema.to_protocol(), expected.schema);
+                assert_eq!(section.arrow_ipc_batch, expected.arrow_ipc_batch);
+                for field in &section.schema.fields {
+                    match ParseAsType::try_from(&field.ty) {
+                        Ok(parsed) => {
+                            assert!(!declares_an_empty_array(&field.ty));
+                            assert_eq!(WasmProcessorType::from(&parsed), field.ty);
+                        }
+                        Err(refusal) => {
+                            assert!(matches!(
+                                refusal.current_context(),
+                                WasmProcessorTypeError::EmptyArray
+                            ));
+                            assert!(declares_an_empty_array(&field.ty));
+                        }
+                    }
+                }
+            }
         });
 }
 

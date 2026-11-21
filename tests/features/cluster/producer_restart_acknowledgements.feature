@@ -22,7 +22,7 @@ Feature: Remote acknowledgements across a producer restart
       CREATE WIRE JSON CODEC restart_ack_codec
         FROM WIRE SCHEMA restart_ack_wire TO SCHEMA restart_ack_event;
       CREATE SCHEMA restart_ack_key ( branch_name STRING );
-      CREATE BRANCH restart_ack_branch SCHEMA restart_ack_key TTL 5m;
+      CREATE PARAMETRIZER restart_ack_branch SCHEMA restart_ack_key TTL 5m;
       CREATE RELAY restart_ack_before_records SCHEMA restart_ack_event
         BRANCHED BY restart_ack_branch;
       CREATE RELAY restart_ack_after_records SCHEMA restart_ack_event

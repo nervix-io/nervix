@@ -1115,13 +1115,13 @@ mod tests {
 
     use nervix_models::{
         AckMode, BranchSelection, ClusterNodeIdentity, ClusterNodeIncarnation, CodecWireFormat,
-        CreateBranch, CreateCodec, CreateEndpoint, CreateGenerator, CreateLookup, CreateReingestor,
-        CreateRelay, CreateSchema, CreateSignalingProtocol, CreateVhost, CreateWireSchema,
-        DomainClockState, DomainConfig, DomainPace, DomainState, DomainStatus, DomainTick,
-        DomainTimeRate, FlushPolicy, JsonType, MaterializedRelayState, MessageErrorPolicy, Model,
-        OutputBranch, ParseAsType, ProcessorInputs, ProcessorOutput, ProcessorOutputs,
-        RelayBranching, SchemaField, SchemaFingerprint, SignalingProtocolOnConnect,
-        SignalingWireFormat, Timestamp, WireSchemaField,
+        CreateCodec, CreateEndpoint, CreateGenerator, CreateLookup, CreateParametrizer,
+        CreateReingestor, CreateRelay, CreateSchema, CreateSignalingProtocol, CreateVhost,
+        CreateWireSchema, DomainClockState, DomainConfig, DomainPace, DomainState, DomainStatus,
+        DomainTick, DomainTimeRate, FlushPolicy, JsonType, MaterializedRelayState,
+        MessageErrorPolicy, Model, OutputBranch, ParseAsType, ProcessorInputs, ProcessorOutput,
+        ProcessorOutputs, RelayBranching, SchemaField, SchemaFingerprint,
+        SignalingProtocolOnConnect, SignalingWireFormat, Timestamp, WireSchemaField,
     };
     use nonzero_ext::nonzero;
 
@@ -1318,6 +1318,7 @@ mod tests {
         domains.insert(
             domain("paced"),
             DomainState {
+                labels: nervix_models::EntityLabels::default(),
                 id: domain("paced"),
                 config: DomainConfig {
                     pace: DomainPace::Paced {
@@ -1890,19 +1891,19 @@ mod tests {
         .with_resolved_branching(Some(ResolvedBranching::branched(
             named("by_tenant"),
             tenant_schema("tenant_key"),
-            nervix_models::ResolvedBranchPartitions::ONE,
+            nervix_models::ResolvedParametrizerPartitions::ONE,
         )));
         let schedule = DomainSchedule::new(
             domain.clone(),
             vec![
                 scheduled_model(Model::Schema(tenant_schema("payload"))),
                 scheduled_model(Model::Schema(tenant_schema("tenant_key"))),
-                scheduled_model(Model::Branch(CreateBranch {
+                scheduled_model(Model::Parametrizer(CreateParametrizer {
                     labels: Default::default(),
                     name: named("by_tenant"),
                     schema: named("tenant_key"),
                     ttl: "5m".to_string(),
-                    partitions: nervix_models::BranchPartitions::ONE,
+                    partitions: nervix_models::ParametrizerPartitions::ONE,
                     eviction: None,
                 })),
                 scheduled_model(tenant_relay("incoming", RelayBranching::unbranched())),

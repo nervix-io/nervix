@@ -280,8 +280,9 @@ impl SessionServiceImpl {
             )
             .change_context(LicensingOperationError::Admission)?;
         let received = executor
-            .run_cpu(
+            .run_cpu_with(
                 CpuClass::Control,
+                nervix_execution::QueueAdmission::WaitForPlace,
                 reservation,
                 move |_reservation, cancellation| {
                     cancellation

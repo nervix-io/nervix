@@ -5,7 +5,7 @@ Feature: Explicit branches
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these Plexus commands fail with "branch name 'by_output_tenant' does not match relay 'input_notifications' branch name 'by_input_tenant'"
+    When these Plexus commands fail with "parametrizer 'by_output_tenant' does not match relay 'input_notifications' parametrizer 'by_input_tenant'"
       """
       CREATE SCHEMA notification (
         tenant STRING,
@@ -16,10 +16,10 @@ Feature: Explicit branches
         tenant STRING
       );
 
-      CREATE BRANCH by_input_tenant
+      CREATE PARAMETRIZER by_input_tenant
         SCHEMA tenant_branch TTL 5m;
 
-      CREATE BRANCH by_output_tenant
+      CREATE PARAMETRIZER by_output_tenant
         SCHEMA tenant_branch TTL 5m;
 
       CREATE RELAY input_notifications
@@ -73,7 +73,7 @@ Feature: Explicit branches
 
       CREATE SCHEMA tenant_branch ( tenant STRING );
 
-      CREATE BRANCH by_tenant
+      CREATE PARAMETRIZER by_tenant
         SCHEMA tenant_branch TTL 5m MAX INSTANCES 1 EVICT LRU;
 
       CREATE RELAY notifications
@@ -89,7 +89,7 @@ Feature: Explicit branches
 
       CREATE HTTP ENDPOINT INGESTOR http_notifications
         FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING notification_codec
         TO notifications
         INHERIT ALL
         BRANCHED BY by_tenant

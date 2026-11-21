@@ -12,8 +12,8 @@ Feature: Delivery latency metrics
       CREATE PACED DOMAIN {{domain}} WITH PERIOD 1m SKEW 1m;
       CREATE SCHEMA reading ( tenant STRING, sequence I64, occurred_at DATETIME );
       CREATE SCHEMA tenant_key ( tenant STRING );
-      CREATE BRANCH tenants SCHEMA tenant_key TTL 1h;
-      CREATE BRANCH reingested_tenants SCHEMA tenant_key TTL 1h;
+      CREATE PARAMETRIZER tenants SCHEMA tenant_key TTL 1h;
+      CREATE PARAMETRIZER reingested_tenants SCHEMA tenant_key TTL 1h;
       CREATE JAQ JSON CODEC reading_batch_codec TO SCHEMA reading
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE WIRE JSON SCHEMA reading_wire MODE STRICT ( tenant string, sequence integer, occurred_at string );
@@ -26,7 +26,7 @@ Feature: Delivery latency metrics
       CREATE VHOST edge delivery-latency-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT ingress ON edge PATH '/readings';
       CREATE HTTP ENDPOINT INGESTOR ingestor FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING reading_batch_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING reading_batch_codec
         TIMESTAMP AT occurred_at
         TO raw_readings INHERIT ALL BRANCHED BY tenants SET tenant = message.tenant
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;

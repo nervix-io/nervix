@@ -431,7 +431,7 @@ Feature: Session protocol
       CREATE HTTP ENDPOINT held_ingress ON held_edge PATH '/held';
       CREATE HTTP ENDPOINT INGESTOR held_ingestor
         FROM held_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING held_event_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING held_event_codec
         TO held_events
         INHERIT ALL
         UNBRANCHED

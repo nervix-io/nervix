@@ -21,7 +21,7 @@ use ahash::HashMap;
 use error_stack::Report;
 use futures_util::{Stream, StreamExt as _};
 use meticulous::{OptionExt as _, ResultExt as _};
-use nervix_execution::{BudgetedBuffer, ChargedBytes, Executor, Reservation};
+use nervix_execution::{BudgetedBuffer, ChargedBytes, Executor, QueueAdmission, Reservation};
 use nervix_models::{
     ClusterNodeIdentity, ClusterNodeName, CoordinationIdentity, DomainClockAuthorityRevision,
     DomainName,
@@ -215,6 +215,11 @@ impl RequestContext {
 }
 
 /// A value that the transport can validate and encode as bounded rkyv.
+///
+/// [`encode_rkyv`](Self::encode_rkyv) and [`decode_rkyv`](Self::decode_rkyv) refuse at once when
+/// the class's CPU queue has no place, which suits a request its caller still holds. The `_with`
+/// forms take the admission from the caller, so a response, which carries work its handler already
+/// did, waits for a place instead.
 #[doc(hidden)]
 pub trait RkyvMessage: Archive + Sized + Send + 'static {
     fn encode_rkyv(
@@ -222,11 +227,30 @@ pub trait RkyvMessage: Archive + Sized + Send + 'static {
         executor: Executor,
         class: PoolClass,
         limit: u64,
+    ) -> impl Future<Output = Result<(Vec<u8>, Reservation), Report<TransportError>>> + Send {
+        self.encode_rkyv_with(executor, class, limit, QueueAdmission::RefuseWhenFull)
+    }
+
+    fn encode_rkyv_with(
+        self,
+        executor: Executor,
+        class: PoolClass,
+        limit: u64,
+        admission: QueueAdmission,
     ) -> impl Future<Output = Result<(Vec<u8>, Reservation), Report<TransportError>>> + Send;
 
     fn decode_rkyv(
         executor: Executor,
         class: PoolClass,
+        payload: Vec<u8>,
+    ) -> impl Future<Output = Result<(Self, Reservation), Report<TransportError>>> + Send {
+        Self::decode_rkyv_with(executor, class, QueueAdmission::RefuseWhenFull, payload)
+    }
+
+    fn decode_rkyv_with(
+        executor: Executor,
+        class: PoolClass,
+        admission: QueueAdmission,
         payload: Vec<u8>,
     ) -> impl Future<Output = Result<(Self, Reservation), Report<TransportError>>> + Send;
 }
@@ -241,32 +265,36 @@ where
     T::Archived: for<'a> rkyv::bytecheck::CheckBytes<rkyv::api::high::HighValidator<'a, RkyvError>>
         + Deserialize<T, HighDeserializer<RkyvError>>,
 {
-    async fn encode_rkyv(
+    async fn encode_rkyv_with(
         self,
         executor: Executor,
         class: PoolClass,
         limit: u64,
+        admission: QueueAdmission,
     ) -> Result<(Vec<u8>, Reservation), Report<TransportError>> {
         wire::encode_rkyv_payload(
             &executor,
             class.memory_class(),
             class.cpu_class(),
             limit,
+            admission,
             self,
         )
         .await
         .map(wire::EncodedPayload::into_parts)
     }
 
-    async fn decode_rkyv(
+    async fn decode_rkyv_with(
         executor: Executor,
         class: PoolClass,
+        admission: QueueAdmission,
         payload: Vec<u8>,
     ) -> Result<(Self, Reservation), Report<TransportError>> {
-        wire::decode_rkyv_payload::<Self>(
+        wire::decode_rkyv_payload_with::<Self>(
             &executor,
             class.memory_class(),
             class.cpu_class(),
+            admission,
             payload,
         )
         .await
@@ -1386,8 +1414,15 @@ where
                 return Err(RemoteRequestFailure::CoordinationIdentityMismatch);
             }
             let response = (handler)(context, request).await;
+            // The handler already did its work, so a full queue holds the answer back rather than
+            // throwing that work away. The caller's reset still ends the wait.
             response
-                .encode_rkyv(executor, M::CLASS, payload_limit)
+                .encode_rkyv_with(
+                    executor,
+                    M::CLASS,
+                    payload_limit,
+                    QueueAdmission::WaitForPlace,
+                )
                 .await
                 .map_err(|error| RemoteRequestFailure::ResponseEncode(error.to_string()))
         })
@@ -2061,10 +2096,16 @@ impl Transport {
             }
             match response.result {
                 Ok(payload) => {
-                    let mapping_input =
-                        M::Response::decode_rkyv(self.inner.executor().clone(), M::CLASS, payload)
-                            .await
-                            .map(|(response, _response_payload_reservation)| response);
+                    // The peer already did the work, so a full queue holds the answer back until
+                    // the request's own deadline rather than discarding it.
+                    let mapping_input = M::Response::decode_rkyv_with(
+                        self.inner.executor().clone(),
+                        M::CLASS,
+                        QueueAdmission::WaitForPlace,
+                        payload,
+                    )
+                    .await
+                    .map(|(response, _response_payload_reservation)| response);
                     match mapping_input {
                         Ok(mapped_value) => Ok(mapped_value),
                         Err(error) => {

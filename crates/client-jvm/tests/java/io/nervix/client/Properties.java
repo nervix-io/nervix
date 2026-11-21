@@ -36,7 +36,7 @@ public final class Properties {
         require(section.name().equals("records") && section.omittedRows() == 1, "section metadata");
         require(section.watermarkLow() == 3 && section.watermarkHigh() == 4, "watermark columns");
         var schema = section.schema();
-        require(schema.branch().equals("by_tenant") && schema.fields(Nervix.Part.BRANCH).getFirst().sensitive(), "branch schema");
+        require(schema.parametrizer().equals("by_tenant") && schema.fields(Nervix.Part.BRANCH).getFirst().sensitive(), "branch schema");
         var fields = schema.fields(Nervix.Part.ROWS);
         require(fields.stream().map(Nervix.Field::name).toList().equals(List.of("sequence", "secret", "sample", "low", "high", "note", "raw", "text")), "field order");
         require(fields.getFirst().type() == Nervix.FieldType.U64 && fields.get(1).sensitive() && fields.get(5).nullable(), "field metadata");

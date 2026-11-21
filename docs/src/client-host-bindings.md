@@ -190,8 +190,9 @@ introduces row-map payloads, implicit numeric conversions or per-cell callbacks 
 ## Typed Inspection
 
 `Outcome::entity_labels()` supplies an independently retained `EntityLabelsInspection` for a
-domain metadata read. Every native binding preserves the exact map, existing domain/node identity,
-captured policy revision and limits, and explicit committed/staged view. A committed view has its
+metadata read. Every native binding preserves the exact map, owner kind and name, captured
+policy revision and limits, and explicit committed or staged view. The domain accessor returns
+the domain for Models, domains and logical resources. It is absent for cluster users. A committed view has its
 applied revision; a staged view has transaction id, accepted position and planning-basis bytes.
 Absent variant fields remain absent, and zero-valued revisions or positions remain present.
 Pointer/length accessors preserve empty values and embedded NUL bytes. No binding derives this

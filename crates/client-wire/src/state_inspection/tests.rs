@@ -9,10 +9,11 @@ use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::{
     BranchKeyFingerprint, ClusterNodeIdentity, ClusterNodeIncarnation, CommandExecutionReference,
     DomainNodeRef, ModelKind, ParseAsType, SchemaField, Timestamp, Unit, WasmBranchStateInspection,
-    WasmCheckpointCounts, WasmCheckpointStage, WasmCheckpointState, WasmRecoveryCounts,
-    WasmRecoveryInspection, WasmSavedStateRejection, WasmStateGeneration, WasmStateRecoveryOutcome,
-    WasmStateReset, WasmStateResetInspection, WasmStateResetReadiness, WasmStateResetReason,
-    WasmStateResetScope,
+    WasmCheckpointCounts, WasmCheckpointStage, WasmCheckpointState, WasmGuestStateDescription,
+    WasmGuestStateField, WasmGuestStateRender, WasmGuestStateRenderStage, WasmGuestStateSection,
+    WasmRecoveryCounts, WasmRecoveryInspection, WasmSavedStateRejection, WasmStateGeneration,
+    WasmStateRecoveryOutcome, WasmStateReset, WasmStateResetInspection, WasmStateResetReadiness,
+    WasmStateResetReason, WasmStateResetScope,
 };
 
 use super::*;
@@ -115,8 +116,39 @@ fn generation(value: u64) -> WasmStateGeneration {
     WasmStateGeneration::try_from(value).assured("the fixture generation is positive")
 }
 
+/// The diagnostic of the fixture's failed render.
+pub(crate) const WASM_RENDER_DIAGNOSTIC: &str =
+    "wasm processor 'counting_guest' state description failed (branch \
+     0202020202020202020202020202020202020202020202020202020202020202, resource \
+     'wasm_reset_guest' version 1 file 'processors/filter_even.wasm', export \
+     'nervix_describe_state', saved state revision 3): wasm guest state description failed: wasm \
+     guest reported global error: guest cannot describe its state";
+
+/// The described section of the fixture's first branch: a required counter and an optional list.
+pub(crate) fn wasm_guest_section() -> WasmGuestStateSection {
+    WasmGuestStateSection {
+        name: name("counters"),
+        fields: vec![
+            WasmGuestStateField {
+                name: name("count"),
+                ty: ParseAsType::U32,
+                optional: false,
+            },
+            WasmGuestStateField {
+                name: name("window"),
+                ty: ParseAsType::Vec {
+                    element: Box::new(ParseAsType::Datetime),
+                },
+                optional: true,
+            },
+        ],
+        rows: 1,
+    }
+}
+
 /// A WASM processor's state read: one partition unit whose latest reset of one branch is ready,
-/// with a confirmed branch and a durable branch that also recorded a recovery.
+/// with a confirmed branch whose guest describes one section and a durable branch whose render
+/// failed and that also recorded a recovery.
 pub(crate) fn wasm_inspection() -> StateInspection {
     let mut reset = WasmStateReset::publishing(
         reference("0192d4e4-7b36-7c3e-9f00-5b2d8c3a1e44"),
@@ -183,6 +215,13 @@ pub(crate) fn wasm_inspection() -> StateInspection {
                                 confirmed_replicas: Some(1),
                             }),
                             recovery: None,
+                            description: Some(WasmGuestStateDescription {
+                                generation: generation(2),
+                                revision: NonZeroU64::new(4),
+                                render: WasmGuestStateRender::Described {
+                                    sections: vec![wasm_guest_section()],
+                                },
+                            }),
                         },
                         WasmBranchStateInspection {
                             branch: Some(BranchKeyFingerprint::new([2; 32])),
@@ -199,6 +238,14 @@ pub(crate) fn wasm_inspection() -> StateInspection {
                                 rejection: WasmSavedStateRejection::ApplicationState,
                                 request: reference("recovery-0001"),
                                 outcome: WasmStateRecoveryOutcome::Recovered,
+                            }),
+                            description: Some(WasmGuestStateDescription {
+                                generation: generation(1),
+                                revision: NonZeroU64::new(3),
+                                render: WasmGuestStateRender::Failed {
+                                    stage: WasmGuestStateRenderStage::StateDescription,
+                                    diagnostic: WASM_RENDER_DIAGNOSTIC.to_string(),
+                                },
                             }),
                         },
                     ],
@@ -558,8 +605,45 @@ fn a_wasm_state_page_round_trips_every_typed_fact_beside_its_json_and_text() {
         "application_state"
     );
     assert_eq!(wasm["branches"][1]["recovery"]["outcome"], "recovered");
+    let described = &wasm["branches"][0]["description"];
+    assert_eq!(described["generation"], 2);
+    assert_eq!(described["revision"], 4);
+    assert_eq!(described["outcome"], "described");
+    assert_eq!(described["failure"], serde_json::Value::Null);
+    let section = &described["sections"][0];
+    assert_eq!(section["name"], "counters");
+    assert_eq!(section["rows"], 1);
+    assert_eq!(section["fields"][0]["name"], "count");
+    assert_eq!(section["fields"][0]["type"], "U32");
+    assert_eq!(section["fields"][0]["optional"], false);
+    assert_eq!(section["fields"][0]["sensitive"], true);
+    assert_eq!(section["fields"][1]["type"], "VEC<DATETIME>");
+    assert_eq!(section["fields"][1]["optional"], true);
+    assert_eq!(section["fields"][1]["sensitive"], true);
+    let failed = &wasm["branches"][1]["description"];
+    assert_eq!(failed["generation"], 1);
+    assert_eq!(failed["revision"], 3);
+    assert_eq!(failed["outcome"], "failed");
+    assert_eq!(failed["sections"], serde_json::Value::Null);
+    assert_eq!(failed["failure"]["stage"], "state_description");
+    assert_eq!(failed["failure"]["diagnostic"], WASM_RENDER_DIAGNOSTIC);
     let state = original.state.assured("the command inspected state");
     let text = state.display_text().assured("WASM facts render");
+    let described_line = format!(
+        "guest state branch={} generation=2 revision=4: values withheld, guest state is always \
+         sensitive",
+        "01".repeat(32)
+    );
+    let section_line = format!(
+        "guest section branch={} name=counters rows=1 fields=count U32, window VEC<DATETIME> \
+         OPTIONAL",
+        "01".repeat(32)
+    );
+    let failed_line = format!(
+        "guest state branch={} generation=1 revision=3: render failed at STATE_DESCRIPTION: \
+         {WASM_RENDER_DIAGNOSTIC}",
+        "02".repeat(32)
+    );
     for line in [
         "binding: resource=wasm_reset_guest version=1 file=processors/filter_even.wasm",
         "state default generation: 1\nstate reset: READY, branch, generation 2\nstate reset \
@@ -569,10 +653,130 @@ fn a_wasm_state_page_round_trips_every_typed_fact_beside_its_json_and_text() {
         "generation=2 committed_revision=4 latest_revision=4 stage=REPLICA_CONFIRMED \
          required_replicas=1 confirmed_replicas=1",
         "generation=1, application state rejected, recovered",
+        &described_line,
+        &section_line,
+        &failed_line,
         "continuation: next-wasm-position",
     ] {
         assert!(text.contains(line), "{line} in {text}");
     }
+}
+
+#[test]
+fn every_render_stage_has_a_lossless_wire_variant_and_a_section_keeps_every_field() {
+    let mut cases = Vec::new();
+    for &stage in wasm::ALL_WASM_GUEST_STATE_RENDER_STAGES {
+        let mut state = wasm_inspection();
+        let StateInspectionResult::Page(page) = &mut state.result else {
+            panic!("page");
+        };
+        let unit = page.units[0].wasm.as_mut().assured("WASM facts");
+        unit.branches[0].description = Some(WasmGuestStateDescription {
+            generation: generation(2),
+            revision: None,
+            render: WasmGuestStateRender::Failed {
+                stage,
+                diagnostic: "render failed".to_string(),
+            },
+        });
+        cases.push(state);
+    }
+    let mut every_type = wasm_inspection();
+    let StateInspectionResult::Page(page) = &mut every_type.result else {
+        panic!("page");
+    };
+    let unit = page.units[0].wasm.as_mut().assured("WASM facts");
+    let mut fields = Vec::new();
+    for (index, ty) in ParseAsType::scalar_variants().iter().enumerate() {
+        fields.push(WasmGuestStateField {
+            name: name(&format!("scalar_{index}")),
+            ty: ty.clone(),
+            optional: index % 2 == 0,
+        });
+    }
+    fields.push(WasmGuestStateField {
+        name: name("nested"),
+        ty: ParseAsType::Array {
+            element: Box::new(ParseAsType::Vec {
+                element: Box::new(ParseAsType::Bytes),
+            }),
+            len: std::num::NonZeroU32::new(3).assured("a literal array length"),
+        },
+        optional: false,
+    });
+    unit.branches[0].description = Some(WasmGuestStateDescription {
+        generation: generation(2),
+        revision: NonZeroU64::new(4),
+        render: WasmGuestStateRender::Described {
+            sections: vec![
+                WasmGuestStateSection {
+                    name: name("every_type"),
+                    fields,
+                    rows: usize::from(u16::MAX),
+                },
+                wasm_guest_section(),
+            ],
+        },
+    });
+    cases.push(every_type);
+    let mut no_state = wasm_inspection();
+    let StateInspectionResult::Page(page) = &mut no_state.result else {
+        panic!("page");
+    };
+    let unit = page.units[0].wasm.as_mut().assured("WASM facts");
+    unit.branches[0].description = Some(WasmGuestStateDescription {
+        generation: generation(2),
+        revision: NonZeroU64::new(4),
+        render: WasmGuestStateRender::Described {
+            sections: Vec::new(),
+        },
+    });
+    cases.push(no_state);
+    for state in cases {
+        let original = outcome(state);
+        assert_eq!(
+            round_trip_reply(&Reply {
+                request_id: request(1),
+                body: ReplyBody::Command(Box::new(original.clone()))
+            })
+            .body,
+            ReplyBody::Command(Box::new(original))
+        );
+    }
+}
+
+#[test]
+fn a_description_beside_no_checkpoint_is_refused() {
+    let mut orphaned = wasm_inspection();
+    let StateInspectionResult::Page(page) = &mut orphaned.result else {
+        panic!("page");
+    };
+    let unit = page.units[0].wasm.as_mut().assured("WASM facts");
+    unit.branches[1].checkpoint = None;
+    let reply = Reply {
+        request_id: request(1),
+        body: ReplyBody::Command(Box::new(outcome(orphaned))),
+    };
+    assert!(reply.encode(&SessionLimits::DEFAULT).is_err());
+}
+
+#[test]
+fn an_entry_measures_its_description_on_top_of_its_own_facts() {
+    let limits = SessionLimits::DEFAULT;
+    let state = wasm_inspection();
+    let StateInspectionResult::Page(page) = &state.result else {
+        panic!("page");
+    };
+    let unit = page.units[0].wasm.as_ref().assured("WASM facts");
+    let described = unit.branches[0].clone();
+    let mut bare = described.clone();
+    bare.description = None;
+    let described_bytes =
+        encoded_wasm_branch_entry_bytes(&described, &limits).assured("a bounded entry encodes");
+    let bare_bytes =
+        encoded_wasm_branch_entry_bytes(&bare, &limits).assured("a bounded entry encodes");
+    assert!(bare_bytes <= MAX_ENCODED_WASM_BRANCH_ENTRY_BYTES);
+    assert!(described_bytes > bare_bytes);
 }
 
 #[test]
@@ -745,6 +949,7 @@ fn every_largest_wasm_branch_entry_fits_its_encoded_bound() {
                 request: longest.clone(),
                 outcome: WasmStateRecoveryOutcome::Attempted,
             }),
+            description: None,
         });
     }
     unit.entries = count;
@@ -775,6 +980,9 @@ struct CraftedEntry {
     branch: u8,
     checkpoint: Option<CraftedCheckpoint>,
     recovery_generation: Option<u64>,
+    /// A guest-state description of one `counters` section whose one `count` field is sensitive
+    /// as given, or none.
+    guest_field_sensitive: Option<bool>,
 }
 
 struct CraftedCheckpoint {
@@ -800,11 +1008,13 @@ impl CraftedUnit {
                         committed_revision: Some(3),
                     }),
                     recovery_generation: None,
+                    guest_field_sensitive: Some(true),
                 },
                 CraftedEntry {
                     branch: 2,
                     checkpoint: None,
                     recovery_generation: Some(1),
+                    guest_field_sensitive: None,
                 },
             ],
         }
@@ -868,12 +1078,67 @@ impl CraftedUnit {
                 }
                 None => None,
             };
+            let description = match crafted.guest_field_sensitive {
+                Some(sensitive) => {
+                    let scalar = wire::ScalarFieldType::create(
+                        &mut fbb,
+                        &wire::ScalarFieldTypeArgs {
+                            scalar: Some(wire::ScalarType::U32),
+                        },
+                    );
+                    let field_type = wire::FieldType::create(
+                        &mut fbb,
+                        &wire::FieldTypeArgs {
+                            shape_type: wire::FieldTypeShape::ScalarFieldType,
+                            shape: Some(scalar.as_union_value()),
+                        },
+                    );
+                    let field_name = fbb.create_string("count");
+                    let field = wire::RowField::create(
+                        &mut fbb,
+                        &wire::RowFieldArgs {
+                            name: Some(field_name),
+                            field_type: Some(field_type),
+                            nullable: false,
+                            sensitive,
+                        },
+                    );
+                    let fields = fbb.create_vector(&[field]);
+                    let section_name = fbb.create_string("counters");
+                    let section = wire::WasmGuestStateSection::create(
+                        &mut fbb,
+                        &wire::WasmGuestStateSectionArgs {
+                            name: Some(section_name),
+                            fields: Some(fields),
+                            rows: 1,
+                        },
+                    );
+                    let sections = fbb.create_vector(&[section]);
+                    let described = wire::WasmGuestStateSections::create(
+                        &mut fbb,
+                        &wire::WasmGuestStateSectionsArgs {
+                            sections: Some(sections),
+                        },
+                    );
+                    Some(wire::WasmGuestStateDescription::create(
+                        &mut fbb,
+                        &wire::WasmGuestStateDescriptionArgs {
+                            generation: 2,
+                            revision: Some(3),
+                            render_type: wire::WasmGuestStateRender::WasmGuestStateSections,
+                            render: Some(described.as_union_value()),
+                        },
+                    ))
+                }
+                None => None,
+            };
             entries.push(wire::WasmBranchStateFacts::create(
                 &mut fbb,
                 &wire::WasmBranchStateFactsArgs {
                     branch: Some(branch),
                     checkpoint,
                     recovery,
+                    description,
                 },
             ));
         }
@@ -931,6 +1196,22 @@ fn a_peer_wasm_unit_table_is_refused_for_what_the_encoder_never_writes() {
     assert_eq!(decoded.entries, 2);
     assert_eq!(decoded.branches.len(), 2);
     assert!(decoded.reset.is_some());
+    let description = decoded.branches[0]
+        .description
+        .as_ref()
+        .assured("the first entry carries a description");
+    assert_eq!(description.sections()[0].fields[0].ty, ParseAsType::U32);
+
+    // Guest state is always sensitive, so a guest section field a peer marks otherwise is refused.
+    let mut public_guest_field = CraftedUnit::valid();
+    public_guest_field.branches[0].guest_field_sensitive = Some(false);
+    assert_eq!(
+        public_guest_field.refusal(),
+        crate::WireDecodeError::InvalidValue {
+            field: "WasmGuestStateSection.fields",
+            kind: "sensitive guest section field",
+        }
+    );
 
     let generation = |field| crate::WireDecodeError::InvalidValue {
         field,
@@ -998,10 +1279,13 @@ fn a_peer_wasm_unit_table_is_refused_for_what_the_encoder_never_writes() {
         entries: 1,
         ..CraftedUnit::valid()
     };
+    let mut orphaned_description = CraftedUnit::valid();
+    orphaned_description.branches[1].guest_field_sensitive = Some(true);
     for (case, unit) in [
         ("unordered", unordered),
         ("stateless", stateless),
         ("overcounted", overcounted),
+        ("orphaned description", orphaned_description),
     ] {
         let refusal = unit.refusal();
         assert!(
@@ -1048,6 +1332,7 @@ fn a_checkpoint_without_a_durability_boundary_renders_its_replica_counts_as_unkn
                 confirmed_replicas: None,
             }),
             recovery: None,
+            description: None,
         }],
     };
     assert_eq!(

@@ -43,7 +43,7 @@ Feature: OTEL emission
       PATH '/audit';
       CREATE HTTP ENDPOINT INGESTOR audit_ingestor
       FROM audit_ingress MODE NO ACK
-      ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING audit_event_codec
+      ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING audit_event_codec
       TIMESTAMP NOW
       TO audit_events
       INHERIT ALL
@@ -187,7 +187,7 @@ Feature: OTEL emission
       PATH '/metric';
       CREATE HTTP ENDPOINT INGESTOR metric_ingestor
       FROM metric_ingress MODE NO ACK
-      ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING request_count_codec
+      ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING request_count_codec
       TO request_counts
       INHERIT ALL
       UNBRANCHED
@@ -313,7 +313,7 @@ Feature: OTEL emission
       PATH '/points';
       CREATE HTTP ENDPOINT INGESTOR point_ingestor
       FROM point_ingress MODE NO ACK
-      ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING latency_point_codec
+      ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING latency_point_codec
       TO latency_points
       INHERIT ALL
       UNBRANCHED

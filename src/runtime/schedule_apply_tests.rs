@@ -33,6 +33,7 @@ async fn scheduled_relay_placement_does_not_create_metric_replication_state() {
     runtime.sync_domains(&BTreeMap::from([(
         domain.clone(),
         DomainState {
+            labels: nervix_models::EntityLabels::default(),
             id: domain.clone(),
             config: DomainConfig {
                 pace: DomainPace::Unpaced,
@@ -97,6 +98,7 @@ async fn paused_schedule_keeps_full_execution_without_rebuilding_unchanged_graph
     let schema = named::<SchemaName>("notification");
     let relay = named::<RelayName>("notifications");
     let running = DomainState {
+        labels: nervix_models::EntityLabels::default(),
         id: domain.clone(),
         config: DomainConfig {
             pace: DomainPace::Unpaced,
@@ -177,6 +179,7 @@ async fn stale_cluster_state_cannot_replace_a_newer_runtime_schedule() {
     let domains = BTreeMap::from([(
         domain.clone(),
         DomainState {
+            labels: nervix_models::EntityLabels::default(),
             id: domain.clone(),
             config: DomainConfig {
                 pace: DomainPace::Unpaced,

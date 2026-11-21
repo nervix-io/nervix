@@ -39,11 +39,11 @@ CREATE WIRE JSON CODEC chaos_life_profile_json
   TO SCHEMA chaos_life_profile
   ENCODE updated_at AS RFC3339;
 
-CREATE BRANCH chaos_life_branch SCHEMA chaos_branch_key TTL 10m MAX INSTANCES 16 EVICT LRU;
+CREATE PARAMETRIZER chaos_life_branch SCHEMA chaos_branch_key TTL 10m MAX INSTANCES 16 EVICT LRU;
 
-CREATE BRANCH chaos_life_expiring SCHEMA chaos_branch_key TTL 20s;
+CREATE PARAMETRIZER chaos_life_expiring SCHEMA chaos_branch_key TTL 20s;
 
-CREATE BRANCH chaos_life_rotation SCHEMA chaos_branch_key TTL 10m MAX INSTANCES 2 EVICT LRU;
+CREATE PARAMETRIZER chaos_life_rotation SCHEMA chaos_branch_key TTL 10m MAX INSTANCES 2 EVICT LRU;
 
 CREATE RELAY chaos_life_profiles SCHEMA chaos_life_profile BRANCHED BY chaos_life_branch CAPACITY 1 WITH MATERIALIZED STATE LAST BY TIMESTAMP;
 

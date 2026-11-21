@@ -19,7 +19,7 @@ Feature: Attached acknowledgements across consumer moves
       CREATE WIRE JSON CODEC moved_sink_codec
         FROM WIRE SCHEMA moved_sink_wire TO SCHEMA moved_sink_event;
       CREATE SCHEMA moved_sink_key ( branch_name STRING );
-      CREATE BRANCH moved_sink_branch SCHEMA moved_sink_key TTL 5m;
+      CREATE PARAMETRIZER moved_sink_branch SCHEMA moved_sink_key TTL 5m;
       CREATE RELAY moved_sink_records SCHEMA moved_sink_event
         BRANCHED BY moved_sink_branch CAPACITY 1;
       CREATE KAFKA CLIENT moved_sink_kafka CONFIG {

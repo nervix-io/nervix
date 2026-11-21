@@ -15,14 +15,16 @@ mod tests;
 
 use chumsky::prelude::*;
 use nervix_models::{
-    CreateStatement, EntityLabelKeys, EntityLabelMutation, EntityLabels, EntityMetadata,
-    LabelAssignment, LabelKey, MutateEntityLabels, ShowLabels, Statement,
+    AdministrativeLabelTarget, CreateStatement, EntityLabelKeys, EntityLabelMutation,
+    EntityLabelTarget, EntityLabels, EntityMetadata, LabelAssignment, LabelKey, MutateEntityLabels,
+    ShowLabels, Statement,
 };
 
 use crate::{
     lexer::{Identifier, Token},
     parser_support::{
-        ParseError, boxed_choice, inspection_format, kw, kw_phrase2, model_ref, string_lit, tok,
+        ParseError, boxed_choice, domain_ref, inspection_format, kw, kw_phrase2, model_ref,
+        resource_ref, string_lit, tok, user_name,
     },
 };
 
@@ -74,6 +76,18 @@ where
 
 pub(crate) fn entity_labels_parser<'src>()
 -> impl Parser<'src, &'src [Token], Statement, extra::Err<ParseError<'src>>> + Clone {
+    let target = boxed_choice!(
+        model_ref().map(EntityLabelTarget::Model),
+        kw(Identifier::Resource)
+            .ignore_then(resource_ref())
+            .map(EntityLabelTarget::Resource),
+        kw(Identifier::Domain)
+            .ignore_then(domain_ref())
+            .map(|name| EntityLabelTarget::Administrative(AdministrativeLabelTarget::Domain(name))),
+        kw(Identifier::User)
+            .ignore_then(user_name())
+            .map(|name| EntityLabelTarget::Administrative(AdministrativeLabelTarget::User(name))),
+    );
     let keys = label_key()
         .separated_by(tok(Token::Comma))
         .allow_trailing()
@@ -86,7 +100,7 @@ pub(crate) fn entity_labels_parser<'src>()
     boxed_choice!(
         kw(Identifier::Set)
             .ignore_then(kw_phrase2(Identifier::Labels, Identifier::On))
-            .ignore_then(model_ref())
+            .ignore_then(target.clone())
             .then(labels())
             .map(
                 |(entity, labels)| Statement::MutateEntityLabels(MutateEntityLabels {
@@ -96,7 +110,7 @@ pub(crate) fn entity_labels_parser<'src>()
             ),
         kw(Identifier::Drop)
             .ignore_then(kw_phrase2(Identifier::Labels, Identifier::On))
-            .ignore_then(model_ref())
+            .ignore_then(target.clone())
             .then(keys)
             .map(
                 |(entity, keys)| Statement::MutateEntityLabels(MutateEntityLabels {
@@ -106,7 +120,7 @@ pub(crate) fn entity_labels_parser<'src>()
             ),
         kw(Identifier::Show)
             .ignore_then(kw_phrase2(Identifier::Labels, Identifier::On))
-            .ignore_then(model_ref())
+            .ignore_then(target)
             .then(
                 kw(Identifier::Format)
                     .ignore_then(inspection_format())

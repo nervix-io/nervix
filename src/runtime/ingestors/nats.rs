@@ -64,10 +64,6 @@ impl NatsSubjectIngestorStartPlan {
             acknowledgement: mode.acknowledgement(),
             buffered_intake: true,
             flush_each_intake: false,
-            // The client reads the subscription and answers the server from its own task while the
-            // loop waits, holding at most its subscription capacity of 65,536 messages before it
-            // drops the newest as a slow consumer.
-            unacknowledged_admission: QueueAdmission::WaitForPlace,
             client_mounts: resolved.mounts.into_iter().collect(),
         }
         .open::<NatsSubjectIngestor>(runtime, ingestor)
@@ -103,9 +99,6 @@ impl NatsStreamIngestorStartPlan {
             // host decides on what it brings.
             buffered_intake: true,
             flush_each_intake: false,
-            // Every delivery mode of this ingestor is acknowledged: a batch the extension workers
-            // refuse is rejected and delivered again, and no payload is taken in unacknowledged.
-            unacknowledged_admission: QueueAdmission::RefuseWhenFull,
             client_mounts: resolved.mounts.into_iter().collect(),
         }
         .open::<NatsStreamIngestor>(runtime, ingestor)

@@ -25,9 +25,9 @@ Feature: Multi-source DAG routing
         FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
-        CREATE IF NOT EXISTS BRANCH by_kafka_notifications SCHEMA user_id_branch TTL 5m;
+        CREATE IF NOT EXISTS PARAMETRIZER by_kafka_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY kafka_ingress SCHEMA notification BRANCHED BY by_kafka_notifications;
-        CREATE IF NOT EXISTS BRANCH by_rabbit_notifications SCHEMA user_id_branch TTL 5m;
+        CREATE IF NOT EXISTS PARAMETRIZER by_rabbit_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY rabbit_ingress SCHEMA notification BRANCHED BY by_rabbit_notifications;
         CREATE RELAY kafka_projected SCHEMA notification BRANCHED BY by_kafka_notifications;
         CREATE RELAY rabbit_projected SCHEMA notification BRANCHED BY by_kafka_notifications;

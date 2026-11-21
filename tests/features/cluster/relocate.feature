@@ -18,14 +18,14 @@ Feature: Relocating runtime nodes onto a named cluster node
         FROM WIRE SCHEMA state_event_wire
         TO SCHEMA state_event;
       CREATE SCHEMA tenant_key ( tenant STRING );
-      CREATE BRANCH by_tenant SCHEMA tenant_key TTL 5m;
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_key TTL 5m;
       CREATE RELAY moving_state SCHEMA state_event BRANCHED BY by_tenant
         WITH MATERIALIZED STATE LAST BY TIMESTAMP;
       CREATE VHOST edge state-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT ingress ON edge PATH '/state';
       CREATE HTTP ENDPOINT INGESTOR state_ingestor
         FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING state_event_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING state_event_codec
         TO moving_state INHERIT ALL BRANCHED BY by_tenant
         SET tenant = message.tenant
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
@@ -69,14 +69,14 @@ Feature: Relocating runtime nodes onto a named cluster node
         FROM WIRE SCHEMA state_event_wire
         TO SCHEMA state_event;
       CREATE SCHEMA tenant_key ( tenant STRING );
-      CREATE BRANCH by_tenant SCHEMA tenant_key TTL 5m;
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_key TTL 5m;
       CREATE RELAY moving_state SCHEMA state_event BRANCHED BY by_tenant
         WITH MATERIALIZED STATE LAST BY TIMESTAMP;
       CREATE VHOST edge state-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT ingress ON edge PATH '/state';
       CREATE HTTP ENDPOINT INGESTOR state_ingestor
         FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING state_event_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING state_event_codec
         TO moving_state INHERIT ALL BRANCHED BY by_tenant
         SET tenant = message.tenant
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
@@ -123,14 +123,14 @@ Feature: Relocating runtime nodes onto a named cluster node
         FROM WIRE SCHEMA transaction_wire
         TO SCHEMA transaction;
       CREATE SCHEMA tenant_branch ( tenant STRING );
-      CREATE BRANCH by_tenant SCHEMA tenant_branch TTL 5m;
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_branch TTL 5m;
       CREATE RELAY inbound SCHEMA transaction BRANCHED BY by_tenant;
       CREATE RELAY deduped SCHEMA transaction BRANCHED BY by_tenant;
       CREATE VHOST edge stopped-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT ingress ON edge PATH '/stopped';
       CREATE HTTP ENDPOINT INGESTOR ingestor_txns
         FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING transaction_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING transaction_codec
         TO inbound INHERIT ALL BRANCHED BY by_tenant
         SET tenant = message.tenant
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
@@ -210,14 +210,14 @@ Feature: Relocating runtime nodes onto a named cluster node
         FROM WIRE SCHEMA transaction_wire
         TO SCHEMA transaction;
       CREATE SCHEMA tenant_branch ( tenant STRING );
-      CREATE BRANCH by_tenant SCHEMA tenant_branch TTL 5m;
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_branch TTL 5m;
       CREATE RELAY inbound SCHEMA transaction BRANCHED BY by_tenant;
       CREATE RELAY deduped SCHEMA transaction BRANCHED BY by_tenant;
       CREATE VHOST edge empty-stopped-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT ingress ON edge PATH '/empty-stopped';
       CREATE HTTP ENDPOINT INGESTOR ingestor_txns
         FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING transaction_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING transaction_codec
         TO inbound INHERIT ALL BRANCHED BY by_tenant
         SET tenant = message.tenant
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
@@ -281,7 +281,7 @@ Feature: Relocating runtime nodes onto a named cluster node
       CREATE HTTP ENDPOINT ingress ON edge PATH '/rejecting-wasm';
       CREATE HTTP ENDPOINT INGESTOR event_ingestor
         FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING event_codec
         TO raw_events INHERIT ALL UNBRANCHED
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE WASM PROCESSOR stateful_guest FROM raw_events
@@ -549,14 +549,14 @@ Feature: Relocating runtime nodes onto a named cluster node
         FROM WIRE SCHEMA state_event_wire
         TO SCHEMA state_event;
       CREATE SCHEMA tenant_key ( tenant STRING );
-      CREATE BRANCH by_tenant SCHEMA tenant_key TTL 5m;
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_key TTL 5m;
       CREATE RELAY moving_state SCHEMA state_event BRANCHED BY by_tenant
         WITH MATERIALIZED STATE LAST BY TIMESTAMP;
       CREATE VHOST edge forced-state-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT ingress ON edge PATH '/forced-state';
       CREATE HTTP ENDPOINT INGESTOR state_ingestor
         FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING state_event_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING state_event_codec
         TO moving_state INHERIT ALL BRANCHED BY by_tenant
         SET tenant = message.tenant
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
@@ -600,7 +600,7 @@ Feature: Relocating runtime nodes onto a named cluster node
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA state_event ( tenant STRING, id I64 );
       CREATE SCHEMA tenant_key ( tenant STRING );
-      CREATE BRANCH by_tenant SCHEMA tenant_key TTL 5m;
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_key TTL 5m;
       CREATE RELAY moving_state SCHEMA state_event BRANCHED BY by_tenant
         WITH MATERIALIZED STATE LAST BY TIMESTAMP;
       START;
@@ -654,14 +654,14 @@ Feature: Relocating runtime nodes onto a named cluster node
         FROM WIRE SCHEMA transaction_wire
         TO SCHEMA transaction;
       CREATE SCHEMA tenant_branch ( tenant STRING );
-      CREATE BRANCH by_tenant SCHEMA tenant_branch TTL 5m;
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_branch TTL 5m;
       CREATE RELAY inbound SCHEMA transaction BRANCHED BY by_tenant;
       CREATE RELAY deduped SCHEMA transaction BRANCHED BY by_tenant;
       CREATE VHOST edge http-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT ingress ON edge PATH '/relocate';
       CREATE HTTP ENDPOINT INGESTOR ingestor_txns
         FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING transaction_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING transaction_codec
         TO inbound INHERIT ALL BRANCHED BY by_tenant
         SET tenant = message.tenant
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
@@ -1206,7 +1206,7 @@ Feature: Relocating runtime nodes onto a named cluster node
       CREATE HTTP ENDPOINT reject_ingress ON edge PATH '/reject';
       CREATE HTTP ENDPOINT INGESTOR listener_ingestor
         FROM reject_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING reject_event_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING reject_event_codec
         TO reject_input INHERIT ALL UNBRANCHED
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE JUNCTION reject_route FROM reject_input UNBRANCHED
@@ -1294,7 +1294,7 @@ Feature: Relocating runtime nodes onto a named cluster node
       CREATE HTTP ENDPOINT failover_ingress ON edge PATH '/failover';
       CREATE HTTP ENDPOINT INGESTOR failover_ingestor
         FROM failover_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING failover_event_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING failover_event_codec
         TO failover_input INHERIT ALL UNBRANCHED
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE JUNCTION failover_route FROM failover_input UNBRANCHED
@@ -1360,7 +1360,7 @@ Feature: Relocating runtime nodes onto a named cluster node
         FROM WIRE SCHEMA promote_event_wire
         TO SCHEMA promote_event;
       CREATE SCHEMA promote_tenant ( tenant STRING );
-      CREATE BRANCH promote_by_tenant SCHEMA promote_tenant TTL 5m;
+      CREATE PARAMETRIZER promote_by_tenant SCHEMA promote_tenant TTL 5m;
       CREATE RELAY promote_output SCHEMA promote_event BRANCHED BY promote_by_tenant;
       CREATE KAFKA CLIENT promote_kafka CONFIG {
         'bootstrap.servers' = '{{kafka_addr}}'
@@ -1544,7 +1544,7 @@ Feature: Relocating runtime nodes onto a named cluster node
       CREATE HTTP ENDPOINT abort_ingress ON edge PATH '/abort';
       CREATE HTTP ENDPOINT INGESTOR abort_ingestor
         FROM abort_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING abort_event_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING abort_event_codec
         TO abort_input INHERIT ALL UNBRANCHED
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE JUNCTION abort_route FROM abort_input UNBRANCHED
@@ -1788,7 +1788,7 @@ Feature: Relocating runtime nodes onto a named cluster node
         FROM WIRE SCHEMA state_event_wire
         TO SCHEMA state_event;
       CREATE SCHEMA state_tenant ( tenant STRING );
-      CREATE BRANCH state_by_tenant SCHEMA state_tenant TTL 5m;
+      CREATE PARAMETRIZER state_by_tenant SCHEMA state_tenant TTL 5m;
       CREATE RELAY moving_state SCHEMA state_event BRANCHED BY state_by_tenant
         WITH MATERIALIZED STATE LAST BY TIMESTAMP;
       CREATE RELAY reader_input SCHEMA state_event BRANCHED BY state_by_tenant;
