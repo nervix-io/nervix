@@ -4,10 +4,12 @@
 //!
 //! - **Owns.** The typed ingestor plan, broker and paced-polling connector traits, ingestor messages,
 //!   acknowledgement policies, lifecycle operations, typed ingestor failures, the cancellation
-//!   through which the host ends a broker read in flight, and the opaque host handle through which
-//!   an ingestor delivers messages and reports lifecycle state.
+//!   through which the host ends a broker read in flight, the opaque host handle through which
+//!   an ingestor delivers messages and reports lifecycle state, and the retained report through
+//!   which an ingestor's connection records the payloads its read-ahead had no room for.
 //! - **Depends on.** Typed ingest metadata, the vocabulary's positions and timestamps,
-//!   `error-stack`, and the primitive boundary's monotonic clock and cancellation token.
+//!   `error-stack`, and the primitive boundary's monotonic clock, cancellation token and shared
+//!   ownership.
 //! - **Must not know.** Runtime collectors, relays, branches, schedules, registry state, ACK-tree
 //!   implementations, metrics implementations, or any connector driver.
 
@@ -29,7 +31,10 @@ use std::{
 use async_trait::async_trait;
 use error_stack::Report;
 use nervix_models::{PositionClass, Timestamp};
-use nervix_primitives::{sync::CancellationToken, time::Instant};
+use nervix_primitives::{
+    sync::{CancellationToken, StdArc},
+    time::Instant,
+};
 use thiserror::Error;
 
 use crate::{
@@ -824,6 +829,68 @@ impl IngestorHost {
     }
 }
 
+/// The host's record of payloads an ingestor's connection dropped because its bounded read-ahead
+/// had no room for traffic its transport does not hold back, such as MQTT publishes at QoS 0.
+///
+/// The task that drops such a payload polls the connection apart from the host's loop and its
+/// [`IngestorHost`], so the host resolves one report for the ingestor's execution unit when it
+/// composes the connector and hands it over in the connector's plan. Each connection keeps a clone
+/// and records every drop through it at once, also while the host waits on a batch's
+/// acknowledgement trees, without naming a metrics type, resolving labels or reaching a registry.
+/// Clones record into the same count.
+#[derive(Clone)]
+pub struct IngestorReadAheadOverflow {
+    /// Shared by every connection the plan starts. A trait object takes the standard reference
+    /// count, because the boundary's `Arc` cannot be coerced to one.
+    record: StdArc<dyn Fn() + Send + Sync>,
+}
+
+impl Debug for IngestorReadAheadOverflow {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("IngestorReadAheadOverflow")
+            .finish_non_exhaustive()
+    }
+}
+
+impl IngestorReadAheadOverflow {
+    /// Retains the host's `record`, which counts one dropped payload: one nonblocking counter
+    /// increment on a child resolved beforehand, without registry access, allocation, waits or
+    /// rate calculation. Construction records nothing.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "the host resolves one overflow recorder when it composes an ingestor's \
+                      connector"
+        )
+    )]
+    pub fn new(record: impl Fn() + Send + Sync + 'static) -> Self {
+        Self {
+            record: StdArc::new(record),
+        }
+    }
+
+    /// Counts one payload dropped for lack of read-ahead room, without changing what the
+    /// connection does with the next one.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            recurring,
+            reason = "records each read-ahead overflow through one retained counter child"
+        )
+    )]
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(
+            reason = "the host-resolved callback performs one nonblocking counter increment"
+        )
+    )]
+    pub fn record_dropped_payload(&self) {
+        (self.record)();
+    }
+}
+
 #[cfg(test)]
 #[cfg_attr(
     nervix_lint,
@@ -836,7 +903,42 @@ mod tests {
         task::Poll,
     };
 
+    use nervix_primitives::sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    };
+
     use super::*;
+
+    #[test]
+    fn a_read_ahead_overflow_report_records_each_drop_through_the_one_recorder_its_clones_share() {
+        let recorded = Arc::new(AtomicU64::new(0));
+        let observation = recorded.clone();
+        let overflow = IngestorReadAheadOverflow::new(move || {
+            observation.fetch_add(1, Ordering::Relaxed);
+        });
+        assert_eq!(
+            recorded.load(Ordering::Relaxed),
+            0,
+            "constructing the report records nothing"
+        );
+
+        let connection = overflow.clone();
+        overflow.record_dropped_payload();
+        connection.record_dropped_payload();
+        connection.record_dropped_payload();
+
+        assert_eq!(
+            recorded.load(Ordering::Relaxed),
+            3,
+            "every clone records into the host's one count, once per drop"
+        );
+        assert_eq!(
+            format!("{overflow:?}"),
+            "IngestorReadAheadOverflow { .. }",
+            "the debug form names the report without exposing the host's recorder"
+        );
+    }
 
     #[nervix_primitives::test]
     async fn a_read_that_is_ready_completes_after_the_host_cancelled() {

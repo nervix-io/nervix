@@ -85,12 +85,12 @@ pub use nervix_models::{
     ClientProducerRefusal, ClientSubmissionRefusal, CommandExecutionReference,
     DomainAdmissionWindow, DomainClockObservation, DomainClockObservedState,
     DomainClockTickObservation, DomainName, EmitterName, ExistingUserPolicy, ImpactPlanningBasis,
-    IngestorName, PacedDomainClock, ResourceUploadIdentity, Restore, RestoreArchive, RestoreMode,
-    RestoreReport, RestoreScope, RestoreStep, RestoreStepOutcome, RestoreStepReport,
-    RestoredDomain, RestoredUsers, SchemaField, SubscriptionDeliveryBehavior, Timestamp,
-    TransactionImpactReport, TransactionInspection, TransactionLifecycle,
-    TransactionOperationAdmission, TransactionOperationNumber, TransactionPosition,
-    TransactionPreviewIdentity, TransactionStatus,
+    IngestorName, NodeInspection, NodeInspectionRecord, NodeInspectionRow, PacedDomainClock,
+    ResourceUploadIdentity, Restore, RestoreArchive, RestoreMode, RestoreReport, RestoreScope,
+    RestoreStep, RestoreStepOutcome, RestoreStepReport, RestoredDomain, RestoredUsers, SchemaField,
+    SubscriptionDeliveryBehavior, Timestamp, TransactionImpactReport, TransactionInspection,
+    TransactionLifecycle, TransactionOperationAdmission, TransactionOperationNumber,
+    TransactionPosition, TransactionPreviewIdentity, TransactionStatus,
 };
 pub use outcome::{CommandOutcome, ResourceUploadOutcome};
 pub use producer::{

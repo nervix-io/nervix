@@ -77,6 +77,7 @@ pub mod schema;
 pub mod server_statement;
 pub mod show_cluster_status;
 pub mod show_create;
+mod show_nodes;
 pub mod show_processor_state;
 pub mod show_stream_state;
 pub mod show_transactions;

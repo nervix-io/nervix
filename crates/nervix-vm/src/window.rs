@@ -1,7 +1,8 @@
 //! Layer: engines and infrastructure.
 //!
-//! - **Owns.** Lowering semantic window assignments into VM expressions and aggregate demands, and
-//!   which shared aggregate structure and per-row arguments each aggregate function reads.
+//! - **Owns.** Lowering semantic window assignments into VM expressions and aggregate demands,
+//!   which shared aggregate structure and per-row arguments each aggregate function reads, and the
+//!   bound a collection aggregate needs from its window.
 //! - **Depends on.** The vocabulary and the VM's program frontend.
 //! - **Must not know.** Plexus tokens or diagnostics, registry state, or runtime tasks.
 
@@ -13,6 +14,7 @@
     )
 )]
 
+mod collection_bound;
 mod collection_type;
 mod route;
 
@@ -26,10 +28,14 @@ use nervix_models::{AssignmentTargetScope, Expression, RouteConstruction, parse_
 use sorted_vec::SortedSet;
 use thiserror::Error;
 
-pub use self::route::{
-    CompiledWindowAssignment, CompiledWindowDemand, CompiledWindowExpr, CompiledWindowInvocation,
-    CompiledWindowRoute, WINDOW_ARGUMENT_NAMESPACE, WindowArgumentColumn, WindowRouteCompileError,
-    WindowRouteSchemas, argument_snapshot_column, argument_snapshot_schema,
+pub use self::{
+    collection_bound::WindowCollectionBound,
+    route::{
+        CompiledWindowAssignment, CompiledWindowDemand, CompiledWindowExpr,
+        CompiledWindowInvocation, CompiledWindowRoute, WINDOW_ARGUMENT_NAMESPACE,
+        WindowArgumentColumn, WindowRouteCompileError, WindowRouteSchemas,
+        argument_snapshot_column, argument_snapshot_schema,
+    },
 };
 pub use crate::program::{WindowAggregateFunction, WindowAggregateInvocation};
 use crate::{

@@ -270,6 +270,12 @@ instance 0 reads each of them whole and lists `partitions=all`. Every emitter me
 an `instance` label: the instance index, or `-` for an emitter that runs one instance. A drain that
 waits for emitters still publishing names each instance as `<emitter> instance <i>`.
 
+`DESCRIBE EMITTER` reports each instance's publish and commit attempts, preparation, retry and
+lifecycle observations under `destination:`. Use `incoming_edges` for traffic from each relay and
+`messages_total sent` for records delivered at that emitter's declared boundary. The
+[Connector Interaction Metrics](metrics-and-observability.md#connector-interaction-metrics)
+inventory defines the matching Prometheus families and their counting points.
+
 ## Publishing modes
 
 Every emitter entity requires `MODE <body>` before its body selection, immediately before
@@ -781,7 +787,7 @@ The `destination:` section of `DESCRIBE EMITTER` separately reports host publish
 attempts and their elapsed wall durations. Retried host attempts each count once, while the
 `sent` counters above continue to count each delivered record once. All operation/outcome
 children exist at zero when the task starts. See
-[Connector Interactions](metrics-and-observability.md#connector-interactions) for the families,
+[Connector Interaction Metrics](metrics-and-observability.md#connector-interaction-metrics) for the families,
 bounded outcomes, labels and process-local lifetime.
 
 ## Batching

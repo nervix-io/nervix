@@ -40,6 +40,8 @@ Use it for:
 - [consensus durability, replication pacing, log retention, and snapshot recovery](./consensus-storage-and-replication.md)
 - [resource versions, pinned bindings, `LATEST` resolution, rebinding, and the HTTPS listener refresh](./resource-versions.md)
 - [WASM guest state: checkpoints, generations, resets, rejected-state recovery, and replay](./wasm-state.md)
+- [inferencer state: model-carried tensors per branch, their identity, publication and snapshot
+  cadence, restore, eviction, handoff, forced recovery, backup, rebinding, and replay](./inferencer-state.md)
 - [backup and restore: the archive contract, quiesced cuts and owner capture, transfer and
   retention, durable restore progress, complete-generation publication, staging maintenance, and
   the evidence behind them](./backup-and-restore-architecture.md)

@@ -263,6 +263,15 @@ and constructions inside `ALTER`. After `metadata.`, an ingestor offers its decl
 fields. Suggestions come from the grammar at the cursor, so a duration or mode position does
 not offer expression functions.
 
+A window processor route's `SET` value also offers the collection aggregates its window admits,
+by the rule the window applies when it is created: `COLLECT_ARRAY` after `WIDTH <n> MESSAGES` with
+no duration, and `COLLECT_VEC` after a message `WIDTH` or a `MAX STATE SIZE`. They are offered
+beside the ordinary functions, so typing `COLLECT_` in
+`CREATE WINDOW PROCESSOR history FROM readings WIDTH 3 MESSAGES STEP 1 MESSAGES UNBRANCHED TO histories SET cpu_values = `
+offers both, and the route can still wrap one in a list function. Inside an aggregate's argument,
+in the route's `WHERE` and in every other processor's routes, expression positions keep the
+ordinary functions alone.
+
 Codec and relay names follow what the statement can accept, by the same rules the web console's
 forms apply to their choices. After `DECODE USING` only codecs that decode are offered, and after
 `ENCODE USING` only codecs that encode. A relay is offered where it agrees with the relays the
@@ -451,9 +460,17 @@ counts, row limits and stale-token handling,
 [Inspect Held Rows](./processors.md#inspect-held-rows) for reorderer and correlator rows, and
 [Inspect Carried Inference State](./processors.md#inspect-carried-inference-state) for tensor sections, and
 [WASM State And Recovery](./wasm-state.md#observability) for WASM checkpoint facts. Standalone JSON
-mode accepts `DESCRIBE TRANSACTION`, `SHOW RELAY ... MATERIALIZED STATE`,
+mode accepts `DESCRIBE TRANSACTION`, `SHOW NODES`, `SHOW RELAY ... MATERIALIZED STATE`,
 `SHOW REORDERER ... STATE`, `SHOW CORRELATOR ... STATE`, `SHOW DEDUPLICATOR ... STATE`,
 `SHOW WINDOW PROCESSOR ... STATE`, `SHOW INFERENCER ... STATE` and `SHOW WASM PROCESSOR ... STATE` with `FORMAT JSON`.
+
+Use one `SHOW NODES` command to read the matching node records as a JSON document. See
+[Selecting Nodes](placement.md#selecting-nodes) for the selector and the meaning of the results.
+
+```bash
+nervix-cli --command "SHOW NODES WHERE tag('zone') = 'eu' FORMAT JSON;"
+```
+
 After a stale-preview `COMMIT` refusal, run `DESCRIBE TRANSACTION` for the
 attached transaction before retrying the commit so the client fences it to the newly reviewed
 planning basis.

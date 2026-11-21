@@ -99,6 +99,7 @@
   - [Relay](./relay.md)
   - [Inherited Partitions](./partitioning.md)
   - [WASM State And Recovery](./wasm-state.md)
+  - [Inferencer State And Recovery](./inferencer-state.md)
   - [Backup And Restore Architecture](./backup-and-restore-architecture.md)
   - [Shutdown And Recovery](./shutdown.md)
   - [Integration Test Lifecycle](./integration-test-lifecycle.md)

@@ -79,6 +79,7 @@ fn summary(bytes: &[u8]) -> BackupArchiveSummary {
 fn outcome(disposition: CommandDisposition) -> CommandOutcome {
     CommandOutcome {
         entity_labels: None,
+        node_inspection: None,
         execution_reference: reference(),
         origin: OutcomeOrigin::Executed,
         disposition,

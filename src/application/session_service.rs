@@ -39,7 +39,7 @@ use nervix_primitives::{
     sync::{Arc, CancellationToken, Mutex as AsyncMutex, StdArc, broadcast},
 };
 use nervix_recovery::Discarded;
-use nervix_vm::program::FunctionName;
+use nervix_vm::program::{FunctionName, WindowAggregateFunction};
 use tracing::warn;
 
 use super::{
@@ -567,6 +567,9 @@ impl CompletionSnapshot<'_> {
                 let mut names = FunctionName::ordinary_completion_names();
                 match scope {
                     BuiltinFunctionScope::Ordinary => {}
+                    BuiltinFunctionScope::NodeSelector => {
+                        names = FunctionName::node_selector_completion_names();
+                    }
                     BuiltinFunctionScope::IngestorEntity(kind) if kind.reads_headers() => {
                         names.push(FunctionName::ReadHeader.as_str().to_string());
                         names.push(FunctionName::ReadHeaders.as_str().to_string());
@@ -576,12 +579,17 @@ impl CompletionSnapshot<'_> {
                     {
                         names.push(FunctionName::WriteHeader.as_str().to_string());
                     }
+                    BuiltinFunctionScope::WindowRoute(route) => {
+                        names.extend(WindowAggregateFunction::route_completion_names(&route));
+                    }
                     BuiltinFunctionScope::IngestorEntity(_)
                     | BuiltinFunctionScope::EmitterInvocation(_) => {}
                 }
+                // An aggregate is spelled as its declaration spells it, in capitals, so the name is
+                // compared with the lower-case word in ASCII lower case too.
                 names
                     .into_iter()
-                    .filter(|name| name.starts_with(&prefix))
+                    .filter(|name| name.to_ascii_lowercase().starts_with(&prefix))
                     .collect()
             }
             SemanticReference::Resource => {
@@ -1604,6 +1612,7 @@ impl SessionServiceImpl {
                 parsed.statement,
                 ClientStatement::Server(
                     Statement::ShowClusterStatus(_)
+                        | Statement::ShowNodes(_)
                         | Statement::DescribeCluster(_)
                         | Statement::DescribeLicense(_)
                 )

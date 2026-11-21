@@ -1021,15 +1021,19 @@ use test_execution::{
     execute_program_in_context_sync, execute_program_sync, execute_program_with_selection_sync,
 };
 
-/// Runs `program` to completion on the calling thread. An admitted execution passes the
-/// `cancellation` its worker checks between instructions; an inline one has none, because its
-/// caller is the task running it.
-fn execute_program_with_selection_in_context_sync(
+struct EvaluatedRegisters {
+    registers: RegisterBank,
+    row_errors: RowErrors,
+}
+
+/// Runs the instructions on the calling thread. An admitted execution checks cancellation
+/// between instructions.
+fn evaluate_registers(
     program: &CompiledProgram,
     batch: &TypedBatch,
     context: &ExecutionContext,
     cancellation: Option<&Cancellation>,
-) -> error_stack::Result<ExecutionResult, RuntimeError> {
+) -> error_stack::Result<EvaluatedRegisters, RuntimeError> {
     if batch.schema().as_ref() != program.input_schema.as_ref() {
         return Err(Report::new(RuntimeError::SchemaMismatch));
     }
@@ -1082,6 +1086,53 @@ fn execute_program_with_selection_in_context_sync(
         }
     }
 
+    Ok(EvaluatedRegisters {
+        registers,
+        row_errors,
+    })
+}
+
+/// The selected rows and the errors indexed by the original input row.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DeterministicPredicateResult {
+    pub selected_rows: RowSelection,
+    pub input_errors: RowErrors,
+}
+
+/// Runs a predicate over a bounded input batch on the calling thread.
+/// Its compiled capability guarantees that evaluation never uses time or injected functions.
+pub fn execute_deterministic_predicate(
+    predicate: &crate::DeterministicPredicate,
+    batch: &TypedBatch,
+) -> error_stack::Result<DeterministicPredicateResult, RuntimeError> {
+    let program = predicate.program();
+    let context = ExecutionContext::new(Timestamp::from_unix_nanos(0));
+    let evaluated = evaluate_registers(program, batch, &context, None)?;
+    let filter = program
+        .filter
+        .verified("predicate compilation always produces a Boolean filter");
+    let values = evaluated.registers.column::<BooleanArray>(filter)?;
+    let holds = predicate_true_rows(values);
+    let matched = match evaluated.row_errors.failed_rows() {
+        Some(failed) => &holds & &!&failed,
+        None => holds,
+    };
+    Ok(DeterministicPredicateResult {
+        selected_rows: RowSelection::Selected(matched.set_indices().collect()),
+        input_errors: evaluated.row_errors,
+    })
+}
+
+fn execute_program_with_selection_in_context_sync(
+    program: &CompiledProgram,
+    batch: &TypedBatch,
+    context: &ExecutionContext,
+    cancellation: Option<&Cancellation>,
+) -> error_stack::Result<ExecutionResult, RuntimeError> {
+    let EvaluatedRegisters {
+        registers,
+        row_errors,
+    } = evaluate_registers(program, batch, context, cancellation)?;
     let mut columns = Vec::with_capacity(program.outputs.len());
     for output in &program.outputs {
         columns.push(registers.output_array(output.reg)?);
@@ -6073,13 +6124,17 @@ fn filter_columns(
 /// for, where a null holds for no row, and every row that carries an error, so the caller sees
 /// each failure. It is at most two bitmap operations, whatever the rows hold.
 fn kept_rows(predicate: &BooleanArray, row_errors: &RowErrors) -> BooleanBuffer {
-    let holds = match predicate.nulls() {
-        Some(nulls) => predicate.values() & nulls.inner(),
-        None => predicate.values().clone(),
-    };
+    let holds = predicate_true_rows(predicate);
     match row_errors.failed_rows() {
         Some(failed) => &holds | &failed,
         None => holds,
+    }
+}
+
+fn predicate_true_rows(predicate: &BooleanArray) -> BooleanBuffer {
+    match predicate.nulls() {
+        Some(nulls) => predicate.values() & nulls.inner(),
+        None => predicate.values().clone(),
     }
 }
 
