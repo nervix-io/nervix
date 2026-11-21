@@ -802,14 +802,19 @@ pub(super) fn entry_lines(state: &WasmUnitStateInspection) -> Vec<String> {
             ));
         }
         if let Some(description) = &entry.description {
-            lines.extend(description_lines(&branch, description));
+            push_description_lines(&mut lines, &branch, description);
         }
     }
     lines
 }
 
-/// The guest-state line of one branch's description, then one line per section it describes.
-fn description_lines(branch: &str, description: &WasmGuestStateDescription) -> Vec<String> {
+/// Appends the guest-state line of one branch's description, then one line per section it
+/// describes, to the entry's lines.
+fn push_description_lines(
+    lines: &mut Vec<String>,
+    branch: &str,
+    description: &WasmGuestStateDescription,
+) {
     let restored = format!(
         "guest state branch={branch} generation={} revision={}",
         description.generation,
@@ -817,7 +822,6 @@ fn description_lines(branch: &str, description: &WasmGuestStateDescription) -> V
     );
     match &description.render {
         WasmGuestStateRender::Described { sections } => {
-            let mut lines = Vec::with_capacity(sections.len() + 1);
             lines.push(format!(
                 "{restored}: values withheld, guest state is always sensitive"
             ));
@@ -829,13 +833,12 @@ fn description_lines(branch: &str, description: &WasmGuestStateDescription) -> V
                     guest_fields_text(&section.fields),
                 ));
             }
-            lines
         }
         WasmGuestStateRender::Failed { stage, diagnostic } => {
-            vec![format!(
+            lines.push(format!(
                 "{restored}: render failed at {}: {diagnostic}",
                 stage.as_ref()
-            )]
+            ));
         }
     }
 }
